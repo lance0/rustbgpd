@@ -9,8 +9,9 @@ gRPC owns the truth.
 ## Status
 
 **Pre-release.** Milestone 1 ("Hear") is complete — UPDATE processing,
-Adj-RIB-In storage, and `ListReceivedRoutes` gRPC endpoint. 222 tests pass.
-Validated against FRR 10.3.1.
+Adj-RIB-In storage, and `ListReceivedRoutes` gRPC endpoint. 222 unit/integration
+tests pass. Interop validated against FRR 10.3.1 (15/15 automated tests pass:
+route receipt, attributes, withdrawal, peer restart recovery).
 
 ## Goals
 

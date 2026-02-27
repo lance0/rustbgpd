@@ -170,10 +170,11 @@ Decode UPDATEs. Store in Adj-RIB-In. Expose via gRPC.
    - Server on configurable `grpc_addr` (default `127.0.0.1:50051`)
    - CI updated with `protobuf-compiler`, Dockerfile updated for builder stage
 
-8. ~~**Interop validation**~~ **Done**
+8. ~~**Interop validation**~~ **Done** — 15/15 automated tests pass
    - Containerlab topology: `m1-frr.clab.yml` (FRR advertising 3 prefixes)
    - FRR config with `network` statements for 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16
-   - Test script: routes received, attributes correct, withdrawal propagates, peer restart clears/repopulates RIB
+   - Automated test script `test-m1-frr.sh`: routes received, attributes correct, withdrawal propagates, peer restart clears/repopulates RIB
+   - Peer restart test uses watchfrr auto-restart + rustbgpd deferred reconnect (~33s)
 
 ### Exit Criteria
 

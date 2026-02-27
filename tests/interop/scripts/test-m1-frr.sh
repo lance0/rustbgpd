@@ -51,7 +51,7 @@ grpc_list_routes_for_peer() {
 # ---------------------------------------------------------------------------
 wait_established() {
     log "Waiting for BGP session to reach Established..."
-    for i in $(seq 1 30); do
+    for i in $(seq 1 45); do
         local state
         state=$(docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
             | grep -o '"bgpState":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
@@ -61,7 +61,7 @@ wait_established() {
         fi
         sleep 2
     done
-    fail "Session did not reach Established within 60s"
+    fail "Session did not reach Established within 90s"
     return 1
 }
 
@@ -186,9 +186,9 @@ test_withdrawal() {
 test_peer_restart() {
     log "Test 4: Peer restart — RIB cleared and repopulated"
 
-    # Restart FRR BGP process
-    docker exec "$FRR" killall bgpd 2>/dev/null || true
-    sleep 2
+    # Kill FRR bgpd — watchfrr will auto-restart it with correct config
+    docker exec "$FRR" killall -9 bgpd 2>/dev/null || true
+    sleep 5
 
     # RIB should be cleared (peer went down)
     local routes_after_kill
@@ -203,9 +203,8 @@ test_peer_restart() {
         log "RIB has $count_after_kill routes (peer down may still be processing)"
     fi
 
-    # FRR should auto-restart bgpd via watchfrr, or we restart it
-    docker exec "$FRR" /usr/lib/frr/bgpd -d 2>/dev/null || true
-    sleep 2
+    # watchfrr restarts bgpd automatically; rustbgpd reconnects after connect_retry_secs (30s)
+    log "Waiting for watchfrr to restart bgpd and rustbgpd to reconnect..."
 
     # Wait for session re-establishment and routes
     wait_established || return 1

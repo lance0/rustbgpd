@@ -301,6 +301,29 @@ Runs all 4 tests automatically. Requires containerlab topology deployed and
 
 ---
 
+## M1 FRR Test Results (2026-02-27, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m1-frr.sh` — **15 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment | PASS | Established on first attempt |
+| Routes received (3/3) | PASS | 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16 |
+| ORIGIN attribute | PASS | IGP (proto3 default zero) |
+| AS_PATH attribute | PASS | Contains 65002 |
+| NEXT_HOP attribute | PASS | 10.0.0.2 |
+| totalCount field | PASS | Present in gRPC response |
+| Route withdrawal | PASS | 192.168.2.0/24 removed after `no network` |
+| Remaining routes after withdrawal | PASS | 192.168.1.0/24 still present |
+| RIB cleared on peer down | PASS | Empty after bgpd killed |
+| Peer restart recovery | PASS | Session re-established (~33s, watchfrr + reconnect timer) |
+| RIB repopulated after restart | PASS | 3/3 routes restored |
+
+Note: Test 4 (peer restart) relies on watchfrr auto-restarting bgpd after
+`killall -9`. rustbgpd reconnects after `connect_retry_secs` (default 30s).
+
+---
+
 ## Troubleshooting
 
 - **Docker network overlap:** Containerlab's default management network

@@ -12,6 +12,11 @@ document (M0–M4).
 
 ### Fixed
 
+- Interop test script: peer restart test (test 4) now relies on watchfrr to
+  auto-restart bgpd instead of manually running `/usr/lib/frr/bgpd -d` which
+  failed to load FRR's integrated config. Wait timeout increased to 90s to
+  accommodate the 30s reconnect timer.
+
 - `rustbgpd-wire`: Unknown NOTIFICATION error codes are now preserved as
   `NotificationCode::Unknown(u8)` instead of being silently mapped to `Cease`.
   This fixes incorrect logging and metrics for NOTIFICATIONs with future or
