@@ -27,6 +27,9 @@ document (M0–M4).
 - `rustbgpd-fsm`: OPEN validation and capability negotiation
 - `rustbgpd-fsm`: Exponential backoff on connect retry (30s–300s)
 - `rustbgpd-fsm`: Property tests (no panics on arbitrary event sequences)
+- `rustbgpd-telemetry`: Prometheus metrics (state transitions, flaps, notifications, messages)
+- `rustbgpd-telemetry`: RIB metric stubs (registered at zero for M1)
+- `rustbgpd-telemetry`: Structured JSON logging via tracing-subscriber with env-filter
 
 ---
 
@@ -42,13 +45,13 @@ Target: **M0 — "Establish"**
 - `rustbgpd-fsm`: RFC 4271 state machine (all 6 states)
 - `rustbgpd-fsm`: Timer inputs (ConnectRetry, Hold, Keepalive)
 - `rustbgpd-fsm`: OPEN negotiation and capability exchange
+- `rustbgpd-telemetry`: Prometheus metric stubs (8 metrics, all counters at zero)
+- `rustbgpd-telemetry`: Structured JSON log events via tracing-subscriber
 
 ### Remaining
 
 - `rustbgpd-transport`: Tokio TCP session management
 - `rustbgpd-transport`: Bounded channels with backpressure
-- `rustbgpd-telemetry`: Prometheus metric stubs (counters at zero)
-- `rustbgpd-telemetry`: Structured JSON log events
 - Fuzz harness stubs for wire decoder
 - Interop validation with FRR and BIRD
 

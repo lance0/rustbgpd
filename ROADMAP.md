@@ -45,6 +45,8 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
    UPDATE encode/decode, capability parsing, property tests)
 2. **rustbgpd-fsm** — RFC 4271 finite state machine (all 6 states, full
    transition table, OPEN negotiation, exponential backoff, property tests)
+3. **rustbgpd-telemetry** — Prometheus metrics (8 metrics: state transitions,
+   flaps, established, notifications, messages, RIB stubs) + JSON logging
 
 ---
 
@@ -72,12 +74,12 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - Negotiation result struct: agreed caps, AFI/SAFI set, peer ASN, peer ID
    - No tokio imports, no I/O — pure function from (State, Event) → (State, Actions)
 
-3. **rustbgpd-telemetry** — Metrics and structured logging `[next]`
+3. ~~**rustbgpd-telemetry** — Metrics and structured logging~~ **Done**
    - Prometheus counters: session state transitions, flaps, NOTIFICATIONs
    - RIB metric stubs (exist at zero): update latency, backpressure, drops
    - Structured JSON events for FSM transitions
 
-4. **rustbgpd-transport** — Tokio TCP glue
+4. **rustbgpd-transport** — Tokio TCP glue `[next]`
    - TCP listener and outbound connection management
    - Read loop: bytes → wire::decode → FSM input
    - Write loop: FSM output → wire::encode → bytes
