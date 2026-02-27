@@ -3,8 +3,10 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::{PrefixList, check_prefix_list};
 use rustbgpd_wire::Ipv4Prefix;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
+
+use crate::event::{RouteEvent, RouteEventType};
 
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
@@ -24,27 +26,42 @@ pub struct RibManager {
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
     export_policy: Option<PrefixList>,
+    peer_export_policies: HashMap<IpAddr, Option<PrefixList>>,
+    route_events_tx: broadcast::Sender<RouteEvent>,
     rx: mpsc::Receiver<RibUpdate>,
 }
 
 impl RibManager {
     #[must_use]
     pub fn new(rx: mpsc::Receiver<RibUpdate>, export_policy: Option<PrefixList>) -> Self {
+        let (route_events_tx, _) = broadcast::channel(4096);
         Self {
             ribs: HashMap::new(),
             loc_rib: LocRib::new(),
             adj_ribs_out: HashMap::new(),
             outbound_peers: HashMap::new(),
             export_policy,
+            peer_export_policies: HashMap::new(),
+            route_events_tx,
             rx,
         }
     }
 
+    /// Resolve the export policy for a peer: per-peer if set, else global.
+    fn export_policy_for(&self, peer: IpAddr) -> Option<&PrefixList> {
+        self.peer_export_policies
+            .get(&peer)
+            .and_then(|p| p.as_ref())
+            .or(self.export_policy.as_ref())
+    }
+
     /// Recompute Loc-RIB best path for a set of affected prefixes.
     /// Returns the set of prefixes that actually changed.
+    /// Also emits route events to the broadcast channel.
     fn recompute_best(&mut self, affected: &HashSet<Ipv4Prefix>) -> HashSet<Ipv4Prefix> {
         let mut changed = HashSet::new();
         for prefix in affected {
+            let previously_installed = self.loc_rib.get(prefix).is_some();
             let candidates: Vec<_> = self
                 .ribs
                 .values()
@@ -53,14 +70,33 @@ impl RibManager {
             let did_change = self.loc_rib.recompute(*prefix, candidates.into_iter());
             if did_change {
                 changed.insert(*prefix);
-                if let Some(best) = self.loc_rib.get(prefix) {
-                    debug!(
-                        %prefix,
-                        peer = %best.peer,
-                        "best path changed"
-                    );
-                } else {
-                    debug!(%prefix, "best path removed");
+                let current_best = self.loc_rib.get(prefix);
+                match (previously_installed, current_best) {
+                    (false, Some(best)) => {
+                        debug!(%prefix, peer = %best.peer, "best path changed");
+                        let _ = self.route_events_tx.send(RouteEvent {
+                            event_type: RouteEventType::Added,
+                            prefix: *prefix,
+                            peer: Some(best.peer),
+                        });
+                    }
+                    (true, None) => {
+                        debug!(%prefix, "best path removed");
+                        let _ = self.route_events_tx.send(RouteEvent {
+                            event_type: RouteEventType::Withdrawn,
+                            prefix: *prefix,
+                            peer: None,
+                        });
+                    }
+                    (true, Some(best)) => {
+                        debug!(%prefix, peer = %best.peer, "best path changed");
+                        let _ = self.route_events_tx.send(RouteEvent {
+                            event_type: RouteEventType::BestChanged,
+                            prefix: *prefix,
+                            peer: Some(best.peer),
+                        });
+                    }
+                    (false, None) => {}
                 }
             }
         }
@@ -78,6 +114,9 @@ impl RibManager {
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
 
+            // Resolve export policy before borrowing rib_out mutably
+            let export_pol = self.export_policy_for(peer).cloned();
+
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
@@ -94,8 +133,8 @@ impl RibManager {
                         continue;
                     }
 
-                    // Export policy check
-                    if check_prefix_list(self.export_policy.as_ref(), *prefix)
+                    // Export policy check (per-peer or global)
+                    if check_prefix_list(export_pol.as_ref(), *prefix)
                         != rustbgpd_policy::PolicyAction::Permit
                     {
                         if rib_out.withdraw(prefix) {
@@ -129,6 +168,7 @@ impl RibManager {
     /// Send the full Loc-RIB to a newly established peer (initial table dump).
     fn send_initial_table(&mut self, peer: IpAddr) {
         let mut announce = Vec::new();
+        let export_pol = self.export_policy_for(peer).cloned();
         let rib_out = self
             .adj_ribs_out
             .entry(peer)
@@ -139,8 +179,8 @@ impl RibManager {
             if route.peer == peer {
                 continue;
             }
-            // Export policy
-            if check_prefix_list(self.export_policy.as_ref(), route.prefix)
+            // Export policy (per-peer or global)
+            if check_prefix_list(export_pol.as_ref(), route.prefix)
                 != rustbgpd_policy::PolicyAction::Permit
             {
                 continue;
@@ -205,11 +245,17 @@ impl RibManager {
                     // Clean up outbound state
                     self.adj_ribs_out.remove(&peer);
                     self.outbound_peers.remove(&peer);
+                    self.peer_export_policies.remove(&peer);
                 }
 
-                RibUpdate::PeerUp { peer, outbound_tx } => {
+                RibUpdate::PeerUp {
+                    peer,
+                    outbound_tx,
+                    export_policy,
+                } => {
                     debug!(%peer, "peer up — registering for outbound updates");
                     self.outbound_peers.insert(peer, outbound_tx);
+                    self.peer_export_policies.insert(peer, export_policy);
                     self.send_initial_table(peer);
                 }
 
@@ -283,6 +329,11 @@ impl RibManager {
                     if reply.send(routes).is_err() {
                         warn!("query caller dropped before receiving response");
                     }
+                }
+
+                RibUpdate::SubscribeRouteEvents { reply } => {
+                    let rx = self.route_events_tx.subscribe();
+                    let _ = reply.send(rx);
                 }
             }
         }
@@ -698,6 +749,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer: target,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -723,6 +775,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer: target,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -756,6 +809,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -795,6 +849,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -828,6 +883,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer: target,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -881,6 +937,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer: target,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -949,6 +1006,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer: target,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -988,6 +1046,7 @@ mod tests {
         tx.send(RibUpdate::PeerUp {
             peer: target,
             outbound_tx: out_tx,
+            export_policy: None,
         })
         .await
         .unwrap();
@@ -1014,6 +1073,265 @@ mod tests {
         let routes = reply_rx.await.unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].prefix, prefix);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_peer_export_policy() {
+        use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
+
+        let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+        let allowed_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        // Peer1 gets a deny policy on 10.0.0.0/8, peer2 has no per-peer policy
+        let peer1_export = Some(PrefixList {
+            entries: vec![PrefixListEntry {
+                prefix: denied_prefix,
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+            }],
+            default_action: PolicyAction::Permit,
+        });
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None);
+        let handle = tokio::spawn(manager.run());
+
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+        let (send_filtered, mut recv_filtered) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: peer1,
+            outbound_tx: send_filtered,
+            export_policy: peer1_export,
+        })
+        .await
+        .unwrap();
+
+        let (send_unfiltered, mut recv_unfiltered) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: peer2,
+            outbound_tx: send_unfiltered,
+            export_policy: None,
+        })
+        .await
+        .unwrap();
+
+        // Source peer sends both prefixes
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![
+                make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+                make_route(allowed_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+            ],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Peer1: should get only the allowed prefix (denied_prefix blocked)
+        let filtered = recv_filtered.recv().await.unwrap();
+        assert_eq!(filtered.announce.len(), 1);
+        assert_eq!(filtered.announce[0].prefix, allowed_prefix);
+
+        // Peer2: should get both (no per-peer policy, no global policy)
+        let unfiltered = recv_unfiltered.recv().await.unwrap();
+        assert_eq!(unfiltered.announce.len(), 2);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peer_down_cleans_up_export_policy() {
+        use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None);
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let (out_tx, _out_rx) = mpsc::channel(64);
+        let policy = Some(PrefixList {
+            entries: vec![PrefixListEntry {
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+            }],
+            default_action: PolicyAction::Permit,
+        });
+
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            outbound_tx: out_tx,
+            export_policy: policy,
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+
+        // Query to confirm loop processed PeerDown
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let routes = reply_rx.await.unwrap();
+        assert!(routes.is_empty());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // --- Route event streaming tests ---
+
+    async fn subscribe_events(
+        tx: &mpsc::Sender<RibUpdate>,
+    ) -> tokio::sync::broadcast::Receiver<crate::event::RouteEvent> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::SubscribeRouteEvents { reply: reply_tx })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn route_event_added_on_new_best() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None);
+        let handle = tokio::spawn(manager.run());
+
+        let mut events_rx = subscribe_events(&tx).await;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert_eq!(event.event_type, crate::event::RouteEventType::Added);
+        assert_eq!(event.prefix, prefix);
+        assert_eq!(event.peer, Some(peer));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_event_withdrawn_on_last_removed() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None);
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Subscribe after route is added
+        let mut events_rx = subscribe_events(&tx).await;
+
+        // Withdraw the route
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![],
+            withdrawn: vec![prefix],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert_eq!(event.event_type, crate::event::RouteEventType::Withdrawn);
+        assert_eq!(event.prefix, prefix);
+        assert!(event.peer.is_none());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_event_best_changed_on_better_path() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None);
+        let handle = tokio::spawn(manager.run());
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+
+        // Peer1 announces first
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer1,
+            announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Subscribe after first route is installed
+        let mut events_rx = subscribe_events(&tx).await;
+
+        // Peer2 announces with higher local-pref — best changes
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer2,
+            announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
+        assert_eq!(event.prefix, prefix);
+        assert_eq!(event.peer, Some(peer2));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multiple_subscribers_receive_same_events() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None);
+        let handle = tokio::spawn(manager.run());
+
+        let mut sub1 = subscribe_events(&tx).await;
+        let mut sub2 = subscribe_events(&tx).await;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let e1 = sub1.recv().await.unwrap();
+        let e2 = sub2.recv().await.unwrap();
+        assert_eq!(e1.prefix, prefix);
+        assert_eq!(e2.prefix, prefix);
+        assert_eq!(e1.event_type, e2.event_type);
 
         drop(tx);
         handle.await.unwrap();

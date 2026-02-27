@@ -8,16 +8,20 @@
 
 mod config;
 mod metrics_server;
+mod peer_manager;
 
+use std::net::Ipv4Addr;
 use std::process;
 
 use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
-use rustbgpd_transport::PeerHandle;
 use tokio::sync::mpsc;
 use tracing::{error, info};
 
+use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
+
 use crate::config::Config;
+use crate::peer_manager::PeerManager;
 
 fn main() {
     let config_path = std::env::args()
@@ -53,6 +57,11 @@ async fn run(config: Config) {
     let metrics = BgpMetrics::new();
     let prometheus_addr = config.prometheus_addr();
     let grpc_addr = config.grpc_addr();
+    let router_id: Ipv4Addr = config
+        .global
+        .router_id
+        .parse()
+        .expect("validated in Config::load");
 
     // Spawn metrics HTTP server
     let metrics_clone = metrics.clone();
@@ -60,41 +69,60 @@ async fn run(config: Config) {
         metrics_server::serve_metrics(prometheus_addr, metrics_clone).await;
     });
 
-    // Build policies
-    let import_policy = config.import_policy();
+    // Build global export policy for RIB manager fallback
     let export_policy = config.export_policy();
 
     // Spawn RIB manager
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
     tokio::spawn(RibManager::new(rib_rx, export_policy).run());
 
+    // Spawn PeerManager
+    let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
+    let peer_mgr = PeerManager::new(
+        peer_mgr_rx,
+        config.global.asn,
+        router_id,
+        metrics.clone(),
+        rib_tx.clone(),
+    );
+    tokio::spawn(peer_mgr.run());
+
     // Spawn gRPC API server
     let grpc_rib_tx = rib_tx.clone();
+    let grpc_peer_mgr_tx = peer_mgr_tx.clone();
     tokio::spawn(async move {
-        rustbgpd_api::server::serve(grpc_addr, grpc_rib_tx).await;
+        rustbgpd_api::server::serve(grpc_addr, grpc_rib_tx, grpc_peer_mgr_tx).await;
     });
 
-    // Spawn peer sessions
+    // Add initial peers from config via PeerManager
     let peer_configs = config.to_peer_configs();
-    let mut handles: Vec<(PeerHandle, String)> = Vec::with_capacity(peer_configs.len());
-
-    for (transport_config, label) in peer_configs {
+    for (transport_config, label, import_policy, export_policy) in peer_configs {
         info!(
             peer = %transport_config.remote_addr,
             label = %label,
             remote_asn = transport_config.peer.remote_asn,
-            "spawning peer session"
+            "adding peer from config"
         );
-        let handle = PeerHandle::spawn(
-            transport_config,
-            metrics.clone(),
-            rib_tx.clone(),
-            import_policy.clone(),
-        );
-        if let Err(e) = handle.start().await {
-            error!(label = %label, error = %e, "failed to start peer session");
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let _ = peer_mgr_tx
+            .send(PeerManagerCommand::AddPeer {
+                config: PeerManagerNeighborConfig {
+                    address: transport_config.remote_addr.ip(),
+                    remote_asn: transport_config.peer.remote_asn,
+                    description: label.clone(),
+                    hold_time: Some(transport_config.peer.hold_time),
+                    max_prefixes: transport_config.max_prefixes,
+                    import_policy,
+                    export_policy,
+                },
+                reply: reply_tx,
+            })
+            .await;
+        match reply_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => error!(label = %label, error = %e, "failed to add peer"),
+            Err(e) => error!(label = %label, error = %e, "peer manager reply dropped"),
         }
-        handles.push((handle, label));
     }
 
     // Wait for shutdown signal
@@ -103,16 +131,8 @@ async fn run(config: Config) {
         Err(e) => error!(error = %e, "failed to listen for shutdown signal"),
     }
 
-    // Graceful shutdown: stop all peers
-    info!("shutting down {} peer sessions", handles.len());
-    for (handle, label) in handles {
-        info!(label = %label, "shutting down peer");
-        match handle.shutdown().await {
-            Ok(Ok(())) => info!(label = %label, "peer shut down cleanly"),
-            Ok(Err(e)) => error!(label = %label, error = %e, "peer shutdown error"),
-            Err(e) => error!(label = %label, error = %e, "peer task join error"),
-        }
-    }
+    // Graceful shutdown via PeerManager
+    let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
 
     info!("rustbgpd exiting");
 }

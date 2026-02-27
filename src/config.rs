@@ -51,6 +51,10 @@ pub struct Neighbor {
     pub md5_password: Option<String>,
     #[serde(default)]
     pub ttl_security: bool,
+    #[serde(default)]
+    pub import_policy: Vec<PrefixListEntryConfig>,
+    #[serde(default)]
+    pub export_policy: Vec<PrefixListEntryConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -83,8 +87,6 @@ pub enum ConfigError {
     InvalidPrometheusAddr { value: String, reason: String },
     #[error("invalid grpc_addr {value:?}: {reason}")]
     InvalidGrpcAddr { value: String, reason: String },
-    #[error("no neighbors configured")]
-    NoNeighbors,
     #[error("invalid hold_time {value}: must be 0 or >= 3")]
     InvalidHoldTime { value: u16 },
 }
@@ -164,10 +166,6 @@ impl Config {
                 reason: e.to_string(),
             })?;
 
-        if self.neighbors.is_empty() {
-            return Err(ConfigError::NoNeighbors);
-        }
-
         for neighbor in &self.neighbors {
             neighbor.address.parse::<IpAddr>().map_err(|e| {
                 ConfigError::InvalidNeighborAddress {
@@ -209,12 +207,26 @@ impl Config {
         parse_prefix_list(&self.policy.export)
     }
 
-    pub fn to_peer_configs(&self) -> Vec<(TransportConfig, String)> {
+    /// Returns `(TransportConfig, label, import_policy, export_policy)` per neighbor.
+    ///
+    /// Per-neighbor policy overrides global; if neighbor has no policy entries,
+    /// the corresponding value is `None` (caller falls back to global).
+    pub fn to_peer_configs(
+        &self,
+    ) -> Vec<(
+        TransportConfig,
+        String,
+        Option<PrefixList>,
+        Option<PrefixList>,
+    )> {
         let router_id: Ipv4Addr = self
             .global
             .router_id
             .parse()
             .expect("validated in Config::load");
+
+        let global_import = self.import_policy();
+        let global_export = self.export_policy();
 
         self.neighbors
             .iter()
@@ -242,7 +254,11 @@ impl Config {
                     .clone()
                     .unwrap_or_else(|| neighbor.address.clone());
 
-                (transport, label)
+                // Per-neighbor policy overrides global
+                let import = parse_prefix_list(&neighbor.import_policy).or(global_import.clone());
+                let export = parse_prefix_list(&neighbor.export_policy).or(global_export.clone());
+
+                (transport, label, import, export)
             })
             .collect()
     }
@@ -300,7 +316,7 @@ hold_time = 90
     }
 
     #[test]
-    fn no_neighbors_rejected() {
+    fn no_neighbors_accepted() {
         let toml_str = r#"
 [global]
 asn = 65001
@@ -311,8 +327,8 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 "#;
-        let err = parse(toml_str).unwrap_err();
-        assert!(matches!(err, ConfigError::NoNeighbors));
+        let config = parse(toml_str).unwrap();
+        assert!(config.neighbors.is_empty());
     }
 
     #[test]
@@ -358,7 +374,7 @@ remote_asn = 65002
         let peers = config.to_peer_configs();
         assert_eq!(peers.len(), 1);
 
-        let (transport, label) = &peers[0];
+        let (transport, label, _, _) = &peers[0];
         assert_eq!(transport.peer.local_asn, 65001);
         assert_eq!(transport.peer.remote_asn, 65002);
         assert_eq!(
@@ -496,5 +512,108 @@ hold_time = 180
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].1, "peer-a");
         assert_eq!(peers[1].1, "10.0.0.3"); // no description → address used
+    }
+
+    #[test]
+    fn per_neighbor_policy_parsed() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[neighbors.import_policy]]
+action = "deny"
+prefix = "10.0.0.0/8"
+
+[[neighbors.export_policy]]
+action = "permit"
+prefix = "192.168.0.0/16"
+"#;
+        let config = parse(toml_str).unwrap();
+        assert_eq!(config.neighbors[0].import_policy.len(), 1);
+        assert_eq!(config.neighbors[0].export_policy.len(), 1);
+
+        let peers = config.to_peer_configs();
+        assert!(peers[0].2.is_some()); // import policy
+        assert!(peers[0].3.is_some()); // export policy
+    }
+
+    #[test]
+    fn per_neighbor_without_policy_falls_back_to_global() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[policy.export]]
+action = "deny"
+prefix = "10.0.0.0/8"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+        let config = parse(toml_str).unwrap();
+        assert!(config.neighbors[0].import_policy.is_empty());
+        assert!(config.neighbors[0].export_policy.is_empty());
+
+        let peers = config.to_peer_configs();
+        // Should inherit global export policy
+        assert!(peers[0].2.is_none()); // no import (neither neighbor nor global)
+        assert!(peers[0].3.is_some()); // export from global
+    }
+
+    #[test]
+    fn per_neighbor_policy_overrides_global() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[policy.export]]
+action = "deny"
+prefix = "10.0.0.0/8"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[neighbors.export_policy]]
+action = "permit"
+prefix = "10.0.0.0/8"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+"#;
+        let config = parse(toml_str).unwrap();
+        let peers = config.to_peer_configs();
+
+        // First neighbor: has per-neighbor export → uses that
+        let export1 = peers[0].3.as_ref().unwrap();
+        assert_eq!(export1.entries[0].action, PolicyAction::Permit);
+
+        // Second neighbor: no per-neighbor → falls back to global deny
+        let export2 = peers[1].3.as_ref().unwrap();
+        assert_eq!(export2.entries[0].action, PolicyAction::Deny);
     }
 }

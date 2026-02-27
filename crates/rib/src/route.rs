@@ -58,4 +58,16 @@ impl Route {
             })
             .unwrap_or(0)
     }
+
+    /// Extract COMMUNITIES (RFC 1997) values, returning empty slice if absent.
+    #[must_use]
+    pub fn communities(&self) -> &[u32] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::Communities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
 }

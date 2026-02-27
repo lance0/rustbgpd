@@ -1,0 +1,163 @@
+# Containerlab topology: rustbgpd ↔ 10× FRR (Milestone 4 — Route Server Mode)
+#
+# Validates: dynamic peer management (AddNeighbor/DeleteNeighbor), per-peer
+# export policy, communities pass-through, WatchRoutes streaming, 10-peer
+# scale, enable/disable.
+#
+# rustbgpd (AS 65001) sits in the center. 10 FRR peers on separate /24 links:
+#   FRR-01 (AS 65010) on 10.0.10.0/24 — advertises 172.16.10.0/24, 172.16.11.0/24
+#   FRR-02 (AS 65011) on 10.0.11.0/24 — advertises 172.16.20.0/24, 172.16.21.0/24
+#   ...
+#   FRR-10 (AS 65019) on 10.0.19.0/24 — advertises 172.16.100.0/24, 172.16.101.0/24
+#
+# Per-peer export policy: FRR-01 gets deny on 10.0.0.0/8, others permit all.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m4-frr.clab.yml
+#   containerlab destroy -t tests/interop/m4-frr.clab.yml
+
+name: m4-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      binds:
+        - ./configs/rustbgpd-m4-frr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.10.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.11.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.12.1/24 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.0.13.1/24 dev eth4
+        - ip link set eth4 up
+        - ip addr add 10.0.14.1/24 dev eth5
+        - ip link set eth5 up
+        - ip addr add 10.0.15.1/24 dev eth6
+        - ip link set eth6 up
+        - ip addr add 10.0.16.1/24 dev eth7
+        - ip link set eth7 up
+        - ip addr add 10.0.17.1/24 dev eth8
+        - ip link set eth8 up
+        - ip addr add 10.0.18.1/24 dev eth9
+        - ip link set eth9 up
+        - ip addr add 10.0.19.1/24 dev eth10
+        - ip link set eth10 up
+      env:
+        RUST_LOG: info
+
+    frr-01:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-01.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.10.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-02:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-02.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.11.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-03:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-03.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.12.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-04:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-04.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.13.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-05:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-05.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.14.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-06:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-06.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.15.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-07:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-07.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.16.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-08:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-08.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.17.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-09:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-09.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.18.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-10:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m4-10.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.19.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-01:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-02:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr-03:eth1"]
+    - endpoints: ["rustbgpd:eth4", "frr-04:eth1"]
+    - endpoints: ["rustbgpd:eth5", "frr-05:eth1"]
+    - endpoints: ["rustbgpd:eth6", "frr-06:eth1"]
+    - endpoints: ["rustbgpd:eth7", "frr-07:eth1"]
+    - endpoints: ["rustbgpd:eth8", "frr-08:eth1"]
+    - endpoints: ["rustbgpd:eth9", "frr-09:eth1"]
+    - endpoints: ["rustbgpd:eth10", "frr-10:eth1"]

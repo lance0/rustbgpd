@@ -331,22 +331,73 @@ authentication.
 
 ---
 
-## M4 — "Route Server Mode"
+## M4 — "Route Server Mode" `[complete]`
 
-Scale to many peers with per-peer policy.
+Dynamic peer management, per-peer policy, typed communities, real-time
+route event streaming.
 
-- 50+ peers in containerlab, stable under churn
-- Per-peer import/export filters
-- Communities pass-through (optional)
-- RIB scaling evaluation
-- `WatchRoutes` streaming gRPC endpoint
+### Build Order
+
+1. ~~**Wire — Typed COMMUNITIES attribute** (`crates/wire/src/attribute.rs`)~~ **Done**
+   - `PathAttribute::Communities(Vec<u32>)` variant for RFC 1997 communities
+   - Decode/encode in attribute codec, `communities()` accessor on Route
+   - 6 tests: decode single/multiple/empty, odd-length error, roundtrip, type_code+flags
+
+2. ~~**Proto + gRPC — communities in Route message**~~ **Done**
+   - `repeated uint32 communities` field added to Route and AddPathRequest
+   - `route_to_proto()` and injection service updated
+
+3. ~~**Per-peer import/export policy**~~ **Done**
+   - `import_policy` / `export_policy` fields on `[[neighbors]]` config section
+   - Per-neighbor overrides global: neighbor-specific if present, else global fallback
+   - `RibManager::export_policy_for()` resolution helper
+   - `PeerUp` carries per-peer export policy to RIB manager
+   - 5 new config + RIB tests
+
+4. ~~**PeerManager + session state query** (`src/peer_manager.rs`)~~ **Done**
+   - Channel-based single-task ownership (ADR-0017)
+   - Commands: AddPeer, DeletePeer, ListPeers, GetPeerState, EnablePeer, DisablePeer, Shutdown
+   - `PeerHandle::query_state()` returns FSM state + prefix count
+   - Starting with zero configured neighbors is now valid
+   - Shared types in `crates/api/src/peer_types.rs`
+   - 7 tests
+
+5. ~~**NeighborService gRPC** (`crates/api/src/neighbor_service.rs`)~~ **Done**
+   - All 6 RPCs: add, delete, list, get state, enable, disable
+   - Maps PeerInfo to proto NeighborState
+
+6. ~~**WatchRoutes streaming**~~ **Done**
+   - `tokio::sync::broadcast` channel (capacity 4096) in RibManager (ADR-0018)
+   - `RouteEvent` type: Added, Withdrawn, BestChanged
+   - Events emitted after `recompute_best()` with old/new state diff
+   - `SubscribeRouteEvents` variant in `RibUpdate`
+   - gRPC `watch_routes()` uses `BroadcastStream` with peer address filtering
+   - Lagged subscribers logged and skipped (no crash)
+   - 4 new tests
+
+7. ~~**Interop validation**~~ **Done** — 17/17 automated tests pass
+   - 10-peer containerlab topology: `m4-frr.clab.yml` (rustbgpd + 10× FRR)
+   - 8 static peers + 2 dynamic peers (added/removed via gRPC)
+   - Per-peer export policy: FRR-01 deny on 10.0.0.0/8 le 32, others permit all
+   - Test script `test-m4-frr.sh`: 7 test scenarios covering sessions,
+     ListNeighbors, received routes, per-peer export policy, dynamic
+     AddNeighbor/DeleteNeighbor, and Enable/Disable
+
+### Exit Criteria
+
+- Dynamic peer add/remove via gRPC, verified end-to-end
+- Per-peer export policy enforcement (different peers see different routes)
+- Communities decoded, exposed in gRPC, injected via AddPath
+- WatchRoutes streams real-time route events to multiple subscribers
+- 10-peer interop topology validated against FRR 10.3.1 (17/17 tests pass)
+- 306 tests pass, clippy clean, fmt clean
 
 ---
 
 ## Post-v1
 
 - MP-BGP (IPv6 unicast)
-- Communities and extended communities
+- Extended communities (type 16)
 - FlowSpec speaker mode (prefixd lineage)
 - BMP exporter
 - RPKI validation (RTR client)

@@ -37,6 +37,7 @@ tonic-build = "0.13"
 prost = "0.13"
 prometheus = "0.13"
 socket2 = { version = "0.5", features = ["all"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

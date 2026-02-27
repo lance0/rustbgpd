@@ -10,6 +10,46 @@ document (M0–M4).
 
 ## [Unreleased]
 
+### Added (M4 — "Route Server Mode")
+
+- `rustbgpd-wire`: Typed COMMUNITIES attribute (RFC 1997). `PathAttribute::Communities(Vec<u32>)`
+  variant replaces opaque `Unknown` for type code 8. Decode, encode, and `Route::communities()`
+  accessor. 6 tests.
+- `rustbgpd-rib`: `RouteEvent` type with `Added`, `Withdrawn`, `BestChanged` variants.
+  `tokio::sync::broadcast` channel (capacity 4096) emits events after best-path recomputation.
+  `SubscribeRouteEvents` variant in `RibUpdate`. (ADR-0018)
+- `rustbgpd-rib`: Per-peer export policy support. `RibManager` stores per-peer policies via
+  `PeerUp`, resolves with `export_policy_for()` (per-peer overrides global). Cleaned up on
+  `PeerDown`. 2 new tests.
+- `rustbgpd-api`: `NeighborService` gRPC implementation with all 6 RPCs: `AddNeighbor`,
+  `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`.
+- `rustbgpd-api`: `WatchRoutes` gRPC streaming endpoint. Subscribes to RIB broadcast channel,
+  wraps in `BroadcastStream`, filters by peer address, maps `RouteEvent` to proto `RouteEvent`.
+  Lagged subscribers are logged and skipped.
+- `rustbgpd-api`: `peer_types` module with shared `PeerManagerCommand`, `PeerManagerNeighborConfig`,
+  and `PeerInfo` types used by both binary and API crate.
+- `rustbgpd-api`: Communities field populated in `route_to_proto()` and accepted in
+  `AddPath` injection requests.
+- `rustbgpd-transport`: `PeerCommand::QueryState` variant returns `PeerSessionState`
+  (FSM state, prefix count, negotiated hold time, four-octet-AS flag).
+- `PeerManager` (`src/peer_manager.rs`): Channel-based single-task ownership for dynamic
+  peer lifecycle management. Commands: AddPeer, DeletePeer, ListPeers, GetPeerState,
+  EnablePeer, DisablePeer, Shutdown. (ADR-0017)
+- Config: per-neighbor `import_policy` and `export_policy` sections in `[[neighbors]]`.
+  Neighbor-specific policy overrides global; absence falls back to global.
+- Config: starting with zero `[[neighbors]]` is now valid (peers added dynamically).
+- Dependencies: `tokio-stream` (with `sync` feature) for `BroadcastStream` wrapper.
+- Interop: 10-peer containerlab topology `m4-frr.clab.yml` (rustbgpd + 10× FRR).
+  8 static peers + 2 dynamic. Automated test script `test-m4-frr.sh` with 7 test
+  scenarios (17 pass/fail checks): static sessions, ListNeighbors, received routes,
+  per-peer export policy, dynamic AddNeighbor/DeleteNeighbor, Enable/Disable.
+
+### Changed
+
+- MSRV bumped from Rust 1.85 to 1.93. Required for `let` chains and
+  `usize::is_multiple_of()` stabilization.
+- Dockerfile updated from `rust:1.85-bookworm` to `rust:1.93-bookworm`.
+
 ### Added (M3 — "Speak")
 
 - `rustbgpd-policy`: `PrefixList` with ge/le range matching, first-match-wins

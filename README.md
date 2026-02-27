@@ -8,12 +8,11 @@ gRPC owns the truth.
 
 ## Status
 
-**Pre-release.** Milestone 3 ("Speak") is complete — outbound UPDATE
-generation, route injection via gRPC, global prefix-list policy,
-max-prefix enforcement, TCP MD5 authentication, and GTSM/TTL security.
-284 unit/integration tests pass. Interop validated against FRR 10.3.1
-(3-node topology: route redistribution, split horizon, injection,
-withdrawal propagation, DeletePath).
+**Pre-release.** Milestone 4 ("Route Server Mode") is complete — dynamic
+peer management via gRPC, per-peer import/export policy, typed COMMUNITIES
+(RFC 1997), WatchRoutes real-time streaming, and PeerManager with session
+state queries. 306 unit/integration tests pass. Interop validated against
+FRR 10.3.1.
 
 ## Goals
 
@@ -52,7 +51,7 @@ Seven crates with strict dependency rules:
 - **M1 — "Hear"** `[complete]` — UPDATE decode, Adj-RIB-In, `ListReceivedRoutes` gRPC
 - **M2 — "Decide"** `[complete]` — Loc-RIB best-path selection, `ListBestRoutes` gRPC
 - **M3 — "Speak"** `[complete]` — Route injection, Adj-RIB-Out, policy, TCP MD5
-- **M4 — "Route Server"** — Many peers, per-peer policy, scale testing
+- **M4 — "Route Server"** `[complete]` — Dynamic peers, per-peer policy, communities, WatchRoutes
 
 See [ROADMAP.md](ROADMAP.md) for detailed build order.
 
@@ -63,7 +62,7 @@ cargo build
 cargo test --workspace
 ```
 
-Requires Rust 1.85+ (edition 2024).
+Requires Rust 1.93+ (edition 2024).
 
 ## Running
 
@@ -108,6 +107,37 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.InjectionService/DeletePath
 ```
 
+### Managing Neighbors via gRPC
+
+```bash
+# Add a neighbor dynamically
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"config": {"address": "10.0.0.2", "remote_asn": 65002, "description": "peer-2"}}' \
+  localhost:50051 rustbgpd.v1.NeighborService/AddNeighbor
+
+# List all neighbors
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.NeighborService/ListNeighbors
+
+# Delete a neighbor
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/DeleteNeighbor
+```
+
+### Streaming Route Events
+
+```bash
+# Watch all route changes (streams until interrupted)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+
+# Watch route changes for a specific peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"neighbor_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+```
+
 ## Interop Testing
 
 Interop tests run via [containerlab](https://containerlab.dev/). Topologies
@@ -118,6 +148,7 @@ containerlab deploy -t tests/interop/m0-frr.clab.yml
 containerlab deploy -t tests/interop/m0-bird.clab.yml
 containerlab deploy -t tests/interop/m1-frr.clab.yml
 containerlab deploy -t tests/interop/m3-frr.clab.yml
+containerlab deploy -t tests/interop/m4-frr.clab.yml    # 10-peer dynamic management
 ```
 
 ## License

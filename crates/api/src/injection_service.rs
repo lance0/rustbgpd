@@ -72,6 +72,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         if req.med > 0 {
             attributes.push(PathAttribute::Med(req.med));
         }
+        if !req.communities.is_empty() {
+            attributes.push(PathAttribute::Communities(req.communities));
+        }
 
         let route = Route {
             prefix,

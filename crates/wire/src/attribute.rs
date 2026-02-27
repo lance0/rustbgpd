@@ -82,6 +82,8 @@ pub enum PathAttribute {
     NextHop(Ipv4Addr),
     LocalPref(u32),
     Med(u32),
+    /// RFC 1997 COMMUNITIES — each u32 is high16=ASN, low16=value.
+    Communities(Vec<u32>),
     /// Unknown or unrecognized attribute, preserved for re-advertisement.
     Unknown(RawAttribute),
 }
@@ -96,6 +98,7 @@ impl PathAttribute {
             Self::NextHop(_) => attr_type::NEXT_HOP,
             Self::LocalPref(_) => attr_type::LOCAL_PREF,
             Self::Med(_) => attr_type::MULTI_EXIT_DISC,
+            Self::Communities(_) => attr_type::COMMUNITIES,
             Self::Unknown(raw) => raw.type_code,
         }
     }
@@ -108,6 +111,7 @@ impl PathAttribute {
                 attr_flags::TRANSITIVE
             }
             Self::Med(_) => attr_flags::OPTIONAL,
+            Self::Communities(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             Self::Unknown(raw) => raw.flags,
         }
     }
@@ -258,6 +262,20 @@ fn decode_attribute_value(
             Ok(PathAttribute::LocalPref(lp))
         }
 
+        attr_type::COMMUNITIES => {
+            if !value.len().is_multiple_of(4) {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("COMMUNITIES length {} not a multiple of 4", value.len()),
+                });
+            }
+            let communities = value
+                .chunks_exact(4)
+                .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            Ok(PathAttribute::Communities(communities))
+        }
+
         // ATOMIC_AGGREGATE, AGGREGATOR, and any unknown type → RawAttribute
         _ => Ok(PathAttribute::Unknown(RawAttribute {
             flags,
@@ -358,6 +376,13 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                 flags = attr_flags::TRANSITIVE;
                 type_code = attr_type::LOCAL_PREF;
                 value.extend_from_slice(&lp.to_be_bytes());
+            }
+            PathAttribute::Communities(communities) => {
+                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                type_code = attr_type::COMMUNITIES;
+                for &c in communities {
+                    value.extend_from_slice(&c.to_be_bytes());
+                }
             }
             PathAttribute::Unknown(raw) => {
                 flags = raw.flags;
@@ -658,6 +683,65 @@ mod tests {
         encode_path_attributes(&attrs, &mut buf, true);
         let decoded = decode_path_attributes(&buf, true).unwrap();
         assert_eq!(decoded, attrs);
+    }
+
+    #[test]
+    fn decode_communities_single() {
+        // flags=0xC0 (optional+transitive), type=8, len=4, community=65001:100
+        // 65001 = 0xFDE9, 100 = 0x0064 → u32 = 0xFDE90064
+        let community: u32 = (65001 << 16) | 100;
+        let bytes = community.to_be_bytes();
+        let buf = [0xC0, 0x08, 0x04, bytes[0], bytes[1], bytes[2], bytes[3]];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0], PathAttribute::Communities(vec![community]));
+    }
+
+    #[test]
+    fn decode_communities_multiple() {
+        let c1: u32 = (65001 << 16) | 100;
+        let c2: u32 = (65002 << 16) | 200;
+        let b1 = c1.to_be_bytes();
+        let b2 = c2.to_be_bytes();
+        let buf = [
+            0xC0, 0x08, 0x08, b1[0], b1[1], b1[2], b1[3], b2[0], b2[1], b2[2], b2[3],
+        ];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::Communities(vec![c1, c2]));
+    }
+
+    #[test]
+    fn decode_communities_empty() {
+        // flags=0xC0, type=8, len=0
+        let buf = [0xC0, 0x08, 0x00];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::Communities(vec![]));
+    }
+
+    #[test]
+    fn decode_communities_odd_length_rejected() {
+        // flags=0xC0, type=8, len=3, only 3 bytes (not multiple of 4)
+        let buf = [0xC0, 0x08, 0x03, 0x01, 0x02, 0x03];
+        assert!(decode_path_attributes(&buf, true).is_err());
+    }
+
+    #[test]
+    fn communities_roundtrip() {
+        let c1: u32 = (65001 << 16) | 100;
+        let c2: u32 = (65002 << 16) | 200;
+        let attrs = vec![PathAttribute::Communities(vec![c1, c2])];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded, attrs);
+    }
+
+    #[test]
+    fn communities_type_code_and_flags() {
+        let attr = PathAttribute::Communities(vec![]);
+        assert_eq!(attr.type_code(), 8);
+        assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
     }
 
     #[test]

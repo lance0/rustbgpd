@@ -1,7 +1,10 @@
+use std::net::IpAddr;
+
+use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PrefixList;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::config::TransportConfig;
@@ -9,7 +12,7 @@ use crate::error::TransportError;
 use crate::session::PeerSession;
 
 /// Commands sent to a running peer session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum PeerCommand {
     /// Start the BGP session (`ManualStart`).
     Start,
@@ -17,6 +20,20 @@ pub enum PeerCommand {
     Stop,
     /// Shut down the task entirely.
     Shutdown,
+    /// Query the current session state.
+    QueryState {
+        reply: oneshot::Sender<PeerSessionState>,
+    },
+}
+
+/// Snapshot of a peer session's runtime state.
+#[derive(Debug, Clone)]
+pub struct PeerSessionState {
+    pub fsm_state: SessionState,
+    pub peer_ip: IpAddr,
+    pub prefix_count: usize,
+    pub negotiated_hold_time: Option<u16>,
+    pub four_octet_as: Option<bool>,
 }
 
 /// Handle for controlling a spawned peer session.
@@ -42,10 +59,12 @@ impl PeerHandle {
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PrefixList>,
+        export_policy: Option<PrefixList>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
-            let mut session = PeerSession::new(config, metrics, rx, rib_tx, import_policy);
+            let mut session =
+                PeerSession::new(config, metrics, rx, rib_tx, import_policy, export_policy);
             session.run().await
         });
         Self { commands: tx, task }
@@ -77,6 +96,20 @@ impl PeerHandle {
     pub async fn shutdown(self) -> Result<Result<(), TransportError>, tokio::task::JoinError> {
         let _ = self.commands.send(PeerCommand::Shutdown).await;
         self.task.await
+    }
+
+    /// Query the current session state.
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the session task has exited or the reply was dropped.
+    pub async fn query_state(&self) -> Option<PeerSessionState> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(PeerCommand::QueryState { reply: reply_tx })
+            .await
+            .ok()?;
+        reply_rx.await.ok()
     }
 
     /// Check if the session task has finished.

@@ -11,12 +11,14 @@
 pub mod adj_rib_in;
 pub mod adj_rib_out;
 pub mod best_path;
+pub mod event;
 pub mod loc_rib;
 pub mod manager;
 pub mod route;
 pub mod update;
 
 pub use best_path::best_path_cmp;
+pub use event::{RouteEvent, RouteEventType};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::Route;

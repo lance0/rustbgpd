@@ -8,6 +8,8 @@
 #![warn(clippy::pedantic)]
 
 mod injection_service;
+mod neighbor_service;
+pub mod peer_types;
 mod rib_service;
 pub mod server;
 

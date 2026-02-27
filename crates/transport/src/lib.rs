@@ -18,4 +18,4 @@ pub mod timer;
 
 pub use config::TransportConfig;
 pub use error::TransportError;
-pub use handle::{PeerCommand, PeerHandle};
+pub use handle::{PeerCommand, PeerHandle, PeerSessionState};

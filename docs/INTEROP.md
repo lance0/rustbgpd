@@ -14,7 +14,8 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m1-frr.clab.yml` | Tested (M1, M2) | UPDATE/RIB + best-path | FRR advertises 3 prefixes via `network` | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m3-frr.clab.yml` | Tested (M3) | 3-node redistribution | 2× FRR peers, route injection | — |
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
-| GoBGP | 3.x | — | Planned (M4) | Secondary target | — | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m4-frr.clab.yml` | Tested (M4) | 10-peer dynamic mgmt | 8 static + 2 dynamic peers | — |
+| GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
 | Cisco IOS-XE | — | — | Stretch | If available | — | — |
@@ -485,6 +486,145 @@ Runs all 5 tests automatically. Requires containerlab topology deployed and
 | Route injection | PASS | Both peers see 10.99.0.0/24 after AddPath |
 | Withdrawal propagation | PASS | FRR-B drops 192.168.2.0/24 after FRR-A withdraws |
 | DeletePath | PASS | Both peers drop 10.99.0.0/24 after DeletePath |
+
+---
+
+## M4 Test Procedures
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m4-frr.clab.yml`
+
+### Network Layout
+
+```
+M4 FRR (10-node):
+
+                        rustbgpd (AS 65001)
+        eth1: 10.0.10.1   ...   eth10: 10.0.19.1
+             │                        │
+     10.0.10.2/24              10.0.19.2/24
+     FRR-01 (AS 65010)   ...  FRR-10 (AS 65019)
+```
+
+8 FRR peers are statically configured (FRR-01 through FRR-08).
+FRR-09 and FRR-10 are present in the topology but added dynamically via gRPC.
+Each FRR peer advertises 2 prefixes (172.16.x0.0/24, 172.16.x1.0/24).
+FRR-01 has a per-peer export policy: deny 10.0.0.0/8 le 32.
+
+### Test 1: All 8 Static Sessions Establish
+
+Wait for all 8 FRR peers to report `Established` via `show bgp neighbors`.
+
+**Pass criteria:** All 8 sessions reach Established within 90s.
+
+### Test 2: ListNeighbors Returns 8 Peers
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/ListNeighbors
+```
+
+**Pass criteria:** Response contains 8 neighbors with `SESSION_STATE_ESTABLISHED`.
+
+### Test 3: Received Routes from All Peers
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListReceivedRoutes
+```
+
+**Pass criteria:** At least 16 routes received (2 per peer × 8 peers).
+In practice, routes redistributed between peers may increase the total.
+
+### Test 4: Per-Peer Export Policy
+
+Inject 10.99.0.0/24 via `AddPath`. FRR-01 (with deny 10.0.0.0/8 le 32
+export policy) should NOT see it. FRR-02 (no per-peer policy) should see it.
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "10.99.0.0", "prefix_length": 24, "next_hop": "10.0.10.1"}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.InjectionService/AddPath
+
+docker exec clab-m4-frr-frr-01 vtysh -c "show bgp ipv4 unicast 10.99.0.0/24 json"
+docker exec clab-m4-frr-frr-02 vtysh -c "show bgp ipv4 unicast 10.99.0.0/24 json"
+```
+
+**Pass criteria:** FRR-01 does not have 10.99.0.0/24. FRR-02 does.
+
+### Test 5: Dynamic AddNeighbor
+
+Add FRR-09 (AS 65018) via gRPC. Verify session establishes and ListNeighbors
+returns 9.
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"config": {"address": "10.0.18.2", "remote_asn": 65018, "description": "frr-09-dynamic"}}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/AddNeighbor
+```
+
+**Pass criteria:** FRR-09 session reaches Established. ListNeighbors returns 9.
+
+### Test 6: Dynamic DeleteNeighbor
+
+Delete FRR-09 via gRPC. Verify ListNeighbors returns 8 again.
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.18.2"}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/DeleteNeighbor
+```
+
+**Pass criteria:** ListNeighbors returns 8.
+
+### Test 7: Enable/Disable Neighbor
+
+Disable FRR-01 via `DisableNeighbor`, verify session drops. Re-enable via
+`EnableNeighbor`, verify session re-establishes.
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.10.2", "reason": "test"}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/DisableNeighbor
+
+# Wait 5s, verify FRR-01 is not Established
+
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.10.2"}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.NeighborService/EnableNeighbor
+```
+
+**Pass criteria:** FRR-01 drops to Active/Idle after disable, then
+re-establishes after enable.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m4-frr.sh
+```
+
+Runs all 7 tests automatically. Requires containerlab topology deployed,
+rustbgpd started, and `grpcurl` on the host.
+
+---
+
+## M4 FRR Test Results (2026-02-27, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m4-frr.sh` — **17 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Static sessions (8/8) | PASS | All 8 sessions established on first attempt |
+| ListNeighbors count | PASS | Returned 8 peers with SESSION_STATE_ESTABLISHED |
+| Received routes | PASS | 30 routes received (>= 16 expected) |
+| Per-peer export policy (FRR-01 deny) | PASS | FRR-01 correctly denied 10.99.0.0/24 |
+| Per-peer export policy (FRR-02 allow) | PASS | FRR-02 received 10.99.0.0/24 |
+| Dynamic AddNeighbor (FRR-09) | PASS | Session established, ListNeighbors returned 9 |
+| Dynamic DeleteNeighbor (FRR-09) | PASS | ListNeighbors returned 8 after deletion |
+| DisableNeighbor (FRR-01) | PASS | Session dropped to Active state |
+| EnableNeighbor (FRR-01) | PASS | Session re-established on first attempt |
 
 ---
 

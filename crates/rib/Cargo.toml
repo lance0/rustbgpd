@@ -13,5 +13,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+tokio-stream.workspace = true
+
 [dev-dependencies]
 proptest = "1"

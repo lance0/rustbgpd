@@ -21,7 +21,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::framing::ReadBuffer;
-use crate::handle::PeerCommand;
+use crate::handle::{PeerCommand, PeerSessionState};
 use crate::timer::{Timers, poll_timer};
 
 /// Runtime for a single BGP peer session.
@@ -55,6 +55,8 @@ pub(crate) struct PeerSession {
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     /// Import policy (prefix filter applied to inbound UPDATEs).
     import_policy: Option<PrefixList>,
+    /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
+    export_policy: Option<PrefixList>,
     /// Number of accepted prefixes (for max-prefix enforcement).
     prefix_count: usize,
 }
@@ -69,6 +71,7 @@ impl PeerSession {
         commands: mpsc::Receiver<PeerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PrefixList>,
+        export_policy: Option<PrefixList>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -91,6 +94,7 @@ impl PeerSession {
             outbound_rx,
             outbound_tx,
             import_policy,
+            export_policy,
             prefix_count: 0,
         }
     }
@@ -296,6 +300,7 @@ impl PeerSession {
                     let _ = self.rib_tx.try_send(RibUpdate::PeerUp {
                         peer: self.peer_ip,
                         outbound_tx: self.outbound_tx.clone(),
+                        export_policy: self.export_policy.clone(),
                     });
                 }
                 Action::SessionDown => {
@@ -602,6 +607,17 @@ impl PeerSession {
                 self.timers.stop_all();
                 ControlFlow::Break(())
             }
+            PeerCommand::QueryState { reply } => {
+                let state = PeerSessionState {
+                    fsm_state: self.fsm.state(),
+                    peer_ip: self.peer_ip,
+                    prefix_count: self.prefix_count,
+                    negotiated_hold_time: self.negotiated.as_ref().map(|n| n.hold_time),
+                    four_octet_as: self.negotiated.as_ref().map(|n| n.four_octet_as),
+                };
+                let _ = reply.send(state);
+                ControlFlow::Continue(())
+            }
         }
     }
 
@@ -753,7 +769,7 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel(8);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
 
-        PeerSession::new(config, metrics, cmd_rx, rib_tx, None)
+        PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None)
     }
 
     fn make_route(local_pref: u32) -> Route {

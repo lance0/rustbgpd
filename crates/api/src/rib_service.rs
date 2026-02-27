@@ -2,11 +2,12 @@ use std::net::IpAddr;
 use std::pin::Pin;
 
 use tokio::sync::{mpsc, oneshot};
-use tonic::codegen::tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tonic::{Request, Response, Status};
+use tracing::debug;
 
 use crate::proto;
-use rustbgpd_rib::{RibUpdate, Route};
+use rustbgpd_rib::{RibUpdate, Route, RouteEventType};
 use rustbgpd_wire::{AsPathSegment, PathAttribute};
 
 pub struct RibService {
@@ -51,6 +52,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut as_path = Vec::new();
     let mut local_pref = 0u32;
     let mut med = 0u32;
+    let mut communities = Vec::new();
 
     for attr in &route.attributes {
         match attr {
@@ -65,6 +67,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
             }
             PathAttribute::LocalPref(lp) => local_pref = *lp,
             PathAttribute::Med(m) => med = *m,
+            PathAttribute::Communities(c) => communities.extend(c),
             _ => {}
         }
     }
@@ -79,6 +82,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         local_pref,
         med,
         best,
+        communities,
     }
 }
 
@@ -253,8 +257,63 @@ impl proto::rib_service_server::RibService for RibService {
 
     async fn watch_routes(
         &self,
-        _request: Request<proto::WatchRoutesRequest>,
+        request: Request<proto::WatchRoutesRequest>,
     ) -> Result<Response<Self::WatchRoutesStream>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let req = request.into_inner();
+
+        let peer_filter: Option<IpAddr> = if req.neighbor_address.is_empty() {
+            None
+        } else {
+            Some(
+                req.neighbor_address
+                    .parse()
+                    .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
+            )
+        };
+
+        // Subscribe to route events from the RIB manager
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::SubscribeRouteEvents { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let broadcast_rx = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
+            Ok(event) => {
+                // Filter by peer address if requested
+                if let Some(filter_addr) = peer_filter
+                    && event.peer != Some(filter_addr)
+                {
+                    return None;
+                }
+
+                let event_type = match event.event_type {
+                    RouteEventType::Added => proto::RouteEventType::Added,
+                    RouteEventType::Withdrawn => proto::RouteEventType::Withdrawn,
+                    RouteEventType::BestChanged => proto::RouteEventType::BestChanged,
+                };
+
+                Some(Ok(proto::RouteEvent {
+                    event_type: event_type.into(),
+                    prefix: event.prefix.addr.to_string(),
+                    prefix_length: u32::from(event.prefix.len),
+                    peer_address: event
+                        .peer
+                        .map_or_else(String::new, |p: IpAddr| p.to_string()),
+                    afi_safi: proto::AddressFamily::Ipv4Unicast.into(),
+                    timestamp: String::new(),
+                }))
+            }
+            Err(_lagged) => {
+                debug!("WatchRoutes subscriber lagged, skipping missed events");
+                None
+            }
+        });
+
+        Ok(Response::new(Box::pin(stream)))
     }
 }

@@ -448,14 +448,26 @@ Inject and withdraw routes via gRPC (`AddPath` / `DeletePath`). Build Adj-RIB-Ou
 - Resource limits enforced and observable via metrics.
 - 284 tests pass (M3), clippy clean, fmt clean.
 
-### Milestone 4: "Route Server Mode"
+### Milestone 4: "Route Server Mode" `[complete]`
 
-Many peers, no transit behavior by default. Per-peer import and export filters. Simple communities pass-through (optional). RIB scaling evaluation.
+Dynamic peer management, per-peer policy, typed communities, real-time route event streaming.
+
+**Implementation choices:**
+- `PeerManager` uses the same channel-based single-task ownership pattern as `RibManager` (ADR-0017). Commands arrive via bounded mpsc, replies via oneshot.
+- Shared types (`PeerManagerCommand`, `PeerInfo`) live in `crates/api/src/peer_types.rs` to avoid circular dependencies between the binary and API crates.
+- Per-peer export policy: `RibManager` stores per-peer policies from `PeerUp`, resolves via `export_policy_for()` (per-peer overrides global). Config supports per-neighbor `import_policy` / `export_policy` sections.
+- Typed COMMUNITIES (RFC 1997): `PathAttribute::Communities(Vec<u32>)` replaces opaque `Unknown` for type code 8. Each `u32` is `(ASN << 16) | value`.
+- `WatchRoutes` uses `tokio::sync::broadcast` (ADR-0018) — zero overhead with no subscribers, independent receivers, lagged subscribers get error instead of blocking.
+- `PeerHandle::query_state()` enables FSM state queries from PeerManager without shared mutable state.
+- Starting with zero configured neighbors is now valid — peers can be added entirely via gRPC.
 
 **Exit criteria:**
-- 50+ peers in a containerlab scenario, stable under churn.
-- Route reflection behavior explicitly not supported in v1 (document this).
-- Per-peer policy enforcement verified end-to-end.
+- Dynamic peer add/remove via gRPC, verified end-to-end.
+- Per-peer export policy enforcement (different peers see different routes).
+- Communities decoded, exposed in gRPC, injected via AddPath.
+- WatchRoutes streams real-time route events to multiple subscribers.
+- 10-peer interop validated against FRR 10.3.1 (17/17 automated tests pass).
+- 306 tests pass (M4), clippy clean, fmt clean.
 
 ---
 
@@ -639,7 +651,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | GTSM (TTL security) | 5082 | M3 | FRR | Configurable per-peer |
 | Route server mode (many peers) | — | M4 | FRR, BIRD, GoBGP | No transit by default |
 | MP-BGP (IPv6 unicast) | 4760 | Post-v1 | — | Roadmap |
-| Communities | 1997 | Post-v1 | — | Roadmap |
+| Communities (standard) | 1997 | M4 | FRR | Typed decode/encode, gRPC exposure |
 | Extended communities | 4360 | Post-v1 | — | Roadmap |
 | FlowSpec | 8955 | Post-v1 | — | Roadmap (prefixd lineage) |
 | Graceful restart | 4724 | Post-v1 | — | Roadmap |

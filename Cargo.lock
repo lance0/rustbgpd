@@ -834,6 +834,7 @@ dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tracing",
@@ -866,6 +867,7 @@ dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tracing",
 ]
 
@@ -1162,6 +1164,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

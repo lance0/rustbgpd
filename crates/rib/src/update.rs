@@ -1,7 +1,9 @@
 use std::net::IpAddr;
 
-use tokio::sync::{mpsc, oneshot};
+use rustbgpd_policy::PrefixList;
+use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::event::RouteEvent;
 use crate::route::Route;
 
 /// Routes to be sent outbound to a peer.
@@ -24,6 +26,7 @@ pub enum RibUpdate {
     PeerUp {
         peer: IpAddr,
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+        export_policy: Option<PrefixList>,
     },
     /// Inject a locally-originated route.
     InjectRoute {
@@ -46,5 +49,9 @@ pub enum RibUpdate {
     QueryAdvertisedRoutes {
         peer: IpAddr,
         reply: oneshot::Sender<Vec<Route>>,
+    },
+    /// Subscribe to route change events via broadcast channel.
+    SubscribeRouteEvents {
+        reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
     },
 }

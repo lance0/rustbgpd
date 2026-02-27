@@ -65,6 +65,7 @@ pub mod attr_type {
     pub const LOCAL_PREF: u8 = 5;
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
+    pub const COMMUNITIES: u8 = 8;
 }
 
 /// Path attribute flag bits (RFC 4271 §4.3).

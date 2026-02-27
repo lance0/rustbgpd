@@ -1,0 +1,76 @@
+# M4 interop config — 8 static peers, 2 added dynamically via gRPC
+# Per-peer export policy: frr-01 gets deny on 10.0.0.0/8
+
+[global]
+asn = 65001
+router_id = "10.0.10.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+grpc_addr = "0.0.0.0:50051"
+
+# FRR-01 (AS 65010) — has per-peer export policy
+[[neighbors]]
+address = "10.0.10.2"
+remote_asn = 65010
+description = "frr-01"
+hold_time = 90
+
+[[neighbors.export_policy]]
+prefix = "10.0.0.0/8"
+le = 32
+action = "deny"
+
+# FRR-02 (AS 65011)
+[[neighbors]]
+address = "10.0.11.2"
+remote_asn = 65011
+description = "frr-02"
+hold_time = 90
+
+# FRR-03 (AS 65012)
+[[neighbors]]
+address = "10.0.12.2"
+remote_asn = 65012
+description = "frr-03"
+hold_time = 90
+
+# FRR-04 (AS 65013)
+[[neighbors]]
+address = "10.0.13.2"
+remote_asn = 65013
+description = "frr-04"
+hold_time = 90
+
+# FRR-05 (AS 65014)
+[[neighbors]]
+address = "10.0.14.2"
+remote_asn = 65014
+description = "frr-05"
+hold_time = 90
+
+# FRR-06 (AS 65015)
+[[neighbors]]
+address = "10.0.15.2"
+remote_asn = 65015
+description = "frr-06"
+hold_time = 90
+
+# FRR-07 (AS 65016)
+[[neighbors]]
+address = "10.0.16.2"
+remote_asn = 65016
+description = "frr-07"
+hold_time = 90
+
+# FRR-08 (AS 65017)
+[[neighbors]]
+address = "10.0.17.2"
+remote_asn = 65017
+description = "frr-08"
+hold_time = 90
+
+# FRR-09 (AS 65018) — NOT configured, added dynamically
+# FRR-10 (AS 65019) — NOT configured, added dynamically

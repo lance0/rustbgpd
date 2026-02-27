@@ -18,6 +18,7 @@ prost.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
+tokio-stream.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true
