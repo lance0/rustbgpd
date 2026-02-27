@@ -5,6 +5,7 @@
 *~
 .env
 .DS_Store
+.claude/
 
 # Containerlab generated
 *.bak

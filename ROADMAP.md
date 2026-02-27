@@ -5,6 +5,47 @@ release with passing CI, updated interop matrix, and changelog entry.
 
 ---
 
+## Market Context
+
+The BGP daemon space is dominated by monolithic C implementations that
+bundle BGP with OSPF, IS-IS, and every other routing protocol:
+
+| Project | Language | Model | Strengths | Gaps |
+|---------|----------|-------|-----------|------|
+| FRR | C | Full routing suite | Feature-complete, wide adoption | Monolith, CLI-first, limited API |
+| BIRD | C | Full routing suite | Excellent filter language, lightweight | CLI-first, no native gRPC |
+| OpenBGPD | C | BGP-only | Clean design, OpenBSD pedigree | Limited platform support, no API |
+| GoBGP | Go | BGP-only, gRPC API | API-first, good ergonomics | GC pauses at scale, Go-specific protos |
+
+**Why rustbgpd exists:**
+
+- **GoBGP proved the model.** API-first BGP with gRPC works. Operators
+  want programmable routing, not CLI scripting. But GoBGP carries Go's
+  GC overhead and its protos are Go-flavored.
+- **No Rust BGP daemon exists for production use.** Memory safety,
+  zero-cost abstractions, and no GC make Rust ideal for a control plane
+  that must be reliable and predictable under load.
+- **The codec is independently valuable.** `rustbgpd-wire` as a
+  standalone, fuzzed BGP codec library fills a gap in the Rust ecosystem.
+  Anyone building BGP tooling in Rust (monitors, analyzers, test harnesses)
+  can use it without pulling in a full daemon.
+- **Observability is an afterthought in existing daemons.** Prometheus
+  metrics, structured JSON logs, and machine-parseable errors from day
+  one — not bolted on later.
+
+**Target users:** Network automation teams, IX operators, anyone who
+currently drives GoBGP via gRPC and wants memory safety and predictable
+performance. Not a replacement for FRR/BIRD in full routing suite roles.
+
+---
+
+## Completed
+
+Nothing yet — workspace scaffolding is in place, implementation begins
+with M0.
+
+---
+
 ## M0 — "Establish" `[current]`
 
 Session establishment and stability. The daemon connects to peers,
@@ -49,6 +90,14 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - Test: peer restart recovery
    - Test: TCP reset recovery
    - Test: malformed OPEN → correct NOTIFICATION
+
+### Exit Criteria
+
+- Establish and hold 30+ minutes with FRR and BIRD
+- Survive peer restart and TCP reset
+- Correct NOTIFICATION on malformed OPEN
+- Prometheus metrics capture all state transitions
+- Structured log events for every FSM transition
 
 ---
 
@@ -102,10 +151,28 @@ Scale to many peers with per-peer policy.
 
 - MP-BGP (IPv6 unicast)
 - Communities and extended communities
-- FlowSpec speaker mode
+- FlowSpec speaker mode (prefixd lineage)
 - BMP exporter
 - RPKI validation (RTR client)
 - Graceful restart
 - TCP-AO authentication
 - Config persistence (gRPC → TOML writeback)
 - Extended message support (RFC 8654)
+
+---
+
+## Non-Goals
+
+These are explicitly out of scope. Not "maybe later" — out of scope.
+
+- **Full routing suite.** No OSPF, IS-IS, LDP, MPLS, PIM. This is a BGP daemon.
+- **CLI-first operation.** The CLI is a convenience wrapper around gRPC,
+  not the primary interface. If you want rich CLI, use `grpcurl` or write
+  a client.
+- **GoBGP proto compatibility.** Our protos are our own. A compat adapter
+  can exist as a separate project if anyone wants it.
+- **Windows support.** Linux is the target. macOS for dev builds only.
+- **Web UI / dashboard.** Grafana + Prometheus is the monitoring story.
+  We export metrics, not render dashboards.
+- **Plugin system in v1.** Policy is built-in and minimal. WASM/DSL
+  plugins are post-v1 if the core is stable enough to warrant them.

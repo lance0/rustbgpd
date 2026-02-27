@@ -8,13 +8,24 @@ document (M0–M4).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- Workspace with 7 crates: wire, fsm, transport, rib, policy, api, telemetry
+- gRPC proto skeleton (`rustbgpd.v1` package, all 5 services)
+- Containerlab interop topologies for FRR 10.x and BIRD 2.x
+- Design document, RFC notes, interop matrix template
+- Roadmap with market context and milestone plan (M0–M4)
+
+---
+
 ## [0.0.1] — Unreleased
 
-### Status: M0 — "Establish" (In Progress)
+Target: **M0 — "Establish"**
 
 ### Planned
 
-- Workspace setup with 7 crates: wire, fsm, transport, rib, policy, api, telemetry
 - `rustbgpd-wire`: OPEN, KEEPALIVE, NOTIFICATION encode/decode
 - `rustbgpd-wire`: Capability parsing (4-byte ASN, MP-BGP)
 - `rustbgpd-wire`: Strict 4096-byte message size enforcement
@@ -25,8 +36,6 @@ document (M0–M4).
 - `rustbgpd-transport`: Bounded channels with backpressure
 - `rustbgpd-telemetry`: Prometheus metric stubs (counters at zero)
 - `rustbgpd-telemetry`: Structured JSON log events
-- gRPC proto skeleton (`rustbgpd.v1` package)
-- Containerlab interop topologies (FRR, BIRD)
 - Fuzz harness stubs for wire decoder
 
 ### Exit Criteria
