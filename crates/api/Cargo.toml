@@ -1,0 +1,22 @@
+[package]
+name = "rustbgpd-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "gRPC API server — tonic bindings for all five rustbgpd services"
+
+[dependencies]
+rustbgpd-wire.workspace = true
+rustbgpd-fsm.workspace = true
+rustbgpd-rib.workspace = true
+rustbgpd-policy.workspace = true
+rustbgpd-transport.workspace = true
+rustbgpd-telemetry.workspace = true
+tonic.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

@@ -1,0 +1,32 @@
+# Containerlab topology: rustbgpd ↔ FRR (Milestone 0)
+#
+# Validates: OPEN exchange, KEEPALIVE hold, NOTIFICATION on error,
+# session re-establishment after peer restart and TCP reset.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m0-frr.clab.yml
+#   containerlab destroy -t tests/interop/m0-frr.clab.yml
+
+name: m0-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      binds:
+        - ./configs/rustbgpd-frr.toml:/etc/rustbgpd/config.toml:ro
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m0.conf:/etc/frr/frr.conf:ro
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65001
+# FRR:      10.0.0.2, AS 65002

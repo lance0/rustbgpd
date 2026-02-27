@@ -1,0 +1,19 @@
+[package]
+name = "rustbgpd-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "TCP connection management — tokio read/write loops, session runtime, bounded channels"
+
+[dependencies]
+rustbgpd-wire.workspace = true
+rustbgpd-fsm.workspace = true
+rustbgpd-telemetry.workspace = true
+bytes.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+prometheus.workspace = true
+
+[dev-dependencies]

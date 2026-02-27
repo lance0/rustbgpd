@@ -1,0 +1,13 @@
+[package]
+name = "rustbgpd-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Minimal policy engine — prefix allow/deny, max-prefix enforcement, attribute filters"
+
+[dependencies]
+rustbgpd-wire.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

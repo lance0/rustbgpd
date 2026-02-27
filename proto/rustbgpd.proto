@@ -1,0 +1,268 @@
+syntax = "proto3";
+
+package rustbgpd.v1;
+
+option java_multiple_files = true;
+option java_package = "com.rustbgpd.v1";
+
+// ---------------------------------------------------------------------------
+// Common types
+// ---------------------------------------------------------------------------
+
+enum AddressFamily {
+  ADDRESS_FAMILY_UNSPECIFIED = 0;
+  ADDRESS_FAMILY_IPV4_UNICAST = 1;
+  ADDRESS_FAMILY_IPV6_UNICAST = 2;
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_IDLE = 1;
+  SESSION_STATE_CONNECT = 2;
+  SESSION_STATE_ACTIVE = 3;
+  SESSION_STATE_OPEN_SENT = 4;
+  SESSION_STATE_OPEN_CONFIRM = 5;
+  SESSION_STATE_ESTABLISHED = 6;
+}
+
+message ErrorDetail {
+  oneof kind {
+    BgpProtocolError bgp = 1;
+    ResourceLimitError resource = 2;
+    ConfigError config = 3;
+  }
+}
+
+message BgpProtocolError {
+  uint32 error_code = 1;
+  uint32 error_subcode = 2;
+  string description = 3;
+  string peer_address = 4;
+}
+
+message ResourceLimitError {
+  string limit_name = 1;
+  uint64 current_value = 2;
+  uint64 max_value = 3;
+  string peer_address = 4;
+}
+
+message ConfigError {
+  string field_path = 1;
+  string message = 2;
+  string provided_value = 3;
+}
+
+// ---------------------------------------------------------------------------
+// GlobalService — Daemon configuration and identity
+// ---------------------------------------------------------------------------
+
+service GlobalService {
+  rpc GetGlobal(GetGlobalRequest) returns (GlobalState);
+  rpc SetGlobal(SetGlobalRequest) returns (SetGlobalResponse);
+}
+
+message GetGlobalRequest {}
+
+message GlobalState {
+  uint32 asn = 1;
+  string router_id = 2;
+  uint32 listen_port = 3;
+}
+
+message SetGlobalRequest {
+  uint32 asn = 1;
+  string router_id = 2;
+  uint32 listen_port = 3;
+}
+
+message SetGlobalResponse {}
+
+// ---------------------------------------------------------------------------
+// NeighborService — Peer lifecycle and state
+// ---------------------------------------------------------------------------
+
+service NeighborService {
+  rpc AddNeighbor(AddNeighborRequest) returns (AddNeighborResponse);
+  rpc DeleteNeighbor(DeleteNeighborRequest) returns (DeleteNeighborResponse);
+  rpc ListNeighbors(ListNeighborsRequest) returns (ListNeighborsResponse);
+  rpc GetNeighborState(GetNeighborStateRequest) returns (NeighborState);
+  rpc EnableNeighbor(EnableNeighborRequest) returns (EnableNeighborResponse);
+  rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
+}
+
+message NeighborConfig {
+  string address = 1;
+  uint32 remote_asn = 2;
+  string description = 3;
+  uint32 hold_time = 4;
+  uint32 max_prefixes = 5;
+}
+
+message NeighborState {
+  NeighborConfig config = 1;
+  SessionState state = 2;
+  uint64 uptime_seconds = 3;
+  uint64 prefixes_received = 4;
+  uint64 prefixes_sent = 5;
+  uint64 updates_received = 6;
+  uint64 updates_sent = 7;
+  uint64 notifications_received = 8;
+  uint64 notifications_sent = 9;
+  uint64 flap_count = 10;
+  string last_error = 11;
+}
+
+message AddNeighborRequest {
+  NeighborConfig config = 1;
+}
+
+message AddNeighborResponse {}
+
+message DeleteNeighborRequest {
+  string address = 1;
+}
+
+message DeleteNeighborResponse {}
+
+message ListNeighborsRequest {}
+
+message ListNeighborsResponse {
+  repeated NeighborState neighbors = 1;
+}
+
+message GetNeighborStateRequest {
+  string address = 1;
+}
+
+message EnableNeighborRequest {
+  string address = 1;
+}
+
+message EnableNeighborResponse {}
+
+message DisableNeighborRequest {
+  string address = 1;
+  string reason = 2;
+}
+
+message DisableNeighborResponse {}
+
+// ---------------------------------------------------------------------------
+// RibService — RIB queries (paginated + streaming)
+// ---------------------------------------------------------------------------
+
+service RibService {
+  rpc ListReceivedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+  rpc ListBestRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+  rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+  rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
+}
+
+message ListRoutesRequest {
+  string neighbor_address = 1;
+  AddressFamily afi_safi = 2;
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+
+message ListRoutesResponse {
+  repeated Route routes = 1;
+  string next_page_token = 2;
+  uint64 total_count = 3;
+}
+
+message Route {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  string next_hop = 3;
+  string peer_address = 4;
+  uint32 origin = 5;
+  repeated uint32 as_path = 6;
+  uint32 local_pref = 7;
+  uint32 med = 8;
+  bool best = 9;
+}
+
+message WatchRoutesRequest {
+  string neighbor_address = 1;
+  AddressFamily afi_safi = 2;
+}
+
+enum RouteEventType {
+  ROUTE_EVENT_TYPE_UNSPECIFIED = 0;
+  ROUTE_EVENT_TYPE_ADDED = 1;
+  ROUTE_EVENT_TYPE_WITHDRAWN = 2;
+  ROUTE_EVENT_TYPE_BEST_CHANGED = 3;
+}
+
+message RouteEvent {
+  RouteEventType event_type = 1;
+  string prefix = 2;
+  uint32 prefix_length = 3;
+  string peer_address = 4;
+  AddressFamily afi_safi = 5;
+  string timestamp = 6;
+}
+
+// ---------------------------------------------------------------------------
+// InjectionService — Programmatic route injection
+// ---------------------------------------------------------------------------
+
+service InjectionService {
+  rpc AddPath(AddPathRequest) returns (AddPathResponse);
+  rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
+}
+
+message AddPathRequest {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  string next_hop = 3;
+  repeated uint32 as_path = 4;
+  uint32 origin = 5;
+  uint32 local_pref = 6;
+  uint32 med = 7;
+}
+
+message AddPathResponse {
+  bytes uuid = 1;
+}
+
+message DeletePathRequest {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  bytes uuid = 3;
+}
+
+message DeletePathResponse {}
+
+// ---------------------------------------------------------------------------
+// ControlService — Daemon lifecycle and health
+// ---------------------------------------------------------------------------
+
+service ControlService {
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+  rpc GetHealth(HealthRequest) returns (HealthResponse);
+  rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+}
+
+message ShutdownRequest {
+  string reason = 1;
+}
+
+message ShutdownResponse {}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  uint64 uptime_seconds = 2;
+  uint32 active_peers = 3;
+  uint32 total_routes = 4;
+}
+
+message MetricsRequest {}
+
+message MetricsResponse {
+  string prometheus_text = 1;
+}

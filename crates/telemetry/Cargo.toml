@@ -1,0 +1,15 @@
+[package]
+name = "rustbgpd-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Prometheus metrics and structured tracing for rustbgpd"
+
+[dependencies]
+prometheus.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]

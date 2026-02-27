@@ -1,0 +1,13 @@
+[package]
+name = "rustbgpd-rib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "RIB data structures — Adj-RIB-In, Loc-RIB best-path selection, Adj-RIB-Out"
+
+[dependencies]
+rustbgpd-wire.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
