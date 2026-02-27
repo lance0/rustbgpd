@@ -154,6 +154,7 @@ After tests 1–4, dump metrics and verify consistency:
 | Peer restart recovery | PASS | Auto-reconnect, `established_total`=2 |
 | TCP reset recovery | PASS | Cease NOTIFICATIONs received, `established_total`=3 |
 | Full metrics dump | PASS | 3 establishments, 2 flaps, all counters consistent |
+| **30-min soak** | **PASS** | **35 min, 35/35 checks, 73 keepalives, 0 flaps** |
 
 ## BIRD Test Results (2026-02-27, BIRD 2.0.12)
 
@@ -164,6 +165,7 @@ After tests 1–4, dump metrics and verify consistency:
 | Peer restart recovery | PASS | Auto-reconnect after `birdc down`, `established_total`=2 |
 | TCP reset recovery | PASS | `birdc restart`, Cease NOTIFICATIONs received, `established_total`=3 |
 | Full metrics dump | PASS | 3 establishments, 2 flaps, Cease subcodes 2+4 |
+| **30-min soak** | **PASS** | **35 min, 35/35 checks, 0 flaps** |
 
 ---
 

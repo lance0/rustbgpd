@@ -57,7 +57,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 
 ---
 
-## M0 — "Establish" `[current]`
+## M0 — "Establish" `[complete]`
 
 Session establishment and stability. The daemon connects to peers,
 completes OPEN/KEEPALIVE exchange, and holds Established state.
@@ -107,8 +107,8 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - ~~Test: session establishment~~ **Pass** (both peers)
    - ~~Test: peer restart recovery~~ **Pass** (both peers)
    - ~~Test: TCP reset recovery~~ **Pass** (both peers)
-   - Test: establish, hold 30+ minutes, verify keepalives `[remaining]`
-   - Test: malformed OPEN → correct NOTIFICATION `[remaining]`
+   - ~~Test: establish, hold 30+ minutes, verify keepalives~~ **Pass** (FRR 35min/73 KAs, BIRD 35min)
+   - ~~Test: malformed OPEN → correct NOTIFICATION~~ **Pass** (Bad Peer AS → code 2/subcode 2)
 
 ### Exit Criteria
 

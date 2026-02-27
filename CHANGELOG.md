@@ -82,10 +82,6 @@ Target: **M0 — "Establish"**
 - Daemon binary: config loading → telemetry init → peer spawn → metrics server → shutdown
 - CI pipeline: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`
 
-### Remaining
-
-- 30-minute soak test with FRR and BIRD
-
 ### Exit Criteria
 
 - Establish and hold 30+ minutes with FRR and BIRD
