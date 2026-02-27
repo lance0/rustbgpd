@@ -1,32 +1,45 @@
 /// RFC 4271 §4.5 — NOTIFICATION error codes.
+///
+/// Known codes (1–6) have named variants. Unknown codes from the wire are
+/// preserved via `Unknown(u8)` so the original byte is never lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
 pub enum NotificationCode {
-    MessageHeader = 1,
-    OpenMessage = 2,
-    UpdateMessage = 3,
-    HoldTimerExpired = 4,
-    FsmError = 5,
-    Cease = 6,
+    MessageHeader,
+    OpenMessage,
+    UpdateMessage,
+    HoldTimerExpired,
+    FsmError,
+    Cease,
+    /// A code value not defined in RFC 4271. The raw byte is preserved
+    /// for logging and re-encoding.
+    Unknown(u8),
 }
 
 impl NotificationCode {
     #[must_use]
-    pub fn from_u8(value: u8) -> Option<Self> {
+    pub fn from_u8(value: u8) -> Self {
         match value {
-            1 => Some(Self::MessageHeader),
-            2 => Some(Self::OpenMessage),
-            3 => Some(Self::UpdateMessage),
-            4 => Some(Self::HoldTimerExpired),
-            5 => Some(Self::FsmError),
-            6 => Some(Self::Cease),
-            _ => None,
+            1 => Self::MessageHeader,
+            2 => Self::OpenMessage,
+            3 => Self::UpdateMessage,
+            4 => Self::HoldTimerExpired,
+            5 => Self::FsmError,
+            6 => Self::Cease,
+            other => Self::Unknown(other),
         }
     }
 
     #[must_use]
     pub fn as_u8(self) -> u8 {
-        self as u8
+        match self {
+            Self::MessageHeader => 1,
+            Self::OpenMessage => 2,
+            Self::UpdateMessage => 3,
+            Self::HoldTimerExpired => 4,
+            Self::FsmError => 5,
+            Self::Cease => 6,
+            Self::Unknown(v) => v,
+        }
     }
 }
 
@@ -39,6 +52,7 @@ impl std::fmt::Display for NotificationCode {
             Self::HoldTimerExpired => write!(f, "Hold Timer Expired"),
             Self::FsmError => write!(f, "Finite State Machine Error"),
             Self::Cease => write!(f, "Cease"),
+            Self::Unknown(code) => write!(f, "Unknown({code})"),
         }
     }
 }
@@ -123,7 +137,9 @@ pub fn description(code: NotificationCode, subcode: u8) -> &'static str {
         (NotificationCode::Cease, 3) => "Peer De-configured",
         (NotificationCode::Cease, 4) => "Out of Resources",
         (NotificationCode::Cease, 9) => "Hard Reset",
-        // Fallback
+        // Unknown code
+        (NotificationCode::Unknown(_), _) => "Unknown Error Code",
+        // Fallback for known code with unknown subcode
         (_, _) => "Unknown",
     }
 }
@@ -135,16 +151,22 @@ mod tests {
     #[test]
     fn from_u8_roundtrip() {
         for code_val in 1..=6u8 {
-            let code = NotificationCode::from_u8(code_val).unwrap();
+            let code = NotificationCode::from_u8(code_val);
             assert_eq!(code.as_u8(), code_val);
+            assert!(!matches!(code, NotificationCode::Unknown(_)));
         }
     }
 
     #[test]
-    fn from_u8_unknown() {
-        assert!(NotificationCode::from_u8(0).is_none());
-        assert!(NotificationCode::from_u8(7).is_none());
-        assert!(NotificationCode::from_u8(255).is_none());
+    fn from_u8_unknown_preserved() {
+        assert_eq!(NotificationCode::from_u8(0), NotificationCode::Unknown(0));
+        assert_eq!(NotificationCode::from_u8(7), NotificationCode::Unknown(7));
+        assert_eq!(
+            NotificationCode::from_u8(255),
+            NotificationCode::Unknown(255)
+        );
+        // Raw byte survives roundtrip
+        assert_eq!(NotificationCode::from_u8(42).as_u8(), 42);
     }
 
     #[test]

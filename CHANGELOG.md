@@ -10,6 +10,16 @@ document (M0–M4).
 
 ## [Unreleased]
 
+### Fixed
+
+- `rustbgpd-wire`: Unknown NOTIFICATION error codes are now preserved as
+  `NotificationCode::Unknown(u8)` instead of being silently mapped to `Cease`.
+  This fixes incorrect logging and metrics for NOTIFICATIONs with future or
+  non-standard error codes. (ADR-0011)
+- `rustbgpd-transport`: Use `code.as_u8()` instead of `code as u8` cast for
+  NOTIFICATION metric labels — more explicit and correct with the new enum
+  representation.
+
 ### Added
 
 - Workspace with 7 crates: wire, fsm, transport, rib, policy, api, telemetry

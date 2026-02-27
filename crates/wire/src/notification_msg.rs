@@ -38,9 +38,7 @@ impl NotificationMessage {
         }
 
         let code_byte = buf.get_u8();
-        // Unknown codes are stored as Cease with the raw subcode,
-        // but we should preserve the actual byte. Use Cease as fallback.
-        let code = NotificationCode::from_u8(code_byte).unwrap_or(NotificationCode::Cease);
+        let code = NotificationCode::from_u8(code_byte);
 
         let subcode = buf.get_u8();
 

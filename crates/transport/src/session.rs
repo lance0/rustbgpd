@@ -174,7 +174,7 @@ impl PeerSession {
                     }
                     self.metrics.record_notification_sent(
                         &self.peer_label,
-                        &(code as u8).to_string(),
+                        &code.as_u8().to_string(),
                         &subcode.to_string(),
                     );
                     self.metrics
@@ -318,7 +318,7 @@ impl PeerSession {
                         Message::Notification(notif) => {
                             self.metrics.record_notification_received(
                                 &self.peer_label,
-                                &(notif.code as u8).to_string(),
+                                &notif.code.as_u8().to_string(),
                                 &notif.subcode.to_string(),
                             );
                             self.metrics

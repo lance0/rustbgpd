@@ -49,3 +49,5 @@ pub mod open_subcode {
   sufficient.
 - **Negative:** No compile-time exhaustiveness check on subcodes. This
   is acceptable — subcodes are open-ended by design.
+- **See also:** ADR-0011 extends this philosophy to error codes with
+  `NotificationCode::Unknown(u8)` for unrecognized code bytes.

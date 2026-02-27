@@ -18,6 +18,8 @@ fn arb_notification_code() -> impl Strategy<Value = NotificationCode> {
         Just(NotificationCode::HoldTimerExpired),
         Just(NotificationCode::FsmError),
         Just(NotificationCode::Cease),
+        // Unknown codes: 0 and 7–255 (outside the RFC 4271 range)
+        prop_oneof![Just(0u8), 7..=255u8].prop_map(NotificationCode::Unknown),
     ]
 }
 

@@ -18,6 +18,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0008](0008-single-task-per-peer.md) | Single tokio task per peer for M0 | Accepted | 2026-02-27 |
 | [0009](0009-iterative-action-loop.md) | Iterative action loop to avoid async recursion | Accepted | 2026-02-27 |
 | [0010](0010-minimal-metrics-server.md) | Minimal TCP metrics server, no HTTP framework | Accepted | 2026-02-27 |
+| [0011](0011-unknown-notification-code-variant.md) | Unknown variant for NOTIFICATION error codes | Accepted | 2026-02-27 |
 
 ## Template
 

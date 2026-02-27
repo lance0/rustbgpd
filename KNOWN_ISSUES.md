@@ -5,7 +5,12 @@ resolved.
 
 ---
 
-*No known issues yet.*
+## Resolved
+
+- **Unknown NOTIFICATION codes mapped to Cease (fixed).** The wire decoder
+  silently converted unrecognized NOTIFICATION error codes to `Cease`,
+  losing the original byte. Fixed by adding `Unknown(u8)` variant to
+  `NotificationCode`. See ADR-0011.
 
 ## Limitations (by design, not bugs)
 
