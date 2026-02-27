@@ -396,15 +396,24 @@ route event streaming.
 
 ## Post-v1
 
+### Protocol extensions
 - MP-BGP (IPv6 unicast)
 - Extended communities (type 16)
 - FlowSpec speaker mode (prefixd lineage)
+- Graceful restart
+- Extended message support (RFC 8654)
+
+### Infrastructure
+- Inbound TCP listener (passive peering — `listen_port` is parsed but unused)
 - BMP exporter
 - RPKI validation (RTR client)
-- Graceful restart
 - TCP-AO authentication
 - Config persistence (gRPC → TOML writeback)
-- Extended message support (RFC 8654)
+
+### Performance / correctness
+- Batch multiple NLRI per outbound UPDATE (currently one UPDATE per prefix)
+- Synchronize `prefix_count` with actual RIB state (currently add/subtract heuristic)
+- Replace hand-rolled metrics HTTP server with proper HTTP/1.1 handling
 
 ---
 
