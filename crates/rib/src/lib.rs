@@ -9,10 +9,14 @@
 #![warn(clippy::pedantic)]
 
 pub mod adj_rib_in;
+pub mod best_path;
+pub mod loc_rib;
 pub mod manager;
 pub mod route;
 pub mod update;
 
+pub use best_path::best_path_cmp;
+pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::Route;
 pub use update::RibUpdate;

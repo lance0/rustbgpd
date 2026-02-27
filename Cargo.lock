@@ -861,6 +861,7 @@ dependencies = [
 name = "rustbgpd-rib"
 version = "0.0.1"
 dependencies = [
+ "proptest",
  "rustbgpd-wire",
  "thiserror 2.0.18",
  "tokio",

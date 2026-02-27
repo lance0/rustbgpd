@@ -451,6 +451,7 @@ impl PeerSession {
             .map(|prefix| Route {
                 prefix: *prefix,
                 next_hop,
+                peer: self.peer_ip,
                 attributes: parsed.attributes.clone(),
                 received_at: now,
             })

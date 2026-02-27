@@ -60,7 +60,7 @@ impl AdjRibIn {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr};
     use std::time::Instant;
 
     use super::*;
@@ -69,6 +69,7 @@ mod tests {
         Route {
             prefix,
             next_hop,
+            peer: IpAddr::V4(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
         }

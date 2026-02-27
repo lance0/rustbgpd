@@ -10,6 +10,26 @@ document (M0–M4).
 
 ## [Unreleased]
 
+### Added (M2 — "Decide")
+
+- `rustbgpd-rib`: `Route` now carries `peer: IpAddr` for tiebreaking and gRPC
+  reporting. Accessor helpers `origin()`, `as_path()`, `local_pref()`, `med()`
+  extract attributes with RFC-appropriate defaults.
+- `rustbgpd-rib`: Best-path comparison function `best_path_cmp()` implementing
+  RFC 4271 §9.1.2 decision process: LOCAL_PREF → AS_PATH length → ORIGIN → MED
+  → peer address. Deterministic MED (always-compare). Standalone function, not
+  `Ord` on `Route`. (ADR-0014)
+- `rustbgpd-rib`: Property tests for best-path comparison (antisymmetry,
+  transitivity, totality) via proptest.
+- `rustbgpd-rib`: `LocRib` struct — stores one best route per prefix, with
+  incremental `recompute()` that returns whether the best path changed.
+- `rustbgpd-rib`: `RibManager` now owns a `LocRib` and recomputes best paths
+  on every announce, withdraw, and peer-down event. Only affected prefixes are
+  recomputed. `QueryBestRoutes` variant added to `RibUpdate`.
+- `rustbgpd-api`: `ListBestRoutes` gRPC endpoint with offset pagination,
+  returning routes with `best: true`. `route_to_proto()` now uses `route.peer`
+  for the `peer_address` field.
+
 ### Fixed
 
 - Interop test script: peer restart test (test 4) now relies on watchfrr to

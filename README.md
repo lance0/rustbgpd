@@ -8,10 +8,9 @@ gRPC owns the truth.
 
 ## Status
 
-**Pre-release.** Milestone 1 ("Hear") is complete — UPDATE processing,
-Adj-RIB-In storage, and `ListReceivedRoutes` gRPC endpoint. 222 unit/integration
-tests pass. Interop validated against FRR 10.3.1 (15/15 automated tests pass:
-route receipt, attributes, withdrawal, peer restart recovery).
+**Pre-release.** Milestone 2 ("Decide") is complete — Loc-RIB best-path
+selection per RFC 4271 §9.1.2 with `ListBestRoutes` gRPC endpoint. 248
+unit/integration tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 ## Goals
 
@@ -48,7 +47,7 @@ Seven crates with strict dependency rules:
 
 - **M0 — "Establish"** `[complete]` — OPEN/KEEPALIVE/NOTIFICATION, FSM, session stability
 - **M1 — "Hear"** `[complete]` — UPDATE decode, Adj-RIB-In, `ListReceivedRoutes` gRPC
-- **M2 — "Decide"** — Best-path selection, `ListBestRoutes`
+- **M2 — "Decide"** `[complete]` — Loc-RIB best-path selection, `ListBestRoutes` gRPC
 - **M3 — "Speak"** — Route injection, Adj-RIB-Out, policy, TCP MD5
 - **M4 — "Route Server"** — Many peers, per-peer policy, scale testing
 
@@ -82,8 +81,13 @@ Ctrl+C triggers graceful shutdown.
 ### Querying Routes via gRPC
 
 ```bash
+# All received routes (Adj-RIB-In)
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListReceivedRoutes
+
+# Best routes (Loc-RIB)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListBestRoutes
 ```
 
 ## Interop Testing

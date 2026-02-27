@@ -400,27 +400,31 @@ Decode UPDATEs. Support IPv4 unicast NLRI. Support attributes: ORIGIN, AS_PATH (
 - Fuzz harness in CI for the UPDATE decoder (at least smoke-level coverage).
 - Structured events for every route learned and withdrawn.
 
-### Milestone 2: "Decide"
+### Milestone 2: "Decide" `[complete]`
 
-Loc-RIB best-path selection — minimal but deterministic. The comparison function is a **total ordering**: it must never return equality for distinct paths.
+Loc-RIB best-path selection — minimal but deterministic. The comparison function is a **total ordering**: it must never return equality for distinct paths (from distinct peers).
 
-Best-path rules (v1), applied in order:
-1. Highest LOCAL_PREF
-2. Shortest AS_PATH (count of ASN segments, AS_SET counts as 1)
+Best-path rules (implemented), applied in order:
+1. Highest LOCAL_PREF (default 100 if absent)
+2. Shortest AS_PATH (AS_SET counts as 1, per RFC 4271 §9.1.2.2)
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
-4. Lowest MED (only if same neighboring AS — optional, configurable)
-5. eBGP over iBGP
-6. Lowest router-id tiebreaker
-7. Lowest peer address (final disambiguator — guarantees strict ordering)
+4. Lowest MED (deterministic — always-compare across all peers, not just same-AS)
+5. Lowest peer address (final disambiguator — guarantees strict ordering)
 
-The last two tiebreakers ensure that for any two distinct paths, comparison produces a strict `Ordering::Less` or `Ordering::Greater`, never `Equal`. This is a property test target.
+**Implementation choices (ADR-0014):**
+- `best_path_cmp()` is a standalone function, not `Ord` on `Route`. Domain-specific ordering doesn't belong as a trait impl — multiple orderings may be needed.
+- Deterministic MED (always-compare) matches GoBGP default. Simpler and avoids ordering sensitivity.
+- eBGP/iBGP and router-id tiebreakers are deferred to M3 when outbound advertisement requires the full decision process.
+- `LocRib` lives inside `RibManager` — same single-task ownership pattern, no new locks.
+- Incremental recompute: only prefixes affected by each update are re-evaluated.
 
-Expose via `ListBestRoutes`.
+Exposed via `ListBestRoutes` gRPC endpoint with offset pagination.
 
 **Exit criteria:**
-- Deterministic outcomes for all decision inputs, verified by property tests.
+- Deterministic outcomes for all decision inputs, verified by property tests (antisymmetry, transitivity, totality).
 - Stable best-path selection with multiple paths from multiple peers.
-- Structured events for best-path changes.
+- Structured debug events for best-path changes.
+- 248 tests pass, clippy clean, fmt clean.
 
 ### Milestone 3: "Speak"
 

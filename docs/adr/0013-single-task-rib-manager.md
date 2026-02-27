@@ -63,3 +63,11 @@ pub enum RibUpdate {
   is simpler than distributed cleanup across shared state.
 - The pattern is identical to the design document's specified data flow:
   `Session RX → wire::decode → fsm → RibUpdate → RIB task`.
+
+## Update (M2)
+
+The `RibManager` now also owns a `LocRib` (Loc-RIB best-path table).
+This is a natural extension of the single-task ownership pattern — the
+Loc-RIB is recomputed incrementally on every announce, withdraw, and
+peer-down event within the same task. No new locks or synchronization
+were needed. A `QueryBestRoutes` variant was added to `RibUpdate`.

@@ -186,14 +186,62 @@ Decode UPDATEs. Store in Adj-RIB-In. Expose via gRPC.
 
 ---
 
-## M2 — "Decide"
+## M2 — "Decide" `[complete]`
 
-Loc-RIB best-path selection.
+Loc-RIB best-path selection per RFC 4271 §9.1.2.
 
-- Best-path comparison: LOCAL_PREF → AS_PATH length → ORIGIN → MED → eBGP/iBGP → router-id → peer address
-- Total ordering property tests (no ties for distinct paths)
-- `ListBestRoutes` gRPC endpoint
-- Structured events for best-path changes
+### Build Order
+
+1. ~~**Route peer field** (`crates/rib/src/route.rs`)~~ **Done**
+   - Added `peer: IpAddr` to `Route` for tiebreaker and gRPC reporting
+   - Accessor helpers: `origin()`, `as_path()`, `local_pref()`, `med()`
+   - Ripple fixes across transport, adj_rib_in, and manager tests
+
+2. ~~**Best-path comparison** (`crates/rib/src/best_path.rs`)~~ **Done**
+   - `best_path_cmp(a, b) -> Ordering` — preferred route sorts `Less`
+   - Decision steps: LOCAL_PREF → AS_PATH length → ORIGIN → MED → peer address
+   - Deterministic MED (always-compare) — simpler, matches GoBGP behavior
+   - Standalone function, not `Ord` on `Route` (ADR-0014)
+   - 9 unit tests (one per decision step + edge cases)
+   - 3 proptest property tests: antisymmetry, transitivity, totality
+
+3. ~~**Loc-RIB struct** (`crates/rib/src/loc_rib.rs`)~~ **Done**
+   - `LocRib { routes: HashMap<Ipv4Prefix, Route> }` — best route per prefix
+   - `recompute(prefix, candidates)` picks best via `min_by(best_path_cmp)`
+   - Returns whether best changed (for event emission)
+   - 5 unit tests: single candidate, replacement, withdrawal, unchanged, multi-candidate
+
+4. ~~**RibManager integration** (`crates/rib/src/manager.rs`)~~ **Done**
+   - `loc_rib: LocRib` field inside `RibManager`
+   - Incremental recompute: only affected prefixes on announce/withdraw/peer-down
+   - `PeerDown`: collects affected prefixes *before* clearing Adj-RIB-In
+   - `QueryBestRoutes` variant in `RibUpdate` enum
+   - Debug tracing for best-path changes
+   - 4 integration tests: winner query, peer-down promotion, withdrawal update, per-prefix winners
+
+5. ~~**gRPC endpoint** (`crates/api/src/rib_service.rs`)~~ **Done**
+   - `list_best_routes()` with same pagination pattern as `list_received_routes()`
+   - `route_to_proto()` updated to use `route.peer` for `peer_address` field
+   - `best: true` flag set on best routes
+
+### Design Choices
+
+- **Deterministic MED** — always-compare across all peers (not just same-AS).
+  Simpler, avoids ordering sensitivity, matches GoBGP default.
+- **Peer address tiebreaker** — router-id tiebreak deferred to M3/M4 when
+  we have outbound route advertisement and need full BGP decision process.
+- **eBGP/iBGP step skipped** — deferred until transport distinguishes session
+  types and router-id is available for a more complete implementation.
+
+### Exit Criteria
+
+- Deterministic outcomes for all decision inputs, verified by property tests
+- Stable best-path selection with multiple paths from multiple peers
+- Structured debug events for best-path changes
+- `ListBestRoutes` gRPC endpoint with pagination
+- 248 tests pass, clippy clean, fmt clean
+
+---
 
 ## M3 — "Speak"
 

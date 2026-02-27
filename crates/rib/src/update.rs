@@ -19,4 +19,6 @@ pub enum RibUpdate {
         peer: Option<IpAddr>,
         reply: oneshot::Sender<Vec<Route>>,
     },
+    /// Query: return best routes from the Loc-RIB.
+    QueryBestRoutes { reply: oneshot::Sender<Vec<Route>> },
 }

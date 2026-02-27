@@ -32,9 +32,21 @@ impl RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))
     }
+
+    async fn query_best_routes(&self) -> Result<Vec<Route>, Status> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))
+    }
 }
 
-fn route_to_proto(route: &Route, peer_addr: &str) -> proto::Route {
+fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut origin = 0u32;
     let mut as_path = Vec::new();
     let mut local_pref = 0u32;
@@ -61,12 +73,12 @@ fn route_to_proto(route: &Route, peer_addr: &str) -> proto::Route {
         prefix: route.prefix.addr.to_string(),
         prefix_length: u32::from(route.prefix.len),
         next_hop: route.next_hop.to_string(),
-        peer_address: peer_addr.to_string(),
+        peer_address: route.peer.to_string(),
         origin,
         as_path,
         local_pref,
         med,
-        best: false,
+        best,
     }
 }
 
@@ -112,10 +124,7 @@ impl proto::rib_service_server::RibService for RibService {
             .iter()
             .skip(offset)
             .take(page_size)
-            .map(|r| {
-                let peer_addr = peer.map_or(String::new(), |p| p.to_string());
-                route_to_proto(r, &peer_addr)
-            })
+            .map(|r| route_to_proto(r, false))
             .collect();
 
         let next_offset = offset + page.len();
@@ -134,9 +143,45 @@ impl proto::rib_service_server::RibService for RibService {
 
     async fn list_best_routes(
         &self,
-        _request: Request<proto::ListRoutesRequest>,
+        request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let req = request.into_inner();
+        let all_routes = self.query_best_routes().await?;
+        let total_count = all_routes.len() as u64;
+
+        let offset: usize = if req.page_token.is_empty() {
+            0
+        } else {
+            req.page_token
+                .parse()
+                .map_err(|_| Status::invalid_argument("invalid page_token"))?
+        };
+
+        let page_size = if req.page_size == 0 {
+            100
+        } else {
+            req.page_size as usize
+        };
+
+        let page: Vec<proto::Route> = all_routes
+            .iter()
+            .skip(offset)
+            .take(page_size)
+            .map(|r| route_to_proto(r, true))
+            .collect();
+
+        let next_offset = offset + page.len();
+        let next_page_token = if next_offset < all_routes.len() {
+            next_offset.to_string()
+        } else {
+            String::new()
+        };
+
+        Ok(Response::new(proto::ListRoutesResponse {
+            routes: page,
+            next_page_token,
+            total_count,
+        }))
     }
 
     async fn list_advertised_routes(
