@@ -16,6 +16,12 @@ topology:
       image: rustbgpd:dev
       binds:
         - ./configs/rustbgpd-frr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
 
     frr:
       kind: linux
@@ -23,6 +29,9 @@ topology:
       binds:
         - ./configs/frr-daemons:/etc/frr/daemons:ro
         - ./configs/frr-bgpd-m0.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
 
   links:
     - endpoints: ["rustbgpd:eth1", "frr:eth1"]

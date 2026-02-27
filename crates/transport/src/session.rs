@@ -28,6 +28,9 @@ pub(crate) struct PeerSession {
     metrics: BgpMetrics,
     commands: mpsc::Receiver<PeerCommand>,
     peer_label: String,
+    /// Suppresses automatic restart when the FSM transitions to Idle.
+    /// Set when the operator sends `ManualStop` or `Shutdown`.
+    stop_requested: bool,
 }
 
 impl PeerSession {
@@ -47,6 +50,7 @@ impl PeerSession {
             metrics,
             commands,
             peer_label,
+            stop_requested: false,
         }
     }
 
@@ -209,6 +213,12 @@ impl PeerSession {
                         old.as_str(),
                         new.as_str(),
                     );
+                    // Auto-restart: when the FSM falls back to Idle after
+                    // a connection failure (not operator-initiated), send
+                    // ManualStart to re-enter the connect cycle.
+                    if new == SessionState::Idle && !self.stop_requested {
+                        follow_up.push(Event::ManualStart);
+                    }
                 }
                 Action::SessionEstablished(neg) => {
                     info!(
@@ -341,14 +351,17 @@ impl PeerSession {
     async fn handle_command(&mut self, cmd: PeerCommand) -> ControlFlow<()> {
         match cmd {
             PeerCommand::Start => {
+                self.stop_requested = false;
                 self.drive_fsm(Event::ManualStart).await;
                 ControlFlow::Continue(())
             }
             PeerCommand::Stop => {
+                self.stop_requested = true;
                 self.drive_fsm(Event::ManualStop).await;
                 ControlFlow::Continue(())
             }
             PeerCommand::Shutdown => {
+                self.stop_requested = true;
                 info!(peer = %self.peer_label, "shutdown requested");
                 if self.fsm.state() == SessionState::Established {
                     self.drive_fsm(Event::ManualStop).await;
