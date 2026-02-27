@@ -36,6 +36,10 @@ document (M0–M4).
 - `rustbgpd-transport`: `PeerHandle` / `PeerCommand` API for spawning and controlling sessions
 - `rustbgpd-transport`: Full OPEN/KEEPALIVE handshake, reconnection, and teardown
 - `rustbgpd-transport`: Telemetry integration (state transitions, messages, notifications)
+- Daemon entrypoint: TOML config loading, peer spawning, graceful SIGTERM shutdown
+- Prometheus `/metrics` HTTP endpoint served via `tokio::net::TcpListener`
+- Config module (`src/config.rs`) with validation (router ID, neighbor addresses, hold time)
+- CI workflow (`.github/workflows/ci.yml`): fmt, clippy, test on push/PR
 
 ---
 
@@ -56,6 +60,8 @@ Target: **M0 — "Establish"**
 - `rustbgpd-transport`: Single-task-per-peer TCP session runtime
 - `rustbgpd-transport`: Framing, timers, connect/disconnect lifecycle
 - `rustbgpd-transport`: 18 tests (12 unit + 6 integration with mock peer)
+- Daemon binary: config loading → telemetry init → peer spawn → metrics server → shutdown
+- CI pipeline: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`
 
 ### Remaining
 

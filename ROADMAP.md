@@ -50,6 +50,10 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 4. **rustbgpd-transport** — Tokio TCP session runtime (single task per peer,
    length-delimited framing, timer management, PeerHandle API, telemetry
    integration, 18 tests including mock-peer integration)
+5. **Daemon entrypoint** — TOML config loading with validation, peer session
+   spawning, Prometheus `/metrics` HTTP endpoint, graceful SIGTERM shutdown
+6. **CI workflow** — GitHub Actions: `cargo fmt --check`, `cargo clippy`,
+   `cargo test --workspace` on every push and PR
 
 ---
 
@@ -91,7 +95,13 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - Iterative action loop avoids async recursion
    - Full telemetry integration (state transitions, messages, notifications)
 
-5. **Interop validation** `[next]`
+5. ~~**Daemon entrypoint** — Config, metrics, peer wiring, shutdown~~ **Done**
+   - TOML config loading and validation (`src/config.rs`)
+   - Prometheus `/metrics` HTTP endpoint (`src/metrics_server.rs`)
+   - CLI arg parsing, telemetry init, peer spawn, SIGTERM shutdown (`src/main.rs`)
+   - CI workflow: fmt, clippy, test (`.github/workflows/ci.yml`)
+
+6. **Interop validation** `[next]`
    - Containerlab topology: rustbgpd ↔ FRR
    - Containerlab topology: rustbgpd ↔ BIRD
    - Test: establish, hold 30+ minutes, verify keepalives

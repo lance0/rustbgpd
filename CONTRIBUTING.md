@@ -24,9 +24,9 @@ cargo clippy -- -D warnings        # Lint with warnings as errors
 cargo test --workspace             # All tests
 ```
 
-All PRs must pass:
-- `cargo fmt -- --check`
-- `cargo clippy -- -D warnings`
+All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
 ### Conventions
@@ -63,7 +63,9 @@ docs: update interop matrix for BIRD 2.16
 ## Project Structure
 
 ```
-src/main.rs              # Binary entry point
+src/main.rs              # Binary entry point — config, wiring, shutdown
+src/config.rs            # TOML config types, loading, validation
+src/metrics_server.rs    # Prometheus /metrics HTTP endpoint
 crates/
   wire/                  # BGP codec — zero internal deps
   fsm/                   # RFC 4271 state machine — pure, no I/O

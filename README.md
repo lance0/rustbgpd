@@ -61,6 +61,20 @@ cargo test --workspace
 
 Requires Rust 1.85+ (edition 2024).
 
+## Running
+
+```bash
+# With a config file
+./target/debug/rustbgpd path/to/config.toml
+
+# Default config path: /etc/rustbgpd/config.toml
+./target/debug/rustbgpd
+```
+
+See `tests/interop/configs/` for example TOML configs. The daemon exposes
+a Prometheus metrics endpoint at the address configured in
+`[global.telemetry].prometheus_addr`. Ctrl+C triggers graceful shutdown.
+
 ## Interop Testing
 
 Interop tests run via [containerlab](https://containerlab.dev/). Topologies
