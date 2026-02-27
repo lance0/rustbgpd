@@ -101,13 +101,14 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - CLI arg parsing, telemetry init, peer spawn, SIGTERM shutdown (`src/main.rs`)
    - CI workflow: fmt, clippy, test (`.github/workflows/ci.yml`)
 
-6. **Interop validation** `[next]`
-   - Containerlab topology: rustbgpd ↔ FRR
-   - Containerlab topology: rustbgpd ↔ BIRD
-   - Test: establish, hold 30+ minutes, verify keepalives
-   - Test: peer restart recovery
-   - Test: TCP reset recovery
-   - Test: malformed OPEN → correct NOTIFICATION
+6. ~~**Interop validation** — FRR and BIRD~~ **Done**
+   - ~~Containerlab topology: rustbgpd ↔ FRR (10.3.1)~~ **Pass**
+   - ~~Containerlab topology: rustbgpd ↔ BIRD (2.0.12)~~ **Pass**
+   - ~~Test: session establishment~~ **Pass** (both peers)
+   - ~~Test: peer restart recovery~~ **Pass** (both peers)
+   - ~~Test: TCP reset recovery~~ **Pass** (both peers)
+   - Test: establish, hold 30+ minutes, verify keepalives `[remaining]`
+   - Test: malformed OPEN → correct NOTIFICATION `[remaining]`
 
 ### Exit Criteria
 

@@ -11,7 +11,7 @@ not "someone tried it once."
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|
 | FRR (bgpd) | 10.3.1 | `tests/interop/m0-frr.clab.yml` | Tested (M0) | All 5 tests pass | Needs `no bgp ebgp-requires-policy` | Cease on `clear bgp *` |
-| BIRD | 2.x | `tests/interop/m0-bird.clab.yml` | Planned (M0) | Primary interop target | — | — |
+| BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | GoBGP | 3.x | — | Planned (M4) | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -26,6 +26,7 @@ not "someone tried it once."
 - Docker installed and running
 - containerlab installed
 - `rustbgpd:dev` Docker image built: `docker build -t rustbgpd:dev .`
+- `bird:2-bookworm` Docker image built: `docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop/`
 
 ### FRR (M0)
 
@@ -49,10 +50,37 @@ sudo docker exec clab-m0-frr-rustbgpd curl -s http://127.0.0.1:9179/metrics
 sudo containerlab destroy -t tests/interop/m0-frr.clab.yml
 ```
 
-### Network Layout
+### BIRD (M0)
+
+```sh
+# Build BIRD image (one-time)
+docker build -t bird:2-bookworm -f tests/interop/Dockerfile.bird tests/interop/
+
+# Deploy topology
+containerlab deploy -t tests/interop/m0-bird.clab.yml
+
+# Start BIRD (create run dir first)
+docker exec clab-m0-bird-bird mkdir -p /run/bird
+docker exec -d clab-m0-bird-bird bird -c /etc/bird/bird.conf
+
+# Start rustbgpd
+docker exec -d clab-m0-bird-rustbgpd /usr/local/bin/start-rustbgpd.sh
+
+# Check BIRD session state
+docker exec clab-m0-bird-bird birdc show protocols rustbgpd
+
+# Check Prometheus metrics (via management IP)
+curl -s http://<rustbgpd-mgmt-ip>:9179/metrics
+
+# Tear down
+containerlab destroy -t tests/interop/m0-bird.clab.yml
+```
+
+### Network Layouts
 
 ```
-rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR (10.0.0.2/24, AS 65002)
+FRR:  rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR  (10.0.0.2/24, AS 65002)
+BIRD: rustbgpd (10.0.1.1/24, AS 65001) ── eth1 ─── eth1 ── BIRD (10.0.1.2/24, AS 65003)
 ```
 
 IP assignment is done via `exec` commands in the topology YAML. Containerlab
@@ -127,6 +155,16 @@ After tests 1–4, dump metrics and verify consistency:
 | TCP reset recovery | PASS | Cease NOTIFICATIONs received, `established_total`=3 |
 | Full metrics dump | PASS | 3 establishments, 2 flaps, all counters consistent |
 
+## BIRD Test Results (2026-02-27, BIRD 2.0.12)
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment | PASS | Established in <1s |
+| Metrics endpoint | PASS | Full FSM path in `state_transitions_total` |
+| Peer restart recovery | PASS | Auto-reconnect after `birdc down`, `established_total`=2 |
+| TCP reset recovery | PASS | `birdc restart`, Cease NOTIFICATIONs received, `established_total`=3 |
+| Full metrics dump | PASS | 3 establishments, 2 flaps, Cease subcodes 2+4 |
+
 ---
 
 ## Per-Peer Notes
@@ -144,8 +182,15 @@ After tests 1–4, dump metrics and verify consistency:
 ### BIRD
 
 - Primary CI target. Must not break.
-- BIRD version tracked in containerlab topology.
-- Topology file exists (`m0-bird.clab.yml`) but not yet validated.
+- BIRD 2.0.12 (Debian bookworm package) used for M0 validation.
+- Custom Docker image built from `tests/interop/Dockerfile.bird` (Debian bookworm + bird2).
+- `/run/bird` directory must be created before starting bird (not present in
+  the base image; bird needs it for `bird.ctl` socket).
+- BIRD sends an empty UPDATE immediately after session establishment (since
+  `export none` is configured). rustbgpd receives this as a valid update.
+- BIRD sends Cease/Administrative Shutdown (subcode 2) on `birdc down` and
+  Cease/Administrative Reset (subcode 4) on `birdc restart`.
+- `kind: linux` in containerlab — IP addresses assigned via `exec` post-deploy.
 
 ### GoBGP
 
@@ -179,3 +224,9 @@ for global route limit violations. Track peer behavior here:
   commands set it.
 - **Large Docker build context:** Ensure `.dockerignore` includes `target/`.
   Without it, the build context exceeds 2 GB.
+- **BIRD "Cannot create control socket":** Run `mkdir -p /run/bird` inside the
+  container before starting bird. The Debian package expects this directory.
+- **BIRD shows "Active / Connection refused":** BIRD is trying outbound to
+  rustbgpd's port 179, but rustbgpd only connects outbound in M0 (no listener).
+  This is normal — rustbgpd's outbound connect will establish the session.
+  If it persists, check the connect-retry timer interval.

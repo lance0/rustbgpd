@@ -16,12 +16,21 @@ topology:
       image: rustbgpd:dev
       binds:
         - ./configs/rustbgpd-bird.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.1.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
 
     bird:
       kind: linux
-      image: bird:2.16
+      image: bird:2-bookworm
       binds:
         - ./configs/bird-m0.conf:/etc/bird/bird.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
 
   links:
     - endpoints: ["rustbgpd:eth1", "bird:eth1"]
