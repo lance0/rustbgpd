@@ -20,4 +20,10 @@ path = "fuzz_targets/decode_message.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "decode_update"
+path = "fuzz_targets/decode_update.rs"
+test = false
+doc = false
+
 [workspace]

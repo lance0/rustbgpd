@@ -1,8 +1,18 @@
 //! rustbgpd-rib — RIB data structures
 //!
-//! Adj-RIB-In per neighbor, Loc-RIB best-path selection, Adj-RIB-Out
-//! per neighbor. Route objects keyed by (AFI, SAFI, prefix).
+//! Adj-RIB-In per neighbor, managed by a single tokio task.
+//! Peer sessions send updates via bounded `mpsc` channel.
+//! Queries use embedded `oneshot` for response.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+
+pub mod adj_rib_in;
+pub mod manager;
+pub mod route;
+pub mod update;
+
+pub use manager::RibManager;
+pub use route::Route;
+pub use update::RibUpdate;

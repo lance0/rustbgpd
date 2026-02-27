@@ -324,7 +324,6 @@ impl Session {
         }
     }
 
-    #[expect(clippy::needless_pass_by_value)]
     fn handle_established(&mut self, event: Event) -> Vec<Action> {
         match event {
             Event::ManualStop => {
@@ -359,7 +358,7 @@ impl Session {
                 ]
             }
 
-            Event::KeepaliveReceived | Event::UpdateReceived(_) => {
+            Event::KeepaliveReceived | Event::UpdateReceived => {
                 let mut actions = Vec::new();
                 if let Some(ref neg) = self.negotiated {
                     let hold = u32::from(neg.hold_time);
@@ -367,6 +366,20 @@ impl Session {
                         actions.push(Action::StartTimer(TimerType::Hold, hold));
                     }
                 }
+                actions
+            }
+
+            Event::UpdateValidationError(notif) => {
+                self.connect_retry_counter += 1;
+                self.negotiated = None;
+                let mut actions = vec![
+                    Action::SessionDown,
+                    Action::SendNotification(notif),
+                    Action::CloseTcpConnection,
+                    Action::StopTimer(TimerType::Hold),
+                    Action::StopTimer(TimerType::Keepalive),
+                ];
+                actions.push(self.transition_to(SessionState::Idle));
                 actions
             }
 
@@ -947,17 +960,30 @@ mod tests {
     #[test]
     fn established_update_received_restarts_hold() {
         let mut s = reach_established();
-        let update = rustbgpd_wire::UpdateMessage {
-            withdrawn_routes: Bytes::new(),
-            path_attributes: Bytes::new(),
-            nlri: Bytes::new(),
-        };
-        let actions = s.handle_event(Event::UpdateReceived(update));
+        let actions = s.handle_event(Event::UpdateReceived);
 
         assert_eq!(s.state(), SessionState::Established);
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::StartTimer(TimerType::Hold, _)
+        )));
+    }
+
+    #[test]
+    fn established_update_validation_error_tears_down() {
+        let mut s = reach_established();
+        let notif = rustbgpd_wire::NotificationMessage::new(
+            NotificationCode::UpdateMessage,
+            3, // Missing Well-known
+            Bytes::from_static(&[1]),
+        );
+        let actions = s.handle_event(Event::UpdateValidationError(notif));
+
+        assert_eq!(s.state(), SessionState::Idle);
+        assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::SendNotification(n) if n.code == NotificationCode::UpdateMessage
         )));
     }
 

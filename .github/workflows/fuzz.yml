@@ -17,6 +17,10 @@ jobs:
         run: |
           cd crates/wire
           cargo +nightly fuzz run decode_message -- -max_total_time=300 -max_len=4096
+      - name: Fuzz UPDATE parser (5 minutes)
+        run: |
+          cd crates/wire
+          cargo +nightly fuzz run decode_update -- -max_total_time=300 -max_len=4096
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@v4

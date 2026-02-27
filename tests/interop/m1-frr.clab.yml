@@ -1,0 +1,43 @@
+# Containerlab topology: rustbgpd ↔ FRR (Milestone 1 — UPDATE/RIB)
+#
+# Validates: UPDATE processing, Adj-RIB-In storage, gRPC ListReceivedRoutes,
+# route withdrawal, and RIB clearing on peer restart.
+#
+# FRR advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m1-frr.clab.yml
+#   containerlab destroy -t tests/interop/m1-frr.clab.yml
+
+name: m1-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      binds:
+        - ./configs/rustbgpd-m1-frr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m1.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65001
+# FRR:      10.0.0.2, AS 65002

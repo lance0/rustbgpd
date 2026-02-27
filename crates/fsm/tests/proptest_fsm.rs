@@ -4,7 +4,7 @@ use bytes::Bytes;
 use proptest::prelude::*;
 
 use rustbgpd_wire::{
-    Afi, Capability, DecodeError, NotificationMessage, OpenMessage, Safi, UpdateMessage,
+    Afi, Capability, DecodeError, NotificationMessage, OpenMessage, Safi,
     notification::NotificationCode,
 };
 
@@ -52,11 +52,13 @@ fn arb_event() -> impl Strategy<Value = Event> {
             Bytes::new(),
         ))),
         // UPDATE
-        Just(Event::UpdateReceived(UpdateMessage {
-            withdrawn_routes: Bytes::new(),
-            path_attributes: Bytes::new(),
-            nlri: Bytes::new(),
-        })),
+        Just(Event::UpdateReceived),
+        // UPDATE validation error
+        Just(Event::UpdateValidationError(NotificationMessage::new(
+            NotificationCode::UpdateMessage,
+            3,
+            Bytes::new(),
+        ))),
         // DecodeError
         Just(Event::DecodeError(DecodeError::InvalidMarker)),
     ]

@@ -11,8 +11,10 @@ mod metrics_server;
 
 use std::process;
 
+use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::PeerHandle;
+use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::config::Config;
@@ -50,11 +52,22 @@ async fn run(config: Config) {
 
     let metrics = BgpMetrics::new();
     let prometheus_addr = config.prometheus_addr();
+    let grpc_addr = config.grpc_addr();
 
     // Spawn metrics HTTP server
     let metrics_clone = metrics.clone();
     tokio::spawn(async move {
         metrics_server::serve_metrics(prometheus_addr, metrics_clone).await;
+    });
+
+    // Spawn RIB manager
+    let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
+    tokio::spawn(RibManager::new(rib_rx).run());
+
+    // Spawn gRPC API server
+    let grpc_rib_tx = rib_tx.clone();
+    tokio::spawn(async move {
+        rustbgpd_api::server::serve(grpc_addr, grpc_rib_tx).await;
     });
 
     // Spawn peer sessions
@@ -68,7 +81,7 @@ async fn run(config: Config) {
             remote_asn = transport_config.peer.remote_asn,
             "spawning peer session"
         );
-        let handle = PeerHandle::spawn(transport_config, metrics.clone());
+        let handle = PeerHandle::spawn(transport_config, metrics.clone(), rib_tx.clone());
         if let Err(e) = handle.start().await {
             error!(label = %label, error = %e, "failed to start peer session");
         }

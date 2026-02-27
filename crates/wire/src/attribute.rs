@@ -2,6 +2,9 @@ use std::net::Ipv4Addr;
 
 use bytes::Bytes;
 
+use crate::constants::{as_path_segment, attr_flags, attr_type};
+use crate::error::DecodeError;
+
 /// Origin attribute values per RFC 4271 §5.1.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
@@ -72,8 +75,6 @@ impl AsPath {
 ///
 /// Known attributes are decoded into typed variants. Unknown attributes
 /// are preserved as `RawAttribute` for pass-through with the Partial bit.
-///
-/// Type definitions are exported in M0. Decode logic is M1 scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathAttribute {
     Origin(Origin),
@@ -85,6 +86,33 @@ pub enum PathAttribute {
     Unknown(RawAttribute),
 }
 
+impl PathAttribute {
+    /// Return the type code of this attribute.
+    #[must_use]
+    pub fn type_code(&self) -> u8 {
+        match self {
+            Self::Origin(_) => attr_type::ORIGIN,
+            Self::AsPath(_) => attr_type::AS_PATH,
+            Self::NextHop(_) => attr_type::NEXT_HOP,
+            Self::LocalPref(_) => attr_type::LOCAL_PREF,
+            Self::Med(_) => attr_type::MULTI_EXIT_DISC,
+            Self::Unknown(raw) => raw.type_code,
+        }
+    }
+
+    /// Return the wire flags for this attribute.
+    #[must_use]
+    pub fn flags(&self) -> u8 {
+        match self {
+            Self::Origin(_) | Self::AsPath(_) | Self::NextHop(_) | Self::LocalPref(_) => {
+                attr_flags::TRANSITIVE
+            }
+            Self::Med(_) => attr_flags::OPTIONAL,
+            Self::Unknown(raw) => raw.flags,
+        }
+    }
+}
+
 /// Raw attribute preserved for pass-through (RFC 4271 §5).
 ///
 /// On re-advertisement, the Partial bit (0x20) is OR'd into `flags`.
@@ -94,6 +122,284 @@ pub struct RawAttribute {
     pub flags: u8,
     pub type_code: u8,
     pub data: Bytes,
+}
+
+/// Decode path attributes from wire bytes (RFC 4271 §4.3).
+///
+/// Each attribute is: flags(1) + type(1) + length(1 or 2) + value.
+/// The Extended Length flag determines 1-byte vs 2-byte length.
+///
+/// `four_octet_as` controls whether AS numbers in `AS_PATH` are 2 or 4 bytes.
+///
+/// # Errors
+///
+/// Returns `DecodeError` on truncated data or malformed attribute values.
+pub fn decode_path_attributes(
+    mut buf: &[u8],
+    four_octet_as: bool,
+) -> Result<Vec<PathAttribute>, DecodeError> {
+    let mut attrs = Vec::new();
+
+    while !buf.is_empty() {
+        // Need at least flags(1) + type(1) = 2
+        if buf.len() < 2 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "truncated attribute header".to_string(),
+            });
+        }
+
+        let flags = buf[0];
+        let type_code = buf[1];
+        buf = &buf[2..];
+
+        let extended = (flags & attr_flags::EXTENDED_LENGTH) != 0;
+        let value_len = if extended {
+            if buf.len() < 2 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: "truncated extended-length attribute".to_string(),
+                });
+            }
+            let len = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+            buf = &buf[2..];
+            len
+        } else {
+            if buf.is_empty() {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: "truncated attribute length".to_string(),
+                });
+            }
+            let len = buf[0] as usize;
+            buf = &buf[1..];
+            len
+        };
+
+        if buf.len() < value_len {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "attribute type {type_code} value truncated: need {value_len}, have {}",
+                    buf.len()
+                ),
+            });
+        }
+
+        let value = &buf[..value_len];
+        buf = &buf[value_len..];
+
+        let attr = decode_attribute_value(flags, type_code, value, four_octet_as)?;
+        attrs.push(attr);
+    }
+
+    Ok(attrs)
+}
+
+/// Decode a single attribute value given its flags, type code, and raw bytes.
+fn decode_attribute_value(
+    flags: u8,
+    type_code: u8,
+    value: &[u8],
+    four_octet_as: bool,
+) -> Result<PathAttribute, DecodeError> {
+    match type_code {
+        attr_type::ORIGIN => {
+            if value.len() != 1 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("ORIGIN length {} (expected 1)", value.len()),
+                });
+            }
+            match Origin::from_u8(value[0]) {
+                Some(origin) => Ok(PathAttribute::Origin(origin)),
+                None => Ok(PathAttribute::Origin(Origin::Incomplete)),
+            }
+        }
+
+        attr_type::AS_PATH => {
+            let segments = decode_as_path(value, four_octet_as)?;
+            Ok(PathAttribute::AsPath(AsPath { segments }))
+        }
+
+        attr_type::NEXT_HOP => {
+            if value.len() != 4 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("NEXT_HOP length {} (expected 4)", value.len()),
+                });
+            }
+            let addr = Ipv4Addr::new(value[0], value[1], value[2], value[3]);
+            Ok(PathAttribute::NextHop(addr))
+        }
+
+        attr_type::MULTI_EXIT_DISC => {
+            if value.len() != 4 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("MED length {} (expected 4)", value.len()),
+                });
+            }
+            let med = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
+            Ok(PathAttribute::Med(med))
+        }
+
+        attr_type::LOCAL_PREF => {
+            if value.len() != 4 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("LOCAL_PREF length {} (expected 4)", value.len()),
+                });
+            }
+            let lp = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
+            Ok(PathAttribute::LocalPref(lp))
+        }
+
+        // ATOMIC_AGGREGATE, AGGREGATOR, and any unknown type → RawAttribute
+        _ => Ok(PathAttribute::Unknown(RawAttribute {
+            flags,
+            type_code,
+            data: Bytes::copy_from_slice(value),
+        })),
+    }
+}
+
+/// Decode `AS_PATH` segments from the attribute value bytes.
+fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegment>, DecodeError> {
+    let as_size: usize = if four_octet_as { 4 } else { 2 };
+    let mut segments = Vec::new();
+
+    while !buf.is_empty() {
+        if buf.len() < 2 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "truncated AS_PATH segment header".to_string(),
+            });
+        }
+
+        let seg_type = buf[0];
+        let seg_count = buf[1] as usize;
+        buf = &buf[2..];
+
+        let needed = seg_count * as_size;
+        if buf.len() < needed {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "AS_PATH segment truncated: need {needed} bytes for {seg_count} ASNs, have {}",
+                    buf.len()
+                ),
+            });
+        }
+
+        let mut asns = Vec::with_capacity(seg_count);
+        for _ in 0..seg_count {
+            let asn = if four_octet_as {
+                let v = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                buf = &buf[4..];
+                v
+            } else {
+                let v = u32::from(u16::from_be_bytes([buf[0], buf[1]]));
+                buf = &buf[2..];
+                v
+            };
+            asns.push(asn);
+        }
+
+        match seg_type {
+            as_path_segment::AS_SET => segments.push(AsPathSegment::AsSet(asns)),
+            as_path_segment::AS_SEQUENCE => segments.push(AsPathSegment::AsSequence(asns)),
+            _ => {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("unknown AS_PATH segment type {seg_type}"),
+                });
+            }
+        }
+    }
+
+    Ok(segments)
+}
+
+/// Encode path attributes to wire bytes.
+///
+/// `four_octet_as` controls whether AS numbers in `AS_PATH` are 2 or 4 bytes.
+pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_octet_as: bool) {
+    for attr in attrs {
+        let mut value = Vec::new();
+        let flags;
+        let type_code;
+
+        match attr {
+            PathAttribute::Origin(origin) => {
+                flags = attr_flags::TRANSITIVE;
+                type_code = attr_type::ORIGIN;
+                value.push(*origin as u8);
+            }
+            PathAttribute::AsPath(as_path) => {
+                flags = attr_flags::TRANSITIVE;
+                type_code = attr_type::AS_PATH;
+                encode_as_path(as_path, &mut value, four_octet_as);
+            }
+            PathAttribute::NextHop(addr) => {
+                flags = attr_flags::TRANSITIVE;
+                type_code = attr_type::NEXT_HOP;
+                value.extend_from_slice(&addr.octets());
+            }
+            PathAttribute::Med(med) => {
+                flags = attr_flags::OPTIONAL;
+                type_code = attr_type::MULTI_EXIT_DISC;
+                value.extend_from_slice(&med.to_be_bytes());
+            }
+            PathAttribute::LocalPref(lp) => {
+                flags = attr_flags::TRANSITIVE;
+                type_code = attr_type::LOCAL_PREF;
+                value.extend_from_slice(&lp.to_be_bytes());
+            }
+            PathAttribute::Unknown(raw) => {
+                flags = raw.flags;
+                type_code = raw.type_code;
+                value.extend_from_slice(&raw.data);
+            }
+        }
+
+        // Use extended length if value > 255 bytes
+        if value.len() > 255 {
+            buf.push(flags | attr_flags::EXTENDED_LENGTH);
+            buf.push(type_code);
+            #[expect(clippy::cast_possible_truncation)]
+            let len = value.len() as u16;
+            buf.extend_from_slice(&len.to_be_bytes());
+        } else {
+            buf.push(flags);
+            buf.push(type_code);
+            #[expect(clippy::cast_possible_truncation)]
+            buf.push(value.len() as u8);
+        }
+        buf.extend_from_slice(&value);
+    }
+}
+
+/// Encode `AS_PATH` segments into value bytes.
+fn encode_as_path(as_path: &AsPath, buf: &mut Vec<u8>, four_octet_as: bool) {
+    for segment in &as_path.segments {
+        let (seg_type, asns) = match segment {
+            AsPathSegment::AsSet(asns) => (as_path_segment::AS_SET, asns),
+            AsPathSegment::AsSequence(asns) => (as_path_segment::AS_SEQUENCE, asns),
+        };
+        buf.push(seg_type);
+        #[expect(clippy::cast_possible_truncation)]
+        buf.push(asns.len() as u8);
+        for &asn in asns {
+            if four_octet_as {
+                buf.extend_from_slice(&asn.to_be_bytes());
+            } else {
+                #[expect(clippy::cast_possible_truncation)]
+                let as2 = asn as u16;
+                buf.extend_from_slice(&as2.to_be_bytes());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +437,226 @@ mod tests {
         let path = AsPath { segments: vec![] };
         assert!(path.is_empty());
         assert_eq!(path.len(), 0);
+    }
+
+    #[test]
+    fn decode_origin_igp() {
+        // flags=0x40 (transitive), type=1, len=1, value=0 (IGP)
+        let buf = [0x40, 0x01, 0x01, 0x00];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0], PathAttribute::Origin(Origin::Igp));
+    }
+
+    #[test]
+    fn decode_origin_egp() {
+        let buf = [0x40, 0x01, 0x01, 0x01];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::Origin(Origin::Egp));
+    }
+
+    #[test]
+    fn decode_next_hop() {
+        // flags=0x40, type=3, len=4, value=10.0.0.1
+        let buf = [0x40, 0x03, 0x04, 10, 0, 0, 1];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    #[test]
+    fn decode_med() {
+        // flags=0x80 (optional), type=4, len=4, value=100
+        let buf = [0x80, 0x04, 0x04, 0, 0, 0, 100];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::Med(100));
+    }
+
+    #[test]
+    fn decode_local_pref() {
+        // flags=0x40, type=5, len=4, value=200
+        let buf = [0x40, 0x05, 0x04, 0, 0, 0, 200];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::LocalPref(200));
+    }
+
+    #[test]
+    fn decode_as_path_4byte() {
+        // flags=0x40, type=2, len=10
+        // segment: type=2 (AS_SEQUENCE), count=2, ASNs: 65001, 65002 (4 bytes each)
+        let buf = [
+            0x40, 0x02, 0x0A, // header
+            0x02, 0x02, // AS_SEQUENCE, 2 ASNs
+            0x00, 0x00, 0xFD, 0xE9, // 65001
+            0x00, 0x00, 0xFD, 0xEA, // 65002
+        ];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(
+            attrs[0],
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])]
+            })
+        );
+    }
+
+    #[test]
+    fn decode_as_path_2byte() {
+        // flags=0x40, type=2, len=6
+        // segment: type=2 (AS_SEQUENCE), count=2, ASNs: 100, 200 (2 bytes each)
+        let buf = [
+            0x40, 0x02, 0x06, // header
+            0x02, 0x02, // AS_SEQUENCE, 2 ASNs
+            0x00, 0x64, // 100
+            0x00, 0xC8, // 200
+        ];
+        let attrs = decode_path_attributes(&buf, false).unwrap();
+        assert_eq!(
+            attrs[0],
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![100, 200])]
+            })
+        );
+    }
+
+    #[test]
+    fn decode_unknown_attribute_preserved() {
+        // flags=0xC0 (optional+transitive), type=99, len=3, data=[1,2,3]
+        let buf = [0xC0, 99, 0x03, 1, 2, 3];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(
+            attrs[0],
+            PathAttribute::Unknown(RawAttribute {
+                flags: 0xC0,
+                type_code: 99,
+                data: Bytes::from_static(&[1, 2, 3]),
+            })
+        );
+    }
+
+    #[test]
+    fn decode_atomic_aggregate_as_unknown() {
+        // ATOMIC_AGGREGATE: flags=0x40, type=6, len=0
+        let buf = [0x40, 0x06, 0x00];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert!(matches!(attrs[0], PathAttribute::Unknown(_)));
+    }
+
+    #[test]
+    fn decode_extended_length() {
+        // flags=0x50 (transitive+extended), type=2, len=0x000A (10)
+        // Same AS_PATH as the 4-byte test
+        let buf = [
+            0x50, 0x02, 0x00, 0x0A, // header with extended length
+            0x02, 0x02, // AS_SEQUENCE, 2 ASNs
+            0x00, 0x00, 0xFD, 0xE9, // 65001
+            0x00, 0x00, 0xFD, 0xEA, // 65002
+        ];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(
+            attrs[0],
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])]
+            })
+        );
+    }
+
+    #[test]
+    fn decode_multiple_attributes() {
+        let mut buf = Vec::new();
+        // ORIGIN IGP
+        buf.extend_from_slice(&[0x40, 0x01, 0x01, 0x00]);
+        // NEXT_HOP 10.0.0.1
+        buf.extend_from_slice(&[0x40, 0x03, 0x04, 10, 0, 0, 1]);
+        // AS_PATH empty
+        buf.extend_from_slice(&[0x40, 0x02, 0x00]);
+
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs[0], PathAttribute::Origin(Origin::Igp));
+        assert_eq!(attrs[1], PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(attrs[2], PathAttribute::AsPath(AsPath { segments: vec![] }));
+    }
+
+    #[test]
+    fn roundtrip_attributes_4byte() {
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001, 65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
+            PathAttribute::Med(100),
+            PathAttribute::LocalPref(200),
+        ];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded, attrs);
+    }
+
+    #[test]
+    fn roundtrip_attributes_2byte() {
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Egp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![100, 200])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(172, 16, 0, 1)),
+        ];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, false);
+        let decoded = decode_path_attributes(&buf, false).unwrap();
+        assert_eq!(decoded, attrs);
+    }
+
+    #[test]
+    fn reject_truncated_attribute_header() {
+        let buf = [0x40]; // only 1 byte
+        assert!(decode_path_attributes(&buf, true).is_err());
+    }
+
+    #[test]
+    fn reject_truncated_attribute_value() {
+        // ORIGIN claims 1 byte value but nothing follows
+        let buf = [0x40, 0x01, 0x01];
+        assert!(decode_path_attributes(&buf, true).is_err());
+    }
+
+    #[test]
+    fn reject_bad_origin_length() {
+        // ORIGIN with 2-byte value
+        let buf = [0x40, 0x01, 0x02, 0x00, 0x00];
+        assert!(decode_path_attributes(&buf, true).is_err());
+    }
+
+    #[test]
+    fn as_path_with_set_and_sequence() {
+        // AS_SEQUENCE [65001], AS_SET [65002, 65003]
+        let attrs = vec![PathAttribute::AsPath(AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![65001]),
+                AsPathSegment::AsSet(vec![65002, 65003]),
+            ],
+        })];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded, attrs);
+    }
+
+    #[test]
+    fn unknown_attribute_roundtrip() {
+        let attrs = vec![PathAttribute::Unknown(RawAttribute {
+            flags: 0xC0,
+            type_code: 99,
+            data: Bytes::from_static(&[1, 2, 3, 4, 5]),
+        })];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded, attrs);
     }
 }

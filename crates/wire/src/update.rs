@@ -1,13 +1,15 @@
 use bytes::{Buf, BufMut, Bytes};
 
+use crate::attribute::PathAttribute;
 use crate::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
 use crate::error::{DecodeError, EncodeError};
 use crate::header::{BgpHeader, MessageType};
+use crate::nlri::Ipv4Prefix;
 
 /// A decoded BGP UPDATE message (RFC 4271 §4.3).
 ///
-/// In M0, the three variable-length sections are stored as raw `Bytes`.
-/// Full attribute and NLRI parsing is M1 scope.
+/// Stores the three variable-length sections as raw `Bytes`.
+/// Call [`parse()`](Self::parse) to decode NLRI and path attributes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateMessage {
     /// Raw withdrawn routes (NLRI encoding).
@@ -16,6 +18,14 @@ pub struct UpdateMessage {
     pub path_attributes: Bytes,
     /// Raw Network Layer Reachability Information.
     pub nlri: Bytes,
+}
+
+/// A fully parsed UPDATE message with decoded prefixes and attributes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedUpdate {
+    pub withdrawn: Vec<Ipv4Prefix>,
+    pub attributes: Vec<PathAttribute>,
+    pub announced: Vec<Ipv4Prefix>,
 }
 
 impl UpdateMessage {
@@ -83,6 +93,27 @@ impl UpdateMessage {
             withdrawn_routes,
             path_attributes,
             nlri,
+        })
+    }
+
+    /// Parse the raw UPDATE into decoded prefixes and path attributes.
+    ///
+    /// `four_octet_as` controls whether AS numbers in `AS_PATH` are 2 or 4 bytes
+    /// wide (determined by capability negotiation).
+    ///
+    /// # Errors
+    ///
+    /// Returns `DecodeError` if NLRI or attribute data is malformed.
+    pub fn parse(&self, four_octet_as: bool) -> Result<ParsedUpdate, DecodeError> {
+        let withdrawn = crate::nlri::decode_nlri(&self.withdrawn_routes)?;
+        let attributes =
+            crate::attribute::decode_path_attributes(&self.path_attributes, four_octet_as)?;
+        let announced = crate::nlri::decode_nlri(&self.nlri)?;
+
+        Ok(ParsedUpdate {
+            withdrawn,
+            attributes,
+            announced,
         })
     }
 

@@ -1,10 +1,13 @@
+use std::net::IpAddr;
 use std::ops::ControlFlow;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use rustbgpd_fsm::{Action, Event, Session, SessionState};
+use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
+use rustbgpd_rib::{RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Message, encode_message};
+use rustbgpd_wire::notification::NotificationCode;
+use rustbgpd_wire::{Message, NotificationMessage, encode_message};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -30,7 +33,11 @@ pub(crate) struct PeerSession {
     timers: Timers,
     metrics: BgpMetrics,
     commands: mpsc::Receiver<PeerCommand>,
+    rib_tx: mpsc::Sender<RibUpdate>,
     peer_label: String,
+    peer_ip: IpAddr,
+    /// Negotiated session parameters (set when Established).
+    negotiated: Option<NegotiatedSession>,
     /// Suppresses automatic restart when the FSM transitions to Idle.
     /// Set when the operator sends `ManualStop` or `Shutdown`.
     stop_requested: bool,
@@ -45,8 +52,10 @@ impl PeerSession {
         config: TransportConfig,
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
+        let peer_ip = config.remote_addr.ip();
         let fsm = Session::new(config.peer.clone());
         Self {
             config,
@@ -56,7 +65,10 @@ impl PeerSession {
             timers: Timers::default(),
             metrics,
             commands,
+            rib_tx,
             peer_label,
+            peer_ip,
+            negotiated: None,
             stop_requested: false,
             reconnect_timer: None,
         }
@@ -155,6 +167,7 @@ impl PeerSession {
     /// Execute a batch of FSM actions, returning any follow-up events.
     ///
     /// Follow-up events arise from TCP connect results and send failures.
+    #[expect(clippy::too_many_lines)]
     async fn execute_actions(&mut self, actions: Vec<Action>) -> Vec<Event> {
         let mut follow_up = Vec::new();
 
@@ -250,9 +263,14 @@ impl PeerSession {
                         four_octet_as = neg.four_octet_as,
                         "session established"
                     );
+                    self.negotiated = Some(neg);
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
+                    self.negotiated = None;
+                    let _ = self
+                        .rib_tx
+                        .try_send(RibUpdate::PeerDown { peer: self.peer_ip });
                 }
             }
         }
@@ -349,7 +367,8 @@ impl PeerSession {
                         Message::Update(update) => {
                             self.metrics
                                 .record_message_received(&self.peer_label, "update");
-                            Event::UpdateReceived(update)
+                            self.process_update(update).await;
+                            continue;
                         }
                     };
                     self.drive_fsm(event).await;
@@ -366,6 +385,87 @@ impl PeerSession {
                 }
             }
         }
+    }
+
+    /// Parse an UPDATE message, validate attributes, send routes to RIB,
+    /// and feed the appropriate event to the FSM.
+    async fn process_update(&mut self, update: rustbgpd_wire::UpdateMessage) {
+        let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
+
+        // 1. Structural decode
+        let parsed = match update.parse(four_octet_as) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(peer = %self.peer_label, error = %e, "UPDATE decode error");
+                self.drive_fsm(Event::DecodeError(e)).await;
+                return;
+            }
+        };
+
+        // 2. Semantic validation
+        let has_nlri = !parsed.announced.is_empty();
+        let is_ebgp = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
+
+        if let Err(update_err) = rustbgpd_wire::validate::validate_update_attributes(
+            &parsed.attributes,
+            has_nlri,
+            is_ebgp,
+        ) {
+            warn!(
+                peer = %self.peer_label,
+                subcode = update_err.subcode,
+                "UPDATE validation error"
+            );
+            let notif = NotificationMessage::new(
+                NotificationCode::UpdateMessage,
+                update_err.subcode,
+                bytes::Bytes::from(update_err.data),
+            );
+            self.drive_fsm(Event::UpdateValidationError(notif)).await;
+            return;
+        }
+
+        // 3. Build routes and send to RIB
+        let next_hop = parsed
+            .attributes
+            .iter()
+            .find_map(|a| {
+                if let rustbgpd_wire::PathAttribute::NextHop(nh) = a {
+                    Some(*nh)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(match self.peer_ip {
+                IpAddr::V4(v4) => v4,
+                IpAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
+            });
+
+        let now = Instant::now();
+        let announced: Vec<Route> = parsed
+            .announced
+            .iter()
+            .map(|prefix| Route {
+                prefix: *prefix,
+                next_hop,
+                attributes: parsed.attributes.clone(),
+                received_at: now,
+            })
+            .collect();
+
+        if !announced.is_empty() || !parsed.withdrawn.is_empty() {
+            let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
+                peer: self.peer_ip,
+                announced,
+                withdrawn: parsed.withdrawn,
+            });
+        }
+
+        // 4. Tell FSM about the update (restarts hold timer)
+        self.drive_fsm(Event::UpdateReceived).await;
     }
 
     /// Map external commands to FSM events.

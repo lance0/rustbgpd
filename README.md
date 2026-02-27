@@ -8,8 +8,9 @@ gRPC owns the truth.
 
 ## Status
 
-**Pre-release.** Currently working toward Milestone 0 ("Establish") — session
-establishment and stability with FRR and BIRD.
+**Pre-release.** Milestone 1 ("Hear") is complete — UPDATE processing,
+Adj-RIB-In storage, and `ListReceivedRoutes` gRPC endpoint. 222 tests pass.
+Validated against FRR 10.3.1.
 
 ## Goals
 
@@ -44,8 +45,8 @@ Seven crates with strict dependency rules:
 
 ## Milestones
 
-- **M0 — "Establish"** `[current]` — OPEN/KEEPALIVE/NOTIFICATION, FSM, session stability
-- **M1 — "Hear"** — UPDATE decode, Adj-RIB-In, `ListReceivedRoutes`
+- **M0 — "Establish"** `[complete]` — OPEN/KEEPALIVE/NOTIFICATION, FSM, session stability
+- **M1 — "Hear"** `[complete]` — UPDATE decode, Adj-RIB-In, `ListReceivedRoutes` gRPC
 - **M2 — "Decide"** — Best-path selection, `ListBestRoutes`
 - **M3 — "Speak"** — Route injection, Adj-RIB-Out, policy, TCP MD5
 - **M4 — "Route Server"** — Many peers, per-peer policy, scale testing
@@ -73,7 +74,16 @@ Requires Rust 1.85+ (edition 2024).
 
 See `tests/interop/configs/` for example TOML configs. The daemon exposes
 a Prometheus metrics endpoint at the address configured in
-`[global.telemetry].prometheus_addr`. Ctrl+C triggers graceful shutdown.
+`[global.telemetry].prometheus_addr` and a gRPC API server at
+`[global.telemetry].grpc_addr` (default `127.0.0.1:50051`).
+Ctrl+C triggers graceful shutdown.
+
+### Querying Routes via gRPC
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListReceivedRoutes
+```
 
 ## Interop Testing
 
@@ -83,6 +93,7 @@ are in `tests/interop/`.
 ```
 containerlab deploy -t tests/interop/m0-frr.clab.yml
 containerlab deploy -t tests/interop/m0-bird.clab.yml
+containerlab deploy -t tests/interop/m1-frr.clab.yml
 ```
 
 ## License

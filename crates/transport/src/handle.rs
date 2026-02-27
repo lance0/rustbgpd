@@ -1,3 +1,4 @@
+use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -35,10 +36,14 @@ impl PeerHandle {
     /// The session starts in Idle. Send [`PeerCommand::Start`] to initiate
     /// the BGP handshake.
     #[must_use]
-    pub fn spawn(config: TransportConfig, metrics: BgpMetrics) -> Self {
+    pub fn spawn(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
-            let mut session = PeerSession::new(config, metrics, rx);
+            let mut session = PeerSession::new(config, metrics, rx, rib_tx);
             session.run().await
         });
         Self { commands: tx, task }

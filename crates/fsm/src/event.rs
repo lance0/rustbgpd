@@ -1,4 +1,4 @@
-use rustbgpd_wire::{DecodeError, NotificationMessage, OpenMessage, UpdateMessage};
+use rustbgpd_wire::{DecodeError, NotificationMessage, OpenMessage};
 
 /// Input events that drive FSM transitions.
 #[derive(Debug, Clone)]
@@ -32,8 +32,10 @@ pub enum Event {
     KeepaliveReceived,
     /// A NOTIFICATION was decoded from the peer.
     NotificationReceived(NotificationMessage),
-    /// A valid UPDATE was decoded from the peer.
-    UpdateReceived(UpdateMessage),
+    /// A valid UPDATE was processed (routes forwarded to RIB by transport).
+    UpdateReceived,
+    /// UPDATE validation failed — send NOTIFICATION and tear down.
+    UpdateValidationError(NotificationMessage),
     /// The wire decoder failed to parse an incoming message.
     DecodeError(DecodeError),
 }
@@ -54,7 +56,8 @@ impl Event {
             Self::OpenReceived(_) => "OpenReceived",
             Self::KeepaliveReceived => "KeepaliveReceived",
             Self::NotificationReceived(_) => "NotificationReceived",
-            Self::UpdateReceived(_) => "UpdateReceived",
+            Self::UpdateReceived => "UpdateReceived",
+            Self::UpdateValidationError(_) => "UpdateValidationError",
             Self::DecodeError(_) => "DecodeError",
         }
     }

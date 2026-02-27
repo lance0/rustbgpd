@@ -24,7 +24,45 @@ document (M0–M4).
   (connect-retry interval, default 30s) instead of firing `ManualStart`
   immediately. Discovered during malformed OPEN interop testing against FRR.
 
-### Added
+### Added (M1 — "Hear")
+
+- `rustbgpd-wire`: `Ipv4Prefix` type with NLRI encode/decode per RFC 4271 §4.3
+  prefix-length encoding. Host bit masking, 0-32 range validation, Display impl.
+- `rustbgpd-wire`: Path attribute decode/encode (`decode_path_attributes`,
+  `encode_path_attributes`) supporting ORIGIN, AS_PATH (2-byte and 4-byte),
+  NEXT_HOP, MED, LOCAL_PREF, and unknown attribute preservation. Extended Length
+  flag support.
+- `rustbgpd-wire`: UPDATE attribute validation (`validate_update_attributes`)
+  separate from structural decode. Checks: duplicate types (3,1), unrecognized
+  well-known (3,2), missing mandatory attributes (3,3), flag mismatch (3,4),
+  invalid NEXT_HOP (3,8), malformed AS_PATH (3,11). (ADR-0012)
+- `rustbgpd-wire`: `ParsedUpdate` struct and `UpdateMessage::parse()` for
+  combined NLRI + attribute decoding.
+- `rustbgpd-wire`: Fuzz target for UPDATE decoder (`decode_update`), added to
+  nightly fuzz CI.
+- `rustbgpd-rib`: Adj-RIB-In implementation with `Route`, `AdjRibIn`, and
+  `RibManager`. Single tokio task owns all state via bounded mpsc channel (4096).
+  Queries via embedded oneshot. No `Arc<RwLock>`. (ADR-0013)
+- `rustbgpd-fsm`: `UpdateValidationError` event — triggers NOTIFICATION and
+  session teardown on RFC-violating UPDATEs. `UpdateReceived` is now payloadless
+  (transport handles UPDATE content).
+- `rustbgpd-transport`: UPDATE processing pipeline in `process_update()`:
+  structural decode → semantic validation → RIB insertion → FSM event. Sends
+  `PeerDown` to RIB on session teardown.
+- `rustbgpd-api`: gRPC server via tonic with proto codegen. `ListReceivedRoutes`
+  RPC with offset pagination (default page_size=100). Other RibService RPCs
+  return UNIMPLEMENTED.
+- Config: `grpc_addr` field in `[global.telemetry]` (default `127.0.0.1:50051`)
+  with SocketAddr validation.
+- Daemon: gRPC server spawned alongside metrics server and RIB manager.
+- CI: `protobuf-compiler` installed in GitHub Actions workflow.
+- Dockerfile: `protobuf-compiler` added to builder stage for tonic-build.
+- Containerlab topology `m1-frr.clab.yml`: FRR advertising 3 prefixes
+  (192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16) for UPDATE/RIB interop testing.
+- Interop test script `test-m1-frr.sh`: validates routes received, path
+  attributes, withdrawal propagation, and RIB clearing on peer restart.
+
+### Added (M0 — "Establish")
 
 - Workspace with 7 crates: wire, fsm, transport, rib, policy, api, telemetry
 - gRPC proto skeleton (`rustbgpd.v1` package, all 5 services)

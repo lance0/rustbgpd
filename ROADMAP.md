@@ -120,18 +120,70 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
 
 ---
 
-## M1 — "Hear"
+## M1 — "Hear" `[complete]`
 
 Decode UPDATEs. Store in Adj-RIB-In. Expose via gRPC.
 
-- UPDATE decode: IPv4 unicast NLRI, withdrawn routes
-- Path attributes: ORIGIN, AS_PATH (2-byte + 4-byte), NEXT_HOP, LOCAL_PREF, MED
-- Unknown transitive attribute pass-through (Partial bit policy)
-- Adj-RIB-In per neighbor
-- `ListReceivedRoutes` gRPC endpoint
-- Attribute validation matrix (all checks from DESIGN.md)
-- Fuzz harness for UPDATE decoder
-- Interop: RIB dump matches peer's advertised routes
+### Build Order
+
+1. ~~**Wire — NLRI parsing** (`crates/wire/src/nlri.rs`)~~ **Done**
+   - `Ipv4Prefix` type with `Copy`, `Hash`, `Eq`, `Ord` derives
+   - `decode_nlri` / `encode_nlri` per RFC 4271 §4.3 prefix-length encoding
+   - Host bit masking, 0-32 range validation, truncation detection
+   - 11 unit tests including roundtrip, edge cases (/0, /32), malformed input
+
+2. ~~**Wire — Path attribute decode/encode** (`crates/wire/src/attribute.rs`)~~ **Done**
+   - `decode_path_attributes` / `encode_path_attributes` with `four_octet_as` flag
+   - TLV header parsing: flags + type + length (1 or 2 byte) + value
+   - Types: ORIGIN, AS_PATH (2-byte + 4-byte), NEXT_HOP, MED, LOCAL_PREF, Unknown
+   - Extended Length flag support, unknown attribute preservation
+   - 22 tests including roundtrip for both AS widths
+
+3. ~~**Wire — Attribute validation** (`crates/wire/src/validate.rs`)~~ **Done**
+   - Separate from decode: structural ("can I read?") vs semantic ("is it correct?")
+   - Checks: duplicate types (3,1), unrecognized well-known (3,2), missing mandatory (3,3),
+     flag mismatch (3,4), invalid NEXT_HOP (3,8), malformed AS_PATH (3,11)
+   - 14 tests covering all error subcodes and valid cases
+
+4. ~~**Wire — ParsedUpdate + fuzz** (`crates/wire/src/update.rs`)~~ **Done**
+   - `ParsedUpdate { withdrawn, attributes, announced }` struct
+   - `UpdateMessage::parse(four_octet_as)` delegates to NLRI + attribute decoders
+   - New fuzz target `decode_update` in CI
+
+5. ~~**RIB crate** (`crates/rib/`)~~ **Done**
+   - `Route { prefix, next_hop, attributes, received_at }`
+   - `AdjRibIn` per-peer with `HashMap<Ipv4Prefix, Route>`
+   - `RibUpdate` enum: `RoutesReceived`, `PeerDown`, `QueryReceivedRoutes`
+   - `RibManager` single tokio task, bounded mpsc (4096), oneshot queries
+   - 9 tests (5 unit + 4 async integration)
+
+6. ~~**Transport + FSM integration**~~ **Done**
+   - FSM: payloadless `UpdateReceived`, new `UpdateValidationError` event
+   - Transport: `process_update()` pipeline (parse → validate → RIB → FSM)
+   - `PeerDown` sent to RIB on session teardown
+   - `rib_tx` threaded from daemon entrypoint through `PeerHandle::spawn()`
+
+7. ~~**gRPC API** (`crates/api/`)~~ **Done**
+   - Proto codegen via `tonic_build` in `build.rs`
+   - `ListReceivedRoutes` with offset pagination (default page_size=100)
+   - Other RibService RPCs return `UNIMPLEMENTED`
+   - Server on configurable `grpc_addr` (default `127.0.0.1:50051`)
+   - CI updated with `protobuf-compiler`, Dockerfile updated for builder stage
+
+8. ~~**Interop validation**~~ **Done**
+   - Containerlab topology: `m1-frr.clab.yml` (FRR advertising 3 prefixes)
+   - FRR config with `network` statements for 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16
+   - Test script: routes received, attributes correct, withdrawal propagates, peer restart clears/repopulates RIB
+
+### Exit Criteria
+
+- RIB dump matches peer's advertised routes for a controlled prefix set
+- Fuzz harness in CI for the UPDATE decoder
+- Attribute validation covers all RFC 4271 §6.3 checks
+- gRPC `ListReceivedRoutes` returns correct routes with pagination
+- 222 tests pass, clippy clean, fmt clean
+
+---
 
 ## M2 — "Decide"
 

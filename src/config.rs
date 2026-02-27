@@ -30,6 +30,12 @@ pub struct TelemetryConfig {
     pub prometheus_addr: String,
     #[expect(dead_code)] // parsed from config, only "json" in M0
     pub log_format: String,
+    #[serde(default = "default_grpc_addr")]
+    pub grpc_addr: String,
+}
+
+fn default_grpc_addr() -> String {
+    "127.0.0.1:50051".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +58,8 @@ pub enum ConfigError {
     InvalidNeighborAddress { value: String, reason: String },
     #[error("invalid prometheus_addr {value:?}: {reason}")]
     InvalidPrometheusAddr { value: String, reason: String },
+    #[error("invalid grpc_addr {value:?}: {reason}")]
+    InvalidGrpcAddr { value: String, reason: String },
     #[error("no neighbors configured")]
     NoNeighbors,
     #[error("invalid hold_time {value}: must be 0 or >= 3")]
@@ -86,6 +94,16 @@ impl Config {
                 reason: e.to_string(),
             })?;
 
+        // Validate grpc_addr is a valid SocketAddr
+        self.global
+            .telemetry
+            .grpc_addr
+            .parse::<SocketAddr>()
+            .map_err(|e| ConfigError::InvalidGrpcAddr {
+                value: self.global.telemetry.grpc_addr.clone(),
+                reason: e.to_string(),
+            })?;
+
         if self.neighbors.is_empty() {
             return Err(ConfigError::NoNeighbors);
         }
@@ -111,6 +129,14 @@ impl Config {
         self.global
             .telemetry
             .prometheus_addr
+            .parse()
+            .expect("validated in Config::load")
+    }
+
+    pub fn grpc_addr(&self) -> SocketAddr {
+        self.global
+            .telemetry
+            .grpc_addr
             .parse()
             .expect("validated in Config::load")
     }

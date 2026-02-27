@@ -9,5 +9,7 @@ description = "RIB data structures — Adj-RIB-In, Loc-RIB best-path selection, 
 [dependencies]
 rustbgpd-wire.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]

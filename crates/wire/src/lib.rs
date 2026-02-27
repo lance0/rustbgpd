@@ -34,10 +34,12 @@ pub mod error;
 pub mod header;
 pub mod keepalive;
 pub mod message;
+pub mod nlri;
 pub mod notification;
 pub mod notification_msg;
 pub mod open;
 pub mod update;
+pub mod validate;
 
 // Re-export primary public API
 pub use capability::{Afi, Capability, Safi};
@@ -51,3 +53,6 @@ pub use update::UpdateMessage;
 
 // Re-export attribute types
 pub use attribute::{AsPath, AsPathSegment, Origin, PathAttribute, RawAttribute};
+pub use nlri::Ipv4Prefix;
+pub use update::ParsedUpdate;
+pub use validate::UpdateError;

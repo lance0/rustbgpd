@@ -22,10 +22,18 @@ implementation choices made during development.
   does not advertise 4-byte ASN capability, we use 2-byte AS in OPEN
   and set AS_TRANS (23456) if our ASN > 65535.
 
-### §4.3 — UPDATE Message (decode only in M0, full processing in M1)
+### §4.3 — UPDATE Message
 
-- Wire-level decode implemented in M0 for completeness of the codec,
-  but UPDATE processing (RIB population) is M1 scope.
+- Wire-level decode implemented in M0. Full processing (NLRI, path
+  attributes, validation, RIB population) implemented in M1.
+- NLRI uses prefix-length encoding: 1 byte prefix length + ceil(len/8)
+  bytes of address. Host bits are masked off on decode.
+- Path attribute TLV: flags(1) + type(1) + length(1 or 2) + value.
+  Extended Length flag (0x10) controls 2-byte length field.
+- 2-byte vs 4-byte AS_PATH encoding controlled by `four_octet_as`
+  capability negotiated in OPEN.
+- Structural decode (can I read these bytes?) separated from semantic
+  validation (is the attribute set RFC-compliant?). See ADR-0012.
 
 ### §4.4 — KEEPALIVE Message
 
@@ -157,6 +165,66 @@ If the negotiated hold time is non-zero and less than 3 seconds,
 rustbgpd sends NOTIFICATION (2, 6) — Unacceptable Hold Time. This
 prevents pathologically short hold times that would cause false flaps.
 RFC 4271 recommends a minimum of 3 seconds; we enforce it.
+
+---
+
+## Milestone 1 — RFC 4271 Sections
+
+### §5.1.1 — ORIGIN Attribute
+
+- Decoded from 1-byte value: 0=IGP, 1=EGP, 2=INCOMPLETE.
+- Well-known mandatory. Flags must be Optional=0, Transitive=1.
+
+### §5.1.2 — AS_PATH Attribute
+
+- Segments decoded as type(1) + count(1) + ASNs(2 or 4 bytes each).
+- Segment types: AS_SEQUENCE (2), AS_SET (1).
+- Empty segments (count=0) are rejected as malformed (NOTIFICATION 3,11).
+- 4-byte ASN encoding used when `four_octet_as` capability is negotiated.
+
+### §5.1.3 — NEXT_HOP Attribute
+
+- 4 bytes decoded as IPv4 address.
+- Validated: 0.0.0.0, 127.0.0.0/8, 224.0.0.0/4, 255.255.255.255 are
+  all rejected with NOTIFICATION (3, 8) — Invalid NEXT_HOP Attribute.
+- Mandatory for eBGP with NLRI. Not required for iBGP (may be omitted
+  or set by the transport layer).
+
+### §5.1.4 — MULTI_EXIT_DISC (MED) Attribute
+
+- 4 bytes decoded as u32.
+- Optional non-transitive. Decoded and stored but not yet used in
+  best-path comparison (M2 scope).
+
+### §5.1.5 — LOCAL_PREF Attribute
+
+- 4 bytes decoded as u32.
+- Well-known mandatory (iBGP scope). Decoded and stored but not yet
+  used in best-path comparison (M2 scope).
+
+### §6.3 — UPDATE Message Error Handling
+
+- All validation checks produce specific NOTIFICATION subcodes:
+  - (3,1) Malformed Attribute List — duplicate type codes
+  - (3,2) Unrecognized Well-known Attribute — Optional=0 + unknown type
+  - (3,3) Missing Well-known Attribute — ORIGIN, AS_PATH, NEXT_HOP (eBGP)
+  - (3,4) Attribute Flags Error — well-known with wrong Optional/Transitive
+  - (3,8) Invalid NEXT_HOP Attribute — reserved/multicast/loopback address
+  - (3,11) Malformed AS_PATH — empty segment
+- Validation is separate from decode (ADR-0012). Withdrawal-only UPDATEs
+  (zero attributes) pass decode fine and skip validation.
+
+### §9.1 — Adj-RIB-In
+
+- Per-peer `AdjRibIn` stores routes keyed by `Ipv4Prefix`.
+- Insert replaces existing route for the same prefix.
+- Withdraw removes by prefix, returns whether the route existed.
+- PeerDown clears all routes for that peer.
+- Single `RibManager` tokio task owns all Adj-RIB-In state (ADR-0013).
+
+---
+
+## Interpretation Decisions
 
 ### Attribute Ordering
 

@@ -11,6 +11,7 @@ not "someone tried it once."
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|
 | FRR (bgpd) | 10.3.1 | `tests/interop/m0-frr.clab.yml` | Tested (M0) | All 5 tests pass | Needs `no bgp ebgp-requires-policy` | Cease on `clear bgp *` |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m1-frr.clab.yml` | Tested (M1) | UPDATE/RIB tests | FRR advertises 3 prefixes via `network` | — |
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | GoBGP | 3.x | — | Planned (M4) | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
@@ -230,6 +231,73 @@ for global route limit violations. Track peer behavior here:
 | FRR | TBD | TBD | — |
 | BIRD | TBD | TBD | — |
 | GoBGP | TBD | TBD | — |
+
+---
+
+## M1 Test Procedures
+
+### Prerequisites (in addition to M0)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m1-frr.clab.yml`
+
+### Network Layout
+
+```
+M1 FRR: rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR (10.0.0.2/24, AS 65002)
+```
+
+FRR advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16 via `network` statements.
+
+### Test 1: Routes Appear in RIB
+
+After session reaches Established, wait for UPDATEs to propagate (typically <5s).
+Query via gRPC:
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"neighbor_address": "10.0.0.2"}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListReceivedRoutes
+```
+
+**Pass criteria:** Response contains 3 routes with prefixes 192.168.1.0,
+192.168.2.0, and 10.10.0.0.
+
+### Test 2: Route Attributes Correct
+
+From the same gRPC response, verify:
+- `origin` = 0 (IGP) — FRR `network` statements produce IGP origin
+- `as_path` contains 65002
+- `next_hop` = "10.0.0.2"
+
+### Test 3: Route Withdrawal
+
+Remove a network from FRR:
+
+```sh
+docker exec clab-m1-frr-frr vtysh -c "conf t" -c "router bgp 65002" \
+  -c "address-family ipv4 unicast" -c "no network 192.168.2.0/24" -c "end"
+```
+
+Wait ~5s, then query again.
+
+**Pass criteria:** 192.168.2.0/24 is no longer in the response. Other routes remain.
+
+### Test 4: Peer Restart — RIB Cleared and Repopulated
+
+Kill FRR's bgpd, wait for session teardown, restart bgpd.
+
+**Pass criteria:** RIB is empty after peer down, then repopulated with 3 routes
+after session re-establishes.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m1-frr.sh
+```
+
+Runs all 4 tests automatically. Requires containerlab topology deployed and
+`grpcurl` on the host.
 
 ---
 
