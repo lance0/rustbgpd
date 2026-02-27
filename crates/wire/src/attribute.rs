@@ -213,7 +213,10 @@ fn decode_attribute_value(
             }
             match Origin::from_u8(value[0]) {
                 Some(origin) => Ok(PathAttribute::Origin(origin)),
-                None => Ok(PathAttribute::Origin(Origin::Incomplete)),
+                None => Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("invalid ORIGIN value {}", value[0]),
+                }),
             }
         }
 
@@ -453,6 +456,17 @@ mod tests {
         let buf = [0x40, 0x01, 0x01, 0x01];
         let attrs = decode_path_attributes(&buf, true).unwrap();
         assert_eq!(attrs[0], PathAttribute::Origin(Origin::Egp));
+    }
+
+    #[test]
+    fn decode_origin_invalid_value() {
+        // ORIGIN with value 5 — not a valid Origin (only 0-2 are defined)
+        let buf = [0x40, 0x01, 0x01, 0x05];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(
+            matches!(err, DecodeError::MalformedField { .. }),
+            "expected MalformedField, got: {err:?}"
+        );
     }
 
     #[test]

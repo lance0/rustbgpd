@@ -86,6 +86,11 @@ impl DecodeError {
                 2, // Bad Message Length
                 Bytes::new(),
             ),
+            Self::MalformedField { message_type, .. } if *message_type == "UPDATE" => (
+                NotificationCode::UpdateMessage,
+                1, // Malformed Attribute List
+                Bytes::new(),
+            ),
             Self::MalformedField { .. } | Self::MalformedOptionalParameter { .. } => {
                 (NotificationCode::OpenMessage, 0, Bytes::new())
             }
@@ -144,5 +149,27 @@ mod tests {
         let (code, subcode, _) = err.to_notification();
         assert_eq!(code, NotificationCode::UpdateMessage);
         assert_eq!(subcode, 1);
+    }
+
+    #[test]
+    fn update_malformed_field_maps_to_update_error() {
+        let err = DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "invalid ORIGIN value 5".into(),
+        };
+        let (code, subcode, _) = err.to_notification();
+        assert_eq!(code, NotificationCode::UpdateMessage);
+        assert_eq!(subcode, 1);
+    }
+
+    #[test]
+    fn open_malformed_field_maps_to_open_error() {
+        let err = DecodeError::MalformedField {
+            message_type: "OPEN",
+            detail: "test".into(),
+        };
+        let (code, subcode, _) = err.to_notification();
+        assert_eq!(code, NotificationCode::OpenMessage);
+        assert_eq!(subcode, 0);
     }
 }

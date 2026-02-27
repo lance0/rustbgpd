@@ -104,7 +104,7 @@ impl proto::rib_service_server::RibService for RibService {
         };
 
         let all_routes = self.query_routes(peer).await?;
-        let total_count = all_routes.len() as u64;
+        let total_count = u64::try_from(all_routes.len()).unwrap_or(u64::MAX);
 
         let offset: usize = if req.page_token.is_empty() {
             0
@@ -147,7 +147,7 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
         let all_routes = self.query_best_routes().await?;
-        let total_count = all_routes.len() as u64;
+        let total_count = u64::try_from(all_routes.len()).unwrap_or(u64::MAX);
 
         let offset: usize = if req.page_token.is_empty() {
             0

@@ -29,12 +29,15 @@ resolved.
   only. Passive-mode peers require a listener (planned for M3).
 - **Single task per peer.** Adequate for current OPEN/KEEPALIVE/UPDATE
   traffic. May need split reader/writer tasks for high UPDATE throughput.
-- **No best-path selection.** Adj-RIB-In stores all received routes.
-  Loc-RIB best-path comparison is M2 scope.
+- **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
+  LOCAL_PREF should only appear in iBGP UPDATEs. The validator does
+  not reject LOCAL_PREF from eBGP peers because session type (iBGP vs
+  eBGP) is not yet distinguished. Will be enforced in M3 when the
+  transport tracks session type.
 - **No outbound UPDATE generation.** Routes are received and stored but
   not re-advertised. Adj-RIB-Out is M3 scope.
-- **gRPC: only ListReceivedRoutes implemented.** Other RibService RPCs
-  and all other services return UNIMPLEMENTED. Full API is incremental
-  across M2-M4.
+- **gRPC: ListReceivedRoutes and ListBestRoutes implemented.** Other
+  RibService RPCs and all other services return UNIMPLEMENTED. Full
+  API is incremental across M3-M4.
 - **No gRPC TLS.** Server listens in plaintext. TLS and mTLS are
   post-v1 scope. Default bind is localhost only.
