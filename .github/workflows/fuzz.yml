@@ -1,0 +1,25 @@
+name: Fuzz
+
+on:
+  schedule:
+    - cron: '0 4 * * *'  # nightly at 04:00 UTC
+  workflow_dispatch:       # manual trigger
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz
+      - name: Fuzz wire decoder (5 minutes)
+        run: |
+          cd crates/wire
+          cargo +nightly fuzz run decode_message -- -max_total_time=300 -max_len=4096
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: crates/wire/fuzz/artifacts/

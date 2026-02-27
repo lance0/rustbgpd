@@ -7,6 +7,13 @@ resolved.
 
 ## Resolved
 
+- **Hot reconnect loop on persistent OPEN rejection (fixed).** When a peer
+  consistently rejected OPENs (e.g., ASN mismatch), auto-reconnect fired
+  `ManualStart` immediately as a synchronous follow-up, causing 29K+ cycles
+  in 10 seconds. Fixed by introducing a deferred reconnect timer that waits
+  `connect_retry_secs` (default 30s) before reconnecting. Discovered during
+  malformed OPEN interop testing against FRR.
+
 - **Unknown NOTIFICATION codes mapped to Cease (fixed).** The wire decoder
   silently converted unrecognized NOTIFICATION error codes to `Cease`,
   losing the original byte. Fixed by adding `Unknown(u8)` variant to

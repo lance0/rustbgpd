@@ -1,4 +1,6 @@
 use std::ops::ControlFlow;
+use std::pin::Pin;
+use std::time::Duration;
 
 use rustbgpd_fsm::{Action, Event, Session, SessionState};
 use rustbgpd_telemetry::BgpMetrics;
@@ -6,6 +8,7 @@ use rustbgpd_wire::{Message, encode_message};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Sleep;
 use tracing::{debug, error, info, warn};
 
 use crate::config::TransportConfig;
@@ -31,6 +34,10 @@ pub(crate) struct PeerSession {
     /// Suppresses automatic restart when the FSM transitions to Idle.
     /// Set when the operator sends `ManualStop` or `Shutdown`.
     stop_requested: bool,
+    /// Deferred reconnect timer. When the FSM falls to Idle unexpectedly,
+    /// this timer fires after the connect-retry interval to avoid a hot
+    /// reconnect loop (e.g., persistent OPEN validation failures).
+    reconnect_timer: Option<Pin<Box<Sleep>>>,
 }
 
 impl PeerSession {
@@ -51,6 +58,7 @@ impl PeerSession {
             commands,
             peer_label,
             stop_requested: false,
+            reconnect_timer: None,
         }
     }
 
@@ -63,6 +71,7 @@ impl PeerSession {
                 read_buf,
                 timers,
                 commands,
+                reconnect_timer,
                 ..
             } = self;
 
@@ -110,6 +119,13 @@ impl PeerSession {
                 () = poll_timer(&mut timers.keepalive) => {
                     timers.keepalive = None;
                     self.drive_fsm(Event::KeepaliveTimerExpires).await;
+                }
+
+                // Deferred reconnect after unexpected Idle
+                () = poll_timer(reconnect_timer) => {
+                    self.reconnect_timer = None;
+                    debug!(peer = %self.peer_label, "reconnect timer fired");
+                    self.drive_fsm(Event::ManualStart).await;
                 }
             }
         }
@@ -214,10 +230,15 @@ impl PeerSession {
                         new.as_str(),
                     );
                     // Auto-restart: when the FSM falls back to Idle after
-                    // a connection failure (not operator-initiated), send
-                    // ManualStart to re-enter the connect cycle.
+                    // a connection failure (not operator-initiated), start
+                    // a deferred reconnect timer. This avoids a hot loop
+                    // when the peer persistently fails (e.g., ASN mismatch).
                     if new == SessionState::Idle && !self.stop_requested {
-                        follow_up.push(Event::ManualStart);
+                        let delay = self.config.peer.connect_retry_secs;
+                        debug!(peer = %self.peer_label, delay_secs = delay, "scheduling reconnect");
+                        self.reconnect_timer = Some(Box::pin(
+                            tokio::time::sleep(Duration::from_secs(u64::from(delay))),
+                        ));
                     }
                 }
                 Action::SessionEstablished(neg) => {
@@ -352,16 +373,19 @@ impl PeerSession {
         match cmd {
             PeerCommand::Start => {
                 self.stop_requested = false;
+                self.reconnect_timer = None;
                 self.drive_fsm(Event::ManualStart).await;
                 ControlFlow::Continue(())
             }
             PeerCommand::Stop => {
                 self.stop_requested = true;
+                self.reconnect_timer = None;
                 self.drive_fsm(Event::ManualStop).await;
                 ControlFlow::Continue(())
             }
             PeerCommand::Shutdown => {
                 self.stop_requested = true;
+                self.reconnect_timer = None;
                 info!(peer = %self.peer_label, "shutdown requested");
                 if self.fsm.state() == SessionState::Established {
                     self.drive_fsm(Event::ManualStop).await;

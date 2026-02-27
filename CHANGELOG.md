@@ -19,6 +19,10 @@ document (M0–M4).
 - `rustbgpd-transport`: Use `code.as_u8()` instead of `code as u8` cast for
   NOTIFICATION metric labels — more explicit and correct with the new enum
   representation.
+- `rustbgpd-transport`: Fix hot reconnect loop when peer persistently rejects
+  OPENs (e.g., ASN mismatch). Auto-reconnect now uses a deferred timer
+  (connect-retry interval, default 30s) instead of firing `ManualStart`
+  immediately. Discovered during malformed OPEN interop testing against FRR.
 
 ### Added
 
@@ -50,6 +54,11 @@ document (M0–M4).
 - Prometheus `/metrics` HTTP endpoint served via `tokio::net::TcpListener`
 - Config module (`src/config.rs`) with validation (router ID, neighbor addresses, hold time)
 - CI workflow (`.github/workflows/ci.yml`): fmt, clippy, test on push/PR
+- Nightly fuzz CI (`.github/workflows/fuzz.yml`): 5-minute wire decoder fuzzing
+- `rustbgpd-wire`: Negative property tests — 5 corruption strategies (bit flip,
+  truncation, insertion, overwrite, trailing garbage) verify decoder never panics
+- `rustbgpd-wire`: Fuzz harness for `decode_message` via cargo-fuzz / libfuzzer
+- Malformed OPEN interop test config (`rustbgpd-frr-badopen.toml`)
 
 ---
 
@@ -75,8 +84,7 @@ Target: **M0 — "Establish"**
 
 ### Remaining
 
-- Fuzz harness stubs for wire decoder
-- Interop validation with FRR and BIRD
+- 30-minute soak test with FRR and BIRD
 
 ### Exit Criteria
 

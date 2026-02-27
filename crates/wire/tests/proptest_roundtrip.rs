@@ -106,6 +106,60 @@ fn arb_message() -> impl Strategy<Value = Message> {
     ]
 }
 
+/// Corruption strategies for negative testing.
+mod corrupt {
+    use bytes::{BufMut, BytesMut};
+
+    /// Flip a single random bit in the buffer.
+    pub fn bit_flip(data: &[u8], byte_idx: usize, bit_idx: usize) -> Vec<u8> {
+        let mut out = data.to_vec();
+        if !out.is_empty() {
+            let i = byte_idx % out.len();
+            out[i] ^= 1 << (bit_idx % 8);
+        }
+        out
+    }
+
+    /// Truncate the buffer to a shorter length.
+    pub fn truncate(data: &[u8], new_len: usize) -> Vec<u8> {
+        let len = if data.is_empty() {
+            0
+        } else {
+            new_len % data.len()
+        };
+        data[..len].to_vec()
+    }
+
+    /// Insert a random byte at a random position.
+    pub fn insert_byte(data: &[u8], pos: usize, byte: u8) -> Vec<u8> {
+        let mut out = data.to_vec();
+        let i = if out.is_empty() { 0 } else { pos % (out.len() + 1) };
+        out.insert(i, byte);
+        out
+    }
+
+    /// Overwrite a range of bytes with a given value.
+    pub fn overwrite(data: &[u8], start: usize, val: u8, count: usize) -> Vec<u8> {
+        let mut out = data.to_vec();
+        if !out.is_empty() {
+            let s = start % out.len();
+            let n = count % 8 + 1;
+            for i in s..(s + n).min(out.len()) {
+                out[i] = val;
+            }
+        }
+        out
+    }
+
+    /// Extend the buffer with extra garbage bytes.
+    pub fn extend(data: &[u8], extra: &[u8]) -> Vec<u8> {
+        let mut buf = BytesMut::with_capacity(data.len() + extra.len());
+        buf.put_slice(data);
+        buf.put_slice(extra);
+        buf.to_vec()
+    }
+}
+
 proptest! {
     #[test]
     fn roundtrip_any_message(msg in arb_message()) {
@@ -146,6 +200,70 @@ proptest! {
     fn decode_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
         let mut buf = Bytes::from(data);
         // We don't care about the result, just that it doesn't panic
+        let _ = decode_message(&mut buf);
+    }
+
+    /// Encode a valid message, flip one bit, decode — must not panic.
+    #[test]
+    fn corrupt_bit_flip_never_panics(
+        msg in arb_message(),
+        byte_idx in any::<usize>(),
+        bit_idx in any::<usize>(),
+    ) {
+        let encoded = encode_message(&msg).expect("encode should succeed");
+        let corrupted = corrupt::bit_flip(&encoded, byte_idx, bit_idx);
+        let mut buf = Bytes::from(corrupted);
+        let _ = decode_message(&mut buf); // Ok or Err, never panic
+    }
+
+    /// Encode a valid message, truncate it, decode — must not panic.
+    #[test]
+    fn corrupt_truncation_never_panics(
+        msg in arb_message(),
+        new_len in any::<usize>(),
+    ) {
+        let encoded = encode_message(&msg).expect("encode should succeed");
+        let corrupted = corrupt::truncate(&encoded, new_len);
+        let mut buf = Bytes::from(corrupted);
+        let _ = decode_message(&mut buf);
+    }
+
+    /// Encode a valid message, insert a random byte, decode — must not panic.
+    #[test]
+    fn corrupt_insertion_never_panics(
+        msg in arb_message(),
+        pos in any::<usize>(),
+        byte in any::<u8>(),
+    ) {
+        let encoded = encode_message(&msg).expect("encode should succeed");
+        let corrupted = corrupt::insert_byte(&encoded, pos, byte);
+        let mut buf = Bytes::from(corrupted);
+        let _ = decode_message(&mut buf);
+    }
+
+    /// Encode a valid message, overwrite a section, decode — must not panic.
+    #[test]
+    fn corrupt_overwrite_never_panics(
+        msg in arb_message(),
+        start in any::<usize>(),
+        val in any::<u8>(),
+        count in any::<usize>(),
+    ) {
+        let encoded = encode_message(&msg).expect("encode should succeed");
+        let corrupted = corrupt::overwrite(&encoded, start, val, count);
+        let mut buf = Bytes::from(corrupted);
+        let _ = decode_message(&mut buf);
+    }
+
+    /// Encode a valid message, append garbage, decode — must not panic.
+    #[test]
+    fn corrupt_trailing_garbage_never_panics(
+        msg in arb_message(),
+        garbage in proptest::collection::vec(any::<u8>(), 1..256),
+    ) {
+        let encoded = encode_message(&msg).expect("encode should succeed");
+        let corrupted = corrupt::extend(&encoded, &garbage);
+        let mut buf = Bytes::from(corrupted);
         let _ = decode_message(&mut buf);
     }
 }

@@ -1,0 +1,16 @@
+# rustbgpd config for malformed OPEN test.
+# Expects remote_asn=65099 but FRR will send 65002 — triggers Bad Peer AS NOTIFICATION.
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65099
+description = "frr-badopen"
+hold_time = 90

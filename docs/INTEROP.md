@@ -199,6 +199,25 @@ After tests 1–4, dump metrics and verify consistency:
 
 ---
 
+## Malformed OPEN Test Results (2026-02-27, FRR 10.3.1)
+
+Config: `tests/interop/configs/rustbgpd-frr-badopen.toml` — rustbgpd expects
+`remote_asn=65099` but FRR sends AS 65002.
+
+| Check | Result | Details |
+|-------|--------|---------|
+| NOTIFICATION sent | PASS | Code 2 (Open Message), Subcode 2 (Bad Peer AS) |
+| TCP closed after NOTIFICATION | PASS | Connection torn down immediately |
+| No hot reconnect loop | PASS | Deferred reconnect timer (30s) prevents rapid cycling |
+| Reconnect fires on schedule | PASS | Second attempt exactly 30s after first rejection |
+
+Previously this scenario caused a hot loop (29K+ cycles / 10s) because
+auto-reconnect injected `ManualStart` synchronously. Fixed by adding a
+`reconnect_timer` to `PeerSession` that defers reconnection by
+`connect_retry_secs`.
+
+---
+
 ## Cease Subcode Compatibility
 
 Per RFC_NOTES.md, rustbgpd sends Cease subcode 4 (Out of Resources)
