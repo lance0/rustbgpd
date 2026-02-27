@@ -233,12 +233,21 @@ Loc-RIB best-path selection per RFC 4271 §9.1.2.
 - **eBGP/iBGP step skipped** — deferred until transport distinguishes session
   types and router-id is available for a more complete implementation.
 
+6. ~~**Interop validation** — FRR 10.3.1~~ **Done**
+   - Reused M1 containerlab topology (`m1-frr.clab.yml`)
+   - M1 automated test script: 15/15 tests pass (route receipt, attributes,
+     withdrawal, peer restart recovery)
+   - `ListBestRoutes` returns 3 best routes with `best: true` and correct
+     `peerAddress` populated from `route.peer`
+   - `ListBestRoutes` pagination verified (page_size=2, nextPageToken, page 2)
+
 ### Exit Criteria
 
 - Deterministic outcomes for all decision inputs, verified by property tests
 - Stable best-path selection with multiple paths from multiple peers
 - Structured debug events for best-path changes
 - `ListBestRoutes` gRPC endpoint with pagination
+- Interop validated against FRR 10.3.1 (15/15 M1 tests + M2 best-routes)
 - 248 tests pass, clippy clean, fmt clean
 
 ---

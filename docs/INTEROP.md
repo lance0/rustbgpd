@@ -11,7 +11,7 @@ not "someone tried it once."
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|
 | FRR (bgpd) | 10.3.1 | `tests/interop/m0-frr.clab.yml` | Tested (M0) | All 5 tests pass | Needs `no bgp ebgp-requires-policy` | Cease on `clear bgp *` |
-| FRR (bgpd) | 10.3.1 | `tests/interop/m1-frr.clab.yml` | Tested (M1) | UPDATE/RIB tests | FRR advertises 3 prefixes via `network` | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m1-frr.clab.yml` | Tested (M1, M2) | UPDATE/RIB + best-path | FRR advertises 3 prefixes via `network` | — |
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | GoBGP | 3.x | — | Planned (M4) | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
@@ -321,6 +321,63 @@ Automated test: `bash tests/interop/scripts/test-m1-frr.sh` — **15 passed, 0 f
 
 Note: Test 4 (peer restart) relies on watchfrr auto-restarting bgpd after
 `killall -9`. rustbgpd reconnects after `connect_retry_secs` (default 30s).
+
+---
+
+## M2 Test Procedures
+
+M2 reuses the M1 containerlab topology (`m1-frr.clab.yml`) — FRR advertising
+3 prefixes to rustbgpd. With a single peer, the Loc-RIB best routes should
+match the Adj-RIB-In received routes, with `best: true` set.
+
+### Test 1: ListBestRoutes Returns Correct Routes
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListBestRoutes
+```
+
+**Pass criteria:** Response contains 3 routes with `best: true`, correct
+`peerAddress` (10.0.0.2), and matching prefixes/attributes.
+
+### Test 2: ListBestRoutes Pagination
+
+```sh
+# Page 1 (size 2)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 2}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListBestRoutes
+
+# Page 2
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 2, "page_token": "2"}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.RibService/ListBestRoutes
+```
+
+**Pass criteria:** Page 1 returns 2 routes with `nextPageToken: "2"`,
+page 2 returns 1 route with empty `nextPageToken`.
+
+### Test 3: M1 Regression (all existing tests still pass)
+
+```sh
+bash tests/interop/scripts/test-m1-frr.sh
+```
+
+**Pass criteria:** 15/15 tests pass — route receipt, attributes, withdrawal,
+peer restart recovery all unaffected by M2 changes.
+
+---
+
+## M2 FRR Test Results (2026-02-27, FRR 10.3.1)
+
+| Test | Result | Details |
+|------|--------|---------|
+| M1 regression (15 tests) | PASS | All 15 automated tests pass |
+| ListBestRoutes — 3 routes | PASS | All 3 prefixes with `best: true` |
+| ListBestRoutes — peerAddress | PASS | `10.0.0.2` from `route.peer` field |
+| ListBestRoutes — attributes | PASS | AS_PATH=[65002], NEXT_HOP=10.0.0.2 |
+| ListBestRoutes — pagination (page 1) | PASS | 2 routes, nextPageToken="2" |
+| ListBestRoutes — pagination (page 2) | PASS | 1 route, no nextPageToken |
 
 ---
 

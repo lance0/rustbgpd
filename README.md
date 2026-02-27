@@ -10,7 +10,8 @@ gRPC owns the truth.
 
 **Pre-release.** Milestone 2 ("Decide") is complete — Loc-RIB best-path
 selection per RFC 4271 §9.1.2 with `ListBestRoutes` gRPC endpoint. 248
-unit/integration tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+unit/integration tests pass. Interop validated against FRR 10.3.1
+(15/15 automated tests pass + `ListBestRoutes` verified).
 
 ## Goals
 

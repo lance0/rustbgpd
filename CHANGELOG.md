@@ -29,6 +29,9 @@ document (M0–M4).
 - `rustbgpd-api`: `ListBestRoutes` gRPC endpoint with offset pagination,
   returning routes with `best: true`. `route_to_proto()` now uses `route.peer`
   for the `peer_address` field.
+- Interop validation: FRR 10.3.1 — M1 automated test script (15/15 pass),
+  `ListBestRoutes` returns correct best routes with pagination. Reuses M1
+  containerlab topology (`m1-frr.clab.yml`).
 
 ### Fixed
 
