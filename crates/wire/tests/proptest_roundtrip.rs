@@ -133,7 +133,11 @@ mod corrupt {
     /// Insert a random byte at a random position.
     pub fn insert_byte(data: &[u8], pos: usize, byte: u8) -> Vec<u8> {
         let mut out = data.to_vec();
-        let i = if out.is_empty() { 0 } else { pos % (out.len() + 1) };
+        let i = if out.is_empty() {
+            0
+        } else {
+            pos % (out.len() + 1)
+        };
         out.insert(i, byte);
         out
     }

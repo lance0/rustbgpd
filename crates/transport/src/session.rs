@@ -236,9 +236,9 @@ impl PeerSession {
                     if new == SessionState::Idle && !self.stop_requested {
                         let delay = self.config.peer.connect_retry_secs;
                         debug!(peer = %self.peer_label, delay_secs = delay, "scheduling reconnect");
-                        self.reconnect_timer = Some(Box::pin(
-                            tokio::time::sleep(Duration::from_secs(u64::from(delay))),
-                        ));
+                        self.reconnect_timer = Some(Box::pin(tokio::time::sleep(
+                            Duration::from_secs(u64::from(delay)),
+                        )));
                     }
                 }
                 Action::SessionEstablished(neg) => {
