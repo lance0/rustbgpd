@@ -53,8 +53,16 @@ implementation choices made during development.
 - All timers modeled as inputs (not spawned internally): ConnectRetry,
   Hold, Keepalive.
 - DelayOpen timer: not implemented in v1 (RFC 4271 §8 optional).
-- IdleHold timer: implemented for dampening rapid reconnection attempts.
-  Exponential backoff from 30s to 300s on repeated failures.
+- Exponential backoff on connect retry: `base * 2^counter`, capped at
+  300s, reset on ManualStart or reaching Established.
+- Initial hold timer before OPEN negotiation: 240s (RFC 4271 "large
+  value"), replaced by negotiated value once OPEN exchange completes.
+- `handle_event` never returns `Result` — every (State, Event) pair
+  produces a well-defined output. Invalid events in any state produce a
+  NOTIFICATION (FSM Error) and transition to Idle.
+- `SessionDown` action only emitted when leaving Established state.
+  Failed handshakes are not surfaced as session-down events.
+- `StateChanged` action emitted on every state transition for telemetry.
 
 ### §10 — Error Handling
 

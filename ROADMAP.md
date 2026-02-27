@@ -41,8 +41,10 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 
 ## Completed
 
-Nothing yet — workspace scaffolding is in place, implementation begins
-with M0.
+1. **rustbgpd-wire** — BGP message codec (OPEN, KEEPALIVE, NOTIFICATION,
+   UPDATE encode/decode, capability parsing, property tests)
+2. **rustbgpd-fsm** — RFC 4271 finite state machine (all 6 states, full
+   transition table, OPEN negotiation, exponential backoff, property tests)
 
 ---
 
@@ -53,7 +55,7 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
 
 ### Build Order
 
-1. **rustbgpd-wire** — OPEN, KEEPALIVE, NOTIFICATION encode/decode
+1. ~~**rustbgpd-wire** — OPEN, KEEPALIVE, NOTIFICATION encode/decode~~ **Done**
    - BGP header (marker, length, type) parsing with 4096-byte enforcement
    - OPEN message: version, ASN, hold time, router ID, capabilities
    - Capability TLV parsing: 4-byte ASN (code 65), MP-BGP (code 1)
@@ -62,7 +64,7 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - Property tests: `encode(decode(x)) == x` roundtrip
    - Fuzz harness: message decode from arbitrary bytes
 
-2. **rustbgpd-fsm** — Pure RFC 4271 state machine
+2. ~~**rustbgpd-fsm** — Pure RFC 4271 state machine~~ **Done**
    - Six states: Idle, Connect, Active, OpenSent, OpenConfirm, Established
    - Input events: message received, timer fired, TCP connected/disconnected
    - Output actions: send message, start/stop timer, connect, disconnect
@@ -70,7 +72,7 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - Negotiation result struct: agreed caps, AFI/SAFI set, peer ASN, peer ID
    - No tokio imports, no I/O — pure function from (State, Event) → (State, Actions)
 
-3. **rustbgpd-telemetry** — Metrics and structured logging
+3. **rustbgpd-telemetry** — Metrics and structured logging `[next]`
    - Prometheus counters: session state transitions, flaps, NOTIFICATIONs
    - RIB metric stubs (exist at zero): update latency, backpressure, drops
    - Structured JSON events for FSM transitions
