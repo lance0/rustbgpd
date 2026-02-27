@@ -152,6 +152,35 @@ impl UpdateMessage {
         Ok(())
     }
 
+    /// Build an `UpdateMessage` from structured data.
+    ///
+    /// Encodes NLRI, withdrawn routes, and path attributes into the raw
+    /// `Bytes` fields that `encode()` expects.
+    #[must_use]
+    pub fn build(
+        announced: &[Ipv4Prefix],
+        withdrawn: &[Ipv4Prefix],
+        attributes: &[PathAttribute],
+        four_octet_as: bool,
+    ) -> Self {
+        let mut withdrawn_buf = Vec::new();
+        crate::nlri::encode_nlri(withdrawn, &mut withdrawn_buf);
+
+        let mut attrs_buf = Vec::new();
+        if !announced.is_empty() {
+            crate::attribute::encode_path_attributes(attributes, &mut attrs_buf, four_octet_as);
+        }
+
+        let mut nlri_buf = Vec::new();
+        crate::nlri::encode_nlri(announced, &mut nlri_buf);
+
+        Self {
+            withdrawn_routes: Bytes::from(withdrawn_buf),
+            path_attributes: Bytes::from(attrs_buf),
+            nlri: Bytes::from(nlri_buf),
+        }
+    }
+
     /// Total encoded size in bytes.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
@@ -249,6 +278,81 @@ mod tests {
         let body_len = usize::from(header.length) - HEADER_LEN;
         let decoded = UpdateMessage::decode(&mut bytes, body_len).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn build_roundtrip() {
+        use crate::attribute::{AsPath, AsPathSegment, Origin};
+
+        let announced = vec![
+            Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24),
+            Ipv4Prefix::new(std::net::Ipv4Addr::new(192, 168, 1, 0), 24),
+        ];
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+        ];
+
+        let msg = UpdateMessage::build(&announced, &[], &attrs, true);
+        let parsed = msg.parse(true).unwrap();
+        assert_eq!(parsed.announced, announced);
+        assert!(parsed.withdrawn.is_empty());
+        assert_eq!(parsed.attributes, attrs);
+    }
+
+    #[test]
+    fn build_withdrawal_only() {
+        let withdrawn = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24)];
+        let msg = UpdateMessage::build(&[], &withdrawn, &[], true);
+        let parsed = msg.parse(true).unwrap();
+        assert!(parsed.announced.is_empty());
+        assert_eq!(parsed.withdrawn, withdrawn);
+        assert!(parsed.attributes.is_empty());
+    }
+
+    #[test]
+    fn build_announce_only() {
+        use crate::attribute::Origin;
+
+        let announced = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 1, 0, 0), 16)];
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+        ];
+        let msg = UpdateMessage::build(&announced, &[], &attrs, true);
+
+        // Verify it encodes and decodes properly
+        let mut encoded = BytesMut::with_capacity(msg.encoded_len());
+        msg.encode(&mut encoded).unwrap();
+
+        let mut bytes = encoded.freeze();
+        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let body_len = usize::from(header.length) - HEADER_LEN;
+        let decoded = UpdateMessage::decode(&mut bytes, body_len).unwrap();
+        let parsed = decoded.parse(true).unwrap();
+        assert_eq!(parsed.announced, announced);
+        assert_eq!(parsed.attributes, attrs);
+    }
+
+    #[test]
+    fn build_mixed() {
+        use crate::attribute::Origin;
+
+        let announced = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24)];
+        let withdrawn = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(172, 16, 0, 0), 16)];
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+        ];
+
+        let msg = UpdateMessage::build(&announced, &withdrawn, &attrs, true);
+        let parsed = msg.parse(true).unwrap();
+        assert_eq!(parsed.announced, announced);
+        assert_eq!(parsed.withdrawn, withdrawn);
+        assert_eq!(parsed.attributes, attrs);
     }
 
     #[test]

@@ -862,6 +862,7 @@ name = "rustbgpd-rib"
 version = "0.0.1"
 dependencies = [
  "proptest",
+ "rustbgpd-policy",
  "rustbgpd-wire",
  "thiserror 2.0.18",
  "tokio",
@@ -883,11 +884,14 @@ name = "rustbgpd-transport"
 version = "0.0.1"
 dependencies = [
  "bytes",
+ "libc",
  "prometheus",
  "rustbgpd-fsm",
+ "rustbgpd-policy",
  "rustbgpd-rib",
  "rustbgpd-telemetry",
  "rustbgpd-wire",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

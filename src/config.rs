@@ -1,8 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use rustbgpd_fsm::PeerConfig;
+use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
 use rustbgpd_transport::TransportConfig;
-use rustbgpd_wire::{Afi, Safi};
+use rustbgpd_wire::{Afi, Ipv4Prefix, Safi};
 use serde::Deserialize;
 
 const DEFAULT_HOLD_TIME: u16 = 90;
@@ -14,6 +15,8 @@ pub struct Config {
     pub global: Global,
     #[serde(default)]
     pub neighbors: Vec<Neighbor>,
+    #[serde(default)]
+    pub policy: PolicyConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +47,26 @@ pub struct Neighbor {
     pub remote_asn: u32,
     pub description: Option<String>,
     pub hold_time: Option<u16>,
+    pub max_prefixes: Option<u32>,
+    pub md5_password: Option<String>,
+    #[serde(default)]
+    pub ttl_security: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PolicyConfig {
+    #[serde(default)]
+    pub import: Vec<PrefixListEntryConfig>,
+    #[serde(default)]
+    pub export: Vec<PrefixListEntryConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrefixListEntryConfig {
+    pub action: String,
+    pub prefix: String,
+    pub ge: Option<u8>,
+    pub le: Option<u8>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +87,43 @@ pub enum ConfigError {
     NoNeighbors,
     #[error("invalid hold_time {value}: must be 0 or >= 3")]
     InvalidHoldTime { value: u16 },
+}
+
+fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Option<PrefixList> {
+    if entries.is_empty() {
+        return None;
+    }
+    let parsed: Vec<PrefixListEntry> = entries
+        .iter()
+        .filter_map(|e| {
+            let action = match e.action.as_str() {
+                "permit" => PolicyAction::Permit,
+                "deny" => PolicyAction::Deny,
+                _ => return None,
+            };
+            let parts: Vec<&str> = e.prefix.split('/').collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            let addr: Ipv4Addr = parts[0].parse().ok()?;
+            let len: u8 = parts[1].parse().ok()?;
+            Some(PrefixListEntry {
+                prefix: Ipv4Prefix::new(addr, len),
+                ge: e.ge,
+                le: e.le,
+                action,
+            })
+        })
+        .collect();
+
+    if parsed.is_empty() {
+        return None;
+    }
+
+    Some(PrefixList {
+        entries: parsed,
+        default_action: PolicyAction::Permit,
+    })
 }
 
 impl Config {
@@ -141,6 +201,14 @@ impl Config {
             .expect("validated in Config::load")
     }
 
+    pub fn import_policy(&self) -> Option<PrefixList> {
+        parse_prefix_list(&self.policy.import)
+    }
+
+    pub fn export_policy(&self) -> Option<PrefixList> {
+        parse_prefix_list(&self.policy.export)
+    }
+
     pub fn to_peer_configs(&self) -> Vec<(TransportConfig, String)> {
         let router_id: Ipv4Addr = self
             .global
@@ -164,7 +232,10 @@ impl Config {
                 };
 
                 let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
-                let transport = TransportConfig::new(peer, remote_addr);
+                let mut transport = TransportConfig::new(peer, remote_addr);
+                transport.max_prefixes = neighbor.max_prefixes;
+                transport.md5_password.clone_from(&neighbor.md5_password);
+                transport.ttl_security = neighbor.ttl_security;
 
                 let label = neighbor
                     .description
@@ -304,6 +375,97 @@ remote_asn = 65002
             config.prometheus_addr(),
             "0.0.0.0:9179".parse::<SocketAddr>().unwrap()
         );
+    }
+
+    #[test]
+    fn neighbor_max_prefixes() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+max_prefixes = 1000
+"#;
+        let config = parse(toml_str).unwrap();
+        assert_eq!(config.neighbors[0].max_prefixes, Some(1000));
+
+        let peers = config.to_peer_configs();
+        assert_eq!(peers[0].0.max_prefixes, Some(1000));
+    }
+
+    #[test]
+    fn neighbor_md5_and_ttl_security() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+md5_password = "secret"
+ttl_security = true
+"#;
+        let config = parse(toml_str).unwrap();
+        assert_eq!(config.neighbors[0].md5_password.as_deref(), Some("secret"));
+        assert!(config.neighbors[0].ttl_security);
+
+        let peers = config.to_peer_configs();
+        assert_eq!(peers[0].0.md5_password.as_deref(), Some("secret"));
+        assert!(peers[0].0.ttl_security);
+    }
+
+    #[test]
+    fn policy_config_parsed() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[policy.import]]
+action = "deny"
+prefix = "10.0.0.0/8"
+ge = 24
+le = 32
+
+[[policy.export]]
+action = "permit"
+prefix = "192.168.0.0/16"
+"#;
+        let config = parse(toml_str).unwrap();
+        let import = config.import_policy().unwrap();
+        assert_eq!(import.entries.len(), 1);
+        let export = config.export_policy().unwrap();
+        assert_eq!(export.entries.len(), 1);
+    }
+
+    #[test]
+    fn empty_policy_returns_none() {
+        let config = parse(valid_toml()).unwrap();
+        assert!(config.import_policy().is_none());
+        assert!(config.export_policy().is_none());
     }
 
     #[test]

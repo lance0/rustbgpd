@@ -60,9 +60,13 @@ async fn run(config: Config) {
         metrics_server::serve_metrics(prometheus_addr, metrics_clone).await;
     });
 
+    // Build policies
+    let import_policy = config.import_policy();
+    let export_policy = config.export_policy();
+
     // Spawn RIB manager
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
-    tokio::spawn(RibManager::new(rib_rx).run());
+    tokio::spawn(RibManager::new(rib_rx, export_policy).run());
 
     // Spawn gRPC API server
     let grpc_rib_tx = rib_tx.clone();
@@ -81,7 +85,12 @@ async fn run(config: Config) {
             remote_asn = transport_config.peer.remote_asn,
             "spawning peer session"
         );
-        let handle = PeerHandle::spawn(transport_config, metrics.clone(), rib_tx.clone());
+        let handle = PeerHandle::spawn(
+            transport_config,
+            metrics.clone(),
+            rib_tx.clone(),
+            import_policy.clone(),
+        );
         if let Err(e) = handle.start().await {
             error!(label = %label, error = %e, "failed to start peer session");
         }

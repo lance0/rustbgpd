@@ -11,6 +11,12 @@ pub struct TransportConfig {
     pub remote_addr: SocketAddr,
     /// Timeout for outbound TCP connect attempts.
     pub connect_timeout: Duration,
+    /// Maximum number of prefixes accepted from this peer before Cease/1.
+    pub max_prefixes: Option<u32>,
+    /// TCP MD5 authentication password (RFC 2385).
+    pub md5_password: Option<String>,
+    /// Enable GTSM / TTL security (RFC 5082).
+    pub ttl_security: bool,
 }
 
 impl TransportConfig {
@@ -24,6 +30,9 @@ impl TransportConfig {
             peer,
             remote_addr,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
+            max_prefixes: None,
+            md5_password: None,
+            ttl_security: false,
         }
     }
 }

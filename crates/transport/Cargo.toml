@@ -10,12 +10,15 @@ description = "TCP connection management — tokio read/write loops, session run
 rustbgpd-wire.workspace = true
 rustbgpd-fsm.workspace = true
 rustbgpd-rib.workspace = true
+rustbgpd-policy.workspace = true
 rustbgpd-telemetry.workspace = true
 bytes.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
 prometheus.workspace = true
+socket2.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 rustbgpd-rib.workspace = true

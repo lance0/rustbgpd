@@ -10,6 +10,49 @@ document (M0–M4).
 
 ## [Unreleased]
 
+### Added (M3 — "Speak")
+
+- `rustbgpd-policy`: `PrefixList` with ge/le range matching, first-match-wins
+  evaluation, and `check_prefix_list()` convenience function. 9 tests.
+- `rustbgpd-wire`: `UpdateMessage::build()` high-level constructor for creating
+  outbound UPDATEs from structured data (announced prefixes, withdrawn prefixes,
+  path attributes). 4 tests.
+- `rustbgpd-rib`: `AdjRibOut` per-peer outbound route table. `OutboundRouteUpdate`
+  type for announce/withdraw batches. (ADR-0015)
+- `rustbgpd-rib`: `RibManager` gains outbound distribution: `distribute_changes()`
+  computes deltas per peer with split-horizon and export policy filtering.
+  `send_initial_table()` sends full Loc-RIB dump on peer establishment.
+- `rustbgpd-rib`: Route injection via `InjectRoute` / `WithdrawInjected` messages.
+  Injected routes stored under sentinel peer `0.0.0.0` in standard Adj-RIB-In,
+  participating in normal best-path selection and distribution.
+- `rustbgpd-rib`: `QueryAdvertisedRoutes` variant for querying Adj-RIB-Out per peer.
+  8 new M3 tests (38 total).
+- `rustbgpd-transport`: Per-peer outbound channel (mpsc, capacity 4096) receives
+  `OutboundRouteUpdate` from RIB manager. `send_route_update()` converts to wire
+  UPDATEs. `prepare_outbound_attributes()` handles eBGP (ASN prepend, NEXT_HOP
+  rewrite, LOCAL_PREF strip) and iBGP (default LOCAL_PREF 100). 5 unit tests.
+- `rustbgpd-transport`: Import policy filtering — inbound UPDATEs filtered by
+  global prefix-list before RIB insertion.
+- `rustbgpd-transport`: Max-prefix enforcement — tracks accepted prefix count,
+  sends Cease/1 (Maximum Number of Prefixes Reached) NOTIFICATION when exceeded.
+- `rustbgpd-transport`: TCP MD5 authentication (RFC 2385) via `setsockopt(TCP_MD5SIG)`.
+  Linux only. Configurable per-neighbor via `md5_password` config field. (ADR-0016)
+- `rustbgpd-transport`: GTSM / TTL security (RFC 5082) via `setsockopt(IP_MINTTL)`.
+  Linux only. Configurable per-neighbor via `ttl_security` config field.
+- `rustbgpd-transport`: TCP connection refactored to use `socket2::Socket` for
+  pre-connect socket option application.
+- `rustbgpd-api`: `InjectionService` with `AddPath` (returns UUID derived from
+  prefix) and `DeletePath` gRPC endpoints.
+- `rustbgpd-api`: `ListAdvertisedRoutes` implemented (previously UNIMPLEMENTED stub).
+  Queries Adj-RIB-Out for a specific peer.
+- `rustbgpd-telemetry`: New metrics — `rib_adj_out_prefixes` (gauge),
+  `rib_loc_prefixes` (gauge), `max_prefix_exceeded` (counter).
+- Config: `max_prefixes`, `md5_password`, `ttl_security` fields on `[[neighbors]]`.
+  Global `[policy]` section with `import` and `export` prefix-list entries.
+- Interop: 3-node containerlab topology `m3-frr.clab.yml` (rustbgpd + 2× FRR).
+  Automated test script `test-m3-frr.sh` with 5 test scenarios: route
+  redistribution, split horizon, route injection, withdrawal propagation, DeletePath.
+
 ### Added (M2 — "Decide")
 
 - `rustbgpd-rib`: `Route` now carries `peer: IpAddr` for tiebreaking and gRPC

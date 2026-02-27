@@ -36,6 +36,8 @@ tonic = "0.13"
 tonic-build = "0.13"
 prost = "0.13"
 prometheus = "0.13"
+socket2 = { version = "0.5", features = ["all"] }
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 

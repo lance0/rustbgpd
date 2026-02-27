@@ -186,9 +186,69 @@ impl proto::rib_service_server::RibService for RibService {
 
     async fn list_advertised_routes(
         &self,
-        _request: Request<proto::ListRoutesRequest>,
+        request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
-        Err(Status::unimplemented("not yet implemented"))
+        let req = request.into_inner();
+
+        if req.neighbor_address.is_empty() {
+            return Err(Status::invalid_argument(
+                "neighbor_address is required for advertised routes",
+            ));
+        }
+
+        let peer: IpAddr = req
+            .neighbor_address
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryAdvertisedRoutes {
+                peer,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let all_routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let total_count = u64::try_from(all_routes.len()).unwrap_or(u64::MAX);
+
+        let offset: usize = if req.page_token.is_empty() {
+            0
+        } else {
+            req.page_token
+                .parse()
+                .map_err(|_| Status::invalid_argument("invalid page_token"))?
+        };
+
+        let page_size = if req.page_size == 0 {
+            100
+        } else {
+            req.page_size as usize
+        };
+
+        let page: Vec<proto::Route> = all_routes
+            .iter()
+            .skip(offset)
+            .take(page_size)
+            .map(|r| route_to_proto(r, false))
+            .collect();
+
+        let next_offset = offset + page.len();
+        let next_page_token = if next_offset < all_routes.len() {
+            next_offset.to_string()
+        } else {
+            String::new()
+        };
+
+        Ok(Response::new(proto::ListRoutesResponse {
+            routes: page,
+            next_page_token,
+            total_count,
+        }))
     }
 
     async fn watch_routes(

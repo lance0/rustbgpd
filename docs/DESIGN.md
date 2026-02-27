@@ -16,7 +16,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 **Observable by default.** Prometheus metrics, structured logs, and machine-parseable errors everywhere. Operators should never have to guess what the daemon is doing or why a session flapped.
 
-**Safe, boring, maintainable.** Minimal `unsafe` (ideally none). Fuzzed wire decoder. Explicit resource limits. No clever tricks — just correct, auditable Rust.
+**Safe, boring, maintainable.** Minimal `unsafe` (one module for TCP MD5/GTSM socket options). Fuzzed wire decoder. Explicit resource limits. No clever tricks — just correct, auditable Rust.
 
 ## Non-Goals (v1)
 
@@ -424,17 +424,29 @@ Exposed via `ListBestRoutes` gRPC endpoint with offset pagination.
 - Deterministic outcomes for all decision inputs, verified by property tests (antisymmetry, transitivity, totality).
 - Stable best-path selection with multiple paths from multiple peers.
 - Structured debug events for best-path changes.
-- 248 tests pass, clippy clean, fmt clean.
+- 248 tests pass (M2), clippy clean, fmt clean.
 
-### Milestone 3: "Speak"
+### Milestone 3: "Speak" `[complete]`
 
-Inject and withdraw routes via gRPC (`AddPath` / `DeletePath`). Build Adj-RIB-Out per neighbor. Advertise to peers, withdrawals work correctly. v1 policy: import/export allow/deny lists + max-prefix guard.
+Inject and withdraw routes via gRPC (`AddPath` / `DeletePath`). Build Adj-RIB-Out per neighbor. Advertise to peers, withdrawals work correctly. v1 policy: import/export allow/deny lists + max-prefix guard. TCP MD5 authentication and GTSM/TTL security.
+
+**Implementation choices:**
+- Adj-RIB-Out lives inside `RibManager` — same single-task ownership, no new locks (ADR-0015).
+- Per-peer outbound channel (mpsc, capacity 4096) created in `PeerSession`, sender registered via `PeerUp` message on Established.
+- Outbound UPDATEs bypass the pure FSM — consistent with inbound pattern.
+- Injected routes stored under sentinel peer `0.0.0.0` in standard Adj-RIB-In, participating in normal best-path selection and distribution.
+- `UpdateMessage::build()` high-level constructor for outbound UPDATEs.
+- eBGP outbound: prepend local ASN to AS_PATH, set NEXT_HOP to local router ID, strip LOCAL_PREF.
+- iBGP outbound: ensure LOCAL_PREF present (default 100), pass NEXT_HOP through.
+- TCP MD5 and GTSM require `socket2::Socket` for pre-connect `setsockopt` calls (ADR-0016). Only `unsafe` code in the project, isolated to `socket_opts` module.
+- Global prefix-list policy: first-match-wins evaluation, separate import/export lists.
 
 **Exit criteria:**
 - A client can programmatically announce a prefix and verify it appears on the peer.
 - Withdrawals propagate correctly.
 - Max-prefix enforcement drops session with NOTIFICATION when exceeded.
 - Resource limits enforced and observable via metrics.
+- 284 tests pass (M3), clippy clean, fmt clean.
 
 ### Milestone 4: "Route Server Mode"
 

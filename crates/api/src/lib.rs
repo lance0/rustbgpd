@@ -7,6 +7,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+mod injection_service;
 mod rib_service;
 pub mod server;
 

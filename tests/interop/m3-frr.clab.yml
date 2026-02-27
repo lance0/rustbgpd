@@ -1,0 +1,56 @@
+# Containerlab topology: rustbgpd ↔ 2× FRR (Milestone 3 — Speak)
+#
+# Validates: route redistribution, route injection (gRPC AddPath/DeletePath),
+# split horizon, withdrawal propagation, max-prefix enforcement, export policy.
+#
+# FRR-A (AS 65002) advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16
+# FRR-B (AS 65003) advertises: nothing (receives redistributed routes)
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m3-frr.clab.yml
+#   containerlab destroy -t tests/interop/m3-frr.clab.yml
+
+name: m3-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      binds:
+        - ./configs/rustbgpd-m3-frr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m3-a.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m3-b.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-b:eth1"]
+
+# Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR-A (10.0.0.2, AS 65002)
+# Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1, AS 65001) ↔ FRR-B (10.0.1.2, AS 65003)

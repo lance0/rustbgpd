@@ -12,6 +12,8 @@ pub mod error;
 pub mod framing;
 pub mod handle;
 pub(crate) mod session;
+#[allow(unsafe_code)]
+mod socket_opts;
 pub mod timer;
 
 pub use config::TransportConfig;

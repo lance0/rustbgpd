@@ -1,3 +1,4 @@
+use rustbgpd_policy::PrefixList;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::mpsc;
@@ -40,10 +41,11 @@ impl PeerHandle {
         config: TransportConfig,
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PrefixList>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
-            let mut session = PeerSession::new(config, metrics, rx, rib_tx);
+            let mut session = PeerSession::new(config, metrics, rx, rib_tx, import_policy);
             session.run().await
         });
         Self { commands: tx, task }

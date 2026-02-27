@@ -4,10 +4,14 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
-use rustbgpd_rib::{RibUpdate, Route};
+use rustbgpd_policy::PrefixList;
+use rustbgpd_rib::{OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::notification::NotificationCode;
-use rustbgpd_wire::{Message, NotificationMessage, encode_message};
+use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
+use rustbgpd_wire::{
+    AsPath, AsPathSegment, Message, NotificationMessage, PathAttribute, UpdateMessage,
+    encode_message,
+};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -45,7 +49,18 @@ pub(crate) struct PeerSession {
     /// this timer fires after the connect-retry interval to avoid a hot
     /// reconnect loop (e.g., persistent OPEN validation failures).
     reconnect_timer: Option<Pin<Box<Sleep>>>,
+    /// Receiver for outbound route updates from the RIB manager.
+    outbound_rx: mpsc::Receiver<OutboundRouteUpdate>,
+    /// Sender clone held to give to RIB manager on `PeerUp`.
+    outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+    /// Import policy (prefix filter applied to inbound UPDATEs).
+    import_policy: Option<PrefixList>,
+    /// Number of accepted prefixes (for max-prefix enforcement).
+    prefix_count: usize,
 }
+
+/// Outbound channel buffer size.
+const OUTBOUND_BUFFER: usize = 4096;
 
 impl PeerSession {
     pub(crate) fn new(
@@ -53,10 +68,12 @@ impl PeerSession {
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PrefixList>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
         let fsm = Session::new(config.peer.clone());
+        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
         Self {
             config,
             fsm,
@@ -71,6 +88,10 @@ impl PeerSession {
             negotiated: None,
             stop_requested: false,
             reconnect_timer: None,
+            outbound_rx,
+            outbound_tx,
+            import_policy,
+            prefix_count: 0,
         }
     }
 
@@ -84,6 +105,7 @@ impl PeerSession {
                 timers,
                 commands,
                 reconnect_timer,
+                outbound_rx,
                 ..
             } = self;
 
@@ -138,6 +160,12 @@ impl PeerSession {
                     self.reconnect_timer = None;
                     debug!(peer = %self.peer_label, "reconnect timer fired");
                     self.drive_fsm(Event::ManualStart).await;
+                }
+
+                // Outbound route updates from RIB manager
+                Some(update) = outbound_rx.recv(),
+                    if self.fsm.state() == SessionState::Established => {
+                    self.send_route_update(update).await;
                 }
             }
         }
@@ -264,10 +292,16 @@ impl PeerSession {
                         "session established"
                     );
                     self.negotiated = Some(neg);
+                    // Register with RIB manager for outbound updates
+                    let _ = self.rib_tx.try_send(RibUpdate::PeerUp {
+                        peer: self.peer_ip,
+                        outbound_tx: self.outbound_tx.clone(),
+                    });
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
                     self.negotiated = None;
+                    self.prefix_count = 0;
                     let _ = self
                         .rib_tx
                         .try_send(RibUpdate::PeerDown { peer: self.peer_ip });
@@ -297,16 +331,12 @@ impl PeerSession {
 
     /// Attempt an outbound TCP connection with timeout.
     ///
-    /// Returns the FSM event to fire (connected or failed).
+    /// Uses `socket2` to create the socket so that MD5 and GTSM options can be
+    /// applied before connecting.
     async fn attempt_connect(&mut self) -> Option<Event> {
         debug!(peer = %self.peer_label, addr = %self.config.remote_addr, "connecting");
 
-        match tokio::time::timeout(
-            self.config.connect_timeout,
-            TcpStream::connect(self.config.remote_addr),
-        )
-        .await
-        {
+        match tokio::time::timeout(self.config.connect_timeout, self.create_and_connect()).await {
             Ok(Ok(stream)) => {
                 info!(peer = %self.peer_label, "TCP connected");
                 self.stream = Some(stream);
@@ -321,6 +351,53 @@ impl PeerSession {
                 Some(Event::TcpConnectionFails)
             }
         }
+    }
+
+    /// Create a socket with MD5/GTSM options and connect to the peer.
+    async fn create_and_connect(&self) -> std::io::Result<TcpStream> {
+        use socket2::{Domain, Protocol, SockAddr, Type};
+
+        let domain = if self.config.remote_addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+
+        let socket = socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+
+        // Apply MD5 authentication before connect
+        if let Some(ref password) = self.config.md5_password {
+            crate::socket_opts::set_tcp_md5sig(&socket, self.config.remote_addr, password)?;
+            debug!(peer = %self.peer_label, "TCP MD5 authentication configured");
+        }
+
+        // Apply GTSM / TTL security before connect
+        if self.config.ttl_security {
+            crate::socket_opts::set_gtsm(&socket)?;
+            debug!(peer = %self.peer_label, "GTSM / TTL security configured");
+        }
+
+        socket.set_nonblocking(true)?;
+
+        let addr = SockAddr::from(self.config.remote_addr);
+        match socket.connect(&addr) {
+            Ok(()) => {}
+            Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+            Err(e) => return Err(e),
+        }
+
+        let std_stream: std::net::TcpStream = socket.into();
+        let stream = TcpStream::from_std(std_stream)?;
+
+        // Wait for connection to complete
+        stream.writable().await?;
+
+        // Check for connection errors
+        if let Some(err) = stream.take_error()? {
+            return Err(err);
+        }
+
+        Ok(stream)
     }
 
     /// Drop the TCP stream and clear the read buffer.
@@ -387,8 +464,9 @@ impl PeerSession {
         }
     }
 
-    /// Parse an UPDATE message, validate attributes, send routes to RIB,
-    /// and feed the appropriate event to the FSM.
+    /// Parse an UPDATE message, validate attributes, apply import policy,
+    /// enforce max-prefix limit, send routes to RIB, and feed the
+    /// appropriate event to the FSM.
     async fn process_update(&mut self, update: rustbgpd_wire::UpdateMessage) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
 
@@ -428,7 +506,7 @@ impl PeerSession {
             return;
         }
 
-        // 3. Build routes and send to RIB
+        // 3. Build routes and apply import policy
         let next_hop = parsed
             .attributes
             .iter()
@@ -445,9 +523,15 @@ impl PeerSession {
             });
 
         let now = Instant::now();
+
+        // Apply import policy filter
         let announced: Vec<Route> = parsed
             .announced
             .iter()
+            .filter(|prefix| {
+                rustbgpd_policy::check_prefix_list(self.import_policy.as_ref(), **prefix)
+                    == rustbgpd_policy::PolicyAction::Permit
+            })
             .map(|prefix| Route {
                 prefix: *prefix,
                 next_hop,
@@ -457,6 +541,29 @@ impl PeerSession {
             })
             .collect();
 
+        // 4. Max-prefix enforcement
+        self.prefix_count += announced.len();
+        self.prefix_count = self.prefix_count.saturating_sub(parsed.withdrawn.len());
+
+        if let Some(max) = self.config.max_prefixes
+            && self.prefix_count > max as usize
+        {
+            warn!(
+                peer = %self.peer_label,
+                count = self.prefix_count,
+                max,
+                "max prefix exceeded"
+            );
+            self.metrics.record_max_prefix_exceeded(&self.peer_label);
+            let notif = NotificationMessage::new(
+                NotificationCode::Cease,
+                cease_subcode::MAX_PREFIXES,
+                bytes::Bytes::new(),
+            );
+            self.drive_fsm(Event::UpdateValidationError(notif)).await;
+            return;
+        }
+
         if !announced.is_empty() || !parsed.withdrawn.is_empty() {
             let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
                 peer: self.peer_ip,
@@ -465,7 +572,7 @@ impl PeerSession {
             });
         }
 
-        // 4. Tell FSM about the update (restarts hold timer)
+        // 5. Tell FSM about the update (restarts hold timer)
         self.drive_fsm(Event::UpdateReceived).await;
     }
 
@@ -497,6 +604,117 @@ impl PeerSession {
             }
         }
     }
+
+    /// Send an outbound route update as wire UPDATE messages.
+    async fn send_route_update(&mut self, update: OutboundRouteUpdate) {
+        let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
+        let is_ebgp = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
+
+        // Send withdrawals
+        if !update.withdraw.is_empty() {
+            let msg = UpdateMessage::build(&[], &update.withdraw, &[], four_octet_as);
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
+                return;
+            }
+            self.metrics.record_message_sent(&self.peer_label, "update");
+        }
+
+        // Send announcements (one UPDATE per route for simplicity)
+        for route in &update.announce {
+            let attrs = self.prepare_outbound_attributes(route, is_ebgp);
+            let msg = UpdateMessage::build(&[route.prefix], &[], &attrs, four_octet_as);
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
+                return;
+            }
+            self.metrics.record_message_sent(&self.peer_label, "update");
+        }
+    }
+
+    /// Prepare path attributes for outbound advertisement.
+    ///
+    /// For eBGP: prepend our ASN, set `NEXT_HOP` to local addr, strip `LOCAL_PREF`.
+    /// For iBGP: ensure `LOCAL_PREF` present (default 100), pass `NEXT_HOP` through.
+    fn prepare_outbound_attributes(&self, route: &Route, is_ebgp: bool) -> Vec<PathAttribute> {
+        let mut attrs = Vec::new();
+
+        for attr in &route.attributes {
+            match attr {
+                PathAttribute::AsPath(as_path) => {
+                    if is_ebgp {
+                        // Prepend our ASN
+                        let mut new_segments =
+                            vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                        for seg in &as_path.segments {
+                            match seg {
+                                AsPathSegment::AsSequence(asns) => {
+                                    // Merge into first sequence if possible
+                                    if let Some(AsPathSegment::AsSequence(first)) =
+                                        new_segments.first_mut()
+                                    {
+                                        first.extend(asns);
+                                    }
+                                }
+                                AsPathSegment::AsSet(asns) => {
+                                    new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                                }
+                            }
+                        }
+                        attrs.push(PathAttribute::AsPath(AsPath {
+                            segments: new_segments,
+                        }));
+                    } else {
+                        attrs.push(attr.clone());
+                    }
+                }
+                PathAttribute::NextHop(_) => {
+                    if is_ebgp {
+                        // Set NEXT_HOP to our local address
+                        let local_addr = match self.config.remote_addr.ip() {
+                            IpAddr::V4(_) => self.config.peer.local_router_id,
+                            IpAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
+                        };
+                        attrs.push(PathAttribute::NextHop(local_addr));
+                    } else {
+                        attrs.push(attr.clone());
+                    }
+                }
+                PathAttribute::LocalPref(_) => {
+                    if !is_ebgp {
+                        attrs.push(attr.clone());
+                    }
+                    // Strip LOCAL_PREF for eBGP
+                }
+                _ => {
+                    attrs.push(attr.clone());
+                }
+            }
+        }
+
+        // For iBGP, ensure LOCAL_PREF is present (default 100)
+        if !is_ebgp
+            && !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
+        {
+            attrs.push(PathAttribute::LocalPref(100));
+        }
+
+        // For eBGP, ensure AS_PATH is present (even if empty)
+        if is_ebgp && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))) {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
+            }));
+        }
+
+        attrs
+    }
 }
 
 /// Read from TCP into the buffer. Extracted as a freestanding async fn
@@ -509,4 +727,141 @@ async fn read_tcp(
     use tokio::io::AsyncReadExt;
     let stream = stream.as_mut().expect("read_tcp called without stream");
     stream.read_buf(buf).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::time::Instant;
+
+    use rustbgpd_fsm::PeerConfig;
+    use rustbgpd_wire::{Afi, AsPath, AsPathSegment, Origin, PathAttribute, Safi};
+
+    use super::*;
+
+    fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
+        let peer_config = PeerConfig {
+            local_asn,
+            remote_asn,
+            local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+            hold_time: 90,
+            connect_retry_secs: 30,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+        };
+        let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+        let metrics = BgpMetrics::new();
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+
+        PeerSession::new(config, metrics, cmd_rx, rib_tx, None)
+    }
+
+    fn make_route(local_pref: u32) -> Route {
+        Route {
+            prefix: rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+            next_hop: Ipv4Addr::new(10, 0, 0, 2),
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            attributes: vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+                PathAttribute::LocalPref(local_pref),
+            ],
+            received_at: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn ebgp_prepends_asn() {
+        let session = make_test_session(65001, 65002);
+        let route = make_route(100);
+        let attrs = session.prepare_outbound_attributes(&route, true);
+
+        let as_path = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::AsPath(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+
+        // Should have our ASN prepended
+        if let AsPathSegment::AsSequence(asns) = &as_path.segments[0] {
+            assert_eq!(asns[0], 65001);
+            assert_eq!(asns[1], 65002);
+        } else {
+            panic!("expected AS_SEQUENCE");
+        }
+    }
+
+    #[test]
+    fn ebgp_strips_local_pref() {
+        let session = make_test_session(65001, 65002);
+        let route = make_route(200);
+        let attrs = session.prepare_outbound_attributes(&route, true);
+
+        assert!(
+            !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
+        );
+    }
+
+    #[test]
+    fn ibgp_preserves_local_pref() {
+        let session = make_test_session(65001, 65001);
+        let route = make_route(200);
+        let attrs = session.prepare_outbound_attributes(&route, false);
+
+        let lp = attrs.iter().find_map(|a| match a {
+            PathAttribute::LocalPref(lp) => Some(*lp),
+            _ => None,
+        });
+        assert_eq!(lp, Some(200));
+    }
+
+    #[test]
+    fn ebgp_sets_next_hop() {
+        let session = make_test_session(65001, 65002);
+        let route = make_route(100);
+        let attrs = session.prepare_outbound_attributes(&route, true);
+
+        let nh = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::NextHop(nh) => Some(*nh),
+                _ => None,
+            })
+            .unwrap();
+
+        // Should be set to local_router_id (10.0.0.1)
+        assert_eq!(nh, Ipv4Addr::new(10, 0, 0, 1));
+    }
+
+    #[test]
+    fn ibgp_default_local_pref_when_missing() {
+        let session = make_test_session(65001, 65001);
+        let route = Route {
+            prefix: rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+            next_hop: Ipv4Addr::new(10, 0, 0, 2),
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            attributes: vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                }),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            received_at: Instant::now(),
+        };
+        let attrs = session.prepare_outbound_attributes(&route, false);
+
+        let lp = attrs.iter().find_map(|a| match a {
+            PathAttribute::LocalPref(lp) => Some(*lp),
+            _ => None,
+        });
+        assert_eq!(lp, Some(100));
+    }
 }

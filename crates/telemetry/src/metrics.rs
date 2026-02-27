@@ -26,8 +26,13 @@ pub struct BgpMetrics {
     messages_sent: IntCounterVec,
     messages_received: IntCounterVec,
 
-    // ── RIB (stubs — wired in M1) ─────────────────────────────────
+    // ── RIB ──────────────────────────────────────────────────────
     rib_prefixes: IntGaugeVec,
+    rib_adj_out_prefixes: IntGaugeVec,
+    rib_loc_prefixes: IntGaugeVec,
+
+    // ── Policy ──────────────────────────────────────────────────
+    max_prefix_exceeded: IntCounterVec,
 }
 
 impl BgpMetrics {
@@ -48,6 +53,7 @@ impl BgpMetrics {
     ///
     /// Panics if metric registration fails.
     #[must_use]
+    #[expect(clippy::too_many_lines)]
     pub fn with_registry(registry: Registry) -> Self {
         let state_transitions = IntCounterVec::new(
             Opts::new(
@@ -118,6 +124,33 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rib_adj_out_prefixes = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rib_adj_out_prefixes",
+                "Number of prefixes in Adj-RIB-Out per peer and AFI/SAFI",
+            ),
+            &["peer", "afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let rib_loc_prefixes = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rib_loc_prefixes",
+                "Number of prefixes in the Loc-RIB per AFI/SAFI",
+            ),
+            &["afi_safi"],
+        )
+        .expect("valid metric definition");
+
+        let max_prefix_exceeded = IntCounterVec::new(
+            Opts::new(
+                "bgp_max_prefix_exceeded_total",
+                "Number of times a peer exceeded its max-prefix limit",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -142,6 +175,15 @@ impl BgpMetrics {
         registry
             .register(Box::new(rib_prefixes.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_adj_out_prefixes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(rib_loc_prefixes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(max_prefix_exceeded.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -153,6 +195,9 @@ impl BgpMetrics {
             messages_sent,
             messages_received,
             rib_prefixes,
+            rib_adj_out_prefixes,
+            rib_loc_prefixes,
+            max_prefix_exceeded,
         }
     }
 
@@ -210,12 +255,29 @@ impl BgpMetrics {
     }
 
     /// Set the number of prefixes in Adj-RIB-In for a peer/AFI-SAFI.
-    ///
-    /// Stub for M1 — exists at zero until RIB processing is implemented.
     pub fn set_rib_prefixes(&self, peer: &str, afi_safi: &str, count: i64) {
         self.rib_prefixes
             .with_label_values(&[peer, afi_safi])
             .set(count);
+    }
+
+    /// Set the number of prefixes in Adj-RIB-Out for a peer/AFI-SAFI.
+    pub fn set_adj_rib_out_prefixes(&self, peer: &str, afi_safi: &str, count: i64) {
+        self.rib_adj_out_prefixes
+            .with_label_values(&[peer, afi_safi])
+            .set(count);
+    }
+
+    /// Set the number of prefixes in the Loc-RIB for an AFI/SAFI.
+    pub fn set_loc_rib_prefixes(&self, afi_safi: &str, count: i64) {
+        self.rib_loc_prefixes
+            .with_label_values(&[afi_safi])
+            .set(count);
+    }
+
+    /// Record a max-prefix-exceeded event for a peer.
+    pub fn record_max_prefix_exceeded(&self, peer: &str) {
+        self.max_prefix_exceeded.with_label_values(&[peer]).inc();
     }
 }
 
@@ -401,6 +463,40 @@ mod tests {
         assert!(text.contains("bgp_session_state_transitions_total"));
         assert!(text.contains("bgp_messages_sent_total"));
         assert!(text.contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn adj_rib_out_prefixes_gauge() {
+        let m = BgpMetrics::new();
+        m.set_adj_rib_out_prefixes("10.0.0.1", "ipv4_unicast", 5);
+
+        let val = m
+            .rib_adj_out_prefixes
+            .with_label_values(&["10.0.0.1", "ipv4_unicast"])
+            .get();
+        assert_eq!(val, 5);
+    }
+
+    #[test]
+    fn loc_rib_prefixes_gauge() {
+        let m = BgpMetrics::new();
+        m.set_loc_rib_prefixes("ipv4_unicast", 42);
+
+        let val = m
+            .rib_loc_prefixes
+            .with_label_values(&["ipv4_unicast"])
+            .get();
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn max_prefix_exceeded_counter() {
+        let m = BgpMetrics::new();
+        m.record_max_prefix_exceeded("10.0.0.1");
+        m.record_max_prefix_exceeded("10.0.0.1");
+
+        let val = m.max_prefix_exceeded.with_label_values(&["10.0.0.1"]).get();
+        assert_eq!(val, 2);
     }
 
     #[test]

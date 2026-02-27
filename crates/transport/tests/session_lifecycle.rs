@@ -79,6 +79,9 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         peer: test_peer_config(),
         remote_addr: addr,
         connect_timeout: Duration::from_secs(5),
+        max_prefixes: None,
+        md5_password: None,
+        ttl_security: false,
     }
 }
 
@@ -89,7 +92,7 @@ async fn full_handshake_reaches_established() {
     let metrics = BgpMetrics::new();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx);
+    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx, None);
     handle.start().await.unwrap();
 
     // Accept the inbound connection from rustbgpd
@@ -129,7 +132,7 @@ async fn peer_disconnect_triggers_retry() {
     let metrics = BgpMetrics::new();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx);
+    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx, None);
     handle.start().await.unwrap();
 
     // Accept first connection
@@ -164,7 +167,7 @@ async fn notification_from_peer_tears_down() {
     let metrics = BgpMetrics::new();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx);
+    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx, None);
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -209,7 +212,7 @@ async fn keepalive_exchange_in_established() {
     config.peer.hold_time = 9; // keepalive interval = 3s
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(config, metrics.clone(), rib_tx);
+    let handle = PeerHandle::spawn(config, metrics.clone(), rib_tx, None);
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -250,7 +253,7 @@ async fn stop_command_sends_cease() {
     let metrics = BgpMetrics::new();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx);
+    let handle = PeerHandle::spawn(transport_config(addr), metrics.clone(), rib_tx, None);
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -302,7 +305,7 @@ async fn connect_failure_retries() {
     config.peer.connect_retry_secs = 1;
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(config, metrics.clone(), rib_tx);
+    let handle = PeerHandle::spawn(config, metrics.clone(), rib_tx, None);
     handle.start().await.unwrap();
 
     // Let it fail and retry a couple times

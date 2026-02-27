@@ -1,0 +1,21 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+grpc_addr = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-a"
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65003
+description = "frr-b"
+hold_time = 90

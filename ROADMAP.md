@@ -252,17 +252,84 @@ Loc-RIB best-path selection per RFC 4271 §9.1.2.
 
 ---
 
-## M3 — "Speak"
+## M3 — "Speak" `[complete]`
 
-Route injection, advertisement, and policy.
+Route injection, advertisement, and policy. The daemon becomes a real BGP
+speaker: when best-path changes, advertise/withdraw to all peers. Operators
+can inject routes via gRPC, apply prefix-list policy, and use TCP
+authentication.
 
-- `AddPath` / `DeletePath` gRPC endpoints
-- Adj-RIB-Out computation per neighbor
-- UPDATE encoding and advertisement
-- Import/export allow/deny policy
-- Max-prefix enforcement (NOTIFICATION Cease on exceed)
-- TCP MD5 authentication (Linux only)
-- GTSM / TTL security
+### Build Order
+
+1. ~~**Policy crate** — `PrefixList`~~ **Done**
+   - `PolicyAction` (Permit/Deny), `PrefixListEntry` with ge/le range matching
+   - `PrefixList::evaluate()` — first-match-wins prefix filter
+   - `check_prefix_list()` convenience function (None = permit all)
+   - 9 tests covering exact match, ge/le range, first-match-wins, defaults
+
+2. ~~**Wire — `UpdateMessage::build()`**~~ **Done**
+   - High-level constructor: `build(announced, withdrawn, attributes, four_octet_as)`
+   - Encodes NLRI and path attributes into raw Bytes fields
+   - 4 tests: roundtrip, withdrawal-only, announce-only, mixed
+
+3. ~~**Config — new neighbor fields + policy config**~~ **Done**
+   - Neighbor: `max_prefixes`, `md5_password`, `ttl_security`
+   - Global `[policy]` section with import/export prefix-list entries
+   - `Config::import_policy()` / `Config::export_policy()` → `Option<PrefixList>`
+   - 4 new config tests
+
+4. ~~**Telemetry — outbound metrics**~~ **Done**
+   - `rib_adj_out_prefixes` (IntGaugeVec), `rib_loc_prefixes` (IntGaugeVec),
+     `max_prefix_exceeded` (IntCounterVec)
+   - Recording methods on `BgpMetrics`
+
+5. ~~**RIB — Adj-RIB-Out, outbound distribution, route injection**~~ **Done**
+   - `AdjRibOut` struct (per-peer HashMap)
+   - `OutboundRouteUpdate { announce, withdraw }` type
+   - `RibUpdate` variants: `PeerUp`, `InjectRoute`, `WithdrawInjected`, `QueryAdvertisedRoutes`
+   - `RibManager::distribute_changes()` — split-horizon + export policy + delta
+   - `RibManager::send_initial_table()` — full Loc-RIB dump on PeerUp
+   - Injected routes stored under sentinel peer `0.0.0.0` (ADR-0015)
+   - 8 new M3 tests (38 total RIB tests)
+
+6. ~~**Transport — outbound channel + UPDATE sending**~~ **Done**
+   - Per-peer outbound channel (mpsc, capacity 4096)
+   - `tokio::select!` branch for `OutboundRouteUpdate` in Established state
+   - `send_route_update()` — build wire UPDATEs from outbound updates
+   - `prepare_outbound_attributes()` — eBGP: prepend ASN, set NEXT_HOP, strip
+     LOCAL_PREF; iBGP: ensure LOCAL_PREF (default 100)
+   - Import policy filtering in `process_update()`
+   - Max-prefix enforcement with Cease/1 NOTIFICATION
+   - `PeerUp` sent to RIB on SessionEstablished
+   - 5 unit tests for attribute preparation
+
+7. ~~**gRPC — InjectionService + ListAdvertisedRoutes**~~ **Done**
+   - `InjectionService` with `AddPath` (returns UUID) and `DeletePath`
+   - `ListAdvertisedRoutes` implemented (was UNIMPLEMENTED stub)
+   - Both services registered in gRPC server
+
+8. ~~**TCP MD5 + GTSM**~~ **Done**
+   - `socket_opts.rs` — `set_tcp_md5sig()` and `set_gtsm()` (Linux only, ADR-0016)
+   - `attempt_connect()` refactored to use `socket2::Socket` for pre-connect options
+   - Non-Linux stubs return `Unsupported`
+   - Dependencies: `socket2`, `libc`
+
+9. ~~**Interop validation**~~ **Done**
+   - 3-node containerlab topology: rustbgpd + FRR-A (AS 65002) + FRR-B (AS 65003)
+   - Test script with 5 scenarios: redistribution, split horizon, injection,
+     withdrawal propagation, DeletePath
+
+### Exit Criteria
+
+- Routes redistributed between peers with correct AS_PATH prepending
+- Split horizon prevents echo (route not sent back to originator)
+- `AddPath` / `DeletePath` inject and withdraw routes via gRPC
+- Max-prefix enforcement tears down session with Cease/1 NOTIFICATION
+- Import/export prefix-list policy filters routes
+- TCP MD5 and GTSM socket options applied before connect (Linux)
+- 288 tests pass, clippy clean, fmt clean
+
+---
 
 ## M4 — "Route Server Mode"
 

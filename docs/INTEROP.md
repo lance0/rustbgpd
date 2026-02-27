@@ -12,6 +12,7 @@ not "someone tried it once."
 |------|---------|----------|--------|-------|--------------|------------------------|
 | FRR (bgpd) | 10.3.1 | `tests/interop/m0-frr.clab.yml` | Tested (M0) | All 5 tests pass | Needs `no bgp ebgp-requires-policy` | Cease on `clear bgp *` |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m1-frr.clab.yml` | Tested (M1, M2) | UPDATE/RIB + best-path | FRR advertises 3 prefixes via `network` | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m3-frr.clab.yml` | Tested (M3) | 3-node redistribution | 2× FRR peers, route injection | — |
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | GoBGP | 3.x | — | Planned (M4) | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
@@ -378,6 +379,112 @@ peer restart recovery all unaffected by M2 changes.
 | ListBestRoutes — attributes | PASS | AS_PATH=[65002], NEXT_HOP=10.0.0.2 |
 | ListBestRoutes — pagination (page 1) | PASS | 2 routes, nextPageToken="2" |
 | ListBestRoutes — pagination (page 2) | PASS | 1 route, no nextPageToken |
+
+---
+
+## M3 Test Procedures
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m3-frr.clab.yml`
+
+### Network Layout
+
+```
+M3 FRR (3-node):
+
+  rustbgpd (AS 65001)
+  eth1: 10.0.0.1/24        eth2: 10.0.1.1/24
+       │                         │
+       │                         │
+  eth1: 10.0.0.2/24        eth1: 10.0.1.2/24
+  FRR-A (AS 65002)          FRR-B (AS 65003)
+```
+
+FRR-A advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16 via `network` statements.
+FRR-B receives only (no route advertisements).
+
+### Test 1: Route Redistribution
+
+After sessions reach Established, FRR-A's routes should propagate through
+rustbgpd to FRR-B.
+
+```sh
+docker exec clab-m3-frr-frrb vtysh -c "show bgp ipv4 unicast"
+```
+
+**Pass criteria:** FRR-B sees 3 routes from FRR-A with AS_PATH `65001 65002`.
+
+### Test 2: Split Horizon
+
+FRR-A should NOT receive its own routes back from rustbgpd.
+
+```sh
+docker exec clab-m3-frr-frra vtysh -c "show bgp ipv4 unicast"
+```
+
+**Pass criteria:** FRR-A sees only its own locally-originated routes, not
+routes reflected back through rustbgpd.
+
+### Test 3: Route Injection
+
+Inject a route via gRPC and verify both peers receive it.
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "10.99.0.0", "prefix_length": 24, "next_hop": "10.0.0.1"}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.InjectionService/AddPath
+
+docker exec clab-m3-frr-frra vtysh -c "show bgp ipv4 unicast 10.99.0.0/24"
+docker exec clab-m3-frr-frrb vtysh -c "show bgp ipv4 unicast 10.99.0.0/24"
+```
+
+**Pass criteria:** Both FRR-A and FRR-B see 10.99.0.0/24 with AS_PATH `65001`.
+
+### Test 4: Withdrawal Propagation
+
+Remove a network from FRR-A and verify FRR-B sees the withdrawal.
+
+```sh
+docker exec clab-m3-frr-frra vtysh -c "conf t" -c "router bgp 65002" \
+  -c "address-family ipv4 unicast" -c "no network 192.168.2.0/24" -c "end"
+```
+
+**Pass criteria:** FRR-B no longer sees 192.168.2.0/24.
+
+### Test 5: DeletePath
+
+Withdraw the injected route via gRPC.
+
+```sh
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "10.99.0.0", "prefix_length": 24}' \
+  <rustbgpd-mgmt-ip>:50051 rustbgpd.v1.InjectionService/DeletePath
+```
+
+**Pass criteria:** Both FRR-A and FRR-B no longer see 10.99.0.0/24.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m3-frr.sh
+```
+
+Runs all 5 tests automatically. Requires containerlab topology deployed and
+`grpcurl` on the host.
+
+---
+
+## M3 FRR Test Results (2026-02-27, FRR 10.3.1)
+
+| Test | Result | Details |
+|------|--------|---------|
+| Route redistribution (A→B) | PASS | FRR-B sees 3 routes with AS_PATH 65001 65002 |
+| Split horizon | PASS | FRR-A does not receive its own routes back |
+| Route injection | PASS | Both peers see 10.99.0.0/24 after AddPath |
+| Withdrawal propagation | PASS | FRR-B drops 192.168.2.0/24 after FRR-A withdraws |
+| DeletePath | PASS | Both peers drop 10.99.0.0/24 after DeletePath |
 
 ---
 
