@@ -17,3 +17,4 @@ thiserror.workspace = true
 prometheus.workspace = true
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

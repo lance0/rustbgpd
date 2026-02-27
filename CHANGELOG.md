@@ -30,6 +30,12 @@ document (M0–M4).
 - `rustbgpd-telemetry`: Prometheus metrics (state transitions, flaps, notifications, messages)
 - `rustbgpd-telemetry`: RIB metric stubs (registered at zero for M1)
 - `rustbgpd-telemetry`: Structured JSON logging via tracing-subscriber with env-filter
+- `rustbgpd-transport`: Single-task-per-peer Tokio TCP session runtime
+- `rustbgpd-transport`: Length-delimited framing with `peek_message_length`
+- `rustbgpd-transport`: Timer management with `poll_timer` future for `select!` compatibility
+- `rustbgpd-transport`: `PeerHandle` / `PeerCommand` API for spawning and controlling sessions
+- `rustbgpd-transport`: Full OPEN/KEEPALIVE handshake, reconnection, and teardown
+- `rustbgpd-transport`: Telemetry integration (state transitions, messages, notifications)
 
 ---
 
@@ -47,11 +53,12 @@ Target: **M0 — "Establish"**
 - `rustbgpd-fsm`: OPEN negotiation and capability exchange
 - `rustbgpd-telemetry`: Prometheus metric stubs (8 metrics, all counters at zero)
 - `rustbgpd-telemetry`: Structured JSON log events via tracing-subscriber
+- `rustbgpd-transport`: Single-task-per-peer TCP session runtime
+- `rustbgpd-transport`: Framing, timers, connect/disconnect lifecycle
+- `rustbgpd-transport`: 18 tests (12 unit + 6 integration with mock peer)
 
 ### Remaining
 
-- `rustbgpd-transport`: Tokio TCP session management
-- `rustbgpd-transport`: Bounded channels with backpressure
 - Fuzz harness stubs for wire decoder
 - Interop validation with FRR and BIRD
 

@@ -47,6 +47,9 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
    transition table, OPEN negotiation, exponential backoff, property tests)
 3. **rustbgpd-telemetry** — Prometheus metrics (8 metrics: state transitions,
    flaps, established, notifications, messages, RIB stubs) + JSON logging
+4. **rustbgpd-transport** — Tokio TCP session runtime (single task per peer,
+   length-delimited framing, timer management, PeerHandle API, telemetry
+   integration, 18 tests including mock-peer integration)
 
 ---
 
@@ -79,15 +82,16 @@ completes OPEN/KEEPALIVE exchange, and holds Established state.
    - RIB metric stubs (exist at zero): update latency, backpressure, drops
    - Structured JSON events for FSM transitions
 
-4. **rustbgpd-transport** — Tokio TCP glue `[next]`
-   - TCP listener and outbound connection management
-   - Read loop: bytes → wire::decode → FSM input
-   - Write loop: FSM output → wire::encode → bytes
-   - Bounded channels between reader/writer/FSM
-   - Session lifecycle: connect, established, teardown
-   - Integration with telemetry counters
+4. ~~**rustbgpd-transport** — Tokio TCP glue~~ **Done**
+   - Single-task-per-peer session runtime with `tokio::select!`
+   - Read loop: bytes → `peek_message_length` → `decode_message` → FSM event
+   - Write loop: FSM action → `encode_message` → TCP write
+   - Timer management: `Option<Pin<Box<Sleep>>>` with freestanding `poll_timer`
+   - `PeerHandle` / `PeerCommand` API for external control (Start, Stop, Shutdown)
+   - Iterative action loop avoids async recursion
+   - Full telemetry integration (state transitions, messages, notifications)
 
-5. **Interop validation**
+5. **Interop validation** `[next]`
    - Containerlab topology: rustbgpd ↔ FRR
    - Containerlab topology: rustbgpd ↔ BIRD
    - Test: establish, hold 30+ minutes, verify keepalives

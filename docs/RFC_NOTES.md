@@ -64,6 +64,28 @@ implementation choices made during development.
   Failed handshakes are not surfaced as session-down events.
 - `StateChanged` action emitted on every state transition for telemetry.
 
+### §8.2 — Timers (transport implementation)
+
+- Timers are `Option<Pin<Box<Sleep>>>` in the transport layer. `None`
+  means the timer is stopped; `Some` means it is running.
+- A freestanding `poll_timer` future is used in `tokio::select!` to
+  avoid `&mut self` borrow conflicts with other select branches.
+- When a timer fires, the transport clears the slot (`= None`) before
+  feeding the event to the FSM. The FSM may restart the timer via a
+  `StartTimer` action in the same event cycle.
+
+### §8.2 — TCP Connection Management (transport implementation)
+
+- Transport uses `Option<TcpStream>` for connection state. `None` when
+  disconnected; the TCP read branch of `select!` is disabled via a
+  guard (`if stream.is_some()`).
+- `InitiateTcpConnection` action triggers `TcpStream::connect` with a
+  configurable timeout. The result is returned as a follow-up FSM event
+  (`TcpConnectionConfirmed` or `TcpConnectionFails`).
+- Send failures (OPEN, KEEPALIVE) are treated as TCP failures: the
+  stream is dropped and `TcpConnectionFails` is queued.
+- `CloseTcpConnection` drops the stream and clears the read buffer.
+
 ### §10 — Error Handling
 
 - Every error condition maps to a specific NOTIFICATION code/subcode.
