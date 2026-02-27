@@ -86,11 +86,9 @@ impl DecodeError {
                 2, // Bad Message Length
                 Bytes::new(),
             ),
-            Self::MalformedField { .. } | Self::MalformedOptionalParameter { .. } => (
-                NotificationCode::OpenMessage,
-                0,
-                Bytes::new(),
-            ),
+            Self::MalformedField { .. } | Self::MalformedOptionalParameter { .. } => {
+                (NotificationCode::OpenMessage, 0, Bytes::new())
+            }
             Self::UpdateLengthMismatch { .. } => (
                 NotificationCode::UpdateMessage,
                 1, // Malformed Attribute List

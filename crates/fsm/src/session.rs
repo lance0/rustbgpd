@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
-use rustbgpd_wire::notification::NotificationCode;
 use rustbgpd_wire::OpenMessage;
+use rustbgpd_wire::notification::NotificationCode;
 
 use crate::action::{Action, NegotiatedSession, TimerType};
 use crate::config::PeerConfig;
@@ -133,11 +133,7 @@ impl Session {
                 self.enter_idle_silent()
             }
 
-            _ => self.enter_idle_with_notification(
-                NotificationCode::FsmError,
-                0,
-                Bytes::new(),
-            ),
+            _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
 
@@ -180,21 +176,15 @@ impl Session {
                 self.enter_idle_silent()
             }
 
-            _ => self.enter_idle_with_notification(
-                NotificationCode::FsmError,
-                0,
-                Bytes::new(),
-            ),
+            _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
 
     fn handle_open_sent(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop => self.enter_idle_with_notification(
-                NotificationCode::Cease,
-                0,
-                Bytes::new(),
-            ),
+            Event::ManualStop => {
+                self.enter_idle_with_notification(NotificationCode::Cease, 0, Bytes::new())
+            }
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
                 NotificationCode::HoldTimerExpired,
@@ -256,22 +246,16 @@ impl Session {
                 self.enter_idle_with_notification(code, subcode, data)
             }
 
-            _ => self.enter_idle_with_notification(
-                NotificationCode::FsmError,
-                0,
-                Bytes::new(),
-            ),
+            _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
 
     #[expect(clippy::needless_pass_by_value)]
     fn handle_open_confirm(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop => self.enter_idle_with_notification(
-                NotificationCode::Cease,
-                0,
-                Bytes::new(),
-            ),
+            Event::ManualStop => {
+                self.enter_idle_with_notification(NotificationCode::Cease, 0, Bytes::new())
+            }
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
                 NotificationCode::HoldTimerExpired,
@@ -303,11 +287,7 @@ impl Session {
                     actions
                 } else {
                     // Should not happen — negotiated is set in OpenSent
-                    self.enter_idle_with_notification(
-                        NotificationCode::FsmError,
-                        0,
-                        Bytes::new(),
-                    )
+                    self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new())
                 }
             }
 
@@ -340,11 +320,7 @@ impl Session {
                 self.enter_idle_with_notification(code, subcode, data)
             }
 
-            _ => self.enter_idle_with_notification(
-                NotificationCode::FsmError,
-                0,
-                Bytes::new(),
-            ),
+            _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
 
@@ -468,7 +444,8 @@ impl Session {
     fn connect_retry_duration(&self) -> u32 {
         let base = self.config.connect_retry_secs;
         let shift = self.connect_retry_counter.min(31);
-        base.saturating_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX)).min(MAX_RETRY_SECS)
+        base.saturating_mul(1u32.checked_shl(shift).unwrap_or(u32::MAX))
+            .min(MAX_RETRY_SECS)
     }
 
     /// Send a NOTIFICATION, close TCP, stop timers, transition to Idle.
@@ -563,7 +540,10 @@ mod tests {
 
         assert_eq!(s.state(), SessionState::Connect);
         assert_state_changed(&actions, SessionState::Connect);
-        assert!(has_action(&actions, |a| matches!(a, Action::InitiateTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::InitiateTcpConnection
+        )));
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::StartTimer(TimerType::ConnectRetry, _)
@@ -604,7 +584,10 @@ mod tests {
         let actions = s.handle_event(Event::ManualStop);
 
         assert_eq!(s.state(), SessionState::Idle);
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
     }
 
     #[test]
@@ -648,8 +631,14 @@ mod tests {
         let actions = s.handle_event(Event::ConnectRetryTimerExpires);
 
         assert_eq!(s.state(), SessionState::Connect);
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
-        assert!(has_action(&actions, |a| matches!(a, Action::InitiateTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::InitiateTcpConnection
+        )));
     }
 
     #[test]
@@ -659,7 +648,10 @@ mod tests {
         let actions = s.handle_event(Event::KeepaliveReceived);
 
         assert_eq!(s.state(), SessionState::Idle);
-        assert!(has_action(&actions, |a| matches!(a, Action::SendNotification(_))));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::SendNotification(_)
+        )));
     }
 
     // ── Active state ───────────────────────────────────────────────
@@ -672,7 +664,10 @@ mod tests {
         let actions = s.handle_event(Event::ManualStop);
 
         assert_eq!(s.state(), SessionState::Idle);
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
     }
 
     #[test]
@@ -683,7 +678,10 @@ mod tests {
         let actions = s.handle_event(Event::ConnectRetryTimerExpires);
 
         assert_eq!(s.state(), SessionState::Connect);
-        assert!(has_action(&actions, |a| matches!(a, Action::InitiateTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::InitiateTcpConnection
+        )));
     }
 
     #[test]
@@ -746,7 +744,10 @@ mod tests {
         let actions = s.handle_event(Event::TcpConnectionFails);
 
         assert_eq!(s.state(), SessionState::Active);
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
     }
 
     #[test]
@@ -773,7 +774,10 @@ mod tests {
         let actions = s.handle_event(Event::OpenReceived(bad_open));
 
         assert_eq!(s.state(), SessionState::Idle);
-        assert!(has_action(&actions, |a| matches!(a, Action::SendNotification(_))));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::SendNotification(_)
+        )));
     }
 
     #[test]
@@ -782,15 +786,15 @@ mod tests {
         s.handle_event(Event::ManualStart);
         s.handle_event(Event::TcpConnectionConfirmed);
 
-        let notif = rustbgpd_wire::NotificationMessage::new(
-            NotificationCode::Cease,
-            0,
-            Bytes::new(),
-        );
+        let notif =
+            rustbgpd_wire::NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
         let actions = s.handle_event(Event::NotificationReceived(notif));
 
         assert_eq!(s.state(), SessionState::Idle);
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
     }
 
     // ── OpenConfirm state ──────────────────────────────────────────
@@ -859,15 +863,15 @@ mod tests {
         s.handle_event(Event::TcpConnectionConfirmed);
         s.handle_event(Event::OpenReceived(peer_open()));
 
-        let notif = rustbgpd_wire::NotificationMessage::new(
-            NotificationCode::Cease,
-            0,
-            Bytes::new(),
-        );
+        let notif =
+            rustbgpd_wire::NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
         let actions = s.handle_event(Event::NotificationReceived(notif));
 
         assert_eq!(s.state(), SessionState::Idle);
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
     }
 
     #[test]
@@ -879,7 +883,10 @@ mod tests {
         let actions = s.handle_event(Event::TcpConnectionFails);
 
         assert_eq!(s.state(), SessionState::Idle);
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
     }
 
     // ── Established state ──────────────────────────────────────────
@@ -957,16 +964,16 @@ mod tests {
     #[test]
     fn established_notification_received_goes_idle() {
         let mut s = reach_established();
-        let notif = rustbgpd_wire::NotificationMessage::new(
-            NotificationCode::Cease,
-            0,
-            Bytes::new(),
-        );
+        let notif =
+            rustbgpd_wire::NotificationMessage::new(NotificationCode::Cease, 0, Bytes::new());
         let actions = s.handle_event(Event::NotificationReceived(notif));
 
         assert_eq!(s.state(), SessionState::Idle);
         assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));
-        assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::CloseTcpConnection
+        )));
     }
 
     #[test]

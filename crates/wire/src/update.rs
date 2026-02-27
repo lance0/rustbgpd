@@ -51,9 +51,7 @@ impl UpdateMessage {
             .checked_sub(2)
             .and_then(|v| v.checked_sub(usize::from(withdrawn_routes_len)))
             .ok_or_else(|| DecodeError::UpdateLengthMismatch {
-                detail: format!(
-                    "withdrawn routes length {withdrawn_routes_len} exceeds body"
-                ),
+                detail: format!("withdrawn routes length {withdrawn_routes_len} exceeds body"),
             })?;
 
         if after_withdrawn < 2 {
@@ -126,7 +124,11 @@ impl UpdateMessage {
     /// Total encoded size in bytes.
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        HEADER_LEN + 2 + self.withdrawn_routes.len() + 2 + self.path_attributes.len()
+        HEADER_LEN
+            + 2
+            + self.withdrawn_routes.len()
+            + 2
+            + self.path_attributes.len()
             + self.nlri.len()
     }
 }

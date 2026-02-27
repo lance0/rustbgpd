@@ -1,6 +1,6 @@
 use bytes::Bytes;
 
-use rustbgpd_wire::notification::{open_subcode, NotificationCode};
+use rustbgpd_wire::notification::{NotificationCode, open_subcode};
 use rustbgpd_wire::{Capability, NotificationMessage, OpenMessage};
 
 use crate::action::NegotiatedSession;
@@ -233,9 +233,7 @@ mod tests {
         cfg.remote_asn = 4_200_000_001;
         let mut open = peer_open();
         open.my_as = rustbgpd_wire::constants::AS_TRANS;
-        open.capabilities = vec![Capability::FourOctetAs {
-            asn: 4_200_000_001,
-        }];
+        open.capabilities = vec![Capability::FourOctetAs { asn: 4_200_000_001 }];
         let neg = validate_open(&open, &cfg).unwrap();
         assert_eq!(neg.peer_asn, 4_200_000_001);
         assert!(neg.four_octet_as);

@@ -162,7 +162,10 @@ mod tests {
         ];
         for (code, subcode) in pairs {
             let desc = description(code, subcode);
-            assert!(!desc.is_empty(), "empty description for ({code}, {subcode})");
+            assert!(
+                !desc.is_empty(),
+                "empty description for ({code}, {subcode})"
+            );
             assert_ne!(desc, "Unknown", "got Unknown for ({code}, {subcode})");
         }
     }

@@ -2,9 +2,7 @@ use std::net::Ipv4Addr;
 
 use bytes::{Buf, BufMut, BytesMut};
 
-use crate::capability::{
-    Capability, decode_optional_parameters, encode_optional_parameters,
-};
+use crate::capability::{Capability, decode_optional_parameters, encode_optional_parameters};
 use crate::constants::{BGP_VERSION, HEADER_LEN, MAX_MESSAGE_LEN};
 use crate::error::{DecodeError, EncodeError};
 use crate::header::{BgpHeader, MessageType};
@@ -133,11 +131,7 @@ impl OpenMessage {
     pub fn encoded_len(&self) -> usize {
         let cap_size: usize = self.capabilities.iter().map(Capability::encoded_len).sum();
         // opt params wrapper: type(1) + len(1) per parameter block
-        let opt_params_overhead = if self.capabilities.is_empty() {
-            0
-        } else {
-            2
-        };
+        let opt_params_overhead = if self.capabilities.is_empty() { 0 } else { 2 };
         HEADER_LEN + 10 + opt_params_overhead + cap_size
     }
 
@@ -233,11 +227,11 @@ mod tests {
     #[test]
     fn reject_bad_version() {
         let body: &[u8] = &[
-            3,    // version 3 (bad)
+            3, // version 3 (bad)
             0xFD, 0xE9, // AS 65001
             0, 90, // hold time
             10, 0, 0, 1, // router ID
-            0,  // opt params len
+            0, // opt params len
         ];
         let mut buf = bytes::Bytes::copy_from_slice(body);
         assert!(matches!(
@@ -259,11 +253,11 @@ mod tests {
     #[test]
     fn reject_inconsistent_opt_params_length() {
         let body: &[u8] = &[
-            4,    // version
+            4, // version
             0xFD, 0xE9, // AS 65001
             0, 90, // hold time
             10, 0, 0, 1, // router ID
-            5,  // opt params len = 5, but body_len says 10
+            5, // opt params len = 5, but body_len says 10
         ];
         let mut buf = bytes::Bytes::copy_from_slice(body);
         assert!(matches!(

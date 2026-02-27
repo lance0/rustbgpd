@@ -95,10 +95,7 @@ impl BgpMetrics {
         .expect("valid metric definition");
 
         let messages_sent = IntCounterVec::new(
-            Opts::new(
-                "bgp_messages_sent_total",
-                "Total BGP messages sent by type",
-            ),
+            Opts::new("bgp_messages_sent_total", "Total BGP messages sent by type"),
             &["peer", "type"],
         )
         .expect("valid metric definition");
@@ -289,10 +286,7 @@ mod tests {
         let m = BgpMetrics::new();
         m.record_state_transition("10.0.0.1", "open_confirm", "established");
 
-        let est = m
-            .session_established
-            .with_label_values(&["10.0.0.1"])
-            .get();
+        let est = m.session_established.with_label_values(&["10.0.0.1"]).get();
         assert_eq!(est, 1);
     }
 

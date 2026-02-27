@@ -8,10 +8,8 @@ use rustbgpd_fsm::PeerConfig;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{PeerHandle, TransportConfig};
 use rustbgpd_wire::{
-    Afi, Capability, Message, NotificationMessage, OpenMessage, Safi,
-    decode_message, encode_message,
-    notification::NotificationCode,
-    peek_message_length,
+    Afi, Capability, Message, NotificationMessage, OpenMessage, Safi, decode_message,
+    encode_message, notification::NotificationCode, peek_message_length,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -49,10 +47,7 @@ fn mock_open() -> OpenMessage {
 }
 
 /// Read a complete BGP message from a TCP stream.
-async fn read_bgp_message(
-    stream: &mut tokio::net::TcpStream,
-    buf: &mut BytesMut,
-) -> Message {
+async fn read_bgp_message(stream: &mut tokio::net::TcpStream, buf: &mut BytesMut) -> Message {
     loop {
         // Check if we have a complete message
         if let Ok(Some(len)) = peek_message_length(buf) {
@@ -145,13 +140,10 @@ async fn peer_disconnect_triggers_retry() {
     drop(peer_stream);
 
     // The FSM should retry — accept the second connection
-    let (mut peer_stream2, _) = tokio::time::timeout(
-        Duration::from_secs(15),
-        listener.accept(),
-    )
-    .await
-    .expect("should retry connection")
-    .unwrap();
+    let (mut peer_stream2, _) = tokio::time::timeout(Duration::from_secs(15), listener.accept())
+        .await
+        .expect("should retry connection")
+        .unwrap();
 
     let mut buf2 = BytesMut::with_capacity(4096);
     let msg = read_bgp_message(&mut peer_stream2, &mut buf2).await;

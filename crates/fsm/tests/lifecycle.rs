@@ -47,7 +47,10 @@ fn full_lifecycle_idle_to_established_to_idle() {
     // ── Idle → Connect: ManualStart ────────────────────────────────
     let actions = s.handle_event(Event::ManualStart);
     assert_eq!(s.state(), SessionState::Connect);
-    assert!(has_action(&actions, |a| matches!(a, Action::InitiateTcpConnection)));
+    assert!(has_action(&actions, |a| matches!(
+        a,
+        Action::InitiateTcpConnection
+    )));
     assert!(has_action(&actions, |a| matches!(
         a,
         Action::StartTimer(TimerType::ConnectRetry, 30)
@@ -184,7 +187,10 @@ fn established_notification_tears_down() {
     let actions = s.handle_event(Event::NotificationReceived(notif));
     assert_eq!(s.state(), SessionState::Idle);
     assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));
-    assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+    assert!(has_action(&actions, |a| matches!(
+        a,
+        Action::CloseTcpConnection
+    )));
 }
 
 /// OPEN validation failure during handshake
@@ -203,6 +209,12 @@ fn open_validation_failure_in_opensent() {
 
     let actions = s.handle_event(Event::OpenReceived(bad_open));
     assert_eq!(s.state(), SessionState::Idle);
-    assert!(has_action(&actions, |a| matches!(a, Action::SendNotification(_))));
-    assert!(has_action(&actions, |a| matches!(a, Action::CloseTcpConnection)));
+    assert!(has_action(&actions, |a| matches!(
+        a,
+        Action::SendNotification(_)
+    )));
+    assert!(has_action(&actions, |a| matches!(
+        a,
+        Action::CloseTcpConnection
+    )));
 }

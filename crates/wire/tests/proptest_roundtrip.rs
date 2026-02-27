@@ -31,8 +31,7 @@ fn arb_safi() -> impl Strategy<Value = Safi> {
 
 fn arb_capability() -> impl Strategy<Value = Capability> {
     prop_oneof![
-        (arb_afi(), arb_safi())
-            .prop_map(|(afi, safi)| Capability::MultiProtocol { afi, safi }),
+        (arb_afi(), arb_safi()).prop_map(|(afi, safi)| Capability::MultiProtocol { afi, safi }),
         any::<u32>().prop_map(|asn| Capability::FourOctetAs { asn }),
         // Unknown capabilities: code must not collide with known codes (1, 65)
         // and data length fits in u8
@@ -91,7 +90,9 @@ fn arb_notification() -> impl Strategy<Value = NotificationMessage> {
         any::<u8>(),
         proptest::collection::vec(any::<u8>(), 0..200),
     )
-        .prop_map(|(code, subcode, data)| NotificationMessage::new(code, subcode, Bytes::from(data)))
+        .prop_map(|(code, subcode, data)| {
+            NotificationMessage::new(code, subcode, Bytes::from(data))
+        })
 }
 
 fn arb_message() -> impl Strategy<Value = Message> {

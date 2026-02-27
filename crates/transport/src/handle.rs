@@ -41,10 +41,7 @@ impl PeerHandle {
             let mut session = PeerSession::new(config, metrics, rx);
             session.run().await
         });
-        Self {
-            commands: tx,
-            task,
-        }
+        Self { commands: tx, task }
     }
 
     /// Send a Start command to begin the BGP handshake.

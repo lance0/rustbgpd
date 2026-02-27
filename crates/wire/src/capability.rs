@@ -92,9 +92,7 @@ impl Capability {
                 let _reserved = buf.get_u8();
                 let safi_raw = buf.get_u8();
 
-                if let (Some(afi), Some(safi)) =
-                    (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw))
-                {
+                if let (Some(afi), Some(safi)) = (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw)) {
                     Ok(Capability::MultiProtocol { afi, safi })
                 } else {
                     // Unrecognized AFI/SAFI — store as unknown

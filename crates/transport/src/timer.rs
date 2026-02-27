@@ -21,7 +21,9 @@ impl Timers {
     /// Start (or restart) a timer with the given duration in seconds.
     pub fn start(&mut self, timer_type: TimerType, secs: u32) {
         let slot = self.slot_mut(timer_type);
-        *slot = Some(Box::pin(tokio::time::sleep(Duration::from_secs(u64::from(secs)))));
+        *slot = Some(Box::pin(tokio::time::sleep(Duration::from_secs(
+            u64::from(secs),
+        ))));
     }
 
     /// Stop a running timer.
@@ -49,9 +51,7 @@ impl Timers {
 ///
 /// This is a freestanding function (not a method) so it can be used in
 /// `tokio::select!` without conflicting with other `&mut self` borrows.
-pub fn poll_timer(
-    timer: &mut Option<Pin<Box<Sleep>>>,
-) -> PollTimer<'_> {
+pub fn poll_timer(timer: &mut Option<Pin<Box<Sleep>>>) -> PollTimer<'_> {
     PollTimer { timer }
 }
 
