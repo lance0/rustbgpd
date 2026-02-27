@@ -777,6 +777,8 @@ dependencies = [
 name = "rustbgpd-fsm"
 version = "0.0.1"
 dependencies = [
+ "bytes",
+ "proptest",
  "rustbgpd-wire",
  "thiserror 2.0.18",
 ]

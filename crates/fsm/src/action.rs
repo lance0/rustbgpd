@@ -1,0 +1,56 @@
+use rustbgpd_wire::{Capability, NotificationMessage, OpenMessage};
+
+use crate::state::SessionState;
+
+/// Which timer to start or stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TimerType {
+    ConnectRetry,
+    Hold,
+    Keepalive,
+}
+
+/// Result of a successful OPEN exchange — the negotiated session parameters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedSession {
+    /// Peer's 4-byte ASN (from capability, or 2-byte fallback).
+    pub peer_asn: u32,
+    /// Peer's BGP Identifier (router ID).
+    pub peer_router_id: std::net::Ipv4Addr,
+    /// Negotiated hold time in seconds.
+    pub hold_time: u16,
+    /// Keepalive interval = `hold_time` / 3 (0 if `hold_time` is 0).
+    pub keepalive_interval: u16,
+    /// Capabilities the peer advertised.
+    pub peer_capabilities: Vec<Capability>,
+    /// Whether both sides support 4-octet AS numbers.
+    pub four_octet_as: bool,
+}
+
+/// Output actions produced by the FSM on each transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Send an OPEN message to the peer.
+    SendOpen(OpenMessage),
+    /// Send a KEEPALIVE message to the peer.
+    SendKeepalive,
+    /// Send a NOTIFICATION message to the peer, then close.
+    SendNotification(NotificationMessage),
+    /// Start (or restart) a timer with the given duration in seconds.
+    StartTimer(TimerType, u32),
+    /// Cancel a running timer.
+    StopTimer(TimerType),
+    /// Initiate an outbound TCP connection to the peer.
+    InitiateTcpConnection,
+    /// Tear down the TCP connection.
+    CloseTcpConnection,
+    /// The FSM transitioned to a new state (for telemetry).
+    StateChanged {
+        old: SessionState,
+        new: SessionState,
+    },
+    /// The session is fully established — negotiated parameters enclosed.
+    SessionEstablished(NegotiatedSession),
+    /// The session left the Established state.
+    SessionDown,
+}

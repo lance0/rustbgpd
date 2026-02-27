@@ -9,5 +9,7 @@ description = "RFC 4271 BGP finite state machine — pure, no I/O, no async runt
 [dependencies]
 rustbgpd-wire.workspace = true
 thiserror.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
+proptest = "1"
