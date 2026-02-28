@@ -410,10 +410,19 @@ route event streaming.
 - TCP-AO authentication
 - Config persistence (gRPC → TOML writeback)
 
+### API polish
+- Populate NeighborState fields currently hardcoded to 0 (hold_time, uptime, counters)
+- API input validation at gRPC boundary (reject ASN=0, range-check hold_time)
+- API unit tests (currently covered only by interop tests)
+
 ### Performance / correctness
 - Batch multiple NLRI per outbound UPDATE (currently one UPDATE per prefix)
 - Synchronize `prefix_count` with actual RIB state (currently add/subtract heuristic)
 - Replace hand-rolled metrics HTTP server with proper HTTP/1.1 handling
+- Warn on RIB channel drops from `try_send()` failure (currently silent, only metric)
+- `list_peers()` sequential queries — parallelize for large peer counts
+- Fix IPv6 NEXT_HOP defaulting to 0.0.0.0 (wrong, but IPv6 out of scope for v1)
+- Error on invalid policy entries in config instead of silently skipping
 
 ---
 
