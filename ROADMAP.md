@@ -42,18 +42,33 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 ## Completed
 
 1. **rustbgpd-wire** — BGP message codec (OPEN, KEEPALIVE, NOTIFICATION,
-   UPDATE encode/decode, capability parsing, property tests)
+   UPDATE encode/decode, capability parsing, property tests). RFC-compliant
+   attribute flag validation, specific UPDATE error subcodes, Partial bit
+   handling, Cease subcode 7 (Connection Collision Resolution).
 2. **rustbgpd-fsm** — RFC 4271 finite state machine (all 6 states, full
    transition table, OPEN negotiation, exponential backoff, property tests)
-3. **rustbgpd-telemetry** — Prometheus metrics (8 metrics: state transitions,
-   flaps, established, notifications, messages, RIB stubs) + JSON logging
+3. **rustbgpd-telemetry** — Prometheus metrics (state transitions, flaps,
+   notifications, messages, RIB gauges at all mutation points, outbound
+   route drops) + structured JSON logging
 4. **rustbgpd-transport** — Tokio TCP session runtime (single task per peer,
-   length-delimited framing, timer management, PeerHandle API, telemetry
-   integration, 18 tests including mock-peer integration)
-5. **Daemon entrypoint** — TOML config loading with validation, peer session
-   spawning, Prometheus `/metrics` HTTP endpoint, graceful SIGTERM shutdown
-6. **CI workflow** — GitHub Actions: `cargo fmt --check`, `cargo clippy`,
-   `cargo test --workspace` on every push and PR
+   length-delimited framing, timer management, PeerHandle API, session
+   notifications for collision detection, outbound UPDATE batching,
+   import/export policy, max-prefix enforcement, TCP MD5/GTSM, session
+   counters, accurate prefix tracking)
+5. **rustbgpd-rib** — Adj-RIB-In, Loc-RIB, Adj-RIB-Out, best-path
+   selection (RFC 4271 §9.1.2 with eBGP-over-iBGP), outbound distribution
+   with split-horizon and per-peer export policy, route injection, dirty
+   peer resync, WatchRoutes broadcast streaming
+6. **rustbgpd-api** — 5 gRPC services: GlobalService, ControlService,
+   NeighborService, InjectionService, RibService. WatchRoutes streaming,
+   coordinated shutdown, input validation
+7. **Daemon entrypoint** — TOML config loading with validation, dynamic
+   peer management (PeerManager), inbound TCP listener, Prometheus
+   `/metrics` endpoint (hardened), gRPC server supervision, coordinated
+   shutdown (ctrl-c + Shutdown RPC + gRPC failure), non-loopback gRPC
+   security warning
+8. **CI workflow** — GitHub Actions: `cargo fmt --check`, `cargo clippy`,
+   `cargo test --workspace` on every push and PR. Nightly fuzz CI.
 
 ---
 
@@ -526,36 +541,66 @@ affect operators and automation consumers.
 
 ---
 
-## M9 — "Production Hardening"
+## M9 — "Production Hardening" `[complete]`
 
-Security, resilience, and operational safety.
+Security, resilience, operational safety, and core protocol compliance
+(TCP collision detection promoted from post-v1).
 
 ### Build order
 
-1. **Metrics server slow-client exhaustion** (`src/metrics_server.rs`)
-   - Accept loop spawns unbounded tasks. No read timeout, no request-line
-     size limit. `gather()` uses `expect()` — encoding failure panics.
-   - Fix: add read timeout and max request-line length, cap concurrent
-     connections, return 500 on encoding failure.
+1. ~~**Metrics server hardening** (`src/metrics_server.rs`)~~ **Done**
+   - Read timeout (5s), request-line size limit (8192 bytes), concurrent
+     connection cap (64 via `Semaphore`), `gather()` errors return 500
+     instead of panicking. 3 new tests.
 
-2. **Shutdown RPC is unauthenticated kill switch** (`crates/api/src/control_service.rs`, `server.rs`)
-   - No auth/authz or transport security. Default is loopback, but
-     configurable. Exposed gRPC = anyone can stop the daemon.
-   - Fix: warn on non-loopback bind, or add mTLS/auth interceptors.
-     Document security posture.
+2. ~~**gRPC security posture** (`src/main.rs`, `docs/SECURITY.md`)~~ **Done**
+   - Non-loopback gRPC bind logs warning at startup. New `docs/SECURITY.md`
+     documents authentication posture, privileged RPCs, and recommendations.
 
-3. **gRPC server failure is detached and non-fatal** (`src/main.rs`, `crates/api/src/server.rs`)
-   - gRPC runs in a detached task. If it exits, daemon keeps running
-     without its control plane. Awkward for an API-first daemon.
-   - Fix: supervise the gRPC task. Decide whether API loss terminates
-     the daemon or triggers restart/backoff.
+3. ~~**TCP collision detection** (RFC 4271 §6.8)~~ **Done**
+   - Wire: Cease subcode 7 (`CONNECTION_COLLISION_RESOLUTION`).
+   - Transport: `SessionNotification` enum (`OpenReceived`, `BackToIdle`),
+     `CollisionDump` command, `remote_router_id` in `PeerSessionState`,
+     session notification channel threaded to all spawn sites.
+   - PeerManager: `pending_inbound` per peer, `session_notify_rx` in
+     `select!` loop, `resolve_collision()` compares BGP Identifiers,
+     `replace_with_inbound()` helper. 4 new tests.
+
+4. ~~**gRPC server supervision** (`src/main.rs`)~~ **Done**
+   - gRPC `JoinHandle` added to shutdown `select!`. Unexpected gRPC exit
+     triggers coordinated shutdown (API-first daemon without API should
+     not keep running).
+
+5. ~~**Documentation refresh**~~ **Done**
+   - ROADMAP: updated completed summary, M9 marked complete, v1 scope
+     section added.
+   - CHANGELOG: M9 entry with all items.
+   - `docs/SECURITY.md`: new file documenting gRPC security posture.
 
 ### Exit criteria
 
-- No panic paths from external input
+- No panic paths from external input (metrics gather errors handled)
 - Documented security posture for gRPC exposure
+- TCP collision detection per RFC 4271 §6.8
 - gRPC lifecycle supervised
-- 332+ tests pass, clippy clean, fmt clean
+- 367+ tests pass, clippy clean, fmt clean
+
+---
+
+## v1 Scope
+
+Linux-first, IPv4-unicast only, API-first BGP daemon. M0–M9 form the
+v1 release with these intentional boundaries:
+
+- **Single address family:** IPv4 unicast only. MP-BGP (IPv6) is post-v1.
+- **No full routing suite:** BGP only. No OSPF, IS-IS, MPLS.
+- **No built-in auth:** gRPC has no TLS or authentication. Use a proxy or
+  network-level access control for non-loopback deployments.
+- **No config persistence:** gRPC mutations (AddNeighbor, etc.) are not
+  written back to TOML. Restart reloads the config file.
+- **No graceful restart:** Sessions do not survive daemon restart.
+- **No TCP-AO:** TCP MD5 (RFC 2385) is supported; TCP-AO (RFC 5925) is
+  deferred.
 
 ---
 
@@ -569,7 +614,6 @@ Security, resilience, and operational safety.
 - Extended message support (RFC 8654)
 
 ### Infrastructure
-- TCP connection collision detection (RFC 4271 §6.8)
 - BMP exporter
 - RPKI validation (RTR client)
 - TCP-AO authentication

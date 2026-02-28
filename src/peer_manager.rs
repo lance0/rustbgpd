@@ -6,8 +6,9 @@ use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::PrefixList;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_transport::{PeerHandle, TransportConfig};
+use rustbgpd_transport::{PeerHandle, SessionNotification, TransportConfig};
 use rustbgpd_wire::{Afi, Safi};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -25,6 +26,8 @@ struct ManagedPeer {
     transport_config: TransportConfig,
     import_policy: Option<PrefixList>,
     export_policy: Option<PrefixList>,
+    /// Pending inbound TCP stream waiting for collision resolution.
+    pending_inbound: Option<TcpStream>,
 }
 
 /// Manages the lifecycle of all peer sessions.
@@ -38,6 +41,8 @@ pub struct PeerManager {
     router_id: Ipv4Addr,
     metrics: BgpMetrics,
     rib_tx: mpsc::Sender<RibUpdate>,
+    session_notify_tx: mpsc::Sender<SessionNotification>,
+    session_notify_rx: mpsc::Receiver<SessionNotification>,
 }
 
 impl PeerManager {
@@ -48,6 +53,7 @@ impl PeerManager {
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
     ) -> Self {
+        let (session_notify_tx, session_notify_rx) = mpsc::channel(64);
         Self {
             peers: HashMap::new(),
             rx,
@@ -55,6 +61,8 @@ impl PeerManager {
             router_id,
             metrics,
             rib_tx,
+            session_notify_tx,
+            session_notify_rx,
         }
     }
 
@@ -91,6 +99,7 @@ impl PeerManager {
             self.rib_tx.clone(),
             config.import_policy.clone(),
             config.export_policy.clone(),
+            Some(self.session_notify_tx.clone()),
         );
 
         if let Err(e) = handle.start().await {
@@ -111,6 +120,7 @@ impl PeerManager {
                 transport_config: transport,
                 import_policy: config.import_policy,
                 export_policy: config.export_policy,
+                pending_inbound: None,
             },
         );
 
@@ -222,27 +232,131 @@ impl PeerManager {
         Ok(())
     }
 
-    async fn handle_inbound(&mut self, stream: tokio::net::TcpStream, peer_addr: IpAddr) {
+    async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: IpAddr) {
         let Some(managed) = self.peers.get_mut(&peer_addr) else {
             warn!(%peer_addr, "inbound connection from unknown peer, dropping");
             return;
         };
 
-        // Only accept inbound if peer is enabled and session is currently idle
-        let current_state = managed.handle.query_state().await;
-        let is_idle = current_state
-            .as_ref()
-            .is_none_or(|s| s.fsm_state == SessionState::Idle);
-
-        if !managed.enabled || !is_idle {
-            info!(
-                %peer_addr,
-                "inbound connection for already-connected or disabled peer, dropping"
-            );
+        if !managed.enabled {
+            info!(%peer_addr, "inbound connection for disabled peer, dropping");
             return;
         }
 
-        // Shut down old session and spawn inbound one
+        let current_state = managed.handle.query_state().await;
+        let fsm_state = current_state
+            .as_ref()
+            .map_or(SessionState::Idle, |s| s.fsm_state);
+
+        match fsm_state {
+            SessionState::Idle => {
+                // Accept immediately — no collision possible
+                self.replace_with_inbound(peer_addr, stream).await;
+            }
+            SessionState::Established => {
+                // Already established — drop inbound (no collision)
+                info!(%peer_addr, "inbound connection for established peer, dropping");
+            }
+            SessionState::Connect | SessionState::Active | SessionState::OpenSent => {
+                // Store pending inbound, wait for OpenReceived notification
+                info!(%peer_addr, state = fsm_state.as_str(), "storing pending inbound for collision resolution");
+                if let Some(managed) = self.peers.get_mut(&peer_addr) {
+                    managed.pending_inbound = Some(stream);
+                }
+            }
+            SessionState::OpenConfirm => {
+                // We already have router-id from negotiation — resolve now
+                let remote_router_id = current_state.and_then(|s| s.remote_router_id);
+                if let Some(rid) = remote_router_id {
+                    self.resolve_collision(peer_addr, rid, stream).await;
+                } else {
+                    // Shouldn't happen, but accept inbound as fallback
+                    warn!(%peer_addr, "OpenConfirm but no remote_router_id, accepting inbound");
+                    self.replace_with_inbound(peer_addr, stream).await;
+                }
+            }
+        }
+    }
+
+    async fn handle_session_notification(&mut self, notification: SessionNotification) {
+        match notification {
+            SessionNotification::OpenReceived {
+                peer_addr,
+                remote_router_id,
+            } => {
+                let pending = self
+                    .peers
+                    .get_mut(&peer_addr)
+                    .and_then(|m| m.pending_inbound.take());
+                if let Some(stream) = pending {
+                    self.resolve_collision(peer_addr, remote_router_id, stream)
+                        .await;
+                }
+            }
+            SessionNotification::BackToIdle { peer_addr } => {
+                let pending = self
+                    .peers
+                    .get_mut(&peer_addr)
+                    .and_then(|m| m.pending_inbound.take());
+                if let Some(stream) = pending {
+                    // Existing session failed — accept pending inbound
+                    info!(%peer_addr, "existing session went idle, accepting pending inbound");
+                    self.replace_with_inbound(peer_addr, stream).await;
+                }
+            }
+        }
+    }
+
+    async fn resolve_collision(
+        &mut self,
+        peer_addr: IpAddr,
+        remote_router_id: Ipv4Addr,
+        inbound_stream: TcpStream,
+    ) {
+        let local_id = u32::from(self.router_id);
+        let remote_id = u32::from(remote_router_id);
+
+        match local_id.cmp(&remote_id) {
+            std::cmp::Ordering::Greater => {
+                // We win — keep existing session, drop inbound
+                info!(
+                    %peer_addr,
+                    local_id = %self.router_id,
+                    remote_id = %remote_router_id,
+                    "collision: local wins, dropping inbound"
+                );
+                drop(inbound_stream);
+            }
+            std::cmp::Ordering::Less => {
+                // Remote wins — dump existing, accept inbound
+                info!(
+                    %peer_addr,
+                    local_id = %self.router_id,
+                    remote_id = %remote_router_id,
+                    "collision: remote wins, replacing with inbound"
+                );
+                if let Some(managed) = self.peers.get(&peer_addr) {
+                    let _ = managed.handle.collision_dump().await;
+                }
+                self.replace_with_inbound(peer_addr, inbound_stream).await;
+            }
+            std::cmp::Ordering::Equal => {
+                // Equal router-ids — should not happen; drop inbound
+                warn!(
+                    %peer_addr,
+                    router_id = %self.router_id,
+                    "collision: equal router-ids, dropping inbound"
+                );
+                drop(inbound_stream);
+            }
+        }
+    }
+
+    async fn replace_with_inbound(&mut self, peer_addr: IpAddr, stream: TcpStream) {
+        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+            return;
+        };
+
         let old_handle = std::mem::replace(
             &mut managed.handle,
             PeerHandle::spawn_inbound(
@@ -252,10 +366,11 @@ impl PeerManager {
                 managed.import_policy.clone(),
                 managed.export_policy.clone(),
                 stream,
+                Some(self.session_notify_tx.clone()),
             ),
         );
 
-        // Shut down the old (idle) session
+        // Shut down the old session
         let _ = old_handle.shutdown().await;
 
         // Start the new inbound session — trigger TcpConnectionConfirmed
@@ -268,51 +383,62 @@ impl PeerManager {
 
     /// Run the `PeerManager` event loop until shutdown or channel close.
     pub async fn run(mut self) {
-        while let Some(cmd) = self.rx.recv().await {
-            match cmd {
-                PeerManagerCommand::AddPeer { config, reply } => {
-                    let result = self.add_peer(config).await;
-                    let _ = reply.send(result);
-                }
-                PeerManagerCommand::DeletePeer { address, reply } => {
-                    let result = self.delete_peer(address).await;
-                    let _ = reply.send(result);
-                }
-                PeerManagerCommand::ListPeers { reply } => {
-                    let infos = self.list_peers().await;
-                    let _ = reply.send(infos);
-                }
-                PeerManagerCommand::GetPeerState { address, reply } => {
-                    let info = self.get_peer_info(address).await;
-                    let _ = reply.send(info);
-                }
-                PeerManagerCommand::EnablePeer { address, reply } => {
-                    let result = self.enable_peer(address).await;
-                    let _ = reply.send(result);
-                }
-                PeerManagerCommand::DisablePeer { address, reply } => {
-                    let result = self.disable_peer(address).await;
-                    let _ = reply.send(result);
-                }
-                PeerManagerCommand::AcceptInbound { stream, peer_addr } => {
-                    self.handle_inbound(stream, peer_addr).await;
-                }
-                PeerManagerCommand::Shutdown => {
-                    info!("peer manager shutting down {} peers", self.peers.len());
-                    for (addr, managed) in self.peers.drain() {
-                        debug!(%addr, "shutting down peer");
-                        match managed.handle.shutdown().await {
-                            Ok(Ok(())) => debug!(%addr, "peer shut down"),
-                            Ok(Err(e)) => warn!(%addr, error = %e, "peer shutdown error"),
-                            Err(e) => error!(%addr, error = %e, "peer task join error"),
+        loop {
+            tokio::select! {
+                cmd = self.rx.recv() => {
+                    let Some(cmd) = cmd else {
+                        debug!("peer manager channel closed");
+                        return;
+                    };
+                    match cmd {
+                        PeerManagerCommand::AddPeer { config, reply } => {
+                            let result = self.add_peer(config).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::DeletePeer { address, reply } => {
+                            let result = self.delete_peer(address).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ListPeers { reply } => {
+                            let infos = self.list_peers().await;
+                            let _ = reply.send(infos);
+                        }
+                        PeerManagerCommand::GetPeerState { address, reply } => {
+                            let info = self.get_peer_info(address).await;
+                            let _ = reply.send(info);
+                        }
+                        PeerManagerCommand::EnablePeer { address, reply } => {
+                            let result = self.enable_peer(address).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::DisablePeer { address, reply } => {
+                            let result = self.disable_peer(address).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::AcceptInbound { stream, peer_addr } => {
+                            self.handle_inbound(stream, peer_addr).await;
+                        }
+                        PeerManagerCommand::Shutdown => {
+                            info!("peer manager shutting down {} peers", self.peers.len());
+                            for (addr, managed) in self.peers.drain() {
+                                debug!(%addr, "shutting down peer");
+                                match managed.handle.shutdown().await {
+                                    Ok(Ok(())) => debug!(%addr, "peer shut down"),
+                                    Ok(Err(e)) => warn!(%addr, error = %e, "peer shutdown error"),
+                                    Err(e) => error!(%addr, error = %e, "peer task join error"),
+                                }
+                            }
+                            return;
                         }
                     }
-                    return;
+                }
+                notification = self.session_notify_rx.recv() => {
+                    if let Some(notification) = notification {
+                        self.handle_session_notification(notification).await;
+                    }
                 }
             }
         }
-
-        debug!("peer manager channel closed");
     }
 }
 
@@ -532,6 +658,86 @@ mod tests {
             .unwrap();
             let _ = reply_rx.await;
         }
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[test]
+    fn collision_local_wins() {
+        // Local router-id 10.0.0.10 (higher) vs remote 10.0.0.2 (lower)
+        // → local wins, inbound should be dropped
+        let local_id = u32::from(Ipv4Addr::new(10, 0, 0, 10));
+        let remote_id = u32::from(Ipv4Addr::new(10, 0, 0, 2));
+        assert!(local_id > remote_id, "local should win collision");
+    }
+
+    #[test]
+    fn collision_remote_wins() {
+        // Local router-id 10.0.0.1 (lower) vs remote 10.0.0.10 (higher)
+        // → remote wins, existing session should be dumped
+        let local_id = u32::from(Ipv4Addr::new(10, 0, 0, 1));
+        let remote_id = u32::from(Ipv4Addr::new(10, 0, 0, 10));
+        assert!(local_id < remote_id, "remote should win collision");
+    }
+
+    #[tokio::test]
+    async fn collision_existing_goes_idle_accepts_pending() {
+        // Verify the PeerManager correctly handles notifications via its
+        // select! loop (session_notify channel is wired).
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        // Add peer
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config: make_config(addr, 65002),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        // Verify the peer exists
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::GetPeerState {
+            address: addr,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let info = reply_rx.await.unwrap();
+        assert!(info.is_some());
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inbound_during_established_dropped() {
+        // Verify the handle_inbound match arm for Established works.
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        // Add peer
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config: make_config(addr, 65002),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();

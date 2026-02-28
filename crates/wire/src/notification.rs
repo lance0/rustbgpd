@@ -97,6 +97,8 @@ pub mod cease_subcode {
     pub const ADMINISTRATIVE_SHUTDOWN: u8 = 2;
     pub const PEER_DECONFIGURED: u8 = 3;
     pub const OUT_OF_RESOURCES: u8 = 4;
+    /// RFC 4271 §6.8
+    pub const CONNECTION_COLLISION_RESOLUTION: u8 = 7;
     /// RFC 8538
     pub const HARD_RESET: u8 = 9;
 }
@@ -136,6 +138,7 @@ pub fn description(code: NotificationCode, subcode: u8) -> &'static str {
         (NotificationCode::Cease, 2) => "Administrative Shutdown",
         (NotificationCode::Cease, 3) => "Peer De-configured",
         (NotificationCode::Cease, 4) => "Out of Resources",
+        (NotificationCode::Cease, 7) => "Connection Collision Resolution",
         (NotificationCode::Cease, 9) => "Hard Reset",
         // Unknown code
         (NotificationCode::Unknown(_), _) => "Unknown Error Code",

@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PrefixList;
@@ -11,6 +11,19 @@ use tokio::task::JoinHandle;
 use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::session::PeerSession;
+
+/// Notifications sent from a peer session to the `PeerManager` for
+/// collision detection coordination.
+#[derive(Debug)]
+pub enum SessionNotification {
+    /// Session received a valid OPEN and transitioned to `OpenConfirm`.
+    OpenReceived {
+        peer_addr: IpAddr,
+        remote_router_id: Ipv4Addr,
+    },
+    /// Session fell back to Idle.
+    BackToIdle { peer_addr: IpAddr },
+}
 
 /// Commands sent to a running peer session.
 #[derive(Debug)]
@@ -25,6 +38,8 @@ pub enum PeerCommand {
     QueryState {
         reply: oneshot::Sender<PeerSessionState>,
     },
+    /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
+    CollisionDump,
 }
 
 /// Snapshot of a peer session's runtime state.
@@ -35,6 +50,7 @@ pub struct PeerSessionState {
     pub prefix_count: usize,
     pub negotiated_hold_time: Option<u16>,
     pub four_octet_as: Option<bool>,
+    pub remote_router_id: Option<Ipv4Addr>,
     pub updates_received: u64,
     pub updates_sent: u64,
     pub notifications_received: u64,
@@ -68,11 +84,19 @@ impl PeerHandle {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
+        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
-            let mut session =
-                PeerSession::new(config, metrics, rx, rib_tx, import_policy, export_policy);
+            let mut session = PeerSession::new(
+                config,
+                metrics,
+                rx,
+                rib_tx,
+                import_policy,
+                export_policy,
+                session_notify_tx,
+            );
             session.run().await
         });
         Self { commands: tx, task }
@@ -90,6 +114,7 @@ impl PeerHandle {
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
         stream: TcpStream,
+        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
@@ -101,6 +126,7 @@ impl PeerHandle {
                 import_policy,
                 export_policy,
                 stream,
+                session_notify_tx,
             );
             session.run().await
         });
@@ -133,6 +159,15 @@ impl PeerHandle {
     pub async fn shutdown(self) -> Result<Result<(), TransportError>, tokio::task::JoinError> {
         let _ = self.commands.send(PeerCommand::Shutdown).await;
         self.task.await
+    }
+
+    /// Send a `CollisionDump` command (Cease/7 and tear down).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has already exited.
+    pub async fn collision_dump(&self) -> Result<(), mpsc::error::SendError<PeerCommand>> {
+        self.commands.send(PeerCommand::CollisionDump).await
     }
 
     /// Query the current session state.

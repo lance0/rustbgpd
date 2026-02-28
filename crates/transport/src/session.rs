@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::framing::ReadBuffer;
-use crate::handle::{PeerCommand, PeerSessionState};
+use crate::handle::{PeerCommand, PeerSessionState, SessionNotification};
 use crate::timer::{Timers, poll_timer};
 
 /// Runtime for a single BGP peer session.
@@ -58,6 +58,8 @@ pub(crate) struct PeerSession {
     import_policy: Option<PrefixList>,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
     export_policy: Option<PrefixList>,
+    /// Channel to notify `PeerManager` of session state changes (collision detection).
+    session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
     /// Accepted prefixes for accurate count and dedup.
     known_prefixes: HashSet<rustbgpd_wire::Ipv4Prefix>,
     /// Session counters
@@ -81,6 +83,7 @@ impl PeerSession {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
+        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -104,6 +107,7 @@ impl PeerSession {
             outbound_tx,
             import_policy,
             export_policy,
+            session_notify_tx,
             known_prefixes: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
@@ -116,6 +120,7 @@ impl PeerSession {
     }
 
     /// Create a session for an inbound (already-connected) TCP stream.
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new_inbound(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -124,6 +129,7 @@ impl PeerSession {
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
         stream: TcpStream,
+        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -147,6 +153,7 @@ impl PeerSession {
             outbound_tx,
             import_policy,
             export_policy,
+            session_notify_tx,
             known_prefixes: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
@@ -334,6 +341,23 @@ impl PeerSession {
                         old.as_str(),
                         new.as_str(),
                     );
+
+                    // Notify PeerManager for collision detection
+                    if let Some(ref notify_tx) = self.session_notify_tx {
+                        if new == SessionState::OpenConfirm {
+                            if let Some(ref neg) = self.negotiated {
+                                let _ = notify_tx.try_send(SessionNotification::OpenReceived {
+                                    peer_addr: self.peer_ip,
+                                    remote_router_id: neg.peer_router_id,
+                                });
+                            }
+                        } else if new == SessionState::Idle {
+                            let _ = notify_tx.try_send(SessionNotification::BackToIdle {
+                                peer_addr: self.peer_ip,
+                            });
+                        }
+                    }
+
                     // Auto-restart: when the FSM falls back to Idle after
                     // a connection failure (not operator-initiated), start
                     // a deferred reconnect timer. This avoids a hot loop
@@ -696,6 +720,7 @@ impl PeerSession {
                     prefix_count: self.known_prefixes.len(),
                     negotiated_hold_time: self.negotiated.as_ref().map(|n| n.hold_time),
                     four_octet_as: self.negotiated.as_ref().map(|n| n.four_octet_as),
+                    remote_router_id: self.negotiated.as_ref().map(|n| n.peer_router_id),
                     updates_received: self.updates_received,
                     updates_sent: self.updates_sent,
                     notifications_received: self.notifications_received,
@@ -706,6 +731,28 @@ impl PeerSession {
                 };
                 let _ = reply.send(state);
                 ControlFlow::Continue(())
+            }
+            PeerCommand::CollisionDump => {
+                info!(peer = %self.peer_label, "collision dump: sending Cease/7");
+                self.stop_requested = true;
+                self.reconnect_timer = None;
+                // Send Cease/7 NOTIFICATION
+                let notif = rustbgpd_wire::NotificationMessage::new(
+                    NotificationCode::Cease,
+                    cease_subcode::CONNECTION_COLLISION_RESOLUTION,
+                    bytes::Bytes::new(),
+                );
+                let _ = self.send_message(&Message::Notification(notif)).await;
+                self.notifications_sent += 1;
+                // Clean up RIB if Established
+                if self.fsm.state() == SessionState::Established {
+                    let _ = self
+                        .rib_tx
+                        .try_send(RibUpdate::PeerDown { peer: self.peer_ip });
+                }
+                self.close_tcp();
+                self.timers.stop_all();
+                ControlFlow::Break(())
             }
         }
     }
@@ -880,7 +927,7 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel(8);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
 
-        PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None)
+        PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None)
     }
 
     fn make_route(local_pref: u32) -> Route {

@@ -101,7 +101,17 @@ async fn run(config: Config) {
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
     let (rpc_shutdown_tx, mut rpc_shutdown_rx) = oneshot::channel::<()>();
 
-    // Spawn gRPC API server
+    // Warn if gRPC is bound to a non-loopback address
+    if !grpc_addr.ip().is_loopback() {
+        warn!(
+            %grpc_addr,
+            "gRPC server bound to non-loopback address — all RPCs are \
+             unauthenticated. Use an auth proxy or mTLS for production \
+             non-loopback deployments."
+        );
+    }
+
+    // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_peer_mgr_tx = peer_mgr_tx.clone();
     let serve_config = ServeConfig {
@@ -111,7 +121,7 @@ async fn run(config: Config) {
         metrics: metrics.clone(),
         start_time,
     };
-    tokio::spawn(async move {
+    let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(
             grpc_addr,
             grpc_rib_tx,
@@ -188,7 +198,7 @@ async fn run(config: Config) {
         }
     }
 
-    // Wait for shutdown signal: either ctrl_c or Shutdown RPC
+    // Wait for shutdown signal: ctrl_c, Shutdown RPC, or unexpected gRPC exit
     tokio::select! {
         result = tokio::signal::ctrl_c() => {
             match result {
@@ -198,6 +208,10 @@ async fn run(config: Config) {
         }
         _ = &mut rpc_shutdown_rx => {
             info!("shutdown initiated via gRPC");
+        }
+        result = &mut grpc_handle => {
+            error!(?result, "gRPC server exited unexpectedly");
+            info!("initiating shutdown due to gRPC server failure");
         }
     }
 

@@ -19,5 +19,5 @@ pub mod timer;
 
 pub use config::TransportConfig;
 pub use error::TransportError;
-pub use handle::{PeerCommand, PeerHandle, PeerSessionState};
+pub use handle::{PeerCommand, PeerHandle, PeerSessionState, SessionNotification};
 pub use listener::{AcceptedConnection, BgpListener};

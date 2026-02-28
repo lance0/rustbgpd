@@ -4,11 +4,56 @@ All notable changes to rustbgpd will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses milestone-based versioning aligned with the design
-document (M0–M8).
+document (M0–M9).
 
 ---
 
 ## [Unreleased]
+
+## M9 — "Production Hardening"
+
+### Added
+
+- `rustbgpd-wire`: Cease subcode 7 (`CONNECTION_COLLISION_RESOLUTION`) for
+  TCP collision detection per RFC 4271 §6.8. Human-readable description in
+  `notification::description()`.
+- `rustbgpd-transport`: `SessionNotification` enum (`OpenReceived`,
+  `BackToIdle`) sent from peer sessions to PeerManager for collision detection
+  coordination. `CollisionDump` command variant on `PeerCommand` — sends
+  Cease/7 NOTIFICATION, cleans up RIB if Established, closes TCP.
+  `remote_router_id: Option<Ipv4Addr>` added to `PeerSessionState`. Session
+  notification channel threaded through `PeerHandle::spawn()` and
+  `PeerHandle::spawn_inbound()`. (ADR-0021)
+- `PeerManager`: TCP collision detection. `pending_inbound` per peer stores
+  inbound TCP streams awaiting resolution. `session_notify_rx` in `select!`
+  loop handles `OpenReceived` (resolve collision) and `BackToIdle` (accept
+  pending). `resolve_collision()` compares BGP Identifiers — higher wins.
+  `replace_with_inbound()` helper extracted for clean session replacement.
+  4 new tests. (ADR-0021)
+- `docs/SECURITY.md`: new document covering gRPC security posture,
+  authentication gaps, privileged RPCs, and deployment recommendations.
+- `docs/adr/0021-tcp-collision-detection.md`: ADR for collision detection
+  architecture.
+- `docs/adr/0022-grpc-server-supervision.md`: ADR for gRPC server
+  supervision.
+
+### Changed
+
+- `src/main.rs`: gRPC server `JoinHandle` now supervised — unexpected exit
+  triggers coordinated shutdown (API-first daemon without API should not
+  keep running). Added to shutdown `select!` alongside ctrl-c and Shutdown
+  RPC. (ADR-0022)
+- `src/main.rs`: Non-loopback gRPC bind address triggers a warning at
+  startup, informing operators that all RPCs are unauthenticated.
+- `src/metrics_server.rs`: Read timeout (5s) prevents slow-client
+  exhaustion. Request-line size limit (8192 bytes) returns 400 for oversized
+  requests. Concurrent connection cap (64 via `tokio::sync::Semaphore`)
+  provides backpressure. `gather()` errors return 500 Internal Server Error
+  instead of panicking. 3 new tests.
+- CHANGELOG updated with versioning through M9.
+- ROADMAP updated: completed summary reflects M0–M8 work, M9 marked
+  complete, v1 scope section added, TCP collision detection moved from
+  post-v1 into M9.
 
 ## M8 — "API & Observability"
 
