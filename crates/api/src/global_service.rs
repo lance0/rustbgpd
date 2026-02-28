@@ -2,6 +2,10 @@ use tonic::{Request, Response, Status};
 
 use crate::proto;
 
+/// Read-only view of daemon global configuration.
+///
+/// `GetGlobal` returns ASN, router-id, and listen port.
+/// `SetGlobal` is intentionally unimplemented — runtime config mutation is deferred.
 pub struct GlobalService {
     asn: u32,
     router_id: String,
@@ -9,6 +13,7 @@ pub struct GlobalService {
 }
 
 impl GlobalService {
+    /// Create a new `GlobalService` with the daemon's startup configuration.
     pub fn new(asn: u32, router_id: String, listen_port: u32) -> Self {
         Self {
             asn,

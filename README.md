@@ -35,7 +35,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **316 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **332 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -244,7 +244,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** All five milestones are complete. 306 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** All six milestones are complete. 332 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Milestone | Status | Scope |
 |-----------|--------|-------|
@@ -253,6 +253,8 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | M2 -- Decide | Complete | Loc-RIB best-path selection, `ListBestRoutes` gRPC |
 | M3 -- Speak | Complete | Route injection, Adj-RIB-Out, export policy, TCP MD5 |
 | M4 -- Route Server | Complete | Dynamic peers, per-peer policy, communities, WatchRoutes |
+| M5 -- Polish | Complete | Inbound listener, session counters, NLRI batching, API hardening |
+| M6 -- Compliance | Complete | Wire RFC compliance, GlobalService, ControlService, coordinated shutdown |
 
 Next: MP-BGP (IPv6), extended communities, graceful restart, BMP, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
 

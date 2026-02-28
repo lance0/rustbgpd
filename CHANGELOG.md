@@ -4,14 +4,32 @@ All notable changes to rustbgpd will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses milestone-based versioning aligned with the design
-document (M0–M5).
+document (M0–M6).
 
 ---
 
 ## [Unreleased]
 
+## M6 — "Compliance"
+
 ### Added
 
+- `rustbgpd-wire`: RFC-compliant attribute flag validation at decode time. Known
+  attribute types are checked for correct Optional/Transitive flags, producing
+  `UpdateAttributeError` with subcode 4 (Attribute Flags Error) and full attribute
+  data per RFC 4271 §6.3. Replaces dead `check_wellknown_flags` in validator.
+- `rustbgpd-wire`: Specific UPDATE error subcodes replace generic subcode 1
+  (Malformed Attribute List) — length errors produce subcode 5, invalid ORIGIN
+  produces subcode 6, malformed AS_PATH produces subcode 11. All include the
+  offending attribute as NOTIFICATION data.
+- `rustbgpd-wire`: `UpdateAttributeError` variant on `DecodeError` carrying subcode,
+  attribute data, and detail string. `to_notification()` maps it to the correct
+  `(UpdateMessage, subcode, data)` tuple.
+- `rustbgpd-wire`: Shared `attr_error_data()` helper builds RFC 4271 §6.3 error data
+  (flags + type + length + value), correctly setting the Extended Length flag for
+  values > 255 bytes. Replaces buggy `encode_attr_for_error` in validator.
+- `rustbgpd-wire`: Partial bit (0x20) is now OR'd into flags when encoding unknown
+  transitive attributes for re-advertisement, per RFC 4271 §5. 10 new tests.
 - `rustbgpd-api`: `GlobalService` gRPC implementation — `GetGlobal` returns daemon
   ASN, router-id, and listen port; `SetGlobal` returns UNIMPLEMENTED (runtime mutation
   deferred to post-v1). 2 tests. (ADR-0020)

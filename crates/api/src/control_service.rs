@@ -9,6 +9,11 @@ use crate::peer_types::PeerManagerCommand;
 use crate::proto;
 use rustbgpd_telemetry::BgpMetrics;
 
+/// Daemon lifecycle and observability service.
+///
+/// `GetHealth` returns uptime, peer count, and route count.
+/// `GetMetrics` returns Prometheus text exposition.
+/// `Shutdown` triggers coordinated daemon shutdown via a oneshot channel.
 pub struct ControlService {
     start_time: tokio::time::Instant,
     metrics: BgpMetrics,
@@ -17,6 +22,10 @@ pub struct ControlService {
 }
 
 impl ControlService {
+    /// Create a new `ControlService`.
+    ///
+    /// `shutdown_tx` is consumed by the first `Shutdown` RPC call to trigger
+    /// coordinated daemon exit.
     pub fn new(
         start_time: tokio::time::Instant,
         metrics: BgpMetrics,
