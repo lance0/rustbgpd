@@ -3,7 +3,7 @@
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** Lance  
-**Status:** Draft  
+**Status:** M4 complete  
 **Last updated:** 2026-02-27
 
 ---
@@ -617,7 +617,7 @@ rustbgpd/
 ## Roadmap Beyond v1
 
 - MP-BGP extensions (IPv6 unicast)
-- Communities and extended communities
+- Extended communities
 - FlowSpec speaker mode (prefixd lineage)
 - BMP exporter
 - RPKI validation integration (RTR client)

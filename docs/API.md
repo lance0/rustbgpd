@@ -1,0 +1,238 @@
+# gRPC API Reference
+
+rustbgpd exposes five gRPC services on a configurable address (default
+`127.0.0.1:50051`). All examples use
+[grpcurl](https://github.com/fullstorydev/grpcurl) with proto file reflection.
+
+The proto definition lives at `proto/rustbgpd.proto`.
+
+---
+
+## GlobalService
+
+Daemon identity and configuration.
+
+| RPC | Description |
+|-----|-------------|
+| `GetGlobal` | Returns ASN, router ID, and listen port |
+| `SetGlobal` | Updates daemon configuration (currently a no-op placeholder) |
+
+```bash
+# Get daemon identity
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.GlobalService/GetGlobal
+```
+
+---
+
+## NeighborService
+
+Peer lifecycle management. Supports static peers from config and dynamic peers
+added at runtime.
+
+| RPC | Description |
+|-----|-------------|
+| `AddNeighbor` | Add a peer dynamically (starts session immediately) |
+| `DeleteNeighbor` | Remove a peer and tear down its session |
+| `ListNeighbors` | List all peers with session state and counters |
+| `GetNeighborState` | Get detailed state for a single peer |
+| `EnableNeighbor` | Re-enable a previously disabled peer |
+| `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
+
+### Add a neighbor
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"config": {"address": "10.0.0.2", "remote_asn": 65002, "description": "peer-2"}}' \
+  localhost:50051 rustbgpd.v1.NeighborService/AddNeighbor
+```
+
+### List all neighbors
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.NeighborService/ListNeighbors
+```
+
+### Get a single neighbor's state
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/GetNeighborState
+```
+
+### Disable a neighbor
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2", "reason": "maintenance"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/DisableNeighbor
+```
+
+### Enable a neighbor
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/EnableNeighbor
+```
+
+### Delete a neighbor
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/DeleteNeighbor
+```
+
+---
+
+## RibService
+
+Query the routing information base and subscribe to real-time route changes.
+
+| RPC | Description |
+|-----|-------------|
+| `ListReceivedRoutes` | Adj-RIB-In: all routes received from peers |
+| `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
+| `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
+| `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
+
+### List received routes (Adj-RIB-In)
+
+```bash
+# All received routes
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListReceivedRoutes
+
+# From a specific peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"neighbor_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListReceivedRoutes
+```
+
+### List best routes (Loc-RIB)
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListBestRoutes
+```
+
+### List advertised routes (Adj-RIB-Out)
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"neighbor_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListAdvertisedRoutes
+```
+
+### Pagination
+
+All `List*` RPCs support pagination via `page_size` and `page_token`:
+
+```bash
+# First page (2 routes)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 2}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBestRoutes
+
+# Next page
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"page_size": 2, "page_token": "2"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListBestRoutes
+```
+
+### Watch route changes (streaming)
+
+```bash
+# Watch all route changes (streams until interrupted)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+
+# Watch changes for a specific peer
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"neighbor_address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+```
+
+Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
+`ROUTE_EVENT_TYPE_BEST_CHANGED`.
+
+---
+
+## InjectionService
+
+Programmatic route injection and withdrawal. Injected routes appear as locally
+originated (peer address `0.0.0.0`) and are advertised to all peers (subject to
+export policy).
+
+| RPC | Description |
+|-----|-------------|
+| `AddPath` | Inject a route with specified attributes |
+| `DeletePath` | Withdraw a previously injected route |
+
+### Inject a route
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "prefix": "10.99.0.0",
+    "prefix_length": 24,
+    "next_hop": "10.0.0.1",
+    "communities": [4259905793]
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddPath
+```
+
+Optional fields: `as_path`, `origin`, `local_pref`, `med`, `communities`.
+
+### Withdraw a route
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "10.99.0.0", "prefix_length": 24}' \
+  localhost:50051 rustbgpd.v1.InjectionService/DeletePath
+```
+
+---
+
+## ControlService
+
+Daemon lifecycle, health checks, and metrics.
+
+| RPC | Description |
+|-----|-------------|
+| `GetHealth` | Returns health status, uptime, active peers, total routes |
+| `GetMetrics` | Returns Prometheus metrics as text |
+| `Shutdown` | Initiates graceful shutdown |
+
+### Health check
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.ControlService/GetHealth
+```
+
+### Get Prometheus metrics via gRPC
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.ControlService/GetMetrics
+```
+
+### Graceful shutdown
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"reason": "maintenance window"}' \
+  localhost:50051 rustbgpd.v1.ControlService/Shutdown
+```
+
+---
+
+## Proto File
+
+The full proto definition is at [`proto/rustbgpd.proto`](../proto/rustbgpd.proto).
+You can generate typed clients for Python, Go, Rust, Node.js, or any language
+with protobuf/gRPC support.
