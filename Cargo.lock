@@ -825,6 +825,7 @@ dependencies = [
 name = "rustbgpd-api"
 version = "0.1.0"
 dependencies = [
+ "prometheus",
  "prost",
  "rustbgpd-fsm",
  "rustbgpd-policy",

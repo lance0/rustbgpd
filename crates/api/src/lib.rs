@@ -7,6 +7,8 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+mod control_service;
+mod global_service;
 mod injection_service;
 mod neighbor_service;
 pub mod peer_types;

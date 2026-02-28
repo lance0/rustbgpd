@@ -7,6 +7,11 @@
 .DS_Store
 .claude/
 
+# Fuzz artifacts
+crates/wire/fuzz/corpus/
+crates/wire/fuzz/target/
+crates/wire/fuzz/Cargo.lock
+
 # Containerlab generated
 *.bak
 clab-*/

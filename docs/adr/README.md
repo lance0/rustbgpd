@@ -26,6 +26,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0016](0016-socket2-for-md5-gtsm.md) | socket2 for TCP MD5 and GTSM socket options | Accepted | 2026-02-27 |
 | [0017](0017-peer-manager-channel-based-ownership.md) | PeerManager — channel-based single-task ownership | Accepted | 2026-02-27 |
 | [0018](0018-broadcast-channel-for-watch-routes.md) | Broadcast channel for WatchRoutes streaming | Accepted | 2026-02-27 |
+| [0019](0019-inbound-tcp-listener.md) | Inbound TCP listener for passive peering | Accepted | 2026-02-27 |
+| [0020](0020-global-control-services-coordinated-shutdown.md) | GlobalService, ControlService, and coordinated shutdown | Accepted | 2026-02-27 |
 
 ## Template
 

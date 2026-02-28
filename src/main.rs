@@ -16,10 +16,11 @@ use std::process;
 use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::BgpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
+use rustbgpd_api::server::ServeConfig;
 
 use crate::config::Config;
 use crate::peer_manager::PeerManager;
@@ -48,6 +49,8 @@ fn main() {
 
 #[expect(clippy::too_many_lines)]
 async fn run(config: Config) {
+    let start_time = tokio::time::Instant::now();
+
     info!(
         version = env!("CARGO_PKG_VERSION"),
         asn = config.global.asn,
@@ -81,7 +84,7 @@ async fn run(config: Config) {
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
     tokio::spawn(RibManager::new(rib_rx, export_policy, metrics.clone()).run());
 
-    // Spawn PeerManager
+    // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let peer_mgr = PeerManager::new(
         peer_mgr_rx,
@@ -90,13 +93,34 @@ async fn run(config: Config) {
         metrics.clone(),
         rib_tx.clone(),
     );
-    tokio::spawn(peer_mgr.run());
+    let peer_mgr_handle = tokio::spawn(peer_mgr.run());
+
+    // Shutdown channels:
+    // - grpc_shutdown: signals the tonic server to stop
+    // - rpc_shutdown: given to ControlService so Shutdown RPC can trigger exit
+    let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
+    let (rpc_shutdown_tx, mut rpc_shutdown_rx) = oneshot::channel::<()>();
 
     // Spawn gRPC API server
     let grpc_rib_tx = rib_tx.clone();
     let grpc_peer_mgr_tx = peer_mgr_tx.clone();
+    let serve_config = ServeConfig {
+        asn: config.global.asn,
+        router_id: config.global.router_id.clone(),
+        listen_port: u32::from(config.global.listen_port),
+        metrics: metrics.clone(),
+        start_time,
+    };
     tokio::spawn(async move {
-        rustbgpd_api::server::serve(grpc_addr, grpc_rib_tx, grpc_peer_mgr_tx).await;
+        rustbgpd_api::server::serve(
+            grpc_addr,
+            grpc_rib_tx,
+            grpc_peer_mgr_tx,
+            serve_config,
+            grpc_shutdown_rx,
+            rpc_shutdown_tx,
+        )
+        .await;
     });
 
     // Spawn BGP inbound TCP listener
@@ -164,14 +188,31 @@ async fn run(config: Config) {
         }
     }
 
-    // Wait for shutdown signal
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => info!("received shutdown signal"),
-        Err(e) => error!(error = %e, "failed to listen for shutdown signal"),
+    // Wait for shutdown signal: either ctrl_c or Shutdown RPC
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            match result {
+                Ok(()) => info!("received shutdown signal"),
+                Err(e) => error!(error = %e, "failed to listen for shutdown signal"),
+            }
+        }
+        _ = &mut rpc_shutdown_rx => {
+            info!("shutdown initiated via gRPC");
+        }
     }
 
-    // Graceful shutdown via PeerManager
+    // Coordinated shutdown:
+    // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)
+    info!("initiating coordinated shutdown");
     let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
+
+    // 2. Wait for PeerManager to finish draining all peers
+    if let Err(e) = peer_mgr_handle.await {
+        error!(error = %e, "peer manager task panicked");
+    }
+
+    // 3. Stop the gRPC server
+    let _ = grpc_shutdown_tx.send(());
 
     info!("rustbgpd exiting");
 }

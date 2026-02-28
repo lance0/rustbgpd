@@ -10,6 +10,19 @@ document (M0–M5).
 
 ## [Unreleased]
 
+### Added
+
+- `rustbgpd-api`: `GlobalService` gRPC implementation — `GetGlobal` returns daemon
+  ASN, router-id, and listen port; `SetGlobal` returns UNIMPLEMENTED (runtime mutation
+  deferred to post-v1). 2 tests. (ADR-0020)
+- `rustbgpd-api`: `ControlService` gRPC implementation — `GetHealth` returns uptime,
+  active peer count, and total route count; `GetMetrics` returns Prometheus text
+  exposition; `Shutdown` initiates coordinated daemon shutdown via gRPC. 2 tests.
+  (ADR-0020)
+- Coordinated shutdown: ctrl-c and `Shutdown` RPC both trigger ordered teardown —
+  PeerManager drains all peers (sending NOTIFICATIONs), then gRPC server exits
+  gracefully via `serve_with_shutdown`. Previously the runtime dropped mid-shutdown.
+
 ### Fixed
 
 - `rustbgpd-wire`: 2-octet ASN encoding no longer silently truncates 4-byte ASNs.
