@@ -422,6 +422,160 @@ server hardening.
 
 ---
 
+## M6 — "Compliance" `[complete]`
+
+Wire RFC compliance, GlobalService, ControlService, coordinated shutdown.
+
+### Build order
+
+1. ~~Crates.io packaging~~ — version 0.1.0, metadata, proto copied into api crate **Done**
+2. ~~Review nits~~ — ASN truncation → AS_TRANS, config validation, pagination dedup **Done**
+3. ~~GlobalService + ControlService~~ — GetGlobal, GetHealth, GetMetrics, Shutdown (ADR-0020) **Done**
+4. ~~Coordinated shutdown~~ — ctrl-c and Shutdown RPC both trigger ordered teardown **Done**
+5. ~~eBGP NEXT_HOP fix~~ — uses TCP local socket addr instead of router-id **Done**
+6. ~~afi_safi validation~~ — reject unsupported address families with INVALID_ARGUMENT **Done**
+7. ~~Wire attribute RFC compliance~~ — flag validation at decode, specific subcodes, Partial bit **Done**
+
+### Exit criteria
+
+- All 5 gRPC services operational
+- Coordinated shutdown from both ctrl-c and RPC
+- Wire attribute errors produce RFC-correct subcodes and data
+- 332 tests pass, clippy clean, fmt clean
+
+---
+
+## M7 — "Wire & RIB Correctness"
+
+Peer-visible bugs found during full-project code review. Fix these first,
+then re-run FRR/BIRD interop suites.
+
+### Build order
+
+1. **Adj-RIB-Out divergence on channel-full** (`crates/rib/src/manager.rs`)
+   - `distribute_changes()` and `send_initial_table()` mutate AdjRibOut
+     before attempting `tx.try_send()`. If the channel is full, internal
+     state diverges from what was actually sent to the peer.
+   - Fix: stage delta, send, commit only on success. Mark peer dirty on
+     failure and rebuild from known-good snapshot.
+
+2. **Malformed NLRI maps to wrong NOTIFICATION** (`crates/wire/src/nlri.rs`, `error.rs`, `update.rs`)
+   - `decode_nlri()` reports bad prefix lengths as `MalformedField` →
+     subcode 1 (Malformed Attribute List). RFC 4271 requires subcode 10
+     (Invalid Network Field).
+   - Fix: dedicated NLRI decode error variant → subcode 10 with offending
+     bytes.
+
+3. **PARTIAL bit set too broadly on unknown attributes** (`crates/wire/src/attribute.rs`)
+   - Encode path sets PARTIAL whenever TRANSITIVE is set. Correct only for
+     optional transitive. ATOMIC_AGGREGATE flows through Unknown and gets
+     PARTIAL incorrectly.
+   - Fix: set PARTIAL only when both OPTIONAL and TRANSITIVE, or promote
+     ATOMIC_AGGREGATE to a first-class typed variant.
+
+4. **Policy prefix lengths >32 can panic** (`src/config.rs`, `crates/policy/src/prefix_list.rs`)
+   - Config accepts any u8 CIDR length. `PrefixListEntry::matches()` shifts
+     by `32 - len` which panics or produces nonsense for len > 32.
+   - Fix: reject lengths outside 0..=32 at config load, validate ge/le
+     bounds.
+
+5. **Best-path omits eBGP-over-iBGP preference** (`crates/rib/src/best_path.rs`)
+   - Comparator stops at LOCAL_PREF, AS_PATH, ORIGIN, MED, peer address.
+     Missing eBGP-over-iBGP and later tie-break stages per §9.1.2.
+   - Fix: implement remaining stages (at minimum eBGP-over-iBGP), or
+     document "simplified best-path mode" and remove RFC-complete claims.
+
+### Exit criteria
+
+- All 5 findings fixed with regression tests
+- FRR and BIRD interop suites re-validated
+- 332+ tests pass, clippy clean, fmt clean
+
+---
+
+## M8 — "API & Observability"
+
+API contract issues and metrics accuracy found during code review. These
+affect operators and automation consumers.
+
+### Build order
+
+1. **WatchRoutes loses withdrawals and peer transitions** (`crates/api/src/rib_service.rs`, `crates/rib/src/event.rs`)
+   - Withdraw events have `peer: None`, BestChanged carries only new peer.
+     A subscriber filtered to the old peer misses "route moved away."
+     Timestamp is always empty.
+   - Fix: include old+new peer in event model, or make WatchRoutes
+     prefix-scoped. Populate timestamp (RFC 3339 or Unix seconds).
+
+2. **DeletePath.uuid ignored** (`crates/api/src/injection_service.rs`, `proto/rustbgpd.proto`)
+   - AddPath returns uuid, DeletePath accepts it, but implementation
+     ignores it and withdraws by prefix only. Misleads multi-writer clients.
+   - Fix: persist IDs and require on delete, or remove uuid from API.
+
+3. **Health/neighbor counters semantically wrong** (`crates/api/src/control_service.rs`, `neighbor_service.rs`)
+   - `active_peers` is just `peers.len()` (counts idle/disabled).
+     `total_routes` sums per-peer prefix counts (not Loc-RIB).
+     `prefixes_sent` hardcoded to 0.
+   - Fix: define exact field semantics, source from session state and
+     AdjRibOut/Loc-RIB.
+
+4. **Dead Prometheus gauges** (`crates/telemetry/src/metrics.rs`, `crates/rib/src/manager.rs`)
+   - `set_rib_prefixes`, `set_adj_rib_out_prefixes`, `set_loc_rib_prefixes`
+     exist but have no production call sites.
+   - Fix: wire into RibManager on every meaningful mutation, or remove
+     until they can be kept accurate.
+
+5. **IPv6 neighbors accepted but unsupported** (`crates/api/src/neighbor_service.rs`, `src/config.rs`)
+   - API accepts any IpAddr, but transport is IPv4-only. GTSM uses
+     IPv4-only socket options.
+   - Fix: reject IPv6 peers at config/API boundaries until MP-BGP lands.
+
+6. **SetGlobal permanently UNIMPLEMENTED** (`crates/api/src/global_service.rs`, `proto/rustbgpd.proto`)
+   - Fix: remove from proto until runtime mutation exists, or mark clearly
+     as reserved/deferred.
+
+### Exit criteria
+
+- API contracts match implementation behavior
+- Metrics reflect actual RIB state
+- Consumers get correct data from all gRPC endpoints
+- 332+ tests pass, clippy clean, fmt clean
+
+---
+
+## M9 — "Production Hardening"
+
+Security, resilience, and operational safety.
+
+### Build order
+
+1. **Metrics server slow-client exhaustion** (`src/metrics_server.rs`)
+   - Accept loop spawns unbounded tasks. No read timeout, no request-line
+     size limit. `gather()` uses `expect()` — encoding failure panics.
+   - Fix: add read timeout and max request-line length, cap concurrent
+     connections, return 500 on encoding failure.
+
+2. **Shutdown RPC is unauthenticated kill switch** (`crates/api/src/control_service.rs`, `server.rs`)
+   - No auth/authz or transport security. Default is loopback, but
+     configurable. Exposed gRPC = anyone can stop the daemon.
+   - Fix: warn on non-loopback bind, or add mTLS/auth interceptors.
+     Document security posture.
+
+3. **gRPC server failure is detached and non-fatal** (`src/main.rs`, `crates/api/src/server.rs`)
+   - gRPC runs in a detached task. If it exits, daemon keeps running
+     without its control plane. Awkward for an API-first daemon.
+   - Fix: supervise the gRPC task. Decide whether API loss terminates
+     the daemon or triggers restart/backoff.
+
+### Exit criteria
+
+- No panic paths from external input
+- Documented security posture for gRPC exposure
+- gRPC lifecycle supervised
+- 332+ tests pass, clippy clean, fmt clean
+
+---
+
 ## Post-v1
 
 ### Protocol extensions
@@ -437,11 +591,6 @@ server hardening.
 - RPKI validation (RTR client)
 - TCP-AO authentication
 - Config persistence (gRPC → TOML writeback)
-
-### Performance / correctness
-- `list_peers()` sequential queries — parallelize for large peer counts
-- Fix IPv6 NEXT_HOP defaulting to 0.0.0.0 (wrong, but IPv6 out of scope for v1)
-- Error on invalid policy entries in config instead of silently skipping
 
 ---
 

@@ -256,7 +256,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | M5 -- Polish | Complete | Inbound listener, session counters, NLRI batching, API hardening |
 | M6 -- Compliance | Complete | Wire RFC compliance, GlobalService, ControlService, coordinated shutdown |
 
-Next: MP-BGP (IPv6), extended communities, graceful restart, BMP, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: M7 (wire & RIB correctness), M8 (API & observability), M9 (production hardening), then MP-BGP, graceful restart, BMP, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 
