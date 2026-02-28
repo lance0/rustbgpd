@@ -35,7 +35,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **364 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **366 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -226,7 +226,7 @@ docker run -d --name rustbgpd \
   rustbgpd:dev /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml
 ```
 
-Set `grpc_addr = "0.0.0.0:50051"` in the config so the gRPC port is reachable from outside the container.
+Set `grpc_addr = "0.0.0.0:50051"` in the config so the gRPC port is reachable from outside the container. **Note:** this exposes the unauthenticated gRPC API on all interfaces. For production, bind to a management interface or front with an mTLS proxy. See [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Interop Testing
 
@@ -244,7 +244,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** Nine milestones complete. 364 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** Nine milestones complete. 366 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Milestone | Status | Scope |
 |-----------|--------|-------|

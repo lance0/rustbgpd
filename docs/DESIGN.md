@@ -425,7 +425,7 @@ Exposed via `ListBestRoutes` gRPC endpoint with offset pagination.
 - Deterministic outcomes for all decision inputs, verified by property tests (antisymmetry, transitivity, totality).
 - Stable best-path selection with multiple paths from multiple peers.
 - Structured debug events for best-path changes.
-- 364 tests pass (M9), clippy clean, fmt clean.
+- 366 tests pass (M9), clippy clean, fmt clean.
 
 ### Milestone 3: "Speak" `[complete]`
 

@@ -10,6 +10,28 @@ document (M0–M9).
 
 ## [Unreleased]
 
+### Fixed
+
+- `rustbgpd-transport`: `SessionNotification::OpenReceived` now reads
+  `self.fsm.negotiated()` (available at `OpenConfirm`) instead of
+  `self.negotiated` (set later at `SessionEstablished`). Previously the
+  notification never fired, bypassing TCP collision detection entirely.
+  1 integration test.
+- `PeerManager`: `disable_peer()` now clears `pending_inbound`. `BackToIdle`
+  handler guards against accepting pending inbound for disabled peers.
+  Previously disabling a peer could be undone by a queued inbound connection.
+  1 test.
+- `rustbgpd-transport`: Session notification `try_send()` failures now logged
+  with `warn!` instead of silently discarded.
+- `src/metrics_server.rs`: Semaphore permit acquired before `accept()` for
+  exact connection cap (was off-by-one: 65 instead of 64).
+- `docs/SECURITY.md`: Corrected metrics endpoint description (no default
+  address; common port is 9179, not 9090).
+- `README.md`: Docker section now warns that `grpc_addr = "0.0.0.0:50051"`
+  exposes unauthenticated RPCs. Links to `docs/SECURITY.md`.
+- `crates/fsm/src/session.rs`: Doc comment on `negotiated()` corrected from
+  "available after Established" to "available after `OpenConfirm`".
+
 ## M9 — "Production Hardening"
 
 ### Added

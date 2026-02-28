@@ -45,7 +45,7 @@ impl Session {
         self.state
     }
 
-    /// Negotiated session parameters (available after `Established`).
+    /// Negotiated session parameters (available after `OpenConfirm`).
     #[must_use]
     pub fn negotiated(&self) -> Option<&NegotiatedSession> {
         self.negotiated.as_ref()

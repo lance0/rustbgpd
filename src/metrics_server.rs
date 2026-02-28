@@ -29,18 +29,19 @@ pub async fn serve_metrics(addr: SocketAddr, metrics: BgpMetrics) {
     let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
     loop {
+        // Acquire permit before accepting to enforce an exact connection cap.
+        let permit = semaphore.clone().acquire_owned().await;
+        let Ok(permit) = permit else {
+            warn!("metrics semaphore closed");
+            return;
+        };
+
         let (stream, peer) = match listener.accept().await {
             Ok(conn) => conn,
             Err(e) => {
                 error!(error = %e, "metrics server accept error");
                 continue;
             }
-        };
-
-        let permit = semaphore.clone().acquire_owned().await;
-        let Ok(permit) = permit else {
-            warn!("metrics semaphore closed");
-            return;
         };
 
         let metrics = metrics.clone();
@@ -146,9 +147,9 @@ mod tests {
 
         tokio::spawn(async move {
             loop {
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
                 let (stream, _) = listener.accept().await.unwrap();
                 let m = metrics.clone();
-                let permit = semaphore.clone().acquire_owned().await.unwrap();
                 tokio::spawn(async move {
                     let _ = handle_connection(stream, &m).await;
                     drop(permit);
@@ -231,9 +232,9 @@ mod tests {
         let sem = semaphore.clone();
         tokio::spawn(async move {
             loop {
+                let permit = sem.clone().acquire_owned().await.unwrap();
                 let (stream, _) = listener.accept().await.unwrap();
                 let m = metrics.clone();
-                let permit = sem.clone().acquire_owned().await.unwrap();
                 tokio::spawn(async move {
                     let _ = handle_connection(stream, &m).await;
                     drop(permit);

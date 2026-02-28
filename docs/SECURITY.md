@@ -39,7 +39,8 @@ and `GetMetrics` are read-only but also unauthenticated.
 
 ## Metrics endpoint
 
-The Prometheus `/metrics` HTTP endpoint (default `127.0.0.1:9090`) is
+The Prometheus `/metrics` HTTP endpoint (configured via `prometheus_addr`;
+commonly `0.0.0.0:9179`) is
 read-only and unauthenticated. It exposes operational counters and gauges
 but no secrets. The same loopback-vs-non-loopback considerations apply.
 

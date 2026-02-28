@@ -583,7 +583,7 @@ Security, resilience, operational safety, and core protocol compliance
 - Documented security posture for gRPC exposure
 - TCP collision detection per RFC 4271 §6.8
 - gRPC lifecycle supervised
-- 364 tests pass (+17 new), clippy clean, fmt clean
+- 366 tests pass (+19 new), clippy clean, fmt clean
 
 ---
 

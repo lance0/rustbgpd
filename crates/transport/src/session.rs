@@ -41,7 +41,7 @@ pub(crate) struct PeerSession {
     rib_tx: mpsc::Sender<RibUpdate>,
     peer_label: String,
     peer_ip: IpAddr,
-    /// Negotiated session parameters (set when Established).
+    /// Negotiated session parameters (set when `SessionEstablished`).
     negotiated: Option<NegotiatedSession>,
     /// Suppresses automatic restart when the FSM transitions to Idle.
     /// Set when the operator sends `ManualStop` or `Shutdown`.
@@ -342,19 +342,32 @@ impl PeerSession {
                         new.as_str(),
                     );
 
-                    // Notify PeerManager for collision detection
+                    // Notify PeerManager for collision detection.
+                    // Read from the FSM's negotiated (set at OpenConfirm),
+                    // not self.negotiated (set later at SessionEstablished).
                     if let Some(ref notify_tx) = self.session_notify_tx {
-                        if new == SessionState::OpenConfirm {
-                            if let Some(ref neg) = self.negotiated {
-                                let _ = notify_tx.try_send(SessionNotification::OpenReceived {
-                                    peer_addr: self.peer_ip,
-                                    remote_router_id: neg.peer_router_id,
-                                });
-                            }
-                        } else if new == SessionState::Idle {
-                            let _ = notify_tx.try_send(SessionNotification::BackToIdle {
+                        if new == SessionState::OpenConfirm
+                            && let Some(neg) = self.fsm.negotiated()
+                            && let Err(e) = notify_tx.try_send(SessionNotification::OpenReceived {
                                 peer_addr: self.peer_ip,
-                            });
+                                remote_router_id: neg.peer_router_id,
+                            })
+                        {
+                            warn!(
+                                peer = %self.peer_label,
+                                error = %e,
+                                "failed to send OpenReceived notification"
+                            );
+                        } else if new == SessionState::Idle
+                            && let Err(e) = notify_tx.try_send(SessionNotification::BackToIdle {
+                                peer_addr: self.peer_ip,
+                            })
+                        {
+                            warn!(
+                                peer = %self.peer_label,
+                                error = %e,
+                                "failed to send BackToIdle notification"
+                            );
                         }
                     }
 

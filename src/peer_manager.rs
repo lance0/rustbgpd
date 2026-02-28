@@ -223,6 +223,7 @@ impl PeerManager {
             .get_mut(&address)
             .ok_or_else(|| format!("peer {address} not found"))?;
         managed.enabled = false;
+        managed.pending_inbound = None;
         managed
             .handle
             .stop()
@@ -294,10 +295,15 @@ impl PeerManager {
                 }
             }
             SessionNotification::BackToIdle { peer_addr } => {
-                let pending = self
-                    .peers
-                    .get_mut(&peer_addr)
-                    .and_then(|m| m.pending_inbound.take());
+                let pending = self.peers.get_mut(&peer_addr).and_then(|m| {
+                    if m.enabled {
+                        m.pending_inbound.take()
+                    } else {
+                        // Peer is disabled — drop pending inbound
+                        m.pending_inbound = None;
+                        None
+                    }
+                });
                 if let Some(stream) = pending {
                     // Existing session failed — accept pending inbound
                     info!(%peer_addr, "existing session went idle, accepting pending inbound");
@@ -445,6 +451,7 @@ impl PeerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::sync::oneshot;
 
     fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
@@ -713,6 +720,56 @@ mod tests {
         .unwrap();
         let info = reply_rx.await.unwrap();
         assert!(info.is_some());
+
+        tx.send(PeerManagerCommand::Shutdown).await.unwrap();
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disable_peer_stays_disabled() {
+        // Verify that disabling a peer keeps it disabled even after
+        // the session goes idle (BackToIdle should not re-enable).
+        let (tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let handle = tokio::spawn(mgr.run());
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        // Add peer
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::AddPeer {
+            config: make_config(addr, 65002),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        // Disable peer
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::DisablePeer {
+            address: addr,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        assert!(reply_rx.await.unwrap().is_ok());
+
+        // Give time for the session to process Stop and go Idle
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify the peer is still disabled
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::GetPeerState {
+            address: addr,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let info = reply_rx.await.unwrap().unwrap();
+        assert!(!info.enabled, "peer should remain disabled");
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();
