@@ -2,7 +2,7 @@
 
 ## Development Setup
 
-- Rust 1.93+ (edition 2024)
+- Rust 1.87+ (edition 2024)
 - Linux x86_64 or aarch64 (primary targets)
 - macOS works for development but is not CI-tested
 - Docker + [containerlab](https://containerlab.dev/) for interop tests

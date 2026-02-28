@@ -272,9 +272,9 @@ document (M0–M9).
 
 ### Changed
 
-- MSRV bumped from Rust 1.85 to 1.93. Required for `let` chains and
+- MSRV bumped from Rust 1.85 to 1.87. Required for `let` chains and
   `usize::is_multiple_of()` stabilization.
-- Dockerfile updated from `rust:1.85-bookworm` to `rust:1.93-bookworm`.
+- Dockerfile updated from `rust:1.85-bookworm` to `rust:1.87-bookworm`.
 
 ### Added (M3 — "Speak")
 
