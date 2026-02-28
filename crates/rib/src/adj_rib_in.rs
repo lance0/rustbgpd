@@ -72,6 +72,7 @@ mod tests {
             peer: IpAddr::V4(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
+            is_ebgp: true,
         }
     }
 

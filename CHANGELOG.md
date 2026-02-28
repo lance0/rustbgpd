@@ -4,11 +4,38 @@ All notable changes to rustbgpd will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses milestone-based versioning aligned with the design
-document (M0–M6).
+document (M0–M7).
 
 ---
 
 ## [Unreleased]
+
+## M7 — "Wire & RIB Correctness"
+
+### Fixed
+
+- `rustbgpd-rib`: Adj-RIB-Out divergence on channel-full. `distribute_changes()`
+  and `send_initial_table()` now stage deltas before `try_send()`. Mutations
+  commit only on success; on failure, AdjRibOut is cleared entirely to prevent
+  internal state diverging from what was actually sent to the peer. 2 tests.
+- `rustbgpd-wire`: Malformed NLRI (prefix length > 32) now produces
+  `InvalidNetworkField` error with UPDATE subcode 10 (Invalid Network Field)
+  instead of generic subcode 1 (Malformed Attribute List). Per RFC 4271 §6.3.
+  2 tests.
+- `rustbgpd-wire`: PARTIAL bit on re-advertised unknown attributes narrowed
+  to optional transitive only (both OPTIONAL and TRANSITIVE flags set).
+  Previously set PARTIAL whenever TRANSITIVE was set, incorrectly marking
+  well-known transitive attributes like ATOMIC_AGGREGATE. 1 test.
+- Config: policy prefix lengths validated at load time. Rejects prefix
+  length > 32, ge > 32, ge < prefix length, le > 32, and ge > le. Previously
+  accepted any `u8` value, which could cause panics in `PrefixListEntry::matches()`
+  due to shifts by `32 - len`. 4 tests.
+
+### Added
+
+- `rustbgpd-rib`: eBGP-over-iBGP preference in best-path selection. `Route`
+  gains `is_ebgp: bool` field. Best-path step 5 (between MED and peer address
+  tiebreaker) prefers eBGP routes over iBGP per RFC 4271 §9.1.2. 3 tests.
 
 ## M6 — "Compliance"
 

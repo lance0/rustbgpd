@@ -87,6 +87,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             peer: LOCAL_PEER,
             attributes,
             received_at: std::time::Instant::now(),
+            is_ebgp: false,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();

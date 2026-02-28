@@ -10,12 +10,13 @@ use crate::route::Route;
 
 /// Compare two routes for best-path selection.
 ///
-/// The preferred route sorts `Less`. Decision steps:
+/// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
 /// 1. Highest `LOCAL_PREF` (default 100)
 /// 2. Shortest `AS_PATH` length (default 0)
 /// 3. Lowest ORIGIN — IGP < EGP < INCOMPLETE
 /// 4. Lowest MED (default 0; always-compare / deterministic MED)
-/// 5. Lowest peer address (tiebreaker)
+/// 5. eBGP over iBGP
+/// 6. Lowest peer address (tiebreaker)
 #[must_use]
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
     // 1. Highest LOCAL_PREF wins → reverse comparison
@@ -44,7 +45,13 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
         return cmp;
     }
 
-    // 5. Lowest peer address (final tiebreaker)
+    // 5. eBGP over iBGP (eBGP = true sorts Less = preferred)
+    let cmp = b.is_ebgp.cmp(&a.is_ebgp);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // 6. Lowest peer address (final tiebreaker)
     a.peer.cmp(&b.peer)
 }
 
@@ -71,6 +78,7 @@ mod tests {
                 PathAttribute::LocalPref(100),
             ],
             received_at: Instant::now(),
+            is_ebgp: true,
         }
     }
 
@@ -176,6 +184,25 @@ mod tests {
     }
 
     #[test]
+    fn ebgp_beats_ibgp() {
+        let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        a.is_ebgp = true;
+        let mut b = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        b.is_ebgp = false;
+        // eBGP route wins even though peer address is lower
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+        assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
+    }
+
+    #[test]
+    fn ebgp_ibgp_same_both_ebgp_falls_through() {
+        let a = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let b = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        // Both eBGP — falls through to peer tiebreaker
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+    }
+
+    #[test]
     fn igp_beats_incomplete() {
         let a = with_origin(base_route(Ipv4Addr::new(1, 0, 0, 1)), Origin::Igp);
         let b = with_origin(base_route(Ipv4Addr::new(1, 0, 0, 2)), Origin::Incomplete);
@@ -209,9 +236,10 @@ mod proptests {
             0u32..=500,                                // local_pref
             prop::collection::vec(1u32..=65535, 0..5), // as_path ASNs
             arb_origin(),
-            0u32..=1000, // MED
+            0u32..=1000,   // MED
+            any::<bool>(), // is_ebgp
         )
-            .prop_map(|(peer_oct, lp, asns, origin, med)| {
+            .prop_map(|(peer_oct, lp, asns, origin, med, is_ebgp)| {
                 let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
                 Route {
                     prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
@@ -230,6 +258,7 @@ mod proptests {
                         PathAttribute::Med(med),
                     ],
                     received_at: Instant::now(),
+                    is_ebgp,
                 }
             })
     }

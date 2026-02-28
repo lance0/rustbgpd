@@ -42,6 +42,9 @@ pub enum DecodeError {
         data: Vec<u8>,
         detail: String,
     },
+
+    #[error("UPDATE invalid network field: {detail}")]
+    InvalidNetworkField { detail: String, data: Vec<u8> },
 }
 
 /// Errors encountered while encoding a BGP message to bytes.
@@ -109,6 +112,11 @@ impl DecodeError {
             Self::UpdateAttributeError { subcode, data, .. } => (
                 NotificationCode::UpdateMessage,
                 *subcode,
+                Bytes::from(data.clone()),
+            ),
+            Self::InvalidNetworkField { data, .. } => (
+                NotificationCode::UpdateMessage,
+                10, // Invalid Network Field
                 Bytes::from(data.clone()),
             ),
         }
@@ -185,6 +193,18 @@ mod tests {
         assert_eq!(code, NotificationCode::UpdateMessage);
         assert_eq!(subcode, 6);
         assert_eq!(data.as_ref(), &[0x40, 0x01, 0x01, 0x05]);
+    }
+
+    #[test]
+    fn invalid_network_field_maps_to_subcode_10() {
+        let err = DecodeError::InvalidNetworkField {
+            detail: "prefix length 33 exceeds 32".into(),
+            data: vec![33, 10, 0, 0, 0],
+        };
+        let (code, subcode, data) = err.to_notification();
+        assert_eq!(code, NotificationCode::UpdateMessage);
+        assert_eq!(subcode, 10);
+        assert_eq!(data.as_ref(), &[33, 10, 0, 0, 0]);
     }
 
     #[test]

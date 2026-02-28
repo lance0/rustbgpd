@@ -3,8 +3,8 @@
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** Lance  
-**Status:** M4 complete  
-**Last updated:** 2026-02-27
+**Status:** M7 complete
+**Last updated:** 2026-02-28
 
 ---
 
@@ -409,12 +409,13 @@ Best-path rules (implemented), applied in order:
 2. Shortest AS_PATH (AS_SET counts as 1, per RFC 4271 §9.1.2.2)
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
 4. Lowest MED (deterministic — always-compare across all peers, not just same-AS)
-5. Lowest peer address (final disambiguator — guarantees strict ordering)
+5. eBGP over iBGP (prefer external routes)
+6. Lowest peer address (final disambiguator — guarantees strict ordering)
 
 **Implementation choices (ADR-0014):**
 - `best_path_cmp()` is a standalone function, not `Ord` on `Route`. Domain-specific ordering doesn't belong as a trait impl — multiple orderings may be needed.
 - Deterministic MED (always-compare) matches GoBGP default. Simpler and avoids ordering sensitivity.
-- eBGP/iBGP and router-id tiebreakers are deferred to M3 when outbound advertisement requires the full decision process.
+- `Route` carries `is_ebgp: bool` for eBGP-over-iBGP preference (step 5).
 - `LocRib` lives inside `RibManager` — same single-task ownership pattern, no new locks.
 - Incremental recompute: only prefixes affected by each update are re-evaluated.
 
@@ -424,7 +425,7 @@ Exposed via `ListBestRoutes` gRPC endpoint with offset pagination.
 - Deterministic outcomes for all decision inputs, verified by property tests (antisymmetry, transitivity, totality).
 - Stable best-path selection with multiple paths from multiple peers.
 - Structured debug events for best-path changes.
-- 248 tests pass (M2), clippy clean, fmt clean.
+- 342 tests pass (M7), clippy clean, fmt clean.
 
 ### Milestone 3: "Speak" `[complete]`
 

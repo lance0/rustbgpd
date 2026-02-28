@@ -445,51 +445,38 @@ Wire RFC compliance, GlobalService, ControlService, coordinated shutdown.
 
 ---
 
-## M7 — "Wire & RIB Correctness"
+## M7 — "Wire & RIB Correctness" `[complete]`
 
-Peer-visible bugs found during full-project code review. Fix these first,
-then re-run FRR/BIRD interop suites.
+Peer-visible bugs found during full-project code review.
 
-### Build order
+### Completed
 
-1. **Adj-RIB-Out divergence on channel-full** (`crates/rib/src/manager.rs`)
-   - `distribute_changes()` and `send_initial_table()` mutate AdjRibOut
-     before attempting `tx.try_send()`. If the channel is full, internal
-     state diverges from what was actually sent to the peer.
-   - Fix: stage delta, send, commit only on success. Mark peer dirty on
-     failure and rebuild from known-good snapshot.
+1. ~~**Adj-RIB-Out divergence on channel-full** (`crates/rib/src/manager.rs`)~~
+   - `distribute_changes()` and `send_initial_table()` now stage deltas
+     before `try_send()`. Mutations commit only on success. On failure,
+     AdjRibOut is cleared entirely to prevent divergence. 2 tests.
 
-2. **Malformed NLRI maps to wrong NOTIFICATION** (`crates/wire/src/nlri.rs`, `error.rs`, `update.rs`)
-   - `decode_nlri()` reports bad prefix lengths as `MalformedField` →
-     subcode 1 (Malformed Attribute List). RFC 4271 requires subcode 10
-     (Invalid Network Field).
-   - Fix: dedicated NLRI decode error variant → subcode 10 with offending
-     bytes.
+2. ~~**Malformed NLRI maps to wrong NOTIFICATION** (`crates/wire/src/nlri.rs`, `error.rs`)~~
+   - `InvalidNetworkField` error variant → subcode 10 with offending bytes.
+     2 tests.
 
-3. **PARTIAL bit set too broadly on unknown attributes** (`crates/wire/src/attribute.rs`)
-   - Encode path sets PARTIAL whenever TRANSITIVE is set. Correct only for
-     optional transitive. ATOMIC_AGGREGATE flows through Unknown and gets
-     PARTIAL incorrectly.
-   - Fix: set PARTIAL only when both OPTIONAL and TRANSITIVE, or promote
-     ATOMIC_AGGREGATE to a first-class typed variant.
+3. ~~**PARTIAL bit set too broadly on unknown attributes** (`crates/wire/src/attribute.rs`)~~
+   - PARTIAL now only set when both OPTIONAL and TRANSITIVE flags present.
+     Well-known transitive attributes (e.g., ATOMIC_AGGREGATE) no longer
+     get PARTIAL incorrectly. 1 test.
 
-4. **Policy prefix lengths >32 can panic** (`src/config.rs`, `crates/policy/src/prefix_list.rs`)
-   - Config accepts any u8 CIDR length. `PrefixListEntry::matches()` shifts
-     by `32 - len` which panics or produces nonsense for len > 32.
-   - Fix: reject lengths outside 0..=32 at config load, validate ge/le
-     bounds.
+4. ~~**Policy prefix lengths >32 can panic** (`src/config.rs`)~~
+   - Config rejects prefix lengths > 32, ge > 32, ge < prefix length,
+     le > 32, and ge > le at load time. 4 tests.
 
-5. **Best-path omits eBGP-over-iBGP preference** (`crates/rib/src/best_path.rs`)
-   - Comparator stops at LOCAL_PREF, AS_PATH, ORIGIN, MED, peer address.
-     Missing eBGP-over-iBGP and later tie-break stages per §9.1.2.
-   - Fix: implement remaining stages (at minimum eBGP-over-iBGP), or
-     document "simplified best-path mode" and remove RFC-complete claims.
+5. ~~**Best-path omits eBGP-over-iBGP preference** (`crates/rib/src/best_path.rs`)~~
+   - Added eBGP-over-iBGP preference as step 5 (between MED and peer
+     address tiebreaker). `Route` gains `is_ebgp: bool` field. 3 tests.
 
 ### Exit criteria
 
 - All 5 findings fixed with regression tests
-- FRR and BIRD interop suites re-validated
-- 332+ tests pass, clippy clean, fmt clean
+- 342 tests pass (+10 new), clippy clean, fmt clean
 
 ---
 

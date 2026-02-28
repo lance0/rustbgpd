@@ -132,6 +132,40 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
             .map_err(|_| ConfigError::InvalidPolicyEntry {
                 reason: format!("invalid prefix length in {:?}", e.prefix),
             })?;
+        if len > 32 {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("prefix length {} exceeds 32 in {:?}", len, e.prefix),
+            });
+        }
+        if let Some(ge) = e.ge {
+            if ge > 32 {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!("ge value {} exceeds 32 in {:?}", ge, e.prefix),
+                });
+            }
+            if ge < len {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "ge value {} is less than prefix length {} in {:?}",
+                        ge, len, e.prefix
+                    ),
+                });
+            }
+        }
+        if let Some(le) = e.le
+            && le > 32
+        {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("le value {} exceeds 32 in {:?}", le, e.prefix),
+            });
+        }
+        if let (Some(ge), Some(le)) = (e.ge, e.le)
+            && ge > le
+        {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("ge value {} exceeds le value {} in {:?}", ge, le, e.prefix),
+            });
+        }
         parsed.push(PrefixListEntry {
             prefix: Ipv4Prefix::new(addr, len),
             ge: e.ge,
@@ -729,6 +763,94 @@ prefix = "not-a-prefix"
 "#;
         let config = parse(toml_str).unwrap();
         let err = config.export_policy().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn policy_prefix_length_over_32_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[policy.import]]
+action = "deny"
+prefix = "10.0.0.0/33"
+"#;
+        let config = parse(toml_str).unwrap();
+        let err = config.import_policy().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn policy_ge_over_32_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[policy.import]]
+action = "deny"
+prefix = "10.0.0.0/8"
+ge = 33
+"#;
+        let config = parse(toml_str).unwrap();
+        let err = config.import_policy().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn policy_ge_less_than_prefix_len_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[policy.import]]
+action = "deny"
+prefix = "10.0.0.0/16"
+ge = 8
+"#;
+        let config = parse(toml_str).unwrap();
+        let err = config.import_policy().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn policy_ge_exceeds_le_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[policy.import]]
+action = "deny"
+prefix = "10.0.0.0/8"
+ge = 24
+le = 16
+"#;
+        let config = parse(toml_str).unwrap();
+        let err = config.import_policy().unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 }

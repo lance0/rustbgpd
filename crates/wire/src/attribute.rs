@@ -455,9 +455,11 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                 }
             }
             PathAttribute::Unknown(raw) => {
-                // RFC 4271 §5: unrecognized optional transitive attributes must
-                // be propagated with the Partial bit set.
-                flags = if (raw.flags & attr_flags::TRANSITIVE) != 0 {
+                // RFC 4271 §5: unrecognized *optional* transitive attributes
+                // must be propagated with the Partial bit set. Well-known
+                // transitive attributes (OPTIONAL=0) must NOT get PARTIAL.
+                let optional_transitive = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                flags = if (raw.flags & optional_transitive) == optional_transitive {
                     raw.flags | attr_flags::PARTIAL
                 } else {
                     raw.flags
@@ -942,6 +944,19 @@ mod tests {
             buf[0],
             attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL
         );
+    }
+
+    #[test]
+    fn encode_unknown_wellknown_transitive_no_partial() {
+        // Well-known transitive (OPTIONAL=0, TRANSITIVE=1) should NOT get PARTIAL
+        let attr = PathAttribute::Unknown(RawAttribute {
+            flags: attr_flags::TRANSITIVE, // 0x40, well-known transitive
+            type_code: 99,
+            data: Bytes::from_static(&[1, 2]),
+        });
+        let mut buf = Vec::new();
+        encode_path_attributes(&[attr], &mut buf, true);
+        assert_eq!(buf[0], attr_flags::TRANSITIVE);
     }
 
     #[test]

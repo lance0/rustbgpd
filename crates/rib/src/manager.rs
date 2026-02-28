@@ -111,6 +111,10 @@ impl RibManager {
     }
 
     /// Distribute Loc-RIB changes to all registered outbound peers.
+    ///
+    /// `AdjRibOut` is only committed after a successful channel send. On send
+    /// failure the `AdjRibOut` is cleared so the next successful send will
+    /// rebuild from the current Loc-RIB state.
     fn distribute_changes(&mut self, changed_prefixes: &HashSet<Ipv4Prefix>) {
         if changed_prefixes.is_empty() {
             return;
@@ -121,7 +125,7 @@ impl RibManager {
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
 
-            // Resolve export policy before borrowing rib_out mutably
+            // Resolve export policy before borrowing rib_out
             let export_pol = self.export_policy_for(peer).cloned();
 
             let rib_out = self
@@ -129,12 +133,12 @@ impl RibManager {
                 .entry(peer)
                 .or_insert_with(|| AdjRibOut::new(peer));
 
+            // Stage: compute delta without mutating AdjRibOut
             for prefix in changed_prefixes {
                 if let Some(best) = self.loc_rib.get(prefix) {
                     // Split horizon: don't send route back to its source
                     if best.peer == peer {
-                        // If we previously advertised this, withdraw it
-                        if rib_out.withdraw(prefix) {
+                        if rib_out.get(prefix).is_some() {
                             withdraw.push(*prefix);
                         }
                         continue;
@@ -144,18 +148,17 @@ impl RibManager {
                     if check_prefix_list(export_pol.as_ref(), *prefix)
                         != rustbgpd_policy::PolicyAction::Permit
                     {
-                        if rib_out.withdraw(prefix) {
+                        if rib_out.get(prefix).is_some() {
                             withdraw.push(*prefix);
                         }
                         continue;
                     }
 
                     // Advertise (or re-advertise if already in Adj-RIB-Out)
-                    rib_out.insert(best.clone());
                     announce.push(best.clone());
                 } else {
                     // Best path removed — withdraw if previously advertised
-                    if rib_out.withdraw(prefix) {
+                    if rib_out.get(prefix).is_some() {
                         withdraw.push(*prefix);
                     }
                 }
@@ -164,24 +167,42 @@ impl RibManager {
             if (!announce.is_empty() || !withdraw.is_empty())
                 && let Some(tx) = self.outbound_peers.get(&peer)
             {
-                let update = OutboundRouteUpdate { announce, withdraw };
+                let update = OutboundRouteUpdate {
+                    announce: announce.clone(),
+                    withdraw: withdraw.clone(),
+                };
                 if tx.try_send(update).is_err() {
-                    warn!(%peer, "outbound channel full or closed");
+                    warn!(%peer, "outbound channel full or closed — clearing Adj-RIB-Out");
                     self.metrics.record_outbound_route_drop(&peer.to_string());
+                    // Clear AdjRibOut so next successful send rebuilds from scratch
+                    if let Some(rib_out) = self.adj_ribs_out.get_mut(&peer) {
+                        rib_out.clear();
+                    }
+                } else {
+                    // Commit: apply staged mutations to AdjRibOut
+                    let rib_out = self
+                        .adj_ribs_out
+                        .get_mut(&peer)
+                        .expect("rib_out just accessed");
+                    for route in &announce {
+                        rib_out.insert(route.clone());
+                    }
+                    for prefix in &withdraw {
+                        rib_out.withdraw(prefix);
+                    }
                 }
             }
         }
     }
 
     /// Send the full Loc-RIB to a newly established peer (initial table dump).
+    ///
+    /// `AdjRibOut` is only populated after a successful channel send.
     fn send_initial_table(&mut self, peer: IpAddr) {
         let mut announce = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
-        let rib_out = self
-            .adj_ribs_out
-            .entry(peer)
-            .or_insert_with(|| AdjRibOut::new(peer));
 
+        // Stage: collect eligible routes without mutating AdjRibOut
         for route in self.loc_rib.iter() {
             // Split horizon
             if route.peer == peer {
@@ -193,7 +214,6 @@ impl RibManager {
             {
                 continue;
             }
-            rib_out.insert(route.clone());
             announce.push(route.clone());
         }
 
@@ -201,12 +221,21 @@ impl RibManager {
             && let Some(tx) = self.outbound_peers.get(&peer)
         {
             let update = OutboundRouteUpdate {
-                announce,
+                announce: announce.clone(),
                 withdraw: vec![],
             };
             if tx.try_send(update).is_err() {
                 warn!(%peer, "outbound channel full or closed during initial dump");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
+            } else {
+                // Commit: populate AdjRibOut with what was actually sent
+                let rib_out = self
+                    .adj_ribs_out
+                    .entry(peer)
+                    .or_insert_with(|| AdjRibOut::new(peer));
+                for route in &announce {
+                    rib_out.insert(route.clone());
+                }
             }
         }
     }
@@ -369,6 +398,7 @@ mod tests {
             peer: IpAddr::V4(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
+            is_ebgp: true,
         }
     }
 
@@ -385,6 +415,7 @@ mod tests {
                 PathAttribute::LocalPref(local_pref),
             ],
             received_at: Instant::now(),
+            is_ebgp: true,
         }
     }
 
@@ -907,6 +938,7 @@ mod tests {
                 PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
             ],
             received_at: Instant::now(),
+            is_ebgp: false,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -958,6 +990,7 @@ mod tests {
             peer: LOCAL_PEER,
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
+            is_ebgp: false,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1196,6 +1229,144 @@ mod tests {
         .unwrap();
         let routes = reply_rx.await.unwrap();
         assert!(routes.is_empty());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn channel_full_clears_adj_rib_out() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+
+        // Channel capacity 1: fills after one send
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+        })
+        .await
+        .unwrap();
+
+        // First route: should succeed (channel empty → fits)
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Drain the successful send so we can verify AdjRibOut
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+
+        // Verify AdjRibOut has the route
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert_eq!(advertised.len(), 1);
+
+        // Send prefix2 — fills the channel (capacity 1)
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // DON'T drain — channel is now full. Withdraw prefix1 to trigger
+        // another distribute_changes that will fail on try_send.
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![],
+            withdrawn: vec![prefix1],
+        })
+        .await
+        .unwrap();
+
+        // Force serialization
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        // After channel-full failure, AdjRibOut should be cleared
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert!(
+            advertised.is_empty(),
+            "AdjRibOut should be cleared after channel-full failure"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initial_dump_channel_full_skips_adj_rib_out() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        // Pre-populate Loc-RIB
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Use a closed channel (drop rx side immediately) to guarantee send failure
+        let (out_tx, out_rx) = mpsc::channel(1);
+        drop(out_rx);
+
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+        })
+        .await
+        .unwrap();
+
+        // AdjRibOut should be empty since initial dump send failed
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert!(
+            advertised.is_empty(),
+            "AdjRibOut should be empty when initial dump send fails"
+        );
 
         drop(tx);
         handle.await.unwrap();

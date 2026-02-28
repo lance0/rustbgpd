@@ -11,6 +11,8 @@ pub struct Route {
     pub peer: IpAddr,
     pub attributes: Vec<PathAttribute>,
     pub received_at: Instant,
+    /// Whether this route was learned via an eBGP session (local ASN != remote ASN).
+    pub is_ebgp: bool,
 }
 
 impl Route {

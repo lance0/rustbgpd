@@ -40,7 +40,8 @@ payloadless events).
 **Negative:**
 - The RIB manager task does more work per update (iterates all peers).
 - A slow peer's outbound channel can back up, but `try_send` prevents blocking
-  the RIB task.
+  the RIB task. On channel-full, AdjRibOut is cleared entirely to prevent
+  divergence between internal state and what the peer actually received (M7).
 
 **Neutral:**
 - Injected routes (via gRPC `AddPath`) use sentinel peer `0.0.0.0` and

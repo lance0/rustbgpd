@@ -53,9 +53,9 @@ pub fn decode_nlri(mut buf: &[u8]) -> Result<Vec<Ipv4Prefix>, DecodeError> {
         buf = &buf[1..];
 
         if prefix_len > 32 {
-            return Err(DecodeError::MalformedField {
-                message_type: "UPDATE",
+            return Err(DecodeError::InvalidNetworkField {
                 detail: format!("NLRI prefix length {prefix_len} exceeds 32"),
+                data: buf.to_vec(),
             });
         }
 
@@ -144,7 +144,10 @@ mod tests {
     fn reject_prefix_len_exceeds_32() {
         let buf = [33, 10, 0, 0, 0];
         let err = decode_nlri(&buf).unwrap_err();
-        assert!(matches!(err, DecodeError::MalformedField { .. }));
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+        let (code, subcode, _) = err.to_notification();
+        assert_eq!(code, crate::notification::NotificationCode::UpdateMessage);
+        assert_eq!(subcode, 10);
     }
 
     #[test]

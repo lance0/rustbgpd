@@ -619,6 +619,7 @@ impl PeerSession {
                 peer: self.peer_ip,
                 attributes: parsed.attributes.clone(),
                 received_at: now,
+                is_ebgp,
             })
             .collect();
 
@@ -896,6 +897,7 @@ mod tests {
                 PathAttribute::LocalPref(local_pref),
             ],
             received_at: Instant::now(),
+            is_ebgp: true,
         }
     }
 
@@ -983,6 +985,7 @@ mod tests {
                 PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
             ],
             received_at: Instant::now(),
+            is_ebgp: false,
         };
         let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
 
