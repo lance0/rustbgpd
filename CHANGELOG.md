@@ -3,12 +3,18 @@
 All notable changes to rustbgpd will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-This project uses milestone-based versioning aligned with the design
-document (M0–M9).
+This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
 ## [Unreleased]
+
+## [0.1.0] — 2026-02-28
+
+First tagged release. Covers milestones M0–M9: a fully functional,
+IPv4-unicast BGP daemon with gRPC API, RFC 4271 compliance, TCP collision
+detection, and interop validation against FRR 10.3.1 and BIRD 2.0.12.
+367 tests pass.
 
 ### Fixed
 
@@ -446,32 +452,3 @@ document (M0–M9).
 - `rustbgpd-wire`: Fuzz harness for `decode_message` via cargo-fuzz / libfuzzer
 - Malformed OPEN interop test config (`rustbgpd-frr-badopen.toml`)
 
----
-
-## [0.0.1] — Unreleased
-
-Target: **M0 — "Establish"**
-
-### Done
-
-- `rustbgpd-wire`: OPEN, KEEPALIVE, NOTIFICATION encode/decode
-- `rustbgpd-wire`: Capability parsing (4-byte ASN, MP-BGP)
-- `rustbgpd-wire`: Strict 4096-byte message size enforcement
-- `rustbgpd-fsm`: RFC 4271 state machine (all 6 states)
-- `rustbgpd-fsm`: Timer inputs (ConnectRetry, Hold, Keepalive)
-- `rustbgpd-fsm`: OPEN negotiation and capability exchange
-- `rustbgpd-telemetry`: Prometheus metric stubs (8 metrics, all counters at zero)
-- `rustbgpd-telemetry`: Structured JSON log events via tracing-subscriber
-- `rustbgpd-transport`: Single-task-per-peer TCP session runtime
-- `rustbgpd-transport`: Framing, timers, connect/disconnect lifecycle
-- `rustbgpd-transport`: 18 tests (12 unit + 6 integration with mock peer)
-- Daemon binary: config loading → telemetry init → peer spawn → metrics server → shutdown
-- CI pipeline: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test --workspace`
-
-### Exit Criteria
-
-- Establish and hold 30+ minutes with FRR and BIRD
-- Survive peer restart and TCP reset
-- Correct NOTIFICATION on malformed OPEN
-- Prometheus metrics capture all state transitions
-- Structured log events for every FSM transition
