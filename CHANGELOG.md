@@ -17,12 +17,22 @@ document (M0–M9).
   `self.negotiated` (set later at `SessionEstablished`). Previously the
   notification never fired, bypassing TCP collision detection entirely.
   1 integration test.
+- `rustbgpd-transport`: `QueryState` now reads `remote_router_id` (and
+  `negotiated_hold_time`, `four_octet_as`) from `self.fsm.negotiated()`
+  with fallback to `self.negotiated`. Previously `handle_inbound()` in
+  OpenConfirm could not resolve collisions because `remote_router_id` was
+  `None`. 1 integration test.
+- `rustbgpd-transport`: Session notification channel changed from bounded
+  `mpsc::channel(64)` with `try_send()` to `mpsc::unbounded_channel()` with
+  `send()`. Collision notifications are no longer silently dropped under
+  channel pressure. Unbounded is safe here because rate is bounded by FSM
+  state transitions (infrequent). Avoids deadlock risk that `send().await`
+  on a bounded channel would introduce (PeerManager queries peer state via
+  the same task).
 - `PeerManager`: `disable_peer()` now clears `pending_inbound`. `BackToIdle`
   handler guards against accepting pending inbound for disabled peers.
   Previously disabling a peer could be undone by a queued inbound connection.
   1 test.
-- `rustbgpd-transport`: Session notification `try_send()` failures now logged
-  with `warn!` instead of silently discarded.
 - `src/metrics_server.rs`: Semaphore permit acquired before `accept()` for
   exact connection cap (was off-by-one: 65 instead of 64).
 - `docs/SECURITY.md`: Corrected metrics endpoint description (no default
@@ -31,6 +41,7 @@ document (M0–M9).
   exposes unauthenticated RPCs. Links to `docs/SECURITY.md`.
 - `crates/fsm/src/session.rs`: Doc comment on `negotiated()` corrected from
   "available after Established" to "available after `OpenConfirm`".
+- `ROADMAP.md`: Corrected M8 test count from 347 to 357.
 
 ## M9 — "Production Hardening"
 

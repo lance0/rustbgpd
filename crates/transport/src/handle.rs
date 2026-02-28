@@ -84,7 +84,7 @@ impl PeerHandle {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
-        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
@@ -114,7 +114,7 @@ impl PeerHandle {
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {

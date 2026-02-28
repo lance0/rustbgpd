@@ -59,7 +59,9 @@ pub(crate) struct PeerSession {
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
     export_policy: Option<PrefixList>,
     /// Channel to notify `PeerManager` of session state changes (collision detection).
-    session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
+    /// Unbounded so notifications are never dropped and never block (avoids
+    /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
+    session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     /// Accepted prefixes for accurate count and dedup.
     known_prefixes: HashSet<rustbgpd_wire::Ipv4Prefix>,
     /// Session counters
@@ -83,7 +85,7 @@ impl PeerSession {
         rib_tx: mpsc::Sender<RibUpdate>,
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
-        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -129,7 +131,7 @@ impl PeerSession {
         import_policy: Option<PrefixList>,
         export_policy: Option<PrefixList>,
         stream: TcpStream,
-        session_notify_tx: Option<mpsc::Sender<SessionNotification>>,
+        session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -345,10 +347,12 @@ impl PeerSession {
                     // Notify PeerManager for collision detection.
                     // Read from the FSM's negotiated (set at OpenConfirm),
                     // not self.negotiated (set later at SessionEstablished).
+                    // Uses unbounded channel so notifications are never dropped
+                    // and never block (avoids deadlock with QueryState).
                     if let Some(ref notify_tx) = self.session_notify_tx {
                         if new == SessionState::OpenConfirm
                             && let Some(neg) = self.fsm.negotiated()
-                            && let Err(e) = notify_tx.try_send(SessionNotification::OpenReceived {
+                            && let Err(e) = notify_tx.send(SessionNotification::OpenReceived {
                                 peer_addr: self.peer_ip,
                                 remote_router_id: neg.peer_router_id,
                             })
@@ -359,7 +363,7 @@ impl PeerSession {
                                 "failed to send OpenReceived notification"
                             );
                         } else if new == SessionState::Idle
-                            && let Err(e) = notify_tx.try_send(SessionNotification::BackToIdle {
+                            && let Err(e) = notify_tx.send(SessionNotification::BackToIdle {
                                 peer_addr: self.peer_ip,
                             })
                         {
@@ -727,13 +731,19 @@ impl PeerSession {
             }
             PeerCommand::QueryState { reply } => {
                 let uptime_secs = self.established_at.map_or(0, |t| t.elapsed().as_secs());
+                // Prefer FSM's negotiated (available at OpenConfirm) over
+                // self.negotiated (set later at SessionEstablished). This is
+                // critical for collision detection: handle_inbound() reads
+                // remote_router_id via QueryState when the session is in
+                // OpenConfirm.
+                let neg = self.fsm.negotiated().or(self.negotiated.as_ref());
                 let state = PeerSessionState {
                     fsm_state: self.fsm.state(),
                     peer_ip: self.peer_ip,
                     prefix_count: self.known_prefixes.len(),
-                    negotiated_hold_time: self.negotiated.as_ref().map(|n| n.hold_time),
-                    four_octet_as: self.negotiated.as_ref().map(|n| n.four_octet_as),
-                    remote_router_id: self.negotiated.as_ref().map(|n| n.peer_router_id),
+                    negotiated_hold_time: neg.map(|n| n.hold_time),
+                    four_octet_as: neg.map(|n| n.four_octet_as),
+                    remote_router_id: neg.map(|n| n.peer_router_id),
                     updates_received: self.updates_received,
                     updates_sent: self.updates_sent,
                     notifications_received: self.notifications_received,

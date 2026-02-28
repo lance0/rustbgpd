@@ -537,7 +537,7 @@ affect operators and automation consumers.
 - API contracts match implementation behavior
 - Metrics reflect actual RIB state
 - Consumers get correct data from all gRPC endpoints
-- 347 tests pass (+13 new), clippy clean, fmt clean
+- 357 tests pass (+13 new), clippy clean, fmt clean
 
 ---
 
@@ -583,7 +583,7 @@ Security, resilience, operational safety, and core protocol compliance
 - Documented security posture for gRPC exposure
 - TCP collision detection per RFC 4271 §6.8
 - gRPC lifecycle supervised
-- 366 tests pass (+19 new), clippy clean, fmt clean
+- 367 tests pass (+20 new), clippy clean, fmt clean
 
 ---
 

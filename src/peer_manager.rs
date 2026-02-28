@@ -41,8 +41,8 @@ pub struct PeerManager {
     router_id: Ipv4Addr,
     metrics: BgpMetrics,
     rib_tx: mpsc::Sender<RibUpdate>,
-    session_notify_tx: mpsc::Sender<SessionNotification>,
-    session_notify_rx: mpsc::Receiver<SessionNotification>,
+    session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
+    session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
 }
 
 impl PeerManager {
@@ -53,7 +53,7 @@ impl PeerManager {
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
     ) -> Self {
-        let (session_notify_tx, session_notify_rx) = mpsc::channel(64);
+        let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
         Self {
             peers: HashMap::new(),
             rx,

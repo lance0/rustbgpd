@@ -360,7 +360,7 @@ async fn open_confirm_sends_session_notification() {
     let addr = listener.local_addr().unwrap();
     let metrics = BgpMetrics::new();
 
-    let (notify_tx, mut notify_rx) = mpsc::channel::<SessionNotification>(16);
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
     let handle = PeerHandle::spawn(
@@ -403,6 +403,66 @@ async fn open_confirm_sends_session_notification() {
         }
         other => panic!("expected OpenReceived, got {other:?}"),
     }
+
+    // Clean shutdown
+    handle.shutdown().await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn query_state_returns_router_id_at_open_confirm() {
+    // Verify that QueryState exposes remote_router_id during OpenConfirm
+    // (not just after SessionEstablished). This is critical for collision
+    // detection: handle_inbound() reads remote_router_id via QueryState
+    // when the existing session is already in OpenConfirm.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = BgpMetrics::new();
+
+    let (notify_tx, mut notify_rx) = mpsc::unbounded_channel::<SessionNotification>();
+
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let handle = PeerHandle::spawn(
+        transport_config(addr),
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        Some(notify_tx),
+    );
+    handle.start().await.unwrap();
+
+    // Accept the connection from rustbgpd
+    let (mut peer_stream, _) = listener.accept().await.unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+
+    // Read the OPEN from rustbgpd
+    let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
+    assert!(matches!(msg, Message::Open(_)));
+
+    // Send our OPEN — rustbgpd transitions to OpenConfirm
+    send_bgp_message(&mut peer_stream, &Message::Open(mock_open())).await;
+
+    // Wait for the OpenReceived notification to confirm we're in OpenConfirm
+    let notification = tokio::time::timeout(Duration::from_secs(5), notify_rx.recv())
+        .await
+        .expect("should receive notification within timeout")
+        .expect("channel should not be closed");
+    assert!(matches!(
+        notification,
+        SessionNotification::OpenReceived { .. }
+    ));
+
+    // Now query state — remote_router_id should be available even though
+    // we haven't sent KEEPALIVE yet (session is NOT Established)
+    let state = handle
+        .query_state()
+        .await
+        .expect("query_state should succeed");
+    assert_eq!(
+        state.remote_router_id,
+        Some(Ipv4Addr::new(10, 0, 0, 2)),
+        "remote_router_id should be available at OpenConfirm, not just Established"
+    );
 
     // Clean shutdown
     handle.shutdown().await.unwrap().unwrap();

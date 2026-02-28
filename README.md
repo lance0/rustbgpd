@@ -35,7 +35,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **366 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **367 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -244,7 +244,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** Nine milestones complete. 366 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** Nine milestones complete. 367 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Milestone | Status | Scope |
 |-----------|--------|-------|
