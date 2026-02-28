@@ -437,7 +437,7 @@ Inject and withdraw routes via gRPC (`AddPath` / `DeletePath`). Build Adj-RIB-Ou
 - Outbound UPDATEs bypass the pure FSM — consistent with inbound pattern.
 - Injected routes stored under sentinel peer `0.0.0.0` in standard Adj-RIB-In, participating in normal best-path selection and distribution.
 - `UpdateMessage::build()` high-level constructor for outbound UPDATEs.
-- eBGP outbound: prepend local ASN to AS_PATH, set NEXT_HOP to local router ID, strip LOCAL_PREF.
+- eBGP outbound: prepend local ASN to AS_PATH, set NEXT_HOP to session's local IPv4 socket address (reachable, not router-id), strip LOCAL_PREF.
 - iBGP outbound: ensure LOCAL_PREF present (default 100), pass NEXT_HOP through.
 - TCP MD5 and GTSM require `socket2::Socket` for pre-connect `setsockopt` calls (ADR-0016). Only `unsafe` code in the project, isolated to `socket_opts` module.
 - Global prefix-list policy: first-match-wins evaluation, separate import/export lists.

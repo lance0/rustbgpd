@@ -198,12 +198,13 @@ mod tests {
     #[test]
     fn invalid_network_field_maps_to_subcode_10() {
         let err = DecodeError::InvalidNetworkField {
-            detail: "prefix length 33 exceeds 32".into(),
+            detail: "NLRI prefix length 33 exceeds 32".into(),
             data: vec![33, 10, 0, 0, 0],
         };
         let (code, subcode, data) = err.to_notification();
         assert_eq!(code, NotificationCode::UpdateMessage);
         assert_eq!(subcode, 10);
+        // Data includes the offending length byte + address bytes
         assert_eq!(data.as_ref(), &[33, 10, 0, 0, 0]);
     }
 

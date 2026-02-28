@@ -49,21 +49,30 @@ pub fn decode_nlri(mut buf: &[u8]) -> Result<Vec<Ipv4Prefix>, DecodeError> {
     let mut prefixes = Vec::new();
 
     while !buf.is_empty() {
+        let field_start = buf;
         let prefix_len = buf[0];
         buf = &buf[1..];
 
         if prefix_len > 32 {
+            // Include the length byte + available address bytes in error data
+            let addr_bytes = usize::from(prefix_len.div_ceil(8)).min(buf.len());
             return Err(DecodeError::InvalidNetworkField {
                 detail: format!("NLRI prefix length {prefix_len} exceeds 32"),
-                data: buf.to_vec(),
+                data: field_start[..=addr_bytes].to_vec(),
             });
         }
 
         let byte_count = usize::from(prefix_len.div_ceil(8));
         if buf.len() < byte_count {
-            return Err(DecodeError::Incomplete {
-                needed: byte_count,
-                available: buf.len(),
+            // Truncated NLRI is also an Invalid Network Field, not a header
+            // framing error. Include the length byte + available bytes.
+            return Err(DecodeError::InvalidNetworkField {
+                detail: format!(
+                    "NLRI truncated: prefix length {prefix_len} requires \
+                     {byte_count} bytes, have {}",
+                    buf.len()
+                ),
+                data: field_start[..=buf.len()].to_vec(),
             });
         }
 
@@ -145,9 +154,11 @@ mod tests {
         let buf = [33, 10, 0, 0, 0];
         let err = decode_nlri(&buf).unwrap_err();
         assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
-        let (code, subcode, _) = err.to_notification();
+        let (code, subcode, data) = err.to_notification();
         assert_eq!(code, crate::notification::NotificationCode::UpdateMessage);
         assert_eq!(subcode, 10);
+        // Error data includes the length byte + available address bytes
+        assert_eq!(data.as_ref(), &[33, 10, 0, 0, 0]);
     }
 
     #[test]
@@ -155,7 +166,12 @@ mod tests {
         // /24 needs 3 bytes but only 2 provided
         let buf = [24, 10, 0];
         let err = decode_nlri(&buf).unwrap_err();
-        assert!(matches!(err, DecodeError::Incomplete { .. }));
+        assert!(matches!(err, DecodeError::InvalidNetworkField { .. }));
+        let (code, subcode, data) = err.to_notification();
+        assert_eq!(code, crate::notification::NotificationCode::UpdateMessage);
+        assert_eq!(subcode, 10);
+        // Error data includes the length byte + available bytes
+        assert_eq!(data.as_ref(), &[24, 10, 0]);
     }
 
     #[test]

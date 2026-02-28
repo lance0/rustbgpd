@@ -16,20 +16,25 @@ document (M0–M7).
 
 - `rustbgpd-rib`: Adj-RIB-Out divergence on channel-full. `distribute_changes()`
   and `send_initial_table()` now stage deltas before `try_send()`. Mutations
-  commit only on success; on failure, AdjRibOut is cleared entirely to prevent
-  internal state diverging from what was actually sent to the peer. 2 tests.
-- `rustbgpd-wire`: Malformed NLRI (prefix length > 32) now produces
-  `InvalidNetworkField` error with UPDATE subcode 10 (Invalid Network Field)
-  instead of generic subcode 1 (Malformed Attribute List). Per RFC 4271 §6.3.
+  commit only on success. On failure the peer is marked dirty and a full export
+  resync runs on the next event loop iteration, diffing the entire Loc-RIB
+  against AdjRibOut to recover missed updates and withdrawals. AdjRibOut is
+  preserved (not cleared) so knowledge of the peer's on-wire state is retained.
   2 tests.
+- `rustbgpd-wire`: Both malformed NLRI cases — prefix length > 32 and truncated
+  NLRI buffer — now produce `InvalidNetworkField` with UPDATE subcode 10
+  (Invalid Network Field). Previously prefix_len > 32 used subcode 1 and
+  truncation mapped to Message Header / Bad Message Length (1/2). Error data
+  includes the offending length byte and available address bytes. 2 tests.
 - `rustbgpd-wire`: PARTIAL bit on re-advertised unknown attributes narrowed
   to optional transitive only (both OPTIONAL and TRANSITIVE flags set).
   Previously set PARTIAL whenever TRANSITIVE was set, incorrectly marking
   well-known transitive attributes like ATOMIC_AGGREGATE. 1 test.
-- Config: policy prefix lengths validated at load time. Rejects prefix
-  length > 32, ge > 32, ge < prefix length, le > 32, and ge > le. Previously
-  accepted any `u8` value, which could cause panics in `PrefixListEntry::matches()`
-  due to shifts by `32 - len`. 4 tests.
+- Config: policy prefix lengths eagerly validated in `Config::validate()` at
+  load time. Rejects prefix length > 32, ge > 32, ge < prefix length, le > 32,
+  and ge > le. Previously deferred to first policy access, which could cause
+  panics in `PrefixListEntry::matches()`. Both global and per-neighbor policies
+  are now checked. 4 tests.
 
 ### Added
 

@@ -28,6 +28,8 @@ pub struct RibManager {
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
     export_policy: Option<PrefixList>,
     peer_export_policies: HashMap<IpAddr, Option<PrefixList>>,
+    /// Peers that failed a `try_send()` and need a full export resync.
+    dirty_peers: HashSet<IpAddr>,
     route_events_tx: broadcast::Sender<RouteEvent>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
@@ -48,6 +50,7 @@ impl RibManager {
             outbound_peers: HashMap::new(),
             export_policy,
             peer_export_policies: HashMap::new(),
+            dirty_peers: HashSet::new(),
             route_events_tx,
             metrics,
             rx,
@@ -112,16 +115,33 @@ impl RibManager {
 
     /// Distribute Loc-RIB changes to all registered outbound peers.
     ///
-    /// `AdjRibOut` is only committed after a successful channel send. On send
-    /// failure the `AdjRibOut` is cleared so the next successful send will
-    /// rebuild from the current Loc-RIB state.
+    /// For clean peers, only `changed_prefixes` are evaluated. Dirty peers
+    /// (those that failed a previous `try_send()`) get a full export resync:
+    /// all Loc-RIB and `AdjRibOut` prefixes are diffed to bring the peer's
+    /// view back in sync. `AdjRibOut` is only committed after a successful
+    /// channel send; on failure the peer stays dirty for retry on the next
+    /// event loop iteration.
     fn distribute_changes(&mut self, changed_prefixes: &HashSet<Ipv4Prefix>) {
-        if changed_prefixes.is_empty() {
+        if changed_prefixes.is_empty() && self.dirty_peers.is_empty() {
             return;
         }
 
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
         for peer in peers {
+            // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
+            let is_dirty = self.dirty_peers.contains(&peer);
+            let effective_prefixes: HashSet<Ipv4Prefix> = if is_dirty {
+                let mut all: HashSet<Ipv4Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
+                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                    all.extend(rib_out.iter().map(|r| r.prefix));
+                }
+                all
+            } else if changed_prefixes.is_empty() {
+                continue;
+            } else {
+                changed_prefixes.clone()
+            };
+
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
 
@@ -134,7 +154,7 @@ impl RibManager {
                 .or_insert_with(|| AdjRibOut::new(peer));
 
             // Stage: compute delta without mutating AdjRibOut
-            for prefix in changed_prefixes {
+            for prefix in &effective_prefixes {
                 if let Some(best) = self.loc_rib.get(prefix) {
                     // Split horizon: don't send route back to its source
                     if best.peer == peer {
@@ -172,12 +192,9 @@ impl RibManager {
                     withdraw: withdraw.clone(),
                 };
                 if tx.try_send(update).is_err() {
-                    warn!(%peer, "outbound channel full or closed — clearing Adj-RIB-Out");
+                    warn!(%peer, "outbound channel full or closed — marking dirty for resync");
                     self.metrics.record_outbound_route_drop(&peer.to_string());
-                    // Clear AdjRibOut so next successful send rebuilds from scratch
-                    if let Some(rib_out) = self.adj_ribs_out.get_mut(&peer) {
-                        rib_out.clear();
-                    }
+                    self.dirty_peers.insert(peer);
                 } else {
                     // Commit: apply staged mutations to AdjRibOut
                     let rib_out = self
@@ -190,14 +207,22 @@ impl RibManager {
                     for prefix in &withdraw {
                         rib_out.withdraw(prefix);
                     }
+                    if is_dirty {
+                        self.dirty_peers.remove(&peer);
+                    }
                 }
+            } else if is_dirty && announce.is_empty() && withdraw.is_empty() {
+                // Dirty peer with no diff — already in sync
+                self.dirty_peers.remove(&peer);
             }
         }
     }
 
     /// Send the full Loc-RIB to a newly established peer (initial table dump).
     ///
-    /// `AdjRibOut` is only populated after a successful channel send.
+    /// `AdjRibOut` is only populated after a successful channel send. On
+    /// failure the peer is marked dirty so `distribute_changes()` will
+    /// retry a full resync on the next event loop iteration.
     fn send_initial_table(&mut self, peer: IpAddr) {
         let mut announce = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
@@ -225,8 +250,9 @@ impl RibManager {
                 withdraw: vec![],
             };
             if tx.try_send(update).is_err() {
-                warn!(%peer, "outbound channel full or closed during initial dump");
+                warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
+                self.dirty_peers.insert(peer);
             } else {
                 // Commit: populate AdjRibOut with what was actually sent
                 let rib_out = self
@@ -284,6 +310,7 @@ impl RibManager {
                     self.adj_ribs_out.remove(&peer);
                     self.outbound_peers.remove(&peer);
                     self.peer_export_policies.remove(&peer);
+                    self.dirty_peers.remove(&peer);
                 }
 
                 RibUpdate::PeerUp {
@@ -1235,7 +1262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_full_clears_adj_rib_out() {
+    async fn channel_full_marks_dirty_and_resyncs() {
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
@@ -1305,7 +1332,9 @@ mod tests {
             .unwrap();
         let _ = reply_rx.await;
 
-        // After channel-full failure, AdjRibOut should be cleared
+        // After channel-full failure, AdjRibOut preserves last successfully
+        // sent state: both prefix1 and prefix2 were sent before the failure.
+        // The withdrawal of prefix1 was lost because the channel was full.
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RibUpdate::QueryAdvertisedRoutes {
             peer: target,
@@ -1314,9 +1343,53 @@ mod tests {
         .await
         .unwrap();
         let advertised = reply_rx.await.unwrap();
+        assert_eq!(
+            advertised.len(),
+            2,
+            "AdjRibOut preserves last successfully sent state (prefix1+prefix2)"
+        );
+
+        // Now drain the channel to allow resync
+        let _ = out_rx.recv().await.unwrap();
+
+        // Trigger another route event to give dirty resync a chance to run
+        let prefix3 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 3, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix3, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Drain the resync update
+        let resync = out_rx.recv().await.unwrap();
+
+        // The resync should withdraw prefix1 (no longer in Loc-RIB) and
+        // announce prefix2 + prefix3 (current Loc-RIB state)
         assert!(
-            advertised.is_empty(),
-            "AdjRibOut should be cleared after channel-full failure"
+            resync.withdraw.contains(&prefix1),
+            "resync should withdraw prefix1 (no longer in Loc-RIB)"
+        );
+        let announced_prefixes: Vec<_> = resync.announce.iter().map(|r| r.prefix).collect();
+        assert!(
+            announced_prefixes.contains(&prefix3),
+            "resync should announce prefix3 (new)"
+        );
+
+        // After successful resync, AdjRibOut should match Loc-RIB
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert_eq!(
+            advertised.len(),
+            2,
+            "AdjRibOut matches Loc-RIB after resync"
         );
 
         drop(tx);
@@ -1324,7 +1397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_dump_channel_full_skips_adj_rib_out() {
+    async fn initial_dump_failure_marks_dirty_and_resyncs() {
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());

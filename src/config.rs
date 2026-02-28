@@ -218,6 +218,10 @@ impl Config {
                 reason: e.to_string(),
             })?;
 
+        // Eagerly validate all policies at load time
+        parse_prefix_list(&self.policy.import)?;
+        parse_prefix_list(&self.policy.export)?;
+
         for neighbor in &self.neighbors {
             neighbor.address.parse::<IpAddr>().map_err(|e| {
                 ConfigError::InvalidNeighborAddress {
@@ -230,6 +234,9 @@ impl Config {
             if hold_time != 0 && hold_time < 3 {
                 return Err(ConfigError::InvalidHoldTime { value: hold_time });
             }
+
+            parse_prefix_list(&neighbor.import_policy)?;
+            parse_prefix_list(&neighbor.export_policy)?;
         }
 
         Ok(())
@@ -736,8 +743,7 @@ remote_asn = 65002
 action = "allow"
 prefix = "10.0.0.0/8"
 "#;
-        let config = parse(toml_str).unwrap();
-        let err = config.import_policy().unwrap_err();
+        let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 
@@ -761,8 +767,7 @@ remote_asn = 65002
 action = "deny"
 prefix = "not-a-prefix"
 "#;
-        let config = parse(toml_str).unwrap();
-        let err = config.export_policy().unwrap_err();
+        let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 
@@ -782,8 +787,7 @@ log_format = "json"
 action = "deny"
 prefix = "10.0.0.0/33"
 "#;
-        let config = parse(toml_str).unwrap();
-        let err = config.import_policy().unwrap_err();
+        let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 
@@ -804,8 +808,7 @@ action = "deny"
 prefix = "10.0.0.0/8"
 ge = 33
 "#;
-        let config = parse(toml_str).unwrap();
-        let err = config.import_policy().unwrap_err();
+        let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 
@@ -826,8 +829,7 @@ action = "deny"
 prefix = "10.0.0.0/16"
 ge = 8
 "#;
-        let config = parse(toml_str).unwrap();
-        let err = config.import_policy().unwrap_err();
+        let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 
@@ -849,8 +851,7 @@ prefix = "10.0.0.0/8"
 ge = 24
 le = 16
 "#;
-        let config = parse(toml_str).unwrap();
-        let err = config.import_policy().unwrap_err();
+        let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 }

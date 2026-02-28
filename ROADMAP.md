@@ -452,13 +452,13 @@ Peer-visible bugs found during full-project code review.
 ### Completed
 
 1. ~~**Adj-RIB-Out divergence on channel-full** (`crates/rib/src/manager.rs`)~~
-   - `distribute_changes()` and `send_initial_table()` now stage deltas
-     before `try_send()`. Mutations commit only on success. On failure,
-     AdjRibOut is cleared entirely to prevent divergence. 2 tests.
+   - Stage-then-commit with dirty peer tracking. On send failure, AdjRibOut
+     is preserved and peer is marked dirty. Next event loop iteration runs
+     a full export resync (all Loc-RIB + AdjRibOut prefixes diffed). 2 tests.
 
 2. ~~**Malformed NLRI maps to wrong NOTIFICATION** (`crates/wire/src/nlri.rs`, `error.rs`)~~
-   - `InvalidNetworkField` error variant → subcode 10 with offending bytes.
-     2 tests.
+   - Both prefix_len > 32 and truncated NLRI now return `InvalidNetworkField`
+     → subcode 10 with the offending field bytes. 2 tests.
 
 3. ~~**PARTIAL bit set too broadly on unknown attributes** (`crates/wire/src/attribute.rs`)~~
    - PARTIAL now only set when both OPTIONAL and TRANSITIVE flags present.
