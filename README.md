@@ -1,7 +1,7 @@
 # rustbgpd
 
 [![Build](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.87+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
 
 An API-first BGP daemon written in Rust. rustbgpd brings the programmable,
@@ -41,7 +41,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 
 ### Prerequisites
 
-- **Rust 1.87+** (edition 2024)
+- **Rust 1.88+** (edition 2024)
 - **protobuf-compiler** (`apt-get install protobuf-compiler` on Debian/Ubuntu)
 - **grpcurl** (optional, for verifying the gRPC API)
 
@@ -213,7 +213,7 @@ Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Working examples
 docker build -t rustbgpd:dev .
 ```
 
-The multi-stage Dockerfile uses `rust:1.87-bookworm` with `protobuf-compiler` for the build stage and `debian:bookworm-slim` for the runtime.
+The multi-stage Dockerfile uses `rust:1.88-bookworm` with `protobuf-compiler` for the build stage and `debian:bookworm-slim` for the runtime.
 
 ### Run
 
