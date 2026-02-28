@@ -492,7 +492,7 @@ Peer-visible bugs found during full-project code review.
 ### Exit criteria
 
 - All 5 findings fixed with regression tests
-- 342 tests pass (+10 new), clippy clean, fmt clean
+- 344 tests pass (+10 new), clippy clean, fmt clean
 
 ---
 
@@ -537,7 +537,7 @@ affect operators and automation consumers.
 - API contracts match implementation behavior
 - Metrics reflect actual RIB state
 - Consumers get correct data from all gRPC endpoints
-- 357 tests pass, clippy clean, fmt clean
+- 347 tests pass (+13 new), clippy clean, fmt clean
 
 ---
 
@@ -583,7 +583,7 @@ Security, resilience, operational safety, and core protocol compliance
 - Documented security posture for gRPC exposure
 - TCP collision detection per RFC 4271 §6.8
 - gRPC lifecycle supervised
-- 367+ tests pass, clippy clean, fmt clean
+- 364 tests pass (+17 new), clippy clean, fmt clean
 
 ---
 

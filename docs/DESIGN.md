@@ -3,7 +3,7 @@
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** Lance  
-**Status:** M7 complete
+**Status:** M9 complete
 **Last updated:** 2026-02-28
 
 ---
@@ -425,7 +425,7 @@ Exposed via `ListBestRoutes` gRPC endpoint with offset pagination.
 - Deterministic outcomes for all decision inputs, verified by property tests (antisymmetry, transitivity, totality).
 - Stable best-path selection with multiple paths from multiple peers.
 - Structured debug events for best-path changes.
-- 342 tests pass (M7), clippy clean, fmt clean.
+- 364 tests pass (M9), clippy clean, fmt clean.
 
 ### Milestone 3: "Speak" `[complete]`
 

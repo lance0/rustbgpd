@@ -90,7 +90,7 @@ document (M0–M9).
 - Proto: `RouteEvent` gains `previous_peer_address` (field 7) and timestamp
   comment clarified as Unix epoch seconds.
 - `rustbgpd-rib`: `QueryLocRibCount` and `QueryAdvertisedCount` variants added
-  to `RibUpdate` for accurate health and neighbor counters.
+  to `RibUpdate` for accurate health and neighbor counters. 2 tests.
 - `rustbgpd-api`: `ControlService` and `NeighborService` now accept `rib_tx`
   for querying RIB state.
 

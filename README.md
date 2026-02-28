@@ -35,7 +35,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **342 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **364 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -244,7 +244,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** Seven milestones complete. 342 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** Nine milestones complete. 364 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Milestone | Status | Scope |
 |-----------|--------|-------|
@@ -256,8 +256,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | M5 -- Polish | Complete | Inbound listener, session counters, NLRI batching, API hardening |
 | M6 -- Compliance | Complete | Wire RFC compliance, GlobalService, ControlService, coordinated shutdown |
 | M7 -- Wire & RIB Correctness | Complete | Adj-RIB-Out divergence fix, NLRI subcode, PARTIAL bit, policy validation, eBGP best-path |
+| M8 -- API & Observability | Complete | IPv6 rejection, Prometheus gauges, WatchRoutes events, health counters |
+| M9 -- Production Hardening | Complete | Metrics server hardening, gRPC security, TCP collision detection, gRPC supervision |
 
-Next: M8 (API & observability), M9 (production hardening), then MP-BGP, graceful restart, BMP, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: MP-BGP (IPv6), graceful restart, BMP, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

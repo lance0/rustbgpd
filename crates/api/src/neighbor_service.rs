@@ -39,7 +39,7 @@ async fn query_advertised_count(
     let count = reply_rx
         .await
         .map_err(|_| Status::internal("RIB manager dropped reply"))?;
-    Ok(count as u64)
+    Ok(u64::try_from(count).unwrap_or(u64::MAX))
 }
 
 fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
