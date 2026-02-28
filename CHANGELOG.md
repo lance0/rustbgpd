@@ -25,6 +25,16 @@ document (M0–M5).
 
 ### Fixed
 
+- `rustbgpd-transport`: eBGP NEXT_HOP rewrite now uses the TCP session's local
+  address instead of `local_router_id`. Router-id is often a loopback that is
+  not reachable from the peer; the local socket address is correct.
+- `rustbgpd-api`: `AddPath` with empty `as_path` no longer produces a zero-length
+  AS_SEQUENCE segment that fails our own UPDATE validator. Empty input now creates
+  an AS_PATH with no segments (correct for locally-originated routes).
+- `rustbgpd-api`: `afi_safi` field in `ListReceivedRoutes`, `ListBestRoutes`,
+  `ListAdvertisedRoutes`, and `WatchRoutes` is now validated. Requesting an
+  unsupported address family (e.g., IPv6) returns `INVALID_ARGUMENT` instead of
+  silently returning IPv4 data.
 - `rustbgpd-wire`: 2-octet ASN encoding no longer silently truncates 4-byte ASNs.
   ASNs > 65535 are now mapped to `AS_TRANS` (23456) per RFC 6793.
 - Config: invalid policy entries (unknown action, malformed prefix) now return

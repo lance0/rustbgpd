@@ -47,6 +47,18 @@ impl RibService {
     }
 }
 
+/// Reject address families we don't support yet.
+/// 0 = UNSPECIFIED (treat as "any"), 1 = `IPV4_UNICAST` — both accepted.
+#[allow(clippy::result_large_err)]
+fn validate_afi_safi(value: i32) -> Result<(), Status> {
+    if value != 0 && value != proto::AddressFamily::Ipv4Unicast as i32 {
+        return Err(Status::invalid_argument(
+            "only ADDRESS_FAMILY_IPV4_UNICAST is supported",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_page_params(req: &proto::ListRoutesRequest) -> Result<(usize, usize), &'static str> {
     let offset: usize = if req.page_token.is_empty() {
         0
@@ -140,6 +152,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
+        validate_afi_safi(req.afi_safi)?;
 
         let peer = if req.neighbor_address.is_empty() {
             None
@@ -166,6 +179,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
+        validate_afi_safi(req.afi_safi)?;
         let all_routes = self.query_best_routes().await?;
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
         Ok(Response::new(build_response(
@@ -181,6 +195,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::ListRoutesRequest>,
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
+        validate_afi_safi(req.afi_safi)?;
 
         if req.neighbor_address.is_empty() {
             return Err(Status::invalid_argument(
@@ -220,6 +235,7 @@ impl proto::rib_service_server::RibService for RibService {
         request: Request<proto::WatchRoutesRequest>,
     ) -> Result<Response<Self::WatchRoutesStream>, Status> {
         let req = request.into_inner();
+        validate_afi_safi(req.afi_safi)?;
 
         let peer_filter: Option<IpAddr> = if req.neighbor_address.is_empty() {
             None
@@ -275,5 +291,56 @@ impl proto::rib_service_server::RibService for RibService {
         });
 
         Ok(Response::new(Box::pin(stream)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::rib_service_server::RibService as _;
+
+    fn make_service() -> RibService {
+        let (tx, _rx) = mpsc::channel(16);
+        RibService::new(tx)
+    }
+
+    #[tokio::test]
+    async fn list_received_routes_rejects_ipv6() {
+        let svc = make_service();
+        let req = Request::new(proto::ListRoutesRequest {
+            neighbor_address: String::new(),
+            afi_safi: proto::AddressFamily::Ipv6Unicast.into(),
+            page_size: 0,
+            page_token: String::new(),
+        });
+        let err = svc.list_received_routes(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("IPV4_UNICAST"));
+    }
+
+    #[tokio::test]
+    async fn list_best_routes_rejects_ipv6() {
+        let svc = make_service();
+        let req = Request::new(proto::ListRoutesRequest {
+            neighbor_address: String::new(),
+            afi_safi: proto::AddressFamily::Ipv6Unicast.into(),
+            page_size: 0,
+            page_token: String::new(),
+        });
+        let err = svc.list_best_routes(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn watch_routes_rejects_ipv6() {
+        let svc = make_service();
+        let req = Request::new(proto::WatchRoutesRequest {
+            neighbor_address: String::new(),
+            afi_safi: proto::AddressFamily::Ipv6Unicast.into(),
+        });
+        match svc.watch_routes(req).await {
+            Err(err) => assert_eq!(err.code(), tonic::Code::InvalidArgument),
+            Ok(_) => panic!("expected INVALID_ARGUMENT error"),
+        }
     }
 }

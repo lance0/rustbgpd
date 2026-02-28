@@ -64,9 +64,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         ];
 
         if req.as_path.is_empty() {
-            attributes.push(PathAttribute::AsPath(AsPath {
-                segments: vec![AsPathSegment::AsSequence(vec![])],
-            }));
+            attributes.push(PathAttribute::AsPath(AsPath { segments: vec![] }));
         } else {
             attributes.push(PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(req.as_path)],

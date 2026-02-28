@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -717,6 +717,17 @@ impl PeerSession {
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
 
+        // Extract TCP local address for NEXT_HOP rewrite (fall back to router-id)
+        let local_ipv4 = self
+            .stream
+            .as_ref()
+            .and_then(|s| s.local_addr().ok())
+            .and_then(|addr| match addr.ip() {
+                IpAddr::V4(v4) => Some(v4),
+                IpAddr::V6(_) => None,
+            })
+            .unwrap_or(self.config.peer.local_router_id);
+
         // Send withdrawals
         if !update.withdraw.is_empty() {
             let msg = UpdateMessage::build(&[], &update.withdraw, &[], four_octet_as);
@@ -732,7 +743,7 @@ impl PeerSession {
         // Send announcements — batch routes with identical attributes
         let mut groups: Vec<(Vec<PathAttribute>, Vec<rustbgpd_wire::Ipv4Prefix>)> = Vec::new();
         for route in &update.announce {
-            let attrs = self.prepare_outbound_attributes(route, is_ebgp);
+            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
             if let Some(group) = groups.iter_mut().find(|(a, _)| *a == attrs) {
                 group.1.push(route.prefix);
             } else {
@@ -756,7 +767,12 @@ impl PeerSession {
     ///
     /// For eBGP: prepend our ASN, set `NEXT_HOP` to local addr, strip `LOCAL_PREF`.
     /// For iBGP: ensure `LOCAL_PREF` present (default 100), pass `NEXT_HOP` through.
-    fn prepare_outbound_attributes(&self, route: &Route, is_ebgp: bool) -> Vec<PathAttribute> {
+    fn prepare_outbound_attributes(
+        &self,
+        route: &Route,
+        is_ebgp: bool,
+        local_ipv4: Ipv4Addr,
+    ) -> Vec<PathAttribute> {
         let mut attrs = Vec::new();
 
         for attr in &route.attributes {
@@ -790,12 +806,7 @@ impl PeerSession {
                 }
                 PathAttribute::NextHop(_) => {
                     if is_ebgp {
-                        // Set NEXT_HOP to our local address
-                        let local_addr = match self.config.remote_addr.ip() {
-                            IpAddr::V4(_) => self.config.peer.local_router_id,
-                            IpAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
-                        };
-                        attrs.push(PathAttribute::NextHop(local_addr));
+                        attrs.push(PathAttribute::NextHop(local_ipv4));
                     } else {
                         attrs.push(attr.clone());
                     }
@@ -892,7 +903,7 @@ mod tests {
     fn ebgp_prepends_asn() {
         let session = make_test_session(65001, 65002);
         let route = make_route(100);
-        let attrs = session.prepare_outbound_attributes(&route, true);
+        let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1));
 
         let as_path = attrs
             .iter()
@@ -915,7 +926,7 @@ mod tests {
     fn ebgp_strips_local_pref() {
         let session = make_test_session(65001, 65002);
         let route = make_route(200);
-        let attrs = session.prepare_outbound_attributes(&route, true);
+        let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1));
 
         assert!(
             !attrs
@@ -928,8 +939,7 @@ mod tests {
     fn ibgp_preserves_local_pref() {
         let session = make_test_session(65001, 65001);
         let route = make_route(200);
-        let attrs = session.prepare_outbound_attributes(&route, false);
-
+        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
         let lp = attrs.iter().find_map(|a| match a {
             PathAttribute::LocalPref(lp) => Some(*lp),
             _ => None,
@@ -941,7 +951,11 @@ mod tests {
     fn ebgp_sets_next_hop() {
         let session = make_test_session(65001, 65002);
         let route = make_route(100);
-        let attrs = session.prepare_outbound_attributes(&route, true);
+        // In production, local_ipv4 is extracted from the TCP stream's local
+        // address. Test sessions have no real stream, so the caller provides
+        // the address directly. Here we simulate a real local address.
+        let local_ipv4 = Ipv4Addr::new(172, 16, 0, 1);
+        let attrs = session.prepare_outbound_attributes(&route, true, local_ipv4);
 
         let nh = attrs
             .iter()
@@ -951,8 +965,7 @@ mod tests {
             })
             .unwrap();
 
-        // Should be set to local_router_id (10.0.0.1)
-        assert_eq!(nh, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(nh, local_ipv4);
     }
 
     #[test]
@@ -971,7 +984,7 @@ mod tests {
             ],
             received_at: Instant::now(),
         };
-        let attrs = session.prepare_outbound_attributes(&route, false);
+        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
 
         let lp = attrs.iter().find_map(|a| match a {
             PathAttribute::LocalPref(lp) => Some(*lp),

@@ -33,3 +33,10 @@ resolved.
   eBGP) is not yet fully distinguished. Will be enforced post-v1.
 - **No gRPC TLS.** Server listens in plaintext. TLS and mTLS are
   post-v1 scope. Default bind is localhost only.
+- **InjectionService uuid is prefix-derived.** `AddPathResponse.uuid` is
+  deterministically derived from the prefix; `DeletePath` ignores uuid and
+  withdraws by prefix only. Multiple distinct injected paths per prefix
+  are not supported.
+- **DisableNeighbor reason not propagated.** The `reason` field in
+  `DisableNeighborRequest` is accepted but not included in the Cease
+  NOTIFICATION sent to the peer.
