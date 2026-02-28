@@ -16,12 +16,12 @@ document (M0–M7).
 
 - `rustbgpd-rib`: Adj-RIB-Out divergence on channel-full. `distribute_changes()`
   and `send_initial_table()` now stage deltas before `try_send()`. Mutations
-  commit only on success. On failure the peer is marked dirty and a resync timer
-  (1 second) fires independently of incoming mutations, diffing the entire
-  Loc-RIB against AdjRibOut to recover missed updates and withdrawals. The event
-  loop uses `tokio::select!` when dirty peers exist, racing between incoming
-  messages and the resync timer. AdjRibOut is preserved (not cleared) so
-  knowledge of the peer's on-wire state is retained. 2 tests.
+  commit only on success. On failure the peer is marked dirty and a persistent
+  resync timer (1 second, pinned across loop iterations) fires independently of
+  both incoming mutations and non-mutating query traffic, diffing the entire
+  Loc-RIB against AdjRibOut to recover missed updates and withdrawals. AdjRibOut
+  is preserved (not cleared) so knowledge of the peer's on-wire state is
+  retained. 4 tests.
 - `rustbgpd-wire`: Both malformed NLRI cases — prefix length > 32 and truncated
   NLRI buffer — now produce `InvalidNetworkField` with UPDATE subcode 10
   (Invalid Network Field). Previously prefix_len > 32 used subcode 1 and

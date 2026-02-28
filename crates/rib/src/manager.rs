@@ -1558,7 +1558,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initial_dump_failure_marks_dirty_and_resyncs() {
+    async fn initial_dump_failure_leaves_adjribout_empty() {
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
@@ -1600,6 +1600,96 @@ mod tests {
         assert!(
             advertised.is_empty(),
             "AdjRibOut should be empty when initial dump send fails"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn initial_dump_failure_resyncs_via_timer() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        // Pre-populate Loc-RIB
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Use a full channel (capacity 1, pre-filled) to fail the initial dump
+        // but keep the channel recoverable (unlike closed).
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        // Fill the channel so send_initial_table's try_send fails
+        out_tx
+            .send(OutboundRouteUpdate {
+                announce: vec![],
+                withdraw: vec![],
+            })
+            .await
+            .unwrap();
+
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+        })
+        .await
+        .unwrap();
+
+        // Force serialization — initial dump should have failed (channel full)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert!(
+            advertised.is_empty(),
+            "AdjRibOut should be empty after failed initial dump"
+        );
+
+        // Drain the channel to make room for the resync
+        let _ = out_rx.recv().await.unwrap();
+
+        // Advance time to trigger the resync timer
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        // The resync should deliver the initial table
+        let resync = out_rx.recv().await.unwrap();
+        assert_eq!(
+            resync.announce.len(),
+            1,
+            "resync should announce the route from Loc-RIB"
+        );
+        assert_eq!(resync.announce[0].prefix, prefix);
+        assert!(resync.withdraw.is_empty());
+
+        // AdjRibOut should now reflect Loc-RIB
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert_eq!(
+            advertised.len(),
+            1,
+            "AdjRibOut should match Loc-RIB after resync"
         );
 
         drop(tx);
