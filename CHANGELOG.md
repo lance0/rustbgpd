@@ -4,11 +4,38 @@ All notable changes to rustbgpd will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses milestone-based versioning aligned with the design
-document (M0–M4).
+document (M0–M5).
 
 ---
 
 ## [Unreleased]
+
+### Added (M5 — "Polish")
+
+- `rustbgpd-transport`: Inbound TCP listener. `BgpListener` accepts connections on
+  `listen_port` and forwards to PeerManager via `AcceptInbound` command. `PeerSession::new_inbound()`
+  starts with an already-connected stream. `PeerHandle::spawn_inbound()` spawns inbound sessions.
+  (ADR-0019)
+- `rustbgpd-transport`: Session counters — `updates_received`, `updates_sent`,
+  `notifications_received`, `notifications_sent`, `flap_count`, `uptime_secs`, `last_error`
+  tracked per session and exposed via `PeerSessionState` and gRPC `NeighborState`.
+- `rustbgpd-transport`: Accurate prefix tracking via `HashSet<Ipv4Prefix>` instead of
+  add/subtract heuristic. Duplicate announcements no longer inflate count; withdrawals
+  of unknown prefixes no longer underflow.
+- `rustbgpd-transport`: NLRI batching — outbound UPDATEs with identical path attributes
+  are grouped into a single wire UPDATE message.
+- `rustbgpd-api`: Input validation for `AddNeighbor` (reject `remote_asn=0`,
+  `hold_time` of 1 or 2) and `AddPath` (reject `next_hop` of `0.0.0.0` or multicast).
+  4 unit tests.
+- `rustbgpd-api`: `NeighborState` proto fields fully populated — uptime, update/notification
+  counters, flap count, last error, hold_time, max_prefixes. Previously hardcoded to 0.
+- `rustbgpd-rib`: `RibManager` accepts `BgpMetrics` and records `outbound_route_drops`
+  counter when `try_send()` fails.
+- `rustbgpd-telemetry`: `outbound_route_drops` IntCounterVec metric (labeled by peer).
+- Config: `#[serde(deny_unknown_fields)]` on all config structs — typos now cause
+  startup errors instead of silent acceptance. 2 tests.
+- Metrics server: per-connection task spawn, HTTP path routing (404 for non-`/metrics`),
+  5-second write timeout. 2 tests.
 
 ### Added (M4 — "Route Server Mode")
 

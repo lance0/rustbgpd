@@ -2,6 +2,7 @@ use std::net::IpAddr;
 
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PrefixList;
+use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 
 /// Commands sent to the `PeerManager` task.
@@ -29,6 +30,10 @@ pub enum PeerManagerCommand {
         address: IpAddr,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    AcceptInbound {
+        stream: TcpStream,
+        peer_addr: IpAddr,
+    },
     Shutdown,
 }
 
@@ -52,4 +57,13 @@ pub struct PeerInfo {
     pub state: SessionState,
     pub enabled: bool,
     pub prefix_count: usize,
+    pub hold_time: Option<u16>,
+    pub max_prefixes: Option<u32>,
+    pub updates_received: u64,
+    pub updates_sent: u64,
+    pub notifications_received: u64,
+    pub notifications_sent: u64,
+    pub flap_count: u64,
+    pub uptime_secs: u64,
+    pub last_error: String,
 }

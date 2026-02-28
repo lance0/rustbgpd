@@ -21,8 +21,8 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         address: info.address.to_string(),
         remote_asn: info.remote_asn,
         description: info.description.clone(),
-        hold_time: 0,
-        max_prefixes: 0,
+        hold_time: info.hold_time.map_or(0, u32::from),
+        max_prefixes: info.max_prefixes.unwrap_or(0),
     };
 
     let state = match info.state {
@@ -37,15 +37,15 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
     proto::NeighborState {
         config: Some(config),
         state: state.into(),
-        uptime_seconds: 0,
+        uptime_seconds: info.uptime_secs,
         prefixes_received: info.prefix_count as u64,
         prefixes_sent: 0,
-        updates_received: 0,
-        updates_sent: 0,
-        notifications_received: 0,
-        notifications_sent: 0,
-        flap_count: 0,
-        last_error: String::new(),
+        updates_received: info.updates_received,
+        updates_sent: info.updates_sent,
+        notifications_received: info.notifications_received,
+        notifications_sent: info.notifications_sent,
+        flap_count: info.flap_count,
+        last_error: info.last_error.clone(),
     }
 }
 
@@ -64,6 +64,14 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+
+        if config.remote_asn == 0 {
+            return Err(Status::invalid_argument("remote_asn must be > 0"));
+        }
+
+        if config.hold_time > 0 && config.hold_time < 3 {
+            return Err(Status::invalid_argument("hold_time must be 0 or >= 3"));
+        }
 
         let peer_config = PeerManagerNeighborConfig {
             address,
@@ -228,5 +236,50 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(Status::not_found)?;
 
         Ok(Response::new(proto::DisableNeighborResponse {}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::neighbor_service_server::NeighborService as _;
+
+    fn make_service() -> NeighborService {
+        let (tx, _rx) = mpsc::channel(16);
+        NeighborService::new(tx)
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_asn_zero() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 0,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("remote_asn"));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_hold_time_two() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 2,
+                max_prefixes: 0,
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("hold_time"));
     }
 }

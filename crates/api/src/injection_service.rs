@@ -45,6 +45,13 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
 
+        if next_hop == Ipv4Addr::UNSPECIFIED {
+            return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
+        }
+        if next_hop.octets()[0] >= 224 && next_hop.octets()[0] <= 239 {
+            return Err(Status::invalid_argument("next_hop must not be multicast"));
+        }
+
         let origin = match req.origin {
             0 => Origin::Igp,
             1 => Origin::Egp,
@@ -140,5 +147,52 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .map_err(|e| Status::internal(format!("withdraw failed: {e}")))?;
 
         Ok(Response::new(proto::DeletePathResponse {}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proto::injection_service_server::InjectionService as _;
+
+    fn make_service() -> InjectionService {
+        let (tx, _rx) = mpsc::channel(16);
+        InjectionService::new(tx)
+    }
+
+    #[tokio::test]
+    async fn add_path_rejects_zero_next_hop() {
+        let svc = make_service();
+        let req = Request::new(proto::AddPathRequest {
+            prefix: "10.0.0.0".into(),
+            prefix_length: 24,
+            next_hop: "0.0.0.0".into(),
+            origin: 0,
+            as_path: vec![],
+            local_pref: 0,
+            med: 0,
+            communities: vec![],
+        });
+        let err = svc.add_path(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("0.0.0.0"));
+    }
+
+    #[tokio::test]
+    async fn add_path_rejects_multicast_next_hop() {
+        let svc = make_service();
+        let req = Request::new(proto::AddPathRequest {
+            prefix: "10.0.0.0".into(),
+            prefix_length: 24,
+            next_hop: "224.0.0.1".into(),
+            origin: 0,
+            as_path: vec![],
+            local_pref: 0,
+            med: 0,
+            communities: vec![],
+        });
+        let err = svc.add_path(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("multicast"));
     }
 }

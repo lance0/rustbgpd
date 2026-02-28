@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use rustbgpd_api::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
 use rustbgpd_fsm::{PeerConfig, SessionState};
+use rustbgpd_policy::PrefixList;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{PeerHandle, TransportConfig};
@@ -19,6 +20,11 @@ struct ManagedPeer {
     remote_asn: u32,
     description: String,
     enabled: bool,
+    hold_time: Option<u16>,
+    max_prefixes: Option<u32>,
+    transport_config: TransportConfig,
+    import_policy: Option<PrefixList>,
+    export_policy: Option<PrefixList>,
 }
 
 /// Manages the lifecycle of all peer sessions.
@@ -76,13 +82,15 @@ impl PeerManager {
         let address = config.address;
         let remote_asn = config.remote_asn;
         let description = config.description.clone();
+        let hold_time = config.hold_time;
+        let max_prefixes = config.max_prefixes;
 
         let handle = PeerHandle::spawn(
-            transport,
+            transport.clone(),
             self.metrics.clone(),
             self.rib_tx.clone(),
-            config.import_policy,
-            config.export_policy,
+            config.import_policy.clone(),
+            config.export_policy.clone(),
         );
 
         if let Err(e) = handle.start().await {
@@ -98,6 +106,11 @@ impl PeerManager {
                 remote_asn,
                 description,
                 enabled: true,
+                hold_time,
+                max_prefixes,
+                transport_config: transport,
+                import_policy: config.import_policy,
+                export_policy: config.export_policy,
             },
         );
 
@@ -121,35 +134,59 @@ impl PeerManager {
 
     async fn get_peer_info(&self, address: IpAddr) -> Option<PeerInfo> {
         let managed = self.peers.get(&address)?;
-        let (state, prefix_count) = match managed.handle.query_state().await {
-            Some(s) => (s.fsm_state, s.prefix_count),
-            None => (SessionState::Idle, 0),
-        };
+        let session_state = managed.handle.query_state().await;
 
         Some(PeerInfo {
             address,
             remote_asn: managed.remote_asn,
             description: managed.description.clone(),
-            state,
+            state: session_state
+                .as_ref()
+                .map_or(SessionState::Idle, |s| s.fsm_state),
             enabled: managed.enabled,
-            prefix_count,
+            prefix_count: session_state.as_ref().map_or(0, |s| s.prefix_count),
+            hold_time: managed.hold_time,
+            max_prefixes: managed.max_prefixes,
+            updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
+            updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
+            notifications_received: session_state
+                .as_ref()
+                .map_or(0, |s| s.notifications_received),
+            notifications_sent: session_state.as_ref().map_or(0, |s| s.notifications_sent),
+            flap_count: session_state.as_ref().map_or(0, |s| s.flap_count),
+            uptime_secs: session_state.as_ref().map_or(0, |s| s.uptime_secs),
+            last_error: session_state
+                .as_ref()
+                .map_or_else(String::new, |s| s.last_error.clone()),
         })
     }
 
     async fn list_peers(&self) -> Vec<PeerInfo> {
         let mut infos = Vec::with_capacity(self.peers.len());
         for (&addr, managed) in &self.peers {
-            let (state, prefix_count) = match managed.handle.query_state().await {
-                Some(s) => (s.fsm_state, s.prefix_count),
-                None => (SessionState::Idle, 0),
-            };
+            let session_state = managed.handle.query_state().await;
             infos.push(PeerInfo {
                 address: addr,
                 remote_asn: managed.remote_asn,
                 description: managed.description.clone(),
-                state,
+                state: session_state
+                    .as_ref()
+                    .map_or(SessionState::Idle, |s| s.fsm_state),
                 enabled: managed.enabled,
-                prefix_count,
+                prefix_count: session_state.as_ref().map_or(0, |s| s.prefix_count),
+                hold_time: managed.hold_time,
+                max_prefixes: managed.max_prefixes,
+                updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
+                updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
+                notifications_received: session_state
+                    .as_ref()
+                    .map_or(0, |s| s.notifications_received),
+                notifications_sent: session_state.as_ref().map_or(0, |s| s.notifications_sent),
+                flap_count: session_state.as_ref().map_or(0, |s| s.flap_count),
+                uptime_secs: session_state.as_ref().map_or(0, |s| s.uptime_secs),
+                last_error: session_state
+                    .as_ref()
+                    .map_or_else(String::new, |s| s.last_error.clone()),
             });
         }
         infos
@@ -185,6 +222,50 @@ impl PeerManager {
         Ok(())
     }
 
+    async fn handle_inbound(&mut self, stream: tokio::net::TcpStream, peer_addr: IpAddr) {
+        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+            warn!(%peer_addr, "inbound connection from unknown peer, dropping");
+            return;
+        };
+
+        // Only accept inbound if peer is enabled and session is currently idle
+        let current_state = managed.handle.query_state().await;
+        let is_idle = current_state
+            .as_ref()
+            .is_none_or(|s| s.fsm_state == SessionState::Idle);
+
+        if !managed.enabled || !is_idle {
+            info!(
+                %peer_addr,
+                "inbound connection for already-connected or disabled peer, dropping"
+            );
+            return;
+        }
+
+        // Shut down old session and spawn inbound one
+        let old_handle = std::mem::replace(
+            &mut managed.handle,
+            PeerHandle::spawn_inbound(
+                managed.transport_config.clone(),
+                self.metrics.clone(),
+                self.rib_tx.clone(),
+                managed.import_policy.clone(),
+                managed.export_policy.clone(),
+                stream,
+            ),
+        );
+
+        // Shut down the old (idle) session
+        let _ = old_handle.shutdown().await;
+
+        // Start the new inbound session — trigger TcpConnectionConfirmed
+        if let Err(e) = managed.handle.start().await {
+            warn!(%peer_addr, error = %e, "failed to start inbound session");
+        } else {
+            info!(%peer_addr, "inbound session started");
+        }
+    }
+
     /// Run the `PeerManager` event loop until shutdown or channel close.
     pub async fn run(mut self) {
         while let Some(cmd) = self.rx.recv().await {
@@ -212,6 +293,9 @@ impl PeerManager {
                 PeerManagerCommand::DisablePeer { address, reply } => {
                     let result = self.disable_peer(address).await;
                     let _ = reply.send(result);
+                }
+                PeerManagerCommand::AcceptInbound { stream, peer_addr } => {
+                    self.handle_inbound(stream, peer_addr).await;
                 }
                 PeerManagerCommand::Shutdown => {
                     info!("peer manager shutting down {} peers", self.peers.len());

@@ -4,6 +4,7 @@ use std::time::Duration;
 use rustbgpd_fsm::PeerConfig;
 
 /// Transport-layer configuration for a single BGP peer.
+#[derive(Clone)]
 pub struct TransportConfig {
     /// FSM-level peer configuration (ASN, hold time, router ID, etc.).
     pub peer: PeerConfig,

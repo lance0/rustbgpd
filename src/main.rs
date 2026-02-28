@@ -15,8 +15,9 @@ use std::process;
 
 use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
+use rustbgpd_transport::BgpListener;
 use tokio::sync::mpsc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
 
@@ -74,7 +75,7 @@ async fn run(config: Config) {
 
     // Spawn RIB manager
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
-    tokio::spawn(RibManager::new(rib_rx, export_policy).run());
+    tokio::spawn(RibManager::new(rib_rx, export_policy, metrics.clone()).run());
 
     // Spawn PeerManager
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
@@ -92,6 +93,34 @@ async fn run(config: Config) {
     let grpc_peer_mgr_tx = peer_mgr_tx.clone();
     tokio::spawn(async move {
         rustbgpd_api::server::serve(grpc_addr, grpc_rib_tx, grpc_peer_mgr_tx).await;
+    });
+
+    // Spawn BGP inbound TCP listener
+    let listen_addr = config.listen_addr();
+    let listener_peer_mgr_tx = peer_mgr_tx.clone();
+    tokio::spawn(async move {
+        let (accept_tx, mut accept_rx) =
+            mpsc::channel::<rustbgpd_transport::AcceptedConnection>(64);
+        match BgpListener::bind(listen_addr, accept_tx).await {
+            Ok(listener) => {
+                // Forward accepted connections to PeerManager in a separate task
+                let tx = listener_peer_mgr_tx;
+                tokio::spawn(async move {
+                    while let Some(conn) = accept_rx.recv().await {
+                        let _ = tx
+                            .send(PeerManagerCommand::AcceptInbound {
+                                stream: conn.stream,
+                                peer_addr: conn.peer_addr,
+                            })
+                            .await;
+                    }
+                });
+                listener.run().await;
+            }
+            Err(e) => {
+                warn!(%listen_addr, error = %e, "failed to bind BGP listener");
+            }
+        }
     });
 
     // Add initial peers from config via PeerManager

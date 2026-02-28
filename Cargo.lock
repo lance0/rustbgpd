@@ -864,6 +864,7 @@ version = "0.0.1"
 dependencies = [
  "proptest",
  "rustbgpd-policy",
+ "rustbgpd-telemetry",
  "rustbgpd-wire",
  "thiserror 2.0.18",
  "tokio",

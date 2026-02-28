@@ -394,6 +394,34 @@ route event streaming.
 
 ---
 
+## M5 — "Polish" `[complete]`
+
+Inbound listener, API hardening, session counters, NLRI batching, metrics
+server hardening.
+
+### Build order
+
+1. ~~Strict config parsing~~ — `#[serde(deny_unknown_fields)]` on all structs **Done**
+2. ~~API input validation~~ — reject ASN=0, hold_time 1-2, next_hop 0.0.0.0/multicast **Done**
+3. ~~Session counters~~ — updates, notifications, flaps, uptime, last_error **Done**
+4. ~~Accurate prefix_count~~ — `HashSet<Ipv4Prefix>` replaces add/subtract heuristic **Done**
+5. ~~NLRI batching~~ — group outbound UPDATEs by shared attributes **Done**
+6. ~~Metrics server hardening~~ — per-connection spawn, 404, write timeout, RIB drop metric **Done**
+7. ~~Inbound TCP listener~~ — `BgpListener`, `PeerSession::new_inbound()`, PeerManager integration **Done**
+8. ~~Documentation~~ — ADR-0019, CHANGELOG, README, ROADMAP **Done**
+
+### Exit criteria
+
+- Inbound TCP listener accepts passive peering
+- All NeighborState fields populated
+- API rejects invalid inputs with INVALID_ARGUMENT
+- prefix_count accurate under re-announcement
+- NLRI batching reduces wire UPDATE count
+- Metrics server returns 404 for non-/metrics paths
+- 314 tests pass, clippy clean, fmt clean
+
+---
+
 ## Post-v1
 
 ### Protocol extensions
@@ -404,22 +432,13 @@ route event streaming.
 - Extended message support (RFC 8654)
 
 ### Infrastructure
-- Inbound TCP listener (passive peering — `listen_port` is parsed but unused)
+- TCP connection collision detection (RFC 4271 §6.8)
 - BMP exporter
 - RPKI validation (RTR client)
 - TCP-AO authentication
 - Config persistence (gRPC → TOML writeback)
 
-### API polish
-- Populate NeighborState fields currently hardcoded to 0 (hold_time, uptime, counters)
-- API input validation at gRPC boundary (reject ASN=0, range-check hold_time)
-- API unit tests (currently covered only by interop tests)
-
 ### Performance / correctness
-- Batch multiple NLRI per outbound UPDATE (currently one UPDATE per prefix)
-- Synchronize `prefix_count` with actual RIB state (currently add/subtract heuristic)
-- Replace hand-rolled metrics HTTP server with proper HTTP/1.1 handling
-- Warn on RIB channel drops from `try_send()` failure (currently silent, only metric)
 - `list_peers()` sequential queries — parallelize for large peer counts
 - Fix IPv6 NEXT_HOP defaulting to 0.0.0.0 (wrong, but IPv6 out of scope for v1)
 - Error on invalid policy entries in config instead of silently skipping

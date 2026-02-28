@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod framing;
 pub mod handle;
+pub mod listener;
 pub(crate) mod session;
 #[allow(unsafe_code)]
 mod socket_opts;
@@ -19,3 +20,4 @@ pub mod timer;
 pub use config::TransportConfig;
 pub use error::TransportError;
 pub use handle::{PeerCommand, PeerHandle, PeerSessionState};
+pub use listener::{AcceptedConnection, BgpListener};

@@ -11,6 +11,7 @@ const DEFAULT_CONNECT_RETRY_SECS: u32 = 30;
 const BGP_PORT: u16 = 179;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub global: Global,
     #[serde(default)]
@@ -20,15 +21,16 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Global {
     pub asn: u32,
     pub router_id: String,
-    #[expect(dead_code)] // parsed from config, unused in M0 (outbound only)
     pub listen_port: u16,
     pub telemetry: TelemetryConfig,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     pub prometheus_addr: String,
     #[expect(dead_code)] // parsed from config, only "json" in M0
@@ -42,6 +44,7 @@ fn default_grpc_addr() -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Neighbor {
     pub address: String,
     pub remote_asn: u32,
@@ -58,6 +61,7 @@ pub struct Neighbor {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     #[serde(default)]
     pub import: Vec<PrefixListEntryConfig>,
@@ -66,6 +70,7 @@ pub struct PolicyConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PrefixListEntryConfig {
     pub action: String,
     pub prefix: String,
@@ -189,6 +194,13 @@ impl Config {
             .prometheus_addr
             .parse()
             .expect("validated in Config::load")
+    }
+
+    pub fn listen_addr(&self) -> SocketAddr {
+        SocketAddr::new(
+            std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            self.global.listen_port,
+        )
     }
 
     pub fn grpc_addr(&self) -> SocketAddr {
@@ -575,6 +587,44 @@ remote_asn = 65002
         // Should inherit global export policy
         assert!(peers[0].2.is_none()); // no import (neither neighbor nor global)
         assert!(peers[0].3.is_some()); // export from global
+    }
+
+    #[test]
+    fn unknown_field_in_global_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+unknown_field = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn unknown_field_in_neighbor_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_tme = 90
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
     }
 
     #[test]

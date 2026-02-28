@@ -29,12 +29,13 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 
 - **gRPC-native** -- five services covering peer lifecycle, RIB queries, route injection, streaming events, and daemon control
 - **RFC 4271 compliant** -- full FSM, path attribute validation, best-path selection, split horizon, Adj-RIB-In / Loc-RIB / Adj-RIB-Out
+- **Inbound + outbound peering** -- accepts incoming TCP connections and initiates outbound; passive peering supported
 - **Dynamic peer management** -- add, delete, enable, and disable neighbors at runtime via gRPC
 - **Per-peer policy** -- import/export prefix lists at global or neighbor level
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **306 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **314 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 

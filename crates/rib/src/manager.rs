@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::{PrefixList, check_prefix_list};
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::Ipv4Prefix;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
@@ -28,12 +29,17 @@ pub struct RibManager {
     export_policy: Option<PrefixList>,
     peer_export_policies: HashMap<IpAddr, Option<PrefixList>>,
     route_events_tx: broadcast::Sender<RouteEvent>,
+    metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
 }
 
 impl RibManager {
     #[must_use]
-    pub fn new(rx: mpsc::Receiver<RibUpdate>, export_policy: Option<PrefixList>) -> Self {
+    pub fn new(
+        rx: mpsc::Receiver<RibUpdate>,
+        export_policy: Option<PrefixList>,
+        metrics: BgpMetrics,
+    ) -> Self {
         let (route_events_tx, _) = broadcast::channel(4096);
         Self {
             ribs: HashMap::new(),
@@ -43,6 +49,7 @@ impl RibManager {
             export_policy,
             peer_export_policies: HashMap::new(),
             route_events_tx,
+            metrics,
             rx,
         }
     }
@@ -160,6 +167,7 @@ impl RibManager {
                 let update = OutboundRouteUpdate { announce, withdraw };
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full or closed");
+                    self.metrics.record_outbound_route_drop(&peer.to_string());
                 }
             }
         }
@@ -198,6 +206,7 @@ impl RibManager {
             };
             if tx.try_send(update).is_err() {
                 warn!(%peer, "outbound channel full or closed during initial dump");
+                self.metrics.record_outbound_route_drop(&peer.to_string());
             }
         }
     }
@@ -382,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn routes_received_and_queried() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -416,7 +425,7 @@ mod tests {
     #[tokio::test]
     async fn peer_down_clears_routes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -451,7 +460,7 @@ mod tests {
     #[tokio::test]
     async fn withdrawal_removes_route() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -496,7 +505,7 @@ mod tests {
     #[tokio::test]
     async fn query_all_peers() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -544,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn best_routes_returns_winner() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -585,7 +594,7 @@ mod tests {
     #[tokio::test]
     async fn peer_down_promotes_second_best() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -627,7 +636,7 @@ mod tests {
     #[tokio::test]
     async fn withdrawal_updates_best() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -675,7 +684,7 @@ mod tests {
     #[tokio::test]
     async fn different_best_per_prefix() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -728,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn peer_up_triggers_initial_table_dump() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -767,7 +776,7 @@ mod tests {
     #[tokio::test]
     async fn route_change_distributes_to_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -801,7 +810,7 @@ mod tests {
     #[tokio::test]
     async fn split_horizon_prevents_echo() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -841,7 +850,7 @@ mod tests {
     #[tokio::test]
     async fn peer_down_cleans_up_outbound() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -875,7 +884,7 @@ mod tests {
     #[tokio::test]
     async fn inject_route_enters_loc_rib_and_distributes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -929,7 +938,7 @@ mod tests {
     #[tokio::test]
     async fn withdraw_injected_removes_and_distributes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -998,7 +1007,7 @@ mod tests {
         };
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, Some(export_policy));
+        let manager = RibManager::new(rx, Some(export_policy), BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1038,7 +1047,7 @@ mod tests {
     #[tokio::test]
     async fn query_advertised_routes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1097,7 +1106,7 @@ mod tests {
         });
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1152,7 +1161,7 @@ mod tests {
         use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1207,7 +1216,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_added_on_new_best() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let mut events_rx = subscribe_events(&tx).await;
@@ -1234,7 +1243,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_withdrawn_on_last_removed() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1271,7 +1280,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_best_changed_on_better_path() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -1311,7 +1320,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_subscribers_receive_same_events() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let mut sub1 = subscribe_events(&tx).await;

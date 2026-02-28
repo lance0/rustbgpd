@@ -4,6 +4,7 @@ use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PrefixList;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
+use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -34,6 +35,13 @@ pub struct PeerSessionState {
     pub prefix_count: usize,
     pub negotiated_hold_time: Option<u16>,
     pub four_octet_as: Option<bool>,
+    pub updates_received: u64,
+    pub updates_sent: u64,
+    pub notifications_received: u64,
+    pub notifications_sent: u64,
+    pub flap_count: u64,
+    pub uptime_secs: u64,
+    pub last_error: String,
 }
 
 /// Handle for controlling a spawned peer session.
@@ -65,6 +73,35 @@ impl PeerHandle {
         let task = tokio::spawn(async move {
             let mut session =
                 PeerSession::new(config, metrics, rx, rib_tx, import_policy, export_policy);
+            session.run().await
+        });
+        Self { commands: tx, task }
+    }
+
+    /// Spawn a new peer session for an inbound (already-connected) TCP stream.
+    ///
+    /// The session starts with a connected stream and receives
+    /// `TcpConnectionConfirmed` to begin the handshake.
+    #[must_use]
+    pub fn spawn_inbound(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PrefixList>,
+        export_policy: Option<PrefixList>,
+        stream: TcpStream,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
+        let task = tokio::spawn(async move {
+            let mut session = PeerSession::new_inbound(
+                config,
+                metrics,
+                rx,
+                rib_tx,
+                import_policy,
+                export_policy,
+                stream,
+            );
             session.run().await
         });
         Self { commands: tx, task }

@@ -33,6 +33,9 @@ pub struct BgpMetrics {
 
     // ── Policy ──────────────────────────────────────────────────
     max_prefix_exceeded: IntCounterVec,
+
+    // ── RIB drops ───────────────────────────────────────────────
+    outbound_route_drops: IntCounterVec,
 }
 
 impl BgpMetrics {
@@ -151,6 +154,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let outbound_route_drops = IntCounterVec::new(
+            Opts::new(
+                "bgp_outbound_route_drops_total",
+                "Number of outbound route updates dropped due to full channel",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -184,6 +196,9 @@ impl BgpMetrics {
         registry
             .register(Box::new(max_prefix_exceeded.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(outbound_route_drops.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -198,6 +213,7 @@ impl BgpMetrics {
             rib_adj_out_prefixes,
             rib_loc_prefixes,
             max_prefix_exceeded,
+            outbound_route_drops,
         }
     }
 
@@ -278,6 +294,11 @@ impl BgpMetrics {
     /// Record a max-prefix-exceeded event for a peer.
     pub fn record_max_prefix_exceeded(&self, peer: &str) {
         self.max_prefix_exceeded.with_label_values(&[peer]).inc();
+    }
+
+    /// Record an outbound route update drop for a peer.
+    pub fn record_outbound_route_drop(&self, peer: &str) {
+        self.outbound_route_drops.with_label_values(&[peer]).inc();
     }
 }
 

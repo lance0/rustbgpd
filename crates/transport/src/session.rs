@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::IpAddr;
 use std::ops::ControlFlow;
 use std::pin::Pin;
@@ -57,8 +58,16 @@ pub(crate) struct PeerSession {
     import_policy: Option<PrefixList>,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
     export_policy: Option<PrefixList>,
-    /// Number of accepted prefixes (for max-prefix enforcement).
-    prefix_count: usize,
+    /// Accepted prefixes for accurate count and dedup.
+    known_prefixes: HashSet<rustbgpd_wire::Ipv4Prefix>,
+    /// Session counters
+    updates_received: u64,
+    updates_sent: u64,
+    notifications_received: u64,
+    notifications_sent: u64,
+    flap_count: u64,
+    established_at: Option<Instant>,
+    last_error: String,
 }
 
 /// Outbound channel buffer size.
@@ -95,7 +104,57 @@ impl PeerSession {
             outbound_tx,
             import_policy,
             export_policy,
-            prefix_count: 0,
+            known_prefixes: HashSet::new(),
+            updates_received: 0,
+            updates_sent: 0,
+            notifications_received: 0,
+            notifications_sent: 0,
+            flap_count: 0,
+            established_at: None,
+            last_error: String::new(),
+        }
+    }
+
+    /// Create a session for an inbound (already-connected) TCP stream.
+    pub(crate) fn new_inbound(
+        config: TransportConfig,
+        metrics: BgpMetrics,
+        commands: mpsc::Receiver<PeerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        import_policy: Option<PrefixList>,
+        export_policy: Option<PrefixList>,
+        stream: TcpStream,
+    ) -> Self {
+        let peer_label = config.remote_addr.to_string();
+        let peer_ip = config.remote_addr.ip();
+        let fsm = Session::new(config.peer.clone());
+        let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
+        Self {
+            config,
+            fsm,
+            stream: Some(stream),
+            read_buf: ReadBuffer::new(),
+            timers: Timers::default(),
+            metrics,
+            commands,
+            rib_tx,
+            peer_label,
+            peer_ip,
+            negotiated: None,
+            stop_requested: false,
+            reconnect_timer: None,
+            outbound_rx,
+            outbound_tx,
+            import_policy,
+            export_policy,
+            known_prefixes: HashSet::new(),
+            updates_received: 0,
+            updates_sent: 0,
+            notifications_received: 0,
+            notifications_sent: 0,
+            flap_count: 0,
+            established_at: None,
+            last_error: String::new(),
         }
     }
 
@@ -233,6 +292,7 @@ impl PeerSession {
                         warn!(peer = %self.peer_label, error = %e, "failed to send NOTIFICATION");
                         // Continue — we're tearing down anyway
                     }
+                    self.notifications_sent += 1;
                     self.metrics.record_notification_sent(
                         &self.peer_label,
                         &code.as_u8().to_string(),
@@ -296,6 +356,7 @@ impl PeerSession {
                         "session established"
                     );
                     self.negotiated = Some(neg);
+                    self.established_at = Some(Instant::now());
                     // Register with RIB manager for outbound updates
                     let _ = self.rib_tx.try_send(RibUpdate::PeerUp {
                         peer: self.peer_ip,
@@ -306,7 +367,10 @@ impl PeerSession {
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
                     self.negotiated = None;
-                    self.prefix_count = 0;
+                    self.known_prefixes.clear();
+                    if self.established_at.take().is_some() {
+                        self.flap_count += 1;
+                    }
                     let _ = self
                         .rib_tx
                         .try_send(RibUpdate::PeerDown { peer: self.peer_ip });
@@ -336,9 +400,18 @@ impl PeerSession {
 
     /// Attempt an outbound TCP connection with timeout.
     ///
+    /// If a stream is already connected (inbound session), return
+    /// `TcpConnectionConfirmed` immediately without connecting.
+    ///
     /// Uses `socket2` to create the socket so that MD5 and GTSM options can be
     /// applied before connecting.
     async fn attempt_connect(&mut self) -> Option<Event> {
+        // Inbound session: stream already connected
+        if self.stream.is_some() {
+            debug!(peer = %self.peer_label, "already connected (inbound)");
+            return Some(Event::TcpConnectionConfirmed);
+        }
+
         debug!(peer = %self.peer_label, addr = %self.config.remote_addr, "connecting");
 
         match tokio::time::timeout(self.config.connect_timeout, self.create_and_connect()).await {
@@ -437,6 +510,8 @@ impl PeerSession {
                             Event::KeepaliveReceived
                         }
                         Message::Notification(notif) => {
+                            self.notifications_received += 1;
+                            self.last_error = format!("{}/{}", notif.code.as_u8(), notif.subcode);
                             self.metrics.record_notification_received(
                                 &self.peer_label,
                                 &notif.code.as_u8().to_string(),
@@ -447,6 +522,7 @@ impl PeerSession {
                             Event::NotificationReceived(notif)
                         }
                         Message::Update(update) => {
+                            self.updates_received += 1;
                             self.metrics
                                 .record_message_received(&self.peer_label, "update");
                             self.process_update(update).await;
@@ -546,16 +622,20 @@ impl PeerSession {
             })
             .collect();
 
-        // 4. Max-prefix enforcement
-        self.prefix_count += announced.len();
-        self.prefix_count = self.prefix_count.saturating_sub(parsed.withdrawn.len());
+        // 4. Max-prefix enforcement — track via HashSet for accuracy
+        for prefix in &parsed.withdrawn {
+            self.known_prefixes.remove(prefix);
+        }
+        for route in &announced {
+            self.known_prefixes.insert(route.prefix);
+        }
 
         if let Some(max) = self.config.max_prefixes
-            && self.prefix_count > max as usize
+            && self.known_prefixes.len() > max as usize
         {
             warn!(
                 peer = %self.peer_label,
-                count = self.prefix_count,
+                count = self.known_prefixes.len(),
                 max,
                 "max prefix exceeded"
             );
@@ -608,12 +688,20 @@ impl PeerSession {
                 ControlFlow::Break(())
             }
             PeerCommand::QueryState { reply } => {
+                let uptime_secs = self.established_at.map_or(0, |t| t.elapsed().as_secs());
                 let state = PeerSessionState {
                     fsm_state: self.fsm.state(),
                     peer_ip: self.peer_ip,
-                    prefix_count: self.prefix_count,
+                    prefix_count: self.known_prefixes.len(),
                     negotiated_hold_time: self.negotiated.as_ref().map(|n| n.hold_time),
                     four_octet_as: self.negotiated.as_ref().map(|n| n.four_octet_as),
+                    updates_received: self.updates_received,
+                    updates_sent: self.updates_sent,
+                    notifications_received: self.notifications_received,
+                    notifications_sent: self.notifications_sent,
+                    flap_count: self.flap_count,
+                    uptime_secs,
+                    last_error: self.last_error.clone(),
                 };
                 let _ = reply.send(state);
                 ControlFlow::Continue(())
@@ -637,18 +725,29 @@ impl PeerSession {
                 warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
                 return;
             }
+            self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
-        // Send announcements (one UPDATE per route for simplicity)
+        // Send announcements — batch routes with identical attributes
+        let mut groups: Vec<(Vec<PathAttribute>, Vec<rustbgpd_wire::Ipv4Prefix>)> = Vec::new();
         for route in &update.announce {
             let attrs = self.prepare_outbound_attributes(route, is_ebgp);
-            let msg = UpdateMessage::build(&[route.prefix], &[], &attrs, four_octet_as);
+            if let Some(group) = groups.iter_mut().find(|(a, _)| *a == attrs) {
+                group.1.push(route.prefix);
+            } else {
+                groups.push((attrs, vec![route.prefix]));
+            }
+        }
+
+        for (attrs, prefixes) in &groups {
+            let msg = UpdateMessage::build(prefixes, &[], attrs, four_octet_as);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
                 return;
             }
+            self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
     }
