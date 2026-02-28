@@ -21,3 +21,4 @@ tokio-stream.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+tokio = { workspace = true, features = ["test-util"] }

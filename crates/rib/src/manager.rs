@@ -17,6 +17,9 @@ use crate::update::{OutboundRouteUpdate, RibUpdate};
 /// Sentinel peer address for locally-injected routes.
 const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
+/// How long to wait before retrying distribution to dirty peers.
+const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
 /// Runs as a single tokio task, receiving updates via an mpsc channel.
@@ -119,8 +122,8 @@ impl RibManager {
     /// (those that failed a previous `try_send()`) get a full export resync:
     /// all Loc-RIB and `AdjRibOut` prefixes are diffed to bring the peer's
     /// view back in sync. `AdjRibOut` is only committed after a successful
-    /// channel send; on failure the peer stays dirty for retry on the next
-    /// event loop iteration.
+    /// channel send; on failure the peer stays dirty for retry via the
+    /// resync timer.
     fn distribute_changes(&mut self, changed_prefixes: &HashSet<Ipv4Prefix>) {
         if changed_prefixes.is_empty() && self.dirty_peers.is_empty() {
             return;
@@ -222,7 +225,7 @@ impl RibManager {
     ///
     /// `AdjRibOut` is only populated after a successful channel send. On
     /// failure the peer is marked dirty so `distribute_changes()` will
-    /// retry a full resync on the next event loop iteration.
+    /// retry a full resync via the resync timer.
     fn send_initial_table(&mut self, peer: IpAddr) {
         let mut announce = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
@@ -266,139 +269,168 @@ impl RibManager {
         }
     }
 
-    /// Run the RIB manager event loop until the channel is closed.
+    /// Process a single `RibUpdate` message.
     #[expect(clippy::too_many_lines)]
-    pub async fn run(mut self) {
-        while let Some(update) = self.rx.recv().await {
-            match update {
-                RibUpdate::RoutesReceived {
-                    peer,
-                    announced,
-                    withdrawn,
-                } => {
-                    let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
-                    let mut affected = HashSet::new();
+    fn handle_update(&mut self, update: RibUpdate) {
+        match update {
+            RibUpdate::RoutesReceived {
+                peer,
+                announced,
+                withdrawn,
+            } => {
+                let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+                let mut affected = HashSet::new();
 
-                    for prefix in &withdrawn {
-                        if rib.withdraw(prefix) {
-                            debug!(%peer, %prefix, "withdrawn");
-                            affected.insert(*prefix);
-                        }
+                for prefix in &withdrawn {
+                    if rib.withdraw(prefix) {
+                        debug!(%peer, %prefix, "withdrawn");
+                        affected.insert(*prefix);
                     }
+                }
 
-                    for route in announced {
-                        debug!(%peer, prefix = %route.prefix, "announced");
-                        affected.insert(route.prefix);
-                        rib.insert(route);
-                    }
+                for route in announced {
+                    debug!(%peer, prefix = %route.prefix, "announced");
+                    affected.insert(route.prefix);
+                    rib.insert(route);
+                }
 
-                    debug!(%peer, routes = rib.len(), "rib updated");
+                debug!(%peer, routes = rib.len(), "rib updated");
+                let changed = self.recompute_best(&affected);
+                self.distribute_changes(&changed);
+            }
+
+            RibUpdate::PeerDown { peer } => {
+                if let Some(rib) = self.ribs.get_mut(&peer) {
+                    let affected: HashSet<Ipv4Prefix> = rib.iter().map(|r| r.prefix).collect();
+                    let count = rib.len();
+                    rib.clear();
+                    debug!(%peer, cleared = count, "peer down — rib cleared");
                     let changed = self.recompute_best(&affected);
                     self.distribute_changes(&changed);
                 }
+                // Clean up outbound state
+                self.adj_ribs_out.remove(&peer);
+                self.outbound_peers.remove(&peer);
+                self.peer_export_policies.remove(&peer);
+                self.dirty_peers.remove(&peer);
+            }
 
-                RibUpdate::PeerDown { peer } => {
-                    if let Some(rib) = self.ribs.get_mut(&peer) {
-                        let affected: HashSet<Ipv4Prefix> = rib.iter().map(|r| r.prefix).collect();
-                        let count = rib.len();
-                        rib.clear();
-                        debug!(%peer, cleared = count, "peer down — rib cleared");
-                        let changed = self.recompute_best(&affected);
-                        self.distribute_changes(&changed);
-                    }
-                    // Clean up outbound state
-                    self.adj_ribs_out.remove(&peer);
-                    self.outbound_peers.remove(&peer);
-                    self.peer_export_policies.remove(&peer);
-                    self.dirty_peers.remove(&peer);
-                }
+            RibUpdate::PeerUp {
+                peer,
+                outbound_tx,
+                export_policy,
+            } => {
+                debug!(%peer, "peer up — registering for outbound updates");
+                self.outbound_peers.insert(peer, outbound_tx);
+                self.peer_export_policies.insert(peer, export_policy);
+                self.send_initial_table(peer);
+            }
 
-                RibUpdate::PeerUp {
-                    peer,
-                    outbound_tx,
-                    export_policy,
-                } => {
-                    debug!(%peer, "peer up — registering for outbound updates");
-                    self.outbound_peers.insert(peer, outbound_tx);
-                    self.peer_export_policies.insert(peer, export_policy);
-                    self.send_initial_table(peer);
-                }
+            RibUpdate::InjectRoute { route, reply } => {
+                let prefix = route.prefix;
+                let rib = self
+                    .ribs
+                    .entry(LOCAL_PEER)
+                    .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+                rib.insert(route);
+                debug!(%prefix, "injected local route");
 
-                RibUpdate::InjectRoute { route, reply } => {
-                    let prefix = route.prefix;
-                    let rib = self
-                        .ribs
-                        .entry(LOCAL_PEER)
-                        .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-                    rib.insert(route);
-                    debug!(%prefix, "injected local route");
+                let mut affected = HashSet::new();
+                affected.insert(prefix);
+                let changed = self.recompute_best(&affected);
+                self.distribute_changes(&changed);
 
+                let _ = reply.send(Ok(()));
+            }
+
+            RibUpdate::WithdrawInjected { prefix, reply } => {
+                let rib = self
+                    .ribs
+                    .entry(LOCAL_PEER)
+                    .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+                if rib.withdraw(&prefix) {
+                    debug!(%prefix, "withdrawn injected route");
                     let mut affected = HashSet::new();
                     affected.insert(prefix);
                     let changed = self.recompute_best(&affected);
                     self.distribute_changes(&changed);
-
                     let _ = reply.send(Ok(()));
+                } else {
+                    let _ = reply.send(Err(format!("prefix {prefix} not found")));
                 }
+            }
 
-                RibUpdate::WithdrawInjected { prefix, reply } => {
-                    let rib = self
+            RibUpdate::QueryReceivedRoutes { peer, reply } => {
+                let routes: Vec<_> = match peer {
+                    Some(peer_addr) => self
                         .ribs
-                        .entry(LOCAL_PEER)
-                        .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-                    if rib.withdraw(&prefix) {
-                        debug!(%prefix, "withdrawn injected route");
-                        let mut affected = HashSet::new();
-                        affected.insert(prefix);
-                        let changed = self.recompute_best(&affected);
-                        self.distribute_changes(&changed);
-                        let _ = reply.send(Ok(()));
-                    } else {
-                        let _ = reply.send(Err(format!("prefix {prefix} not found")));
-                    }
-                }
-
-                RibUpdate::QueryReceivedRoutes { peer, reply } => {
-                    let routes: Vec<_> = match peer {
-                        Some(peer_addr) => self
-                            .ribs
-                            .get(&peer_addr)
-                            .map(|rib| rib.iter().cloned().collect())
-                            .unwrap_or_default(),
-                        None => self
-                            .ribs
-                            .values()
-                            .flat_map(|rib| rib.iter().cloned())
-                            .collect(),
-                    };
-
-                    if reply.send(routes).is_err() {
-                        warn!("query caller dropped before receiving response");
-                    }
-                }
-
-                RibUpdate::QueryBestRoutes { reply } => {
-                    let routes: Vec<_> = self.loc_rib.iter().cloned().collect();
-                    if reply.send(routes).is_err() {
-                        warn!("query caller dropped before receiving response");
-                    }
-                }
-
-                RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
-                    let routes: Vec<_> = self
-                        .adj_ribs_out
-                        .get(&peer)
+                        .get(&peer_addr)
                         .map(|rib| rib.iter().cloned().collect())
-                        .unwrap_or_default();
+                        .unwrap_or_default(),
+                    None => self
+                        .ribs
+                        .values()
+                        .flat_map(|rib| rib.iter().cloned())
+                        .collect(),
+                };
 
-                    if reply.send(routes).is_err() {
-                        warn!("query caller dropped before receiving response");
-                    }
+                if reply.send(routes).is_err() {
+                    warn!("query caller dropped before receiving response");
                 }
+            }
 
-                RibUpdate::SubscribeRouteEvents { reply } => {
-                    let rx = self.route_events_tx.subscribe();
-                    let _ = reply.send(rx);
+            RibUpdate::QueryBestRoutes { reply } => {
+                let routes: Vec<_> = self.loc_rib.iter().cloned().collect();
+                if reply.send(routes).is_err() {
+                    warn!("query caller dropped before receiving response");
+                }
+            }
+
+            RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
+                let routes: Vec<_> = self
+                    .adj_ribs_out
+                    .get(&peer)
+                    .map(|rib| rib.iter().cloned().collect())
+                    .unwrap_or_default();
+
+                if reply.send(routes).is_err() {
+                    warn!("query caller dropped before receiving response");
+                }
+            }
+
+            RibUpdate::SubscribeRouteEvents { reply } => {
+                let rx = self.route_events_tx.subscribe();
+                let _ = reply.send(rx);
+            }
+        }
+    }
+
+    /// Run the RIB manager event loop until the channel is closed.
+    ///
+    /// When dirty peers exist (from failed outbound sends), a resync timer
+    /// fires to retry distribution independently of incoming mutations.
+    pub async fn run(mut self) {
+        loop {
+            if self.dirty_peers.is_empty() {
+                match self.rx.recv().await {
+                    Some(update) => self.handle_update(update),
+                    None => break,
+                }
+            } else {
+                tokio::select! {
+                    update = self.rx.recv() => {
+                        match update {
+                            Some(update) => self.handle_update(update),
+                            None => break,
+                        }
+                    }
+                    () = tokio::time::sleep(DIRTY_RESYNC_INTERVAL) => {
+                        debug!(
+                            count = self.dirty_peers.len(),
+                            "resync timer fired for dirty peers"
+                        );
+                        self.distribute_changes(&HashSet::new());
+                    }
                 }
             }
         }
@@ -410,7 +442,7 @@ impl RibManager {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute};
     use tokio::sync::oneshot;
@@ -1263,6 +1295,8 @@ mod tests {
 
     #[tokio::test]
     async fn channel_full_marks_dirty_and_resyncs() {
+        tokio::time::pause();
+
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
@@ -1352,29 +1386,23 @@ mod tests {
         // Now drain the channel to allow resync
         let _ = out_rx.recv().await.unwrap();
 
-        // Trigger another route event to give dirty resync a chance to run
-        let prefix3 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 3, 0), 24);
-        tx.send(RibUpdate::RoutesReceived {
-            peer: source,
-            announced: vec![make_route(prefix3, Ipv4Addr::new(10, 0, 0, 1))],
-            withdrawn: vec![],
-        })
-        .await
-        .unwrap();
+        // Advance time to trigger the dirty-peer resync timer — no external
+        // route mutation needed; the timer fires independently.
+        tokio::time::advance(Duration::from_secs(2)).await;
 
         // Drain the resync update
         let resync = out_rx.recv().await.unwrap();
 
         // The resync should withdraw prefix1 (no longer in Loc-RIB) and
-        // announce prefix2 + prefix3 (current Loc-RIB state)
+        // re-announce prefix2 (current Loc-RIB state)
         assert!(
             resync.withdraw.contains(&prefix1),
             "resync should withdraw prefix1 (no longer in Loc-RIB)"
         );
         let announced_prefixes: Vec<_> = resync.announce.iter().map(|r| r.prefix).collect();
         assert!(
-            announced_prefixes.contains(&prefix3),
-            "resync should announce prefix3 (new)"
+            announced_prefixes.contains(&prefix2),
+            "resync should re-announce prefix2"
         );
 
         // After successful resync, AdjRibOut should match Loc-RIB
@@ -1388,8 +1416,8 @@ mod tests {
         let advertised = reply_rx.await.unwrap();
         assert_eq!(
             advertised.len(),
-            2,
-            "AdjRibOut matches Loc-RIB after resync"
+            1,
+            "AdjRibOut matches Loc-RIB after resync (only prefix2)"
         );
 
         drop(tx);

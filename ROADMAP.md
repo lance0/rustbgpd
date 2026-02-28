@@ -453,8 +453,9 @@ Peer-visible bugs found during full-project code review.
 
 1. ~~**Adj-RIB-Out divergence on channel-full** (`crates/rib/src/manager.rs`)~~
    - Stage-then-commit with dirty peer tracking. On send failure, AdjRibOut
-     is preserved and peer is marked dirty. Next event loop iteration runs
-     a full export resync (all Loc-RIB + AdjRibOut prefixes diffed). 2 tests.
+     is preserved and peer is marked dirty. A 1-second resync timer fires
+     independently via `tokio::select!`, diffing all Loc-RIB + AdjRibOut
+     prefixes. No external mutation required to trigger retry. 2 tests.
 
 2. ~~**Malformed NLRI maps to wrong NOTIFICATION** (`crates/wire/src/nlri.rs`, `error.rs`)~~
    - Both prefix_len > 32 and truncated NLRI now return `InvalidNetworkField`
