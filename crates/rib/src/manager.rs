@@ -407,16 +407,29 @@ impl RibManager {
 
     /// Run the RIB manager event loop until the channel is closed.
     ///
-    /// When dirty peers exist (from failed outbound sends), a resync timer
-    /// fires to retry distribution independently of incoming mutations.
+    /// When dirty peers exist (from failed outbound sends), a persistent
+    /// resync timer fires to retry distribution independently of both
+    /// incoming mutations and non-mutating query traffic. The timer is
+    /// started when `dirty_peers` transitions from empty to non-empty and
+    /// reset after each retry tick; it is not recreated per loop iteration,
+    /// so incoming messages cannot starve it.
     pub async fn run(mut self) {
+        // Persistent timer: starts far in the future (disabled). Reset to
+        // DIRTY_RESYNC_INTERVAL when dirty_peers becomes non-empty.
+        let resync_sleep = tokio::time::sleep(DIRTY_RESYNC_INTERVAL);
+        tokio::pin!(resync_sleep);
+        let mut resync_armed = false;
+
         loop {
-            if self.dirty_peers.is_empty() {
-                match self.rx.recv().await {
-                    Some(update) => self.handle_update(update),
-                    None => break,
-                }
-            } else {
+            // Arm the timer when dirty_peers transitions from empty → non-empty.
+            if !self.dirty_peers.is_empty() && !resync_armed {
+                resync_sleep
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
+                resync_armed = true;
+            }
+
+            if resync_armed {
                 tokio::select! {
                     update = self.rx.recv() => {
                         match update {
@@ -424,14 +437,34 @@ impl RibManager {
                             None => break,
                         }
                     }
-                    () = tokio::time::sleep(DIRTY_RESYNC_INTERVAL) => {
+                    () = resync_sleep.as_mut() => {
                         debug!(
                             count = self.dirty_peers.len(),
                             "resync timer fired for dirty peers"
                         );
                         self.distribute_changes(&HashSet::new());
+
+                        // Reset for next tick if still dirty, otherwise disarm.
+                        if self.dirty_peers.is_empty() {
+                            resync_armed = false;
+                        } else {
+                            resync_sleep.as_mut().reset(
+                                tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL,
+                            );
+                        }
                     }
                 }
+            } else {
+                // No dirty peers — just wait for the next message.
+                match self.rx.recv().await {
+                    Some(update) => self.handle_update(update),
+                    None => break,
+                }
+            }
+
+            // Disarm if dirty_peers was cleared by a message handler (e.g. PeerDown).
+            if self.dirty_peers.is_empty() {
+                resync_armed = false;
             }
         }
 
@@ -1418,6 +1451,106 @@ mod tests {
             advertised.len(),
             1,
             "AdjRibOut matches Loc-RIB after resync (only prefix2)"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dirty_resync_not_starved_by_query_traffic() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+        })
+        .await
+        .unwrap();
+
+        // Announce prefix1
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let _ = out_rx.recv().await.unwrap(); // drain
+
+        // Withdraw prefix1 — channel is empty so this fills it
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![],
+            withdrawn: vec![prefix1],
+        })
+        .await
+        .unwrap();
+
+        // That send succeeded (channel was empty). Now announce again to fill.
+        let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Don't drain — channel full. Send another route to trigger a failed
+        // distribute_changes, marking the peer dirty.
+        let prefix3 = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 12);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix3, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Force serialization
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        // Drain the outbound channel to allow resync
+        let _ = out_rx.recv().await.unwrap();
+
+        // Advance 500ms — not enough for the 1s timer
+        tokio::time::advance(Duration::from_millis(500)).await;
+
+        // Send several queries to exercise the "message churn" path.
+        // With the old code (sleep recreated each iteration), each query
+        // would reset the 1s countdown, starving the timer.
+        for _ in 0..5 {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+                .await
+                .unwrap();
+            let _ = reply_rx.await;
+        }
+
+        // Advance the remaining 600ms — total 1100ms, past the 1s deadline
+        // that was set before the query churn.
+        tokio::time::advance(Duration::from_millis(600)).await;
+
+        // The resync should fire despite the intervening queries.
+        let resync = out_rx.recv().await.unwrap();
+        assert!(
+            !resync.announce.is_empty() || !resync.withdraw.is_empty(),
+            "resync should produce updates despite query churn"
         );
 
         drop(tx);
