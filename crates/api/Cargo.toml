@@ -2,8 +2,11 @@
 name = "rustbgpd-api"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "gRPC API server — tonic bindings for all five rustbgpd services"
 
 [dependencies]

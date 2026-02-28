@@ -2,8 +2,11 @@
 name = "rustbgpd-rib"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "RIB data structures — Adj-RIB-In, Loc-RIB best-path selection, Adj-RIB-Out"
 
 [dependencies]

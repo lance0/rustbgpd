@@ -2,8 +2,11 @@
 name = "rustbgpd-fsm"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "RFC 4271 BGP finite state machine — pure, no I/O, no async runtime"
 
 [dependencies]
