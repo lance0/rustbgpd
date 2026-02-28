@@ -422,8 +422,9 @@ fn encode_as_path(as_path: &AsPath, buf: &mut Vec<u8>, four_octet_as: bool) {
             if four_octet_as {
                 buf.extend_from_slice(&asn.to_be_bytes());
             } else {
-                #[expect(clippy::cast_possible_truncation)]
-                let as2 = asn as u16;
+                // RFC 6793: ASNs > 65535 are mapped to AS_TRANS (23456)
+                // in 2-octet AS_PATH encoding.
+                let as2 = u16::try_from(asn).unwrap_or(crate::constants::AS_TRANS);
                 buf.extend_from_slice(&as2.to_be_bytes());
             }
         }

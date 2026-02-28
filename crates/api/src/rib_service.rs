@@ -47,6 +47,50 @@ impl RibService {
     }
 }
 
+fn parse_page_params(req: &proto::ListRoutesRequest) -> Result<(usize, usize), &'static str> {
+    let offset: usize = if req.page_token.is_empty() {
+        0
+    } else {
+        req.page_token.parse().map_err(|_| "invalid page_token")?
+    };
+
+    let page_size = if req.page_size == 0 {
+        100
+    } else {
+        req.page_size as usize
+    };
+
+    Ok((offset, page_size))
+}
+
+fn build_response(
+    routes: &[Route],
+    offset: usize,
+    page_size: usize,
+    best: bool,
+) -> proto::ListRoutesResponse {
+    let total_count = u64::try_from(routes.len()).unwrap_or(u64::MAX);
+    let page: Vec<proto::Route> = routes
+        .iter()
+        .skip(offset)
+        .take(page_size)
+        .map(|r| route_to_proto(r, best))
+        .collect();
+
+    let next_offset = offset + page.len();
+    let next_page_token = if next_offset < routes.len() {
+        next_offset.to_string()
+    } else {
+        String::new()
+    };
+
+    proto::ListRoutesResponse {
+        routes: page,
+        next_page_token,
+        total_count,
+    }
+}
+
 fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut origin = 0u32;
     let mut as_path = Vec::new();
@@ -108,41 +152,13 @@ impl proto::rib_service_server::RibService for RibService {
         };
 
         let all_routes = self.query_routes(peer).await?;
-        let total_count = u64::try_from(all_routes.len()).unwrap_or(u64::MAX);
-
-        let offset: usize = if req.page_token.is_empty() {
-            0
-        } else {
-            req.page_token
-                .parse()
-                .map_err(|_| Status::invalid_argument("invalid page_token"))?
-        };
-
-        let page_size = if req.page_size == 0 {
-            100
-        } else {
-            req.page_size as usize
-        };
-
-        let page: Vec<proto::Route> = all_routes
-            .iter()
-            .skip(offset)
-            .take(page_size)
-            .map(|r| route_to_proto(r, false))
-            .collect();
-
-        let next_offset = offset + page.len();
-        let next_page_token = if next_offset < all_routes.len() {
-            next_offset.to_string()
-        } else {
-            String::new()
-        };
-
-        Ok(Response::new(proto::ListRoutesResponse {
-            routes: page,
-            next_page_token,
-            total_count,
-        }))
+        let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
+        Ok(Response::new(build_response(
+            &all_routes,
+            offset,
+            page_size,
+            false,
+        )))
     }
 
     async fn list_best_routes(
@@ -151,41 +167,13 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
         let all_routes = self.query_best_routes().await?;
-        let total_count = u64::try_from(all_routes.len()).unwrap_or(u64::MAX);
-
-        let offset: usize = if req.page_token.is_empty() {
-            0
-        } else {
-            req.page_token
-                .parse()
-                .map_err(|_| Status::invalid_argument("invalid page_token"))?
-        };
-
-        let page_size = if req.page_size == 0 {
-            100
-        } else {
-            req.page_size as usize
-        };
-
-        let page: Vec<proto::Route> = all_routes
-            .iter()
-            .skip(offset)
-            .take(page_size)
-            .map(|r| route_to_proto(r, true))
-            .collect();
-
-        let next_offset = offset + page.len();
-        let next_page_token = if next_offset < all_routes.len() {
-            next_offset.to_string()
-        } else {
-            String::new()
-        };
-
-        Ok(Response::new(proto::ListRoutesResponse {
-            routes: page,
-            next_page_token,
-            total_count,
-        }))
+        let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
+        Ok(Response::new(build_response(
+            &all_routes,
+            offset,
+            page_size,
+            true,
+        )))
     }
 
     async fn list_advertised_routes(
@@ -218,41 +206,13 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
-        let total_count = u64::try_from(all_routes.len()).unwrap_or(u64::MAX);
-
-        let offset: usize = if req.page_token.is_empty() {
-            0
-        } else {
-            req.page_token
-                .parse()
-                .map_err(|_| Status::invalid_argument("invalid page_token"))?
-        };
-
-        let page_size = if req.page_size == 0 {
-            100
-        } else {
-            req.page_size as usize
-        };
-
-        let page: Vec<proto::Route> = all_routes
-            .iter()
-            .skip(offset)
-            .take(page_size)
-            .map(|r| route_to_proto(r, false))
-            .collect();
-
-        let next_offset = offset + page.len();
-        let next_page_token = if next_offset < all_routes.len() {
-            next_offset.to_string()
-        } else {
-            String::new()
-        };
-
-        Ok(Response::new(proto::ListRoutesResponse {
-            routes: page,
-            next_page_token,
-            total_count,
-        }))
+        let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
+        Ok(Response::new(build_response(
+            &all_routes,
+            offset,
+            page_size,
+            false,
+        )))
     }
 
     async fn watch_routes(

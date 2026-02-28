@@ -10,6 +10,25 @@ document (M0–M5).
 
 ## [Unreleased]
 
+### Fixed
+
+- `rustbgpd-wire`: 2-octet ASN encoding no longer silently truncates 4-byte ASNs.
+  ASNs > 65535 are now mapped to `AS_TRANS` (23456) per RFC 6793.
+- Config: invalid policy entries (unknown action, malformed prefix) now return
+  `ConfigError::InvalidPolicyEntry` instead of being silently filtered. 2 tests.
+- `KNOWN_ISSUES.md`: removed stale entries about missing inbound listener and
+  outbound UPDATE generation (resolved in M5 and M3 respectively).
+- Metrics server: inbound accept forwarding failure now logged instead of silently
+  dropped.
+
+### Changed
+
+- `rustbgpd-api`: Deduplicated pagination logic in `RibService` — extracted
+  `parse_page_params()` and `build_response()` helpers used by all 3 list RPCs.
+- Workspace version bumped to 0.1.0. Repository URL fixed. Added `rust-version`,
+  `keywords`, `categories` metadata for crates.io publishing. Proto file copied
+  into api crate for standalone packaging.
+
 ### Added (M5 — "Polish")
 
 - `rustbgpd-transport`: Inbound TCP listener. `BgpListener` accepts connections on

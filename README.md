@@ -35,7 +35,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **314 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **316 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 

@@ -94,43 +94,56 @@ pub enum ConfigError {
     InvalidGrpcAddr { value: String, reason: String },
     #[error("invalid hold_time {value}: must be 0 or >= 3")]
     InvalidHoldTime { value: u16 },
+    #[error("invalid policy entry: {reason}")]
+    InvalidPolicyEntry { reason: String },
 }
 
-fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Option<PrefixList> {
+fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixList>, ConfigError> {
     if entries.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let parsed: Vec<PrefixListEntry> = entries
-        .iter()
-        .filter_map(|e| {
-            let action = match e.action.as_str() {
-                "permit" => PolicyAction::Permit,
-                "deny" => PolicyAction::Deny,
-                _ => return None,
-            };
-            let parts: Vec<&str> = e.prefix.split('/').collect();
-            if parts.len() != 2 {
-                return None;
+    let mut parsed = Vec::with_capacity(entries.len());
+    for e in entries {
+        let action = match e.action.as_str() {
+            "permit" => PolicyAction::Permit,
+            "deny" => PolicyAction::Deny,
+            other => {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!("unknown action {other:?}, expected \"permit\" or \"deny\""),
+                });
             }
-            let addr: Ipv4Addr = parts[0].parse().ok()?;
-            let len: u8 = parts[1].parse().ok()?;
-            Some(PrefixListEntry {
-                prefix: Ipv4Prefix::new(addr, len),
-                ge: e.ge,
-                le: e.le,
-                action,
-            })
-        })
-        .collect();
-
-    if parsed.is_empty() {
-        return None;
+        };
+        let parts: Vec<&str> = e.prefix.split('/').collect();
+        if parts.len() != 2 {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!(
+                    "invalid prefix {:?}, expected CIDR notation (e.g. 10.0.0.0/8)",
+                    e.prefix
+                ),
+            });
+        }
+        let addr: Ipv4Addr = parts[0]
+            .parse()
+            .map_err(|_| ConfigError::InvalidPolicyEntry {
+                reason: format!("invalid address in prefix {:?}", e.prefix),
+            })?;
+        let len: u8 = parts[1]
+            .parse()
+            .map_err(|_| ConfigError::InvalidPolicyEntry {
+                reason: format!("invalid prefix length in {:?}", e.prefix),
+            })?;
+        parsed.push(PrefixListEntry {
+            prefix: Ipv4Prefix::new(addr, len),
+            ge: e.ge,
+            le: e.le,
+            action,
+        });
     }
 
-    Some(PrefixList {
+    Ok(Some(PrefixList {
         entries: parsed,
         default_action: PolicyAction::Permit,
-    })
+    }))
 }
 
 impl Config {
@@ -211,11 +224,11 @@ impl Config {
             .expect("validated in Config::load")
     }
 
-    pub fn import_policy(&self) -> Option<PrefixList> {
+    pub fn import_policy(&self) -> Result<Option<PrefixList>, ConfigError> {
         parse_prefix_list(&self.policy.import)
     }
 
-    pub fn export_policy(&self) -> Option<PrefixList> {
+    pub fn export_policy(&self) -> Result<Option<PrefixList>, ConfigError> {
         parse_prefix_list(&self.policy.export)
     }
 
@@ -223,56 +236,58 @@ impl Config {
     ///
     /// Per-neighbor policy overrides global; if neighbor has no policy entries,
     /// the corresponding value is `None` (caller falls back to global).
+    #[expect(clippy::type_complexity)]
     pub fn to_peer_configs(
         &self,
-    ) -> Vec<(
-        TransportConfig,
-        String,
-        Option<PrefixList>,
-        Option<PrefixList>,
-    )> {
+    ) -> Result<
+        Vec<(
+            TransportConfig,
+            String,
+            Option<PrefixList>,
+            Option<PrefixList>,
+        )>,
+        ConfigError,
+    > {
         let router_id: Ipv4Addr = self
             .global
             .router_id
             .parse()
             .expect("validated in Config::load");
 
-        let global_import = self.import_policy();
-        let global_export = self.export_policy();
+        let global_import = self.import_policy()?;
+        let global_export = self.export_policy()?;
 
-        self.neighbors
-            .iter()
-            .map(|neighbor| {
-                let peer_addr: IpAddr =
-                    neighbor.address.parse().expect("validated in Config::load");
+        let mut configs = Vec::with_capacity(self.neighbors.len());
+        for neighbor in &self.neighbors {
+            let peer_addr: IpAddr = neighbor.address.parse().expect("validated in Config::load");
 
-                let peer = PeerConfig {
-                    local_asn: self.global.asn,
-                    remote_asn: neighbor.remote_asn,
-                    local_router_id: router_id,
-                    hold_time: neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
-                    connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
-                    families: vec![(Afi::Ipv4, Safi::Unicast)],
-                };
+            let peer = PeerConfig {
+                local_asn: self.global.asn,
+                remote_asn: neighbor.remote_asn,
+                local_router_id: router_id,
+                hold_time: neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
+                connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
+                families: vec![(Afi::Ipv4, Safi::Unicast)],
+            };
 
-                let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
-                let mut transport = TransportConfig::new(peer, remote_addr);
-                transport.max_prefixes = neighbor.max_prefixes;
-                transport.md5_password.clone_from(&neighbor.md5_password);
-                transport.ttl_security = neighbor.ttl_security;
+            let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
+            let mut transport = TransportConfig::new(peer, remote_addr);
+            transport.max_prefixes = neighbor.max_prefixes;
+            transport.md5_password.clone_from(&neighbor.md5_password);
+            transport.ttl_security = neighbor.ttl_security;
 
-                let label = neighbor
-                    .description
-                    .clone()
-                    .unwrap_or_else(|| neighbor.address.clone());
+            let label = neighbor
+                .description
+                .clone()
+                .unwrap_or_else(|| neighbor.address.clone());
 
-                // Per-neighbor policy overrides global
-                let import = parse_prefix_list(&neighbor.import_policy).or(global_import.clone());
-                let export = parse_prefix_list(&neighbor.export_policy).or(global_export.clone());
+            // Per-neighbor policy overrides global
+            let import = parse_prefix_list(&neighbor.import_policy)?.or(global_import.clone());
+            let export = parse_prefix_list(&neighbor.export_policy)?.or(global_export.clone());
 
-                (transport, label, import, export)
-            })
-            .collect()
+            configs.push((transport, label, import, export));
+        }
+        Ok(configs)
     }
 }
 
@@ -376,14 +391,14 @@ remote_asn = 65002
         let config = parse(toml_str).unwrap();
         assert_eq!(config.neighbors[0].hold_time, None);
 
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
         assert_eq!(peers[0].0.peer.hold_time, 90);
     }
 
     #[test]
     fn to_peer_configs_maps_correctly() {
         let config = parse(valid_toml()).unwrap();
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
         assert_eq!(peers.len(), 1);
 
         let (transport, label, _, _) = &peers[0];
@@ -425,7 +440,7 @@ max_prefixes = 1000
         let config = parse(toml_str).unwrap();
         assert_eq!(config.neighbors[0].max_prefixes, Some(1000));
 
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
         assert_eq!(peers[0].0.max_prefixes, Some(1000));
     }
 
@@ -451,7 +466,7 @@ ttl_security = true
         assert_eq!(config.neighbors[0].md5_password.as_deref(), Some("secret"));
         assert!(config.neighbors[0].ttl_security);
 
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
         assert_eq!(peers[0].0.md5_password.as_deref(), Some("secret"));
         assert!(peers[0].0.ttl_security);
     }
@@ -483,17 +498,17 @@ action = "permit"
 prefix = "192.168.0.0/16"
 "#;
         let config = parse(toml_str).unwrap();
-        let import = config.import_policy().unwrap();
+        let import = config.import_policy().unwrap().unwrap();
         assert_eq!(import.entries.len(), 1);
-        let export = config.export_policy().unwrap();
+        let export = config.export_policy().unwrap().unwrap();
         assert_eq!(export.entries.len(), 1);
     }
 
     #[test]
     fn empty_policy_returns_none() {
         let config = parse(valid_toml()).unwrap();
-        assert!(config.import_policy().is_none());
-        assert!(config.export_policy().is_none());
+        assert!(config.import_policy().unwrap().is_none());
+        assert!(config.export_policy().unwrap().is_none());
     }
 
     #[test]
@@ -520,7 +535,7 @@ remote_asn = 65003
 hold_time = 180
 "#;
         let config = parse(toml_str).unwrap();
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
         assert_eq!(peers.len(), 2);
         assert_eq!(peers[0].1, "peer-a");
         assert_eq!(peers[1].1, "10.0.0.3"); // no description → address used
@@ -554,7 +569,7 @@ prefix = "192.168.0.0/16"
         assert_eq!(config.neighbors[0].import_policy.len(), 1);
         assert_eq!(config.neighbors[0].export_policy.len(), 1);
 
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
         assert!(peers[0].2.is_some()); // import policy
         assert!(peers[0].3.is_some()); // export policy
     }
@@ -583,7 +598,7 @@ remote_asn = 65002
         assert!(config.neighbors[0].import_policy.is_empty());
         assert!(config.neighbors[0].export_policy.is_empty());
 
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
         // Should inherit global export policy
         assert!(peers[0].2.is_none()); // no import (neither neighbor nor global)
         assert!(peers[0].3.is_some()); // export from global
@@ -656,7 +671,7 @@ address = "10.0.0.3"
 remote_asn = 65003
 "#;
         let config = parse(toml_str).unwrap();
-        let peers = config.to_peer_configs();
+        let peers = config.to_peer_configs().unwrap();
 
         // First neighbor: has per-neighbor export → uses that
         let export1 = peers[0].3.as_ref().unwrap();
@@ -665,5 +680,55 @@ remote_asn = 65003
         // Second neighbor: no per-neighbor → falls back to global deny
         let export2 = peers[1].3.as_ref().unwrap();
         assert_eq!(export2.entries[0].action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn invalid_policy_action_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[policy.import]]
+action = "allow"
+prefix = "10.0.0.0/8"
+"#;
+        let config = parse(toml_str).unwrap();
+        let err = config.import_policy().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn invalid_policy_prefix_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[[policy.export]]
+action = "deny"
+prefix = "not-a-prefix"
+"#;
+        let config = parse(toml_str).unwrap();
+        let err = config.export_policy().unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
     }
 }

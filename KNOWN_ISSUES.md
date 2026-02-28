@@ -22,22 +22,14 @@ resolved.
 ## Limitations (by design, not bugs)
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
-- **No collision detection.** RFC 4271 §6.8. Transport supports only
-  outbound connections. Collision detection requires inbound listener
-  support (planned for M3).
-- **No inbound TCP listener.** Transport initiates outbound connections
-  only. Passive-mode peers require a listener (planned for M3).
+- **No collision detection.** RFC 4271 §6.8. If both sides initiate
+  simultaneously, the inbound connection is dropped. Collision detection
+  (compare router IDs, close the higher) is deferred to post-v1.
 - **Single task per peer.** Adequate for current OPEN/KEEPALIVE/UPDATE
   traffic. May need split reader/writer tasks for high UPDATE throughput.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does
   not reject LOCAL_PREF from eBGP peers because session type (iBGP vs
-  eBGP) is not yet distinguished. Will be enforced in M3 when the
-  transport tracks session type.
-- **No outbound UPDATE generation.** Routes are received and stored but
-  not re-advertised. Adj-RIB-Out is M3 scope.
-- **gRPC: ListReceivedRoutes and ListBestRoutes implemented.** Other
-  RibService RPCs and all other services return UNIMPLEMENTED. Full
-  API is incremental across M3-M4.
+  eBGP) is not yet fully distinguished. Will be enforced post-v1.
 - **No gRPC TLS.** Server listens in plaintext. TLS and mTLS are
   post-v1 scope. Default bind is localhost only.

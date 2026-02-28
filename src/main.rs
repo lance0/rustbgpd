@@ -46,6 +46,7 @@ fn main() {
     rt.block_on(run(config));
 }
 
+#[expect(clippy::too_many_lines)]
 async fn run(config: Config) {
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -71,7 +72,10 @@ async fn run(config: Config) {
     });
 
     // Build global export policy for RIB manager fallback
-    let export_policy = config.export_policy();
+    let export_policy = config.export_policy().unwrap_or_else(|e| {
+        error!("invalid global export policy: {e}");
+        process::exit(1);
+    });
 
     // Spawn RIB manager
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
@@ -107,12 +111,15 @@ async fn run(config: Config) {
                 let tx = listener_peer_mgr_tx;
                 tokio::spawn(async move {
                     while let Some(conn) = accept_rx.recv().await {
-                        let _ = tx
+                        if let Err(e) = tx
                             .send(PeerManagerCommand::AcceptInbound {
                                 stream: conn.stream,
                                 peer_addr: conn.peer_addr,
                             })
-                            .await;
+                            .await
+                        {
+                            warn!(error = %e, "failed to forward inbound connection to peer manager");
+                        }
                     }
                 });
                 listener.run().await;
@@ -124,7 +131,10 @@ async fn run(config: Config) {
     });
 
     // Add initial peers from config via PeerManager
-    let peer_configs = config.to_peer_configs();
+    let peer_configs = config.to_peer_configs().unwrap_or_else(|e| {
+        error!("invalid policy configuration: {e}");
+        process::exit(1);
+    });
     for (transport_config, label, import_policy, export_policy) in peer_configs {
         info!(
             peer = %transport_config.remote_addr,
