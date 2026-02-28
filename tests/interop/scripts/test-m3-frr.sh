@@ -304,6 +304,19 @@ test_delete_path() {
     fi
 }
 
+# Start rustbgpd inside the container (CMD is sleep infinity)
+start_rustbgpd() {
+    log "Starting rustbgpd daemon..."
+    docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
+    sleep 3
+    if docker exec "$RUSTBGPD" cat /proc/*/comm 2>/dev/null | grep -q rustbgpd; then
+        log "rustbgpd is running"
+    else
+        echo "ERROR: rustbgpd failed to start" >&2
+        exit 1
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -312,6 +325,7 @@ main() {
     log "Topology: $TOPO"
 
     resolve_grpc_addr
+    start_rustbgpd
 
     test_route_redistribution
     test_split_horizon
