@@ -1,22 +1,40 @@
 # rustbgpd
 
+[![Build](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/rustbgpd/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-1.93+-orange.svg)](https://www.rust-lang.org)
+[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE-MIT)
+
 An API-first BGP daemon written in Rust. rustbgpd brings the programmable,
 gRPC-driven operating model pioneered by GoBGP to a memory-safe runtime with
 no garbage collector. It targets network automation teams, IX operators, and
 anyone who wants to drive BGP sessions from code rather than CLI commands.
 
+## Why rustbgpd?
+
+If you're automating BGP -- injecting routes, managing peers, reacting to events -- you need an API, not a CLI. GoBGP proved this model works. rustbgpd takes the same idea and rebuilds it in Rust:
+
+| | FRR / BIRD | GoBGP | rustbgpd |
+|---|---|---|---|
+| **Primary interface** | CLI | gRPC | gRPC |
+| **Runtime** | C | Go (GC) | Rust (no GC) |
+| **Scope** | Full routing suite | BGP-only | BGP-only |
+| **Dynamic peers** | Config reload | gRPC | gRPC |
+| **Real-time events** | Log parsing | BMP/MRT | gRPC streaming |
+| **Observability** | SNMP, CLI | Prometheus | Prometheus + structured logs |
+| **Wire codec reuse** | No | No | `rustbgpd-wire` standalone crate |
+
+**Key idea:** Config file bootstraps initial state, then gRPC owns the truth at runtime. No restarts to add peers, change policy, or inject routes.
+
 ## Highlights
 
-- **gRPC-native** -- five services covering peer lifecycle, RIB queries, route injection, streaming events, and daemon control. Config file bootstraps; gRPC owns the truth at runtime.
-- **RFC 4271 compliant** -- full FSM, path attribute validation, best-path selection (always-compare MED), split horizon, Adj-RIB-In / Loc-RIB / Adj-RIB-Out.
-- **Dynamic peer management** -- add, delete, enable, and disable neighbors at runtime via gRPC. Zero-neighbor boot is valid.
-- **Per-peer policy** -- import/export prefix lists at global or neighbor level. Neighbor policy overrides global.
-- **Typed communities** -- RFC 1997 community encoding and propagation.
-- **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over a server-streaming RPC.
-- **Observable by default** -- Prometheus metrics endpoint, structured JSON logging, per-peer counters.
-- **TCP MD5 and GTSM** -- session security via `setsockopt` (Linux).
-- **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab.
-- **306 tests** -- unit, integration, and property tests across all crates.
+- **gRPC-native** -- five services covering peer lifecycle, RIB queries, route injection, streaming events, and daemon control
+- **RFC 4271 compliant** -- full FSM, path attribute validation, best-path selection, split horizon, Adj-RIB-In / Loc-RIB / Adj-RIB-Out
+- **Dynamic peer management** -- add, delete, enable, and disable neighbors at runtime via gRPC
+- **Per-peer policy** -- import/export prefix lists at global or neighbor level
+- **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
+- **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
+- **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
+- **306 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -108,7 +126,15 @@ Seven crates with strict dependency rules:
 | `rustbgpd-api` | gRPC server (tonic). Five services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 
-Key design decisions: the FSM is a pure function `(State, Event) -> (State, Vec<Action>)` with no I/O. The RIB runs as a single tokio task with channel-based access -- no `Arc<RwLock>`. One tokio task per peer session. See [docs/DESIGN.md](docs/DESIGN.md) and [docs/adr/](docs/adr/) for detailed rationale.
+### How data flows
+
+1. **Peer connects** -- transport opens TCP, drives the pure FSM through OPEN/KEEPALIVE handshake
+2. **UPDATEs arrive** -- transport decodes wire bytes, validates attributes per RFC 4271, inserts into RIB
+3. **Best-path runs** -- RIB recomputes affected prefixes, updates Loc-RIB, emits route events
+4. **Peers notified** -- RIB distributes changes to per-peer Adj-RIB-Out channels (split horizon, export policy)
+5. **gRPC serves** -- API queries RIB snapshots, streams events, accepts route injections and peer commands
+
+The FSM is a pure function `(State, Event) -> (State, Vec<Action>)` with no I/O. The RIB runs as a single tokio task with channel-based access -- no `Arc<RwLock>`. See [docs/DESIGN.md](docs/DESIGN.md) and [docs/adr/](docs/adr/) for detailed rationale.
 
 ## gRPC API
 
@@ -228,6 +254,19 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | M4 -- Route Server | Complete | Dynamic peers, per-peer policy, communities, WatchRoutes |
 
 Next: MP-BGP (IPv6), extended communities, graceful restart, BMP, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
+
+## Documentation
+
+| Topic | Link |
+|-------|------|
+| Design document | [docs/DESIGN.md](docs/DESIGN.md) |
+| gRPC API reference | [docs/API.md](docs/API.md) |
+| Configuration reference | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+| Interop test results | [docs/INTEROP.md](docs/INTEROP.md) |
+| Architecture decisions | [docs/adr/](docs/adr/) |
+| Roadmap | [ROADMAP.md](ROADMAP.md) |
+| Changelog | [CHANGELOG.md](CHANGELOG.md) |
+| Contributing | [CONTRIBUTING.md](CONTRIBUTING.md) |
 
 ## License
 
