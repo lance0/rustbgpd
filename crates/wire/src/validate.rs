@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::attribute::{AsPath, AsPathSegment, PathAttribute};
+use crate::attribute::{AsPath, AsPathSegment, PathAttribute, attr_error_data};
 use crate::constants::{attr_flags, attr_type};
 use crate::notification::update_subcode;
 
@@ -15,11 +15,6 @@ pub struct UpdateError {
 
 /// Well-known attribute type codes that MUST be present when NLRI is advertised.
 const MANDATORY_ATTRS: &[u8] = &[attr_type::ORIGIN, attr_type::AS_PATH];
-
-/// Expected flags for well-known attributes: Optional=0, Transitive=1.
-/// Only the high two bits (Optional + Transitive) are checked.
-const WELLKNOWN_FLAGS_MASK: u8 = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
-const WELLKNOWN_FLAGS_EXPECTED: u8 = attr_flags::TRANSITIVE;
 
 /// Validate the semantic correctness of a set of path attributes.
 ///
@@ -38,7 +33,6 @@ pub fn validate_update_attributes(
     is_ebgp: bool,
 ) -> Result<(), UpdateError> {
     check_duplicate_types(attrs)?;
-    check_wellknown_flags(attrs)?;
     check_unrecognized_wellknown(attrs)?;
 
     if has_nlri {
@@ -79,7 +73,7 @@ fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateErr
             if (raw.flags & attr_flags::OPTIONAL) == 0 {
                 return Err(UpdateError {
                     subcode: update_subcode::UNRECOGNIZED_WELLKNOWN,
-                    data: encode_attr_for_error(raw.flags, raw.type_code, &raw.data),
+                    data: attr_error_data(raw.flags, raw.type_code, &raw.data),
                 });
             }
         }
@@ -108,31 +102,6 @@ fn check_mandatory_present(attrs: &[PathAttribute], is_ebgp: bool) -> Result<(),
         });
     }
 
-    Ok(())
-}
-
-/// (3,4) Flag mismatch on well-known attributes.
-/// Well-known attributes must have Optional=0, Transitive=1.
-fn check_wellknown_flags(attrs: &[PathAttribute]) -> Result<(), UpdateError> {
-    for attr in attrs {
-        let tc = attr.type_code();
-        // Only check known well-known types
-        match tc {
-            attr_type::ORIGIN
-            | attr_type::AS_PATH
-            | attr_type::NEXT_HOP
-            | attr_type::LOCAL_PREF => {
-                let flags = attr.flags();
-                if (flags & WELLKNOWN_FLAGS_MASK) != WELLKNOWN_FLAGS_EXPECTED {
-                    return Err(UpdateError {
-                        subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
-                        data: vec![flags, tc],
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
     Ok(())
 }
 
@@ -189,20 +158,6 @@ fn check_as_path(path: &AsPath) -> Result<(), UpdateError> {
         }
     }
     Ok(())
-}
-
-/// Encode attribute header + data for error reporting.
-fn encode_attr_for_error(flags: u8, type_code: u8, data: &[u8]) -> Vec<u8> {
-    let mut buf = vec![flags, type_code];
-    let len = data.len();
-    if len > 255 {
-        #[expect(clippy::cast_possible_truncation)]
-        buf.push((len >> 8) as u8);
-    }
-    #[expect(clippy::cast_possible_truncation)]
-    buf.push(len as u8);
-    buf.extend_from_slice(data);
-    buf
 }
 
 #[cfg(test)]

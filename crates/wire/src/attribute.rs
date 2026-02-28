@@ -4,6 +4,7 @@ use bytes::Bytes;
 
 use crate::constants::{as_path_segment, attr_flags, attr_type};
 use crate::error::DecodeError;
+use crate::notification::update_subcode;
 
 /// Origin attribute values per RFC 4271 §5.1.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -207,32 +208,58 @@ fn decode_attribute_value(
     value: &[u8],
     four_octet_as: bool,
 ) -> Result<PathAttribute, DecodeError> {
+    // Validate Optional + Transitive flags for known attribute types (RFC 4271 §6.3).
+    let flags_mask = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+    if let Some(expected) = expected_flags(type_code)
+        && (flags & flags_mask) != expected
+    {
+        return Err(DecodeError::UpdateAttributeError {
+            subcode: update_subcode::ATTRIBUTE_FLAGS_ERROR,
+            data: attr_error_data(flags, type_code, value),
+            detail: format!(
+                "type {} flags {:#04x} (expected {:#04x})",
+                type_code,
+                flags & flags_mask,
+                expected
+            ),
+        });
+    }
+
     match type_code {
         attr_type::ORIGIN => {
             if value.len() != 1 {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
                     detail: format!("ORIGIN length {} (expected 1)", value.len()),
                 });
             }
             match Origin::from_u8(value[0]) {
                 Some(origin) => Ok(PathAttribute::Origin(origin)),
-                None => Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
+                None => Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::INVALID_ORIGIN,
+                    data: attr_error_data(flags, type_code, value),
                     detail: format!("invalid ORIGIN value {}", value[0]),
                 }),
             }
         }
 
         attr_type::AS_PATH => {
-            let segments = decode_as_path(value, four_octet_as)?;
+            let segments = decode_as_path(value, four_octet_as).map_err(|e| {
+                DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::MALFORMED_AS_PATH,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: e.to_string(),
+                }
+            })?;
             Ok(PathAttribute::AsPath(AsPath { segments }))
         }
 
         attr_type::NEXT_HOP => {
             if value.len() != 4 {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
                     detail: format!("NEXT_HOP length {} (expected 4)", value.len()),
                 });
             }
@@ -242,8 +269,9 @@ fn decode_attribute_value(
 
         attr_type::MULTI_EXIT_DISC => {
             if value.len() != 4 {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
                     detail: format!("MED length {} (expected 4)", value.len()),
                 });
             }
@@ -253,8 +281,9 @@ fn decode_attribute_value(
 
         attr_type::LOCAL_PREF => {
             if value.len() != 4 {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
                     detail: format!("LOCAL_PREF length {} (expected 4)", value.len()),
                 });
             }
@@ -264,8 +293,9 @@ fn decode_attribute_value(
 
         attr_type::COMMUNITIES => {
             if !value.len().is_multiple_of(4) {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
                     detail: format!("COMMUNITIES length {} not a multiple of 4", value.len()),
                 });
             }
@@ -342,6 +372,46 @@ fn decode_as_path(mut buf: &[u8], four_octet_as: bool) -> Result<Vec<AsPathSegme
     Ok(segments)
 }
 
+/// Build the attribute-triplet (flags + type + length + value) used as
+/// NOTIFICATION data in UPDATE error subcodes per RFC 4271 §6.3.
+pub(crate) fn attr_error_data(flags: u8, type_code: u8, value: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3 + value.len());
+    if value.len() > 255 {
+        buf.push(flags | attr_flags::EXTENDED_LENGTH);
+        buf.push(type_code);
+        #[expect(clippy::cast_possible_truncation)]
+        let len = value.len() as u16;
+        buf.extend_from_slice(&len.to_be_bytes());
+    } else {
+        buf.push(flags);
+        buf.push(type_code);
+        #[expect(clippy::cast_possible_truncation)]
+        buf.push(value.len() as u8);
+    }
+    buf.extend_from_slice(value);
+    buf
+}
+
+/// Return the expected Optional + Transitive flags for known attribute types.
+/// Returns `None` for unrecognized types (no validation performed).
+fn expected_flags(type_code: u8) -> Option<u8> {
+    match type_code {
+        // Well-known mandatory/discretionary: Optional=0, Transitive=1
+        attr_type::ORIGIN
+        | attr_type::AS_PATH
+        | attr_type::NEXT_HOP
+        | attr_type::LOCAL_PREF
+        | attr_type::ATOMIC_AGGREGATE => Some(attr_flags::TRANSITIVE),
+        // Optional non-transitive
+        attr_type::MULTI_EXIT_DISC => Some(attr_flags::OPTIONAL),
+        // Optional transitive
+        attr_type::AGGREGATOR | attr_type::COMMUNITIES => {
+            Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE)
+        }
+        _ => None,
+    }
+}
+
 /// Encode path attributes to wire bytes.
 ///
 /// `four_octet_as` controls whether AS numbers in `AS_PATH` are 2 or 4 bytes.
@@ -385,7 +455,13 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                 }
             }
             PathAttribute::Unknown(raw) => {
-                flags = raw.flags;
+                // RFC 4271 §5: unrecognized optional transitive attributes must
+                // be propagated with the Partial bit set.
+                flags = if (raw.flags & attr_flags::TRANSITIVE) != 0 {
+                    raw.flags | attr_flags::PARTIAL
+                } else {
+                    raw.flags
+                };
                 type_code = raw.type_code;
                 value.extend_from_slice(&raw.data);
             }
@@ -489,10 +565,12 @@ mod tests {
         // ORIGIN with value 5 — not a valid Origin (only 0-2 are defined)
         let buf = [0x40, 0x01, 0x01, 0x05];
         let err = decode_path_attributes(&buf, true).unwrap_err();
-        assert!(
-            matches!(err, DecodeError::MalformedField { .. }),
-            "expected MalformedField, got: {err:?}"
-        );
+        match &err {
+            DecodeError::UpdateAttributeError { subcode, .. } => {
+                assert_eq!(*subcode, update_subcode::INVALID_ORIGIN);
+            }
+            other => panic!("expected UpdateAttributeError, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -747,6 +825,8 @@ mod tests {
 
     #[test]
     fn unknown_attribute_roundtrip() {
+        // Input has flags 0xC0 (optional+transitive). After encoding, the
+        // Partial bit is OR'd in for transitive unknowns → 0xE0.
         let attrs = vec![PathAttribute::Unknown(RawAttribute {
             flags: 0xC0,
             type_code: 99,
@@ -756,6 +836,124 @@ mod tests {
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
         let decoded = decode_path_attributes(&buf, true).unwrap();
-        assert_eq!(decoded, attrs);
+        assert_eq!(
+            decoded,
+            vec![PathAttribute::Unknown(RawAttribute {
+                flags: 0xE0, // Partial bit set on re-advertisement
+                type_code: 99,
+                data: Bytes::from_static(&[1, 2, 3, 4, 5]),
+            })]
+        );
+    }
+
+    #[test]
+    fn origin_with_optional_flag_rejected() {
+        // ORIGIN with flags 0xC0 (Optional+Transitive) — should be 0x40 (Transitive only)
+        let buf = [0xC0, 0x01, 0x01, 0x00];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        match &err {
+            DecodeError::UpdateAttributeError { subcode, .. } => {
+                assert_eq!(*subcode, update_subcode::ATTRIBUTE_FLAGS_ERROR);
+            }
+            other => panic!("expected UpdateAttributeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn med_with_transitive_flag_rejected() {
+        // MED with flags 0xC0 (Optional+Transitive) — should be 0x80 (Optional only)
+        let buf = [0xC0, 0x04, 0x04, 0, 0, 0, 100];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        match &err {
+            DecodeError::UpdateAttributeError { subcode, .. } => {
+                assert_eq!(*subcode, update_subcode::ATTRIBUTE_FLAGS_ERROR);
+            }
+            other => panic!("expected UpdateAttributeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn communities_without_optional_rejected() {
+        // COMMUNITIES with flags 0x40 (Transitive only) — should be 0xC0 (Optional+Transitive)
+        let buf = [0x40, 0x08, 0x04, 0, 0, 0, 100];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        match &err {
+            DecodeError::UpdateAttributeError { subcode, .. } => {
+                assert_eq!(*subcode, update_subcode::ATTRIBUTE_FLAGS_ERROR);
+            }
+            other => panic!("expected UpdateAttributeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn next_hop_length_error_subcode() {
+        // NEXT_HOP with 3 bytes instead of 4
+        let buf = [0x40, 0x03, 0x03, 10, 0, 0];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        match &err {
+            DecodeError::UpdateAttributeError { subcode, .. } => {
+                assert_eq!(*subcode, update_subcode::ATTRIBUTE_LENGTH_ERROR);
+            }
+            other => panic!("expected UpdateAttributeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_origin_value_subcode() {
+        // ORIGIN with value 5 → subcode 6 (INVALID_ORIGIN)
+        let buf = [0x40, 0x01, 0x01, 0x05];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        match &err {
+            DecodeError::UpdateAttributeError { subcode, .. } => {
+                assert_eq!(*subcode, update_subcode::INVALID_ORIGIN);
+            }
+            other => panic!("expected UpdateAttributeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn as_path_bad_segment_subcode() {
+        // AS_PATH with unknown segment type 5
+        let buf = [
+            0x40, 0x02, 0x06, // AS_PATH header, length 6
+            0x05, 0x01, // unknown segment type 5, count 1
+            0x00, 0x00, 0xFD, 0xE9, // ASN 65001
+        ];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        match &err {
+            DecodeError::UpdateAttributeError { subcode, .. } => {
+                assert_eq!(*subcode, update_subcode::MALFORMED_AS_PATH);
+            }
+            other => panic!("expected UpdateAttributeError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encode_unknown_transitive_sets_partial() {
+        let attr = PathAttribute::Unknown(RawAttribute {
+            flags: attr_flags::OPTIONAL | attr_flags::TRANSITIVE, // 0xC0
+            type_code: 99,
+            data: Bytes::from_static(&[1, 2]),
+        });
+        let mut buf = Vec::new();
+        encode_path_attributes(&[attr], &mut buf, true);
+        // First byte is flags — should have PARTIAL bit set
+        assert_eq!(
+            buf[0],
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE | attr_flags::PARTIAL
+        );
+    }
+
+    #[test]
+    fn encode_unknown_nontransitive_no_partial() {
+        let attr = PathAttribute::Unknown(RawAttribute {
+            flags: attr_flags::OPTIONAL, // 0x80, no Transitive
+            type_code: 99,
+            data: Bytes::from_static(&[1, 2]),
+        });
+        let mut buf = Vec::new();
+        encode_path_attributes(&[attr], &mut buf, true);
+        // First byte is flags — should NOT have PARTIAL bit
+        assert_eq!(buf[0], attr_flags::OPTIONAL);
     }
 }

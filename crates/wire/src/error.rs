@@ -35,6 +35,13 @@ pub enum DecodeError {
 
     #[error("UPDATE length mismatch: {detail}")]
     UpdateLengthMismatch { detail: String },
+
+    #[error("UPDATE attribute error (subcode {subcode}): {detail}")]
+    UpdateAttributeError {
+        subcode: u8,
+        data: Vec<u8>,
+        detail: String,
+    },
 }
 
 /// Errors encountered while encoding a BGP message to bytes.
@@ -99,6 +106,11 @@ impl DecodeError {
                 1, // Malformed Attribute List
                 Bytes::new(),
             ),
+            Self::UpdateAttributeError { subcode, data, .. } => (
+                NotificationCode::UpdateMessage,
+                *subcode,
+                Bytes::from(data.clone()),
+            ),
         }
     }
 }
@@ -160,6 +172,19 @@ mod tests {
         let (code, subcode, _) = err.to_notification();
         assert_eq!(code, NotificationCode::UpdateMessage);
         assert_eq!(subcode, 1);
+    }
+
+    #[test]
+    fn update_attribute_error_maps_correctly() {
+        let err = DecodeError::UpdateAttributeError {
+            subcode: 6,
+            data: vec![0x40, 0x01, 0x01, 0x05],
+            detail: "invalid ORIGIN value 5".into(),
+        };
+        let (code, subcode, data) = err.to_notification();
+        assert_eq!(code, NotificationCode::UpdateMessage);
+        assert_eq!(subcode, 6);
+        assert_eq!(data.as_ref(), &[0x40, 0x01, 0x01, 0x05]);
     }
 
     #[test]
