@@ -17,8 +17,17 @@ use crate::update::{OutboundRouteUpdate, RibUpdate};
 /// Sentinel peer address for locally-injected routes.
 const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
+/// Label for the single address family we support.
+const AFI_SAFI: &str = "ipv4_unicast";
+
 /// How long to wait before retrying distribution to dirty peers.
 const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Safe cast from usize to i64 for gauge metrics.
+#[expect(clippy::cast_possible_wrap)]
+fn gauge_val(n: usize) -> i64 {
+    n as i64
+}
 
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
@@ -74,7 +83,7 @@ impl RibManager {
     fn recompute_best(&mut self, affected: &HashSet<Ipv4Prefix>) -> HashSet<Ipv4Prefix> {
         let mut changed = HashSet::new();
         for prefix in affected {
-            let previously_installed = self.loc_rib.get(prefix).is_some();
+            let previous_best_peer = self.loc_rib.get(prefix).map(|r| r.peer);
             let candidates: Vec<_> = self
                 .ribs
                 .values()
@@ -84,35 +93,43 @@ impl RibManager {
             if did_change {
                 changed.insert(*prefix);
                 let current_best = self.loc_rib.get(prefix);
-                match (previously_installed, current_best) {
-                    (false, Some(best)) => {
-                        debug!(%prefix, peer = %best.peer, "best path changed");
+                match (previous_best_peer, current_best) {
+                    (None, Some(best)) => {
+                        debug!(%prefix, peer = %best.peer, "best path added");
                         let _ = self.route_events_tx.send(RouteEvent {
                             event_type: RouteEventType::Added,
                             prefix: *prefix,
                             peer: Some(best.peer),
+                            previous_peer: None,
+                            timestamp: crate::event::unix_timestamp_now(),
                         });
                     }
-                    (true, None) => {
+                    (Some(old_peer), None) => {
                         debug!(%prefix, "best path removed");
                         let _ = self.route_events_tx.send(RouteEvent {
                             event_type: RouteEventType::Withdrawn,
                             prefix: *prefix,
                             peer: None,
+                            previous_peer: Some(old_peer),
+                            timestamp: crate::event::unix_timestamp_now(),
                         });
                     }
-                    (true, Some(best)) => {
+                    (Some(old_peer), Some(best)) => {
                         debug!(%prefix, peer = %best.peer, "best path changed");
                         let _ = self.route_events_tx.send(RouteEvent {
                             event_type: RouteEventType::BestChanged,
                             prefix: *prefix,
                             peer: Some(best.peer),
+                            previous_peer: Some(old_peer),
+                            timestamp: crate::event::unix_timestamp_now(),
                         });
                     }
-                    (false, None) => {}
+                    (None, None) => {}
                 }
             }
         }
+        self.metrics
+            .set_loc_rib_prefixes(AFI_SAFI, gauge_val(self.loc_rib.len()));
         changed
     }
 
@@ -210,6 +227,11 @@ impl RibManager {
                     for prefix in &withdraw {
                         rib_out.withdraw(prefix);
                     }
+                    self.metrics.set_adj_rib_out_prefixes(
+                        &peer.to_string(),
+                        AFI_SAFI,
+                        gauge_val(rib_out.len()),
+                    );
                     if is_dirty {
                         self.dirty_peers.remove(&peer);
                     }
@@ -265,6 +287,11 @@ impl RibManager {
                 for route in &announce {
                     rib_out.insert(route.clone());
                 }
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer.to_string(),
+                    AFI_SAFI,
+                    gauge_val(rib_out.len()),
+                );
             }
         }
     }
@@ -295,6 +322,8 @@ impl RibManager {
                 }
 
                 debug!(%peer, routes = rib.len(), "rib updated");
+                self.metrics
+                    .set_rib_prefixes(&peer.to_string(), AFI_SAFI, gauge_val(rib.len()));
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed);
             }
@@ -305,11 +334,15 @@ impl RibManager {
                     let count = rib.len();
                     rib.clear();
                     debug!(%peer, cleared = count, "peer down — rib cleared");
+                    self.metrics
+                        .set_rib_prefixes(&peer.to_string(), AFI_SAFI, 0);
                     let changed = self.recompute_best(&affected);
                     self.distribute_changes(&changed);
                 }
                 // Clean up outbound state
                 self.adj_ribs_out.remove(&peer);
+                self.metrics
+                    .set_adj_rib_out_prefixes(&peer.to_string(), AFI_SAFI, 0);
                 self.outbound_peers.remove(&peer);
                 self.peer_export_policies.remove(&peer);
                 self.dirty_peers.remove(&peer);
@@ -321,6 +354,10 @@ impl RibManager {
                 export_policy,
             } => {
                 debug!(%peer, "peer up — registering for outbound updates");
+                let peer_label = peer.to_string();
+                self.metrics.set_rib_prefixes(&peer_label, AFI_SAFI, 0);
+                self.metrics
+                    .set_adj_rib_out_prefixes(&peer_label, AFI_SAFI, 0);
                 self.outbound_peers.insert(peer, outbound_tx);
                 self.peer_export_policies.insert(peer, export_policy);
                 self.send_initial_table(peer);
@@ -334,6 +371,11 @@ impl RibManager {
                     .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
                 rib.insert(route);
                 debug!(%prefix, "injected local route");
+                self.metrics.set_rib_prefixes(
+                    &LOCAL_PEER.to_string(),
+                    AFI_SAFI,
+                    gauge_val(rib.len()),
+                );
 
                 let mut affected = HashSet::new();
                 affected.insert(prefix);
@@ -350,6 +392,11 @@ impl RibManager {
                     .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
                 if rib.withdraw(&prefix) {
                     debug!(%prefix, "withdrawn injected route");
+                    self.metrics.set_rib_prefixes(
+                        &LOCAL_PEER.to_string(),
+                        AFI_SAFI,
+                        gauge_val(rib.len()),
+                    );
                     let mut affected = HashSet::new();
                     affected.insert(prefix);
                     let changed = self.recompute_best(&affected);
@@ -401,6 +448,15 @@ impl RibManager {
             RibUpdate::SubscribeRouteEvents { reply } => {
                 let rx = self.route_events_tx.subscribe();
                 let _ = reply.send(rx);
+            }
+
+            RibUpdate::QueryLocRibCount { reply } => {
+                let _ = reply.send(self.loc_rib.len());
+            }
+
+            RibUpdate::QueryAdvertisedCount { peer, reply } => {
+                let count = self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
+                let _ = reply.send(count);
             }
         }
     }
@@ -1836,6 +1892,368 @@ mod tests {
         assert_eq!(e1.prefix, prefix);
         assert_eq!(e2.prefix, prefix);
         assert_eq!(e1.event_type, e2.event_type);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // --- WatchRoutes event tests ---
+
+    #[tokio::test]
+    async fn route_event_withdrawn_carries_previous_peer() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let mut events_rx = subscribe_events(&tx).await;
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![],
+            withdrawn: vec![prefix],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert_eq!(event.event_type, RouteEventType::Withdrawn);
+        assert!(event.peer.is_none());
+        assert_eq!(event.previous_peer, Some(peer));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_event_best_changed_carries_both_peers() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let peer1 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(1, 0, 0, 2));
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer1,
+            announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let mut events_rx = subscribe_events(&tx).await;
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer2,
+            announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert_eq!(event.event_type, RouteEventType::BestChanged);
+        assert_eq!(event.peer, Some(peer2));
+        assert_eq!(event.previous_peer, Some(peer1));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_event_has_timestamp() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let mut events_rx = subscribe_events(&tx).await;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert!(!event.timestamp.is_empty());
+        // Should be a valid integer (Unix seconds)
+        let ts: u64 = event
+            .timestamp
+            .parse()
+            .expect("timestamp should be numeric");
+        assert!(ts > 0);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_event_added_has_no_previous_peer() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let mut events_rx = subscribe_events(&tx).await;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert_eq!(event.event_type, RouteEventType::Added);
+        assert_eq!(event.peer, Some(peer));
+        assert!(event.previous_peer.is_none());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // --- Prometheus gauge tests ---
+
+    #[tokio::test]
+    #[expect(clippy::cast_possible_truncation)]
+    async fn rib_prefixes_gauge_tracks_adjribin() {
+        let metrics = BgpMetrics::new();
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, metrics.clone());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Serialize
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        let families = metrics.registry().gather();
+        let rib_gauge = families
+            .iter()
+            .find(|f| f.get_name() == "bgp_rib_prefixes")
+            .expect("bgp_rib_prefixes metric not found");
+        let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
+        assert_eq!(sample as i64, 1);
+
+        // PeerDown should zero the gauge
+        tx.send(RibUpdate::PeerDown { peer }).await.unwrap();
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        let families = metrics.registry().gather();
+        let rib_gauge = families
+            .iter()
+            .find(|f| f.get_name() == "bgp_rib_prefixes")
+            .expect("bgp_rib_prefixes metric not found");
+        let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
+        assert_eq!(sample as i64, 0);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[expect(clippy::cast_possible_truncation)]
+    async fn loc_rib_gauge_tracks_best() {
+        let metrics = BgpMetrics::new();
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, metrics.clone());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        let families = metrics.registry().gather();
+        let loc_gauge = families
+            .iter()
+            .find(|f| f.get_name() == "bgp_rib_loc_prefixes")
+            .expect("bgp_loc_rib_prefixes metric not found");
+        let sample = loc_gauge.get_metric()[0].get_gauge().get_value();
+        assert_eq!(sample as i64, 1);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[expect(clippy::cast_possible_truncation)]
+    async fn adj_rib_out_gauge_tracks_advertised() {
+        let metrics = BgpMetrics::new();
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, metrics.clone());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        let (out_tx, mut _out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        let families = metrics.registry().gather();
+        let out_gauge = families
+            .iter()
+            .find(|f| f.get_name() == "bgp_rib_adj_out_prefixes")
+            .expect("bgp_adj_rib_out_prefixes metric not found");
+        let sample = out_gauge.get_metric()[0].get_gauge().get_value();
+        assert_eq!(sample as i64, 1);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // --- Query count tests ---
+
+    #[tokio::test]
+    async fn query_loc_rib_count() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![
+                make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1)),
+                make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1)),
+            ],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+            .await
+            .unwrap();
+        let count = reply_rx.await.unwrap();
+        assert_eq!(count, 2);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn query_advertised_count() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        let (out_tx, mut _out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Serialize
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedCount {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let count = reply_rx.await.unwrap();
+        assert_eq!(count, 1);
+
+        // Unknown peer returns 0
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedCount {
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99)),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let count = reply_rx.await.unwrap();
+        assert_eq!(count, 0);
 
         drop(tx);
         handle.await.unwrap();

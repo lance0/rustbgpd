@@ -59,6 +59,7 @@ message ConfigError {
 
 service GlobalService {
   rpc GetGlobal(GetGlobalRequest) returns (GlobalState);
+  // Reserved for future use. Always returns UNIMPLEMENTED.
   rpc SetGlobal(SetGlobalRequest) returns (SetGlobalResponse);
 }
 
@@ -70,12 +71,14 @@ message GlobalState {
   uint32 listen_port = 3;
 }
 
+// Reserved for future use. Always returns UNIMPLEMENTED.
 message SetGlobalRequest {
   uint32 asn = 1;
   string router_id = 2;
   uint32 listen_port = 3;
 }
 
+// Reserved for future use. Always returns UNIMPLEMENTED.
 message SetGlobalResponse {}
 
 // ---------------------------------------------------------------------------
@@ -203,7 +206,9 @@ message RouteEvent {
   uint32 prefix_length = 3;
   string peer_address = 4;
   AddressFamily afi_safi = 5;
+  // Unix epoch seconds.
   string timestamp = 6;
+  string previous_peer_address = 7;
 }
 
 // ---------------------------------------------------------------------------
@@ -227,13 +232,13 @@ message AddPathRequest {
 }
 
 message AddPathResponse {
-  bytes uuid = 1;
+  reserved 1;
 }
 
 message DeletePathRequest {
   string prefix = 1;
   uint32 prefix_length = 2;
-  bytes uuid = 3;
+  reserved 3;
 }
 
 message DeletePathResponse {}

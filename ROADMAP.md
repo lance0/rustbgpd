@@ -481,53 +481,48 @@ Peer-visible bugs found during full-project code review.
 
 ---
 
-## M8 — "API & Observability"
+## M8 — "API & Observability" `[complete]`
 
 API contract issues and metrics accuracy found during code review. These
 affect operators and automation consumers.
 
-### Build order
+### Completed
 
-1. **WatchRoutes loses withdrawals and peer transitions** (`crates/api/src/rib_service.rs`, `crates/rib/src/event.rs`)
-   - Withdraw events have `peer: None`, BestChanged carries only new peer.
-     A subscriber filtered to the old peer misses "route moved away."
-     Timestamp is always empty.
-   - Fix: include old+new peer in event model, or make WatchRoutes
-     prefix-scoped. Populate timestamp (RFC 3339 or Unix seconds).
+1. ~~**IPv6 neighbors accepted but unsupported** (`src/config.rs`, `crates/api/src/neighbor_service.rs`)~~
+   - Config validation and gRPC `AddNeighbor` now reject IPv6 addresses.
+     Wire crate is IPv4-only and GTSM uses IPv4-only socket options. 2 tests.
 
-2. **DeletePath.uuid ignored** (`crates/api/src/injection_service.rs`, `proto/rustbgpd.proto`)
-   - AddPath returns uuid, DeletePath accepts it, but implementation
-     ignores it and withdraws by prefix only. Misleads multi-writer clients.
-   - Fix: persist IDs and require on delete, or remove uuid from API.
+2. ~~**SetGlobal permanently UNIMPLEMENTED** (`proto/rustbgpd.proto`, `crates/api/src/global_service.rs`)~~
+   - SetGlobal RPC, request, and response annotated as reserved for future
+     use (documentation-only). RPC still returns UNIMPLEMENTED.
 
-3. **Health/neighbor counters semantically wrong** (`crates/api/src/control_service.rs`, `neighbor_service.rs`)
-   - `active_peers` is just `peers.len()` (counts idle/disabled).
-     `total_routes` sums per-peer prefix counts (not Loc-RIB).
-     `prefixes_sent` hardcoded to 0.
-   - Fix: define exact field semantics, source from session state and
-     AdjRibOut/Loc-RIB.
+3. ~~**DeletePath.uuid ignored** (`proto/rustbgpd.proto`, `crates/api/src/injection_service.rs`)~~
+   - Removed fake UUID from `AddPathResponse` and `DeletePathRequest`.
+     Both fields reserved for wire compatibility.
 
-4. **Dead Prometheus gauges** (`crates/telemetry/src/metrics.rs`, `crates/rib/src/manager.rs`)
+4. ~~**Dead Prometheus gauges** (`crates/rib/src/manager.rs`)~~
    - `set_rib_prefixes`, `set_adj_rib_out_prefixes`, `set_loc_rib_prefixes`
-     exist but have no production call sites.
-   - Fix: wire into RibManager on every meaningful mutation, or remove
-     until they can be kept accurate.
+     wired at all RIB mutation points. Zero-valued gauges initialized on
+     PeerUp for stable dashboard series. 3 tests.
 
-5. **IPv6 neighbors accepted but unsupported** (`crates/api/src/neighbor_service.rs`, `src/config.rs`)
-   - API accepts any IpAddr, but transport is IPv4-only. GTSM uses
-     IPv4-only socket options.
-   - Fix: reject IPv6 peers at config/API boundaries until MP-BGP lands.
+5. ~~**WatchRoutes loses withdrawals and peer transitions** (`crates/rib/src/event.rs`, `crates/rib/src/manager.rs`, `crates/api/src/rib_service.rs`)~~
+   - `RouteEvent` gains `previous_peer` and `timestamp`. `recompute_best()`
+     captures previous best peer before Loc-RIB mutation. WatchRoutes filter
+     checks both `event.peer` and `event.previous_peer`. Proto gains
+     `previous_peer_address` field. 4 tests.
 
-6. **SetGlobal permanently UNIMPLEMENTED** (`crates/api/src/global_service.rs`, `proto/rustbgpd.proto`)
-   - Fix: remove from proto until runtime mutation exists, or mark clearly
-     as reserved/deferred.
+6. ~~**Health/neighbor counters semantically wrong** (`crates/api/src/control_service.rs`, `crates/api/src/neighbor_service.rs`, `crates/rib/src/update.rs`, `crates/rib/src/manager.rs`)~~
+   - `active_peers` filters to Established only. `total_routes` queries
+     Loc-RIB via `QueryLocRibCount`. `prefixes_sent` queries Adj-RIB-Out
+     via `QueryAdvertisedCount` (returns `Status::internal` on failure,
+     not silent 0). 4 tests.
 
 ### Exit criteria
 
 - API contracts match implementation behavior
 - Metrics reflect actual RIB state
 - Consumers get correct data from all gRPC endpoints
-- 332+ tests pass, clippy clean, fmt clean
+- 357 tests pass, clippy clean, fmt clean
 
 ---
 

@@ -40,11 +40,16 @@ pub async fn serve(
     shutdown_tx: oneshot::Sender<()>,
 ) {
     let rib_svc = RibService::new(rib_tx.clone());
-    let injection_svc = InjectionService::new(rib_tx);
-    let neighbor_svc = NeighborService::new(peer_mgr_tx.clone());
+    let injection_svc = InjectionService::new(rib_tx.clone());
+    let neighbor_svc = NeighborService::new(peer_mgr_tx.clone(), rib_tx.clone());
     let global_svc = GlobalService::new(config.asn, config.router_id, config.listen_port);
-    let control_svc =
-        ControlService::new(config.start_time, config.metrics, peer_mgr_tx, shutdown_tx);
+    let control_svc = ControlService::new(
+        config.start_time,
+        config.metrics,
+        peer_mgr_tx,
+        rib_tx,
+        shutdown_tx,
+    );
 
     info!(%addr, "starting gRPC server");
 

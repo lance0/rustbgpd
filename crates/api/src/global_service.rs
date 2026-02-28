@@ -5,7 +5,7 @@ use crate::proto;
 /// Read-only view of daemon global configuration.
 ///
 /// `GetGlobal` returns ASN, router-id, and listen port.
-/// `SetGlobal` is intentionally unimplemented — runtime config mutation is deferred.
+/// `SetGlobal` is reserved for future use. Always returns UNIMPLEMENTED.
 pub struct GlobalService {
     asn: u32,
     router_id: String,

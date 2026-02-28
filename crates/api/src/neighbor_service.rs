@@ -5,15 +5,41 @@ use tonic::{Request, Response, Status};
 
 use crate::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
 use crate::proto;
+use rustbgpd_rib::RibUpdate;
 
 pub struct NeighborService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    rib_tx: mpsc::Sender<RibUpdate>,
 }
 
 impl NeighborService {
-    pub fn new(peer_mgr_tx: mpsc::Sender<PeerManagerCommand>) -> Self {
-        Self { peer_mgr_tx }
+    pub fn new(
+        peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
+    ) -> Self {
+        Self {
+            peer_mgr_tx,
+            rib_tx,
+        }
     }
+}
+
+async fn query_advertised_count(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    peer: std::net::IpAddr,
+) -> Result<u64, Status> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::QueryAdvertisedCount {
+            peer,
+            reply: reply_tx,
+        })
+        .await
+        .map_err(|_| Status::internal("RIB manager unavailable"))?;
+    let count = reply_rx
+        .await
+        .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+    Ok(count as u64)
 }
 
 fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
@@ -64,6 +90,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .address
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+
+        if address.is_ipv6() {
+            return Err(Status::invalid_argument("IPv6 neighbors not supported"));
+        }
 
         if config.remote_asn == 0 {
             return Err(Status::invalid_argument("remote_asn must be > 0"));
@@ -152,7 +182,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
 
-        let neighbors = infos.iter().map(peer_info_to_proto).collect();
+        let mut neighbors = Vec::with_capacity(infos.len());
+        for info in &infos {
+            let mut state = peer_info_to_proto(info);
+            state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
+            neighbors.push(state);
+        }
 
         Ok(Response::new(proto::ListNeighborsResponse { neighbors }))
     }
@@ -181,7 +216,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
             .ok_or_else(|| Status::not_found(format!("peer {address} not found")))?;
 
-        Ok(Response::new(peer_info_to_proto(&info)))
+        let mut state = peer_info_to_proto(&info);
+        state.prefixes_sent = query_advertised_count(&self.rib_tx, info.address).await?;
+        Ok(Response::new(state))
     }
 
     async fn enable_neighbor(
@@ -246,7 +283,25 @@ mod tests {
 
     fn make_service() -> NeighborService {
         let (tx, _rx) = mpsc::channel(16);
-        NeighborService::new(tx)
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        NeighborService::new(tx, rib_tx)
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_ipv6_address() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "2001:db8::1".into(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("IPv6"));
     }
 
     #[tokio::test]
@@ -281,5 +336,55 @@ mod tests {
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("hold_time"));
+    }
+
+    #[tokio::test]
+    async fn prefixes_sent_populated() {
+        use crate::peer_types::PeerInfo;
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(peer_tx, rib_tx);
+
+        let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+
+        // Spawn responders
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::GetPeerState { reply, .. }) = peer_rx.recv().await {
+                let _ = reply.send(Some(PeerInfo {
+                    address: addr,
+                    remote_asn: 65001,
+                    description: String::new(),
+                    state: rustbgpd_fsm::SessionState::Established,
+                    enabled: true,
+                    prefix_count: 5,
+                    hold_time: None,
+                    max_prefixes: None,
+                    updates_received: 0,
+                    updates_sent: 0,
+                    notifications_received: 0,
+                    notifications_sent: 0,
+                    flap_count: 0,
+                    uptime_secs: 0,
+                    last_error: String::new(),
+                }));
+            }
+        });
+
+        tokio::spawn(async move {
+            if let Some(RibUpdate::QueryAdvertisedCount { reply, .. }) = rib_rx.recv().await {
+                let _ = reply.send(7);
+            }
+        });
+
+        let resp = svc
+            .get_neighbor_state(Request::new(proto::GetNeighborStateRequest {
+                address: "10.0.0.1".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.prefixes_sent, 7);
     }
 }

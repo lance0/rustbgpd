@@ -54,4 +54,11 @@ pub enum RibUpdate {
     SubscribeRouteEvents {
         reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
     },
+    /// Query: return the number of prefixes in the Loc-RIB.
+    QueryLocRibCount { reply: oneshot::Sender<usize> },
+    /// Query: return the number of prefixes advertised to a specific peer.
+    QueryAdvertisedCount {
+        peer: IpAddr,
+        reply: oneshot::Sender<usize>,
+    },
 }

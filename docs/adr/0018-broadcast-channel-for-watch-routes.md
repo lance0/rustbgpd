@@ -25,11 +25,14 @@ Use `tokio::sync::broadcast` with a capacity of 4096:
 - `RibManager` owns a `broadcast::Sender<RouteEvent>` created at construction.
 - After `recompute_best()`, if a prefix changed, emit a `RouteEvent` with the
   appropriate type: `Added` (new best), `Withdrawn` (best removed), or
-  `BestChanged` (best replaced).
+  `BestChanged` (best replaced). Each event carries `previous_peer` (the peer
+  that owned the previous best, if any) and a Unix-epoch `timestamp` (M8).
 - Subscribers request a receiver via `RibUpdate::SubscribeRouteEvents`.
 - The gRPC `watch_routes()` implementation wraps the broadcast receiver in a
   `BroadcastStream`, filters by peer address if specified, and maps to proto
-  `RouteEvent` messages.
+  `RouteEvent` messages. The filter checks both `event.peer` and
+  `event.previous_peer`, so a subscriber filtered to the old peer sees "route
+  moved away" events (M8).
 - `RecvError::Lagged` is logged and skipped — the subscriber misses some events
   but stays connected.
 

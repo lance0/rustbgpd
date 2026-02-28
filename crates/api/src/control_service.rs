@@ -7,6 +7,7 @@ use tracing::info;
 
 use crate::peer_types::PeerManagerCommand;
 use crate::proto;
+use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
 /// Daemon lifecycle and observability service.
@@ -18,6 +19,7 @@ pub struct ControlService {
     start_time: tokio::time::Instant,
     metrics: BgpMetrics,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+    rib_tx: mpsc::Sender<RibUpdate>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -30,12 +32,14 @@ impl ControlService {
         start_time: tokio::time::Instant,
         metrics: BgpMetrics,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
+        rib_tx: mpsc::Sender<RibUpdate>,
         shutdown_tx: oneshot::Sender<()>,
     ) -> Self {
         Self {
             start_time,
             metrics,
             peer_mgr_tx,
+            rib_tx,
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
         }
     }
@@ -59,13 +63,27 @@ impl proto::control_service_server::ControlService for ControlService {
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
 
-        let active_peers = u32::try_from(peers.len()).unwrap_or(u32::MAX);
-        let total_routes: u64 = peers.iter().map(|p| p.prefix_count as u64).sum();
+        let active_peers = peers
+            .iter()
+            .filter(|p| p.state == rustbgpd_fsm::SessionState::Established)
+            .count();
+
+        let (rib_reply_tx, rib_reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryLocRibCount {
+                reply: rib_reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let total_routes = rib_reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
 
         Ok(Response::new(proto::HealthResponse {
             healthy: true,
             uptime_seconds: uptime,
-            active_peers,
+            active_peers: u32::try_from(active_peers).unwrap_or(u32::MAX),
             total_routes: u32::try_from(total_routes).unwrap_or(u32::MAX),
         }))
     }
@@ -121,9 +139,16 @@ mod tests {
 
     fn make_service() -> ControlService {
         let (peer_tx, _peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
         let metrics = BgpMetrics::new();
-        ControlService::new(tokio::time::Instant::now(), metrics, peer_tx, shutdown_tx)
+        ControlService::new(
+            tokio::time::Instant::now(),
+            metrics,
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+        )
     }
 
     #[tokio::test]
@@ -141,9 +166,16 @@ mod tests {
     #[tokio::test]
     async fn shutdown_takes_sender() {
         let (peer_tx, _peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let metrics = BgpMetrics::new();
-        let svc = ControlService::new(tokio::time::Instant::now(), metrics, peer_tx, shutdown_tx);
+        let svc = ControlService::new(
+            tokio::time::Instant::now(),
+            metrics,
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+        );
 
         let resp = svc
             .shutdown(Request::new(proto::ShutdownRequest {
@@ -156,5 +188,80 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // shutdown_rx should have been signaled (or sender dropped)
         assert!(shutdown_rx.await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn active_peers_counts_only_established() {
+        use crate::peer_types::PeerInfo;
+
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel(16);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let metrics = BgpMetrics::new();
+        let svc = ControlService::new(
+            tokio::time::Instant::now(),
+            metrics,
+            peer_tx,
+            rib_tx,
+            shutdown_tx,
+        );
+
+        // Spawn responders
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::ListPeers { reply }) = peer_rx.recv().await {
+                let peers = vec![
+                    PeerInfo {
+                        address: "10.0.0.1".parse().unwrap(),
+                        remote_asn: 65001,
+                        description: String::new(),
+                        state: rustbgpd_fsm::SessionState::Established,
+                        enabled: true,
+                        prefix_count: 5,
+                        hold_time: None,
+                        max_prefixes: None,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    },
+                    PeerInfo {
+                        address: "10.0.0.2".parse().unwrap(),
+                        remote_asn: 65002,
+                        description: String::new(),
+                        state: rustbgpd_fsm::SessionState::Active,
+                        enabled: true,
+                        prefix_count: 0,
+                        hold_time: None,
+                        max_prefixes: None,
+                        updates_received: 0,
+                        updates_sent: 0,
+                        notifications_received: 0,
+                        notifications_sent: 0,
+                        flap_count: 0,
+                        uptime_secs: 0,
+                        last_error: String::new(),
+                    },
+                ];
+                let _ = reply.send(peers);
+            }
+        });
+
+        tokio::spawn(async move {
+            if let Some(RibUpdate::QueryLocRibCount { reply }) = rib_rx.recv().await {
+                let _ = reply.send(42);
+            }
+        });
+
+        let resp = svc
+            .get_health(Request::new(proto::HealthRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.active_peers, 1, "only Established peers counted");
+        assert_eq!(resp.total_routes, 42, "total_routes from Loc-RIB");
     }
 }

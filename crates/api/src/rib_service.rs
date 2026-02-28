@@ -260,11 +260,15 @@ impl proto::rib_service_server::RibService for RibService {
 
         let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
             Ok(event) => {
-                // Filter by peer address if requested
-                if let Some(filter_addr) = peer_filter
-                    && event.peer != Some(filter_addr)
-                {
-                    return None;
+                // Filter by peer address if requested — check both current
+                // and previous peer so subscribers filtered to a specific peer
+                // see BestChanged/Withdrawn events when the route moves away.
+                if let Some(filter_addr) = peer_filter {
+                    let matches_current = event.peer == Some(filter_addr);
+                    let matches_previous = event.previous_peer == Some(filter_addr);
+                    if !matches_current && !matches_previous {
+                        return None;
+                    }
                 }
 
                 let event_type = match event.event_type {
@@ -281,7 +285,10 @@ impl proto::rib_service_server::RibService for RibService {
                         .peer
                         .map_or_else(String::new, |p: IpAddr| p.to_string()),
                     afi_safi: proto::AddressFamily::Ipv4Unicast.into(),
-                    timestamp: String::new(),
+                    timestamp: event.timestamp,
+                    previous_peer_address: event
+                        .previous_peer
+                        .map_or_else(String::new, |p: IpAddr| p.to_string()),
                 }))
             }
             Err(_lagged) => {

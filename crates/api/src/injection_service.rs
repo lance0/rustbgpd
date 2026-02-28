@@ -104,13 +104,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
             .map_err(|e| Status::internal(format!("inject failed: {e}")))?;
 
-        // UUID derived from prefix bytes
-        let mut uuid = Vec::with_capacity(6);
-        uuid.extend_from_slice(&addr.octets());
-        uuid.push(len);
-        uuid.push(0); // padding
-
-        Ok(Response::new(proto::AddPathResponse { uuid }))
+        Ok(Response::new(proto::AddPathResponse {}))
     }
 
     async fn delete_path(

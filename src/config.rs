@@ -223,12 +223,19 @@ impl Config {
         parse_prefix_list(&self.policy.export)?;
 
         for neighbor in &self.neighbors {
-            neighbor.address.parse::<IpAddr>().map_err(|e| {
+            let neighbor_addr: IpAddr = neighbor.address.parse::<IpAddr>().map_err(|e| {
                 ConfigError::InvalidNeighborAddress {
                     value: neighbor.address.clone(),
                     reason: e.to_string(),
                 }
             })?;
+
+            if neighbor_addr.is_ipv6() {
+                return Err(ConfigError::InvalidNeighborAddress {
+                    value: neighbor.address.clone(),
+                    reason: "IPv6 not supported".to_string(),
+                });
+            }
 
             let hold_time = neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
             if hold_time != 0 && hold_time < 3 {
@@ -643,6 +650,14 @@ remote_asn = 65002
         // Should inherit global export policy
         assert!(peers[0].2.is_none()); // no import (neither neighbor nor global)
         assert!(peers[0].3.is_some()); // export from global
+    }
+
+    #[test]
+    fn ipv6_neighbor_address_rejected() {
+        let toml_str = valid_toml().replace("10.0.0.2", "2001:db8::1");
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidNeighborAddress { .. }));
+        assert!(err.to_string().contains("IPv6"));
     }
 
     #[test]

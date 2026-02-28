@@ -4,11 +4,50 @@ All notable changes to rustbgpd will be documented in this file.
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This project uses milestone-based versioning aligned with the design
-document (M0–M7).
+document (M0–M8).
 
 ---
 
 ## [Unreleased]
+
+## M8 — "API & Observability"
+
+### Fixed
+
+- `rustbgpd-rib`: WatchRoutes event model now carries `previous_peer` and
+  `timestamp` on all `RouteEvent` variants. Subscribers filtered to a specific
+  peer now see "route moved away" events (BestChanged/Withdrawn) where the old
+  peer matches. `recompute_best()` captures previous best peer before Loc-RIB
+  mutation. 4 tests.
+- `rustbgpd-rib`: Prometheus gauges (`bgp_rib_prefixes`, `bgp_rib_adj_out_prefixes`,
+  `bgp_rib_loc_prefixes`) wired at all RIB mutation points — RoutesReceived,
+  PeerDown, distribute_changes, send_initial_table, InjectRoute, WithdrawInjected,
+  recompute_best. Zero-valued gauges initialized on PeerUp for stable dashboard
+  series. 3 tests.
+- `rustbgpd-api`: `active_peers` in GetHealth now counts only Established peers
+  (was counting all configured peers). `total_routes` now queries Loc-RIB count
+  (was summing per-peer prefix counts). 1 test.
+- `rustbgpd-api`: `prefixes_sent` in ListNeighbors and GetNeighborState now
+  queries Adj-RIB-Out count per peer (was hardcoded to 0). Returns
+  `Status::internal` on RIB manager failure instead of silently returning 0.
+  1 test.
+- Config: IPv6 neighbor addresses rejected at config validation and gRPC
+  `AddNeighbor` boundary. Wire crate is IPv4-only and GTSM uses IPv4-only
+  socket options. 2 tests.
+
+### Changed
+
+- Proto: `AddPathResponse.uuid` removed (was a fake 6-byte value derived from
+  prefix bytes that `DeletePath` ignored). Both `AddPathResponse` field 1 and
+  `DeletePathRequest` field 3 are now reserved for wire compatibility.
+- Proto: `SetGlobal` RPC, `SetGlobalRequest`, and `SetGlobalResponse` annotated
+  as reserved for future use (documentation-only; RPC still returns UNIMPLEMENTED).
+- Proto: `RouteEvent` gains `previous_peer_address` (field 7) and timestamp
+  comment clarified as Unix epoch seconds.
+- `rustbgpd-rib`: `QueryLocRibCount` and `QueryAdvertisedCount` variants added
+  to `RibUpdate` for accurate health and neighbor counters.
+- `rustbgpd-api`: `ControlService` and `NeighborService` now accept `rib_tx`
+  for querying RIB state.
 
 ## M7 — "Wire & RIB Correctness"
 

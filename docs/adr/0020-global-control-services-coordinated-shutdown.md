@@ -35,9 +35,10 @@ Implement both services and use two `oneshot` channels for shutdown coordination
 
 ### ControlService
 
-- `GetHealth` — queries PeerManager via `ListPeers` to get active peer count and
-  sum prefix counts for total routes. Reports uptime from `Instant` captured at
-  daemon start.
+- `GetHealth` — queries PeerManager via `ListPeers` and filters to Established
+  state for `active_peers`. Queries Loc-RIB count via `QueryLocRibCount` for
+  `total_routes`. Reports uptime from `Instant` captured at daemon start. (M8:
+  previously counted all configured peers and summed per-peer prefix counts.)
 - `GetMetrics` — gathers Prometheus text from the explicit `BgpMetrics` registry,
   reusing the same pattern as `metrics_server.rs`.
 - `Shutdown` — sends `PeerManagerCommand::Shutdown`, then fires the gRPC shutdown
