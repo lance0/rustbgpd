@@ -321,9 +321,7 @@ impl Config {
                 && t > 3600
             {
                 return Err(ConfigError::InvalidGrConfig {
-                    reason: format!(
-                        "gr_stale_routes_time {t} exceeds 3600 (1 hour max)"
-                    ),
+                    reason: format!("gr_stale_routes_time {t} exceeds 3600 (1 hour max)"),
                 });
             }
 

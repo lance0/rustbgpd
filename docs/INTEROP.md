@@ -16,6 +16,7 @@ not "someone tried it once."
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m4-frr.clab.yml` | Tested (M4) | 10-peer dynamic mgmt | 8 static + 2 dynamic peers | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m11-gr-frr.clab.yml` | Ready (M11) | Graceful Restart (RFC 4724) | Short timers (30s restart, 30s stale) | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -701,6 +702,68 @@ bash tests/interop/scripts/test-m10-frr-ipv6.sh
 
 Runs all 6 tests automatically. Requires containerlab topology deployed and
 `grpcurl` on the host.
+
+---
+
+## M11 Test Procedures (Graceful Restart — RFC 4724)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m11-gr-frr.clab.yml`
+
+### Network Layout
+
+```
+M11 GR FRR:
+  rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR (10.0.0.2/24, AS 65002)
+```
+
+FRR has `bgp graceful-restart` with `restart-time 30`. rustbgpd has
+`gr_restart_time = 30`, `gr_stale_routes_time = 30`. Short timers keep tests fast.
+
+FRR advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16.
+
+### Test 1: GR Capability Negotiated
+
+After session reaches Established, verify FRR reports GR capability in
+`show bgp neighbors` JSON. Verify `bgp_gr_stale_routes` = 0 in steady state.
+
+**Pass criteria:** FRR sees GR capability. No stale routes in steady state.
+
+### Test 2: Peer Restart Preserves Routes (Stale Marking)
+
+Kill FRR's bgpd (`killall -9 bgpd`). Wait for rustbgpd to detect session down.
+Query metrics to verify GR is active and routes are preserved as stale.
+
+**Pass criteria:** `bgp_gr_active_peers` >= 1, `bgp_gr_stale_routes` >= 3,
+routes still present in RIB.
+
+### Test 3: End-of-RIB Clears Stale Flag
+
+watchfrr restarts bgpd automatically. Wait for session re-establishment.
+After FRR sends its routes + EoR, stale flags should be cleared.
+
+**Pass criteria:** `bgp_gr_stale_routes` = 0, `bgp_gr_active_peers` = 0,
+routes still present and valid.
+
+### Test 4: GR Timer Expiry Sweeps Stale Routes
+
+Kill FRR's bgpd AND watchfrr (prevent restart). Wait for GR restart timer
+to expire (30s). Stale routes should be swept from the RIB.
+
+**Pass criteria:** `bgp_gr_stale_routes` = 0, peer routes removed from RIB,
+`bgp_gr_timer_expired_total` >= 1.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m11-gr-frr.sh
+```
+
+Runs all 4 tests automatically. Tests 1–3 run sequentially (test 2 kills bgpd,
+test 3 waits for watchfrr to restart it). Test 4 kills both bgpd and watchfrr
+to force timer expiry.
 
 ---
 
