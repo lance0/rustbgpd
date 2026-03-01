@@ -549,6 +549,9 @@ impl RibManager {
             RibUpdate::EndOfRib { peer, afi, safi } => {
                 info!(%peer, ?afi, ?safi, "received End-of-RIB");
                 let is_gr_peer = self.gr_peers.contains_key(&peer);
+                if !is_gr_peer {
+                    debug!(%peer, ?afi, ?safi, "End-of-RIB received without active GR state, ignoring");
+                }
                 if is_gr_peer {
                     // Remove family from awaiting set
                     if let Some(awaiting) = self.gr_peers.get_mut(&peer) {

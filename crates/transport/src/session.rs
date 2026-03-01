@@ -606,6 +606,20 @@ impl PeerSession {
                         Message::Open(open) => {
                             self.metrics
                                 .record_message_received(&self.peer_label, "open");
+                            let gr_cap_count = open
+                                .capabilities
+                                .iter()
+                                .filter(|c| {
+                                    matches!(c, rustbgpd_wire::Capability::GracefulRestart { .. })
+                                })
+                                .count();
+                            if gr_cap_count > 1 {
+                                warn!(
+                                    peer = %self.peer_label,
+                                    count = gr_cap_count,
+                                    "peer sent multiple Graceful Restart capabilities, using first"
+                                );
+                            }
                             Event::OpenReceived(open)
                         }
                         Message::Keepalive => {

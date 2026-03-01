@@ -294,6 +294,7 @@ impl Config {
             }
 
             // Validate GR config
+            let gr_enabled = neighbor.graceful_restart.unwrap_or(true);
             if let Some(t) = neighbor.gr_restart_time
                 && t > 4095
             {
@@ -301,11 +302,28 @@ impl Config {
                     reason: format!("gr_restart_time {t} exceeds 4095 (12-bit max)"),
                 });
             }
+            if let Some(0) = neighbor.gr_restart_time
+                && gr_enabled
+            {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: "gr_restart_time must be > 0 when graceful_restart is enabled"
+                        .to_string(),
+                });
+            }
             if let Some(t) = neighbor.gr_stale_routes_time
                 && t == 0
             {
                 return Err(ConfigError::InvalidGrConfig {
                     reason: "gr_stale_routes_time must be > 0".to_string(),
+                });
+            }
+            if let Some(t) = neighbor.gr_stale_routes_time
+                && t > 3600
+            {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: format!(
+                        "gr_stale_routes_time {t} exceeds 3600 (1 hour max)"
+                    ),
                 });
             }
 
@@ -1026,5 +1044,58 @@ local_ipv6_nexthop = "{nexthop}"
             config.neighbors[0].local_ipv6_nexthop.as_deref(),
             Some("2001:db8::1")
         );
+    }
+
+    fn gr_toml(gr_fields: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+{gr_fields}
+"#
+        )
+    }
+
+    #[test]
+    fn gr_restart_time_zero_with_gr_enabled_rejected() {
+        let err = parse(&gr_toml("gr_restart_time = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
+    }
+
+    #[test]
+    fn gr_restart_time_zero_with_gr_disabled_accepted() {
+        let toml = gr_toml("graceful_restart = false\ngr_restart_time = 0");
+        assert!(parse(&toml).is_ok());
+    }
+
+    #[test]
+    fn gr_stale_routes_time_exceeds_max_rejected() {
+        let err = parse(&gr_toml("gr_stale_routes_time = 7200")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidGrConfig { .. }));
+    }
+
+    #[test]
+    fn gr_stale_routes_time_at_max_accepted() {
+        assert!(parse(&gr_toml("gr_stale_routes_time = 3600")).is_ok());
+    }
+
+    #[test]
+    fn duplicate_families_deduplicated() {
+        let toml = gr_toml(
+            r#"families = ["ipv4_unicast", "ipv4_unicast", "ipv6_unicast", "ipv6_unicast"]"#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert_eq!(peers[0].0.peer.families.len(), 2);
     }
 }
