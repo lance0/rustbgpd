@@ -1016,12 +1016,29 @@ impl PeerSession {
             .or(local_ipv6)
             .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
 
+        // Guard: if eBGP has no valid IPv6 NH, skip all v6 routes. The RIB's
+        // sendable_families filter should prevent this, but defend in depth.
+        if is_ebgp && ebgp_ipv6_nh.is_none() && !v6_routes.is_empty() {
+            debug_assert!(
+                false,
+                "RIB sent {} IPv6 routes to eBGP peer with no valid IPv6 next-hop",
+                v6_routes.len()
+            );
+            warn!(
+                peer = %self.peer_label,
+                count = v6_routes.len(),
+                "BUG: IPv6 routes reached transport for eBGP peer with no valid next-hop; dropping"
+            );
+            v6_routes.clear();
+        }
+
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
         let mut v6_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<Prefix>)> = Vec::new();
         for route in &v6_routes {
             let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
             let nh = if is_ebgp {
+                // Safe: guarded above — ebgp_ipv6_nh is Some if we reach here
                 IpAddr::V6(ebgp_ipv6_nh.unwrap_or(Ipv6Addr::UNSPECIFIED))
             } else {
                 route.next_hop
