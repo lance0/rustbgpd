@@ -72,6 +72,13 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 *Prioritized by effort vs user impact. Quick wins first, then bigger lifts.*
 
+### Interop Test Hardening
+
+- [ ] **`trap cleanup EXIT`** — auto-destroy topology on failure; guard with a `--deploy` flag so manual workflows aren't disrupted
+- [ ] **EoR detection by polling** — replace `sleep 10` in M11 test 3 with a `wait_eor()` loop that polls `bgp_gr_stale_routes` until 0
+- [ ] **Timestamps in log output** — `date +%H:%M:%S` in `log()`/`ok()`/`fail()` across all 5 scripts; especially useful for GR timing
+- [ ] **Pre-flight checks** — verify `grpcurl`, `docker`, `containerlab` exist before running any tests
+
 ### Quick Wins (low effort, high impact)
 
 - [ ] **Extended message support** (RFC 8654) — raise 4096-byte limit for large UPDATE messages; mainly a wire codec change
@@ -153,7 +160,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
-- [x] Automated interop test scripts (M1, M3, M4)
+- [x] Automated interop test scripts (M1, M3, M4, M10, M11)
 - [ ] Binary releases (GitHub Releases with cross-compiled binaries)
 - [ ] Homebrew formula
 - [ ] crates.io publishing (`rustbgpd-wire` first, then workspace)
