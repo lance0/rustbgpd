@@ -11,6 +11,8 @@ use crate::route::Route;
 pub struct OutboundRouteUpdate {
     pub announce: Vec<Route>,
     pub withdraw: Vec<Prefix>,
+    /// End-of-RIB markers to send for these families after the route updates.
+    pub end_of_rib: Vec<(Afi, Safi)>,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -58,6 +60,22 @@ pub enum RibUpdate {
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {
         reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
+    },
+    /// End-of-RIB marker received from a peer for a given address family.
+    EndOfRib {
+        peer: IpAddr,
+        afi: Afi,
+        safi: Safi,
+    },
+    /// Peer entered graceful restart — preserve routes but mark stale.
+    PeerGracefulRestart {
+        peer: IpAddr,
+        /// Peer's advertised restart time (seconds).
+        restart_time: u16,
+        /// Our configured stale routes time (seconds).
+        stale_routes_time: u64,
+        /// Families for which the peer preserved forwarding state.
+        preserved_families: Vec<(Afi, Safi)>,
     },
     /// Query: return the number of prefixes in the Loc-RIB.
     QueryLocRibCount { reply: oneshot::Sender<usize> },

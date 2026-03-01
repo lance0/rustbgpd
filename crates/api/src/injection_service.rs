@@ -109,6 +109,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             attributes,
             received_at: std::time::Instant::now(),
             is_ebgp: false,
+            is_stale: false,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();

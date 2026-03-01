@@ -76,6 +76,20 @@ pub fn validate_open(
     // Intersect address families: only families both sides advertise
     let negotiated_families = intersect_families(config, &open.capabilities);
 
+    // Extract Graceful Restart capability from peer
+    let (peer_gr_capable, peer_restart_state, peer_restart_time, peer_gr_families) = open
+        .capabilities
+        .iter()
+        .find_map(|c| match c {
+            Capability::GracefulRestart {
+                restart_state,
+                restart_time,
+                families,
+            } => Some((true, *restart_state, *restart_time, families.clone())),
+            _ => None,
+        })
+        .unwrap_or_default();
+
     Ok(NegotiatedSession {
         peer_asn,
         peer_router_id: open.bgp_identifier,
@@ -84,6 +98,10 @@ pub fn validate_open(
         peer_capabilities: open.capabilities.clone(),
         four_octet_as,
         negotiated_families,
+        peer_gr_capable,
+        peer_restart_state,
+        peer_restart_time,
+        peer_gr_families,
     })
 }
 
@@ -168,6 +186,8 @@ mod tests {
             hold_time: 90,
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            graceful_restart: false,
+            gr_restart_time: 120,
         }
     }
 
@@ -344,6 +364,40 @@ mod tests {
             neg.negotiated_families
                 .contains(&(Afi::Ipv4, Safi::Unicast))
         );
+    }
+
+    #[test]
+    fn graceful_restart_extracted_from_peer_open() {
+        use rustbgpd_wire::GracefulRestartFamily;
+
+        let cfg = test_config();
+        let mut open = peer_open();
+        open.capabilities.push(Capability::GracefulRestart {
+            restart_state: true,
+            restart_time: 120,
+            families: vec![GracefulRestartFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: true,
+            }],
+        });
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(neg.peer_gr_capable);
+        assert!(neg.peer_restart_state);
+        assert_eq!(neg.peer_restart_time, 120);
+        assert_eq!(neg.peer_gr_families.len(), 1);
+        assert!(neg.peer_gr_families[0].forwarding_preserved);
+    }
+
+    #[test]
+    fn graceful_restart_absent_yields_defaults() {
+        let cfg = test_config();
+        let open = peer_open(); // no GR capability
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert!(!neg.peer_gr_capable);
+        assert!(!neg.peer_restart_state);
+        assert_eq!(neg.peer_restart_time, 0);
+        assert!(neg.peer_gr_families.is_empty());
     }
 
     #[test]

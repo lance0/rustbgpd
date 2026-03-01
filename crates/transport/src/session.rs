@@ -682,7 +682,41 @@ impl PeerSession {
             return;
         }
 
-        // 3. Build routes from body NLRI (IPv4) and MP-BGP NLRI
+        // 3. End-of-RIB detection (RFC 4724 §2)
+        if parsed.announced.is_empty() && parsed.withdrawn.is_empty() {
+            // IPv4 EoR: empty UPDATE (no NLRI, no withdrawn, no attributes)
+            if parsed.attributes.is_empty() {
+                info!(peer = %self.peer_label, family = "ipv4_unicast", "received End-of-RIB");
+                let _ = self.rib_tx.try_send(RibUpdate::EndOfRib {
+                    peer: self.peer_ip,
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                });
+                self.drive_fsm(Event::UpdateReceived).await;
+                return;
+            }
+            // IPv6 EoR: UPDATE with only an empty MP_UNREACH_NLRI
+            if parsed.attributes.len() == 1
+                && let Some(PathAttribute::MpUnreachNlri(mp)) = parsed.attributes.first()
+                && mp.withdrawn.is_empty()
+            {
+                info!(
+                    peer = %self.peer_label,
+                    afi = ?mp.afi,
+                    safi = ?mp.safi,
+                    "received End-of-RIB"
+                );
+                let _ = self.rib_tx.try_send(RibUpdate::EndOfRib {
+                    peer: self.peer_ip,
+                    afi: mp.afi,
+                    safi: mp.safi,
+                });
+                self.drive_fsm(Event::UpdateReceived).await;
+                return;
+            }
+        }
+
+        // 4. Build routes from body NLRI (IPv4) and MP-BGP NLRI
         let body_next_hop: IpAddr = parsed
             .attributes
             .iter()
@@ -731,6 +765,7 @@ impl PeerSession {
                 attributes: route_attrs.clone(),
                 received_at: now,
                 is_ebgp,
+                is_stale: false,
             })
             .collect();
 
@@ -770,6 +805,7 @@ impl PeerSession {
                                 attributes: mp_route_attrs.clone(),
                                 received_at: now,
                                 is_ebgp,
+                                is_stale: false,
                             });
                         }
                     }
@@ -1069,6 +1105,34 @@ impl PeerSession {
             self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
+
+        // Send End-of-RIB markers
+        for (afi, safi) in &update.end_of_rib {
+            let msg = match (afi, safi) {
+                // IPv4 Unicast EoR: empty UPDATE (no NLRI, no withdrawn, no attrs)
+                (Afi::Ipv4, Safi::Unicast) => {
+                    UpdateMessage::build(&[], &[], &[], four_octet_as)
+                }
+                // IPv6 Unicast EoR: UPDATE with empty MP_UNREACH_NLRI
+                (Afi::Ipv6, Safi::Unicast) => {
+                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                        afi: Afi::Ipv6,
+                        safi: Safi::Unicast,
+                        withdrawn: vec![],
+                    })];
+                    UpdateMessage::build(&[], &[], &attrs, four_octet_as)
+                }
+                _ => continue,
+            };
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send End-of-RIB for {afi:?}/{safi:?}");
+                return;
+            }
+            info!(peer = %self.peer_label, afi = ?afi, safi = ?safi, "sent End-of-RIB");
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+        }
     }
 
     /// Prepare path attributes for outbound advertisement.
@@ -1183,6 +1247,8 @@ mod tests {
             hold_time: 90,
             connect_retry_secs: 30,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            graceful_restart: false,
+            gr_restart_time: 120,
         };
         let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
         let metrics = BgpMetrics::new();
@@ -1207,6 +1273,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         }
     }
 
@@ -1295,6 +1362,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             is_ebgp: false,
+            is_stale: false,
         };
         let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
 

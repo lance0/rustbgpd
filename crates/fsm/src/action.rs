@@ -1,4 +1,4 @@
-use rustbgpd_wire::{Afi, Capability, NotificationMessage, OpenMessage, Safi};
+use rustbgpd_wire::{Afi, Capability, GracefulRestartFamily, NotificationMessage, OpenMessage, Safi};
 
 use crate::state::SessionState;
 
@@ -27,6 +27,14 @@ pub struct NegotiatedSession {
     pub four_octet_as: bool,
     /// Address families negotiated between both sides.
     pub negotiated_families: Vec<(Afi, Safi)>,
+    /// Whether the peer advertised Graceful Restart capability.
+    pub peer_gr_capable: bool,
+    /// Whether the peer set the R-bit (currently in restart state).
+    pub peer_restart_state: bool,
+    /// Peer's advertised restart time (seconds).
+    pub peer_restart_time: u16,
+    /// Per-family forwarding state from the peer's GR capability.
+    pub peer_gr_families: Vec<GracefulRestartFamily>,
 }
 
 /// Output actions produced by the FSM on each transition.

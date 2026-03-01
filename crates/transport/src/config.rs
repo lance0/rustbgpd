@@ -23,6 +23,8 @@ pub struct TransportConfig {
     /// `MP_REACH_NLRI`. If `None`, the local IPv6 socket address is used
     /// (if available); otherwise IPv6 routes are suppressed.
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
+    /// Time to retain stale routes after peer restart (seconds). RFC 4724.
+    pub gr_stale_routes_time: u64,
 }
 
 impl TransportConfig {
@@ -40,6 +42,7 @@ impl TransportConfig {
             md5_password: None,
             ttl_security: false,
             local_ipv6_nexthop: None,
+            gr_stale_routes_time: 360,
         }
     }
 }

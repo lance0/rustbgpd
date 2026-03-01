@@ -357,6 +357,7 @@ mod tests {
             attributes: vec![],
             received_at: std::time::Instant::now(),
             is_ebgp: false,
+            is_stale: false,
         };
         let v6 = Route {
             prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
@@ -365,6 +366,7 @@ mod tests {
             attributes: vec![],
             received_at: std::time::Instant::now(),
             is_ebgp: false,
+            is_stale: false,
         };
 
         // Unspecified returns all

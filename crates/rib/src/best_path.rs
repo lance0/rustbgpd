@@ -11,6 +11,7 @@ use crate::route::Route;
 /// Compare two routes for best-path selection.
 ///
 /// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
+/// 0. Non-stale preferred over stale (RFC 4724 demotion)
 /// 1. Highest `LOCAL_PREF` (default 100)
 /// 2. Shortest `AS_PATH` length (default 0)
 /// 3. Lowest ORIGIN — IGP < EGP < INCOMPLETE
@@ -19,6 +20,12 @@ use crate::route::Route;
 /// 6. Lowest peer address (tiebreaker)
 #[must_use]
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
+    // 0. Non-stale preferred over stale (RFC 4724)
+    let cmp = a.is_stale.cmp(&b.is_stale);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
     // 1. Highest LOCAL_PREF wins → reverse comparison
     let cmp = b.local_pref().cmp(&a.local_pref());
     if cmp != Ordering::Equal {
@@ -79,6 +86,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         }
     }
 
@@ -203,6 +211,25 @@ mod tests {
     }
 
     #[test]
+    fn non_stale_beats_stale() {
+        let a = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        let mut b = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        b.is_stale = true;
+        // Non-stale (a) preferred over stale (b)
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+        assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
+    }
+
+    #[test]
+    fn stale_demotion_beats_local_pref() {
+        // A stale route with higher LOCAL_PREF should lose to a non-stale route
+        let mut a = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200);
+        a.is_stale = true;
+        let b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Greater);
+    }
+
+    #[test]
     fn igp_beats_incomplete() {
         let a = with_origin(base_route(Ipv4Addr::new(1, 0, 0, 1)), Origin::Igp);
         let b = with_origin(base_route(Ipv4Addr::new(1, 0, 0, 2)), Origin::Incomplete);
@@ -259,6 +286,7 @@ mod proptests {
                     ],
                     received_at: Instant::now(),
                     is_ebgp,
+                    is_stale: false,
                 }
             })
     }

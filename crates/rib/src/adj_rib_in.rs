@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{Afi, Prefix, Safi};
 
 use crate::route::Route;
 
@@ -56,6 +56,47 @@ impl AdjRibIn {
     pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
         self.routes.get(prefix)
     }
+
+    /// Mark all routes matching the given address family as stale.
+    pub fn mark_stale(&mut self, family: (Afi, Safi)) {
+        for route in self.routes.values_mut() {
+            if route_matches_family(route, family) {
+                route.is_stale = true;
+            }
+        }
+    }
+
+    /// Clear the stale flag on routes matching the given address family.
+    pub fn clear_stale(&mut self, family: (Afi, Safi)) {
+        for route in self.routes.values_mut() {
+            if route_matches_family(route, family) {
+                route.is_stale = false;
+            }
+        }
+    }
+
+    /// Remove all stale routes, returning their prefixes.
+    pub fn sweep_stale(&mut self) -> Vec<Prefix> {
+        let stale: Vec<Prefix> = self
+            .routes
+            .iter()
+            .filter(|(_, r)| r.is_stale)
+            .map(|(p, _)| *p)
+            .collect();
+        for prefix in &stale {
+            self.routes.remove(prefix);
+        }
+        stale
+    }
+}
+
+/// Check whether a route's prefix matches an AFI/SAFI family.
+fn route_matches_family(route: &Route, family: (Afi, Safi)) -> bool {
+    family.1 == Safi::Unicast
+        && matches!(
+            (&route.prefix, family.0),
+            (Prefix::V4(_), Afi::Ipv4) | (Prefix::V6(_), Afi::Ipv6)
+        )
 }
 
 #[cfg(test)]
@@ -75,6 +116,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         }
     }
 
@@ -126,6 +168,62 @@ mod tests {
 
         rib.clear();
         assert!(rib.is_empty());
+    }
+
+    #[test]
+    fn mark_stale_by_family() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(!rib.get(&Prefix::V4(prefix)).unwrap().is_stale);
+
+        rib.mark_stale((Afi::Ipv4, Safi::Unicast));
+        assert!(rib.get(&Prefix::V4(prefix)).unwrap().is_stale);
+    }
+
+    #[test]
+    fn mark_stale_ignores_wrong_family() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
+
+        rib.mark_stale((Afi::Ipv6, Safi::Unicast));
+        assert!(!rib.get(&Prefix::V4(prefix)).unwrap().is_stale);
+    }
+
+    #[test]
+    fn clear_stale_by_family() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
+
+        rib.mark_stale((Afi::Ipv4, Safi::Unicast));
+        assert!(rib.get(&Prefix::V4(prefix)).unwrap().is_stale);
+
+        rib.clear_stale((Afi::Ipv4, Safi::Unicast));
+        assert!(!rib.get(&Prefix::V4(prefix)).unwrap().is_stale);
+    }
+
+    #[test]
+    fn sweep_stale_removes_stale_routes() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let p2 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+        rib.insert(make_route(p1, Ipv4Addr::new(10, 0, 0, 1)));
+        rib.insert(make_route(p2, Ipv4Addr::new(10, 0, 0, 1)));
+
+        rib.mark_stale((Afi::Ipv4, Safi::Unicast));
+        // Insert a fresh (non-stale) route for p2
+        rib.insert(make_route(p2, Ipv4Addr::new(10, 0, 0, 1)));
+
+        let swept = rib.sweep_stale();
+        assert_eq!(swept.len(), 1);
+        assert_eq!(swept[0], Prefix::V4(p1));
+        assert_eq!(rib.len(), 1); // p2 remains
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::net::Ipv4Addr;
 
 use bytes::Bytes;
 use proptest::prelude::*;
-use rustbgpd_wire::capability::{Afi, Capability, Safi};
+use rustbgpd_wire::capability::{Afi, Capability, GracefulRestartFamily, Safi};
 use rustbgpd_wire::constants::BGP_VERSION;
 use rustbgpd_wire::message::{Message, decode_message, encode_message};
 use rustbgpd_wire::notification::NotificationCode;
@@ -31,14 +31,34 @@ fn arb_safi() -> impl Strategy<Value = Safi> {
     prop_oneof![Just(Safi::Unicast), Just(Safi::Multicast),]
 }
 
+fn arb_gr_family() -> impl Strategy<Value = GracefulRestartFamily> {
+    (arb_afi(), arb_safi(), any::<bool>()).prop_map(|(afi, safi, fp)| GracefulRestartFamily {
+        afi,
+        safi,
+        forwarding_preserved: fp,
+    })
+}
+
 fn arb_capability() -> impl Strategy<Value = Capability> {
     prop_oneof![
         (arb_afi(), arb_safi()).prop_map(|(afi, safi)| Capability::MultiProtocol { afi, safi }),
+        (
+            any::<bool>(),
+            (0..=4095u16),
+            proptest::collection::vec(arb_gr_family(), 0..=4),
+        )
+            .prop_map(|(restart_state, restart_time, families)| {
+                Capability::GracefulRestart {
+                    restart_state,
+                    restart_time,
+                    families,
+                }
+            }),
         any::<u32>().prop_map(|asn| Capability::FourOctetAs { asn }),
-        // Unknown capabilities: code must not collide with known codes (1, 65)
+        // Unknown capabilities: code must not collide with known codes (1, 64, 65)
         // and data length fits in u8
         (
-            prop_oneof![2..65u8, 66..=255u8],
+            prop_oneof![2..64u8, 66..=255u8],
             proptest::collection::vec(any::<u8>(), 0..32)
         )
             .prop_map(|(code, data)| Capability::Unknown {

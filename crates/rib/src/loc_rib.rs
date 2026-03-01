@@ -98,6 +98,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         }
     }
 

@@ -59,6 +59,12 @@ pub struct Neighbor {
     /// is also included by default.
     #[serde(default)]
     pub families: Vec<String>,
+    /// Enable Graceful Restart (RFC 4724). Default: true.
+    pub graceful_restart: Option<bool>,
+    /// Restart time advertised in GR capability (seconds, max 4095). Default: 120.
+    pub gr_restart_time: Option<u16>,
+    /// Time to retain stale routes after peer restart (seconds). Default: 360.
+    pub gr_stale_routes_time: Option<u64>,
     /// Explicit IPv6 next-hop for eBGP advertisements when the TCP session
     /// is IPv4. If not set, the local IPv6 socket address is used (if
     /// available); otherwise IPv6 routes are suppressed for this peer.
@@ -107,6 +113,8 @@ pub enum ConfigError {
     InvalidPolicyEntry { reason: String },
     #[error("invalid local_ipv6_nexthop {value:?}: {reason}")]
     InvalidLocalIpv6Nexthop { value: String, reason: String },
+    #[error("invalid graceful restart config: {reason}")]
+    InvalidGrConfig { reason: String },
 }
 
 fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixList>, ConfigError> {
@@ -282,6 +290,22 @@ impl Config {
                 parse_families(&neighbor.families)?;
             }
 
+            // Validate GR config
+            if let Some(t) = neighbor.gr_restart_time
+                && t > 4095
+            {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: format!("gr_restart_time {t} exceeds 4095 (12-bit max)"),
+                });
+            }
+            if let Some(t) = neighbor.gr_stale_routes_time
+                && t == 0
+            {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: "gr_stale_routes_time must be > 0".to_string(),
+                });
+            }
+
             // Validate local_ipv6_nexthop if configured
             if let Some(ref nh) = neighbor.local_ipv6_nexthop {
                 let addr =
@@ -383,6 +407,8 @@ impl Config {
                 hold_time: neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
                 connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
                 families,
+                graceful_restart: neighbor.graceful_restart.unwrap_or(true),
+                gr_restart_time: neighbor.gr_restart_time.unwrap_or(120),
             };
 
             let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
@@ -394,6 +420,7 @@ impl Config {
                 .local_ipv6_nexthop
                 .as_ref()
                 .map(|s| s.parse::<Ipv6Addr>().expect("validated in Config::load"));
+            transport.gr_stale_routes_time = neighbor.gr_stale_routes_time.unwrap_or(360);
 
             let label = neighbor
                 .description

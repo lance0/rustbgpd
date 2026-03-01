@@ -240,6 +240,7 @@ impl RibManager {
                 let update = OutboundRouteUpdate {
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
+                    end_of_rib: vec![],
                 };
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full or closed — marking dirty for resync");
@@ -301,18 +302,26 @@ impl RibManager {
             announce.push(route.clone());
         }
 
-        if !announce.is_empty()
-            && let Some(tx) = self.outbound_peers.get(&peer)
-        {
-            let update = OutboundRouteUpdate {
-                announce: announce.clone(),
-                withdraw: vec![],
-            };
-            if tx.try_send(update).is_err() {
-                warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
-                self.metrics.record_outbound_route_drop(&peer.to_string());
-                self.dirty_peers.insert(peer);
-            } else {
+        // Determine EoR families from this peer's sendable families
+        let eor_families = self
+            .peer_sendable_families
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+
+        if let Some(tx) = self.outbound_peers.get(&peer) {
+            if !announce.is_empty() {
+                let update = OutboundRouteUpdate {
+                    announce: announce.clone(),
+                    withdraw: vec![],
+                    end_of_rib: vec![],
+                };
+                if tx.try_send(update).is_err() {
+                    warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
+                    self.metrics.record_outbound_route_drop(&peer.to_string());
+                    self.dirty_peers.insert(peer);
+                    return;
+                }
                 // Commit: populate AdjRibOut with what was actually sent
                 let rib_out = self
                     .adj_ribs_out
@@ -326,6 +335,18 @@ impl RibManager {
                     "all",
                     gauge_val(rib_out.len()),
                 );
+            }
+
+            // Send End-of-RIB markers for all sendable families
+            if !eor_families.is_empty() {
+                let eor = OutboundRouteUpdate {
+                    announce: vec![],
+                    withdraw: vec![],
+                    end_of_rib: eor_families,
+                };
+                if tx.try_send(eor).is_err() {
+                    debug!(%peer, "outbound channel full — EoR will be sent on resync");
+                }
             }
         }
     }
@@ -490,6 +511,15 @@ impl RibManager {
                 let count = self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
                 let _ = reply.send(count);
             }
+
+            // Graceful Restart handlers — full implementation in commit 6
+            RibUpdate::EndOfRib { peer, afi, safi } => {
+                debug!(peer = %peer, afi = ?afi, safi = ?safi, "received End-of-RIB");
+            }
+
+            RibUpdate::PeerGracefulRestart { peer, .. } => {
+                debug!(peer = %peer, "received PeerGracefulRestart (not yet implemented)");
+            }
         }
     }
 
@@ -583,6 +613,14 @@ mod tests {
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
     }
 
+    /// Drain the initial End-of-RIB marker sent at `PeerUp` time.
+    async fn drain_eor(out_rx: &mut mpsc::Receiver<OutboundRouteUpdate>) {
+        let eor = out_rx.recv().await.unwrap();
+        assert!(eor.announce.is_empty());
+        assert!(eor.withdraw.is_empty());
+        assert!(!eor.end_of_rib.is_empty());
+    }
+
     fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         Route {
             prefix: Prefix::V4(prefix),
@@ -591,6 +629,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         }
     }
 
@@ -608,6 +647,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         }
     }
 
@@ -1019,6 +1059,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1054,6 +1095,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         // The route is FROM this peer — should not be sent back
@@ -1130,6 +1172,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 16);
         let route = Route {
@@ -1142,6 +1185,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             is_ebgp: false,
+            is_stale: false,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1186,6 +1230,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 16);
         let route = Route {
@@ -1195,6 +1240,7 @@ mod tests {
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
             is_ebgp: false,
+            is_stale: false,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1257,6 +1303,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         // This route matches the deny entry
@@ -1360,6 +1407,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut recv_filtered).await;
 
         let (send_unfiltered, mut recv_unfiltered) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
@@ -1370,6 +1418,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut recv_unfiltered).await;
 
         // Source peer sends both prefixes
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1466,6 +1515,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
         // First route: should succeed (channel empty → fits)
         tx.send(RibUpdate::RoutesReceived {
@@ -1755,6 +1805,7 @@ mod tests {
             .send(OutboundRouteUpdate {
                 announce: vec![],
                 withdraw: vec![],
+                end_of_rib: vec![],
             })
             .await
             .unwrap();
@@ -2348,6 +2399,7 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -2361,6 +2413,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         };
 
         // Send both IPv4 and IPv6 routes
@@ -2414,6 +2467,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         };
 
         // Pre-populate Loc-RIB with both IPv4 and IPv6 routes
@@ -2480,6 +2534,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             is_ebgp: true,
+            is_stale: false,
         };
 
         // Pre-populate Loc-RIB

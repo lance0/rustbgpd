@@ -18,6 +18,8 @@ fn test_config() -> PeerConfig {
         hold_time: 90,
         connect_retry_secs: 30,
         families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
     }
 }
 

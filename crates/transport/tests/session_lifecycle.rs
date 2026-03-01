@@ -29,6 +29,8 @@ fn test_peer_config() -> PeerConfig {
         hold_time: 90,
         connect_retry_secs: 5,
         families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
     }
 }
 
@@ -83,6 +85,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         md5_password: None,
         ttl_security: false,
         local_ipv6_nexthop: None,
+        gr_stale_routes_time: 360,
     }
 }
 

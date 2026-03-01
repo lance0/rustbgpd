@@ -52,6 +52,8 @@ pub mod param_type {
 pub mod capability_code {
     /// RFC 4760: Multi-Protocol Extensions.
     pub const MULTI_PROTOCOL: u8 = 1;
+    /// RFC 4724: Graceful Restart.
+    pub const GRACEFUL_RESTART: u8 = 64;
     /// RFC 6793: 4-Byte AS Number.
     pub const FOUR_OCTET_AS: u8 = 65;
 }

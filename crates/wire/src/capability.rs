@@ -41,11 +41,30 @@ impl Safi {
     }
 }
 
+/// Per-AFI/SAFI entry in the Graceful Restart capability (RFC 4724 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GracefulRestartFamily {
+    pub afi: Afi,
+    pub safi: Safi,
+    /// Whether the peer preserved forwarding state for this family.
+    pub forwarding_preserved: bool,
+}
+
 /// BGP capability as negotiated in OPEN optional parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
     /// RFC 4760: Multi-Protocol Extensions.
     MultiProtocol { afi: Afi, safi: Safi },
+    /// RFC 4724: Graceful Restart.
+    GracefulRestart {
+        /// R-bit: the sender has restarted and its forwarding state
+        /// may have been preserved.
+        restart_state: bool,
+        /// Time in seconds the sender will retain stale routes (12-bit, max 4095).
+        restart_time: u16,
+        /// Per-AFI/SAFI forwarding state flags.
+        families: Vec<GracefulRestartFamily>,
+    },
     /// RFC 6793: 4-Byte AS Number.
     FourOctetAs { asn: u32 },
     /// Unknown or unrecognized capability, preserved for re-emission.
@@ -106,6 +125,38 @@ impl Capability {
                     })
                 }
             }
+            capability_code::GRACEFUL_RESTART => {
+                // Minimum 2 bytes (restart flags/time). Each family is 4 bytes.
+                if length < 2 || !(length - 2).is_multiple_of(4) {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                let flags_and_time = buf.get_u16();
+                let restart_state = (flags_and_time & 0x8000) != 0;
+                let restart_time = flags_and_time & 0x0FFF;
+                let family_count = (length - 2) / 4;
+                let mut families = Vec::with_capacity(usize::from(family_count));
+                for _ in 0..family_count {
+                    let afi_raw = buf.get_u16();
+                    let safi_raw = buf.get_u8();
+                    let flags = buf.get_u8();
+                    if let (Some(afi), Some(safi)) =
+                        (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw))
+                    {
+                        families.push(GracefulRestartFamily {
+                            afi,
+                            safi,
+                            forwarding_preserved: (flags & 0x80) != 0,
+                        });
+                    }
+                    // Skip unrecognized AFI/SAFI entries silently
+                }
+                Ok(Capability::GracefulRestart {
+                    restart_state,
+                    restart_time,
+                    families,
+                })
+            }
             capability_code::FOUR_OCTET_AS => {
                 if length != 4 {
                     let data = buf.copy_to_bytes(usize::from(length));
@@ -131,6 +182,25 @@ impl Capability {
                 buf.put_u8(0); // reserved
                 buf.put_u8(*safi as u8);
             }
+            Capability::GracefulRestart {
+                restart_state,
+                restart_time,
+                families,
+            } => {
+                buf.put_u8(capability_code::GRACEFUL_RESTART);
+                #[expect(clippy::cast_possible_truncation)]
+                buf.put_u8((2 + families.len() * 4) as u8);
+                let mut flags_and_time = *restart_time & 0x0FFF;
+                if *restart_state {
+                    flags_and_time |= 0x8000;
+                }
+                buf.put_u16(flags_and_time);
+                for fam in families {
+                    buf.put_u16(fam.afi as u16);
+                    buf.put_u8(fam.safi as u8);
+                    buf.put_u8(if fam.forwarding_preserved { 0x80 } else { 0 });
+                }
+            }
             Capability::FourOctetAs { asn } => {
                 buf.put_u8(capability_code::FOUR_OCTET_AS);
                 buf.put_u8(4); // length
@@ -152,6 +222,7 @@ impl Capability {
     pub fn code(&self) -> u8 {
         match self {
             Self::MultiProtocol { .. } => capability_code::MULTI_PROTOCOL,
+            Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
             Self::FourOctetAs { .. } => capability_code::FOUR_OCTET_AS,
             Self::Unknown { code, .. } => *code,
         }
@@ -162,6 +233,7 @@ impl Capability {
     pub fn encoded_len(&self) -> usize {
         2 + match self {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
+            Self::GracefulRestart { families, .. } => 2 + families.len() * 4,
             Self::Unknown { data, .. } => data.len(),
         }
     }
@@ -368,5 +440,148 @@ mod tests {
         let data: &[u8] = &[65, 4, 0, 0]; // FourOctetAs but only 2 bytes of value
         let mut buf = Bytes::copy_from_slice(data);
         assert!(Capability::decode(&mut buf).is_err());
+    }
+
+    #[test]
+    fn decode_graceful_restart_with_families() {
+        // code=64, len=10 (2 + 2*4), flags=0x80 (R-bit) | time=120
+        // Family 1: IPv4/Unicast, forwarding preserved
+        // Family 2: IPv6/Unicast, forwarding not preserved
+        let mut data = bytes::BytesMut::new();
+        data.put_u8(64); // code
+        data.put_u8(10); // length: 2 + 2*4
+        data.put_u16(0x8078); // R-bit set, restart_time=120
+        data.put_u16(1); // AFI IPv4
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(0x80); // forwarding preserved
+        data.put_u16(2); // AFI IPv6
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(0x00); // forwarding not preserved
+
+        let mut buf = data.freeze();
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            cap,
+            Capability::GracefulRestart {
+                restart_state: true,
+                restart_time: 120,
+                families: vec![
+                    GracefulRestartFamily {
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: true,
+                    },
+                    GracefulRestartFamily {
+                        afi: Afi::Ipv6,
+                        safi: Safi::Unicast,
+                        forwarding_preserved: false,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_graceful_restart_no_r_bit() {
+        let mut data = bytes::BytesMut::new();
+        data.put_u8(64);
+        data.put_u8(6); // 2 + 1*4
+        data.put_u16(0x005A); // R-bit clear, restart_time=90
+        data.put_u16(1); // AFI IPv4
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(0x00); // forwarding not preserved
+
+        let mut buf = data.freeze();
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            cap,
+            Capability::GracefulRestart {
+                restart_state: false,
+                restart_time: 90,
+                families: vec![GracefulRestartFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: false,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_graceful_restart_empty_families() {
+        let mut data = bytes::BytesMut::new();
+        data.put_u8(64);
+        data.put_u8(2); // just the flags/time, no families
+        data.put_u16(0x003C); // time=60
+
+        let mut buf = data.freeze();
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            cap,
+            Capability::GracefulRestart {
+                restart_state: false,
+                restart_time: 60,
+                families: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn roundtrip_graceful_restart() {
+        let original = Capability::GracefulRestart {
+            restart_state: true,
+            restart_time: 120,
+            families: vec![
+                GracefulRestartFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: true,
+                },
+                GracefulRestartFamily {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: false,
+                },
+            ],
+        };
+        let mut encoded = bytes::BytesMut::with_capacity(12);
+        original.encode(&mut encoded);
+        let mut buf = encoded.freeze();
+        let decoded = Capability::decode(&mut buf).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn graceful_restart_encoded_len() {
+        let cap = Capability::GracefulRestart {
+            restart_state: false,
+            restart_time: 120,
+            families: vec![GracefulRestartFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: true,
+            }],
+        };
+        // code(1) + length(1) + flags_time(2) + 1 family(4) = 8
+        assert_eq!(cap.encoded_len(), 8);
+    }
+
+    #[test]
+    fn graceful_restart_code() {
+        let cap = Capability::GracefulRestart {
+            restart_state: false,
+            restart_time: 0,
+            families: vec![],
+        };
+        assert_eq!(cap.code(), 64);
+    }
+
+    #[test]
+    fn graceful_restart_bad_length_stored_as_unknown() {
+        // Length 3 is invalid (not 2 + N*4)
+        let data: &[u8] = &[64, 3, 0x00, 0x3C, 0xFF];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert!(matches!(cap, Capability::Unknown { code: 64, .. }));
     }
 }

@@ -13,6 +13,8 @@ pub struct Route {
     pub received_at: Instant,
     /// Whether this route was learned via an eBGP session (local ASN != remote ASN).
     pub is_ebgp: bool,
+    /// Whether this route is stale due to a peer graceful restart.
+    pub is_stale: bool,
 }
 
 impl Route {

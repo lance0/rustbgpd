@@ -79,11 +79,14 @@ impl PeerManager {
             hold_time: config.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
             connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
             families,
+            graceful_restart: config.graceful_restart,
+            gr_restart_time: config.gr_restart_time,
         };
         let remote_addr = SocketAddr::new(config.address, BGP_PORT);
         let mut transport = TransportConfig::new(peer, remote_addr);
         transport.max_prefixes = config.max_prefixes;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
+        transport.gr_stale_routes_time = config.gr_stale_routes_time;
         transport
     }
 
@@ -470,6 +473,9 @@ mod tests {
             hold_time: None,
             max_prefixes: None,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            graceful_restart: true,
+            gr_restart_time: 120,
+            gr_stale_routes_time: 360,
             local_ipv6_nexthop: None,
             import_policy: None,
             export_policy: None,
