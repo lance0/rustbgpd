@@ -14,8 +14,10 @@ pub struct Ipv4Prefix {
 
 impl Ipv4Prefix {
     /// Create a new prefix, masking off host bits.
+    /// Prefix length is clamped to 32.
     #[must_use]
     pub fn new(addr: Ipv4Addr, len: u8) -> Self {
+        let len = len.min(32);
         let masked = if len == 0 {
             0
         } else if len >= 32 {
@@ -107,8 +109,10 @@ pub struct Ipv6Prefix {
 
 impl Ipv6Prefix {
     /// Create a new prefix, masking off host bits.
+    /// Prefix length is clamped to 128.
     #[must_use]
     pub fn new(addr: Ipv6Addr, len: u8) -> Self {
+        let len = len.min(128);
         let masked = if len == 0 {
             0u128
         } else if len >= 128 {
@@ -420,6 +424,22 @@ mod tests {
     fn prefix_display_v4() {
         let p = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
         assert_eq!(format!("{p}"), "10.0.0.0/24");
+    }
+
+    #[test]
+    fn ipv4_prefix_clamps_length() {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 33);
+        assert_eq!(prefix.len, 32);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 255);
+        assert_eq!(prefix.len, 32);
+    }
+
+    #[test]
+    fn ipv6_prefix_clamps_length() {
+        let prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 129);
+        assert_eq!(prefix.len, 128);
+        let prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 200);
+        assert_eq!(prefix.len, 128);
     }
 
     #[test]
