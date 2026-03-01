@@ -185,6 +185,7 @@ async fn run(config: Config) {
                     description: label.clone(),
                     hold_time: Some(transport_config.peer.hold_time),
                     max_prefixes: transport_config.max_prefixes,
+                    families: transport_config.peer.families.clone(),
                     import_policy,
                     export_policy,
                 },

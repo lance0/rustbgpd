@@ -1,11 +1,33 @@
 use std::net::IpAddr;
 
+use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
 use crate::proto;
 use rustbgpd_rib::RibUpdate;
+
+/// Parse a list of family strings from the gRPC proto into `(Afi, Safi)` pairs.
+#[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
+fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status> {
+    if families.is_empty() {
+        return Ok(vec![(Afi::Ipv4, Safi::Unicast)]);
+    }
+    let mut result = Vec::with_capacity(families.len());
+    for f in families {
+        match f.as_str() {
+            "ipv4_unicast" => result.push((Afi::Ipv4, Safi::Unicast)),
+            "ipv6_unicast" => result.push((Afi::Ipv6, Safi::Unicast)),
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown address family {other:?}, expected \"ipv4_unicast\" or \"ipv6_unicast\""
+                )));
+            }
+        }
+    }
+    Ok(result)
+}
 
 pub struct NeighborService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -49,6 +71,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         description: info.description.clone(),
         hold_time: info.hold_time.map_or(0, u32::from),
         max_prefixes: info.max_prefixes.unwrap_or(0),
+        families: Vec::new(),
     };
 
     let state = match info.state {
@@ -99,6 +122,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             return Err(Status::invalid_argument("hold_time must be 0 or >= 3"));
         }
 
+        let families = parse_families_proto(&config.families)?;
+
         let peer_config = PeerManagerNeighborConfig {
             address,
             remote_asn: config.remote_asn,
@@ -116,6 +141,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             } else {
                 None
             },
+            families,
             import_policy: None,
             export_policy: None,
         };
@@ -293,6 +319,7 @@ mod tests {
                 description: String::new(),
                 hold_time: 90,
                 max_prefixes: 0,
+                families: Vec::new(),
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -310,6 +337,7 @@ mod tests {
                 description: String::new(),
                 hold_time: 2,
                 max_prefixes: 0,
+                families: Vec::new(),
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();

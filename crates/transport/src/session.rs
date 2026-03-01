@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -43,6 +43,9 @@ pub(crate) struct PeerSession {
     peer_ip: IpAddr,
     /// Negotiated session parameters (set when `SessionEstablished`).
     negotiated: Option<NegotiatedSession>,
+    /// Address families negotiated via MP-BGP capabilities. Used to filter
+    /// inbound `MP_REACH_NLRI` and outbound route advertisements.
+    negotiated_families: Vec<(Afi, Safi)>,
     /// Suppresses automatic restart when the FSM transitions to Idle.
     /// Set when the operator sends `ManualStop` or `Shutdown`.
     stop_requested: bool,
@@ -103,6 +106,7 @@ impl PeerSession {
             peer_label,
             peer_ip,
             negotiated: None,
+            negotiated_families: Vec::new(),
             stop_requested: false,
             reconnect_timer: None,
             outbound_rx,
@@ -149,6 +153,7 @@ impl PeerSession {
             peer_label,
             peer_ip,
             negotiated: None,
+            negotiated_families: Vec::new(),
             stop_requested: false,
             reconnect_timer: None,
             outbound_rx,
@@ -396,6 +401,7 @@ impl PeerSession {
                         four_octet_as = neg.four_octet_as,
                         "session established"
                     );
+                    self.negotiated_families.clone_from(&neg.negotiated_families);
                     self.negotiated = Some(neg);
                     self.established_at = Some(Instant::now());
                     // Register with RIB manager for outbound updates
@@ -408,6 +414,7 @@ impl PeerSession {
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
                     self.negotiated = None;
+                    self.negotiated_families.clear();
                     self.known_prefixes.clear();
                     if self.established_at.take().is_some() {
                         self.flap_count += 1;
@@ -586,6 +593,15 @@ impl PeerSession {
         }
     }
 
+    /// Check whether a prefix's address family is among the negotiated families.
+    fn is_family_negotiated(&self, prefix: &Prefix) -> bool {
+        let family = match prefix {
+            Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+            Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+        };
+        self.negotiated_families.contains(&family)
+    }
+
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
@@ -608,7 +624,8 @@ impl PeerSession {
             .attributes
             .iter()
             .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
-        let has_nlri = !parsed.announced.is_empty() || has_mp_nlri;
+        let has_body_nlri = !parsed.announced.is_empty();
+        let has_nlri = has_body_nlri || has_mp_nlri;
         let is_ebgp = self
             .negotiated
             .as_ref()
@@ -617,6 +634,7 @@ impl PeerSession {
         if let Err(update_err) = rustbgpd_wire::validate::validate_update_attributes(
             &parsed.attributes,
             has_nlri,
+            has_body_nlri,
             is_ebgp,
         ) {
             warn!(
@@ -693,9 +711,27 @@ impl PeerSession {
             .collect();
 
         // MP-BGP NLRI from attributes
+        // For IPv6 routes, also strip body NEXT_HOP — it's IPv4-specific and
+        // would contaminate IPv6 route attributes in mixed UPDATEs.
+        let mp_route_attrs: Vec<PathAttribute> = route_attrs
+            .iter()
+            .filter(|a| !matches!(a, PathAttribute::NextHop(_)))
+            .cloned()
+            .collect();
+
         for attr in &parsed.attributes {
             match attr {
                 PathAttribute::MpReachNlri(mp) => {
+                    let family = (mp.afi, mp.safi);
+                    if !self.negotiated_families.contains(&family) {
+                        warn!(
+                            peer = %self.peer_label,
+                            afi = ?mp.afi,
+                            safi = ?mp.safi,
+                            "Ignoring MP_REACH_NLRI for non-negotiated family"
+                        );
+                        continue;
+                    }
                     for prefix in &mp.announced {
                         if rustbgpd_policy::check_prefix_list(
                             self.import_policy.as_ref(),
@@ -706,7 +742,7 @@ impl PeerSession {
                                 prefix: *prefix,
                                 next_hop: mp.next_hop,
                                 peer: self.peer_ip,
-                                attributes: route_attrs.clone(),
+                                attributes: mp_route_attrs.clone(),
                                 received_at: now,
                                 is_ebgp,
                             });
@@ -714,6 +750,10 @@ impl PeerSession {
                     }
                 }
                 PathAttribute::MpUnreachNlri(mp) => {
+                    let family = (mp.afi, mp.safi);
+                    if !self.negotiated_families.contains(&family) {
+                        continue;
+                    }
                     withdrawn.extend_from_slice(&mp.withdrawn);
                 }
                 _ => {}
@@ -862,10 +902,13 @@ impl PeerSession {
             IpAddr::V4(_) => None,
         });
 
-        // Split withdrawals by address family
+        // Split withdrawals by address family, filtering by negotiated families
         let mut v4_withdraw: Vec<Ipv4Prefix> = Vec::new();
         let mut v6_withdraw: Vec<Prefix> = Vec::new();
         for prefix in &update.withdraw {
+            if !self.is_family_negotiated(prefix) {
+                continue;
+            }
             match prefix {
                 Prefix::V4(v4) => v4_withdraw.push(*v4),
                 Prefix::V6(_) => v6_withdraw.push(*prefix),
@@ -901,10 +944,13 @@ impl PeerSession {
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
-        // Split announcements by address family
+        // Split announcements by address family, filtering by negotiated families
         let mut v4_routes: Vec<&Route> = Vec::new();
         let mut v6_routes: Vec<&Route> = Vec::new();
         for route in &update.announce {
+            if !self.is_family_negotiated(&route.prefix) {
+                continue;
+            }
             match route.prefix {
                 Prefix::V4(_) => v4_routes.push(route),
                 Prefix::V6(_) => v6_routes.push(route),
@@ -935,36 +981,40 @@ impl PeerSession {
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
-        // Send IPv6 announcements via `MP_REACH_NLRI` — batch by identical attributes
-        let v6_next_hop = if is_ebgp {
-            local_ipv6.map_or(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), IpAddr::V6)
-        } else {
-            // iBGP: pass through the route's next-hop
-            v6_routes
-                .first()
-                .map_or(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), |r| r.next_hop)
-        };
+        // Resolve IPv6 eBGP next-hop: config override > socket address > suppress
+        let ebgp_ipv6_nh: Option<Ipv6Addr> = self
+            .config
+            .local_ipv6_nexthop
+            .or(local_ipv6)
+            .filter(|addr| !addr.is_unspecified());
 
-        let mut v6_groups: Vec<(Vec<PathAttribute>, Vec<Prefix>)> = Vec::new();
+        if is_ebgp && ebgp_ipv6_nh.is_none() && !v6_routes.is_empty() {
+            warn!(
+                peer = %self.peer_label,
+                count = v6_routes.len(),
+                "No valid IPv6 next-hop available; suppressing IPv6 route advertisements"
+            );
+            v6_routes.clear();
+        }
+
+        // Group by (attributes, next-hop) so routes with different next-hops
+        // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
+        let mut v6_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<Prefix>)> = Vec::new();
         for route in &v6_routes {
             let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
-            if let Some(group) = v6_groups.iter_mut().find(|(a, _)| *a == attrs) {
-                group.1.push(route.prefix);
+            let nh = if is_ebgp {
+                IpAddr::V6(ebgp_ipv6_nh.unwrap_or(Ipv6Addr::UNSPECIFIED))
             } else {
-                v6_groups.push((attrs, vec![route.prefix]));
+                route.next_hop
+            };
+            if let Some(group) = v6_groups.iter_mut().find(|(a, h, _)| *a == attrs && *h == nh) {
+                group.2.push(route.prefix);
+            } else {
+                v6_groups.push((attrs, nh, vec![route.prefix]));
             }
         }
 
-        for (mut attrs, prefixes) in v6_groups {
-            let nh = if is_ebgp {
-                v6_next_hop
-            } else {
-                // For iBGP, use the route's original next-hop per group
-                v6_routes
-                    .iter()
-                    .find(|r| prefixes.contains(&r.prefix))
-                    .map_or(v6_next_hop, |r| r.next_hop)
-            };
+        for (mut attrs, nh, prefixes) in v6_groups {
             attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,

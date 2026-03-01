@@ -67,13 +67,18 @@ impl PeerManager {
     }
 
     fn build_transport_config(&self, config: &PeerManagerNeighborConfig) -> TransportConfig {
+        let families = if config.families.is_empty() {
+            vec![(Afi::Ipv4, Safi::Unicast)]
+        } else {
+            config.families.clone()
+        };
         let peer = PeerConfig {
             local_asn: self.local_asn,
             remote_asn: config.remote_asn,
             local_router_id: self.router_id,
             hold_time: config.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
             connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
-            families: vec![(Afi::Ipv4, Safi::Unicast)],
+            families,
         };
         let remote_addr = SocketAddr::new(config.address, BGP_PORT);
         let mut transport = TransportConfig::new(peer, remote_addr);
@@ -461,6 +466,7 @@ mod tests {
             description: format!("test-peer-{addr}"),
             hold_time: None,
             max_prefixes: None,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
             import_policy: None,
             export_policy: None,
         }

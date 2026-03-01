@@ -59,6 +59,10 @@ pub struct Neighbor {
     /// is also included by default.
     #[serde(default)]
     pub families: Vec<String>,
+    /// Explicit IPv6 next-hop for eBGP advertisements when the TCP session
+    /// is IPv4. If not set, the local IPv6 socket address is used (if
+    /// available); otherwise IPv6 routes are suppressed for this peer.
+    pub local_ipv6_nexthop: Option<String>,
     #[serde(default)]
     pub import_policy: Vec<PrefixListEntryConfig>,
     #[serde(default)]
@@ -101,6 +105,8 @@ pub enum ConfigError {
     InvalidHoldTime { value: u16 },
     #[error("invalid policy entry: {reason}")]
     InvalidPolicyEntry { reason: String },
+    #[error("invalid local_ipv6_nexthop {value:?}: {reason}")]
+    InvalidLocalIpv6Nexthop { value: String, reason: String },
 }
 
 fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixList>, ConfigError> {
@@ -276,6 +282,16 @@ impl Config {
                 parse_families(&neighbor.families)?;
             }
 
+            // Validate local_ipv6_nexthop if configured
+            if let Some(ref nh) = neighbor.local_ipv6_nexthop {
+                nh.parse::<Ipv6Addr>().map_err(|e| {
+                    ConfigError::InvalidLocalIpv6Nexthop {
+                        value: nh.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
+            }
+
             parse_prefix_list(&neighbor.import_policy)?;
             parse_prefix_list(&neighbor.export_policy)?;
         }
@@ -368,6 +384,10 @@ impl Config {
             transport.max_prefixes = neighbor.max_prefixes;
             transport.md5_password.clone_from(&neighbor.md5_password);
             transport.ttl_security = neighbor.ttl_security;
+            transport.local_ipv6_nexthop = neighbor
+                .local_ipv6_nexthop
+                .as_ref()
+                .map(|s| s.parse::<Ipv6Addr>().expect("validated in Config::load"));
 
             let label = neighbor
                 .description

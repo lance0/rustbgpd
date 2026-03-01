@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use rustbgpd_fsm::PeerConfig;
@@ -18,6 +18,11 @@ pub struct TransportConfig {
     pub md5_password: Option<String>,
     /// Enable GTSM / TTL security (RFC 5082).
     pub ttl_security: bool,
+    /// Explicit IPv6 next-hop for eBGP advertisements. Used when the TCP
+    /// session is IPv4 but IPv6 routes need a valid next-hop in
+    /// `MP_REACH_NLRI`. If `None`, the local IPv6 socket address is used
+    /// (if available); otherwise IPv6 routes are suppressed.
+    pub local_ipv6_nexthop: Option<Ipv6Addr>,
 }
 
 impl TransportConfig {
@@ -34,6 +39,7 @@ impl TransportConfig {
             max_prefixes: None,
             md5_password: None,
             ttl_security: false,
+            local_ipv6_nexthop: None,
         }
     }
 }

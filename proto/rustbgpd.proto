@@ -100,6 +100,9 @@ message NeighborConfig {
   string description = 3;
   uint32 hold_time = 4;
   uint32 max_prefixes = 5;
+  // Address families (e.g., "ipv4_unicast", "ipv6_unicast").
+  // If empty, defaults to ["ipv4_unicast"].
+  repeated string families = 6;
 }
 
 message NeighborState {

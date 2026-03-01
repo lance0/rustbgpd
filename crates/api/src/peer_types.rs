@@ -2,6 +2,7 @@ use std::net::IpAddr;
 
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PrefixList;
+use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 
@@ -44,6 +45,7 @@ pub struct PeerManagerNeighborConfig {
     pub description: String,
     pub hold_time: Option<u16>,
     pub max_prefixes: Option<u32>,
+    pub families: Vec<(Afi, Safi)>,
     pub import_policy: Option<PrefixList>,
     pub export_policy: Option<PrefixList>,
 }
