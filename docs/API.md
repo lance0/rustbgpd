@@ -127,6 +127,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListAdvertisedRoutes
 ```
 
+### Address family filtering
+
+All `List*` RPCs accept an `afi_safi` field to filter by address family.
+Supported values: `IPV4_UNICAST` (1), `IPV6_UNICAST` (2), or unspecified (0,
+returns all families). `WatchRoutes` events include the address family of each
+route change.
+
 ### Pagination
 
 All `List*` RPCs support pagination via `page_size` and `page_token`:
@@ -172,7 +179,7 @@ export policy).
 | `AddPath` | Inject a route with specified attributes |
 | `DeletePath` | Withdraw a previously injected route |
 
-### Inject a route
+### Inject an IPv4 route
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
@@ -185,13 +192,37 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.InjectionService/AddPath
 ```
 
+### Inject an IPv6 route
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "prefix": "2001:db8:ff::",
+    "prefix_length": 48,
+    "next_hop": "fd00::1",
+    "origin": 0,
+    "as_path": [65001],
+    "local_pref": 100
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddPath
+```
+
 Optional fields: `as_path`, `origin`, `local_pref`, `med`, `communities`.
+
+The `prefix` and `next_hop` fields accept both IPv4 and IPv6 addresses. Prefix
+length is validated against the address family (max 32 for IPv4, 128 for IPv6).
 
 ### Withdraw a route
 
 ```bash
+# IPv4
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"prefix": "10.99.0.0", "prefix_length": 24}' \
+  localhost:50051 rustbgpd.v1.InjectionService/DeletePath
+
+# IPv6
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "2001:db8:ff::", "prefix_length": 48}' \
   localhost:50051 rustbgpd.v1.InjectionService/DeletePath
 ```
 

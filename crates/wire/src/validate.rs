@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::IpAddr;
 
 use crate::attribute::{AsPath, AsPathSegment, PathAttribute, attr_error_data};
 use crate::constants::{attr_flags, attr_type};
@@ -43,6 +44,7 @@ pub fn validate_update_attributes(
         match attr {
             PathAttribute::NextHop(addr) => check_next_hop(*addr)?,
             PathAttribute::AsPath(path) => check_as_path(path)?,
+            PathAttribute::MpReachNlri(mp) => check_mp_reach_next_hop(mp.next_hop)?,
             _ => {}
         }
     }
@@ -85,6 +87,10 @@ fn check_unrecognized_wellknown(attrs: &[PathAttribute]) -> Result<(), UpdateErr
 fn check_mandatory_present(attrs: &[PathAttribute], is_ebgp: bool) -> Result<(), UpdateError> {
     let present: HashSet<u8> = attrs.iter().map(PathAttribute::type_code).collect();
 
+    // When MP_REACH_NLRI is present, next-hop is carried inside it (RFC 4760 §3),
+    // not in a separate NEXT_HOP attribute.
+    let has_mp_reach = present.contains(&attr_type::MP_REACH_NLRI);
+
     for &tc in MANDATORY_ATTRS {
         if !present.contains(&tc) {
             return Err(UpdateError {
@@ -94,8 +100,8 @@ fn check_mandatory_present(attrs: &[PathAttribute], is_ebgp: bool) -> Result<(),
         }
     }
 
-    // NEXT_HOP mandatory for eBGP with NLRI
-    if is_ebgp && !present.contains(&attr_type::NEXT_HOP) {
+    // NEXT_HOP mandatory for eBGP with body NLRI, but NOT when MP_REACH carries it
+    if is_ebgp && !has_mp_reach && !present.contains(&attr_type::NEXT_HOP) {
         return Err(UpdateError {
             subcode: update_subcode::MISSING_WELLKNOWN,
             data: vec![attr_type::NEXT_HOP],
@@ -141,6 +147,22 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
         });
     }
 
+    Ok(())
+}
+
+/// Validate `MP_REACH_NLRI` next-hop address.
+fn check_mp_reach_next_hop(addr: IpAddr) -> Result<(), UpdateError> {
+    match addr {
+        IpAddr::V4(v4) => check_next_hop(v4)?,
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified() {
+                return Err(UpdateError {
+                    subcode: update_subcode::INVALID_NEXT_HOP,
+                    data: v6.octets().to_vec(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -308,5 +330,53 @@ mod tests {
             data: Bytes::from_static(&[1, 2, 3]),
         })];
         assert!(validate_update_attributes(&attrs, false, true).is_ok());
+    }
+
+    // --- MP_REACH_NLRI validation tests ---
+
+    #[test]
+    fn mp_reach_nlri_no_next_hop_required_for_ebgp() {
+        use crate::attribute::MpReachNlri;
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::{Ipv6Prefix, Prefix};
+
+        // eBGP UPDATE with MP_REACH_NLRI: NEXT_HOP not required in body
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+                announced: vec![Prefix::V6(Ipv6Prefix::new(
+                    "2001:db8::".parse().unwrap(),
+                    32,
+                ))],
+            }),
+        ];
+        assert!(validate_update_attributes(&attrs, true, true).is_ok());
+    }
+
+    #[test]
+    fn mp_reach_nlri_reject_unspecified_v6_next_hop() {
+        use crate::attribute::MpReachNlri;
+        use crate::capability::{Afi, Safi};
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                announced: vec![],
+            }),
+        ];
+        let err = validate_update_attributes(&attrs, true, true).unwrap_err();
+        assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
     }
 }

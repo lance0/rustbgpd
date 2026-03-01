@@ -1,9 +1,11 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::Bytes;
 
+use crate::capability::{Afi, Safi};
 use crate::constants::{as_path_segment, attr_flags, attr_type};
 use crate::error::DecodeError;
+use crate::nlri::Prefix;
 use crate::notification::update_subcode;
 
 /// Origin attribute values per RFC 4271 §5.1.1.
@@ -72,6 +74,23 @@ impl AsPath {
     }
 }
 
+/// RFC 4760 `MP_REACH_NLRI` attribute (type code 14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpReachNlri {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub next_hop: IpAddr,
+    pub announced: Vec<Prefix>,
+}
+
+/// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpUnreachNlri {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub withdrawn: Vec<Prefix>,
+}
+
 /// A known path attribute or raw preserved bytes.
 ///
 /// Known attributes are decoded into typed variants. Unknown attributes
@@ -85,6 +104,10 @@ pub enum PathAttribute {
     Med(u32),
     /// RFC 1997 COMMUNITIES — each u32 is high16=ASN, low16=value.
     Communities(Vec<u32>),
+    /// RFC 4760 `MP_REACH_NLRI`.
+    MpReachNlri(MpReachNlri),
+    /// RFC 4760 `MP_UNREACH_NLRI`.
+    MpUnreachNlri(MpUnreachNlri),
     /// Unknown or unrecognized attribute, preserved for re-advertisement.
     Unknown(RawAttribute),
 }
@@ -100,6 +123,8 @@ impl PathAttribute {
             Self::LocalPref(_) => attr_type::LOCAL_PREF,
             Self::Med(_) => attr_type::MULTI_EXIT_DISC,
             Self::Communities(_) => attr_type::COMMUNITIES,
+            Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
+            Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
             Self::Unknown(raw) => raw.type_code,
         }
     }
@@ -111,8 +136,10 @@ impl PathAttribute {
             Self::Origin(_) | Self::AsPath(_) | Self::NextHop(_) | Self::LocalPref(_) => {
                 attr_flags::TRANSITIVE
             }
-            Self::Med(_) => attr_flags::OPTIONAL,
-            Self::Communities(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            Self::Med(_) | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
+            Self::Communities(_) | Self::MpReachNlri(_) => {
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE
+            }
             Self::Unknown(raw) => raw.flags,
         }
     }
@@ -306,6 +333,9 @@ fn decode_attribute_value(
             Ok(PathAttribute::Communities(communities))
         }
 
+        attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value),
+        attr_type::MP_UNREACH_NLRI => decode_mp_unreach_nlri(value),
+
         // ATOMIC_AGGREGATE, AGGREGATOR, and any unknown type → RawAttribute
         _ => Ok(PathAttribute::Unknown(RawAttribute {
             flags,
@@ -313,6 +343,135 @@ fn decode_attribute_value(
             data: Bytes::copy_from_slice(value),
         })),
     }
+}
+
+/// Decode `MP_REACH_NLRI` (type 14) attribute value.
+///
+/// Wire layout (RFC 4760 §3):
+///   AFI (2) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLRI (variable)
+fn decode_mp_reach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
+    if value.len() < 5 {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!("MP_REACH_NLRI too short: {} bytes", value.len()),
+        });
+    }
+
+    let afi_raw = u16::from_be_bytes([value[0], value[1]]);
+    let safi_raw = value[2];
+    let nh_len = value[3] as usize;
+
+    let afi = Afi::from_u16(afi_raw).ok_or_else(|| DecodeError::MalformedField {
+        message_type: "UPDATE",
+        detail: format!("MP_REACH_NLRI unsupported AFI {afi_raw}"),
+    })?;
+    let safi = Safi::from_u8(safi_raw).ok_or_else(|| DecodeError::MalformedField {
+        message_type: "UPDATE",
+        detail: format!("MP_REACH_NLRI unsupported SAFI {safi_raw}"),
+    })?;
+
+    // 4 bytes for AFI+SAFI+NH-Len, then nh_len bytes, then 1 reserved byte
+    if value.len() < 4 + nh_len + 1 {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!(
+                "MP_REACH_NLRI truncated: NH-Len={nh_len}, have {} bytes total",
+                value.len()
+            ),
+        });
+    }
+
+    let nh_bytes = &value[4..4 + nh_len];
+    let next_hop = match afi {
+        Afi::Ipv4 => {
+            if nh_len != 4 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!("MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4)"),
+                });
+            }
+            IpAddr::V4(Ipv4Addr::new(nh_bytes[0], nh_bytes[1], nh_bytes[2], nh_bytes[3]))
+        }
+        Afi::Ipv6 => {
+            if nh_len != 16 && nh_len != 32 {
+                return Err(DecodeError::MalformedField {
+                    message_type: "UPDATE",
+                    detail: format!(
+                        "MP_REACH_NLRI IPv6 next-hop length {nh_len} (expected 16 or 32)"
+                    ),
+                });
+            }
+            // Take first 16 bytes (global address); ignore link-local if 32
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&nh_bytes[..16]);
+            IpAddr::V6(Ipv6Addr::from(octets))
+        }
+    };
+
+    // Skip reserved byte
+    let nlri_start = 4 + nh_len + 1;
+    let nlri_bytes = &value[nlri_start..];
+
+    let announced = match afi {
+        Afi::Ipv4 => crate::nlri::decode_nlri(nlri_bytes)?
+            .into_iter()
+            .map(Prefix::V4)
+            .collect(),
+        Afi::Ipv6 => crate::nlri::decode_ipv6_nlri(nlri_bytes)?
+            .into_iter()
+            .map(Prefix::V6)
+            .collect(),
+    };
+
+    Ok(PathAttribute::MpReachNlri(MpReachNlri {
+        afi,
+        safi,
+        next_hop,
+        announced,
+    }))
+}
+
+/// Decode `MP_UNREACH_NLRI` (type 15) attribute value.
+///
+/// Wire layout (RFC 4760 §4):
+///   AFI (2) | SAFI (1) | Withdrawn Routes (variable)
+fn decode_mp_unreach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
+    if value.len() < 3 {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!("MP_UNREACH_NLRI too short: {} bytes", value.len()),
+        });
+    }
+
+    let afi_raw = u16::from_be_bytes([value[0], value[1]]);
+    let safi_raw = value[2];
+
+    let afi = Afi::from_u16(afi_raw).ok_or_else(|| DecodeError::MalformedField {
+        message_type: "UPDATE",
+        detail: format!("MP_UNREACH_NLRI unsupported AFI {afi_raw}"),
+    })?;
+    let safi = Safi::from_u8(safi_raw).ok_or_else(|| DecodeError::MalformedField {
+        message_type: "UPDATE",
+        detail: format!("MP_UNREACH_NLRI unsupported SAFI {safi_raw}"),
+    })?;
+
+    let withdrawn_bytes = &value[3..];
+    let withdrawn = match afi {
+        Afi::Ipv4 => crate::nlri::decode_nlri(withdrawn_bytes)?
+            .into_iter()
+            .map(Prefix::V4)
+            .collect(),
+        Afi::Ipv6 => crate::nlri::decode_ipv6_nlri(withdrawn_bytes)?
+            .into_iter()
+            .map(Prefix::V6)
+            .collect(),
+    };
+
+    Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+        afi,
+        safi,
+        withdrawn,
+    }))
 }
 
 /// Decode `AS_PATH` segments from the attribute value bytes.
@@ -403,9 +562,9 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::LOCAL_PREF
         | attr_type::ATOMIC_AGGREGATE => Some(attr_flags::TRANSITIVE),
         // Optional non-transitive
-        attr_type::MULTI_EXIT_DISC => Some(attr_flags::OPTIONAL),
+        attr_type::MULTI_EXIT_DISC | attr_type::MP_UNREACH_NLRI => Some(attr_flags::OPTIONAL),
         // Optional transitive
-        attr_type::AGGREGATOR | attr_type::COMMUNITIES => {
+        attr_type::AGGREGATOR | attr_type::COMMUNITIES | attr_type::MP_REACH_NLRI => {
             Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE)
         }
         _ => None,
@@ -454,6 +613,16 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                     value.extend_from_slice(&c.to_be_bytes());
                 }
             }
+            PathAttribute::MpReachNlri(mp) => {
+                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                type_code = attr_type::MP_REACH_NLRI;
+                encode_mp_reach_nlri(mp, &mut value);
+            }
+            PathAttribute::MpUnreachNlri(mp) => {
+                flags = attr_flags::OPTIONAL;
+                type_code = attr_type::MP_UNREACH_NLRI;
+                encode_mp_unreach_nlri(mp, &mut value);
+            }
             PathAttribute::Unknown(raw) => {
                 // RFC 4271 §5: unrecognized *optional* transitive attributes
                 // must be propagated with the Partial bit set. Well-known
@@ -483,6 +652,46 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
             buf.push(value.len() as u8);
         }
         buf.extend_from_slice(&value);
+    }
+}
+
+/// Encode `MP_REACH_NLRI` value bytes.
+fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
+    buf.push(mp.safi as u8);
+
+    match mp.next_hop {
+        IpAddr::V4(addr) => {
+            buf.push(4); // NH-Len
+            buf.extend_from_slice(&addr.octets());
+        }
+        IpAddr::V6(addr) => {
+            buf.push(16); // NH-Len
+            buf.extend_from_slice(&addr.octets());
+        }
+    }
+
+    buf.push(0); // Reserved
+
+    // Encode NLRI
+    for prefix in &mp.announced {
+        match prefix {
+            Prefix::V4(p) => crate::nlri::encode_nlri(&[*p], buf),
+            Prefix::V6(p) => crate::nlri::encode_ipv6_nlri(&[*p], buf),
+        }
+    }
+}
+
+/// Encode `MP_UNREACH_NLRI` value bytes.
+fn encode_mp_unreach_nlri(mp: &MpUnreachNlri, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
+    buf.push(mp.safi as u8);
+
+    for prefix in &mp.withdrawn {
+        match prefix {
+            Prefix::V4(p) => crate::nlri::encode_nlri(&[*p], buf),
+            Prefix::V6(p) => crate::nlri::encode_ipv6_nlri(&[*p], buf),
+        }
     }
 }
 
@@ -970,5 +1179,146 @@ mod tests {
         encode_path_attributes(&[attr], &mut buf, true);
         // First byte is flags — should NOT have PARTIAL bit
         assert_eq!(buf[0], attr_flags::OPTIONAL);
+    }
+
+    // --- MP_REACH_NLRI / MP_UNREACH_NLRI tests ---
+
+    #[test]
+    fn mp_reach_nlri_ipv6_roundtrip() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::{Ipv6Prefix, Prefix};
+
+        let mp = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            announced: vec![
+                Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
+                Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48)),
+            ],
+        };
+        let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
+    }
+
+    #[test]
+    fn mp_unreach_nlri_ipv6_roundtrip() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::{Ipv6Prefix, Prefix};
+
+        let mp = MpUnreachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            withdrawn: vec![
+                Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
+            ],
+        };
+        let attrs = vec![PathAttribute::MpUnreachNlri(mp.clone())];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], PathAttribute::MpUnreachNlri(mp));
+    }
+
+    #[test]
+    fn mp_reach_nlri_ipv4_roundtrip() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::Prefix;
+
+        let mp = MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            announced: vec![
+                Prefix::V4(crate::nlri::Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16)),
+            ],
+        };
+        let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
+    }
+
+    #[test]
+    fn mp_reach_nlri_type_code_and_flags() {
+        use crate::capability::{Afi, Safi};
+
+        let attr = PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            announced: vec![],
+        });
+        assert_eq!(attr.type_code(), 14);
+        assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+    }
+
+    #[test]
+    fn mp_unreach_nlri_type_code_and_flags() {
+        use crate::capability::{Afi, Safi};
+
+        let attr = PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            withdrawn: vec![],
+        });
+        assert_eq!(attr.type_code(), 15);
+        assert_eq!(attr.flags(), attr_flags::OPTIONAL);
+    }
+
+    #[test]
+    fn mp_reach_nlri_empty_nlri() {
+        use crate::capability::{Afi, Safi};
+
+        let mp = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6("fe80::1".parse().unwrap()),
+            announced: vec![],
+        };
+        let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
+    }
+
+    #[test]
+    fn mp_reach_nlri_bad_flags_rejected() {
+        // MP_REACH_NLRI (type 14) with flags 0x40 (Transitive only)
+        // — should be 0xC0 (Optional+Transitive)
+        // Build minimal valid value: AFI=2, SAFI=1, NH-Len=16, NH=::1, Reserved=0
+        let mut value = Vec::new();
+        value.extend_from_slice(&2u16.to_be_bytes()); // AFI IPv6
+        value.push(1); // SAFI Unicast
+        value.push(16); // NH-Len
+        value.extend_from_slice(&"::1".parse::<Ipv6Addr>().unwrap().octets()); // NH
+        value.push(0); // Reserved
+
+        let mut buf = Vec::new();
+        buf.push(0x40); // flags: Transitive only (wrong)
+        buf.push(14); // type: MP_REACH_NLRI
+        #[expect(clippy::cast_possible_truncation)]
+        buf.push(value.len() as u8);
+        buf.extend_from_slice(&value);
+
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: 4, // ATTRIBUTE_FLAGS_ERROR
+                ..
+            }
+        ));
     }
 }

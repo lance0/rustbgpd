@@ -60,17 +60,33 @@ grpc_addr = "0.0.0.0:50051"
 Optional, repeatable. Each entry defines one BGP peer. Omit entirely for a
 dynamic-only deployment where peers are added at runtime via gRPC.
 
-| Field             | Type   | Required | Default | Description                                      |
-|-------------------|--------|----------|---------|--------------------------------------------------|
-| `address`         | string | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
-| `remote_asn`      | u32    | yes      | --      | Peer's autonomous system number                  |
-| `description`     | string | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
-| `hold_time`       | u16    | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
-| `max_prefixes`    | u32    | no       | --      | Maximum prefixes accepted before session teardown |
-| `md5_password`    | string | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
-| `ttl_security`    | bool   | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
+| Field             | Type     | Required | Default | Description                                      |
+|-------------------|----------|----------|---------|--------------------------------------------------|
+| `address`         | string   | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
+| `remote_asn`      | u32      | yes      | --      | Peer's autonomous system number                  |
+| `description`     | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
+| `hold_time`       | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
+| `max_prefixes`    | u32      | no       | --      | Maximum prefixes accepted before session teardown |
+| `md5_password`    | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
+| `ttl_security`    | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
+| `families`        | [string] | no       | (auto)  | Address families to negotiate (see below)        |
+
+### Address families
+
+The `families` field controls which AFI/SAFI combinations are negotiated with
+the peer via MP-BGP capabilities. Supported values:
+
+- `"ipv4_unicast"` — IPv4 Unicast (AFI 1, SAFI 1)
+- `"ipv6_unicast"` — IPv6 Unicast (AFI 2, SAFI 1)
+
+**Defaults:** If `families` is omitted, the default depends on the neighbor
+address type:
+
+- IPv4 neighbor address → `["ipv4_unicast"]`
+- IPv6 neighbor address → `["ipv4_unicast", "ipv6_unicast"]`
 
 ```toml
+# IPv4 peer with dual-stack
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
@@ -79,6 +95,13 @@ hold_time = 90
 max_prefixes = 10000
 md5_password = "s3cret"
 ttl_security = true
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+# IPv6 peer (defaults to dual-stack)
+[[neighbors]]
+address = "fd00::2"
+remote_asn = 65003
+description = "ipv6-peer"
 ```
 
 ### Per-neighbor policy
@@ -142,7 +165,7 @@ the same schema:
 
 | Field    | Type   | Required | Description                                           |
 |----------|--------|----------|-------------------------------------------------------|
-| `prefix` | string | yes      | Network prefix in CIDR notation (e.g. `"10.0.0.0/8"`) |
+| `prefix` | string | yes      | Network prefix in CIDR notation (IPv4 or IPv6, e.g. `"10.0.0.0/8"` or `"2001:db8::/32"`) |
 | `ge`     | u8     | no       | Minimum prefix length to match (inclusive)            |
 | `le`     | u8     | no       | Maximum prefix length to match (inclusive)            |
 | `action` | string | yes      | `"permit"` or `"deny"`                                |
@@ -283,10 +306,12 @@ starting:
 | Rule | Error |
 |------|-------|
 | `router_id` must be a valid IPv4 address | `invalid router_id` |
-| Each `address` in `[[neighbors]]` must be a valid IP address | `invalid neighbor address` |
+| Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
 | `prometheus_addr` must be a valid `ip:port` | `invalid prometheus_addr` |
 | `grpc_addr` must be a valid `ip:port` | `invalid grpc_addr` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
+| `families` entries must be `"ipv4_unicast"` or `"ipv6_unicast"` | `unsupported address family` |
+| Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
 ### Defaults applied at runtime
@@ -297,5 +322,6 @@ starting:
 | `connect_retry_secs` | 30 seconds (not configurable) |
 | `grpc_addr` | `127.0.0.1:50051` |
 | `ttl_security` | `false` |
+| `families` | `["ipv4_unicast"]` for IPv4 peers; `["ipv4_unicast", "ipv6_unicast"]` for IPv6 peers |
 | `description` | peer address used as label |
 | Policy default action | permit (when no entry matches) |

@@ -10,8 +10,8 @@ use rustbgpd_rib::{OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, Message, NotificationMessage, PathAttribute, UpdateMessage,
-    encode_message,
+    Afi, AsPath, AsPathSegment, Ipv4Prefix, Message, MpReachNlri, MpUnreachNlri,
+    NotificationMessage, PathAttribute, Prefix, Safi, UpdateMessage, encode_message,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -63,7 +63,7 @@ pub(crate) struct PeerSession {
     /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
     session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     /// Accepted prefixes for accurate count and dedup.
-    known_prefixes: HashSet<rustbgpd_wire::Ipv4Prefix>,
+    known_prefixes: HashSet<Prefix>,
     /// Session counters
     updates_received: u64,
     updates_sent: u64,
@@ -589,6 +589,7 @@ impl PeerSession {
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
+    #[expect(clippy::too_many_lines)]
     async fn process_update(&mut self, update: rustbgpd_wire::UpdateMessage) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
 
@@ -603,7 +604,11 @@ impl PeerSession {
         };
 
         // 2. Semantic validation
-        let has_nlri = !parsed.announced.is_empty();
+        let has_mp_nlri = parsed
+            .attributes
+            .iter()
+            .any(|a| matches!(a, PathAttribute::MpReachNlri(_)));
+        let has_nlri = !parsed.announced.is_empty() || has_mp_nlri;
         let is_ebgp = self
             .negotiated
             .as_ref()
@@ -628,44 +633,95 @@ impl PeerSession {
             return;
         }
 
-        // 3. Build routes and apply import policy
-        let next_hop = parsed
+        // 3. Build routes from body NLRI (IPv4) and MP-BGP NLRI
+        let body_next_hop: IpAddr = parsed
             .attributes
             .iter()
             .find_map(|a| {
-                if let rustbgpd_wire::PathAttribute::NextHop(nh) = a {
-                    Some(*nh)
+                if let PathAttribute::NextHop(nh) = a {
+                    Some(IpAddr::V4(*nh))
                 } else {
                     None
                 }
             })
             .unwrap_or(match self.peer_ip {
-                IpAddr::V4(v4) => v4,
-                IpAddr::V6(_) => std::net::Ipv4Addr::UNSPECIFIED,
+                IpAddr::V4(v4) => IpAddr::V4(v4),
+                IpAddr::V6(_) => IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
             });
 
         let now = Instant::now();
 
-        // Apply import policy filter
-        let announced: Vec<Route> = parsed
+        // Filter attributes: strip MP_REACH/MP_UNREACH before storing on routes
+        // (they are per-UPDATE framing, not per-route attributes)
+        let route_attrs: Vec<PathAttribute> = parsed
+            .attributes
+            .iter()
+            .filter(|a| {
+                !matches!(
+                    a,
+                    PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_)
+                )
+            })
+            .cloned()
+            .collect();
+
+        // Body NLRI routes (IPv4)
+        let mut announced: Vec<Route> = parsed
             .announced
             .iter()
             .filter(|prefix| {
-                rustbgpd_policy::check_prefix_list(self.import_policy.as_ref(), **prefix)
-                    == rustbgpd_policy::PolicyAction::Permit
+                rustbgpd_policy::check_prefix_list(
+                    self.import_policy.as_ref(),
+                    Prefix::V4(**prefix),
+                ) == rustbgpd_policy::PolicyAction::Permit
             })
             .map(|prefix| Route {
-                prefix: *prefix,
-                next_hop,
+                prefix: Prefix::V4(*prefix),
+                next_hop: body_next_hop,
                 peer: self.peer_ip,
-                attributes: parsed.attributes.clone(),
+                attributes: route_attrs.clone(),
                 received_at: now,
                 is_ebgp,
             })
             .collect();
 
+        // Body withdrawn routes (IPv4)
+        let mut withdrawn: Vec<Prefix> = parsed
+            .withdrawn
+            .iter()
+            .map(|p| Prefix::V4(*p))
+            .collect();
+
+        // MP-BGP NLRI from attributes
+        for attr in &parsed.attributes {
+            match attr {
+                PathAttribute::MpReachNlri(mp) => {
+                    for prefix in &mp.announced {
+                        if rustbgpd_policy::check_prefix_list(
+                            self.import_policy.as_ref(),
+                            *prefix,
+                        ) == rustbgpd_policy::PolicyAction::Permit
+                        {
+                            announced.push(Route {
+                                prefix: *prefix,
+                                next_hop: mp.next_hop,
+                                peer: self.peer_ip,
+                                attributes: route_attrs.clone(),
+                                received_at: now,
+                                is_ebgp,
+                            });
+                        }
+                    }
+                }
+                PathAttribute::MpUnreachNlri(mp) => {
+                    withdrawn.extend_from_slice(&mp.withdrawn);
+                }
+                _ => {}
+            }
+        }
+
         // 4. Max-prefix enforcement — track via HashSet for accuracy
-        for prefix in &parsed.withdrawn {
+        for prefix in &withdrawn {
             self.known_prefixes.remove(prefix);
         }
         for route in &announced {
@@ -691,11 +747,11 @@ impl PeerSession {
             return;
         }
 
-        if !announced.is_empty() || !parsed.withdrawn.is_empty() {
+        if !announced.is_empty() || !withdrawn.is_empty() {
             let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
                 peer: self.peer_ip,
                 announced,
-                withdrawn: parsed.withdrawn,
+                withdrawn,
             });
         }
 
@@ -781,6 +837,7 @@ impl PeerSession {
     }
 
     /// Send an outbound route update as wire UPDATE messages.
+    #[expect(clippy::too_many_lines)]
     async fn send_route_update(&mut self, update: OutboundRouteUpdate) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
         let is_ebgp = self
@@ -788,20 +845,36 @@ impl PeerSession {
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
 
-        // Extract TCP local address for NEXT_HOP rewrite (fall back to router-id)
-        let local_ipv4 = self
+        // Extract TCP local addresses for NEXT_HOP rewrite
+        let local_addr = self
             .stream
             .as_ref()
             .and_then(|s| s.local_addr().ok())
-            .and_then(|addr| match addr.ip() {
+            .map(|a| a.ip());
+        let local_ipv4 = local_addr
+            .and_then(|a| match a {
                 IpAddr::V4(v4) => Some(v4),
                 IpAddr::V6(_) => None,
             })
             .unwrap_or(self.config.peer.local_router_id);
+        let local_ipv6 = local_addr.and_then(|a| match a {
+            IpAddr::V6(v6) => Some(v6),
+            IpAddr::V4(_) => None,
+        });
 
-        // Send withdrawals
-        if !update.withdraw.is_empty() {
-            let msg = UpdateMessage::build(&[], &update.withdraw, &[], four_octet_as);
+        // Split withdrawals by address family
+        let mut v4_withdraw: Vec<Ipv4Prefix> = Vec::new();
+        let mut v6_withdraw: Vec<Prefix> = Vec::new();
+        for prefix in &update.withdraw {
+            match prefix {
+                Prefix::V4(v4) => v4_withdraw.push(*v4),
+                Prefix::V6(_) => v6_withdraw.push(*prefix),
+            }
+        }
+
+        // Send IPv4 withdrawals via body NLRI
+        if !v4_withdraw.is_empty() {
+            let msg = UpdateMessage::build(&[], &v4_withdraw, &[], four_octet_as);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
@@ -811,22 +884,97 @@ impl PeerSession {
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
-        // Send announcements — batch routes with identical attributes
-        let mut groups: Vec<(Vec<PathAttribute>, Vec<rustbgpd_wire::Ipv4Prefix>)> = Vec::new();
+        // Send IPv6 withdrawals via `MP_UNREACH_NLRI`
+        if !v6_withdraw.is_empty() {
+            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                withdrawn: v6_withdraw,
+            })];
+            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as);
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send v6 withdrawal UPDATE");
+                return;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+        }
+
+        // Split announcements by address family
+        let mut v4_routes: Vec<&Route> = Vec::new();
+        let mut v6_routes: Vec<&Route> = Vec::new();
         for route in &update.announce {
-            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
-            if let Some(group) = groups.iter_mut().find(|(a, _)| *a == attrs) {
-                group.1.push(route.prefix);
-            } else {
-                groups.push((attrs, vec![route.prefix]));
+            match route.prefix {
+                Prefix::V4(_) => v4_routes.push(route),
+                Prefix::V6(_) => v6_routes.push(route),
             }
         }
 
-        for (attrs, prefixes) in &groups {
+        // Send IPv4 announcements via body NLRI — batch by identical attributes
+        let mut v4_groups: Vec<(Vec<PathAttribute>, Vec<Ipv4Prefix>)> = Vec::new();
+        for route in &v4_routes {
+            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
+            if let Prefix::V4(v4) = route.prefix {
+                if let Some(group) = v4_groups.iter_mut().find(|(a, _)| *a == attrs) {
+                    group.1.push(v4);
+                } else {
+                    v4_groups.push((attrs, vec![v4]));
+                }
+            }
+        }
+
+        for (attrs, prefixes) in &v4_groups {
             let msg = UpdateMessage::build(prefixes, &[], attrs, four_octet_as);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
+                return;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+        }
+
+        // Send IPv6 announcements via `MP_REACH_NLRI` — batch by identical attributes
+        let v6_next_hop = if is_ebgp {
+            local_ipv6.map_or(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), IpAddr::V6)
+        } else {
+            // iBGP: pass through the route's next-hop
+            v6_routes
+                .first()
+                .map_or(IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), |r| r.next_hop)
+        };
+
+        let mut v6_groups: Vec<(Vec<PathAttribute>, Vec<Prefix>)> = Vec::new();
+        for route in &v6_routes {
+            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
+            if let Some(group) = v6_groups.iter_mut().find(|(a, _)| *a == attrs) {
+                group.1.push(route.prefix);
+            } else {
+                v6_groups.push((attrs, vec![route.prefix]));
+            }
+        }
+
+        for (mut attrs, prefixes) in v6_groups {
+            let nh = if is_ebgp {
+                v6_next_hop
+            } else {
+                // For iBGP, use the route's original next-hop per group
+                v6_routes
+                    .iter()
+                    .find(|r| prefixes.contains(&r.prefix))
+                    .map_or(v6_next_hop, |r| r.next_hop)
+            };
+            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: nh,
+                announced: prefixes,
+            }));
+            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as);
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send v6 announce UPDATE");
                 return;
             }
             self.updates_sent += 1;
@@ -888,6 +1036,8 @@ impl PeerSession {
                     }
                     // Strip LOCAL_PREF for eBGP
                 }
+                // Strip MP_REACH/MP_UNREACH — rebuilt per-UPDATE, not copied
+                PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_) => {}
                 _ => {
                     attrs.push(attr.clone());
                 }
@@ -932,7 +1082,7 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_fsm::PeerConfig;
-    use rustbgpd_wire::{Afi, AsPath, AsPathSegment, Origin, PathAttribute, Safi};
+    use rustbgpd_wire::{AsPath, AsPathSegment, Origin, PathAttribute};
 
     use super::*;
 
@@ -955,8 +1105,8 @@ mod tests {
 
     fn make_route(local_pref: u32) -> Route {
         Route {
-            prefix: rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
-            next_hop: Ipv4Addr::new(10, 0, 0, 2),
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1044,8 +1194,8 @@ mod tests {
     fn ibgp_default_local_pref_when_missing() {
         let session = make_test_session(65001, 65001);
         let route = Route {
-            prefix: rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
-            next_hop: Ipv4Addr::new(10, 0, 0, 2),
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),

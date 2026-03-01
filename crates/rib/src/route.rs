@@ -1,13 +1,13 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::time::Instant;
 
-use rustbgpd_wire::{AsPath, Ipv4Prefix, Origin, PathAttribute};
+use rustbgpd_wire::{AsPath, Origin, PathAttribute, Prefix};
 
 /// A single route stored in the Adj-RIB-In.
 #[derive(Debug, Clone)]
 pub struct Route {
-    pub prefix: Ipv4Prefix,
-    pub next_hop: Ipv4Addr,
+    pub prefix: Prefix,
+    pub next_hop: IpAddr,
     pub peer: IpAddr,
     pub attributes: Vec<PathAttribute>,
     pub received_at: Instant,

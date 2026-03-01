@@ -167,7 +167,7 @@ impl UpdateMessage {
         crate::nlri::encode_nlri(withdrawn, &mut withdrawn_buf);
 
         let mut attrs_buf = Vec::new();
-        if !announced.is_empty() {
+        if !attributes.is_empty() {
             crate::attribute::encode_path_attributes(attributes, &mut attrs_buf, four_octet_as);
         }
 

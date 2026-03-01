@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustbgpd_wire::Ipv4Prefix;
+use rustbgpd_wire::Prefix;
 
 /// Type of route change event emitted by the RIB manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +15,7 @@ pub enum RouteEventType {
 #[derive(Debug, Clone)]
 pub struct RouteEvent {
     pub event_type: RouteEventType,
-    pub prefix: Ipv4Prefix,
+    pub prefix: Prefix,
     pub peer: Option<IpAddr>,
     pub previous_peer: Option<IpAddr>,
     pub timestamp: String,

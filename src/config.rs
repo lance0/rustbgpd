@@ -1,9 +1,9 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
 use rustbgpd_transport::TransportConfig;
-use rustbgpd_wire::{Afi, Ipv4Prefix, Safi};
+use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use serde::Deserialize;
 
 const DEFAULT_HOLD_TIME: u16 = 90;
@@ -54,6 +54,11 @@ pub struct Neighbor {
     pub md5_password: Option<String>,
     #[serde(default)]
     pub ttl_security: bool,
+    /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
+    /// Default: `["ipv4_unicast"]`. If the neighbor address is IPv6, `"ipv6_unicast"`
+    /// is also included by default.
+    #[serde(default)]
+    pub families: Vec<String>,
     #[serde(default)]
     pub import_policy: Vec<PrefixListEntryConfig>,
     #[serde(default)]
@@ -117,30 +122,42 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
         if parts.len() != 2 {
             return Err(ConfigError::InvalidPolicyEntry {
                 reason: format!(
-                    "invalid prefix {:?}, expected CIDR notation (e.g. 10.0.0.0/8)",
+                    "invalid prefix {:?}, expected CIDR notation (e.g. 10.0.0.0/8 or 2001:db8::/32)",
                     e.prefix
                 ),
             });
         }
-        let addr: Ipv4Addr = parts[0]
-            .parse()
-            .map_err(|_| ConfigError::InvalidPolicyEntry {
-                reason: format!("invalid address in prefix {:?}", e.prefix),
-            })?;
         let len: u8 = parts[1]
             .parse()
             .map_err(|_| ConfigError::InvalidPolicyEntry {
                 reason: format!("invalid prefix length in {:?}", e.prefix),
             })?;
-        if len > 32 {
-            return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!("prefix length {} exceeds 32 in {:?}", len, e.prefix),
-            });
-        }
-        if let Some(ge) = e.ge {
-            if ge > 32 {
+
+        // Parse address as IPv4 or IPv6, determine max prefix length
+        let (prefix, max_len) = if let Ok(v4) = parts[0].parse::<Ipv4Addr>() {
+            if len > 32 {
                 return Err(ConfigError::InvalidPolicyEntry {
-                    reason: format!("ge value {} exceeds 32 in {:?}", ge, e.prefix),
+                    reason: format!("prefix length {} exceeds 32 in {:?}", len, e.prefix),
+                });
+            }
+            (Prefix::V4(Ipv4Prefix::new(v4, len)), 32u8)
+        } else if let Ok(v6) = parts[0].parse::<Ipv6Addr>() {
+            if len > 128 {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!("prefix length {} exceeds 128 in {:?}", len, e.prefix),
+                });
+            }
+            (Prefix::V6(Ipv6Prefix::new(v6, len)), 128u8)
+        } else {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("invalid address in prefix {:?}", e.prefix),
+            });
+        };
+
+        if let Some(ge) = e.ge {
+            if ge > max_len {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!("ge value {} exceeds {} in {:?}", ge, max_len, e.prefix),
                 });
             }
             if ge < len {
@@ -153,10 +170,10 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
             }
         }
         if let Some(le) = e.le
-            && le > 32
+            && le > max_len
         {
             return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!("le value {} exceeds 32 in {:?}", le, e.prefix),
+                reason: format!("le value {} exceeds {} in {:?}", le, max_len, e.prefix),
             });
         }
         if let (Some(ge), Some(le)) = (e.ge, e.le)
@@ -167,7 +184,7 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
             });
         }
         parsed.push(PrefixListEntry {
-            prefix: Ipv4Prefix::new(addr, len),
+            prefix,
             ge: e.ge,
             le: e.le,
             action,
@@ -178,6 +195,25 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
         entries: parsed,
         default_action: PolicyAction::Permit,
     }))
+}
+
+/// Parse a list of address family strings into `(Afi, Safi)` pairs.
+fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, ConfigError> {
+    let mut result = Vec::with_capacity(families.len());
+    for f in families {
+        match f.as_str() {
+            "ipv4_unicast" => result.push((Afi::Ipv4, Safi::Unicast)),
+            "ipv6_unicast" => result.push((Afi::Ipv6, Safi::Unicast)),
+            other => {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "unknown address family {other:?}, expected \"ipv4_unicast\" or \"ipv6_unicast\""
+                    ),
+                });
+            }
+        }
+    }
+    Ok(result)
 }
 
 impl Config {
@@ -223,23 +259,21 @@ impl Config {
         parse_prefix_list(&self.policy.export)?;
 
         for neighbor in &self.neighbors {
-            let neighbor_addr: IpAddr = neighbor.address.parse::<IpAddr>().map_err(|e| {
+            neighbor.address.parse::<IpAddr>().map_err(|e| {
                 ConfigError::InvalidNeighborAddress {
                     value: neighbor.address.clone(),
                     reason: e.to_string(),
                 }
             })?;
 
-            if neighbor_addr.is_ipv6() {
-                return Err(ConfigError::InvalidNeighborAddress {
-                    value: neighbor.address.clone(),
-                    reason: "IPv6 not supported".to_string(),
-                });
-            }
-
             let hold_time = neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
             if hold_time != 0 && hold_time < 3 {
                 return Err(ConfigError::InvalidHoldTime { value: hold_time });
+            }
+
+            // Validate families if explicitly configured
+            if !neighbor.families.is_empty() {
+                parse_families(&neighbor.families)?;
             }
 
             parse_prefix_list(&neighbor.import_policy)?;
@@ -309,13 +343,24 @@ impl Config {
         for neighbor in &self.neighbors {
             let peer_addr: IpAddr = neighbor.address.parse().expect("validated in Config::load");
 
+            let families = if neighbor.families.is_empty() {
+                // Default: IPv4 unicast always. If neighbor is IPv6, also add IPv6 unicast.
+                let mut f = vec![(Afi::Ipv4, Safi::Unicast)];
+                if peer_addr.is_ipv6() {
+                    f.push((Afi::Ipv6, Safi::Unicast));
+                }
+                f
+            } else {
+                parse_families(&neighbor.families)?
+            };
+
             let peer = PeerConfig {
                 local_asn: self.global.asn,
                 remote_asn: neighbor.remote_asn,
                 local_router_id: router_id,
                 hold_time: neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
                 connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
-                families: vec![(Afi::Ipv4, Safi::Unicast)],
+                families,
             };
 
             let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
@@ -653,11 +698,21 @@ remote_asn = 65002
     }
 
     #[test]
-    fn ipv6_neighbor_address_rejected() {
+    fn ipv6_neighbor_address_accepted() {
         let toml_str = valid_toml().replace("10.0.0.2", "2001:db8::1");
-        let err = parse(&toml_str).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidNeighborAddress { .. }));
-        assert!(err.to_string().contains("IPv6"));
+        let config = parse(&toml_str).unwrap();
+        assert_eq!(config.neighbors[0].address, "2001:db8::1");
+    }
+
+    #[test]
+    fn ipv6_neighbor_default_families() {
+        let toml_str = valid_toml().replace("10.0.0.2", "2001:db8::1");
+        let config = parse(&toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        // IPv6 neighbor gets both IPv4 and IPv6 unicast by default
+        assert_eq!(peers[0].0.peer.families.len(), 2);
+        assert_eq!(peers[0].0.peer.families[0], (Afi::Ipv4, Safi::Unicast));
+        assert_eq!(peers[0].0.peer.families[1], (Afi::Ipv6, Safi::Unicast));
     }
 
     #[test]

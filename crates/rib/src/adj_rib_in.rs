@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::Ipv4Prefix;
+use rustbgpd_wire::Prefix;
 
 use crate::route::Route;
 
@@ -9,7 +9,7 @@ use crate::route::Route;
 #[derive(Debug)]
 pub struct AdjRibIn {
     peer: IpAddr,
-    routes: HashMap<Ipv4Prefix, Route>,
+    routes: HashMap<Prefix, Route>,
 }
 
 impl AdjRibIn {
@@ -30,7 +30,7 @@ impl AdjRibIn {
         self.routes.insert(route.prefix, route);
     }
 
-    pub fn withdraw(&mut self, prefix: &Ipv4Prefix) -> bool {
+    pub fn withdraw(&mut self, prefix: &Prefix) -> bool {
         self.routes.remove(prefix).is_some()
     }
 
@@ -53,7 +53,7 @@ impl AdjRibIn {
     }
 
     #[must_use]
-    pub fn get(&self, prefix: &Ipv4Prefix) -> Option<&Route> {
+    pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
         self.routes.get(prefix)
     }
 }
@@ -63,12 +63,14 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Instant;
 
+    use rustbgpd_wire::Ipv4Prefix;
+
     use super::*;
 
     fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         Route {
-            prefix,
-            next_hop,
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(next_hop),
             peer: IpAddr::V4(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
@@ -85,7 +87,7 @@ mod tests {
 
         rib.insert(route);
         assert_eq!(rib.len(), 1);
-        assert!(rib.get(&prefix).is_some());
+        assert!(rib.get(&Prefix::V4(prefix)).is_some());
     }
 
     #[test]
@@ -95,7 +97,7 @@ mod tests {
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
         rib.insert(make_route(prefix, Ipv4Addr::new(10, 0, 0, 1)));
 
-        assert!(rib.withdraw(&prefix));
+        assert!(rib.withdraw(&Prefix::V4(prefix)));
         assert_eq!(rib.len(), 0);
     }
 
@@ -105,7 +107,7 @@ mod tests {
         let mut rib = AdjRibIn::new(peer);
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
-        assert!(!rib.withdraw(&prefix));
+        assert!(!rib.withdraw(&Prefix::V4(prefix)));
     }
 
     #[test]
@@ -137,8 +139,8 @@ mod tests {
 
         assert_eq!(rib.len(), 1);
         assert_eq!(
-            rib.get(&prefix).unwrap().next_hop,
-            Ipv4Addr::new(10, 0, 0, 2)
+            rib.get(&Prefix::V4(prefix)).unwrap().next_hop,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
         );
     }
 }

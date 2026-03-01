@@ -3,7 +3,7 @@
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** Lance  
-**Status:** M9 complete
+**Status:** v0.2.0 — MP-BGP (IPv6 unicast) complete
 **Last updated:** 2026-02-28
 
 ---
@@ -50,7 +50,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 ### High-Level Components
 
-**wire** (codec) — BGP message encode/decode: OPEN, KEEPALIVE, UPDATE, NOTIFICATION, ROUTE-REFRESH. Capability parsing/encoding (4-byte ASN, MP-BGP). NLRI and path attributes, starting with IPv4 unicast. This crate has zero internal dependencies — it is a pure codec library.
+**wire** (codec) — BGP message encode/decode: OPEN, KEEPALIVE, UPDATE, NOTIFICATION, ROUTE-REFRESH. Capability parsing/encoding (4-byte ASN, MP-BGP). IPv4 and IPv6 NLRI, path attributes including `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (RFC 4760). `Prefix` enum wraps `Ipv4Prefix` and `Ipv6Prefix` for AFI-agnostic route representation. This crate has zero internal dependencies — it is a pure codec library.
 
 **Path attribute representation:** The wire crate uses a typed + raw hybrid model. Known attributes (ORIGIN, AS_PATH, NEXT_HOP, etc.) are decoded into typed Rust enums. Unknown attributes are preserved as `RawAttribute { flags: u8, type_code: u8, data: Bytes }` alongside typed ones. This is a hard architectural requirement — the daemon must be able to re-emit unknown optional transitive attributes byte-for-byte with the Partial bit set correctly. Dropping unknown transitive attributes is a protocol correctness bug that breaks interop with peers running newer BGP extensions.
 
@@ -77,7 +77,7 @@ struct RawAttribute {
 
 **transport** — TCP connection management via tokio. Read loop → decode → FSM input. FSM output → encode → write loop. Backpressure via bounded queues. This is the only crate that touches async I/O. Depends on `wire` and `fsm`.
 
-**rib** — AdjRibIn per neighbor, LocRib best-path selection, AdjRibOut computed per neighbor. Route objects keyed by (AFI, SAFI, prefix).
+**rib** — AdjRibIn per neighbor, LocRib best-path selection, AdjRibOut computed per neighbor. Route objects keyed by `Prefix` (IPv4 and IPv6 coexist in the same HashMap). See ADR-0023.
 
 **policy** (v1 minimal) — Prefix allow/deny lists, max-prefix enforcement, simple attribute set/clear. Enough to be operationally useful, not enough to invite bikeshedding.
 
@@ -124,7 +124,7 @@ API:         gRPC call → command → neighbor manager / RIB task
 - **RIB** is authoritative for routing state (what routes exist, which is best).
 - **API** is an adapter layer. It translates gRPC requests into commands and queries against the authoritative components. It is never the source of truth for any state.
 
-**RIB concurrency (v1):** A single RIB task behind a bounded channel is correct for IPv4 unicast. Sessions send `RibUpdate` messages; the RIB processes them sequentially; best-path results fan out to per-neighbor AdjRibOut channels. The sharding seam is at the channel boundary — when a second address family is added (IPv6, FlowSpec), split to one RIB task per AFI/SAFI without changing session code.
+**RIB concurrency (v1):** A single RIB task behind a bounded channel handles both IPv4 and IPv6 unicast. Sessions send `RibUpdate` messages; the RIB processes them sequentially; best-path results fan out to per-neighbor AdjRibOut channels. IPv4 and IPv6 routes coexist in the same `HashMap<Prefix, Route>` (ADR-0023). The sharding seam is at the channel boundary — if a third address family or scale demands it, split to one RIB task per AFI/SAFI without changing session code.
 
 **RIB snapshot model:** Snapshots are generation-based, not deep copies. The RIB stores immutable per-prefix route sets behind `Arc`. A snapshot is a `(generation_id, Arc<RibView>)` handle. Paginated gRPC queries iterate that handle. The active RIB can advance generations without blocking readers. This avoids O(n) cloning on every query — at 10M routes, a full clone per paginated request is a non-starter. Stale snapshots are dropped when the last reader releases its `Arc` handle.
 
@@ -425,7 +425,7 @@ Exposed via `ListBestRoutes` gRPC endpoint with offset pagination.
 - Deterministic outcomes for all decision inputs, verified by property tests (antisymmetry, transitivity, totality).
 - Stable best-path selection with multiple paths from multiple peers.
 - Structured debug events for best-path changes.
-- 367 tests pass (M9), clippy clean, fmt clean.
+- 388 tests pass (v0.2.0), clippy clean, fmt clean.
 
 ### Milestone 3: "Speak" `[complete]`
 
@@ -617,7 +617,6 @@ rustbgpd/
 
 ## Roadmap Beyond v1
 
-- MP-BGP extensions (IPv6 unicast)
 - Extended communities
 - FlowSpec speaker mode (prefixd lineage)
 - BMP exporter
@@ -651,7 +650,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | TCP MD5 authentication | 2385 | M3 | FRR | Linux only |
 | GTSM (TTL security) | 5082 | M3 | FRR | Configurable per-peer |
 | Route server mode (many peers) | — | M4 | FRR, BIRD, GoBGP | No transit by default |
-| MP-BGP (IPv6 unicast) | 4760 | Post-v1 | — | Roadmap |
+| MP-BGP (IPv6 unicast) | 4760 | v0.2.0 | FRR | `MP_REACH_NLRI` / `MP_UNREACH_NLRI`, `Prefix` enum, AFI/SAFI negotiation |
 | Communities (standard) | 1997 | M4 | FRR | Typed decode/encode, gRPC exposure |
 | Extended communities | 4360 | Post-v1 | — | Roadmap |
 | FlowSpec | 8955 | Post-v1 | — | Roadmap (prefixd lineage) |

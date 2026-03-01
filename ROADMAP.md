@@ -34,19 +34,20 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 
 ---
 
-## Completed (v0.1.0)
+## Completed (v0.2.0)
 
+- [x] MP-BGP (IPv6 unicast) — RFC 4760: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` decode/encode, `Ipv6Prefix` type, `Prefix` enum for AFI-agnostic RIB, AFI/SAFI capability negotiation, dual-stack route exchange, IPv6 route injection via gRPC, FRR dual-stack interop validated
 - [x] BGP wire codec — OPEN, UPDATE, NOTIFICATION, KEEPALIVE, NLRI, path attributes, communities, RFC-compliant flag validation, fuzz harness
 - [x] RFC 4271 state machine — all 6 states, full transition table, OPEN negotiation, property tests
 - [x] Tokio transport — single task per peer, inbound listener, TCP MD5/GTSM, session counters, NLRI batching, TCP collision detection (RFC 4271 §6.8)
 - [x] RIB — Adj-RIB-In, Loc-RIB best-path (RFC 4271 §9.1.2 with eBGP preference), Adj-RIB-Out with split horizon, dirty peer resync, route injection, WatchRoutes streaming
-- [x] Policy — prefix lists with ge/le matching, per-peer import/export, global fallback
-- [x] gRPC API — 5 services: Global, Neighbor, RIB, Injection, Control
-- [x] Dynamic peer management — add, delete, enable, disable neighbors at runtime
+- [x] Policy — prefix lists with ge/le matching (IPv4 + IPv6), per-peer import/export, global fallback
+- [x] gRPC API — 5 services: Global, Neighbor, RIB, Injection, Control (all IPv6-capable)
+- [x] Dynamic peer management — add, delete, enable, disable neighbors at runtime (IPv4 + IPv6)
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
-- [x] Interop validated — FRR 10.3.1 (17/17 automated tests), BIRD 2.0.12
-- [x] 367 tests — unit, integration, property, fuzz
+- [x] Interop validated — FRR 10.3.1 (17/17 IPv4 + 6 dual-stack automated tests), BIRD 2.0.12
+- [x] 388 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -54,20 +55,7 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ## Planned Features
 
-### Next — MP-BGP (IPv6 Unicast)
-
-**Why this matters:** IPv4-only is a non-starter for modern deployments. Dual-stack BGP is table stakes. MP-BGP (RFC 4760) is the most requested missing feature and a prerequisite for 1.0.
-
-- [ ] Wire: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` attribute decode/encode (RFC 4760)
-- [ ] Wire: `Ipv6Prefix` type with NLRI encoding
-- [ ] FSM: AFI/SAFI capability negotiation in OPEN
-- [ ] RIB: per-AFI Adj-RIB-In, Loc-RIB, Adj-RIB-Out
-- [ ] Transport: IPv6 peer connections and NEXT_HOP handling
-- [ ] API: address family parameter in all RIB RPCs (currently validates but rejects non-IPv4)
-- [ ] Config: IPv6 neighbor addresses (currently rejected at validation)
-- [ ] Interop: FRR dual-stack topology with IPv6 prefix exchange
-
-### Graceful Restart (RFC 4724)
+### Next — Graceful Restart (RFC 4724)
 
 **Why this matters:** Without graceful restart, every daemon restart causes route flaps across all peers. For production use, peers need to preserve forwarding state during a planned restart.
 
@@ -124,7 +112,7 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 Quality gates before tagging 1.0.0:
 
-- [ ] MP-BGP (at least IPv6 unicast)
+- [x] MP-BGP (at least IPv6 unicast)
 - [ ] Graceful restart
 - [ ] Extended communities
 - [ ] Real-world deployment feedback

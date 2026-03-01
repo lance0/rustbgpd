@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::Ipv4Prefix;
+use rustbgpd_wire::Prefix;
 
 use crate::route::Route;
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 pub struct AdjRibOut {
     peer: IpAddr,
-    routes: HashMap<Ipv4Prefix, Route>,
+    routes: HashMap<Prefix, Route>,
 }
 
 impl AdjRibOut {
@@ -29,12 +29,12 @@ impl AdjRibOut {
         self.routes.insert(route.prefix, route);
     }
 
-    pub fn withdraw(&mut self, prefix: &Ipv4Prefix) -> bool {
+    pub fn withdraw(&mut self, prefix: &Prefix) -> bool {
         self.routes.remove(prefix).is_some()
     }
 
     #[must_use]
-    pub fn get(&self, prefix: &Ipv4Prefix) -> Option<&Route> {
+    pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
         self.routes.get(prefix)
     }
 

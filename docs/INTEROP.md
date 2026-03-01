@@ -15,6 +15,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m3-frr.clab.yml` | Tested (M3) | 3-node redistribution | 2× FRR peers, route injection | — |
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m4-frr.clab.yml` | Tested (M4) | 10-peer dynamic mgmt | 8 static + 2 dynamic peers | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -625,6 +626,81 @@ Automated test: `bash tests/interop/scripts/test-m4-frr.sh` — **17 passed, 0 f
 | Dynamic DeleteNeighbor (FRR-09) | PASS | ListNeighbors returned 8 after deletion |
 | DisableNeighbor (FRR-01) | PASS | Session dropped to Active state |
 | EnableNeighbor (FRR-01) | PASS | Session re-established on first attempt |
+
+---
+
+## M10 Test Procedures (MP-BGP / IPv6 Unicast)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m10-frr-ipv6.clab.yml`
+
+### Network Layout
+
+```
+M10 FRR (dual-stack):
+
+  rustbgpd (AS 65001)               FRR (AS 65002)
+  eth1: 10.0.0.1/24                 eth1: 10.0.0.2/24
+  eth1: fd00::1/64                  eth1: fd00::2/64
+       │                                 │
+       └─────────── eth1 ────────────────┘
+```
+
+BGP session over IPv4 (10.0.0.1 ↔ 10.0.0.2) with MP-BGP IPv6 unicast negotiated.
+
+FRR advertises:
+- IPv4: 192.168.1.0/24, 10.10.0.0/16
+- IPv6: 2001:db8:1::/48, 2001:db8:2::/48
+
+### Test 1: Session with IPv6 AFI/SAFI Capability
+
+Wait for session to reach Established. Verify FRR sees IPv6 unicast AFI/SAFI
+negotiated in the neighbor capabilities.
+
+**Pass criteria:** `ipv6Unicast` appears in FRR's `show bgp neighbors` JSON.
+
+### Test 2: IPv4 Routes Received (backward compat)
+
+Query received routes via gRPC and verify IPv4 prefixes are present.
+
+**Pass criteria:** 192.168.1.0 and 10.10.0.0 in Adj-RIB-In.
+
+### Test 3: IPv6 Routes Received via MP_REACH_NLRI
+
+Query received routes and verify IPv6 prefixes are present.
+
+**Pass criteria:** 2001:db8:1:: and 2001:db8:2:: in Adj-RIB-In.
+
+### Test 4: IPv6 Routes in Best Routes (Loc-RIB)
+
+Query best routes and verify IPv6 prefixes appear.
+
+**Pass criteria:** 2001:db8:1:: and 2001:db8:2:: in Loc-RIB.
+
+### Test 5: IPv6 Route Withdrawal
+
+Withdraw 2001:db8:2::/48 from FRR, verify it disappears from rustbgpd's RIB.
+Other routes (IPv4 + remaining IPv6) must still be present.
+
+**Pass criteria:** 2001:db8:2:: withdrawn; 2001:db8:1:: and 192.168.1.0 still present.
+
+### Test 6: IPv6 Route Injection via gRPC
+
+Inject 2001:db8:ff::/48 via `AddPath`, verify it appears in best routes.
+Clean up via `DeletePath`.
+
+**Pass criteria:** Injected prefix appears in Loc-RIB.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m10-frr-ipv6.sh
+```
+
+Runs all 6 tests automatically. Requires containerlab topology deployed and
+`grpcurl` on the host.
 
 ---
 

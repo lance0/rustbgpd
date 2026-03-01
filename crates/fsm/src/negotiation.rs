@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use rustbgpd_wire::notification::{NotificationCode, open_subcode};
-use rustbgpd_wire::{Capability, NotificationMessage, OpenMessage};
+use rustbgpd_wire::{Afi, Capability, NotificationMessage, OpenMessage, Safi};
 
 use crate::action::NegotiatedSession;
 use crate::config::PeerConfig;
@@ -73,6 +73,9 @@ pub fn validate_open(
         .any(|c| matches!(c, Capability::FourOctetAs { .. }));
     let four_octet_as = peer_has_four_octet; // we always advertise it
 
+    // Intersect address families: only families both sides advertise
+    let negotiated_families = intersect_families(config, &open.capabilities);
+
     Ok(NegotiatedSession {
         peer_asn,
         peer_router_id: open.bgp_identifier,
@@ -80,6 +83,7 @@ pub fn validate_open(
         keepalive_interval,
         peer_capabilities: open.capabilities.clone(),
         four_octet_as,
+        negotiated_families,
     })
 }
 
@@ -92,6 +96,23 @@ pub fn negotiate_hold_time(local: u16, peer: u16) -> u16 {
     } else {
         local.min(peer)
     }
+}
+
+/// Compute the intersection of address families between our config and the
+/// peer's advertised capabilities. Only families both sides support are
+/// negotiated.
+#[must_use]
+fn intersect_families(config: &PeerConfig, peer_caps: &[Capability]) -> Vec<(Afi, Safi)> {
+    config
+        .families
+        .iter()
+        .filter(|(afi, safi)| {
+            peer_caps.iter().any(|c| {
+                matches!(c, Capability::MultiProtocol { afi: a, safi: s } if *a == *afi && *s == *safi)
+            })
+        })
+        .copied()
+        .collect()
 }
 
 #[cfg(test)]

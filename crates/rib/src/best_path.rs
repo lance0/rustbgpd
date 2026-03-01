@@ -60,15 +60,15 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::Instant;
 
-    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute};
+    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
     use super::*;
     use crate::route::Route;
 
     fn base_route(peer: Ipv4Addr) -> Route {
         Route {
-            prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
-            next_hop: peer,
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -217,7 +217,7 @@ mod proptests {
     use std::time::Instant;
 
     use proptest::prelude::*;
-    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute};
+    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
     use super::*;
     use crate::route::Route;
@@ -242,8 +242,8 @@ mod proptests {
             .prop_map(|(peer_oct, lp, asns, origin, med, is_ebgp)| {
                 let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
                 Route {
-                    prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
-                    next_hop: peer,
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                    next_hop: IpAddr::V4(peer),
                     peer: IpAddr::V4(peer),
                     attributes: vec![
                         PathAttribute::LocalPref(lp),

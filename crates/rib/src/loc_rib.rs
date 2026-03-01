@@ -4,14 +4,14 @@
 
 use std::collections::HashMap;
 
-use rustbgpd_wire::Ipv4Prefix;
+use rustbgpd_wire::Prefix;
 
 use crate::best_path::best_path_cmp;
 use crate::route::Route;
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
-    routes: HashMap<Ipv4Prefix, Route>,
+    routes: HashMap<Prefix, Route>,
 }
 
 impl LocRib {
@@ -27,7 +27,7 @@ impl LocRib {
     /// Returns `true` if the best route changed (installed, updated, or removed).
     pub fn recompute<'a>(
         &mut self,
-        prefix: Ipv4Prefix,
+        prefix: Prefix,
         candidates: impl Iterator<Item = &'a Route>,
     ) -> bool {
         let best = candidates.min_by(|a, b| best_path_cmp(a, b)).cloned();
@@ -63,7 +63,7 @@ impl LocRib {
     }
 
     #[must_use]
-    pub fn get(&self, prefix: &Ipv4Prefix) -> Option<&Route> {
+    pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
         self.routes.get(prefix)
     }
 }
@@ -86,8 +86,8 @@ mod tests {
     fn make_route(peer_oct: u8, prefix: Ipv4Prefix, local_pref: u32) -> Route {
         let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
         Route {
-            prefix,
-            next_hop: peer,
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -103,8 +103,9 @@ mod tests {
 
     #[test]
     fn single_candidate_installed() {
-        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-        let route = make_route(1, prefix, 100);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let prefix = Prefix::V4(v4);
+        let route = make_route(1, v4, 100);
         let mut loc = LocRib::new();
 
         assert!(loc.recompute(prefix, [&route].into_iter()));
@@ -117,9 +118,10 @@ mod tests {
 
     #[test]
     fn better_route_replaces() {
-        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-        let route_a = make_route(1, prefix, 100);
-        let route_b = make_route(2, prefix, 200);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let prefix = Prefix::V4(v4);
+        let route_a = make_route(1, v4, 100);
+        let route_b = make_route(2, v4, 200);
         let mut loc = LocRib::new();
 
         loc.recompute(prefix, [&route_a].into_iter());
@@ -132,8 +134,9 @@ mod tests {
 
     #[test]
     fn withdraw_removes() {
-        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-        let route = make_route(1, prefix, 100);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let prefix = Prefix::V4(v4);
+        let route = make_route(1, v4, 100);
         let mut loc = LocRib::new();
 
         loc.recompute(prefix, [&route].into_iter());
@@ -144,8 +147,9 @@ mod tests {
 
     #[test]
     fn unchanged_returns_false() {
-        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-        let route = make_route(1, prefix, 100);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let prefix = Prefix::V4(v4);
+        let route = make_route(1, v4, 100);
         let mut loc = LocRib::new();
 
         loc.recompute(prefix, [&route].into_iter());
@@ -154,10 +158,11 @@ mod tests {
 
     #[test]
     fn multi_candidate_picks_winner() {
-        let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
-        let r1 = make_route(1, prefix, 100);
-        let r2 = make_route(2, prefix, 200);
-        let r3 = make_route(3, prefix, 150);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+        let prefix = Prefix::V4(v4);
+        let r1 = make_route(1, v4, 100);
+        let r2 = make_route(2, v4, 200);
+        let r3 = make_route(3, v4, 150);
         let mut loc = LocRib::new();
 
         loc.recompute(prefix, [&r1, &r2, &r3].into_iter());

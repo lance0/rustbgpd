@@ -91,10 +91,6 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
 
-        if address.is_ipv6() {
-            return Err(Status::invalid_argument("IPv6 neighbors not supported"));
-        }
-
         if config.remote_asn == 0 {
             return Err(Status::invalid_argument("remote_asn must be > 0"));
         }
@@ -285,23 +281,6 @@ mod tests {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         NeighborService::new(tx, rib_tx)
-    }
-
-    #[tokio::test]
-    async fn add_neighbor_rejects_ipv6_address() {
-        let svc = make_service();
-        let req = Request::new(proto::AddNeighborRequest {
-            config: Some(proto::NeighborConfig {
-                address: "2001:db8::1".into(),
-                remote_asn: 65002,
-                description: String::new(),
-                hold_time: 90,
-                max_prefixes: 0,
-            }),
-        });
-        let err = svc.add_neighbor(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("IPv6"));
     }
 
     #[tokio::test]

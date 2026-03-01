@@ -226,6 +226,80 @@ RFC 4271 recommends a minimum of 3 seconds; we enforce it.
 
 ## Interpretation Decisions
 
+---
+
+## RFC 4760 — Multiprotocol Extensions for BGP-4
+
+### §3 — MP_REACH_NLRI (Type 14)
+
+Wire layout:
+
+```
+AFI (2 bytes) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLRI (variable)
+```
+
+- Flags: Optional + Transitive (0xC0).
+- AFI 2 (IPv6), SAFI 1 (Unicast) is the only supported combination beyond
+  IPv4 unicast.
+- Next-hop length: 16 bytes (global IPv6 address) or 32 bytes (global +
+  link-local). When 32 bytes, rustbgpd takes the first 16 (global address)
+  and discards the link-local.
+- NLRI: same prefix-length encoding as IPv4, but up to 128 bits (16 bytes
+  of address data).
+- When `MP_REACH_NLRI` is present in an UPDATE, the body NEXT_HOP attribute
+  (type 3) is not required — the next-hop is carried inside the MP attribute.
+  `validate_update_attributes()` relaxes the NEXT_HOP mandatory check when
+  `has_mp_nlri` is true.
+
+### §3 — MP_UNREACH_NLRI (Type 15)
+
+Wire layout:
+
+```
+AFI (2 bytes) | SAFI (1) | Withdrawn Routes (variable)
+```
+
+- Flags: Optional + Non-Transitive (0x80).
+- Withdrawn routes use the same prefix-length encoding as announced NLRI.
+
+### AFI/SAFI Negotiation
+
+- MP-BGP capabilities are advertised in OPEN via `Capability::MultiProtocol`.
+- `intersect_families()` computes the intersection of locally configured
+  families (from `PeerConfig.families`) and the peer's advertised
+  `MultiProtocol` capabilities. Only negotiated families are processed.
+- Result stored in `NegotiatedSession.negotiated_families`.
+- If neither side advertises IPv4 unicast MP-BGP capability, IPv4 unicast
+  is still implicitly supported (RFC 4760 §8 backward compat: body NLRI
+  is always IPv4).
+
+### IPv6 NLRI Encoding
+
+- Same wire format as IPv4: 1 byte prefix length + ceil(len/8) bytes of
+  address. Maximum prefix length is 128 (vs 32 for IPv4).
+- Host bits are masked off on decode (same as `Ipv4Prefix::new()`).
+- `Ipv6Prefix` type mirrors `Ipv4Prefix`: public fields `addr: Ipv6Addr`
+  and `len: u8`.
+
+### Outbound UPDATE Splitting
+
+- IPv4 routes use body NLRI (WITHDRAWN + NLRI fields in the UPDATE body).
+- IPv6 routes use `MP_REACH_NLRI` / `MP_UNREACH_NLRI` in the path
+  attributes with empty body NLRI.
+- A single UPDATE carries only one address family.
+- `MpReachNlri` and `MpUnreachNlri` are not stored on `Route.attributes` —
+  they are per-UPDATE framing, rebuilt on each outbound send.
+
+### eBGP NEXT_HOP for IPv6
+
+- eBGP next-hop rewrite: `MpReachNlri.next_hop` is set to the local socket's
+  IPv6 address (same pattern as IPv4 eBGP next-hop rewrite).
+- iBGP: next-hop passed through unchanged.
+
+---
+
+## Interpretation Decisions
+
 ### Attribute Ordering
 
 RFC 4271 §4.3 states well-known attributes should appear before optional

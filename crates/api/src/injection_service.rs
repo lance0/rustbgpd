@@ -1,11 +1,11 @@
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
 use rustbgpd_rib::{RibUpdate, Route};
-use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute};
+use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix};
 
 pub struct InjectionService {
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -28,29 +28,48 @@ impl proto::injection_service_server::InjectionService for InjectionService {
     ) -> Result<Response<proto::AddPathResponse>, Status> {
         let req = request.into_inner();
 
-        let addr: Ipv4Addr = req
+        // Parse prefix address as IPv4 or IPv6
+        let addr: IpAddr = req
             .prefix
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
 
-        let len = u8::try_from(req.prefix_length)
-            .ok()
-            .filter(|&l| l <= 32)
-            .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
-
-        let prefix = Ipv4Prefix::new(addr, len);
-
-        let next_hop: Ipv4Addr = req
-            .next_hop
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
-
-        if next_hop == Ipv4Addr::UNSPECIFIED {
-            return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
-        }
-        if next_hop.octets()[0] >= 224 && next_hop.octets()[0] <= 239 {
-            return Err(Status::invalid_argument("next_hop must not be multicast"));
-        }
+        let (prefix, next_hop_ip) = match addr {
+            IpAddr::V4(v4) => {
+                let len = u8::try_from(req.prefix_length)
+                    .ok()
+                    .filter(|&l| l <= 32)
+                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
+                let nh: Ipv4Addr = req
+                    .next_hop
+                    .parse()
+                    .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+                if nh.is_unspecified() {
+                    return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
+                }
+                if nh.is_multicast() {
+                    return Err(Status::invalid_argument("next_hop must not be multicast"));
+                }
+                (Prefix::V4(Ipv4Prefix::new(v4, len)), IpAddr::V4(nh))
+            }
+            IpAddr::V6(v6) => {
+                let len = u8::try_from(req.prefix_length)
+                    .ok()
+                    .filter(|&l| l <= 128)
+                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
+                let nh: Ipv6Addr = req
+                    .next_hop
+                    .parse()
+                    .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+                if nh.is_unspecified() {
+                    return Err(Status::invalid_argument("next_hop must not be ::"));
+                }
+                if nh.is_multicast() {
+                    return Err(Status::invalid_argument("next_hop must not be multicast"));
+                }
+                (Prefix::V6(Ipv6Prefix::new(v6, len)), IpAddr::V6(nh))
+            }
+        };
 
         let origin = match req.origin {
             0 => Origin::Igp,
@@ -58,10 +77,12 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             _ => Origin::Incomplete,
         };
 
-        let mut attributes = vec![
-            PathAttribute::Origin(origin),
-            PathAttribute::NextHop(next_hop),
-        ];
+        let mut attributes = vec![PathAttribute::Origin(origin)];
+
+        // NEXT_HOP attribute only for IPv4 (IPv6 uses MP_REACH_NLRI)
+        if let IpAddr::V4(nh) = next_hop_ip {
+            attributes.push(PathAttribute::NextHop(nh));
+        }
 
         if req.as_path.is_empty() {
             attributes.push(PathAttribute::AsPath(AsPath { segments: vec![] }));
@@ -83,7 +104,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
 
         let route = Route {
             prefix,
-            next_hop,
+            next_hop: next_hop_ip,
             peer: LOCAL_PEER,
             attributes,
             received_at: std::time::Instant::now(),
@@ -113,17 +134,27 @@ impl proto::injection_service_server::InjectionService for InjectionService {
     ) -> Result<Response<proto::DeletePathResponse>, Status> {
         let req = request.into_inner();
 
-        let addr: Ipv4Addr = req
+        let addr: IpAddr = req
             .prefix
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
 
-        let len = u8::try_from(req.prefix_length)
-            .ok()
-            .filter(|&l| l <= 32)
-            .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
-
-        let prefix = Ipv4Prefix::new(addr, len);
+        let prefix = match addr {
+            IpAddr::V4(v4) => {
+                let len = u8::try_from(req.prefix_length)
+                    .ok()
+                    .filter(|&l| l <= 32)
+                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
+                Prefix::V4(Ipv4Prefix::new(v4, len))
+            }
+            IpAddr::V6(v6) => {
+                let len = u8::try_from(req.prefix_length)
+                    .ok()
+                    .filter(|&l| l <= 128)
+                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
+                Prefix::V6(Ipv6Prefix::new(v6, len))
+            }
+        };
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx

@@ -11,7 +11,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -21,13 +21,13 @@ categories = ["network-programming"]
 
 [workspace.dependencies]
 # Internal crates
-rustbgpd-wire = { path = "crates/wire", version = "0.1.0" }
-rustbgpd-fsm = { path = "crates/fsm", version = "0.1.0" }
-rustbgpd-transport = { path = "crates/transport", version = "0.1.0" }
-rustbgpd-rib = { path = "crates/rib", version = "0.1.0" }
-rustbgpd-policy = { path = "crates/policy", version = "0.1.0" }
-rustbgpd-api = { path = "crates/api", version = "0.1.0" }
-rustbgpd-telemetry = { path = "crates/telemetry", version = "0.1.0" }
+rustbgpd-wire = { path = "crates/wire", version = "0.2.0" }
+rustbgpd-fsm = { path = "crates/fsm", version = "0.2.0" }
+rustbgpd-transport = { path = "crates/transport", version = "0.2.0" }
+rustbgpd-rib = { path = "crates/rib", version = "0.2.0" }
+rustbgpd-policy = { path = "crates/policy", version = "0.2.0" }
+rustbgpd-api = { path = "crates/api", version = "0.2.0" }
+rustbgpd-telemetry = { path = "crates/telemetry", version = "0.2.0" }
 
 # External dependencies — pinned across workspace
 bytes = "1"

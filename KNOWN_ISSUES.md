@@ -22,9 +22,6 @@ resolved.
 ## Limitations (by design, not bugs)
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
-- **No collision detection.** RFC 4271 §6.8. If both sides initiate
-  simultaneously, the inbound connection is dropped. Collision detection
-  (compare router IDs, close the higher) is deferred to post-v1.
 - **Single task per peer.** Adequate for current OPEN/KEEPALIVE/UPDATE
   traffic. May need split reader/writer tasks for high UPDATE throughput.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
@@ -40,3 +37,9 @@ resolved.
 - **DisableNeighbor reason not propagated.** The `reason` field in
   `DisableNeighborRequest` is accepted but not included in the Cease
   NOTIFICATION sent to the peer.
+- **IPv6 link-local next-hop discarded.** When `MP_REACH_NLRI` carries a
+  32-byte next-hop (global + link-local), only the first 16 bytes (global
+  address) are used. Link-local next-hops are not tracked or advertised.
+- **Only IPv4 and IPv6 unicast.** MP-BGP supports AFI/SAFI negotiation
+  but only IPv4 unicast (AFI 1, SAFI 1) and IPv6 unicast (AFI 2, SAFI 1)
+  are implemented. Other families (VPNv4, FlowSpec, etc.) are rejected.

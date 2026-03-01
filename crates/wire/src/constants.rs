@@ -66,6 +66,10 @@ pub mod attr_type {
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
     pub const COMMUNITIES: u8 = 8;
+    /// RFC 4760: `MP_REACH_NLRI`.
+    pub const MP_REACH_NLRI: u8 = 14;
+    /// RFC 4760: `MP_UNREACH_NLRI`.
+    pub const MP_UNREACH_NLRI: u8 = 15;
 }
 
 /// Path attribute flag bits (RFC 4271 §4.3).

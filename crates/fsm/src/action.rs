@@ -1,4 +1,4 @@
-use rustbgpd_wire::{Capability, NotificationMessage, OpenMessage};
+use rustbgpd_wire::{Afi, Capability, NotificationMessage, OpenMessage, Safi};
 
 use crate::state::SessionState;
 
@@ -25,6 +25,8 @@ pub struct NegotiatedSession {
     pub peer_capabilities: Vec<Capability>,
     /// Whether both sides support 4-octet AS numbers.
     pub four_octet_as: bool,
+    /// Address families negotiated between both sides.
+    pub negotiated_families: Vec<(Afi, Safi)>,
 }
 
 /// Output actions produced by the FSM on each transition.

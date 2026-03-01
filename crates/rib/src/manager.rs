@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::{PrefixList, check_prefix_list};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::Ipv4Prefix;
+use rustbgpd_wire::Prefix;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
@@ -16,9 +16,6 @@ use crate::update::{OutboundRouteUpdate, RibUpdate};
 
 /// Sentinel peer address for locally-injected routes.
 const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
-
-/// Label for the single address family we support.
-const AFI_SAFI: &str = "ipv4_unicast";
 
 /// How long to wait before retrying distribution to dirty peers.
 const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -80,7 +77,7 @@ impl RibManager {
     /// Recompute Loc-RIB best path for a set of affected prefixes.
     /// Returns the set of prefixes that actually changed.
     /// Also emits route events to the broadcast channel.
-    fn recompute_best(&mut self, affected: &HashSet<Ipv4Prefix>) -> HashSet<Ipv4Prefix> {
+    fn recompute_best(&mut self, affected: &HashSet<Prefix>) -> HashSet<Prefix> {
         let mut changed = HashSet::new();
         for prefix in affected {
             let previous_best_peer = self.loc_rib.get(prefix).map(|r| r.peer);
@@ -129,7 +126,7 @@ impl RibManager {
             }
         }
         self.metrics
-            .set_loc_rib_prefixes(AFI_SAFI, gauge_val(self.loc_rib.len()));
+            .set_loc_rib_prefixes("ipv4_unicast", gauge_val(self.loc_rib.len()));
         changed
     }
 
@@ -141,7 +138,7 @@ impl RibManager {
     /// view back in sync. `AdjRibOut` is only committed after a successful
     /// channel send; on failure the peer stays dirty for retry via the
     /// resync timer.
-    fn distribute_changes(&mut self, changed_prefixes: &HashSet<Ipv4Prefix>) {
+    fn distribute_changes(&mut self, changed_prefixes: &HashSet<Prefix>) {
         if changed_prefixes.is_empty() && self.dirty_peers.is_empty() {
             return;
         }
@@ -150,8 +147,8 @@ impl RibManager {
         for peer in peers {
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
             let is_dirty = self.dirty_peers.contains(&peer);
-            let effective_prefixes: HashSet<Ipv4Prefix> = if is_dirty {
-                let mut all: HashSet<Ipv4Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
+            let effective_prefixes: HashSet<Prefix> = if is_dirty {
+                let mut all: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
                     all.extend(rib_out.iter().map(|r| r.prefix));
                 }
@@ -229,7 +226,7 @@ impl RibManager {
                     }
                     self.metrics.set_adj_rib_out_prefixes(
                         &peer.to_string(),
-                        AFI_SAFI,
+                        "ipv4_unicast",
                         gauge_val(rib_out.len()),
                     );
                     if is_dirty {
@@ -289,7 +286,7 @@ impl RibManager {
                 }
                 self.metrics.set_adj_rib_out_prefixes(
                     &peer.to_string(),
-                    AFI_SAFI,
+                    "ipv4_unicast",
                     gauge_val(rib_out.len()),
                 );
             }
@@ -323,26 +320,26 @@ impl RibManager {
 
                 debug!(%peer, routes = rib.len(), "rib updated");
                 self.metrics
-                    .set_rib_prefixes(&peer.to_string(), AFI_SAFI, gauge_val(rib.len()));
+                    .set_rib_prefixes(&peer.to_string(), "ipv4_unicast", gauge_val(rib.len()));
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed);
             }
 
             RibUpdate::PeerDown { peer } => {
                 if let Some(rib) = self.ribs.get_mut(&peer) {
-                    let affected: HashSet<Ipv4Prefix> = rib.iter().map(|r| r.prefix).collect();
+                    let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
                     let count = rib.len();
                     rib.clear();
                     debug!(%peer, cleared = count, "peer down — rib cleared");
                     self.metrics
-                        .set_rib_prefixes(&peer.to_string(), AFI_SAFI, 0);
+                        .set_rib_prefixes(&peer.to_string(), "ipv4_unicast", 0);
                     let changed = self.recompute_best(&affected);
                     self.distribute_changes(&changed);
                 }
                 // Clean up outbound state
                 self.adj_ribs_out.remove(&peer);
                 self.metrics
-                    .set_adj_rib_out_prefixes(&peer.to_string(), AFI_SAFI, 0);
+                    .set_adj_rib_out_prefixes(&peer.to_string(), "ipv4_unicast", 0);
                 self.outbound_peers.remove(&peer);
                 self.peer_export_policies.remove(&peer);
                 self.dirty_peers.remove(&peer);
@@ -355,9 +352,9 @@ impl RibManager {
             } => {
                 debug!(%peer, "peer up — registering for outbound updates");
                 let peer_label = peer.to_string();
-                self.metrics.set_rib_prefixes(&peer_label, AFI_SAFI, 0);
+                self.metrics.set_rib_prefixes(&peer_label, "ipv4_unicast", 0);
                 self.metrics
-                    .set_adj_rib_out_prefixes(&peer_label, AFI_SAFI, 0);
+                    .set_adj_rib_out_prefixes(&peer_label, "ipv4_unicast", 0);
                 self.outbound_peers.insert(peer, outbound_tx);
                 self.peer_export_policies.insert(peer, export_policy);
                 self.send_initial_table(peer);
@@ -373,7 +370,7 @@ impl RibManager {
                 debug!(%prefix, "injected local route");
                 self.metrics.set_rib_prefixes(
                     &LOCAL_PEER.to_string(),
-                    AFI_SAFI,
+                    "ipv4_unicast",
                     gauge_val(rib.len()),
                 );
 
@@ -394,7 +391,7 @@ impl RibManager {
                     debug!(%prefix, "withdrawn injected route");
                     self.metrics.set_rib_prefixes(
                         &LOCAL_PEER.to_string(),
-                        AFI_SAFI,
+                        "ipv4_unicast",
                         gauge_val(rib.len()),
                     );
                     let mut affected = HashSet::new();
@@ -533,7 +530,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
 
-    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute};
+    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
     use tokio::sync::oneshot;
 
     use super::*;
@@ -541,8 +538,8 @@ mod tests {
 
     fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         Route {
-            prefix,
-            next_hop,
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(next_hop),
             peer: IpAddr::V4(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
@@ -552,8 +549,8 @@ mod tests {
 
     fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref: u32) -> Route {
         Route {
-            prefix,
-            next_hop: peer,
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -595,7 +592,7 @@ mod tests {
 
         let routes = reply_rx.await.unwrap();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].prefix, prefix);
+        assert_eq!(routes[0].prefix, Prefix::V4(prefix));
 
         drop(tx);
         handle.await.unwrap();
@@ -660,7 +657,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer,
             announced: vec![],
-            withdrawn: vec![prefix1],
+            withdrawn: vec![Prefix::V4(prefix1)],
         })
         .await
         .unwrap();
@@ -675,7 +672,7 @@ mod tests {
 
         let routes = reply_rx.await.unwrap();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].prefix, prefix2);
+        assert_eq!(routes[0].prefix, Prefix::V4(prefix2));
 
         drop(tx);
         handle.await.unwrap();
@@ -842,7 +839,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer: peer2,
             announced: vec![],
-            withdrawn: vec![prefix],
+            withdrawn: vec![Prefix::V4(prefix)],
         })
         .await
         .unwrap();
@@ -902,8 +899,8 @@ mod tests {
         let best = reply_rx.await.unwrap();
         assert_eq!(best.len(), 2);
 
-        let best_a = best.iter().find(|r| r.prefix == prefix_a).unwrap();
-        let best_b = best.iter().find(|r| r.prefix == prefix_b).unwrap();
+        let best_a = best.iter().find(|r| r.prefix == Prefix::V4(prefix_a)).unwrap();
+        let best_b = best.iter().find(|r| r.prefix == Prefix::V4(prefix_b)).unwrap();
         assert_eq!(best_a.peer, peer1);
         assert_eq!(best_b.peer, peer2);
 
@@ -945,7 +942,7 @@ mod tests {
         // Should receive initial table dump
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.announce[0].prefix, prefix);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
         assert!(update.withdraw.is_empty());
 
         drop(tx);
@@ -980,7 +977,7 @@ mod tests {
 
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 1);
-        assert_eq!(update.announce[0].prefix, prefix);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
 
         drop(tx);
         handle.await.unwrap();
@@ -1078,8 +1075,8 @@ mod tests {
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 16);
         let route = Route {
-            prefix,
-            next_hop: Ipv4Addr::UNSPECIFIED,
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             peer: LOCAL_PEER,
             attributes: vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1105,7 +1102,7 @@ mod tests {
             .unwrap();
         let best = reply_rx.await.unwrap();
         assert_eq!(best.len(), 1);
-        assert_eq!(best[0].prefix, prefix);
+        assert_eq!(best[0].prefix, Prefix::V4(prefix));
 
         // Should have been distributed
         let update = out_rx.recv().await.unwrap();
@@ -1133,8 +1130,8 @@ mod tests {
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 16);
         let route = Route {
-            prefix,
-            next_hop: Ipv4Addr::UNSPECIFIED,
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             peer: LOCAL_PEER,
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
@@ -1156,7 +1153,7 @@ mod tests {
         // Now withdraw
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RibUpdate::WithdrawInjected {
-            prefix,
+            prefix: Prefix::V4(prefix),
             reply: reply_tx,
         })
         .await
@@ -1166,7 +1163,7 @@ mod tests {
         // Should receive withdrawal
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.withdraw.len(), 1);
-        assert_eq!(update.withdraw[0], prefix);
+        assert_eq!(update.withdraw[0], Prefix::V4(prefix));
 
         drop(tx);
         handle.await.unwrap();
@@ -1179,7 +1176,7 @@ mod tests {
         let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
         let export_policy = PrefixList {
             entries: vec![PrefixListEntry {
-                prefix: denied_prefix,
+                prefix: Prefix::V4(denied_prefix),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
@@ -1262,7 +1259,7 @@ mod tests {
 
         let routes = reply_rx.await.unwrap();
         assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0].prefix, prefix);
+        assert_eq!(routes[0].prefix, Prefix::V4(prefix));
 
         drop(tx);
         handle.await.unwrap();
@@ -1278,7 +1275,7 @@ mod tests {
         // Peer1 gets a deny policy on 10.0.0.0/8, peer2 has no per-peer policy
         let peer1_export = Some(PrefixList {
             entries: vec![PrefixListEntry {
-                prefix: denied_prefix,
+                prefix: Prefix::V4(denied_prefix),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
@@ -1327,7 +1324,7 @@ mod tests {
         // Peer1: should get only the allowed prefix (denied_prefix blocked)
         let filtered = recv_filtered.recv().await.unwrap();
         assert_eq!(filtered.announce.len(), 1);
-        assert_eq!(filtered.announce[0].prefix, allowed_prefix);
+        assert_eq!(filtered.announce[0].prefix, Prefix::V4(allowed_prefix));
 
         // Peer2: should get both (no per-peer policy, no global policy)
         let unfiltered = recv_unfiltered.recv().await.unwrap();
@@ -1349,7 +1346,7 @@ mod tests {
         let (out_tx, _out_rx) = mpsc::channel(64);
         let policy = Some(PrefixList {
             entries: vec![PrefixListEntry {
-                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8)),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
@@ -1443,7 +1440,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer: source,
             announced: vec![],
-            withdrawn: vec![prefix1],
+            withdrawn: vec![Prefix::V4(prefix1)],
         })
         .await
         .unwrap();
@@ -1485,12 +1482,12 @@ mod tests {
         // The resync should withdraw prefix1 (no longer in Loc-RIB) and
         // re-announce prefix2 (current Loc-RIB state)
         assert!(
-            resync.withdraw.contains(&prefix1),
+            resync.withdraw.contains(&Prefix::V4(prefix1)),
             "resync should withdraw prefix1 (no longer in Loc-RIB)"
         );
         let announced_prefixes: Vec<_> = resync.announce.iter().map(|r| r.prefix).collect();
         assert!(
-            announced_prefixes.contains(&prefix2),
+            announced_prefixes.contains(&Prefix::V4(prefix2)),
             "resync should re-announce prefix2"
         );
 
@@ -1548,7 +1545,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer: source,
             announced: vec![],
-            withdrawn: vec![prefix1],
+            withdrawn: vec![Prefix::V4(prefix1)],
         })
         .await
         .unwrap();
@@ -1730,7 +1727,7 @@ mod tests {
             1,
             "resync should announce the route from Loc-RIB"
         );
-        assert_eq!(resync.announce[0].prefix, prefix);
+        assert_eq!(resync.announce[0].prefix, Prefix::V4(prefix));
         assert!(resync.withdraw.is_empty());
 
         // AdjRibOut should now reflect Loc-RIB
@@ -1784,7 +1781,7 @@ mod tests {
 
         let event = events_rx.recv().await.unwrap();
         assert_eq!(event.event_type, crate::event::RouteEventType::Added);
-        assert_eq!(event.prefix, prefix);
+        assert_eq!(event.prefix, Prefix::V4(prefix));
         assert_eq!(event.peer, Some(peer));
 
         drop(tx);
@@ -1814,14 +1811,14 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer,
             announced: vec![],
-            withdrawn: vec![prefix],
+            withdrawn: vec![Prefix::V4(prefix)],
         })
         .await
         .unwrap();
 
         let event = events_rx.recv().await.unwrap();
         assert_eq!(event.event_type, crate::event::RouteEventType::Withdrawn);
-        assert_eq!(event.prefix, prefix);
+        assert_eq!(event.prefix, Prefix::V4(prefix));
         assert!(event.peer.is_none());
 
         drop(tx);
@@ -1861,7 +1858,7 @@ mod tests {
 
         let event = events_rx.recv().await.unwrap();
         assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
-        assert_eq!(event.prefix, prefix);
+        assert_eq!(event.prefix, Prefix::V4(prefix));
         assert_eq!(event.peer, Some(peer2));
 
         drop(tx);
@@ -1889,8 +1886,8 @@ mod tests {
 
         let e1 = sub1.recv().await.unwrap();
         let e2 = sub2.recv().await.unwrap();
-        assert_eq!(e1.prefix, prefix);
-        assert_eq!(e2.prefix, prefix);
+        assert_eq!(e1.prefix, Prefix::V4(prefix));
+        assert_eq!(e2.prefix, Prefix::V4(prefix));
         assert_eq!(e1.event_type, e2.event_type);
 
         drop(tx);
@@ -1920,7 +1917,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer,
             announced: vec![],
-            withdrawn: vec![prefix],
+            withdrawn: vec![Prefix::V4(prefix)],
         })
         .await
         .unwrap();

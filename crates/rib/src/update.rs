@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 
 use rustbgpd_policy::PrefixList;
+use rustbgpd_wire::Prefix;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::event::RouteEvent;
@@ -9,7 +10,7 @@ use crate::route::Route;
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
     pub announce: Vec<Route>,
-    pub withdraw: Vec<rustbgpd_wire::Ipv4Prefix>,
+    pub withdraw: Vec<Prefix>,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -18,7 +19,7 @@ pub enum RibUpdate {
     RoutesReceived {
         peer: IpAddr,
         announced: Vec<Route>,
-        withdrawn: Vec<rustbgpd_wire::Ipv4Prefix>,
+        withdrawn: Vec<Prefix>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown { peer: IpAddr },
@@ -35,7 +36,7 @@ pub enum RibUpdate {
     },
     /// Withdraw a locally-injected route.
     WithdrawInjected {
-        prefix: rustbgpd_wire::Ipv4Prefix,
+        prefix: Prefix,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query: return all received routes, optionally filtered by peer.

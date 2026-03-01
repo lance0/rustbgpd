@@ -9,6 +9,80 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-02-28
+
+MP-BGP (IPv6 unicast) support. rustbgpd is now a dual-stack BGP speaker —
+IPv6 prefixes are exchanged via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (RFC 4760)
+alongside existing IPv4 unicast. This is a cross-cutting change touching all 7
+crates. 388 tests pass.
+
+### Added
+
+- `rustbgpd-wire`: `Ipv6Prefix` type with NLRI encode/decode (prefix-length
+  encoding, max 128, host-bit masking). `Prefix` enum wrapping `Ipv4Prefix` and
+  `Ipv6Prefix` for AFI-agnostic route representation. Helper methods
+  `addr_string()` and `prefix_len()` on `Prefix`.
+- `rustbgpd-wire`: `MpReachNlri` and `MpUnreachNlri` path attribute variants
+  (types 14 and 15). Full decode/encode per RFC 4760 §3: AFI/SAFI, variable-
+  length next-hop (16 or 32 bytes for IPv6, take global address), NLRI.
+  `Afi` and `Safi` enums with `Unknown(u16)` / `Unknown(u8)` variants.
+- `rustbgpd-wire`: `MP_REACH_NLRI` (14) and `MP_UNREACH_NLRI` (15) constants.
+  Flag validation: type 14 = Optional|Transitive (0xC0), type 15 = Optional
+  (0x80).
+- `rustbgpd-fsm`: `intersect_families()` computes the intersection of locally
+  configured address families and peer-advertised MP-BGP capabilities.
+  `NegotiatedSession` gains `negotiated_families: Vec<(Afi, Safi)>`.
+- `rustbgpd-transport`: `process_update()` extracts `MpReachNlri` and
+  `MpUnreachNlri` from parsed attributes, builds routes with `Prefix::V6` and
+  `IpAddr::V6` next-hops, combines with body NLRI for unified RIB insertion.
+- `rustbgpd-transport`: `send_route_update()` splits outbound routes by AFI —
+  IPv4 routes use body NLRI (existing path), IPv6 routes use `MpReachNlri` /
+  `MpUnreachNlri` attributes. eBGP IPv6 next-hop rewritten to local socket
+  address.
+- `rustbgpd-api`: `InjectionService` accepts IPv6 prefixes and next-hops in
+  `AddPath` and `DeletePath`. Prefix length validated against AFI-specific
+  maximum (32 for IPv4, 128 for IPv6).
+- `rustbgpd-api`: `RibService` accepts IPv6 unicast in `afi_safi` filter
+  (previously rejected non-IPv4). `WatchRoutes` events carry correct AFI based
+  on prefix type.
+- Config: `families` field on `[[neighbors]]` — list of address families to
+  negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`). Defaults to
+  `["ipv4_unicast"]` for IPv4 neighbors, `["ipv4_unicast", "ipv6_unicast"]`
+  for IPv6 neighbors.
+- Config: IPv6 neighbor addresses now accepted (previously rejected at
+  validation).
+- Config: IPv6 prefixes supported in policy prefix lists (e.g.,
+  `prefix = "2001:db8::/32"`). Prefix length validation uses AFI-specific
+  maximum (32 for IPv4, 128 for IPv6).
+- Interop: `m10-frr-ipv6.clab.yml` containerlab topology — rustbgpd + FRR
+  dual-stack (IPv4 session with MP-BGP IPv6 unicast). FRR advertises 2 IPv4
+  and 2 IPv6 prefixes.
+- Interop: `test-m10-frr-ipv6.sh` automated test script with 6 tests: session
+  with IPv6 capability, IPv4 backward compat, IPv6 prefix receipt, IPv6 best
+  routes, IPv6 withdrawal, IPv6 route injection via gRPC.
+- ADR-0023: Prefix enum and AFI-agnostic RIB for MP-BGP.
+
+### Changed
+
+- `rustbgpd-wire`: `UpdateMessage::build()` now encodes path attributes when
+  attributes are non-empty, even if body NLRI is empty. Required for IPv6-only
+  UPDATEs that carry NLRI inside `MpReachNlri` attributes.
+- `rustbgpd-wire`: `validate_update_attributes()` relaxes the NEXT_HOP
+  requirement when `MP_REACH_NLRI` is present (RFC 4760 §3 — next-hop is
+  carried inside the MP attribute for non-IPv4 families).
+- `rustbgpd-rib`: `Route.prefix` changed from `Ipv4Prefix` to `Prefix` enum.
+  `Route.next_hop` changed from `Ipv4Addr` to `IpAddr`. All RIB data
+  structures (`AdjRibIn`, `LocRib`, `AdjRibOut`) generalized from
+  `HashMap<Ipv4Prefix, _>` to `HashMap<Prefix, _>`.
+- `rustbgpd-rib`: `RibUpdate` and `OutboundRouteUpdate` use `Prefix` for
+  withdrawn routes (was `Ipv4Prefix`). `RouteEvent.prefix` is now `Prefix`.
+- `rustbgpd-policy`: `PrefixListEntry` generalized to match both IPv4 and IPv6
+  prefixes. `le` defaults to 32 for IPv4, 128 for IPv6.
+- `rustbgpd-transport`: `known_prefixes` changed from `HashSet<Ipv4Prefix>` to
+  `HashSet<Prefix>`. `prepare_outbound_attributes()` strips `MpReachNlri` and
+  `MpUnreachNlri` from cloned attributes (rebuilt per-route for outbound).
+- Workspace version bumped to 0.2.0.
+
 ## [0.1.0] — 2026-02-28
 
 First tagged release. Covers milestones M0–M9: a fully functional,

@@ -27,15 +27,16 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 
 ## Highlights
 
+- **Dual-stack (IPv4 + IPv6)** -- MP-BGP (RFC 4760) with `MP_REACH_NLRI` / `MP_UNREACH_NLRI` for IPv6 unicast; IPv4 backward compatible
 - **gRPC-native** -- five services covering peer lifecycle, RIB queries, route injection, streaming events, and daemon control
 - **RFC 4271 compliant** -- full FSM, path attribute validation, best-path selection, split horizon, Adj-RIB-In / Loc-RIB / Adj-RIB-Out
 - **Inbound + outbound peering** -- accepts incoming TCP connections and initiates outbound; passive peering supported
 - **Dynamic peer management** -- add, delete, enable, and disable neighbors at runtime via gRPC
-- **Per-peer policy** -- import/export prefix lists at global or neighbor level
+- **Per-peer policy** -- import/export prefix lists (IPv4 + IPv6) at global or neighbor level
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **367 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **388 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -72,6 +73,7 @@ address = "10.0.0.2"
 remote_asn = 65002
 description = "upstream-1"
 hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
 
 [[neighbors]]
 address = "10.0.1.2"
@@ -169,7 +171,7 @@ The config file is TOML. All runtime changes go through gRPC -- the file is only
 
 **`[global.telemetry]`** -- Prometheus bind address, log format (`json`), gRPC bind address (default `127.0.0.1:50051`).
 
-**`[[neighbors]]`** -- One block per peer: `address`, `remote_asn`, optional `description`, `hold_time` (default 90), `max_prefixes`, `md5_password`, `ttl_security`.
+**`[[neighbors]]`** -- One block per peer: `address`, `remote_asn`, optional `description`, `hold_time` (default 90), `max_prefixes`, `md5_password`, `ttl_security`, `families` (address families to negotiate, default `["ipv4_unicast"]`).
 
 **`[policy]`** -- Global import/export prefix lists. Each entry has `action` (`permit`/`deny`), `prefix` (CIDR), optional `ge`/`le`.
 
@@ -244,22 +246,20 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** Nine milestones complete. 367 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 388 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
-| Milestone | Status | Scope |
-|-----------|--------|-------|
-| M0 -- Establish | Complete | OPEN/KEEPALIVE/NOTIFICATION, FSM, session stability |
-| M1 -- Hear | Complete | UPDATE decode, Adj-RIB-In, `ListReceivedRoutes` gRPC |
-| M2 -- Decide | Complete | Loc-RIB best-path selection, `ListBestRoutes` gRPC |
-| M3 -- Speak | Complete | Route injection, Adj-RIB-Out, export policy, TCP MD5 |
-| M4 -- Route Server | Complete | Dynamic peers, per-peer policy, communities, WatchRoutes |
-| M5 -- Polish | Complete | Inbound listener, session counters, NLRI batching, API hardening |
-| M6 -- Compliance | Complete | Wire RFC compliance, GlobalService, ControlService, coordinated shutdown |
-| M7 -- Wire & RIB Correctness | Complete | Adj-RIB-Out divergence fix, NLRI subcode, PARTIAL bit, policy validation, eBGP best-path |
-| M8 -- API & Observability | Complete | IPv6 rejection, Prometheus gauges, WatchRoutes events, health counters |
-| M9 -- Production Hardening | Complete | Metrics server hardening, gRPC security, TCP collision detection, gRPC supervision |
+| Feature | Version | Scope |
+|---------|---------|-------|
+| Core BGP | v0.1.0 | OPEN/KEEPALIVE/NOTIFICATION, RFC 4271 FSM, UPDATE decode/encode |
+| RIB | v0.1.0 | Adj-RIB-In, Loc-RIB best-path (RFC 4271 §9.1.2), Adj-RIB-Out, split horizon |
+| gRPC API | v0.1.0 | 5 services: Global, Neighbor, RIB, Injection, Control |
+| Dynamic peers | v0.1.0 | Add/delete/enable/disable neighbors at runtime |
+| Policy | v0.1.0 | Prefix lists with ge/le matching, per-peer import/export |
+| Transport | v0.1.0 | Inbound listener, TCP MD5/GTSM, NLRI batching, collision detection |
+| Operations | v0.1.0 | Coordinated shutdown, gRPC supervision, Prometheus metrics |
+| **MP-BGP (IPv6)** | **v0.2.0** | **RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation** |
 
-Next: MP-BGP (IPv6), graceful restart, BMP, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: graceful restart, extended communities, BMP. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

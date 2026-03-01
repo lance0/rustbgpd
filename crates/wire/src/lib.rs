@@ -52,7 +52,7 @@ pub use open::OpenMessage;
 pub use update::UpdateMessage;
 
 // Re-export attribute types
-pub use attribute::{AsPath, AsPathSegment, Origin, PathAttribute, RawAttribute};
-pub use nlri::Ipv4Prefix;
+pub use attribute::{AsPath, AsPathSegment, MpReachNlri, MpUnreachNlri, Origin, PathAttribute, RawAttribute};
+pub use nlri::{Ipv4Prefix, Ipv6Prefix, Prefix};
 pub use update::ParsedUpdate;
 pub use validate::UpdateError;

@@ -8,7 +8,7 @@ use tracing::debug;
 
 use crate::proto;
 use rustbgpd_rib::{RibUpdate, Route, RouteEventType};
-use rustbgpd_wire::{AsPathSegment, PathAttribute};
+use rustbgpd_wire::{AsPathSegment, PathAttribute, Prefix};
 
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -47,13 +47,16 @@ impl RibService {
     }
 }
 
-/// Reject address families we don't support yet.
-/// 0 = UNSPECIFIED (treat as "any"), 1 = `IPV4_UNICAST` — both accepted.
+/// Validate the requested address family.
+/// 0 = UNSPECIFIED (treat as "any"), 1 = `IPV4_UNICAST`, 2 = `IPV6_UNICAST`.
 #[allow(clippy::result_large_err)]
 fn validate_afi_safi(value: i32) -> Result<(), Status> {
-    if value != 0 && value != proto::AddressFamily::Ipv4Unicast as i32 {
+    if value != 0
+        && value != proto::AddressFamily::Ipv4Unicast as i32
+        && value != proto::AddressFamily::Ipv6Unicast as i32
+    {
         return Err(Status::invalid_argument(
-            "only ADDRESS_FAMILY_IPV4_UNICAST is supported",
+            "unsupported address family",
         ));
     }
     Ok(())
@@ -129,8 +132,8 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     }
 
     proto::Route {
-        prefix: route.prefix.addr.to_string(),
-        prefix_length: u32::from(route.prefix.len),
+        prefix: route.prefix.addr_string(),
+        prefix_length: u32::from(route.prefix.prefix_len()),
         next_hop: route.next_hop.to_string(),
         peer_address: route.peer.to_string(),
         origin,
@@ -279,12 +282,16 @@ impl proto::rib_service_server::RibService for RibService {
 
                 Some(Ok(proto::RouteEvent {
                     event_type: event_type.into(),
-                    prefix: event.prefix.addr.to_string(),
-                    prefix_length: u32::from(event.prefix.len),
+                    prefix: event.prefix.addr_string(),
+                    prefix_length: u32::from(event.prefix.prefix_len()),
                     peer_address: event
                         .peer
                         .map_or_else(String::new, |p: IpAddr| p.to_string()),
-                    afi_safi: proto::AddressFamily::Ipv4Unicast.into(),
+                    afi_safi: match event.prefix {
+                        Prefix::V4(_) => proto::AddressFamily::Ipv4Unicast,
+                        Prefix::V6(_) => proto::AddressFamily::Ipv6Unicast,
+                    }
+                    .into(),
                     timestamp: event.timestamp,
                     previous_peer_address: event
                         .previous_peer
@@ -312,42 +319,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_received_routes_rejects_ipv6() {
+    async fn list_received_routes_rejects_unsupported_afi() {
         let svc = make_service();
         let req = Request::new(proto::ListRoutesRequest {
             neighbor_address: String::new(),
-            afi_safi: proto::AddressFamily::Ipv6Unicast.into(),
+            afi_safi: 99, // unsupported value
             page_size: 0,
             page_token: String::new(),
         });
         let err = svc.list_received_routes(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
-        assert!(err.message().contains("IPV4_UNICAST"));
-    }
-
-    #[tokio::test]
-    async fn list_best_routes_rejects_ipv6() {
-        let svc = make_service();
-        let req = Request::new(proto::ListRoutesRequest {
-            neighbor_address: String::new(),
-            afi_safi: proto::AddressFamily::Ipv6Unicast.into(),
-            page_size: 0,
-            page_token: String::new(),
-        });
-        let err = svc.list_best_routes(req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
-    }
-
-    #[tokio::test]
-    async fn watch_routes_rejects_ipv6() {
-        let svc = make_service();
-        let req = Request::new(proto::WatchRoutesRequest {
-            neighbor_address: String::new(),
-            afi_safi: proto::AddressFamily::Ipv6Unicast.into(),
-        });
-        match svc.watch_routes(req).await {
-            Err(err) => assert_eq!(err.code(), tonic::Code::InvalidArgument),
-            Ok(_) => panic!("expected INVALID_ARGUMENT error"),
-        }
     }
 }
