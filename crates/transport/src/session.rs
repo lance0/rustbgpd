@@ -444,15 +444,36 @@ impl PeerSession {
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
+                    // Check GR state before clearing negotiated info
+                    let gr_update = self.negotiated.as_ref().and_then(|neg| {
+                        if neg.peer_gr_capable && neg.peer_restart_state {
+                            let preserved: Vec<(Afi, Safi)> = neg
+                                .peer_gr_families
+                                .iter()
+                                .filter(|f| f.forwarding_preserved)
+                                .map(|f| (f.afi, f.safi))
+                                .collect();
+                            Some(RibUpdate::PeerGracefulRestart {
+                                peer: self.peer_ip,
+                                restart_time: neg.peer_restart_time,
+                                stale_routes_time: self.config.gr_stale_routes_time,
+                                preserved_families: preserved,
+                            })
+                        } else {
+                            None
+                        }
+                    });
+
                     self.negotiated = None;
                     self.negotiated_families.clear();
                     self.known_prefixes.clear();
                     if self.established_at.take().is_some() {
                         self.flap_count += 1;
                     }
-                    let _ = self
-                        .rib_tx
-                        .try_send(RibUpdate::PeerDown { peer: self.peer_ip });
+
+                    let rib_msg = gr_update
+                        .unwrap_or(RibUpdate::PeerDown { peer: self.peer_ip });
+                    let _ = self.rib_tx.try_send(rib_msg);
                 }
             }
         }
