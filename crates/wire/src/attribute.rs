@@ -136,10 +136,8 @@ impl PathAttribute {
             Self::Origin(_) | Self::AsPath(_) | Self::NextHop(_) | Self::LocalPref(_) => {
                 attr_flags::TRANSITIVE
             }
-            Self::Med(_) | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
-            Self::Communities(_) | Self::MpReachNlri(_) => {
-                attr_flags::OPTIONAL | attr_flags::TRANSITIVE
-            }
+            Self::Med(_) | Self::MpReachNlri(_) | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
+            Self::Communities(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             Self::Unknown(raw) => raw.flags,
         }
     }
@@ -561,10 +559,12 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::NEXT_HOP
         | attr_type::LOCAL_PREF
         | attr_type::ATOMIC_AGGREGATE => Some(attr_flags::TRANSITIVE),
-        // Optional non-transitive
-        attr_type::MULTI_EXIT_DISC | attr_type::MP_UNREACH_NLRI => Some(attr_flags::OPTIONAL),
+        // Optional non-transitive (RFC 4760 §3/§4: MP_REACH/UNREACH are non-transitive)
+        attr_type::MULTI_EXIT_DISC | attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI => {
+            Some(attr_flags::OPTIONAL)
+        }
         // Optional transitive
-        attr_type::AGGREGATOR | attr_type::COMMUNITIES | attr_type::MP_REACH_NLRI => {
+        attr_type::AGGREGATOR | attr_type::COMMUNITIES => {
             Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE)
         }
         _ => None,
@@ -614,7 +614,7 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                 }
             }
             PathAttribute::MpReachNlri(mp) => {
-                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                flags = attr_flags::OPTIONAL;
                 type_code = attr_type::MP_REACH_NLRI;
                 encode_mp_reach_nlri(mp, &mut value);
             }
@@ -1259,7 +1259,8 @@ mod tests {
             announced: vec![],
         });
         assert_eq!(attr.type_code(), 14);
-        assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+        // RFC 4760 §3: MP_REACH_NLRI is optional non-transitive
+        assert_eq!(attr.flags(), attr_flags::OPTIONAL);
     }
 
     #[test]
