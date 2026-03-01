@@ -163,6 +163,7 @@ impl PeerManager {
             prefix_count: session_state.as_ref().map_or(0, |s| s.prefix_count),
             hold_time: managed.hold_time,
             max_prefixes: managed.max_prefixes,
+            families: managed.transport_config.peer.families.clone(),
             updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
             updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
             notifications_received: session_state
@@ -192,6 +193,7 @@ impl PeerManager {
                 prefix_count: session_state.as_ref().map_or(0, |s| s.prefix_count),
                 hold_time: managed.hold_time,
                 max_prefixes: managed.max_prefixes,
+                families: managed.transport_config.peer.families.clone(),
                 updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
                 updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
                 notifications_received: session_state

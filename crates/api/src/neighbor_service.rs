@@ -64,14 +64,28 @@ async fn query_advertised_count(
     Ok(u64::try_from(count).unwrap_or(u64::MAX))
 }
 
+fn family_to_string(afi: Afi, safi: Safi) -> String {
+    match (afi, safi) {
+        (Afi::Ipv4, Safi::Unicast) => "ipv4_unicast".to_string(),
+        (Afi::Ipv6, Safi::Unicast) => "ipv6_unicast".to_string(),
+        _ => format!("{afi:?}_{safi:?}"),
+    }
+}
+
 fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
+    let families = info
+        .families
+        .iter()
+        .map(|(afi, safi)| family_to_string(*afi, *safi))
+        .collect();
+
     let config = proto::NeighborConfig {
         address: info.address.to_string(),
         remote_asn: info.remote_asn,
         description: info.description.clone(),
         hold_time: info.hold_time.map_or(0, u32::from),
         max_prefixes: info.max_prefixes.unwrap_or(0),
-        families: Vec::new(),
+        families,
     };
 
     let state = match info.state {
@@ -368,6 +382,7 @@ mod tests {
                     prefix_count: 5,
                     hold_time: None,
                     max_prefixes: None,
+                    families: vec![(Afi::Ipv4, Safi::Unicast)],
                     updates_received: 0,
                     updates_sent: 0,
                     notifications_received: 0,
@@ -394,5 +409,30 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.prefixes_sent, 7);
+    }
+
+    #[test]
+    fn peer_info_to_proto_includes_families() {
+        let info = PeerInfo {
+            address: "10.0.0.1".parse().unwrap(),
+            remote_asn: 65001,
+            description: String::new(),
+            state: rustbgpd_fsm::SessionState::Established,
+            enabled: true,
+            prefix_count: 0,
+            hold_time: None,
+            max_prefixes: None,
+            families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+            updates_received: 0,
+            updates_sent: 0,
+            notifications_received: 0,
+            notifications_sent: 0,
+            flap_count: 0,
+            uptime_secs: 0,
+            last_error: String::new(),
+        };
+        let state = peer_info_to_proto(&info);
+        let config = state.config.unwrap();
+        assert_eq!(config.families, vec!["ipv4_unicast", "ipv6_unicast"]);
     }
 }

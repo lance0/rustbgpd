@@ -62,6 +62,7 @@ pub struct PeerInfo {
     pub prefix_count: usize,
     pub hold_time: Option<u16>,
     pub max_prefixes: Option<u32>,
+    pub families: Vec<(Afi, Safi)>,
     pub updates_received: u64,
     pub updates_sent: u64,
     pub notifications_received: u64,
