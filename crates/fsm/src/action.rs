@@ -1,4 +1,6 @@
-use rustbgpd_wire::{Afi, Capability, GracefulRestartFamily, NotificationMessage, OpenMessage, Safi};
+use rustbgpd_wire::{
+    Afi, Capability, GracefulRestartFamily, NotificationMessage, OpenMessage, Safi,
+};
 
 use crate::state::SessionState;
 

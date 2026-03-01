@@ -138,8 +138,10 @@ mod tests {
         let cfg = test_config(); // graceful_restart = false
         let caps = cfg.local_capabilities();
         assert_eq!(caps.len(), 2);
-        assert!(!caps
-            .iter()
-            .any(|c| matches!(c, Capability::GracefulRestart { .. })));
+        assert!(
+            !caps
+                .iter()
+                .any(|c| matches!(c, Capability::GracefulRestart { .. }))
+        );
     }
 }

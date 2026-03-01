@@ -471,8 +471,7 @@ impl PeerSession {
                         self.flap_count += 1;
                     }
 
-                    let rib_msg = gr_update
-                        .unwrap_or(RibUpdate::PeerDown { peer: self.peer_ip });
+                    let rib_msg = gr_update.unwrap_or(RibUpdate::PeerDown { peer: self.peer_ip });
                     let _ = self.rib_tx.try_send(rib_msg);
                 }
             }
@@ -1131,9 +1130,7 @@ impl PeerSession {
         for (afi, safi) in &update.end_of_rib {
             let msg = match (afi, safi) {
                 // IPv4 Unicast EoR: empty UPDATE (no NLRI, no withdrawn, no attrs)
-                (Afi::Ipv4, Safi::Unicast) => {
-                    UpdateMessage::build(&[], &[], &[], four_octet_as)
-                }
+                (Afi::Ipv4, Safi::Unicast) => UpdateMessage::build(&[], &[], &[], four_octet_as),
                 // IPv6 Unicast EoR: UPDATE with empty MP_UNREACH_NLRI
                 (Afi::Ipv6, Safi::Unicast) => {
                     let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {

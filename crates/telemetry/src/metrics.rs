@@ -354,9 +354,7 @@ impl BgpMetrics {
 
     /// Set the number of stale routes for a GR peer.
     pub fn set_gr_stale_routes(&self, peer: &str, count: i64) {
-        self.gr_stale_routes
-            .with_label_values(&[peer])
-            .set(count);
+        self.gr_stale_routes.with_label_values(&[peer]).set(count);
     }
 
     /// Record a GR timer expiration for a peer.

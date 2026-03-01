@@ -576,10 +576,7 @@ impl RibManager {
                     self.distribute_changes(&changed);
 
                     // If all families received EoR, GR is complete
-                    let all_done = self
-                        .gr_peers
-                        .get(&peer)
-                        .is_some_and(HashSet::is_empty);
+                    let all_done = self.gr_peers.get(&peer).is_some_and(HashSet::is_empty);
                     if all_done {
                         info!(%peer, "graceful restart complete — all End-of-RIB received");
                         self.gr_peers.remove(&peer);
@@ -616,8 +613,7 @@ impl RibManager {
                 self.distribute_changes(&changed);
 
                 // Set stale timer = min(restart_time, stale_routes_time)
-                let timeout_secs =
-                    u64::from(restart_time).min(stale_routes_time);
+                let timeout_secs = u64::from(restart_time).min(stale_routes_time);
                 let deadline =
                     tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
                 self.gr_stale_deadlines.insert(peer, deadline);
@@ -2846,7 +2842,10 @@ mod tests {
             .unwrap();
         let best = reply_rx.await.unwrap();
         assert_eq!(best.len(), 1);
-        assert!(!best[0].is_stale, "route should no longer be stale after EoR");
+        assert!(
+            !best[0].is_stale,
+            "route should no longer be stale after EoR"
+        );
 
         drop(tx);
         handle.await.unwrap();
@@ -2997,9 +2996,7 @@ mod tests {
         .unwrap();
 
         // Source goes fully down during GR — aborts GR, clears all routes
-        tx.send(RibUpdate::PeerDown { peer: source })
-            .await
-            .unwrap();
+        tx.send(RibUpdate::PeerDown { peer: source }).await.unwrap();
 
         // Routes should be gone
         let (reply_tx, reply_rx) = oneshot::channel();

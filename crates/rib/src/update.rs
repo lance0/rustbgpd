@@ -62,11 +62,7 @@ pub enum RibUpdate {
         reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
     },
     /// End-of-RIB marker received from a peer for a given address family.
-    EndOfRib {
-        peer: IpAddr,
-        afi: Afi,
-        safi: Safi,
-    },
+    EndOfRib { peer: IpAddr, afi: Afi, safi: Safi },
     /// Peer entered graceful restart — preserve routes but mark stale.
     PeerGracefulRestart {
         peer: IpAddr,
