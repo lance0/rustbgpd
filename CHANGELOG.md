@@ -11,6 +11,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `rustbgpd-rib`: Adj-RIB-Out no longer diverges from wire state for eBGP
+  peers without a valid IPv6 next-hop. `sendable_families` passed at `PeerUp`
+  time filters unsendable address families before Adj-RIB-Out insertion,
+  keeping `ListAdvertisedRoutes`, withdraw bookkeeping, and dirty-peer resync
+  in sync with what the transport actually sends.
 - `rustbgpd-wire`: `MP_REACH_NLRI` flags corrected from optional-transitive
   (0xC0) to optional-non-transitive (0x80) per RFC 4760 §3. Affects encoding,
   decoding validation (`expected_flags`), and `flags()` accessor.
