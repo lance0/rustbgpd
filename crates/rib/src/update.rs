@@ -70,8 +70,8 @@ pub enum RibUpdate {
         restart_time: u16,
         /// Our configured stale routes time (seconds).
         stale_routes_time: u64,
-        /// Families for which the peer preserved forwarding state.
-        preserved_families: Vec<(Afi, Safi)>,
+        /// All families from the peer's Graceful Restart capability.
+        gr_families: Vec<(Afi, Safi)>,
     },
     /// Query: return the number of prefixes in the Loc-RIB.
     QueryLocRibCount { reply: oneshot::Sender<usize> },

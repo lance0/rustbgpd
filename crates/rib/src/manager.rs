@@ -592,13 +592,13 @@ impl RibManager {
                 peer,
                 restart_time,
                 stale_routes_time,
-                preserved_families,
+                gr_families,
             } => {
                 info!(%peer, restart_time, stale_routes_time, "peer entered graceful restart");
 
                 // Mark routes as stale for preserved families
                 if let Some(rib) = self.ribs.get_mut(&peer) {
-                    for &family in &preserved_families {
+                    for &family in &gr_families {
                         rib.mark_stale(family);
                     }
                 }
@@ -620,7 +620,7 @@ impl RibManager {
 
                 // Record awaiting families
                 self.gr_peers
-                    .insert(peer, preserved_families.into_iter().collect());
+                    .insert(peer, gr_families.into_iter().collect());
 
                 // Metrics
                 let peer_label = peer.to_string();
@@ -2772,7 +2772,7 @@ mod tests {
             peer: source,
             restart_time: 120,
             stale_routes_time: 360,
-            preserved_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
         })
         .await
         .unwrap();
@@ -2813,7 +2813,7 @@ mod tests {
             peer: source,
             restart_time: 120,
             stale_routes_time: 360,
-            preserved_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
         })
         .await
         .unwrap();
@@ -2876,7 +2876,7 @@ mod tests {
             peer: source,
             restart_time: 5,
             stale_routes_time: 10,
-            preserved_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
         })
         .await
         .unwrap();
@@ -2930,7 +2930,7 @@ mod tests {
             peer: source,
             restart_time: 120,
             stale_routes_time: 360,
-            preserved_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
         })
         .await
         .unwrap();
@@ -2990,7 +2990,7 @@ mod tests {
             peer: source,
             restart_time: 120,
             stale_routes_time: 360,
-            preserved_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
         })
         .await
         .unwrap();

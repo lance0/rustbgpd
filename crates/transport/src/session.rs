@@ -444,20 +444,25 @@ impl PeerSession {
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
-                    // Check GR state before clearing negotiated info
+                    // Check GR state before clearing negotiated info.
+                    // RFC 4724 §4.2: retain routes if the peer previously
+                    // advertised Graceful Restart capability and our config
+                    // enables GR.  The R-bit is NOT checked here — it
+                    // indicates restart state in the NEW OPEN, not the dying
+                    // session.  All families from the peer's GR capability
+                    // are retained (not just forwarding-preserved ones).
                     let gr_update = self.negotiated.as_ref().and_then(|neg| {
-                        if neg.peer_gr_capable && neg.peer_restart_state {
-                            let preserved: Vec<(Afi, Safi)> = neg
+                        if neg.peer_gr_capable && self.config.peer.graceful_restart {
+                            let gr_families: Vec<(Afi, Safi)> = neg
                                 .peer_gr_families
                                 .iter()
-                                .filter(|f| f.forwarding_preserved)
                                 .map(|f| (f.afi, f.safi))
                                 .collect();
                             Some(RibUpdate::PeerGracefulRestart {
                                 peer: self.peer_ip,
                                 restart_time: neg.peer_restart_time,
                                 stale_routes_time: self.config.gr_stale_routes_time,
-                                preserved_families: preserved,
+                                gr_families,
                             })
                         } else {
                             None
