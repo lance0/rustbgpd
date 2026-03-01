@@ -35,6 +35,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `rustbgpd-transport`: Negotiated address families enforced at inbound and
   outbound edges. Routes for non-negotiated families are ignored inbound and
   filtered outbound.
+- `rustbgpd-transport`: Send-time IPv6 next-hop filter now rejects loopback,
+  link-local, and multicast (was only rejecting `::`), consistent with
+  receive-side validation.
 - `rustbgpd-fsm`: Implicit IPv4 unicast fallback per RFC 4760 §8 — when
   neither side advertises MP-BGP for IPv4, IPv4 unicast is still negotiated.
 - `rustbgpd-api`: `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`,
@@ -42,13 +45,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (previously validated the enum but returned all routes regardless).
 - `rustbgpd-api`: `AddNeighbor` gRPC now accepts `families` field for address
   family configuration (previously hardcoded to IPv4 unicast).
+- `rustbgpd-api`: `ListNeighbors` and `GetNeighborState` now return configured
+  address families (was hardcoded to empty).
+- `rustbgpd-api`: `local_ipv6_nexthop` config now properly wired through
+  `PeerManagerNeighborConfig` for statically configured peers (was dead config).
 - `rustbgpd-rib`: Metrics label changed from `"ipv4_unicast"` to `"all"` since
   RIB now tracks both IPv4 and IPv6 routes.
+- Config: `local_ipv6_nexthop` validation now rejects loopback, link-local,
+  multicast, and unspecified addresses (was only checking parse-ability).
 
 ### Added
 
 - Config: `local_ipv6_nexthop` field on `[[neighbors]]` — explicit IPv6
   next-hop address for eBGP sessions over IPv4 transport.
+- `rustbgpd-wire`: Public `is_valid_ipv6_nexthop()` helper for reuse across
+  config validation, send-time filtering, and receive-side validation.
 
 ## [0.2.0] — 2026-02-28
 
