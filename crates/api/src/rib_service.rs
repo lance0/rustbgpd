@@ -62,6 +62,20 @@ fn validate_afi_safi(value: i32) -> Result<(), Status> {
     Ok(())
 }
 
+/// Filter routes by the requested address family.
+/// `afi_safi == 0` (UNSPECIFIED) returns all routes.
+fn filter_routes_by_family(routes: Vec<Route>, afi_safi: i32) -> Vec<Route> {
+    match afi_safi {
+        x if x == proto::AddressFamily::Ipv4Unicast as i32 => {
+            routes.into_iter().filter(|r| matches!(r.prefix, Prefix::V4(_))).collect()
+        }
+        x if x == proto::AddressFamily::Ipv6Unicast as i32 => {
+            routes.into_iter().filter(|r| matches!(r.prefix, Prefix::V6(_))).collect()
+        }
+        _ => routes, // 0 (unspecified) = all
+    }
+}
+
 fn parse_page_params(req: &proto::ListRoutesRequest) -> Result<(usize, usize), &'static str> {
     let offset: usize = if req.page_token.is_empty() {
         0
@@ -168,6 +182,7 @@ impl proto::rib_service_server::RibService for RibService {
         };
 
         let all_routes = self.query_routes(peer).await?;
+        let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
         Ok(Response::new(build_response(
             &all_routes,
@@ -184,6 +199,7 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         validate_afi_safi(req.afi_safi)?;
         let all_routes = self.query_best_routes().await?;
+        let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
         Ok(Response::new(build_response(
             &all_routes,
@@ -223,6 +239,7 @@ impl proto::rib_service_server::RibService for RibService {
         let all_routes = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
 
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
         Ok(Response::new(build_response(
@@ -240,6 +257,7 @@ impl proto::rib_service_server::RibService for RibService {
         let req = request.into_inner();
         validate_afi_safi(req.afi_safi)?;
 
+        let afi_safi_filter = req.afi_safi;
         let peer_filter: Option<IpAddr> = if req.neighbor_address.is_empty() {
             None
         } else {
@@ -263,6 +281,15 @@ impl proto::rib_service_server::RibService for RibService {
 
         let stream = BroadcastStream::new(broadcast_rx).filter_map(move |result| match result {
             Ok(event) => {
+                // Filter by AFI/SAFI if requested
+                if afi_safi_filter != 0 {
+                    let is_v4 = matches!(event.prefix, Prefix::V4(_));
+                    let want_v4 = afi_safi_filter == proto::AddressFamily::Ipv4Unicast as i32;
+                    if is_v4 != want_v4 {
+                        return None;
+                    }
+                }
+
                 // Filter by peer address if requested — check both current
                 // and previous peer so subscribers filtered to a specific peer
                 // see BestChanged/Withdrawn events when the route moves away.
@@ -316,6 +343,43 @@ mod tests {
     fn make_service() -> RibService {
         let (tx, _rx) = mpsc::channel(16);
         RibService::new(tx)
+    }
+
+    #[test]
+    fn filter_routes_unspecified_returns_all() {
+        use std::net::Ipv4Addr;
+        use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
+
+        let v4 = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: "10.0.0.1".parse().unwrap(),
+            peer: "10.0.0.1".parse().unwrap(),
+            attributes: vec![],
+            received_at: std::time::Instant::now(),
+            is_ebgp: false,
+        };
+        let v6 = Route {
+            prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+            next_hop: "2001:db8::1".parse().unwrap(),
+            peer: "2001:db8::1".parse().unwrap(),
+            attributes: vec![],
+            received_at: std::time::Instant::now(),
+            is_ebgp: false,
+        };
+
+        // Unspecified returns all
+        let all = filter_routes_by_family(vec![v4.clone(), v6.clone()], 0);
+        assert_eq!(all.len(), 2);
+
+        // IPv4 filter
+        let v4_only = filter_routes_by_family(vec![v4.clone(), v6.clone()], proto::AddressFamily::Ipv4Unicast as i32);
+        assert_eq!(v4_only.len(), 1);
+        assert!(matches!(v4_only[0].prefix, Prefix::V4(_)));
+
+        // IPv6 filter
+        let v6_only = filter_routes_by_family(vec![v4, v6], proto::AddressFamily::Ipv6Unicast as i32);
+        assert_eq!(v6_only.len(), 1);
+        assert!(matches!(v6_only[0].prefix, Prefix::V6(_)));
     }
 
     #[tokio::test]
