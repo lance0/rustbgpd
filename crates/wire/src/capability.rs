@@ -199,10 +199,16 @@ impl Capability {
                         value: value_len.to_string(),
                     });
                 }
+                if *restart_time > 4095 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "graceful_restart_time",
+                        value: restart_time.to_string(),
+                    });
+                }
                 buf.put_u8(capability_code::GRACEFUL_RESTART);
                 #[expect(clippy::cast_possible_truncation)]
                 buf.put_u8(value_len as u8);
-                let mut flags_and_time = *restart_time & 0x0FFF;
+                let mut flags_and_time = *restart_time;
                 if *restart_state {
                     flags_and_time |= 0x8000;
                 }
@@ -293,12 +299,13 @@ pub fn decode_optional_parameters(
         }
 
         if param_type == param_type::CAPABILITIES {
-            let mut cap_remaining = usize::from(param_len);
-            while cap_remaining > 0 {
-                let before = buf.remaining();
-                let cap = Capability::decode(buf)?;
-                let consumed = before - buf.remaining();
-                cap_remaining = cap_remaining.saturating_sub(consumed);
+            // Parse capabilities from a bounded sub-buffer so a malformed
+            // capability length cannot consume into the next parameter or
+            // beyond the OPEN body.
+            let param_bytes = buf.copy_to_bytes(usize::from(param_len));
+            let mut cap_buf = param_bytes;
+            while cap_buf.has_remaining() {
+                let cap = Capability::decode(&mut cap_buf)?;
                 capabilities.push(cap);
             }
         } else {
@@ -318,6 +325,12 @@ pub fn decode_optional_parameters(
 ///
 /// Returns [`EncodeError::ValueOutOfRange`] if the total capabilities size
 /// exceeds 255 bytes or any individual capability is too large.
+///
+/// # Note
+///
+/// On error, partial bytes may have been written to `buf`. Callers should
+/// encode into a staging buffer (as `OpenMessage::encode` does) to ensure
+/// atomicity.
 pub fn encode_optional_parameters(
     capabilities: &[Capability],
     buf: &mut impl BufMut,
@@ -659,5 +672,55 @@ mod tests {
         // 50 caps * 7 bytes each = 350 > 255
         let mut buf = bytes::BytesMut::new();
         assert!(encode_optional_parameters(&caps, &mut buf).is_err());
+    }
+
+    #[test]
+    fn encode_rejects_restart_time_over_4095() {
+        let cap = Capability::GracefulRestart {
+            restart_state: false,
+            restart_time: 4096,
+            families: vec![],
+        };
+        let mut buf = bytes::BytesMut::new();
+        assert!(cap.encode(&mut buf).is_err());
+    }
+
+    #[test]
+    fn encode_accepts_restart_time_at_4095() {
+        let cap = Capability::GracefulRestart {
+            restart_state: false,
+            restart_time: 4095,
+            families: vec![],
+        };
+        let mut buf = bytes::BytesMut::new();
+        assert!(cap.encode(&mut buf).is_ok());
+    }
+
+    #[test]
+    fn decode_capability_bounded_to_parameter_slice() {
+        // Build optional parameters where the capability inside claims a
+        // length that would overrun the parameter boundary.
+        // Parameter: type=2, len=4 (only 4 bytes of capability data)
+        // Capability inside: code=65 (FourOctetAs), len=8 (claims 8 but only 2 available)
+        // Followed by: a valid second parameter that should not be consumed.
+        let mut data = bytes::BytesMut::new();
+        // Parameter 1: capabilities, len=4
+        data.put_u8(2); // param type = capabilities
+        data.put_u8(4); // param len = 4 bytes
+        // Capability: code=65, len=8 (overflows the 4-byte parameter)
+        data.put_u8(65);
+        data.put_u8(8); // claims 8 bytes but only 2 remain in parameter
+        data.put_u16(0xBEEF); // 2 bytes of data
+        // Parameter 2: unknown type, should be untouched
+        data.put_u8(99); // param type = unknown
+        data.put_u8(2); // param len = 2
+        data.put_u16(0xCAFE);
+
+        let mut buf = data.freeze();
+        // Should fail because the capability overflows the parameter slice
+        // Total is 8 bytes: param1(2+4) + param2(2+2) but we pass the full
+        // length so the outer parser sees both parameters.
+        let result = decode_optional_parameters(&mut buf, 8);
+        assert!(result.is_err());
     }
 }
