@@ -388,7 +388,12 @@ fn decode_mp_reach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
                     detail: format!("MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4)"),
                 });
             }
-            IpAddr::V4(Ipv4Addr::new(nh_bytes[0], nh_bytes[1], nh_bytes[2], nh_bytes[3]))
+            IpAddr::V4(Ipv4Addr::new(
+                nh_bytes[0],
+                nh_bytes[1],
+                nh_bytes[2],
+                nh_bytes[3],
+            ))
         }
         Afi::Ipv6 => {
             if nh_len != 16 && nh_len != 32 {
@@ -1214,9 +1219,10 @@ mod tests {
         let mp = MpUnreachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
-            withdrawn: vec![
-                Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
-            ],
+            withdrawn: vec![Prefix::V6(Ipv6Prefix::new(
+                "2001:db8:1::".parse().unwrap(),
+                48,
+            ))],
         };
         let attrs = vec![PathAttribute::MpUnreachNlri(mp.clone())];
 
@@ -1236,9 +1242,10 @@ mod tests {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            announced: vec![
-                Prefix::V4(crate::nlri::Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 16)),
-            ],
+            announced: vec![Prefix::V4(crate::nlri::Ipv4Prefix::new(
+                Ipv4Addr::new(10, 1, 0, 0),
+                16,
+            ))],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 

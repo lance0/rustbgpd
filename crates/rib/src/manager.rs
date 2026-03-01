@@ -331,8 +331,7 @@ impl RibManager {
                     let count = rib.len();
                     rib.clear();
                     debug!(%peer, cleared = count, "peer down — rib cleared");
-                    self.metrics
-                        .set_rib_prefixes(&peer.to_string(), "all", 0);
+                    self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
                     let changed = self.recompute_best(&affected);
                     self.distribute_changes(&changed);
                 }
@@ -353,8 +352,7 @@ impl RibManager {
                 debug!(%peer, "peer up — registering for outbound updates");
                 let peer_label = peer.to_string();
                 self.metrics.set_rib_prefixes(&peer_label, "all", 0);
-                self.metrics
-                    .set_adj_rib_out_prefixes(&peer_label, "all", 0);
+                self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
                 self.outbound_peers.insert(peer, outbound_tx);
                 self.peer_export_policies.insert(peer, export_policy);
                 self.send_initial_table(peer);
@@ -368,11 +366,8 @@ impl RibManager {
                     .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
                 rib.insert(route);
                 debug!(%prefix, "injected local route");
-                self.metrics.set_rib_prefixes(
-                    &LOCAL_PEER.to_string(),
-                    "all",
-                    gauge_val(rib.len()),
-                );
+                self.metrics
+                    .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
 
                 let mut affected = HashSet::new();
                 affected.insert(prefix);
@@ -899,8 +894,14 @@ mod tests {
         let best = reply_rx.await.unwrap();
         assert_eq!(best.len(), 2);
 
-        let best_a = best.iter().find(|r| r.prefix == Prefix::V4(prefix_a)).unwrap();
-        let best_b = best.iter().find(|r| r.prefix == Prefix::V4(prefix_b)).unwrap();
+        let best_a = best
+            .iter()
+            .find(|r| r.prefix == Prefix::V4(prefix_a))
+            .unwrap();
+        let best_b = best
+            .iter()
+            .find(|r| r.prefix == Prefix::V4(prefix_b))
+            .unwrap();
         assert_eq!(best_a.peer, peer1);
         assert_eq!(best_b.peer, peer2);
 

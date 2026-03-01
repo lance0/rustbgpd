@@ -401,7 +401,8 @@ impl PeerSession {
                         four_octet_as = neg.four_octet_as,
                         "session established"
                     );
-                    self.negotiated_families.clone_from(&neg.negotiated_families);
+                    self.negotiated_families
+                        .clone_from(&neg.negotiated_families);
                     self.negotiated = Some(neg);
                     self.established_at = Some(Instant::now());
                     // Register with RIB manager for outbound updates
@@ -704,11 +705,7 @@ impl PeerSession {
             .collect();
 
         // Body withdrawn routes (IPv4)
-        let mut withdrawn: Vec<Prefix> = parsed
-            .withdrawn
-            .iter()
-            .map(|p| Prefix::V4(*p))
-            .collect();
+        let mut withdrawn: Vec<Prefix> = parsed.withdrawn.iter().map(|p| Prefix::V4(*p)).collect();
 
         // MP-BGP NLRI from attributes
         // For IPv6 routes, also strip body NEXT_HOP — it's IPv4-specific and
@@ -733,10 +730,8 @@ impl PeerSession {
                         continue;
                     }
                     for prefix in &mp.announced {
-                        if rustbgpd_policy::check_prefix_list(
-                            self.import_policy.as_ref(),
-                            *prefix,
-                        ) == rustbgpd_policy::PolicyAction::Permit
+                        if rustbgpd_policy::check_prefix_list(self.import_policy.as_ref(), *prefix)
+                            == rustbgpd_policy::PolicyAction::Permit
                         {
                             announced.push(Route {
                                 prefix: *prefix,
@@ -1007,7 +1002,10 @@ impl PeerSession {
             } else {
                 route.next_hop
             };
-            if let Some(group) = v6_groups.iter_mut().find(|(a, h, _)| *a == attrs && *h == nh) {
+            if let Some(group) = v6_groups
+                .iter_mut()
+                .find(|(a, h, _)| *a == attrs && *h == nh)
+            {
                 group.2.push(route.prefix);
             } else {
                 v6_groups.push((attrs, nh, vec![route.prefix]));

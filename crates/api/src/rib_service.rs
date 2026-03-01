@@ -55,9 +55,7 @@ fn validate_afi_safi(value: i32) -> Result<(), Status> {
         && value != proto::AddressFamily::Ipv4Unicast as i32
         && value != proto::AddressFamily::Ipv6Unicast as i32
     {
-        return Err(Status::invalid_argument(
-            "unsupported address family",
-        ));
+        return Err(Status::invalid_argument("unsupported address family"));
     }
     Ok(())
 }
@@ -66,12 +64,14 @@ fn validate_afi_safi(value: i32) -> Result<(), Status> {
 /// `afi_safi == 0` (UNSPECIFIED) returns all routes.
 fn filter_routes_by_family(routes: Vec<Route>, afi_safi: i32) -> Vec<Route> {
     match afi_safi {
-        x if x == proto::AddressFamily::Ipv4Unicast as i32 => {
-            routes.into_iter().filter(|r| matches!(r.prefix, Prefix::V4(_))).collect()
-        }
-        x if x == proto::AddressFamily::Ipv6Unicast as i32 => {
-            routes.into_iter().filter(|r| matches!(r.prefix, Prefix::V6(_))).collect()
-        }
+        x if x == proto::AddressFamily::Ipv4Unicast as i32 => routes
+            .into_iter()
+            .filter(|r| matches!(r.prefix, Prefix::V4(_)))
+            .collect(),
+        x if x == proto::AddressFamily::Ipv6Unicast as i32 => routes
+            .into_iter()
+            .filter(|r| matches!(r.prefix, Prefix::V6(_)))
+            .collect(),
         _ => routes, // 0 (unspecified) = all
     }
 }
@@ -347,8 +347,8 @@ mod tests {
 
     #[test]
     fn filter_routes_unspecified_returns_all() {
-        use std::net::Ipv4Addr;
         use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
+        use std::net::Ipv4Addr;
 
         let v4 = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -372,12 +372,16 @@ mod tests {
         assert_eq!(all.len(), 2);
 
         // IPv4 filter
-        let v4_only = filter_routes_by_family(vec![v4.clone(), v6.clone()], proto::AddressFamily::Ipv4Unicast as i32);
+        let v4_only = filter_routes_by_family(
+            vec![v4.clone(), v6.clone()],
+            proto::AddressFamily::Ipv4Unicast as i32,
+        );
         assert_eq!(v4_only.len(), 1);
         assert!(matches!(v4_only[0].prefix, Prefix::V4(_)));
 
         // IPv6 filter
-        let v6_only = filter_routes_by_family(vec![v4, v6], proto::AddressFamily::Ipv6Unicast as i32);
+        let v6_only =
+            filter_routes_by_family(vec![v4, v6], proto::AddressFamily::Ipv6Unicast as i32);
         assert_eq!(v6_only.len(), 1);
         assert!(matches!(v6_only[0].prefix, Prefix::V6(_)));
     }

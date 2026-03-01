@@ -158,10 +158,7 @@ mod tests {
             }],
             default_action: PolicyAction::Deny,
         };
-        assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8)),
-            PolicyAction::Deny
-        );
+        assert_eq!(pl.evaluate(v4_prefix([10, 0, 0, 0], 8)), PolicyAction::Deny);
         assert_eq!(
             pl.evaluate(v4_prefix([10, 1, 0, 0], 16)),
             PolicyAction::Permit
@@ -249,10 +246,7 @@ mod tests {
             entries: vec![],
             default_action: PolicyAction::Deny,
         };
-        assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8)),
-            PolicyAction::Deny
-        );
+        assert_eq!(pl.evaluate(v4_prefix([10, 0, 0, 0], 8)), PolicyAction::Deny);
     }
 
     #[test]
@@ -274,10 +268,7 @@ mod tests {
             ],
             default_action: PolicyAction::Permit,
         };
-        assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8)),
-            PolicyAction::Deny
-        );
+        assert_eq!(pl.evaluate(v4_prefix([10, 0, 0, 0], 8)), PolicyAction::Deny);
     }
 
     #[test]

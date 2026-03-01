@@ -284,12 +284,11 @@ impl Config {
 
             // Validate local_ipv6_nexthop if configured
             if let Some(ref nh) = neighbor.local_ipv6_nexthop {
-                nh.parse::<Ipv6Addr>().map_err(|e| {
-                    ConfigError::InvalidLocalIpv6Nexthop {
+                nh.parse::<Ipv6Addr>()
+                    .map_err(|e| ConfigError::InvalidLocalIpv6Nexthop {
                         value: nh.clone(),
                         reason: e.to_string(),
-                    }
-                })?;
+                    })?;
             }
 
             parse_prefix_list(&neighbor.import_policy)?;

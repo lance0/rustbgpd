@@ -124,7 +124,13 @@ fn intersect_families(config: &PeerConfig, peer_caps: &[Capability]) -> Vec<(Afi
     let ipv4_unicast = (Afi::Ipv4, Safi::Unicast);
     if !result.contains(&ipv4_unicast) {
         let peer_advertises_mp_ipv4 = peer_caps.iter().any(|c| {
-            matches!(c, Capability::MultiProtocol { afi: Afi::Ipv4, safi: Safi::Unicast })
+            matches!(
+                c,
+                Capability::MultiProtocol {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast
+                }
+            )
         });
         let local_advertises_mp_ipv4 = config.families.contains(&ipv4_unicast);
 
@@ -293,8 +299,14 @@ mod tests {
         };
         let neg = validate_open(&open, &cfg).unwrap();
         // IPv6 negotiated explicitly, IPv4 added implicitly
-        assert!(neg.negotiated_families.contains(&(Afi::Ipv6, Safi::Unicast)));
-        assert!(neg.negotiated_families.contains(&(Afi::Ipv4, Safi::Unicast)));
+        assert!(
+            neg.negotiated_families
+                .contains(&(Afi::Ipv6, Safi::Unicast))
+        );
+        assert!(
+            neg.negotiated_families
+                .contains(&(Afi::Ipv4, Safi::Unicast))
+        );
     }
 
     #[test]
@@ -322,7 +334,10 @@ mod tests {
         };
         let neg = validate_open(&open, &cfg).unwrap();
         // Peer didn't advertise IPv4 MP → implicit fallback applies
-        assert!(neg.negotiated_families.contains(&(Afi::Ipv4, Safi::Unicast)));
+        assert!(
+            neg.negotiated_families
+                .contains(&(Afi::Ipv4, Safi::Unicast))
+        );
     }
 
     #[test]
