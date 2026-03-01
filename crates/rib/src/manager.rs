@@ -430,28 +430,17 @@ impl RibManager {
                 export_policy,
                 sendable_families,
             } => {
-                // Cancel GR timer if peer re-establishes during graceful restart.
-                // Stale routes will be replaced naturally by fresh routes from the peer.
-                if self.gr_peers.remove(&peer).is_some() {
-                    self.gr_stale_deadlines.remove(&peer);
-                    info!(%peer, "peer re-established during graceful restart — cancelling GR timer");
-                    let peer_label = peer.to_string();
-                    self.metrics.set_gr_active(&peer_label, false);
-                    self.metrics.set_gr_stale_routes(&peer_label, 0);
-                    // Clear stale flags and recompute best paths
-                    if let Some(rib) = self.ribs.get_mut(&peer) {
-                        rib.clear_stale((Afi::Ipv4, Safi::Unicast));
-                        rib.clear_stale((Afi::Ipv6, Safi::Unicast));
+                // If the peer re-establishes during graceful restart, keep
+                // routes stale and wait for End-of-RIB per family (RFC 4724
+                // §4.2).  Reset the timer from restart_time (session window)
+                // to stale_routes_time (EoR window).
+                if self.gr_peers.contains_key(&peer) {
+                    if let Some(&srt) = self.gr_stale_routes_time.get(&peer) {
+                        let deadline = tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(srt);
+                        self.gr_stale_deadlines.insert(peer, deadline);
                     }
-                    let affected: HashSet<Prefix> = self
-                        .ribs
-                        .get(&peer)
-                        .map(|rib| rib.iter().map(|r| r.prefix).collect())
-                        .unwrap_or_default();
-                    if !affected.is_empty() {
-                        let changed = self.recompute_best(&affected);
-                        self.distribute_changes(&changed);
-                    }
+                    info!(%peer, "peer re-established during GR — waiting for End-of-RIB");
                 }
 
                 debug!(%peer, "peer up — registering for outbound updates");
@@ -2937,7 +2926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gr_peer_up_cancels_timer() {
+    async fn gr_peer_up_defers_stale_to_eor() {
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
@@ -2972,8 +2961,8 @@ mod tests {
         let best = reply_rx.await.unwrap();
         assert!(best[0].is_stale);
 
-        // Source re-establishes (PeerUp cancels GR)
-        let (out_tx, _out_rx) = mpsc::channel(64);
+        // Source re-establishes — route should STILL be stale
+        let (out_tx, mut out_rx) = mpsc::channel(64);
         tx.send(RibUpdate::PeerUp {
             peer: source,
             outbound_tx: out_tx,
@@ -2982,15 +2971,105 @@ mod tests {
         })
         .await
         .unwrap();
+        drain_eor(&mut out_rx).await;
 
-        // Route should no longer be stale
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
             .await
             .unwrap();
         let best = reply_rx.await.unwrap();
         assert_eq!(best.len(), 1);
-        assert!(!best[0].is_stale, "stale flag cleared after PeerUp");
+        assert!(best[0].is_stale, "route should still be stale after PeerUp");
+
+        // End-of-RIB clears stale and completes GR
+        tx.send(RibUpdate::EndOfRib {
+            peer: source,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let best = reply_rx.await.unwrap();
+        assert_eq!(best.len(), 1);
+        assert!(
+            !best[0].is_stale,
+            "route should be non-stale after End-of-RIB"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gr_peer_up_timer_expires_sweeps_stale() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        // Source sends a route
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Source enters GR with short restart_time
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer: source,
+            restart_time: 5,
+            stale_routes_time: 10,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        })
+        .await
+        .unwrap();
+
+        // Advance past restart_time but before stale_routes_time
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        // Source re-establishes — timer resets to stale_routes_time (10s)
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: source,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // Route still stale (no EoR yet)
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let best = reply_rx.await.unwrap();
+        assert_eq!(best.len(), 1);
+        assert!(best[0].is_stale);
+
+        // Advance past stale_routes_time — timer should sweep
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let best = reply_rx.await.unwrap();
+        assert!(best.is_empty(), "stale routes should be swept after timer");
 
         drop(tx);
         handle.await.unwrap();
