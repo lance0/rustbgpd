@@ -83,6 +83,7 @@ impl PeerManager {
         let remote_addr = SocketAddr::new(config.address, BGP_PORT);
         let mut transport = TransportConfig::new(peer, remote_addr);
         transport.max_prefixes = config.max_prefixes;
+        transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport
     }
 
@@ -467,6 +468,7 @@ mod tests {
             hold_time: None,
             max_prefixes: None,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
+            local_ipv6_nexthop: None,
             import_policy: None,
             export_policy: None,
         }
@@ -674,6 +676,21 @@ mod tests {
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();
+    }
+
+    #[test]
+    fn build_transport_config_preserves_local_ipv6_nexthop() {
+        let (_, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+
+        let nh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let mut config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+        config.local_ipv6_nexthop = Some(nh);
+
+        let transport = mgr.build_transport_config(&config);
+        assert_eq!(transport.local_ipv6_nexthop, Some(nh));
     }
 
     #[test]

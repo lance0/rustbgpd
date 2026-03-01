@@ -142,6 +142,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 None
             },
             families,
+            local_ipv6_nexthop: None,
             import_policy: None,
             export_policy: None,
         };

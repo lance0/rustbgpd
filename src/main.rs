@@ -186,6 +186,7 @@ async fn run(config: Config) {
                     hold_time: Some(transport_config.peer.hold_time),
                     max_prefixes: transport_config.max_prefixes,
                     families: transport_config.peer.families.clone(),
+                    local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
                     import_policy,
                     export_policy,
                 },

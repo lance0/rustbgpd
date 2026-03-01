@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PrefixList;
@@ -46,6 +46,7 @@ pub struct PeerManagerNeighborConfig {
     pub hold_time: Option<u16>,
     pub max_prefixes: Option<u32>,
     pub families: Vec<(Afi, Safi)>,
+    pub local_ipv6_nexthop: Option<Ipv6Addr>,
     pub import_policy: Option<PrefixList>,
     pub export_policy: Option<PrefixList>,
 }
