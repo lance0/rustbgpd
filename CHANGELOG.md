@@ -9,6 +9,47 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `rustbgpd-wire`: `MP_REACH_NLRI` flags corrected from optional-transitive
+  (0xC0) to optional-non-transitive (0x80) per RFC 4760 §3. Affects encoding,
+  decoding validation (`expected_flags`), and `flags()` accessor.
+  `MP_UNREACH_NLRI` was already correct.
+- `rustbgpd-wire`: `validate_update_attributes()` now requires `NEXT_HOP` for
+  body NLRI even when `MP_REACH_NLRI` is present. Mixed UPDATEs (body NLRI +
+  MP_REACH) no longer incorrectly waive NEXT_HOP.
+- `rustbgpd-wire`: `Ipv4Prefix::new()` clamps prefix length to 32;
+  `Ipv6Prefix::new()` clamps to 128. Wire decoders already rejected invalid
+  lengths but constructors silently created invalid prefixes.
+- `rustbgpd-wire`: IPv6 next-hops in `MP_REACH_NLRI` validated — link-local
+  (`fe80::/10`), loopback, multicast, and unspecified addresses rejected with
+  NOTIFICATION (3,8).
+- `rustbgpd-transport`: IPv6 routes built from `MP_REACH_NLRI` no longer
+  inherit `PathAttribute::NextHop(ipv4)` from the same UPDATE.
+- `rustbgpd-transport`: IPv6 eBGP next-hop resolution: uses
+  `local_ipv6_nexthop` config > local socket address > suppress (no longer
+  falls back to `::`).
+- `rustbgpd-transport`: IPv6 outbound batching now groups by `(attributes,
+  next_hop)` instead of just attributes. Routes with different next-hops get
+  separate UPDATEs.
+- `rustbgpd-transport`: Negotiated address families enforced at inbound and
+  outbound edges. Routes for non-negotiated families are ignored inbound and
+  filtered outbound.
+- `rustbgpd-fsm`: Implicit IPv4 unicast fallback per RFC 4760 §8 — when
+  neither side advertises MP-BGP for IPv4, IPv4 unicast is still negotiated.
+- `rustbgpd-api`: `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`,
+  and `WatchRoutes` now filter results by the requested `afi_safi` family
+  (previously validated the enum but returned all routes regardless).
+- `rustbgpd-api`: `AddNeighbor` gRPC now accepts `families` field for address
+  family configuration (previously hardcoded to IPv4 unicast).
+- `rustbgpd-rib`: Metrics label changed from `"ipv4_unicast"` to `"all"` since
+  RIB now tracks both IPv4 and IPv6 routes.
+
+### Added
+
+- Config: `local_ipv6_nexthop` field on `[[neighbors]]` — explicit IPv6
+  next-hop address for eBGP sessions over IPv4 transport.
+
 ## [0.2.0] — 2026-02-28
 
 MP-BGP (IPv6 unicast) support. rustbgpd is now a dual-stack BGP speaker —
@@ -27,8 +68,8 @@ crates. 388 tests pass.
   length next-hop (16 or 32 bytes for IPv6, take global address), NLRI.
   `Afi` and `Safi` enums with `Unknown(u16)` / `Unknown(u8)` variants.
 - `rustbgpd-wire`: `MP_REACH_NLRI` (14) and `MP_UNREACH_NLRI` (15) constants.
-  Flag validation: type 14 = Optional|Transitive (0xC0), type 15 = Optional
-  (0x80).
+  Flag validation: type 14 = Optional (0x80), type 15 = Optional (0x80)
+  per RFC 4760 §3/§4 (both are optional non-transitive).
 - `rustbgpd-fsm`: `intersect_families()` computes the intersection of locally
   configured address families and peer-advertised MP-BGP capabilities.
   `NegotiatedSession` gains `negotiated_families: Vec<(Afi, Safi)>`.
