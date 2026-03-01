@@ -138,6 +138,15 @@ impl RibManager {
     /// view back in sync. `AdjRibOut` is only committed after a successful
     /// channel send; on failure the peer stays dirty for retry via the
     /// resync timer.
+    ///
+    /// **Limitation:** Adj-RIB-Out may temporarily diverge from what was
+    /// actually sent when the transport layer suppresses routes (e.g.,
+    /// IPv6 eBGP routes with no valid next-hop). The RIB records the
+    /// route as advertised, but the transport never puts it on the wire.
+    /// This is an inherent consequence of single-task RIB ownership
+    /// (ADR-0013/0015); adding feedback channels would violate the
+    /// architecture. The divergence only affects IPv6 eBGP peers without
+    /// a valid next-hop and has no operational impact on routing.
     fn distribute_changes(&mut self, changed_prefixes: &HashSet<Prefix>) {
         if changed_prefixes.is_empty() && self.dirty_peers.is_empty() {
             return;

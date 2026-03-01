@@ -79,6 +79,13 @@ impl AsPath {
 pub struct MpReachNlri {
     pub afi: Afi,
     pub safi: Safi,
+    /// Next-hop address for the announced prefixes.
+    ///
+    /// For IPv6, this stores only the global address. When a 32-byte
+    /// next-hop is received (global + link-local per RFC 4760 §3), the
+    /// decoder extracts the first 16 bytes (global) and discards the
+    /// link-local portion. `IpAddr` can only hold a single address, and
+    /// link-local next-hops are not needed for routing decisions.
     pub next_hop: IpAddr,
     pub announced: Vec<Prefix>,
 }

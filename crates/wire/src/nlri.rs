@@ -14,7 +14,11 @@ pub struct Ipv4Prefix {
 
 impl Ipv4Prefix {
     /// Create a new prefix, masking off host bits.
-    /// Prefix length is clamped to 32.
+    ///
+    /// Prefix length is clamped to 32 (values above 32 are silently
+    /// reduced). This is intentional: wire decoders validate prefix
+    /// lengths before construction, and clamping is safer than panicking
+    /// for internal callers that may compute lengths arithmetically.
     #[must_use]
     pub fn new(addr: Ipv4Addr, len: u8) -> Self {
         let len = len.min(32);
@@ -109,7 +113,11 @@ pub struct Ipv6Prefix {
 
 impl Ipv6Prefix {
     /// Create a new prefix, masking off host bits.
-    /// Prefix length is clamped to 128.
+    ///
+    /// Prefix length is clamped to 128 (values above 128 are silently
+    /// reduced). This is intentional: wire decoders validate prefix
+    /// lengths before construction, and clamping is safer than panicking
+    /// for internal callers that may compute lengths arithmetically.
     #[must_use]
     pub fn new(addr: Ipv6Addr, len: u8) -> Self {
         let len = len.min(128);

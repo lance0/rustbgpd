@@ -43,3 +43,13 @@ resolved.
 - **Only IPv4 and IPv6 unicast.** MP-BGP supports AFI/SAFI negotiation
   but only IPv4 unicast (AFI 1, SAFI 1) and IPv6 unicast (AFI 2, SAFI 1)
   are implemented. Other families (VPNv4, FlowSpec, etc.) are rejected.
+- **Adj-RIB-Out may diverge from wire.** When the transport layer
+  suppresses routes (e.g., IPv6 eBGP routes with no valid next-hop),
+  the RIB records the route as advertised even though it was never sent.
+  This is an inherent consequence of single-task RIB ownership
+  (ADR-0013/0015). The divergence only affects IPv6 eBGP peers without
+  a valid next-hop and has no operational impact on routing.
+- **Implicit IPv4 prevents IPv6-only peers.** Per RFC 4760 §8, IPv4
+  unicast is implicitly added when not explicitly negotiated via
+  MultiProtocol capability. A `disable_ipv4_unicast` config option
+  would be needed for true IPv6-only operation — future work.

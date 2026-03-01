@@ -105,6 +105,12 @@ pub fn negotiate_hold_time(local: u16, peer: u16) -> u16 {
 /// RFC 4760 §8 backward compatibility: if neither side explicitly advertises
 /// IPv4 unicast via `MultiProtocol` capability, IPv4 unicast is implicitly
 /// supported (body NLRI is always IPv4).
+///
+/// **Limitation:** The implicit IPv4 fallback means a peer cannot be
+/// configured as IPv6-only. Even if config specifies only `ipv6_unicast`
+/// and the peer advertises only IPv6 MP, IPv4 unicast is still added
+/// implicitly. An explicit `disable_ipv4_unicast` config option would
+/// be needed to support IPv6-only peers — this is future work.
 #[must_use]
 fn intersect_families(config: &PeerConfig, peer_caps: &[Capability]) -> Vec<(Afi, Safi)> {
     let mut result: Vec<(Afi, Safi)> = config
