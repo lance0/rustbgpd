@@ -126,7 +126,7 @@ impl RibManager {
             }
         }
         self.metrics
-            .set_loc_rib_prefixes("ipv4_unicast", gauge_val(self.loc_rib.len()));
+            .set_loc_rib_prefixes("all", gauge_val(self.loc_rib.len()));
         changed
     }
 
@@ -226,7 +226,7 @@ impl RibManager {
                     }
                     self.metrics.set_adj_rib_out_prefixes(
                         &peer.to_string(),
-                        "ipv4_unicast",
+                        "all",
                         gauge_val(rib_out.len()),
                     );
                     if is_dirty {
@@ -286,7 +286,7 @@ impl RibManager {
                 }
                 self.metrics.set_adj_rib_out_prefixes(
                     &peer.to_string(),
-                    "ipv4_unicast",
+                    "all",
                     gauge_val(rib_out.len()),
                 );
             }
@@ -320,7 +320,7 @@ impl RibManager {
 
                 debug!(%peer, routes = rib.len(), "rib updated");
                 self.metrics
-                    .set_rib_prefixes(&peer.to_string(), "ipv4_unicast", gauge_val(rib.len()));
+                    .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed);
             }
@@ -332,14 +332,14 @@ impl RibManager {
                     rib.clear();
                     debug!(%peer, cleared = count, "peer down — rib cleared");
                     self.metrics
-                        .set_rib_prefixes(&peer.to_string(), "ipv4_unicast", 0);
+                        .set_rib_prefixes(&peer.to_string(), "all", 0);
                     let changed = self.recompute_best(&affected);
                     self.distribute_changes(&changed);
                 }
                 // Clean up outbound state
                 self.adj_ribs_out.remove(&peer);
                 self.metrics
-                    .set_adj_rib_out_prefixes(&peer.to_string(), "ipv4_unicast", 0);
+                    .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
                 self.outbound_peers.remove(&peer);
                 self.peer_export_policies.remove(&peer);
                 self.dirty_peers.remove(&peer);
@@ -352,9 +352,9 @@ impl RibManager {
             } => {
                 debug!(%peer, "peer up — registering for outbound updates");
                 let peer_label = peer.to_string();
-                self.metrics.set_rib_prefixes(&peer_label, "ipv4_unicast", 0);
+                self.metrics.set_rib_prefixes(&peer_label, "all", 0);
                 self.metrics
-                    .set_adj_rib_out_prefixes(&peer_label, "ipv4_unicast", 0);
+                    .set_adj_rib_out_prefixes(&peer_label, "all", 0);
                 self.outbound_peers.insert(peer, outbound_tx);
                 self.peer_export_policies.insert(peer, export_policy);
                 self.send_initial_table(peer);
@@ -370,7 +370,7 @@ impl RibManager {
                 debug!(%prefix, "injected local route");
                 self.metrics.set_rib_prefixes(
                     &LOCAL_PEER.to_string(),
-                    "ipv4_unicast",
+                    "all",
                     gauge_val(rib.len()),
                 );
 
@@ -391,7 +391,7 @@ impl RibManager {
                     debug!(%prefix, "withdrawn injected route");
                     self.metrics.set_rib_prefixes(
                         &LOCAL_PEER.to_string(),
-                        "ipv4_unicast",
+                        "all",
                         gauge_val(rib.len()),
                     );
                     let mut affected = HashSet::new();
