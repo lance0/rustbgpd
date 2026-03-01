@@ -46,6 +46,9 @@ pub struct RibManager {
     gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Deadlines for sweeping stale routes per GR peer.
     gr_stale_deadlines: HashMap<IpAddr, tokio::time::Instant>,
+    /// Configured stale-routes-time per GR peer (seconds), used to reset
+    /// the timer on `PeerUp` during graceful restart.
+    gr_stale_routes_time: HashMap<IpAddr, u64>,
     route_events_tx: broadcast::Sender<RouteEvent>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
@@ -70,6 +73,7 @@ impl RibManager {
             dirty_peers: HashSet::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
+            gr_stale_routes_time: HashMap::new(),
             route_events_tx,
             metrics,
             rx,
@@ -394,6 +398,7 @@ impl RibManager {
                 // If GR was active for this peer, abort it and sweep stale routes
                 if self.gr_peers.remove(&peer).is_some() {
                     self.gr_stale_deadlines.remove(&peer);
+                    self.gr_stale_routes_time.remove(&peer);
                     info!(%peer, "peer down during graceful restart — aborting GR");
                     let peer_label = peer.to_string();
                     self.metrics.set_gr_active(&peer_label, false);
@@ -581,6 +586,7 @@ impl RibManager {
                         info!(%peer, "graceful restart complete — all End-of-RIB received");
                         self.gr_peers.remove(&peer);
                         self.gr_stale_deadlines.remove(&peer);
+                        self.gr_stale_routes_time.remove(&peer);
                         let peer_label = peer.to_string();
                         self.metrics.set_gr_active(&peer_label, false);
                         self.metrics.set_gr_stale_routes(&peer_label, 0);
@@ -596,27 +602,49 @@ impl RibManager {
             } => {
                 info!(%peer, restart_time, stale_routes_time, "peer entered graceful restart");
 
-                // Mark routes as stale for preserved families
+                let mut affected = HashSet::new();
+
                 if let Some(rib) = self.ribs.get_mut(&peer) {
+                    // Mark routes stale for families in the GR capability
                     for &family in &gr_families {
                         rib.mark_stale(family);
                     }
+                    // Withdraw routes for families NOT in the GR capability
+                    let withdrawn = rib.withdraw_families_except(&gr_families);
+                    if !withdrawn.is_empty() {
+                        info!(%peer, count = withdrawn.len(), "withdrew non-GR family routes");
+                    }
+                    for prefix in withdrawn {
+                        affected.insert(prefix);
+                    }
                 }
 
-                // Recompute best paths — stale routes get demoted
-                let affected: HashSet<Prefix> = self
-                    .ribs
-                    .get(&peer)
-                    .map(|rib| rib.iter().map(|r| r.prefix).collect())
-                    .unwrap_or_default();
+                // Include stale routes in affected set for best-path recompute
+                if let Some(rib) = self.ribs.get(&peer) {
+                    for route in rib.iter() {
+                        affected.insert(route.prefix);
+                    }
+                    self.metrics
+                        .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+                }
+
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed);
 
-                // Set stale timer = min(restart_time, stale_routes_time)
-                let timeout_secs = u64::from(restart_time).min(stale_routes_time);
-                let deadline =
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+                // Clean up outbound state — peer is down, dead channel would
+                // cause wasteful dirty-peer resync attempts.
+                self.outbound_peers.remove(&peer);
+                self.adj_ribs_out.remove(&peer);
+                self.peer_export_policies.remove(&peer);
+                self.peer_sendable_families.remove(&peer);
+                self.dirty_peers.remove(&peer);
+
+                // Initial timer = restart_time (window for session re-establishment).
+                // On PeerUp, this is reset to stale_routes_time for EoR.
+                let deadline = tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(u64::from(restart_time));
                 self.gr_stale_deadlines.insert(peer, deadline);
+                self.gr_stale_routes_time.insert(peer, stale_routes_time);
 
                 // Record awaiting families
                 self.gr_peers
@@ -640,6 +668,7 @@ impl RibManager {
         info!(%peer, "graceful restart timer expired — sweeping stale routes");
         self.gr_peers.remove(&peer);
         self.gr_stale_deadlines.remove(&peer);
+        self.gr_stale_routes_time.remove(&peer);
         let peer_label = peer.to_string();
         self.metrics.record_gr_timer_expired(&peer_label);
         self.metrics.set_gr_active(&peer_label, false);
@@ -3005,6 +3034,71 @@ mod tests {
             .unwrap();
         let best = reply_rx.await.unwrap();
         assert!(best.is_empty(), "routes cleared after PeerDown aborts GR");
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gr_withdraws_non_gr_family_routes() {
+        use rustbgpd_wire::Ipv6Prefix;
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source: IpAddr = "10.0.0.1".parse().unwrap();
+        let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+
+        // Source sends both IPv4 and IPv6 routes
+        let v6_route = Route {
+            prefix: Prefix::V6(v6_prefix),
+            next_hop: "2001:db8::1".parse().unwrap(),
+            peer: source,
+            attributes: vec![],
+            received_at: Instant::now(),
+            is_ebgp: true,
+            is_stale: false,
+        };
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)), v6_route],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Verify both routes present
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let best = reply_rx.await.unwrap();
+        assert_eq!(best.len(), 2);
+
+        // GR with only IPv4 in GR capability — IPv6 should be withdrawn
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer: source,
+            restart_time: 120,
+            stale_routes_time: 360,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        })
+        .await
+        .unwrap();
+
+        // IPv4 route should be stale, IPv6 route should be gone
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let best = reply_rx.await.unwrap();
+        assert_eq!(best.len(), 1, "only IPv4 route should remain");
+        assert!(
+            matches!(best[0].prefix, Prefix::V4(_)),
+            "remaining route should be IPv4"
+        );
+        assert!(best[0].is_stale, "IPv4 route should be stale");
 
         drop(tx);
         handle.await.unwrap();

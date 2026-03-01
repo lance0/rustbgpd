@@ -75,6 +75,22 @@ impl AdjRibIn {
         }
     }
 
+    /// Remove all routes whose family is NOT in `keep`, returning their
+    /// prefixes.  Used during graceful restart to withdraw routes for
+    /// families not covered by the peer's GR capability.
+    pub fn withdraw_families_except(&mut self, keep: &[(Afi, Safi)]) -> Vec<Prefix> {
+        let to_remove: Vec<Prefix> = self
+            .routes
+            .iter()
+            .filter(|(_, r)| !keep.iter().any(|&fam| route_matches_family(r, fam)))
+            .map(|(p, _)| *p)
+            .collect();
+        for prefix in &to_remove {
+            self.routes.remove(prefix);
+        }
+        to_remove
+    }
+
     /// Remove all stale routes, returning their prefixes.
     pub fn sweep_stale(&mut self) -> Vec<Prefix> {
         let stale: Vec<Prefix> = self
@@ -101,10 +117,10 @@ fn route_matches_family(route: &Route, family: (Afi, Safi)) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::Instant;
 
-    use rustbgpd_wire::Ipv4Prefix;
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
 
     use super::*;
 
@@ -113,6 +129,18 @@ mod tests {
             prefix: Prefix::V4(prefix),
             next_hop: IpAddr::V4(next_hop),
             peer: IpAddr::V4(next_hop),
+            attributes: vec![],
+            received_at: Instant::now(),
+            is_ebgp: true,
+            is_stale: false,
+        }
+    }
+
+    fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
+        Route {
+            prefix: Prefix::V6(prefix),
+            next_hop: IpAddr::V6(next_hop),
+            peer: IpAddr::V6(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
             is_ebgp: true,
@@ -240,5 +268,38 @@ mod tests {
             rib.get(&Prefix::V4(prefix)).unwrap().next_hop,
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))
         );
+    }
+
+    #[test]
+    fn withdraw_families_except_removes_non_matching() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
+
+        rib.insert(make_route(v4, Ipv4Addr::new(10, 0, 0, 1)));
+        rib.insert(make_v6_route(v6, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)));
+        assert_eq!(rib.len(), 2);
+
+        // Keep only IPv4 — IPv6 should be withdrawn
+        let removed = rib.withdraw_families_except(&[(Afi::Ipv4, Safi::Unicast)]);
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0], Prefix::V6(v6));
+        assert_eq!(rib.len(), 1);
+        assert!(rib.get(&Prefix::V4(v4)).is_some());
+        assert!(rib.get(&Prefix::V6(v6)).is_none());
+    }
+
+    #[test]
+    fn withdraw_families_except_keeps_all_when_matching() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let v4 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        rib.insert(make_route(v4, Ipv4Addr::new(10, 0, 0, 1)));
+
+        let removed =
+            rib.withdraw_families_except(&[(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]);
+        assert!(removed.is_empty());
+        assert_eq!(rib.len(), 1);
     }
 }
