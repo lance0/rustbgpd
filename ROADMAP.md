@@ -162,7 +162,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
-- [x] Automated interop test scripts (M1, M3, M4, M10, M11)
+- [x] Automated interop test scripts (M1, M3, M4, M10, M11, M12)
 - [ ] Binary releases (GitHub Releases with cross-compiled binaries)
 - [ ] Homebrew formula
 - [ ] crates.io publishing (`rustbgpd-wire` first, then workspace)

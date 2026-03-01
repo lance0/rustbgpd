@@ -146,9 +146,14 @@ impl ExtendedCommunity {
 
     /// Decode as Route Target (sub-type 0x02).
     ///
-    /// Returns `(global_admin, local_admin)`:
-    /// - Type 0x00 (2-octet AS): global = AS(u16), local = u32
-    /// - Type 0x02 (4-octet AS): global = AS(u32), local = u16
+    /// Returns `(global_admin, local_admin)` as raw u32 values. The
+    /// interpretation of `global_admin` depends on the type byte:
+    /// - Type 0x00 (2-octet AS specific): global = ASN (fits u16), local = u32
+    /// - Type 0x01 (IPv4 address specific): global = IPv4 addr as u32, local = u16
+    /// - Type 0x02 (4-octet AS specific): global = ASN (u32), local = u16
+    ///
+    /// Callers that need to distinguish these encodings (e.g. for display as
+    /// `RT:192.0.2.1:100` vs `RT:65001:100`) must also check [`type_byte()`](Self::type_byte).
     #[must_use]
     pub fn route_target(self) -> Option<(u32, u32)> {
         if self.subtype() != 0x02 {
@@ -159,7 +164,10 @@ impl ExtendedCommunity {
 
     /// Decode as Route Origin (sub-type 0x03).
     ///
-    /// Same format as Route Target but with sub-type 0x03.
+    /// Same layout as [`route_target()`](Self::route_target) — returns raw
+    /// `(global_admin, local_admin)` with the same type-byte-dependent
+    /// interpretation. Check [`type_byte()`](Self::type_byte) to distinguish
+    /// 2-octet AS, IPv4-address, and 4-octet AS encodings.
     #[must_use]
     pub fn route_origin(self) -> Option<(u32, u32)> {
         if self.subtype() != 0x03 {
@@ -168,7 +176,11 @@ impl ExtendedCommunity {
         self.decode_two_part()
     }
 
-    /// Decode the value field as `(global_admin, local_admin)` based on type.
+    /// Decode the 6-byte value field as `(global_admin, local_admin)`.
+    ///
+    /// Handles all three RFC 4360 two-part layouts (2-octet AS, IPv4, 4-octet
+    /// AS). Returns raw u32 values — the caller decides how to interpret
+    /// `global_admin` (ASN vs IPv4 address) based on `type_byte()`.
     fn decode_two_part(self) -> Option<(u32, u32)> {
         let v = self.value_bytes();
         let t = self.type_byte() & 0x3F; // mask off high two bits
@@ -192,10 +204,19 @@ impl ExtendedCommunity {
 
 impl fmt::Display for ExtendedCommunity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let is_ipv4 = self.type_byte() & 0x3F == 0x01;
         if let Some((g, l)) = self.route_target() {
-            write!(f, "RT:{g}:{l}")
+            if is_ipv4 {
+                write!(f, "RT:{}:{l}", Ipv4Addr::from(g))
+            } else {
+                write!(f, "RT:{g}:{l}")
+            }
         } else if let Some((g, l)) = self.route_origin() {
-            write!(f, "RO:{g}:{l}")
+            if is_ipv4 {
+                write!(f, "RO:{}:{l}", Ipv4Addr::from(g))
+            } else {
+                write!(f, "RO:{g}:{l}")
+            }
         } else {
             write!(f, "0x{:016x}", self.0)
         }
@@ -1266,6 +1287,15 @@ mod tests {
         // 4-octet AS RT: type=0x02, subtype=0x02, AS=65537, value=200
         let ec4 = ExtendedCommunity::new(0x0202_0001_0001_00C8);
         assert_eq!(ec4.route_target(), Some((65537, 200)));
+
+        // IPv4-specific RT: type=0x01, subtype=0x02, IP=192.0.2.1, value=100
+        // 192.0.2.1 = 0xC0000201
+        let ec_ipv4 = ExtendedCommunity::new(0x0102_C000_0201_0064);
+        let (g, l) = ec_ipv4.route_target().unwrap();
+        assert_eq!(g, 0xC000_0201); // 192.0.2.1 as u32
+        assert_eq!(l, 100);
+        // Callers distinguish via type_byte()
+        assert_eq!(ec_ipv4.type_byte() & 0x3F, 0x01);
     }
 
     #[test]
@@ -1286,6 +1316,18 @@ mod tests {
 
         let ro = ExtendedCommunity::new(0x0003_FDE9_0000_0064);
         assert_eq!(ro.to_string(), "RO:65001:100");
+
+        // IPv4-specific RT: type=0x01, subtype=0x02, IP=192.0.2.1, value=100
+        let target_v4 = ExtendedCommunity::new(0x0102_C000_0201_0064);
+        assert_eq!(target_v4.to_string(), "RT:192.0.2.1:100");
+
+        // IPv4-specific RO
+        let origin_v4 = ExtendedCommunity::new(0x0103_C000_0201_0064);
+        assert_eq!(origin_v4.to_string(), "RO:192.0.2.1:100");
+
+        // 4-octet AS RT
+        let rt_as4 = ExtendedCommunity::new(0x0202_0001_0001_00C8);
+        assert_eq!(rt_as4.to_string(), "RT:65537:200");
 
         // Non-transitive opaque → hex fallback
         let opaque = ExtendedCommunity::new(0x4300_1234_5678_9ABC);

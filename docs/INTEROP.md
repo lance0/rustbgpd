@@ -17,6 +17,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m4-frr.clab.yml` | Tested (M4) | 10-peer dynamic mgmt | 8 static + 2 dynamic peers | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m11-gr-frr.clab.yml` | Tested (M11) | Graceful Restart (RFC 4724) | Short timers (30s restart, 30s stale) | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m12-ec-frr.clab.yml` | Tested (M12) | Extended Communities (RFC 4360) | RT:65002:100 via route-map | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -790,6 +791,90 @@ Automated test: `bash tests/interop/scripts/test-m11-gr-frr.sh` — **17 passed,
 | RIB cleared after sweep | PASS | 0 routes from peer |
 | Timer expired counter | PASS | `bgp_gr_timer_expired_total` = 1 |
 | GR completed after expiry | PASS | `bgp_gr_active_peers` = 0 |
+
+---
+
+## M12 Test Procedures (Extended Communities — RFC 4360)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m12-ec-frr.clab.yml`
+
+### Network Layout
+
+```
+M12 EC FRR:
+  rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR (10.0.0.2/24, AS 65002)
+```
+
+FRR has a route-map `EC_OUT` that applies `set extcommunity rt 65002:100` to
+all outbound routes. FRR advertises: 192.168.1.0/24, 192.168.2.0/24.
+
+### Test 1: Routes Received with Extended Communities
+
+After session reaches Established, verify routes have the `extendedCommunities`
+field populated in the gRPC response.
+
+**Pass criteria:** Both prefixes present, `extendedCommunities` field non-empty.
+
+### Test 2: Extended Community Values Correct
+
+Verify the raw uint64 value matches the expected encoding for RT:65002:100
+(2-octet AS specific, type 0x00, subtype 0x02).
+
+**Pass criteria:** Decimal value `842131417596004` (= `0x0002FDEA00000064`)
+appears in the route data. Both routes carry the EC.
+
+### Test 3: Inject Route with Extended Community
+
+Inject 10.99.0.0/24 via `AddPath` with RT:65001:42. Verify the injected route
+appears in best routes with the correct EC value.
+
+**Pass criteria:** Injected route in Loc-RIB with EC value `842127122628650`.
+
+### Test 4: Extended Communities in Best Routes
+
+Verify FRR-originated routes also carry extended communities in ListBestRoutes
+(not just ListReceivedRoutes).
+
+**Pass criteria:** RT:65002:100 present in best routes for FRR prefixes.
+
+### Test 5: Delete Injected Route
+
+Delete 10.99.0.0/24 via `DeletePath`. Verify removal. FRR routes must remain.
+
+**Pass criteria:** Injected route removed, FRR routes still present.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m12-ec-frr.sh
+```
+
+Runs all 5 tests automatically. Requires containerlab topology deployed and
+`grpcurl` on the host.
+
+---
+
+## M12 EC FRR Test Results (2026-03-01, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m12-ec-frr.sh` — **14 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment | PASS | Established on attempt 30 |
+| Routes received (2/2) | PASS | Both prefixes in RIB |
+| extendedCommunities field present | PASS | Field populated in gRPC response |
+| RT:65002:100 value correct | PASS | Decimal 842131417596004 matches |
+| Both routes have ECs | PASS | 2 routes with extendedCommunities |
+| AddPath with EC accepted | PASS | 10.99.0.0/24 injected with RT:65001:42 |
+| Injected route in best routes | PASS | Present in Loc-RIB |
+| Injected EC value correct | PASS | Decimal 842127122628650 matches |
+| FRR route in best routes | PASS | 192.168.1.0/24 present |
+| RT:65002:100 in best routes | PASS | EC preserved through best-path selection |
+| DeletePath removes injected route | PASS | 10.99.0.0/24 removed |
+| FRR routes survive deletion | PASS | 192.168.1.0/24 still present |
 
 ---
 

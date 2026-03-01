@@ -15,6 +15,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with helpers for type/sub-type extraction, route target, and route origin
   decoding. Full wire codec (type 16, Optional|Transitive), stored on
   routes, exposed via gRPC `Route` and `AddPath`. (ADR-0025)
+- **M12 interop test** — Extended communities validated against FRR 10.3.1.
+  FRR route-map sets RT:65002:100, rustbgpd decodes/stores/exposes via gRPC.
+  Injection round-trip verified. 14/14 tests pass.
 
 ---
 
