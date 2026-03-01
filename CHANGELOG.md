@@ -25,6 +25,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Graceful Restart state machine corrections (RFC 4724 review).**
+  - GR trigger now checks `peer_gr_capable` instead of the R-bit from the
+    dying session; R-bit is only meaningful in the *new* OPEN after restart
+  - All families from the peer's GR capability are retained as stale, not
+    just those with `forwarding_preserved=true`
+  - Routes for negotiated families NOT in the peer's GR capability are
+    withdrawn immediately on GR start
+  - `PeerUp` during GR no longer clears stale flags — routes stay stale
+    until End-of-RIB per family, matching RFC 4724 §4.2
+  - Initial GR timer uses `restart_time` (session window); timer resets to
+    `stale_routes_time` on `PeerUp` (EoR window)
+  - `graceful_restart=false` config now gates GR in transport
+  - `bgp_gr_stale_routes` metric updated during partial EoR recovery
+  - Dead outbound channels cleaned up on GR start
+
 - `rustbgpd-rib`: Adj-RIB-Out no longer diverges from wire state for eBGP
   peers without a valid IPv6 next-hop. `sendable_families` passed at `PeerUp`
   time filters unsendable address families before Adj-RIB-Out insertion,

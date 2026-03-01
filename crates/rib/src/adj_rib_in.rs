@@ -278,7 +278,10 @@ mod tests {
         let v6 = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32);
 
         rib.insert(make_route(v4, Ipv4Addr::new(10, 0, 0, 1)));
-        rib.insert(make_v6_route(v6, Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)));
+        rib.insert(make_v6_route(
+            v6,
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+        ));
         assert_eq!(rib.len(), 2);
 
         // Keep only IPv4 — IPv6 should be withdrawn

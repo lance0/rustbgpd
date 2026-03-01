@@ -436,8 +436,8 @@ impl RibManager {
                 // to stale_routes_time (EoR window).
                 if self.gr_peers.contains_key(&peer) {
                     if let Some(&srt) = self.gr_stale_routes_time.get(&peer) {
-                        let deadline = tokio::time::Instant::now()
-                            + std::time::Duration::from_secs(srt);
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
                         self.gr_stale_deadlines.insert(peer, deadline);
                     }
                     info!(%peer, "peer re-established during GR — waiting for End-of-RIB");

@@ -44,21 +44,32 @@ LOCAL_PREF) prefers non-stale over stale. This is stronger than RFC 4724's
 suggestion (which places it after step 6) but matches common implementations
 (GoBGP, FRR) that aggressively demote stale routes.
 
+### GR Trigger (Transport)
+
+On `SessionDown`, GR is triggered when `peer_gr_capable && config.graceful_restart`.
+The R-bit (`peer_restart_state`) is NOT checked — it indicates restart state
+in the *new* OPEN after reconnection, not in the dying session.
+
 ### State Machine (RibManager)
 
 - `gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>` — families awaiting EoR
 - `gr_stale_deadlines: HashMap<IpAddr, tokio::time::Instant>` — sweep deadlines
+- `gr_stale_routes_time: HashMap<IpAddr, u64>` — per-peer EoR timer config
 
-**PeerGracefulRestart:** Mark routes stale for preserved families, recompute
-best-path, set timer = `min(restart_time, stale_routes_time)`.
+**PeerGracefulRestart:** Mark routes stale for ALL families in the peer's
+GR capability (not just forwarding-preserved ones). Withdraw routes for
+negotiated families NOT in the GR capability. Clean up outbound state.
+Set initial timer = `restart_time` (window for session re-establishment).
 
 **EndOfRib:** Clear stale flag for that family, recompute best-path.
 If all families done, remove GR state.
 
 **Timer expiry:** Sweep remaining stale routes as withdrawals.
 
-**PeerUp during GR:** Cancel timer, clear stale flags (fresh routes will
-replace stale ones naturally).
+**PeerUp during GR:** Keep routes stale. Reset timer from `restart_time`
+to `stale_routes_time` (window for EoR). Re-register outbound channel and
+send initial table. Stale flags are cleared by EoR per-family, not by
+PeerUp.
 
 **PeerDown during GR:** Abort — clear all routes immediately (existing
 PeerDown logic).
