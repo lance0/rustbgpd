@@ -215,9 +215,9 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
 fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, ConfigError> {
     let mut result = Vec::with_capacity(families.len());
     for f in families {
-        match f.as_str() {
-            "ipv4_unicast" => result.push((Afi::Ipv4, Safi::Unicast)),
-            "ipv6_unicast" => result.push((Afi::Ipv6, Safi::Unicast)),
+        let family = match f.as_str() {
+            "ipv4_unicast" => (Afi::Ipv4, Safi::Unicast),
+            "ipv6_unicast" => (Afi::Ipv6, Safi::Unicast),
             other => {
                 return Err(ConfigError::InvalidPolicyEntry {
                     reason: format!(
@@ -225,6 +225,9 @@ fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, ConfigError> 
                     ),
                 });
             }
+        };
+        if !result.contains(&family) {
+            result.push(family);
         }
     }
     Ok(result)
