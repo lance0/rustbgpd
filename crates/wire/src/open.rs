@@ -91,7 +91,7 @@ impl OpenMessage {
     pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
         // Calculate optional parameters size
         let mut opt_params = BytesMut::new();
-        encode_optional_parameters(&self.capabilities, &mut opt_params);
+        encode_optional_parameters(&self.capabilities, &mut opt_params)?;
         let opt_params_len = opt_params.len();
 
         if opt_params_len > 255 {

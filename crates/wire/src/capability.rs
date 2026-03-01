@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes};
 
 use crate::constants::{capability_code, param_type};
-use crate::error::DecodeError;
+use crate::error::{DecodeError, EncodeError};
 
 /// Address Family Identifier (IANA).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -173,7 +173,12 @@ impl Capability {
     }
 
     /// Encode a single capability TLV into a buffer.
-    pub fn encode(&self, buf: &mut impl BufMut) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::ValueOutOfRange`] if the capability value
+    /// exceeds the 255-byte limit of the single-octet length field.
+    pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
         match self {
             Capability::MultiProtocol { afi, safi } => {
                 buf.put_u8(capability_code::MULTI_PROTOCOL);
@@ -187,9 +192,16 @@ impl Capability {
                 restart_time,
                 families,
             } => {
+                let value_len = 2 + families.len() * 4;
+                if value_len > 255 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "graceful_restart_capability_length",
+                        value: value_len.to_string(),
+                    });
+                }
                 buf.put_u8(capability_code::GRACEFUL_RESTART);
                 #[expect(clippy::cast_possible_truncation)]
-                buf.put_u8((2 + families.len() * 4) as u8);
+                buf.put_u8(value_len as u8);
                 let mut flags_and_time = *restart_time & 0x0FFF;
                 if *restart_state {
                     flags_and_time |= 0x8000;
@@ -207,14 +219,19 @@ impl Capability {
                 buf.put_u32(*asn);
             }
             Capability::Unknown { code, data } => {
+                if data.len() > 255 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "unknown_capability_length",
+                        value: data.len().to_string(),
+                    });
+                }
                 buf.put_u8(*code);
-                // Safe: capability length field is u8, max 255. Capabilities
-                // with data > 255 bytes cannot exist on the wire.
                 #[expect(clippy::cast_possible_truncation)]
                 buf.put_u8(data.len() as u8);
                 buf.put_slice(data);
             }
         }
+        Ok(())
     }
 
     /// Returns the capability code byte.
@@ -296,13 +313,28 @@ pub fn decode_optional_parameters(
 }
 
 /// Encode capabilities as OPEN optional parameters (parameter type 2).
-pub fn encode_optional_parameters(capabilities: &[Capability], buf: &mut impl BufMut) {
+///
+/// # Errors
+///
+/// Returns [`EncodeError::ValueOutOfRange`] if the total capabilities size
+/// exceeds 255 bytes or any individual capability is too large.
+pub fn encode_optional_parameters(
+    capabilities: &[Capability],
+    buf: &mut impl BufMut,
+) -> Result<(), EncodeError> {
     if capabilities.is_empty() {
-        return;
+        return Ok(());
     }
 
     // Calculate total capability TLV size
     let cap_total: usize = capabilities.iter().map(Capability::encoded_len).sum();
+
+    if cap_total > 255 {
+        return Err(EncodeError::ValueOutOfRange {
+            field: "capabilities_parameter_length",
+            value: cap_total.to_string(),
+        });
+    }
 
     // Parameter type 2 header
     buf.put_u8(param_type::CAPABILITIES);
@@ -310,8 +342,9 @@ pub fn encode_optional_parameters(capabilities: &[Capability], buf: &mut impl Bu
     buf.put_u8(cap_total as u8);
 
     for cap in capabilities {
-        cap.encode(buf);
+        cap.encode(buf)?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -369,7 +402,7 @@ mod tests {
             safi: Safi::Unicast,
         };
         let mut encoded = bytes::BytesMut::with_capacity(6);
-        original.encode(&mut encoded);
+        original.encode(&mut encoded).unwrap();
         let mut buf = encoded.freeze();
         let decoded = Capability::decode(&mut buf).unwrap();
         assert_eq!(original, decoded);
@@ -379,7 +412,7 @@ mod tests {
     fn roundtrip_four_octet_as() {
         let original = Capability::FourOctetAs { asn: 4_200_000_000 };
         let mut encoded = bytes::BytesMut::with_capacity(6);
-        original.encode(&mut encoded);
+        original.encode(&mut encoded).unwrap();
         let mut buf = encoded.freeze();
         let decoded = Capability::decode(&mut buf).unwrap();
         assert_eq!(original, decoded);
@@ -392,7 +425,7 @@ mod tests {
             data: Bytes::from_static(&[1, 2, 3]),
         };
         let mut encoded = bytes::BytesMut::with_capacity(5);
-        original.encode(&mut encoded);
+        original.encode(&mut encoded).unwrap();
         let mut buf = encoded.freeze();
         let decoded = Capability::decode(&mut buf).unwrap();
         assert_eq!(original, decoded);
@@ -545,7 +578,7 @@ mod tests {
             ],
         };
         let mut encoded = bytes::BytesMut::with_capacity(12);
-        original.encode(&mut encoded);
+        original.encode(&mut encoded).unwrap();
         let mut buf = encoded.freeze();
         let decoded = Capability::decode(&mut buf).unwrap();
         assert_eq!(original, decoded);
@@ -583,5 +616,48 @@ mod tests {
         let mut buf = Bytes::copy_from_slice(data);
         let cap = Capability::decode(&mut buf).unwrap();
         assert!(matches!(cap, Capability::Unknown { code: 64, .. }));
+    }
+
+    #[test]
+    fn encode_rejects_oversized_gr_families() {
+        // 64 families → value_len = 2 + 64*4 = 258, exceeds u8
+        let families: Vec<GracefulRestartFamily> = (0..64)
+            .map(|_| GracefulRestartFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+            })
+            .collect();
+        let cap = Capability::GracefulRestart {
+            restart_state: false,
+            restart_time: 120,
+            families,
+        };
+        let mut buf = bytes::BytesMut::new();
+        assert!(cap.encode(&mut buf).is_err());
+    }
+
+    #[test]
+    fn encode_rejects_oversized_unknown_data() {
+        let cap = Capability::Unknown {
+            code: 99,
+            data: Bytes::from(vec![0u8; 256]),
+        };
+        let mut buf = bytes::BytesMut::new();
+        assert!(cap.encode(&mut buf).is_err());
+    }
+
+    #[test]
+    fn encode_optional_params_rejects_overflow() {
+        // Total capabilities exceeding 255 bytes
+        let caps: Vec<Capability> = (0..50)
+            .map(|_| Capability::Unknown {
+                code: 99,
+                data: Bytes::from(vec![0u8; 5]),
+            })
+            .collect();
+        // 50 caps * 7 bytes each = 350 > 255
+        let mut buf = bytes::BytesMut::new();
+        assert!(encode_optional_parameters(&caps, &mut buf).is_err());
     }
 }
