@@ -16,7 +16,7 @@ not "someone tried it once."
 | BIRD | 2.0.12 | `tests/interop/m0-bird.clab.yml` | Tested (M0) | All 5 tests pass | Needs `/run/bird` dir; sends empty UPDATE on establish | Cease/Admin Shutdown + Cease/Admin Reset |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m4-frr.clab.yml` | Tested (M4) | 10-peer dynamic mgmt | 8 static + 2 dynamic peers | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
-| FRR (bgpd) | 10.3.1 | `tests/interop/m11-gr-frr.clab.yml` | Ready (M11) | Graceful Restart (RFC 4724) | Short timers (30s restart, 30s stale) | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m11-gr-frr.clab.yml` | Tested (M11) | Graceful Restart (RFC 4724) | Short timers (30s restart, 30s stale) | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -764,6 +764,32 @@ bash tests/interop/scripts/test-m11-gr-frr.sh
 Runs all 4 tests automatically. Tests 1–3 run sequentially (test 2 kills bgpd,
 test 3 waits for watchfrr to restart it). Test 4 kills both bgpd and watchfrr
 to force timer expiry.
+
+---
+
+## M11 GR FRR Test Results (2026-03-01, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m11-gr-frr.sh` — **17 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment | PASS | Established on first attempt |
+| Routes received (3/3) | PASS | All 3 prefixes in RIB on first attempt |
+| GR capability in FRR neighbor state | PASS | `gracefulRestart` present in JSON |
+| No stale routes in steady state | PASS | `bgp_gr_stale_routes` = 0 |
+| GR active after peer kill | PASS | `bgp_gr_active_peers` = 1 |
+| Routes preserved as stale | PASS | 3 stale routes during GR |
+| Routes in RIB during GR | PASS | 3 routes still present |
+| Session re-established after bgpd restart | PASS | watchfrr restarted bgpd, established on attempt 5 |
+| Stale cleared after EoR | PASS | `bgp_gr_stale_routes` = 0 |
+| GR completed after EoR | PASS | `bgp_gr_active_peers` = 0 |
+| Routes valid after GR | PASS | 3 routes still present |
+| GR active after kill (no watchfrr) | PASS | `bgp_gr_active_peers` = 1 |
+| Routes stale during timer wait | PASS | 3 stale routes |
+| Stale swept after timer expiry | PASS | `bgp_gr_stale_routes` = 0 |
+| RIB cleared after sweep | PASS | 0 routes from peer |
+| Timer expired counter | PASS | `bgp_gr_timer_expired_total` = 1 |
+| GR completed after expiry | PASS | `bgp_gr_active_peers` = 0 |
 
 ---
 
