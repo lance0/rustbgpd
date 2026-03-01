@@ -569,6 +569,15 @@ impl RibManager {
                     let changed = self.recompute_best(&affected);
                     self.distribute_changes(&changed);
 
+                    // Update stale routes metric after partial clear
+                    let peer_label = peer.to_string();
+                    let stale_count = self
+                        .ribs
+                        .get(&peer)
+                        .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
+                    self.metrics
+                        .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
+
                     // If all families received EoR, GR is complete
                     let all_done = self.gr_peers.get(&peer).is_some_and(HashSet::is_empty);
                     if all_done {
@@ -576,7 +585,6 @@ impl RibManager {
                         self.gr_peers.remove(&peer);
                         self.gr_stale_deadlines.remove(&peer);
                         self.gr_stale_routes_time.remove(&peer);
-                        let peer_label = peer.to_string();
                         self.metrics.set_gr_active(&peer_label, false);
                         self.metrics.set_gr_stale_routes(&peer_label, 0);
                     }
