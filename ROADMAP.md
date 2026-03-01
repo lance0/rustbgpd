@@ -47,7 +47,8 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
 - [x] Interop validated — FRR 10.3.1 (17/17 IPv4 + 6 dual-stack automated tests), BIRD 2.0.12
-- [x] 411 tests — unit, integration, property, fuzz
+- [x] Graceful Restart — receiving speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep
+- [x] 433 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -55,17 +56,7 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ## Planned Features
 
-### Next — Graceful Restart (RFC 4724)
-
-**Why this matters:** Without graceful restart, every daemon restart causes route flaps across all peers. For production use, peers need to preserve forwarding state during a planned restart.
-
-- [ ] Wire: Graceful Restart capability encode/decode
-- [ ] FSM: Restarting state, stale path timer, End-of-RIB marker
-- [ ] RIB: stale route marking, timer-based sweep on restart completion
-- [ ] Transport: session restart with forwarding state preservation
-- [ ] Config: `graceful_restart` enable flag, restart time, stalepath time
-
-### Extended Communities (RFC 4360)
+### Next — Extended Communities (RFC 4360)
 
 **Why this matters:** Route targets, traffic engineering, and VPN signaling all use extended communities. Required for any IX or transit use case that tags routes with operational metadata.
 

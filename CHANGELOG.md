@@ -9,6 +9,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Graceful Restart — receiving speaker (RFC 4724).** When a peer restarts
+  with GR capability, routes are preserved as stale during the restart window
+  instead of immediately withdrawn. End-of-RIB markers clear stale flags;
+  timer expiry sweeps remaining stale routes. Enabled by default.
+  - Wire: capability code 64 encode/decode with per-family forwarding flags
+  - Config: `graceful_restart` (default `true`), `gr_restart_time` (default
+    `120`), `gr_stale_routes_time` (default `360`)
+  - FSM: peer GR capability negotiation
+  - RIB: stale route demotion in best-path, timer-based stale sweep,
+    End-of-RIB detection and sending
+  - Transport: GR-aware session teardown (PeerGracefulRestart vs PeerDown)
+
 ### Fixed
 
 - `rustbgpd-rib`: Adj-RIB-Out no longer diverges from wire state for eBGP

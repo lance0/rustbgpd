@@ -47,3 +47,7 @@ resolved.
   unicast is implicitly added when not explicitly negotiated via
   MultiProtocol capability. A `disable_ipv4_unicast` config option
   would be needed for true IPv6-only operation — future work.
+- **Receiving speaker only (graceful restart).** RFC 4724 is implemented
+  as receiving speaker only — we preserve a restarting peer's routes.
+  Restarting speaker mode (advertising `R=1`, preserving our own forwarding
+  state during restart) requires FIB integration and is deferred.

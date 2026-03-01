@@ -395,6 +395,9 @@ impl RibManager {
                 if self.gr_peers.remove(&peer).is_some() {
                     self.gr_stale_deadlines.remove(&peer);
                     info!(%peer, "peer down during graceful restart — aborting GR");
+                    let peer_label = peer.to_string();
+                    self.metrics.set_gr_active(&peer_label, false);
+                    self.metrics.set_gr_stale_routes(&peer_label, 0);
                 }
 
                 if let Some(rib) = self.ribs.get_mut(&peer) {
@@ -427,6 +430,9 @@ impl RibManager {
                 if self.gr_peers.remove(&peer).is_some() {
                     self.gr_stale_deadlines.remove(&peer);
                     info!(%peer, "peer re-established during graceful restart — cancelling GR timer");
+                    let peer_label = peer.to_string();
+                    self.metrics.set_gr_active(&peer_label, false);
+                    self.metrics.set_gr_stale_routes(&peer_label, 0);
                     // Clear stale flags and recompute best paths
                     if let Some(rib) = self.ribs.get_mut(&peer) {
                         rib.clear_stale((Afi::Ipv4, Safi::Unicast));
@@ -578,6 +584,9 @@ impl RibManager {
                         info!(%peer, "graceful restart complete — all End-of-RIB received");
                         self.gr_peers.remove(&peer);
                         self.gr_stale_deadlines.remove(&peer);
+                        let peer_label = peer.to_string();
+                        self.metrics.set_gr_active(&peer_label, false);
+                        self.metrics.set_gr_stale_routes(&peer_label, 0);
                     }
                 }
             }
@@ -616,6 +625,16 @@ impl RibManager {
                 // Record awaiting families
                 self.gr_peers
                     .insert(peer, preserved_families.into_iter().collect());
+
+                // Metrics
+                let peer_label = peer.to_string();
+                self.metrics.set_gr_active(&peer_label, true);
+                let stale_count = self
+                    .ribs
+                    .get(&peer)
+                    .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
+                self.metrics
+                    .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
             }
         }
     }
@@ -625,6 +644,10 @@ impl RibManager {
         info!(%peer, "graceful restart timer expired — sweeping stale routes");
         self.gr_peers.remove(&peer);
         self.gr_stale_deadlines.remove(&peer);
+        let peer_label = peer.to_string();
+        self.metrics.record_gr_timer_expired(&peer_label);
+        self.metrics.set_gr_active(&peer_label, false);
+        self.metrics.set_gr_stale_routes(&peer_label, 0);
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
             let swept = rib.sweep_stale();

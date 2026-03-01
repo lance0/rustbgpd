@@ -36,6 +36,11 @@ pub struct BgpMetrics {
 
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
+
+    // ── Graceful Restart ──────────────────────────────────────
+    gr_active_peers: IntGaugeVec,
+    gr_stale_routes: IntGaugeVec,
+    gr_timer_expired: IntCounterVec,
 }
 
 impl BgpMetrics {
@@ -163,6 +168,33 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let gr_active_peers = IntGaugeVec::new(
+            Opts::new(
+                "bgp_gr_active_peers",
+                "Number of peers currently in graceful restart",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let gr_stale_routes = IntGaugeVec::new(
+            Opts::new(
+                "bgp_gr_stale_routes",
+                "Number of stale routes during graceful restart",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let gr_timer_expired = IntCounterVec::new(
+            Opts::new(
+                "bgp_gr_timer_expired_total",
+                "Number of graceful restart timer expirations",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -199,6 +231,15 @@ impl BgpMetrics {
         registry
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(gr_active_peers.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(gr_stale_routes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(gr_timer_expired.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -214,6 +255,9 @@ impl BgpMetrics {
             rib_loc_prefixes,
             max_prefix_exceeded,
             outbound_route_drops,
+            gr_active_peers,
+            gr_stale_routes,
+            gr_timer_expired,
         }
     }
 
@@ -299,6 +343,25 @@ impl BgpMetrics {
     /// Record an outbound route update drop for a peer.
     pub fn record_outbound_route_drop(&self, peer: &str) {
         self.outbound_route_drops.with_label_values(&[peer]).inc();
+    }
+
+    /// Set the GR active flag for a peer (1 = in GR, 0 = not).
+    pub fn set_gr_active(&self, peer: &str, active: bool) {
+        self.gr_active_peers
+            .with_label_values(&[peer])
+            .set(i64::from(active));
+    }
+
+    /// Set the number of stale routes for a GR peer.
+    pub fn set_gr_stale_routes(&self, peer: &str, count: i64) {
+        self.gr_stale_routes
+            .with_label_values(&[peer])
+            .set(count);
+    }
+
+    /// Record a GR timer expiration for a peer.
+    pub fn record_gr_timer_expired(&self, peer: &str) {
+        self.gr_timer_expired.with_label_values(&[peer]).inc();
     }
 }
 
