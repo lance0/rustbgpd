@@ -981,7 +981,7 @@ impl PeerSession {
             .config
             .local_ipv6_nexthop
             .or(local_ipv6)
-            .filter(|addr| !addr.is_unspecified());
+            .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
 
         if is_ebgp && ebgp_ipv6_nh.is_none() && !v6_routes.is_empty() {
             warn!(

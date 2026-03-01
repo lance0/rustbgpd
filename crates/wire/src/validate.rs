@@ -163,11 +163,7 @@ fn check_mp_reach_next_hop(addr: IpAddr) -> Result<(), UpdateError> {
     match addr {
         IpAddr::V4(v4) => check_next_hop(v4)?,
         IpAddr::V6(v6) => {
-            let reject = v6.is_unspecified()
-                || v6.is_loopback()
-                || v6.is_multicast()
-                || is_ipv6_link_local(&v6);
-            if reject {
+            if !is_valid_ipv6_nexthop(&v6) {
                 return Err(UpdateError {
                     subcode: update_subcode::INVALID_NEXT_HOP,
                     data: v6.octets().to_vec(),
@@ -181,6 +177,18 @@ fn check_mp_reach_next_hop(addr: IpAddr) -> Result<(), UpdateError> {
 /// Check if an IPv6 address is link-local (`fe80::/10`).
 fn is_ipv6_link_local(addr: &std::net::Ipv6Addr) -> bool {
     (addr.segments()[0] & 0xffc0) == 0xfe80
+}
+
+/// Returns `true` if `addr` is a valid IPv6 next-hop for BGP advertisements.
+///
+/// Rejects unspecified (`::`), loopback (`::1`), multicast (`ff00::/8`),
+/// and link-local (`fe80::/10`) addresses.
+#[must_use]
+pub fn is_valid_ipv6_nexthop(addr: &std::net::Ipv6Addr) -> bool {
+    !addr.is_unspecified()
+        && !addr.is_loopback()
+        && !addr.is_multicast()
+        && !is_ipv6_link_local(addr)
 }
 
 /// (3,11) Malformed `AS_PATH`.
@@ -467,6 +475,37 @@ mod tests {
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
+    }
+
+    #[test]
+    fn is_valid_ipv6_nexthop_accepts_global() {
+        assert!(super::is_valid_ipv6_nexthop(
+            &"2001:db8::1".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn is_valid_ipv6_nexthop_rejects_unspecified() {
+        assert!(!super::is_valid_ipv6_nexthop(
+            &std::net::Ipv6Addr::UNSPECIFIED
+        ));
+    }
+
+    #[test]
+    fn is_valid_ipv6_nexthop_rejects_loopback() {
+        assert!(!super::is_valid_ipv6_nexthop(
+            &std::net::Ipv6Addr::LOCALHOST
+        ));
+    }
+
+    #[test]
+    fn is_valid_ipv6_nexthop_rejects_link_local() {
+        assert!(!super::is_valid_ipv6_nexthop(&"fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_valid_ipv6_nexthop_rejects_multicast() {
+        assert!(!super::is_valid_ipv6_nexthop(&"ff02::1".parse().unwrap()));
     }
 
     #[test]

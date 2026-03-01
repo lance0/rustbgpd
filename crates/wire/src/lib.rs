@@ -57,4 +57,4 @@ pub use attribute::{
 };
 pub use nlri::{Ipv4Prefix, Ipv6Prefix, Prefix};
 pub use update::ParsedUpdate;
-pub use validate::UpdateError;
+pub use validate::{UpdateError, is_valid_ipv6_nexthop};

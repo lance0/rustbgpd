@@ -284,11 +284,18 @@ impl Config {
 
             // Validate local_ipv6_nexthop if configured
             if let Some(ref nh) = neighbor.local_ipv6_nexthop {
-                nh.parse::<Ipv6Addr>()
-                    .map_err(|e| ConfigError::InvalidLocalIpv6Nexthop {
+                let addr =
+                    nh.parse::<Ipv6Addr>()
+                        .map_err(|e| ConfigError::InvalidLocalIpv6Nexthop {
+                            value: nh.clone(),
+                            reason: e.to_string(),
+                        })?;
+                if !rustbgpd_wire::is_valid_ipv6_nexthop(&addr) {
+                    return Err(ConfigError::InvalidLocalIpv6Nexthop {
                         value: nh.clone(),
-                        reason: e.to_string(),
-                    })?;
+                        reason: "address is not a valid IPv6 next-hop (loopback, link-local, multicast, or unspecified)".to_string(),
+                    });
+                }
             }
 
             parse_prefix_list(&neighbor.import_policy)?;
@@ -942,5 +949,52 @@ le = 16
 "#;
         let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    fn neighbor_with_nexthop(nexthop: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+local_ipv6_nexthop = "{nexthop}"
+"#
+        )
+    }
+
+    #[test]
+    fn local_ipv6_nexthop_loopback_rejected() {
+        let err = parse(&neighbor_with_nexthop("::1")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidLocalIpv6Nexthop { .. }));
+    }
+
+    #[test]
+    fn local_ipv6_nexthop_link_local_rejected() {
+        let err = parse(&neighbor_with_nexthop("fe80::1")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidLocalIpv6Nexthop { .. }));
+    }
+
+    #[test]
+    fn local_ipv6_nexthop_multicast_rejected() {
+        let err = parse(&neighbor_with_nexthop("ff02::1")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidLocalIpv6Nexthop { .. }));
+    }
+
+    #[test]
+    fn local_ipv6_nexthop_global_accepted() {
+        let config = parse(&neighbor_with_nexthop("2001:db8::1")).unwrap();
+        assert_eq!(
+            config.neighbors[0].local_ipv6_nexthop.as_deref(),
+            Some("2001:db8::1")
+        );
     }
 }
