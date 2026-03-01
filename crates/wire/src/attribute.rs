@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use bytes::Bytes;
@@ -98,6 +99,109 @@ pub struct MpUnreachNlri {
     pub withdrawn: Vec<Prefix>,
 }
 
+/// RFC 4360 Extended Community — 8-byte value stored as `u64`.
+///
+/// Wire layout: type (1) + sub-type (1) + value (6).
+/// Bit 6 of the type byte: 0 = transitive, 1 = non-transitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExtendedCommunity(u64);
+
+impl ExtendedCommunity {
+    /// Create from a raw 8-byte value.
+    #[must_use]
+    pub fn new(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// Return the raw 8-byte value.
+    #[must_use]
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+
+    /// High byte — IANA-assigned type.
+    #[must_use]
+    pub fn type_byte(self) -> u8 {
+        (self.0 >> 56) as u8
+    }
+
+    /// Second byte — sub-type within the type.
+    #[must_use]
+    pub fn subtype(self) -> u8 {
+        self.0.to_be_bytes()[1]
+    }
+
+    /// Transitive if bit 6 of the type byte is 0.
+    #[must_use]
+    pub fn is_transitive(self) -> bool {
+        self.type_byte() & 0x40 == 0
+    }
+
+    /// Bytes 2-7 of the community value.
+    #[must_use]
+    pub fn value_bytes(self) -> [u8; 6] {
+        let b = self.0.to_be_bytes();
+        [b[2], b[3], b[4], b[5], b[6], b[7]]
+    }
+
+    /// Decode as Route Target (sub-type 0x02).
+    ///
+    /// Returns `(global_admin, local_admin)`:
+    /// - Type 0x00 (2-octet AS): global = AS(u16), local = u32
+    /// - Type 0x02 (4-octet AS): global = AS(u32), local = u16
+    #[must_use]
+    pub fn route_target(self) -> Option<(u32, u32)> {
+        if self.subtype() != 0x02 {
+            return None;
+        }
+        self.decode_two_part()
+    }
+
+    /// Decode as Route Origin (sub-type 0x03).
+    ///
+    /// Same format as Route Target but with sub-type 0x03.
+    #[must_use]
+    pub fn route_origin(self) -> Option<(u32, u32)> {
+        if self.subtype() != 0x03 {
+            return None;
+        }
+        self.decode_two_part()
+    }
+
+    /// Decode the value field as `(global_admin, local_admin)` based on type.
+    fn decode_two_part(self) -> Option<(u32, u32)> {
+        let v = self.value_bytes();
+        let t = self.type_byte() & 0x3F; // mask off high two bits
+        match t {
+            // 2-octet AS specific: AS(2) + value(4)
+            0x00 => {
+                let global = u32::from(u16::from_be_bytes([v[0], v[1]]));
+                let local = u32::from_be_bytes([v[2], v[3], v[4], v[5]]);
+                Some((global, local))
+            }
+            // IPv4 Address specific (0x01) or 4-octet AS specific (0x02): 4 + 2
+            0x01 | 0x02 => {
+                let global = u32::from_be_bytes([v[0], v[1], v[2], v[3]]);
+                let local = u32::from(u16::from_be_bytes([v[4], v[5]]));
+                Some((global, local))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ExtendedCommunity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some((g, l)) = self.route_target() {
+            write!(f, "RT:{g}:{l}")
+        } else if let Some((g, l)) = self.route_origin() {
+            write!(f, "RO:{g}:{l}")
+        } else {
+            write!(f, "0x{:016x}", self.0)
+        }
+    }
+}
+
 /// A known path attribute or raw preserved bytes.
 ///
 /// Known attributes are decoded into typed variants. Unknown attributes
@@ -111,6 +215,8 @@ pub enum PathAttribute {
     Med(u32),
     /// RFC 1997 COMMUNITIES — each u32 is high16=ASN, low16=value.
     Communities(Vec<u32>),
+    /// RFC 4360 EXTENDED COMMUNITIES.
+    ExtendedCommunities(Vec<ExtendedCommunity>),
     /// RFC 4760 `MP_REACH_NLRI`.
     MpReachNlri(MpReachNlri),
     /// RFC 4760 `MP_UNREACH_NLRI`.
@@ -130,6 +236,7 @@ impl PathAttribute {
             Self::LocalPref(_) => attr_type::LOCAL_PREF,
             Self::Med(_) => attr_type::MULTI_EXIT_DISC,
             Self::Communities(_) => attr_type::COMMUNITIES,
+            Self::ExtendedCommunities(_) => attr_type::EXTENDED_COMMUNITIES,
             Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
             Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
             Self::Unknown(raw) => raw.type_code,
@@ -144,7 +251,9 @@ impl PathAttribute {
                 attr_flags::TRANSITIVE
             }
             Self::Med(_) | Self::MpReachNlri(_) | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
-            Self::Communities(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+            Self::Communities(_) | Self::ExtendedCommunities(_) => {
+                attr_flags::OPTIONAL | attr_flags::TRANSITIVE
+            }
             Self::Unknown(raw) => raw.flags,
         }
     }
@@ -234,6 +343,7 @@ pub fn decode_path_attributes(
 }
 
 /// Decode a single attribute value given its flags, type code, and raw bytes.
+#[expect(clippy::too_many_lines)]
 fn decode_attribute_value(
     flags: u8,
     type_code: u8,
@@ -336,6 +446,28 @@ fn decode_attribute_value(
                 .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
                 .collect();
             Ok(PathAttribute::Communities(communities))
+        }
+
+        attr_type::EXTENDED_COMMUNITIES => {
+            if !value.len().is_multiple_of(8) {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!(
+                        "EXTENDED_COMMUNITIES length {} not a multiple of 8",
+                        value.len()
+                    ),
+                });
+            }
+            let communities = value
+                .chunks_exact(8)
+                .map(|c| {
+                    ExtendedCommunity::new(u64::from_be_bytes([
+                        c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7],
+                    ]))
+                })
+                .collect();
+            Ok(PathAttribute::ExtendedCommunities(communities))
         }
 
         attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value),
@@ -576,7 +708,7 @@ fn expected_flags(type_code: u8) -> Option<u8> {
             Some(attr_flags::OPTIONAL)
         }
         // Optional transitive
-        attr_type::AGGREGATOR | attr_type::COMMUNITIES => {
+        attr_type::AGGREGATOR | attr_type::COMMUNITIES | attr_type::EXTENDED_COMMUNITIES => {
             Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE)
         }
         _ => None,
@@ -623,6 +755,13 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                 type_code = attr_type::COMMUNITIES;
                 for &c in communities {
                     value.extend_from_slice(&c.to_be_bytes());
+                }
+            }
+            PathAttribute::ExtendedCommunities(communities) => {
+                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                type_code = attr_type::EXTENDED_COMMUNITIES;
+                for &c in communities {
+                    value.extend_from_slice(&c.as_u64().to_be_bytes());
                 }
             }
             PathAttribute::MpReachNlri(mp) => {
@@ -1044,6 +1183,113 @@ mod tests {
         let attr = PathAttribute::Communities(vec![]);
         assert_eq!(attr.type_code(), 8);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+    }
+
+    // --- Extended Communities (RFC 4360) tests ---
+
+    #[test]
+    fn decode_extended_communities_single() {
+        // Route Target 65001:100 — type 0x00, subtype 0x02, AS 65001 (2-octet), value 100
+        let ec = ExtendedCommunity::new(0x0002_FDE9_0000_0064);
+        let bytes = ec.as_u64().to_be_bytes();
+        let buf = [
+            0xC0, 0x10, 0x08, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+            bytes[7],
+        ];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![ec]));
+    }
+
+    #[test]
+    fn decode_extended_communities_multiple() {
+        let ec1 = ExtendedCommunity::new(0x0002_FDE9_0000_0064);
+        let ec2 = ExtendedCommunity::new(0x0003_FDEA_0000_00C8);
+        let b1 = ec1.as_u64().to_be_bytes();
+        let b2 = ec2.as_u64().to_be_bytes();
+        let mut buf = vec![0xC0, 0x10, 16]; // flags, type=16, len=16
+        buf.extend_from_slice(&b1);
+        buf.extend_from_slice(&b2);
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![ec1, ec2]));
+    }
+
+    #[test]
+    fn decode_extended_communities_empty() {
+        let buf = [0xC0, 0x10, 0x00];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![]));
+    }
+
+    #[test]
+    fn decode_extended_communities_bad_length() {
+        // length 5 is not a multiple of 8
+        let buf = [0xC0, 0x10, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05];
+        assert!(decode_path_attributes(&buf, true).is_err());
+    }
+
+    #[test]
+    fn extended_communities_roundtrip() {
+        let ec1 = ExtendedCommunity::new(0x0002_FDE9_0000_0064);
+        let ec2 = ExtendedCommunity::new(0x0003_FDEA_0000_00C8);
+        let attrs = vec![PathAttribute::ExtendedCommunities(vec![ec1, ec2])];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded, attrs);
+    }
+
+    #[test]
+    fn extended_communities_type_code_and_flags() {
+        let attr = PathAttribute::ExtendedCommunities(vec![]);
+        assert_eq!(attr.type_code(), 16);
+        assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+    }
+
+    #[test]
+    fn extended_community_type_subtype() {
+        // Type 0x00, Sub-type 0x02 (Route Target, 2-octet AS)
+        let ec = ExtendedCommunity::new(0x0002_FDE9_0000_0064);
+        assert_eq!(ec.type_byte(), 0x00);
+        assert_eq!(ec.subtype(), 0x02);
+        assert!(ec.is_transitive());
+    }
+
+    #[test]
+    fn extended_community_route_target() {
+        // 2-octet AS RT: type=0x00, subtype=0x02, AS=65001, value=100
+        let ec = ExtendedCommunity::new(0x0002_FDE9_0000_0064);
+        assert_eq!(ec.route_target(), Some((65001, 100)));
+        assert_eq!(ec.route_origin(), None);
+
+        // 4-octet AS RT: type=0x02, subtype=0x02, AS=65537, value=200
+        let ec4 = ExtendedCommunity::new(0x0202_0001_0001_00C8);
+        assert_eq!(ec4.route_target(), Some((65537, 200)));
+    }
+
+    #[test]
+    fn extended_community_is_transitive() {
+        // Type 0x00 → transitive (bit 6 = 0)
+        let t = ExtendedCommunity::new(0x0002_0000_0000_0000);
+        assert!(t.is_transitive());
+
+        // Type 0x40 → non-transitive (bit 6 = 1)
+        let nt = ExtendedCommunity::new(0x4002_0000_0000_0000);
+        assert!(!nt.is_transitive());
+    }
+
+    #[test]
+    fn extended_community_display() {
+        let rt = ExtendedCommunity::new(0x0002_FDE9_0000_0064);
+        assert_eq!(rt.to_string(), "RT:65001:100");
+
+        let ro = ExtendedCommunity::new(0x0003_FDE9_0000_0064);
+        assert_eq!(ro.to_string(), "RO:65001:100");
+
+        // Non-transitive opaque → hex fallback
+        let opaque = ExtendedCommunity::new(0x4300_1234_5678_9ABC);
+        assert_eq!(opaque.to_string(), "0x4300123456789abc");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::time::Instant;
 
-use rustbgpd_wire::{AsPath, Origin, PathAttribute, Prefix};
+use rustbgpd_wire::{AsPath, ExtendedCommunity, Origin, PathAttribute, Prefix};
 
 /// A single route stored in the Adj-RIB-In.
 #[derive(Debug, Clone)]
@@ -70,6 +70,18 @@ impl Route {
             .iter()
             .find_map(|a| match a {
                 PathAttribute::Communities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract EXTENDED COMMUNITIES (RFC 4360) values, returning empty slice if absent.
+    #[must_use]
+    pub fn extended_communities(&self) -> &[ExtendedCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
                 _ => None,
             })
             .unwrap_or(&[])

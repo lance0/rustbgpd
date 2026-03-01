@@ -126,6 +126,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut local_pref = 0u32;
     let mut med = 0u32;
     let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
 
     for attr in &route.attributes {
         match attr {
@@ -141,6 +142,9 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
             PathAttribute::LocalPref(lp) => local_pref = *lp,
             PathAttribute::Med(m) => med = *m,
             PathAttribute::Communities(c) => communities.extend(c),
+            PathAttribute::ExtendedCommunities(ec) => {
+                extended_communities.extend(ec.iter().map(|c| c.as_u64()));
+            }
             _ => {}
         }
     }
@@ -156,6 +160,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         med,
         best,
         communities,
+        extended_communities,
     }
 }
 

@@ -5,7 +5,9 @@ use tonic::{Request, Response, Status};
 
 use crate::proto;
 use rustbgpd_rib::{RibUpdate, Route};
-use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix};
+use rustbgpd_wire::{
+    AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix,
+};
 
 pub struct InjectionService {
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -100,6 +102,14 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         }
         if !req.communities.is_empty() {
             attributes.push(PathAttribute::Communities(req.communities));
+        }
+        if !req.extended_communities.is_empty() {
+            attributes.push(PathAttribute::ExtendedCommunities(
+                req.extended_communities
+                    .iter()
+                    .map(|&v| ExtendedCommunity::new(v))
+                    .collect(),
+            ));
         }
 
         let route = Route {
@@ -197,6 +207,7 @@ mod tests {
             local_pref: 0,
             med: 0,
             communities: vec![],
+            extended_communities: vec![],
         });
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -215,6 +226,7 @@ mod tests {
             local_pref: 0,
             med: 0,
             communities: vec![],
+            extended_communities: vec![],
         });
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);

@@ -189,6 +189,7 @@ message Route {
   uint32 med = 8;
   bool best = 9;
   repeated uint32 communities = 10;
+  repeated uint64 extended_communities = 11;
 }
 
 message WatchRoutesRequest {
@@ -232,6 +233,7 @@ message AddPathRequest {
   uint32 local_pref = 6;
   uint32 med = 7;
   repeated uint32 communities = 8;
+  repeated uint64 extended_communities = 9;
 }
 
 message AddPathResponse {

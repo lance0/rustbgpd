@@ -48,7 +48,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
 - [x] Interop validated — FRR 10.3.1 (17/17 IPv4 + 6 dual-stack automated tests), BIRD 2.0.12
 - [x] Graceful Restart — receiving speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep
-- [x] 448 tests — unit, integration, property, fuzz
+- [x] 458 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -56,15 +56,17 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ## Planned Features
 
-### Next — Extended Communities (RFC 4360)
+### Next — Extended Communities Policy Matching
 
-**Why this matters:** Route targets, traffic engineering, and VPN signaling all use extended communities. Required for any IX or transit use case that tags routes with operational metadata.
+- [ ] Policy: match on extended community values (route target, route origin) in prefix lists
+- [ ] Config: TOML community-match clauses in import/export policy
 
-- [ ] Wire: Extended Communities attribute (type 16) decode/encode
-- [ ] Wire: common subtypes (route target, route origin, 4-byte AS)
-- [ ] RIB: store and expose in route data
-- [ ] API: extended communities in proto Route message and AddPath
-- [ ] Policy: match on extended community values in prefix lists
+### Completed — Extended Communities (RFC 4360)
+
+- [x] Wire: Extended Communities attribute (type 16) decode/encode
+- [x] Wire: common subtypes (route target, route origin, 4-byte AS) via `ExtendedCommunity` newtype helpers
+- [x] RIB: store and expose in route data (`Route.extended_communities()`)
+- [x] API: extended communities in proto Route message and AddPath
 
 ---
 
@@ -112,7 +114,7 @@ Quality gates before tagging 1.0.0:
 
 - [x] MP-BGP (at least IPv6 unicast)
 - [x] Graceful restart
-- [ ] Extended communities
+- [x] Extended communities
 - [ ] Real-world deployment feedback
 - [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
 - [ ] Comprehensive rustdoc for public API

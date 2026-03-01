@@ -7,6 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Extended Communities (RFC 4360).** `ExtendedCommunity(u64)` newtype
+  with helpers for type/sub-type extraction, route target, and route origin
+  decoding. Full wire codec (type 16, Optional|Transitive), stored on
+  routes, exposed via gRPC `Route` and `AddPath`. (ADR-0025)
+
+---
+
 ## [0.3.0] — 2026-03-01
 
 Graceful Restart (RFC 4724) — receiving speaker. Wire codec hardening.
