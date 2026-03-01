@@ -60,16 +60,19 @@ grpc_addr = "0.0.0.0:50051"
 Optional, repeatable. Each entry defines one BGP peer. Omit entirely for a
 dynamic-only deployment where peers are added at runtime via gRPC.
 
-| Field             | Type     | Required | Default | Description                                      |
-|-------------------|----------|----------|---------|--------------------------------------------------|
-| `address`         | string   | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
-| `remote_asn`      | u32      | yes      | --      | Peer's autonomous system number                  |
-| `description`     | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
-| `hold_time`       | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
-| `max_prefixes`    | u32      | no       | --      | Maximum prefixes accepted before session teardown |
-| `md5_password`    | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
-| `ttl_security`    | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
-| `families`        | [string] | no       | (auto)  | Address families to negotiate (see below)        |
+| Field                  | Type     | Required | Default | Description                                      |
+|------------------------|----------|----------|---------|--------------------------------------------------|
+| `address`              | string   | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
+| `remote_asn`           | u32      | yes      | --      | Peer's autonomous system number                  |
+| `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
+| `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
+| `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
+| `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
+| `ttl_security`         | bool     | no       | false   | Enable GTSM / TTL security (RFC 5082, Linux only) |
+| `families`             | [string] | no       | (auto)  | Address families to negotiate (see below)        |
+| `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
+| `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
+| `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 
 ### Address families
 
@@ -103,6 +106,37 @@ address = "fd00::2"
 remote_asn = 65003
 description = "ipv6-peer"
 ```
+
+### Graceful Restart (RFC 4724)
+
+Graceful Restart is enabled by default (receiving speaker mode). When a peer
+with GR capability restarts, its routes are preserved as stale during the
+restart window instead of being immediately withdrawn. End-of-RIB markers
+from the peer clear stale flags per address family; if the timer expires
+before all End-of-RIB markers arrive, remaining stale routes are swept.
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+graceful_restart = true      # default: true
+gr_restart_time = 120        # seconds, advertised in GR capability (max 4095)
+gr_stale_routes_time = 360   # seconds, how long to wait for EoR after reconnect (max 3600)
+```
+
+To disable GR for a specific peer:
+
+```toml
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+graceful_restart = false
+```
+
+**Implementation note:** rustbgpd implements the *receiving speaker* role
+only. It preserves a restarting peer's routes but does not advertise its own
+restart state (R-bit) or preserve its own forwarding state on daemon restart.
+See [ADR-0024](docs/adr/0024-graceful-restart.md).
 
 ### Per-neighbor policy
 
@@ -311,6 +345,9 @@ starting:
 | `grpc_addr` must be a valid `ip:port` | `invalid grpc_addr` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
 | `families` entries must be `"ipv4_unicast"` or `"ipv6_unicast"` | `unsupported address family` |
+| `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
+| `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
+| `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
@@ -323,5 +360,8 @@ starting:
 | `grpc_addr` | `127.0.0.1:50051` |
 | `ttl_security` | `false` |
 | `families` | `["ipv4_unicast"]` for IPv4 peers; `["ipv4_unicast", "ipv6_unicast"]` for IPv6 peers |
+| `graceful_restart` | `true` |
+| `gr_restart_time` | 120 seconds |
+| `gr_stale_routes_time` | 360 seconds |
 | `description` | peer address used as label |
 | Policy default action | permit (when no entry matches) |

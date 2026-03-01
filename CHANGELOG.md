@@ -7,7 +7,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.3.0] — 2026-03-01
+
+Graceful Restart (RFC 4724) — receiving speaker. Wire codec hardening.
+448 tests.
 
 ### Added
 
@@ -19,9 +22,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Config: `graceful_restart` (default `true`), `gr_restart_time` (default
     `120`), `gr_stale_routes_time` (default `360`)
   - FSM: peer GR capability negotiation
-  - RIB: stale route demotion in best-path, timer-based stale sweep,
-    End-of-RIB detection and sending
+  - RIB: stale route demotion in best-path (step 0, before LOCAL_PREF),
+    timer-based stale sweep, End-of-RIB detection and sending
   - Transport: GR-aware session teardown (PeerGracefulRestart vs PeerDown)
+  - Metrics: `bgp_gr_active_peers`, `bgp_gr_stale_routes`,
+    `bgp_gr_timer_expired_total`
+- `rustbgpd-wire`: `Capability::encode()` now returns `Result<(), EncodeError>`
+  — validates capability value lengths and `restart_time` range before encoding
+- Config: `gr_restart_time=0` rejected when `graceful_restart` is enabled;
+  `gr_stale_routes_time` capped at 3600 seconds; duplicate address families
+  in config are deduplicated
 
 ### Fixed
 
@@ -39,6 +49,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `graceful_restart=false` config now gates GR in transport
   - `bgp_gr_stale_routes` metric updated during partial EoR recovery
   - Dead outbound channels cleaned up on GR start
+- `rustbgpd-wire`: capability decode now bounded to the enclosing
+  optional-parameter slice — a malformed capability length can no longer
+  consume into the next parameter or beyond the OPEN body
+- `rustbgpd-wire`: `restart_time > 4095` in `Capability::encode()` now
+  returns an error instead of silently masking with `& 0x0FFF`
 
 - `rustbgpd-rib`: Adj-RIB-Out no longer diverges from wire state for eBGP
   peers without a valid IPv6 next-hop. `sendable_families` passed at `PeerUp`

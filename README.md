@@ -36,7 +36,8 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **388 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **Graceful Restart** -- receiving speaker (RFC 4724): stale route preservation, per-family End-of-RIB, timer-based sweep, enabled by default
+- **448 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -171,7 +172,7 @@ The config file is TOML. All runtime changes go through gRPC -- the file is only
 
 **`[global.telemetry]`** -- Prometheus bind address, log format (`json`), gRPC bind address (default `127.0.0.1:50051`).
 
-**`[[neighbors]]`** -- One block per peer: `address`, `remote_asn`, optional `description`, `hold_time` (default 90), `max_prefixes`, `md5_password`, `ttl_security`, `families` (address families to negotiate, default `["ipv4_unicast"]`).
+**`[[neighbors]]`** -- One block per peer: `address`, `remote_asn`, optional `description`, `hold_time` (default 90), `max_prefixes`, `md5_password`, `ttl_security`, `families` (address families to negotiate, default `["ipv4_unicast"]`), `graceful_restart` (default `true`), `gr_restart_time` (default 120), `gr_stale_routes_time` (default 360).
 
 **`[policy]`** -- Global import/export prefix lists. Each entry has `action` (`permit`/`deny`), `prefix` (CIDR), optional `ge`/`le`.
 
@@ -246,7 +247,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 388 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 448 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -258,8 +259,9 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | Transport | v0.1.0 | Inbound listener, TCP MD5/GTSM, NLRI batching, collision detection |
 | Operations | v0.1.0 | Coordinated shutdown, gRPC supervision, Prometheus metrics |
 | **MP-BGP (IPv6)** | **v0.2.0** | **RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation** |
+| **Graceful Restart** | **v0.3.0** | **RFC 4724: receiving speaker, stale route demotion, End-of-RIB, timer sweep** |
 
-Next: graceful restart, extended communities, BMP. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: extended communities, BMP. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

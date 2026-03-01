@@ -621,7 +621,6 @@ rustbgpd/
 - FlowSpec speaker mode (prefixd lineage)
 - BMP exporter
 - RPKI validation integration (RTR client)
-- Graceful restart (only after core stability)
 - Plugin-based policy engine (WASM or embedded DSL) — only after core stability
 - Config persistence (gRPC changes written back to TOML)
 
@@ -654,7 +653,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | Communities (standard) | 1997 | M4 | FRR | Typed decode/encode, gRPC exposure |
 | Extended communities | 4360 | Post-v1 | — | Roadmap |
 | FlowSpec | 8955 | Post-v1 | — | Roadmap (prefixd lineage) |
-| Graceful restart | 4724 | Post-v1 | — | Roadmap |
+| Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
 | TCP-AO | 5925 | Post-v1 | — | Roadmap |
 | BMP exporter | 7854 | Post-v1 | — | Roadmap |
 | RPKI / RTR client | 8210 | Post-v1 | — | Roadmap |

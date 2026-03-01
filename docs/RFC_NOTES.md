@@ -306,3 +306,116 @@ RFC 4271 §4.3 states well-known attributes should appear before optional
 attributes. rustbgpd accepts out-of-order attributes but emits a
 structured warning event. A future `strict_attribute_order` config option
 may reject them, but this is not v1 scope.
+
+---
+
+## RFC 4724 — Graceful Restart Mechanism for BGP
+
+rustbgpd implements the **receiving speaker** role only. When a peer that
+previously advertised the Graceful Restart capability goes down, rustbgpd
+preserves that peer's routes as stale rather than immediately withdrawing
+them.
+
+### §3 — Graceful Restart Capability
+
+- Capability code 64. Wire format: 2-byte flags/time + N × 4-byte
+  per-family entries.
+- `restart_state` (R-bit): indicates the sender has restarted and may
+  have preserved forwarding state. 12-bit `restart_time` field.
+- Per-family: AFI (2) + SAFI (1) + flags (1). Bit 0x80 =
+  `forwarding_preserved`.
+- Receiving speaker advertises `restart_state: false` and
+  `forwarding_preserved: false` for all configured families.
+- If a peer sends multiple GR capabilities (malformed OPEN), only the
+  first is used. A warning is logged.
+- Capability decode is bounded to the enclosing optional-parameter slice
+  — a malformed capability length cannot consume beyond the parameter.
+
+### §4.1 — Procedures for the Restarting Speaker
+
+Not implemented. rustbgpd does not advertise R=1 or preserve its own
+forwarding state on restart. This requires FIB integration and is deferred.
+
+### §4.2 — Procedures for the Receiving Speaker
+
+**GR trigger:** On `SessionDown`, GR is entered when the peer previously
+advertised GR capability (`peer_gr_capable`) AND local config has
+`graceful_restart = true`. The R-bit is NOT checked — it indicates
+restart state in the NEW OPEN after reconnection, not in the dying session.
+
+**Family handling:** ALL families from the peer's GR capability are retained
+as stale (not just those with `forwarding_preserved=true`). The
+`forwarding_preserved` flag affects forwarding decisions, not route
+retention. Routes for negotiated families NOT in the peer's GR capability
+are withdrawn immediately.
+
+**Stale route demotion:** `Route.is_stale` flag. Best-path step 0 (before
+LOCAL_PREF) prefers non-stale over stale. This is more aggressive than the
+RFC suggestion (step 7 or later) but matches GoBGP and FRR behavior.
+
+**Two-phase timer:**
+1. Initial timer = `restart_time` (peer's advertised value). This is the
+   window for the peer to re-establish the TCP session.
+2. On `PeerUp` during GR, timer resets to `stale_routes_time` (local
+   config, default 360s). This is the window for the peer to send
+   End-of-RIB markers.
+
+**PeerUp during GR:** Routes are NOT cleared of stale flags. The timer is
+reset. Outbound state is re-registered. Stale flags are cleared only by
+per-family End-of-RIB, not by session re-establishment.
+
+**End-of-RIB:** Clears stale flag for the indicated address family.
+Recomputes best paths (previously-demoted routes may now win). If all
+families have received EoR, GR completes and state is cleaned up.
+
+**Timer expiry:** Remaining stale routes are swept as withdrawals. GR
+state is cleaned up. `bgp_gr_timer_expired_total` metric incremented.
+
+### End-of-RIB Detection
+
+- IPv4: empty UPDATE (no NLRI, no withdrawn, no attributes)
+- IPv6: UPDATE with only empty `MP_UNREACH_NLRI`
+
+### End-of-RIB Sending
+
+After sending the initial table to a new peer, EoR markers are sent for
+each negotiated family via `OutboundRouteUpdate.end_of_rib`.
+
+### Metrics
+
+- `bgp_gr_active_peers` — gauge, set on GR entry, cleared on completion
+  or timer expiry
+- `bgp_gr_stale_routes` — gauge per peer, updated on GR entry, per-family
+  EoR, and completion/expiry
+- `bgp_gr_timer_expired_total` — counter, incremented on timer expiry
+
+---
+
+## Interpretation Decisions (RFC 4724)
+
+### Stale Demotion Placement
+
+RFC 4724 suggests demotion "in its decision process" without specifying
+where. rustbgpd places it at step 0 (before LOCAL_PREF), meaning a stale
+route always loses to any non-stale alternative regardless of other
+attributes. This matches GoBGP and FRR and is the safest behavior for a
+receiving speaker.
+
+### All GR Families Retained
+
+RFC 4724 §4.2: "the receiving speaker MUST retain the routes received from
+the restarting speaker for all the address families that were previously
+received in the Graceful Restart Capability." The `forwarding_preserved`
+flag does NOT gate route retention — it indicates whether the data plane
+was preserved for forwarding decisions.
+
+### gr_stale_routes_time Cap
+
+`gr_stale_routes_time` is capped at 3600 seconds (1 hour). This is an
+implementation safety limit, not an RFC constraint. A misconfigured value
+should not keep stale routes for days.
+
+### Receiving Speaker Only
+
+Restarting speaker mode (advertising R=1, preserving forwarding state)
+requires FIB integration that does not exist. Deferred per ADR-0024.
