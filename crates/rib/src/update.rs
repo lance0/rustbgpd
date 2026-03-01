@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 
 use rustbgpd_policy::PrefixList;
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::event::RouteEvent;
@@ -28,6 +28,10 @@ pub enum RibUpdate {
         peer: IpAddr,
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
         export_policy: Option<PrefixList>,
+        /// Address families that the transport can actually serialize for this
+        /// peer. Routes whose AFI is not in this list are filtered out of
+        /// Adj-RIB-Out, preventing divergence between RIB state and wire.
+        sendable_families: Vec<(Afi, Safi)>,
     },
     /// Inject a locally-originated route.
     InjectRoute {

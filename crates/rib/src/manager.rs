@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::{PrefixList, check_prefix_list};
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, warn};
 
@@ -37,6 +37,8 @@ pub struct RibManager {
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
     export_policy: Option<PrefixList>,
     peer_export_policies: HashMap<IpAddr, Option<PrefixList>>,
+    /// Families the transport can actually serialize per peer.
+    peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Peers that failed a `try_send()` and need a full export resync.
     dirty_peers: HashSet<IpAddr>,
     route_events_tx: broadcast::Sender<RouteEvent>,
@@ -59,6 +61,7 @@ impl RibManager {
             outbound_peers: HashMap::new(),
             export_policy,
             peer_export_policies: HashMap::new(),
+            peer_sendable_families: HashMap::new(),
             dirty_peers: HashSet::new(),
             route_events_tx,
             metrics,
@@ -72,6 +75,17 @@ impl RibManager {
             .get(&peer)
             .and_then(|p| p.as_ref())
             .or(self.export_policy.as_ref())
+    }
+
+    /// Check whether a prefix's AFI is sendable for a given peer.
+    fn is_prefix_sendable(&self, peer: IpAddr, prefix: &Prefix) -> bool {
+        let family = match prefix {
+            Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+            Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+        };
+        self.peer_sendable_families
+            .get(&peer)
+            .is_some_and(|fams| fams.contains(&family))
     }
 
     /// Recompute Loc-RIB best path for a set of affected prefixes.
@@ -139,14 +153,10 @@ impl RibManager {
     /// channel send; on failure the peer stays dirty for retry via the
     /// resync timer.
     ///
-    /// **Limitation:** Adj-RIB-Out may temporarily diverge from what was
-    /// actually sent when the transport layer suppresses routes (e.g.,
-    /// IPv6 eBGP routes with no valid next-hop). The RIB records the
-    /// route as advertised, but the transport never puts it on the wire.
-    /// This is an inherent consequence of single-task RIB ownership
-    /// (ADR-0013/0015); adding feedback channels would violate the
-    /// architecture. The divergence only affects IPv6 eBGP peers without
-    /// a valid next-hop and has no operational impact on routing.
+    /// Routes are filtered by `sendable_families` (set at `PeerUp` time)
+    /// so that Adj-RIB-Out only contains routes the transport can actually
+    /// serialize for this peer. The transport retains `is_family_negotiated`
+    /// as a safety net.
     fn distribute_changes(&mut self, changed_prefixes: &HashSet<Prefix>) {
         if changed_prefixes.is_empty() && self.dirty_peers.is_empty() {
             return;
@@ -171,8 +181,9 @@ impl RibManager {
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
 
-            // Resolve export policy before borrowing rib_out
+            // Resolve export policy and sendable families before borrowing rib_out
             let export_pol = self.export_policy_for(peer).cloned();
+            let sendable = self.peer_sendable_families.get(&peer).cloned();
 
             let rib_out = self
                 .adj_ribs_out
@@ -184,6 +195,19 @@ impl RibManager {
                 if let Some(best) = self.loc_rib.get(prefix) {
                     // Split horizon: don't send route back to its source
                     if best.peer == peer {
+                        if rib_out.get(prefix).is_some() {
+                            withdraw.push(*prefix);
+                        }
+                        continue;
+                    }
+
+                    // Sendable family check: skip routes whose AFI the
+                    // transport cannot serialize for this peer.
+                    let family = match prefix {
+                        Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+                        Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+                    };
+                    if !sendable.as_ref().is_some_and(|f| f.contains(&family)) {
                         if rib_out.get(prefix).is_some() {
                             withdraw.push(*prefix);
                         }
@@ -262,6 +286,10 @@ impl RibManager {
         for route in self.loc_rib.iter() {
             // Split horizon
             if route.peer == peer {
+                continue;
+            }
+            // Sendable family check
+            if !self.is_prefix_sendable(peer, &route.prefix) {
                 continue;
             }
             // Export policy (per-peer or global)
@@ -350,6 +378,7 @@ impl RibManager {
                     .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
                 self.outbound_peers.remove(&peer);
                 self.peer_export_policies.remove(&peer);
+                self.peer_sendable_families.remove(&peer);
                 self.dirty_peers.remove(&peer);
             }
 
@@ -357,6 +386,7 @@ impl RibManager {
                 peer,
                 outbound_tx,
                 export_policy,
+                sendable_families,
             } => {
                 debug!(%peer, "peer up — registering for outbound updates");
                 let peer_label = peer.to_string();
@@ -364,6 +394,7 @@ impl RibManager {
                 self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
                 self.outbound_peers.insert(peer, outbound_tx);
                 self.peer_export_policies.insert(peer, export_policy);
+                self.peer_sendable_families.insert(peer, sendable_families);
                 self.send_initial_table(peer);
             }
 
@@ -534,11 +565,23 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::time::{Duration, Instant};
 
-    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
+    use rustbgpd_wire::{
+        Afi, AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, Safi,
+    };
     use tokio::sync::oneshot;
 
     use super::*;
     use crate::route::Route;
+
+    /// Default sendable families for IPv4-only test peers.
+    fn ipv4_sendable() -> Vec<(Afi, Safi)> {
+        vec![(Afi::Ipv4, Safi::Unicast)]
+    }
+
+    /// Sendable families for dual-stack test peers.
+    fn dual_stack_sendable() -> Vec<(Afi, Safi)> {
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+    }
 
     fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         Route {
@@ -945,6 +988,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -971,6 +1015,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1005,6 +1050,7 @@ mod tests {
             peer,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1045,6 +1091,7 @@ mod tests {
             peer,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1079,6 +1126,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1134,6 +1182,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1204,6 +1253,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1244,6 +1294,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1305,6 +1356,7 @@ mod tests {
             peer: peer1,
             outbound_tx: send_filtered,
             export_policy: peer1_export,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1314,6 +1366,7 @@ mod tests {
             peer: peer2,
             outbound_tx: send_unfiltered,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1368,6 +1421,7 @@ mod tests {
             peer,
             outbound_tx: out_tx,
             export_policy: policy,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1408,6 +1462,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1537,6 +1592,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1647,6 +1703,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -1706,6 +1763,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -2144,6 +2202,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -2222,6 +2281,7 @@ mod tests {
             peer: target,
             outbound_tx: out_tx,
             export_policy: None,
+            sendable_families: ipv4_sendable(),
         })
         .await
         .unwrap();
@@ -2261,6 +2321,191 @@ mod tests {
         .unwrap();
         let count = reply_rx.await.unwrap();
         assert_eq!(count, 0);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // --- Sendable families filtering tests ---
+
+    #[tokio::test]
+    async fn distribute_changes_filters_unsendable_families() {
+        use rustbgpd_wire::Ipv6Prefix;
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+
+        // Register peer with IPv4-only sendable families
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+        })
+        .await
+        .unwrap();
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+
+        let v4_route = make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1));
+        let v6_route = Route {
+            prefix: Prefix::V6(v6_prefix),
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            peer: source,
+            attributes: vec![],
+            received_at: Instant::now(),
+            is_ebgp: true,
+        };
+
+        // Send both IPv4 and IPv6 routes
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![v4_route, v6_route],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Should only receive IPv4 route
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
+        assert!(update.withdraw.is_empty());
+
+        // Adj-RIB-Out should only contain IPv4
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert_eq!(advertised.len(), 1);
+        assert_eq!(advertised[0].prefix, Prefix::V4(v4_prefix));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_initial_table_filters_unsendable_families() {
+        use rustbgpd_wire::Ipv6Prefix;
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+
+        let v4_route = make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1));
+        let v6_route = Route {
+            prefix: Prefix::V6(v6_prefix),
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            peer: source,
+            attributes: vec![],
+            received_at: Instant::now(),
+            is_ebgp: true,
+        };
+
+        // Pre-populate Loc-RIB with both IPv4 and IPv6 routes
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![v4_route, v6_route],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Register peer with IPv4-only sendable families — initial dump
+        // should filter out the IPv6 route
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+        })
+        .await
+        .unwrap();
+
+        // Initial table dump should only contain IPv4
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(v4_prefix));
+        assert!(update.withdraw.is_empty());
+
+        // Adj-RIB-Out should only contain IPv4
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let advertised = reply_rx.await.unwrap();
+        assert_eq!(advertised.len(), 1);
+        assert_eq!(advertised[0].prefix, Prefix::V4(v4_prefix));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dual_stack_peer_receives_both_families() {
+        use rustbgpd_wire::Ipv6Prefix;
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let v6_prefix = Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32);
+
+        let v4_route = make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1));
+        let v6_route = Route {
+            prefix: Prefix::V6(v6_prefix),
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            peer: source,
+            attributes: vec![],
+            received_at: Instant::now(),
+            is_ebgp: true,
+        };
+
+        // Pre-populate Loc-RIB
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![v4_route, v6_route],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Register peer with dual-stack sendable families
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: dual_stack_sendable(),
+        })
+        .await
+        .unwrap();
+
+        // Should receive both routes in initial dump
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 2);
 
         drop(tx);
         handle.await.unwrap();

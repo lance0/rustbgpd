@@ -403,6 +403,35 @@ impl PeerSession {
                     );
                     self.negotiated_families
                         .clone_from(&neg.negotiated_families);
+
+                    // Compute sendable families: start from negotiated,
+                    // then for eBGP remove IPv6 unicast if no valid
+                    // IPv6 next-hop is available.
+                    let is_ebgp = neg.peer_asn != self.config.peer.local_asn;
+                    let sendable_families = if is_ebgp {
+                        let local_ipv6 = self
+                            .stream
+                            .as_ref()
+                            .and_then(|s| s.local_addr().ok())
+                            .and_then(|a| match a.ip() {
+                                IpAddr::V6(v6) => Some(v6),
+                                IpAddr::V4(_) => None,
+                            });
+                        let has_v6_nh = self
+                            .config
+                            .local_ipv6_nexthop
+                            .or(local_ipv6)
+                            .filter(rustbgpd_wire::is_valid_ipv6_nexthop)
+                            .is_some();
+                        neg.negotiated_families
+                            .iter()
+                            .filter(|f| **f != (Afi::Ipv6, Safi::Unicast) || has_v6_nh)
+                            .copied()
+                            .collect()
+                    } else {
+                        neg.negotiated_families.clone()
+                    };
+
                     self.negotiated = Some(neg);
                     self.established_at = Some(Instant::now());
                     // Register with RIB manager for outbound updates
@@ -410,6 +439,7 @@ impl PeerSession {
                         peer: self.peer_ip,
                         outbound_tx: self.outbound_tx.clone(),
                         export_policy: self.export_policy.clone(),
+                        sendable_families,
                     });
                 }
                 Action::SessionDown => {
@@ -976,21 +1006,15 @@ impl PeerSession {
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
-        // Resolve IPv6 eBGP next-hop: config override > socket address > suppress
+        // Resolve IPv6 eBGP next-hop: config override > socket address > suppress.
+        // The RIB already filters unsendable families via sendable_families, so
+        // v6_routes should be empty here for eBGP peers without a valid IPv6 NH.
+        // The is_family_negotiated filter above is retained as a safety net.
         let ebgp_ipv6_nh: Option<Ipv6Addr> = self
             .config
             .local_ipv6_nexthop
             .or(local_ipv6)
             .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
-
-        if is_ebgp && ebgp_ipv6_nh.is_none() && !v6_routes.is_empty() {
-            warn!(
-                peer = %self.peer_label,
-                count = v6_routes.len(),
-                "No valid IPv6 next-hop available; suppressing IPv6 route advertisements"
-            );
-            v6_routes.clear();
-        }
 
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
