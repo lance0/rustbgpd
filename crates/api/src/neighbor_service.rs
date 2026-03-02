@@ -288,6 +288,53 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         Ok(Response::new(proto::EnableNeighborResponse {}))
     }
 
+    async fn soft_reset_in(
+        &self,
+        request: Request<proto::SoftResetInRequest>,
+    ) -> Result<Response<proto::SoftResetInResponse>, Status> {
+        let req = request.into_inner();
+        let address: IpAddr = req
+            .address
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+
+        // Empty means "all negotiated families" — pass empty vec through.
+        let families = if req.families.is_empty() {
+            vec![]
+        } else {
+            let mut result = Vec::with_capacity(req.families.len());
+            for f in &req.families {
+                match f.as_str() {
+                    "ipv4_unicast" => result.push((Afi::Ipv4, Safi::Unicast)),
+                    "ipv6_unicast" => result.push((Afi::Ipv6, Safi::Unicast)),
+                    other => {
+                        return Err(Status::invalid_argument(format!(
+                            "unknown address family {other:?}"
+                        )));
+                    }
+                }
+            }
+            result
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::SoftResetIn {
+                address,
+                families,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .map_err(Status::not_found)?;
+
+        Ok(Response::new(proto::SoftResetInResponse {}))
+    }
+
     async fn disable_neighbor(
         &self,
         request: Request<proto::DisableNeighborRequest>,

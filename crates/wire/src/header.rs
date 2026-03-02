@@ -11,6 +11,7 @@ pub enum MessageType {
     Update = 2,
     Notification = 3,
     Keepalive = 4,
+    RouteRefresh = 5,
 }
 
 impl MessageType {
@@ -21,6 +22,7 @@ impl MessageType {
             constants::message_type::UPDATE => Some(Self::Update),
             constants::message_type::NOTIFICATION => Some(Self::Notification),
             constants::message_type::KEEPALIVE => Some(Self::Keepalive),
+            constants::message_type::ROUTE_REFRESH => Some(Self::RouteRefresh),
             _ => None,
         }
     }
@@ -38,6 +40,7 @@ impl std::fmt::Display for MessageType {
             Self::Update => write!(f, "UPDATE"),
             Self::Notification => write!(f, "NOTIFICATION"),
             Self::Keepalive => write!(f, "KEEPALIVE"),
+            Self::RouteRefresh => write!(f, "ROUTE-REFRESH"),
         }
     }
 }

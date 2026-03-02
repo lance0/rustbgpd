@@ -11,7 +11,8 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, Ipv4Prefix, Message, MpReachNlri, MpUnreachNlri,
-    NotificationMessage, PathAttribute, Prefix, Safi, UpdateMessage, encode_message,
+    NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, Safi, UpdateMessage,
+    encode_message,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -646,6 +647,36 @@ impl PeerSession {
                             self.process_update(update).await;
                             continue;
                         }
+                        Message::RouteRefresh(rr) => {
+                            self.metrics
+                                .record_message_received(&self.peer_label, "route_refresh");
+                            let peer_rr = self
+                                .negotiated
+                                .as_ref()
+                                .is_some_and(|n| n.peer_route_refresh);
+                            if !peer_rr {
+                                warn!(
+                                    peer = %self.peer_label,
+                                    "ignoring ROUTE-REFRESH from peer without capability"
+                                );
+                                continue;
+                            }
+                            info!(
+                                peer = %self.peer_label,
+                                afi = ?rr.afi,
+                                safi = ?rr.safi,
+                                "received ROUTE-REFRESH"
+                            );
+                            let _ = self.rib_tx.try_send(RibUpdate::RouteRefreshRequest {
+                                peer: self.peer_ip,
+                                afi: rr.afi,
+                                safi: rr.safi,
+                            });
+                            Event::RouteRefreshReceived {
+                                afi: rr.afi,
+                                safi: rr.safi,
+                            }
+                        }
                     };
                     self.drive_fsm(event).await;
                 }
@@ -962,6 +993,24 @@ impl PeerSession {
                     last_error: self.last_error.clone(),
                 };
                 let _ = reply.send(state);
+                ControlFlow::Continue(())
+            }
+            PeerCommand::SendRouteRefresh { afi, safi } => {
+                if self.fsm.state() != SessionState::Established {
+                    debug!(
+                        peer = %self.peer_label,
+                        "ignoring SendRouteRefresh: not Established"
+                    );
+                    return ControlFlow::Continue(());
+                }
+                let msg = Message::RouteRefresh(RouteRefreshMessage { afi, safi });
+                if let Err(e) = self.send_message(&msg).await {
+                    warn!(peer = %self.peer_label, error = %e, "failed to send ROUTE-REFRESH");
+                } else {
+                    info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
+                    self.metrics
+                        .record_message_sent(&self.peer_label, "route_refresh");
+                }
                 ControlFlow::Continue(())
             }
             PeerCommand::CollisionDump => {

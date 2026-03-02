@@ -38,6 +38,7 @@ pub mod nlri;
 pub mod notification;
 pub mod notification_msg;
 pub mod open;
+pub mod route_refresh;
 pub mod update;
 pub mod validate;
 
@@ -49,6 +50,7 @@ pub use message::{Message, decode_message, encode_message};
 pub use notification::NotificationCode;
 pub use notification_msg::NotificationMessage;
 pub use open::OpenMessage;
+pub use route_refresh::RouteRefreshMessage;
 pub use update::UpdateMessage;
 
 // Re-export attribute types

@@ -47,6 +47,7 @@ impl PeerConfig {
                     .collect(),
             });
         }
+        caps.push(Capability::RouteRefresh);
         caps.push(Capability::FourOctetAs {
             asn: self.local_asn,
         });
@@ -85,10 +86,10 @@ mod tests {
     }
 
     #[test]
-    fn local_capabilities_includes_families_and_four_octet() {
+    fn local_capabilities_includes_families_rr_and_four_octet() {
         let cfg = test_config();
         let caps = cfg.local_capabilities();
-        assert_eq!(caps.len(), 2);
+        assert_eq!(caps.len(), 3);
         assert!(matches!(
             caps[0],
             Capability::MultiProtocol {
@@ -96,7 +97,8 @@ mod tests {
                 safi: Safi::Unicast
             }
         ));
-        assert!(matches!(caps[1], Capability::FourOctetAs { asn: 65001 }));
+        assert!(matches!(caps[1], Capability::RouteRefresh));
+        assert!(matches!(caps[2], Capability::FourOctetAs { asn: 65001 }));
     }
 
     #[test]
@@ -118,8 +120,8 @@ mod tests {
         cfg.graceful_restart = true;
         cfg.gr_restart_time = 120;
         let caps = cfg.local_capabilities();
-        // MultiProtocol + GracefulRestart + FourOctetAs
-        assert_eq!(caps.len(), 3);
+        // MultiProtocol + GracefulRestart + RouteRefresh + FourOctetAs
+        assert_eq!(caps.len(), 4);
         assert!(matches!(
             &caps[1],
             Capability::GracefulRestart {
@@ -137,7 +139,7 @@ mod tests {
     fn local_capabilities_omits_graceful_restart_when_disabled() {
         let cfg = test_config(); // graceful_restart = false
         let caps = cfg.local_capabilities();
-        assert_eq!(caps.len(), 2);
+        assert_eq!(caps.len(), 3); // MultiProtocol + RouteRefresh + FourOctetAs
         assert!(
             !caps
                 .iter()

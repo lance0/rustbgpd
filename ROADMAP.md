@@ -86,7 +86,7 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 - [ ] **Extended message support** (RFC 8654) — raise 4096-byte limit for large UPDATE messages; mainly a wire codec change
 - [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5; `setsockopt` change similar to existing MD5 code
-- [ ] **Route refresh** (RFC 2918) — request peer to re-advertise all routes; useful after policy changes
+- [x] **Route refresh** (RFC 2918) — request peer to re-advertise all routes; useful after policy changes (ADR-0027)
 
 ### Medium Effort (moderate effort, high impact)
 

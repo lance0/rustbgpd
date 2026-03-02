@@ -31,6 +31,11 @@ pub enum PeerManagerCommand {
         address: IpAddr,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    SoftResetIn {
+        address: IpAddr,
+        families: Vec<(Afi, Safi)>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     AcceptInbound {
         stream: TcpStream,
         peer_addr: IpAddr,

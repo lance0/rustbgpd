@@ -365,6 +365,82 @@ impl RibManager {
         }
     }
 
+    /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
+    /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
+    fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+        let family = (afi, safi);
+        let mut announce = Vec::new();
+        let export_pol = self.export_policy_for(peer).cloned();
+
+        for route in self.loc_rib.iter() {
+            // Family filter
+            let route_family = match route.prefix {
+                Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+                Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+            };
+            if route_family != family {
+                continue;
+            }
+            // Split horizon
+            if route.peer == peer {
+                continue;
+            }
+            // Sendable family check
+            if !self.is_prefix_sendable(peer, &route.prefix) {
+                continue;
+            }
+            // Export policy
+            if check_prefix_list(
+                export_pol.as_ref(),
+                route.prefix,
+                route.extended_communities(),
+            ) != rustbgpd_policy::PolicyAction::Permit
+            {
+                continue;
+            }
+            announce.push(route.clone());
+        }
+
+        if let Some(tx) = self.outbound_peers.get(&peer) {
+            if !announce.is_empty() {
+                let update = OutboundRouteUpdate {
+                    announce: announce.clone(),
+                    withdraw: vec![],
+                    end_of_rib: vec![],
+                };
+                if tx.try_send(update).is_err() {
+                    warn!(%peer, "outbound channel full during route refresh response");
+                    self.metrics.record_outbound_route_drop(&peer.to_string());
+                    self.dirty_peers.insert(peer);
+                    return;
+                }
+                // Update AdjRibOut
+                let rib_out = self
+                    .adj_ribs_out
+                    .entry(peer)
+                    .or_insert_with(|| AdjRibOut::new(peer));
+                for route in &announce {
+                    rib_out.insert(route.clone());
+                }
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer.to_string(),
+                    "all",
+                    gauge_val(rib_out.len()),
+                );
+            }
+
+            // Send EoR for the refreshed family
+            let eor = OutboundRouteUpdate {
+                announce: vec![],
+                withdraw: vec![],
+                end_of_rib: vec![family],
+            };
+            if tx.try_send(eor).is_err() {
+                debug!(%peer, "outbound channel full — EoR will be sent on resync");
+            }
+        }
+    }
+
     /// Process a single `RibUpdate` message.
     #[expect(clippy::too_many_lines)]
     fn handle_update(&mut self, update: RibUpdate) {
@@ -595,6 +671,11 @@ impl RibManager {
                         self.metrics.set_gr_stale_routes(&peer_label, 0);
                     }
                 }
+            }
+
+            RibUpdate::RouteRefreshRequest { peer, afi, safi } => {
+                info!(%peer, ?afi, ?safi, "handling route refresh request");
+                self.send_route_refresh_response(peer, afi, safi);
             }
 
             RibUpdate::PeerGracefulRestart {

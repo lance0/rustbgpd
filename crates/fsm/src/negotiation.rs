@@ -90,6 +90,11 @@ pub fn validate_open(
         })
         .unwrap_or_default();
 
+    let peer_route_refresh = open
+        .capabilities
+        .iter()
+        .any(|c| matches!(c, Capability::RouteRefresh));
+
     Ok(NegotiatedSession {
         peer_asn,
         peer_router_id: open.bgp_identifier,
@@ -102,6 +107,7 @@ pub fn validate_open(
         peer_restart_state,
         peer_restart_time,
         peer_gr_families,
+        peer_route_refresh,
     })
 }
 

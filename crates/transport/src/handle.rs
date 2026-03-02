@@ -4,6 +4,7 @@ use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PrefixList;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
+use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -38,6 +39,8 @@ pub enum PeerCommand {
     QueryState {
         reply: oneshot::Sender<PeerSessionState>,
     },
+    /// Send a ROUTE-REFRESH message to the peer (RFC 2918).
+    SendRouteRefresh { afi: Afi, safi: Safi },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
 }
@@ -168,6 +171,21 @@ impl PeerHandle {
     /// Returns an error if the session task has already exited.
     pub async fn collision_dump(&self) -> Result<(), mpsc::error::SendError<PeerCommand>> {
         self.commands.send(PeerCommand::CollisionDump).await
+    }
+
+    /// Send a ROUTE-REFRESH message for the given address family.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has already exited.
+    pub async fn send_route_refresh(
+        &self,
+        afi: Afi,
+        safi: Safi,
+    ) -> Result<(), mpsc::error::SendError<PeerCommand>> {
+        self.commands
+            .send(PeerCommand::SendRouteRefresh { afi, safi })
+            .await
     }
 
     /// Query the current session state.

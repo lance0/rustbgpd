@@ -14,6 +14,7 @@ pub enum TimerType {
 
 /// Result of a successful OPEN exchange — the negotiated session parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct NegotiatedSession {
     /// Peer's 4-byte ASN (from capability, or 2-byte fallback).
     pub peer_asn: u32,
@@ -37,6 +38,8 @@ pub struct NegotiatedSession {
     pub peer_restart_time: u16,
     /// Per-family forwarding state from the peer's GR capability.
     pub peer_gr_families: Vec<GracefulRestartFamily>,
+    /// Whether the peer advertised Route Refresh capability (RFC 2918).
+    pub peer_route_refresh: bool,
 }
 
 /// Output actions produced by the FSM on each transition.

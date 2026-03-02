@@ -92,6 +92,7 @@ service NeighborService {
   rpc GetNeighborState(GetNeighborStateRequest) returns (NeighborState);
   rpc EnableNeighbor(EnableNeighborRequest) returns (EnableNeighborResponse);
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
+  rpc SoftResetIn(SoftResetInRequest) returns (SoftResetInResponse);
 }
 
 message NeighborConfig {
@@ -153,6 +154,15 @@ message DisableNeighborRequest {
 }
 
 message DisableNeighborResponse {}
+
+message SoftResetInRequest {
+  string address = 1;
+  // Address families to refresh (e.g., "ipv4_unicast", "ipv6_unicast").
+  // If empty, refreshes all negotiated families.
+  repeated string families = 2;
+}
+
+message SoftResetInResponse {}
 
 // ---------------------------------------------------------------------------
 // RibService — RIB queries (paginated + streaming)

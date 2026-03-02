@@ -80,4 +80,6 @@ pub enum RibUpdate {
         peer: IpAddr,
         reply: oneshot::Sender<usize>,
     },
+    /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
+    RouteRefreshRequest { peer: IpAddr, afi: Afi, safi: Safi },
 }

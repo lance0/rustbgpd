@@ -6,6 +6,7 @@ use crate::header::{BgpHeader, MessageType};
 use crate::keepalive;
 use crate::notification_msg::NotificationMessage;
 use crate::open::OpenMessage;
+use crate::route_refresh::RouteRefreshMessage;
 use crate::update::UpdateMessage;
 
 /// A decoded BGP message.
@@ -15,6 +16,7 @@ pub enum Message {
     Update(UpdateMessage),
     Notification(NotificationMessage),
     Keepalive,
+    RouteRefresh(RouteRefreshMessage),
 }
 
 impl Message {
@@ -26,6 +28,7 @@ impl Message {
             Self::Update(_) => MessageType::Update,
             Self::Notification(_) => MessageType::Notification,
             Self::Keepalive => MessageType::Keepalive,
+            Self::RouteRefresh(_) => MessageType::RouteRefresh,
         }
     }
 }
@@ -37,6 +40,7 @@ impl std::fmt::Display for Message {
             Self::Update(_) => write!(f, "UPDATE"),
             Self::Notification(n) => write!(f, "NOTIFICATION {}/{}", n.code, n.subcode),
             Self::Keepalive => write!(f, "KEEPALIVE"),
+            Self::RouteRefresh(rr) => write!(f, "{rr}"),
         }
     }
 }
@@ -75,6 +79,10 @@ pub fn decode_message(buf: &mut Bytes) -> Result<Message, DecodeError> {
             let msg = UpdateMessage::decode(buf, body_len)?;
             Ok(Message::Update(msg))
         }
+        MessageType::RouteRefresh => {
+            let msg = RouteRefreshMessage::decode(buf, body_len)?;
+            Ok(Message::RouteRefresh(msg))
+        }
     }
 }
 
@@ -92,6 +100,7 @@ pub fn encode_message(msg: &Message) -> Result<BytesMut, EncodeError> {
         Message::Notification(n) => n.encoded_len(),
         Message::Open(o) => o.encoded_len(),
         Message::Update(u) => u.encoded_len(),
+        Message::RouteRefresh(rr) => rr.encoded_len(),
     });
 
     match msg {
@@ -106,6 +115,9 @@ pub fn encode_message(msg: &Message) -> Result<BytesMut, EncodeError> {
         }
         Message::Update(u) => {
             u.encode(&mut buf)?;
+        }
+        Message::RouteRefresh(rr) => {
+            rr.encode(&mut buf)?;
         }
     }
 

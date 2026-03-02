@@ -358,7 +358,9 @@ impl Session {
                 ]
             }
 
-            Event::KeepaliveReceived | Event::UpdateReceived => {
+            Event::KeepaliveReceived
+            | Event::UpdateReceived
+            | Event::RouteRefreshReceived { .. } => {
                 let mut actions = Vec::new();
                 if let Some(ref neg) = self.negotiated {
                     let hold = u32::from(neg.hold_time);

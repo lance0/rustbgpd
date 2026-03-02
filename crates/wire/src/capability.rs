@@ -65,6 +65,8 @@ pub enum Capability {
         /// Per-AFI/SAFI forwarding state flags.
         families: Vec<GracefulRestartFamily>,
     },
+    /// RFC 2918: Route Refresh.
+    RouteRefresh,
     /// RFC 6793: 4-Byte AS Number.
     FourOctetAs { asn: u32 },
     /// Unknown or unrecognized capability, preserved for re-emission.
@@ -124,6 +126,13 @@ impl Capability {
                         data: data.freeze(),
                     })
                 }
+            }
+            capability_code::ROUTE_REFRESH => {
+                if length != 0 {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                Ok(Capability::RouteRefresh)
             }
             capability_code::GRACEFUL_RESTART => {
                 // Minimum 2 bytes (restart flags/time). Each family is 4 bytes.
@@ -187,6 +196,10 @@ impl Capability {
                 buf.put_u8(0); // reserved
                 buf.put_u8(*safi as u8);
             }
+            Capability::RouteRefresh => {
+                buf.put_u8(capability_code::ROUTE_REFRESH);
+                buf.put_u8(0); // zero-length value
+            }
             Capability::GracefulRestart {
                 restart_state,
                 restart_time,
@@ -245,6 +258,7 @@ impl Capability {
     pub fn code(&self) -> u8 {
         match self {
             Self::MultiProtocol { .. } => capability_code::MULTI_PROTOCOL,
+            Self::RouteRefresh => capability_code::ROUTE_REFRESH,
             Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
             Self::FourOctetAs { .. } => capability_code::FOUR_OCTET_AS,
             Self::Unknown { code, .. } => *code,
@@ -256,6 +270,7 @@ impl Capability {
     pub fn encoded_len(&self) -> usize {
         2 + match self {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
+            Self::RouteRefresh => 0,
             Self::GracefulRestart { families, .. } => 2 + families.len() * 4,
             Self::Unknown { data, .. } => data.len(),
         }

@@ -244,6 +244,35 @@ impl PeerManager {
         Ok(())
     }
 
+    async fn soft_reset_in(
+        &self,
+        address: IpAddr,
+        families: Vec<(Afi, Safi)>,
+    ) -> Result<(), String> {
+        let managed = self
+            .peers
+            .get(&address)
+            .ok_or_else(|| format!("peer {address} not found"))?;
+
+        // Determine which families to request refresh for
+        let target_families = if families.is_empty() {
+            // All configured families for this peer
+            managed.transport_config.peer.families.clone()
+        } else {
+            families
+        };
+
+        for (afi, safi) in &target_families {
+            if let Err(e) = managed.handle.send_route_refresh(*afi, *safi).await {
+                warn!(%address, error = %e, "failed to send route refresh");
+                return Err(format!("failed to send route refresh: {e}"));
+            }
+        }
+
+        info!(%address, families = ?target_families, "soft reset in requested");
+        Ok(())
+    }
+
     async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: IpAddr) {
         let Some(managed) = self.peers.get_mut(&peer_addr) else {
             warn!(%peer_addr, "inbound connection from unknown peer, dropping");
@@ -430,6 +459,10 @@ impl PeerManager {
                         }
                         PeerManagerCommand::DisablePeer { address, reply } => {
                             let result = self.disable_peer(address).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::SoftResetIn { address, families, reply } => {
+                            let result = self.soft_reset_in(address, families).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::AcceptInbound { stream, peer_addr } => {
