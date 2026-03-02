@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use rustbgpd_wire::{AsPath, ExtendedCommunity, Origin, PathAttribute, Prefix};
@@ -24,6 +24,8 @@ pub struct Route {
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or locally originated).
     pub origin_type: RouteOrigin,
+    /// BGP router-id of the peer that sent this route (for `ORIGINATOR_ID`).
+    pub peer_router_id: Ipv4Addr,
     /// Whether this route is stale due to a peer graceful restart.
     pub is_stale: bool,
 }
@@ -99,6 +101,27 @@ impl Route {
             .iter()
             .find_map(|a| match a {
                 PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract `ORIGINATOR_ID` (RFC 4456) if present.
+    #[must_use]
+    pub fn originator_id(&self) -> Option<Ipv4Addr> {
+        self.attributes.iter().find_map(|a| match a {
+            PathAttribute::OriginatorId(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// Extract `CLUSTER_LIST` (RFC 4456), returning empty slice if absent.
+    #[must_use]
+    pub fn cluster_list(&self) -> &[Ipv4Addr] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ClusterList(ids) => Some(ids.as_slice()),
                 _ => None,
             })
             .unwrap_or(&[])

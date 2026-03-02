@@ -86,6 +86,8 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         ttl_security: false,
         local_ipv6_nexthop: None,
         gr_stale_routes_time: 360,
+        route_reflector_client: false,
+        cluster_id: None,
     }
 }
 

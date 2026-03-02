@@ -119,6 +119,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             attributes,
             received_at: std::time::Instant::now(),
             origin_type: RouteOrigin::Local,
+            peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
 

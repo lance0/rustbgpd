@@ -70,6 +70,10 @@ pub mod attr_type {
     pub const ATOMIC_AGGREGATE: u8 = 6;
     pub const AGGREGATOR: u8 = 7;
     pub const COMMUNITIES: u8 = 8;
+    /// RFC 4456: `ORIGINATOR_ID`.
+    pub const ORIGINATOR_ID: u8 = 9;
+    /// RFC 4456: `CLUSTER_LIST`.
+    pub const CLUSTER_LIST: u8 = 10;
     /// RFC 4360: Extended Communities.
     pub const EXTENDED_COMMUNITIES: u8 = 16;
     /// RFC 4760: `MP_REACH_NLRI`.

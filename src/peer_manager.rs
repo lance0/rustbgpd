@@ -39,6 +39,8 @@ pub struct PeerManager {
     rx: mpsc::Receiver<PeerManagerCommand>,
     local_asn: u32,
     router_id: Ipv4Addr,
+    /// Local cluster ID for route reflection (RFC 4456). `None` when not an RR.
+    cluster_id: Option<Ipv4Addr>,
     metrics: BgpMetrics,
     rib_tx: mpsc::Sender<RibUpdate>,
     session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
@@ -50,6 +52,7 @@ impl PeerManager {
         rx: mpsc::Receiver<PeerManagerCommand>,
         local_asn: u32,
         router_id: Ipv4Addr,
+        cluster_id: Option<Ipv4Addr>,
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
     ) -> Self {
@@ -59,6 +62,7 @@ impl PeerManager {
             rx,
             local_asn,
             router_id,
+            cluster_id,
             metrics,
             rib_tx,
             session_notify_tx,
@@ -87,6 +91,8 @@ impl PeerManager {
         transport.max_prefixes = config.max_prefixes;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport.gr_stale_routes_time = config.gr_stale_routes_time;
+        transport.route_reflector_client = config.route_reflector_client;
+        transport.cluster_id = self.cluster_id;
         transport
     }
 
@@ -510,6 +516,7 @@ mod tests {
             gr_restart_time: 120,
             gr_stale_routes_time: 360,
             local_ipv6_nexthop: None,
+            route_reflector_client: false,
             import_policy: None,
             export_policy: None,
         }
@@ -520,7 +527,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -552,7 +559,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -584,7 +591,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -623,7 +630,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
@@ -645,7 +652,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -679,7 +686,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -700,7 +707,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         for i in 2..=3 {
@@ -724,7 +731,7 @@ mod tests {
         let (_, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
 
         let nh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
         let mut config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
@@ -759,7 +766,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -796,7 +803,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -845,7 +852,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
         let metrics = BgpMetrics::new();
-        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), metrics, rib_tx);
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
         let handle = tokio::spawn(mgr.run());
 
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));

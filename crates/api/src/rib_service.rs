@@ -362,6 +362,7 @@ mod tests {
             attributes: vec![],
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
         let v6 = Route {
@@ -371,6 +372,7 @@ mod tests {
             attributes: vec![],
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
 

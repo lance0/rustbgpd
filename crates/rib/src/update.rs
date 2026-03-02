@@ -36,6 +36,8 @@ pub enum RibUpdate {
         sendable_families: Vec<(Afi, Safi)>,
         /// Whether this peer is eBGP (true) or iBGP (false).
         is_ebgp: bool,
+        /// Whether this peer is a route reflector client (RFC 4456).
+        route_reflector_client: bool,
     },
     /// Inject a locally-originated route.
     InjectRoute {

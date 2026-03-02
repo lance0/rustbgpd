@@ -26,6 +26,9 @@ pub struct Global {
     pub asn: u32,
     pub router_id: String,
     pub listen_port: u16,
+    /// Cluster ID for route reflection (RFC 4456). Defaults to `router_id`
+    /// when any neighbor is configured as a route reflector client.
+    pub cluster_id: Option<String>,
     pub telemetry: TelemetryConfig,
 }
 
@@ -69,6 +72,10 @@ pub struct Neighbor {
     /// is IPv4. If not set, the local IPv6 socket address is used (if
     /// available); otherwise IPv6 routes are suppressed for this peer.
     pub local_ipv6_nexthop: Option<String>,
+    /// Mark this neighbor as a route reflector client (RFC 4456).
+    /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
+    #[serde(default)]
+    pub route_reflector_client: bool,
     #[serde(default)]
     pub import_policy: Vec<PrefixListEntryConfig>,
     #[serde(default)]
@@ -120,6 +127,8 @@ pub enum ConfigError {
     InvalidLocalIpv6Nexthop { value: String, reason: String },
     #[error("invalid graceful restart config: {reason}")]
     InvalidGrConfig { reason: String },
+    #[error("invalid route reflector config: {reason}")]
+    InvalidRrConfig { reason: String },
 }
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
@@ -278,6 +287,7 @@ impl Config {
         Ok(config)
     }
 
+    #[expect(clippy::too_many_lines)]
     fn validate(&self) -> Result<(), ConfigError> {
         // Validate router_id is a valid IPv4
         self.global
@@ -287,6 +297,14 @@ impl Config {
                 value: self.global.router_id.clone(),
                 reason: e.to_string(),
             })?;
+
+        // Validate cluster_id if present
+        if let Some(ref cid) = self.global.cluster_id {
+            cid.parse::<Ipv4Addr>()
+                .map_err(|e| ConfigError::InvalidRrConfig {
+                    reason: format!("invalid cluster_id {cid:?}: {e}"),
+                })?;
+        }
 
         // Validate prometheus_addr is a valid SocketAddr
         self.global
@@ -323,6 +341,16 @@ impl Config {
             let hold_time = neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
             if hold_time != 0 && hold_time < 3 {
                 return Err(ConfigError::InvalidHoldTime { value: hold_time });
+            }
+
+            // Validate route_reflector_client: must be iBGP
+            if neighbor.route_reflector_client && neighbor.remote_asn != self.global.asn {
+                return Err(ConfigError::InvalidRrConfig {
+                    reason: format!(
+                        "route_reflector_client requires iBGP (remote_asn {} != local asn {})",
+                        neighbor.remote_asn, self.global.asn
+                    ),
+                });
             }
 
             // Validate families if explicitly configured
@@ -406,6 +434,25 @@ impl Config {
             .grpc_addr
             .parse()
             .expect("validated in Config::load")
+    }
+
+    /// Resolve the effective cluster ID.
+    ///
+    /// Returns `Some` if explicitly configured, or if any neighbor is an RR client
+    /// (defaults to `router_id`). Returns `None` when not acting as a route reflector.
+    pub fn cluster_id(&self) -> Option<Ipv4Addr> {
+        if let Some(ref cid) = self.global.cluster_id {
+            return Some(cid.parse().expect("validated in Config::load"));
+        }
+        if self.neighbors.iter().any(|n| n.route_reflector_client) {
+            let router_id: Ipv4Addr = self
+                .global
+                .router_id
+                .parse()
+                .expect("validated in Config::load");
+            return Some(router_id);
+        }
+        None
     }
 
     pub fn import_policy(&self) -> Result<Option<PrefixList>, ConfigError> {
@@ -1221,5 +1268,115 @@ match_community = ["INVALID"]"#,
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
         assert_eq!(import.entries[0].match_community.len(), 1);
+    }
+
+    // --- Route Reflector config tests ---
+
+    #[test]
+    fn rr_client_on_ebgp_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_reflector_client = true
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRrConfig { .. }));
+    }
+
+    #[test]
+    fn rr_client_on_ibgp_accepted() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_reflector_client = true
+"#;
+        let config = parse(toml_str).unwrap();
+        assert!(config.neighbors[0].route_reflector_client);
+    }
+
+    #[test]
+    fn cluster_id_invalid_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "not-an-ip"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRrConfig { .. }));
+    }
+
+    #[test]
+    fn cluster_id_defaults_to_router_id() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_reflector_client = true
+"#;
+        let config = parse(toml_str).unwrap();
+        assert_eq!(config.cluster_id(), Some(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    #[test]
+    fn explicit_cluster_id_used() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.99"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_reflector_client = true
+"#;
+        let config = parse(toml_str).unwrap();
+        assert_eq!(config.cluster_id(), Some(Ipv4Addr::new(10, 0, 0, 99)));
+    }
+
+    #[test]
+    fn no_rr_client_means_no_cluster_id() {
+        let config = parse(valid_toml()).unwrap();
+        assert_eq!(config.cluster_id(), None);
     }
 }

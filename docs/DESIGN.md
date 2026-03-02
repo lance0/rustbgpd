@@ -410,6 +410,8 @@ Best-path rules (implemented), applied in order:
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
 4. Lowest MED (deterministic — always-compare across all peers, not just same-AS)
 5. eBGP over iBGP (only `RouteOrigin::Ebgp`; Local uses LOCAL_PREF/AS_PATH)
+5.5. Shortest CLUSTER_LIST length (RFC 4456 §9)
+5.6. Lowest ORIGINATOR_ID (RFC 4456 §9) — only when both routes carry the attribute
 6. Lowest peer address (final disambiguator — guarantees strict ordering)
 
 **Implementation choices (ADR-0014):**

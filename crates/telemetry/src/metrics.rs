@@ -39,6 +39,7 @@ pub struct BgpMetrics {
 
     // ── Loop detection ─────────────────────────────────────────
     as_path_loop_detected: IntCounterVec,
+    rr_loop_detected: IntCounterVec,
 
     // ── Graceful Restart ──────────────────────────────────────
     gr_active_peers: IntGaugeVec,
@@ -180,6 +181,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rr_loop_detected = IntCounterVec::new(
+            Opts::new(
+                "bgp_rr_loop_detected_total",
+                "Total updates rejected due to route reflector loop detection",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
         let gr_active_peers = IntGaugeVec::new(
             Opts::new(
                 "bgp_gr_active_peers",
@@ -247,6 +257,9 @@ impl BgpMetrics {
             .register(Box::new(as_path_loop_detected.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(rr_loop_detected.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(gr_active_peers.clone()))
             .expect("metric not already registered");
         registry
@@ -271,6 +284,7 @@ impl BgpMetrics {
             max_prefix_exceeded,
             outbound_route_drops,
             as_path_loop_detected,
+            rr_loop_detected,
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
@@ -366,6 +380,11 @@ impl BgpMetrics {
         self.as_path_loop_detected
             .with_label_values(&[peer])
             .inc_by(count);
+    }
+
+    /// Record a route reflector loop detection event (`ORIGINATOR_ID` or `CLUSTER_LIST` loop).
+    pub fn record_rr_loop_detected(&self, peer: &str) {
+        self.rr_loop_detected.with_label_values(&[peer]).inc();
     }
 
     /// Set the GR active flag for a peer (1 = in GR, 0 = not).

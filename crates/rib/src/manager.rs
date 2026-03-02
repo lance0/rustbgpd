@@ -41,6 +41,10 @@ pub struct RibManager {
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Whether each registered outbound peer is eBGP (true) or iBGP (false).
     peer_is_ebgp: HashMap<IpAddr, bool>,
+    /// Whether each registered outbound peer is a route reflector client.
+    peer_is_rr_client: HashMap<IpAddr, bool>,
+    /// Local cluster ID for route reflection (RFC 4456). `None` = not an RR.
+    cluster_id: Option<Ipv4Addr>,
     /// Peers that failed a `try_send()` and need a full export resync.
     dirty_peers: HashSet<IpAddr>,
     /// `EoR` markers that failed to enqueue and must be retried.
@@ -58,11 +62,56 @@ pub struct RibManager {
     rx: mpsc::Receiver<RibUpdate>,
 }
 
+/// iBGP split-horizon / RFC 4456 reflection logic, extracted as a free
+/// function so it can be called when `self.adj_ribs_out` is mutably borrowed.
+///
+/// RFC 4456 reflection rules (when `cluster_id` is `Some`, i.e. we are an RR):
+/// - eBGP-learned or Local routes: never suppress to anyone
+/// - iBGP-learned from an RR client: reflect to all (clients + non-clients)
+/// - iBGP-learned from a non-client: reflect to clients only
+///
+/// Standard iBGP split-horizon (no RR): suppress all iBGP-learned routes to iBGP peers.
+fn should_suppress_ibgp_inner(
+    route: &crate::route::Route,
+    target_is_ebgp: bool,
+    target_is_rr_client: bool,
+    cluster_id: Option<Ipv4Addr>,
+    peer_is_rr_client: &HashMap<IpAddr, bool>,
+) -> bool {
+    // eBGP targets never suppressed
+    if target_is_ebgp {
+        return false;
+    }
+    // eBGP-learned and Local routes always pass to iBGP peers
+    if route.origin_type != crate::route::RouteOrigin::Ibgp {
+        return false;
+    }
+    // At this point: route is iBGP-learned, target is iBGP
+    match cluster_id {
+        Some(_) => {
+            // RR mode: check if source was a client
+            let source_is_client = peer_is_rr_client.get(&route.peer).copied().unwrap_or(false);
+            if source_is_client {
+                // Client route → reflect to all (clients + non-clients)
+                false
+            } else {
+                // Non-client route → reflect to clients only
+                !target_is_rr_client
+            }
+        }
+        None => {
+            // Standard iBGP split-horizon: suppress all iBGP-learned
+            true
+        }
+    }
+}
+
 impl RibManager {
     #[must_use]
     pub fn new(
         rx: mpsc::Receiver<RibUpdate>,
         export_policy: Option<PrefixList>,
+        cluster_id: Option<Ipv4Addr>,
         metrics: BgpMetrics,
     ) -> Self {
         let (route_events_tx, _) = broadcast::channel(4096);
@@ -75,6 +124,8 @@ impl RibManager {
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),
             peer_is_ebgp: HashMap::new(),
+            peer_is_rr_client: HashMap::new(),
+            cluster_id,
             dirty_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             gr_peers: HashMap::new(),
@@ -103,6 +154,23 @@ impl RibManager {
         self.peer_sendable_families
             .get(&peer)
             .is_some_and(|fams| fams.contains(&family))
+    }
+
+    /// Check whether a route should be suppressed when sending to an iBGP target.
+    fn should_suppress_ibgp(&self, route: &crate::route::Route, target: IpAddr) -> bool {
+        let target_is_ebgp = self.peer_is_ebgp.get(&target).copied().unwrap_or(true);
+        let target_is_rr_client = self
+            .peer_is_rr_client
+            .get(&target)
+            .copied()
+            .unwrap_or(false);
+        should_suppress_ibgp_inner(
+            route,
+            target_is_ebgp,
+            target_is_rr_client,
+            self.cluster_id,
+            &self.peer_is_rr_client,
+        )
     }
 
     /// Recompute Loc-RIB best path for a set of affected prefixes.
@@ -199,9 +267,13 @@ impl RibManager {
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
 
-            // Resolve export policy and sendable families before borrowing rib_out
+            // Resolve export policy, sendable families, and RR state before
+            // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
             let export_pol = self.export_policy_for(peer).cloned();
             let sendable = self.peer_sendable_families.get(&peer).cloned();
+            let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+            let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+            let cluster_id = self.cluster_id;
 
             let rib_out = self
                 .adj_ribs_out
@@ -219,12 +291,14 @@ impl RibManager {
                         continue;
                     }
 
-                    // iBGP split-horizon: non-route-reflector speaker must not
-                    // re-advertise iBGP-learned routes to iBGP peers
-                    // (RFC 4271 §9.1.1). Local routes are always advertisable.
-                    if best.origin_type == crate::route::RouteOrigin::Ibgp
-                        && !self.peer_is_ebgp.get(&peer).copied().unwrap_or(true)
-                    {
+                    // iBGP split-horizon / RFC 4456 reflection rules
+                    if should_suppress_ibgp_inner(
+                        best,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        &self.peer_is_rr_client,
+                    ) {
                         if rib_out.get(prefix).is_some() {
                             withdraw.push(*prefix);
                         }
@@ -335,14 +409,13 @@ impl RibManager {
         let export_pol = self.export_policy_for(peer).cloned();
 
         // Stage: collect eligible routes without mutating AdjRibOut
-        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         for route in self.loc_rib.iter() {
             // Split horizon
             if route.peer == peer {
                 continue;
             }
-            // iBGP split-horizon (local routes are always advertisable)
-            if route.origin_type == crate::route::RouteOrigin::Ibgp && !target_is_ebgp {
+            // iBGP split-horizon / RFC 4456 reflection rules
+            if self.should_suppress_ibgp(route, peer) {
                 continue;
             }
             // Sendable family check
@@ -424,7 +497,6 @@ impl RibManager {
         let family = (afi, safi);
         let mut announce = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
-        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
 
         for route in self.loc_rib.iter() {
             // Family filter
@@ -439,8 +511,8 @@ impl RibManager {
             if route.peer == peer {
                 continue;
             }
-            // iBGP split-horizon (local routes are always advertisable)
-            if route.origin_type == crate::route::RouteOrigin::Ibgp && !target_is_ebgp {
+            // iBGP split-horizon / RFC 4456 reflection rules
+            if self.should_suppress_ibgp(route, peer) {
                 continue;
             }
             // Sendable family check
@@ -589,6 +661,7 @@ impl RibManager {
                 self.peer_export_policies.remove(&peer);
                 self.peer_sendable_families.remove(&peer);
                 self.peer_is_ebgp.remove(&peer);
+                self.peer_is_rr_client.remove(&peer);
                 self.dirty_peers.remove(&peer);
                 self.pending_eor.remove(&peer);
             }
@@ -599,6 +672,7 @@ impl RibManager {
                 export_policy,
                 sendable_families,
                 is_ebgp,
+                route_reflector_client,
             } => {
                 // If the peer re-establishes during graceful restart, keep
                 // routes stale and wait for End-of-RIB per family (RFC 4724
@@ -621,6 +695,7 @@ impl RibManager {
                 self.peer_export_policies.insert(peer, export_policy);
                 self.peer_sendable_families.insert(peer, sendable_families);
                 self.peer_is_ebgp.insert(peer, is_ebgp);
+                self.peer_is_rr_client.insert(peer, route_reflector_client);
                 self.send_initial_table(peer);
             }
 
@@ -814,6 +889,7 @@ impl RibManager {
                 self.peer_export_policies.remove(&peer);
                 self.peer_sendable_families.remove(&peer);
                 self.peer_is_ebgp.remove(&peer);
+                self.peer_is_rr_client.remove(&peer);
                 self.dirty_peers.remove(&peer);
                 self.pending_eor.remove(&peer);
 
@@ -1003,6 +1079,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }
@@ -1021,6 +1098,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }
@@ -1028,7 +1106,7 @@ mod tests {
     #[tokio::test]
     async fn routes_received_and_queried() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1062,7 +1140,7 @@ mod tests {
     #[tokio::test]
     async fn peer_down_clears_routes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1097,7 +1175,7 @@ mod tests {
     #[tokio::test]
     async fn withdrawal_removes_route() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1142,7 +1220,7 @@ mod tests {
     #[tokio::test]
     async fn query_all_peers() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1190,7 +1268,7 @@ mod tests {
     #[tokio::test]
     async fn best_routes_returns_winner() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -1231,7 +1309,7 @@ mod tests {
     #[tokio::test]
     async fn peer_down_promotes_second_best() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -1273,7 +1351,7 @@ mod tests {
     #[tokio::test]
     async fn withdrawal_updates_best() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -1321,7 +1399,7 @@ mod tests {
     #[tokio::test]
     async fn different_best_per_prefix() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix_a = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -1380,7 +1458,7 @@ mod tests {
     #[tokio::test]
     async fn peer_up_triggers_initial_table_dump() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1404,6 +1482,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1421,7 +1500,7 @@ mod tests {
     #[tokio::test]
     async fn route_change_distributes_to_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1432,6 +1511,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1458,7 +1538,7 @@ mod tests {
     #[tokio::test]
     async fn split_horizon_prevents_echo() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1469,6 +1549,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1507,6 +1588,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }
@@ -1514,7 +1596,7 @@ mod tests {
     #[tokio::test]
     async fn ibgp_route_not_sent_to_ibgp_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         // Source: iBGP peer
@@ -1537,6 +1619,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: false,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1552,7 +1635,7 @@ mod tests {
     #[tokio::test]
     async fn ibgp_route_sent_to_ebgp_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         // Source: iBGP peer
@@ -1575,6 +1658,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1594,7 +1678,7 @@ mod tests {
     #[tokio::test]
     async fn ebgp_route_sent_to_ibgp_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         // Source: eBGP peer
@@ -1617,6 +1701,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: false,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1636,7 +1721,7 @@ mod tests {
     #[tokio::test]
     async fn ibgp_split_horizon_withdraw_on_best_change() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         // Setup: eBGP source announces route, iBGP target receives it
@@ -1652,6 +1737,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: false,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1704,7 +1790,7 @@ mod tests {
     #[tokio::test]
     async fn local_route_sent_to_ibgp_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         // Register iBGP target peer first
@@ -1716,6 +1802,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: false,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1730,6 +1817,7 @@ mod tests {
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1753,7 +1841,7 @@ mod tests {
     #[tokio::test]
     async fn local_route_in_initial_table_to_ibgp_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         // Inject a local route first
@@ -1765,6 +1853,7 @@ mod tests {
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -1785,6 +1874,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: false,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1804,7 +1894,7 @@ mod tests {
     #[tokio::test]
     async fn peer_down_cleans_up_outbound() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1815,6 +1905,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1840,7 +1931,7 @@ mod tests {
     #[tokio::test]
     async fn inject_route_enters_loc_rib_and_distributes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1851,6 +1942,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1867,6 +1959,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
 
@@ -1899,7 +1992,7 @@ mod tests {
     #[tokio::test]
     async fn withdraw_injected_removes_and_distributes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -1910,6 +2003,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -1923,6 +2017,7 @@ mod tests {
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
 
@@ -1974,7 +2069,7 @@ mod tests {
         };
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, Some(export_policy), BgpMetrics::new());
+        let manager = RibManager::new(rx, Some(export_policy), None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -1985,6 +2080,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2017,7 +2113,7 @@ mod tests {
     #[tokio::test]
     async fn query_advertised_routes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -2028,6 +2124,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2079,7 +2176,7 @@ mod tests {
         });
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -2092,6 +2189,7 @@ mod tests {
             export_policy: peer1_export,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2104,6 +2202,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2140,7 +2239,7 @@ mod tests {
         use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2162,6 +2261,7 @@ mod tests {
             export_policy: policy,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2188,7 +2288,7 @@ mod tests {
         tokio::time::pause();
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2204,6 +2304,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2322,7 +2423,7 @@ mod tests {
         tokio::time::pause();
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2336,6 +2437,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2422,7 +2524,7 @@ mod tests {
     #[tokio::test]
     async fn initial_dump_failure_leaves_adjribout_empty() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2448,6 +2550,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2475,7 +2578,7 @@ mod tests {
         tokio::time::pause();
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2510,6 +2613,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2579,7 +2683,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_added_on_new_best() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let mut events_rx = subscribe_events(&tx).await;
@@ -2606,7 +2710,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_withdrawn_on_last_removed() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2643,7 +2747,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_best_changed_on_better_path() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -2683,7 +2787,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_subscribers_receive_same_events() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let mut sub1 = subscribe_events(&tx).await;
@@ -2714,7 +2818,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_withdrawn_carries_previous_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2749,7 +2853,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_best_changed_carries_both_peers() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
@@ -2786,7 +2890,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_has_timestamp() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let mut events_rx = subscribe_events(&tx).await;
@@ -2817,7 +2921,7 @@ mod tests {
     #[tokio::test]
     async fn route_event_added_has_no_previous_peer() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let mut events_rx = subscribe_events(&tx).await;
@@ -2848,7 +2952,7 @@ mod tests {
     async fn rib_prefixes_gauge_tracks_adjribin() {
         let metrics = BgpMetrics::new();
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, metrics.clone());
+        let manager = RibManager::new(rx, None, None, metrics.clone());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2901,7 +3005,7 @@ mod tests {
     async fn loc_rib_gauge_tracks_best() {
         let metrics = BgpMetrics::new();
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, metrics.clone());
+        let manager = RibManager::new(rx, None, None, metrics.clone());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2937,7 +3041,7 @@ mod tests {
     async fn adj_rib_out_gauge_tracks_advertised() {
         let metrics = BgpMetrics::new();
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, metrics.clone());
+        let manager = RibManager::new(rx, None, None, metrics.clone());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -2951,6 +3055,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -2986,7 +3091,7 @@ mod tests {
     #[tokio::test]
     async fn query_loc_rib_count() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3017,7 +3122,7 @@ mod tests {
     #[tokio::test]
     async fn query_advertised_count() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3031,6 +3136,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -3082,7 +3188,7 @@ mod tests {
         use rustbgpd_wire::Ipv6Prefix;
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -3095,6 +3201,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -3112,6 +3219,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
 
@@ -3151,7 +3259,7 @@ mod tests {
         use rustbgpd_wire::Ipv6Prefix;
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3166,6 +3274,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
 
@@ -3188,6 +3297,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -3219,7 +3329,7 @@ mod tests {
         use rustbgpd_wire::Ipv6Prefix;
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3234,6 +3344,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
 
@@ -3255,6 +3366,7 @@ mod tests {
             export_policy: None,
             sendable_families: dual_stack_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -3272,7 +3384,7 @@ mod tests {
     #[tokio::test]
     async fn gr_marks_stale_and_demotes_routes() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3286,6 +3398,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -3328,7 +3441,7 @@ mod tests {
     #[tokio::test]
     async fn gr_eor_clears_stale() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3391,7 +3504,7 @@ mod tests {
         tokio::time::pause();
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3445,7 +3558,7 @@ mod tests {
     #[tokio::test]
     async fn gr_peer_up_defers_stale_to_eor() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3486,6 +3599,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -3528,7 +3642,7 @@ mod tests {
         tokio::time::pause();
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3565,6 +3679,7 @@ mod tests {
             export_policy: None,
             sendable_families: ipv4_sendable(),
             is_ebgp: true,
+            route_reflector_client: false,
         })
         .await
         .unwrap();
@@ -3597,7 +3712,7 @@ mod tests {
     #[tokio::test]
     async fn gr_peer_down_aborts_gr() {
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
@@ -3642,7 +3757,7 @@ mod tests {
         use rustbgpd_wire::Ipv6Prefix;
 
         let (tx, rx) = mpsc::channel(64);
-        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
         let handle = tokio::spawn(manager.run());
 
         let source: IpAddr = "10.0.0.1".parse().unwrap();
@@ -3657,6 +3772,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
         tx.send(RibUpdate::RoutesReceived {
@@ -3697,6 +3813,315 @@ mod tests {
             "remaining route should be IPv4"
         );
         assert!(best[0].is_stale, "IPv4 route should be stale");
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // --- Route Reflector tests ---
+
+    #[tokio::test]
+    async fn rr_client_route_reflected_to_all_ibgp() {
+        // When RR receives a route from a client, it should reflect to all
+        // iBGP peers (both clients and non-clients), except the source.
+        let (tx, rx) = mpsc::channel(64);
+        let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+        let manager = RibManager::new(rx, None, cluster_id, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+        let client_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let nonclient_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+        // Register source as iBGP client
+        let (out_tx_src, _) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: source,
+            outbound_tx: out_tx_src,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+        })
+        .await
+        .unwrap();
+
+        // Register client target
+        let (client_tx, mut client_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: client_target,
+            outbound_tx: client_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut client_rx).await;
+
+        // Register non-client target
+        let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: nonclient_target,
+            outbound_tx: nonclient_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut nonclient_rx).await;
+
+        // Source client sends a route
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 4))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Both targets should receive the reflected route
+        let client_update = client_rx.recv().await.unwrap();
+        assert!(
+            !client_update.announce.is_empty(),
+            "client should receive reflected route"
+        );
+
+        let nonclient_update = nonclient_rx.recv().await.unwrap();
+        assert!(
+            !nonclient_update.announce.is_empty(),
+            "non-client should receive route reflected from client"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rr_nonclient_route_reflected_to_clients_only() {
+        // Route from non-client → reflect to clients only (not non-clients).
+        let (tx, rx) = mpsc::channel(64);
+        let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+        let manager = RibManager::new(rx, None, cluster_id, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)); // non-client
+        let client_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let nonclient_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+
+        // Register source as non-client
+        let (out_tx_src, _) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: source,
+            outbound_tx: out_tx_src,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+        })
+        .await
+        .unwrap();
+
+        // Register client target
+        let (client_tx, mut client_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: client_target,
+            outbound_tx: client_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: true,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut client_rx).await;
+
+        // Register non-client target
+        let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: nonclient_target,
+            outbound_tx: nonclient_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut nonclient_rx).await;
+
+        // Source sends a route
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Client should get the route
+        let update_c = client_rx.recv().await.unwrap();
+        assert!(
+            !update_c.announce.is_empty(),
+            "client should receive non-client route"
+        );
+
+        // Non-client should NOT get the route (suppressed by RR)
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            nonclient_rx.try_recv().is_err(),
+            "non-client should not receive non-client route"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_rr_ibgp_split_horizon_unchanged() {
+        // Without cluster_id (no RR), standard split-horizon applies
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+        // Register target first (Loc-RIB empty, clean EoR)
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // Source sends iBGP route
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // iBGP route should be suppressed (standard split-horizon)
+        assert!(
+            out_rx.try_recv().is_err(),
+            "iBGP route should be suppressed without RR"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rr_ebgp_route_to_all_ibgp() {
+        // eBGP-learned routes should go to all iBGP peers regardless of RR role
+        let (tx, rx) = mpsc::channel(64);
+        let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+        let manager = RibManager::new(rx, None, cluster_id, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)); // iBGP non-client
+
+        // Register target first (Loc-RIB empty, clean EoR)
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // eBGP source sends a route
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 5))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let update = out_rx.recv().await.unwrap();
+        assert!(
+            !update.announce.is_empty(),
+            "eBGP route should reach iBGP non-client"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rr_local_route_to_all_ibgp() {
+        // Local routes should pass to all iBGP peers even with RR
+        let (tx, rx) = mpsc::channel(64);
+        let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 1));
+        let manager = RibManager::new(rx, None, cluster_id, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+        // Register target first (Loc-RIB empty, clean EoR)
+        let (out_tx, mut out_rx) = mpsc::channel(16);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+            route_reflector_client: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // Inject local route
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let route = Route {
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            peer: LOCAL_PEER,
+            attributes: vec![PathAttribute::Origin(Origin::Igp)],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+        };
+        let (reply_tx, _) = oneshot::channel();
+        tx.send(RibUpdate::InjectRoute {
+            route,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+
+        let update = out_rx.recv().await.unwrap();
+        assert!(
+            !update.announce.is_empty(),
+            "local route should reach iBGP non-client via RR"
+        );
 
         drop(tx);
         handle.await.unwrap();

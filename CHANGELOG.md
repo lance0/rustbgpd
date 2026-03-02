@@ -47,6 +47,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and existing extended community syntax (`RT:65001:100`). Standard and
   extended community criteria use OR semantics within a single entry.
   (ADR-0028)
+- **Route Reflector (RFC 4456).** Designated speakers can reflect
+  iBGP-learned routes based on client/non-client roles, eliminating
+  the full-mesh requirement. Config: `cluster_id` (global),
+  `route_reflector_client` (per-neighbor). Reflection rules: client
+  routes go to all iBGP peers, non-client routes go to clients only.
+  ORIGINATOR_ID (type 9) and CLUSTER_LIST (type 10) attributes with
+  full wire codec, inbound loop detection, outbound manipulation
+  (set on reflection, stripped on eBGP). Best-path tiebreakers:
+  shortest CLUSTER_LIST, lowest ORIGINATOR_ID (RFC 4456 §9). New
+  metric: `bgp_rr_loop_detected_total`. (ADR-0029)
 
 ### Fixed
 

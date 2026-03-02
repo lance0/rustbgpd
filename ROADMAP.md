@@ -54,7 +54,8 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] AS_PATH loop detection (RFC 4271 §9.1.2) — routes containing local ASN discarded before RIB entry (all peers)
 - [x] iBGP split-horizon (RFC 4271 §9.1.1) — non-route-reflector speaker suppresses iBGP-to-iBGP re-advertisement
 - [x] Standard Communities Policy Matching (RFC 1997) — filter on standard community values in import/export policy, well-known names (ADR-0028)
-- [x] 508 tests — unit, integration, property, fuzz
+- [x] Route Reflector (RFC 4456) — client/non-client reflection rules, ORIGINATOR_ID and CLUSTER_LIST attributes, inbound loop detection, best-path tiebreakers (ADR-0029)
+- [x] 530 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -73,7 +74,6 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ### Quick Wins (low effort, high impact)
 
-- [ ] **Standard communities policy matching** (RFC 1997) — filter on standard community values in import/export policy; reuses the EC matching pattern, most common operational filter
 - [ ] **Extended message support** (RFC 8654) — raise 4096-byte limit for large UPDATE messages; mainly a wire codec change
 - [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5; `setsockopt` change similar to existing MD5 code

@@ -55,6 +55,7 @@ pub struct PeerManagerNeighborConfig {
     pub gr_restart_time: u16,
     pub gr_stale_routes_time: u64,
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
+    pub route_reflector_client: bool,
     pub import_policy: Option<PrefixList>,
     pub export_policy: Option<PrefixList>,
 }

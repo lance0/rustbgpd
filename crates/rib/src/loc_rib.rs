@@ -98,6 +98,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }

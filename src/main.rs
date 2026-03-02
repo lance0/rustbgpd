@@ -81,8 +81,9 @@ async fn run(config: Config) {
     });
 
     // Spawn RIB manager
+    let cluster_id = config.cluster_id();
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
-    tokio::spawn(RibManager::new(rib_rx, export_policy, metrics.clone()).run());
+    tokio::spawn(RibManager::new(rib_rx, export_policy, cluster_id, metrics.clone()).run());
 
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
@@ -90,6 +91,7 @@ async fn run(config: Config) {
         peer_mgr_rx,
         config.global.asn,
         router_id,
+        cluster_id,
         metrics.clone(),
         rib_tx.clone(),
     );
@@ -190,6 +192,7 @@ async fn run(config: Config) {
                     gr_restart_time: transport_config.peer.gr_restart_time,
                     gr_stale_routes_time: transport_config.gr_stale_routes_time,
                     local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
+                    route_reflector_client: transport_config.route_reflector_client,
                     import_policy,
                     export_policy,
                 },

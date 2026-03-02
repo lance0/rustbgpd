@@ -247,6 +247,10 @@ pub enum PathAttribute {
     Communities(Vec<u32>),
     /// RFC 4360 EXTENDED COMMUNITIES.
     ExtendedCommunities(Vec<ExtendedCommunity>),
+    /// RFC 4456 `ORIGINATOR_ID` — original router-id of the route.
+    OriginatorId(Ipv4Addr),
+    /// RFC 4456 `CLUSTER_LIST` — list of cluster-ids traversed.
+    ClusterList(Vec<Ipv4Addr>),
     /// RFC 4760 `MP_REACH_NLRI`.
     MpReachNlri(MpReachNlri),
     /// RFC 4760 `MP_UNREACH_NLRI`.
@@ -266,6 +270,8 @@ impl PathAttribute {
             Self::LocalPref(_) => attr_type::LOCAL_PREF,
             Self::Med(_) => attr_type::MULTI_EXIT_DISC,
             Self::Communities(_) => attr_type::COMMUNITIES,
+            Self::OriginatorId(_) => attr_type::ORIGINATOR_ID,
+            Self::ClusterList(_) => attr_type::CLUSTER_LIST,
             Self::ExtendedCommunities(_) => attr_type::EXTENDED_COMMUNITIES,
             Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
             Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
@@ -280,7 +286,11 @@ impl PathAttribute {
             Self::Origin(_) | Self::AsPath(_) | Self::NextHop(_) | Self::LocalPref(_) => {
                 attr_flags::TRANSITIVE
             }
-            Self::Med(_) | Self::MpReachNlri(_) | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
+            Self::Med(_)
+            | Self::OriginatorId(_)
+            | Self::ClusterList(_)
+            | Self::MpReachNlri(_)
+            | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
             Self::Communities(_) | Self::ExtendedCommunities(_) => {
                 attr_flags::OPTIONAL | attr_flags::TRANSITIVE
             }
@@ -498,6 +508,33 @@ fn decode_attribute_value(
                 })
                 .collect();
             Ok(PathAttribute::ExtendedCommunities(communities))
+        }
+
+        attr_type::ORIGINATOR_ID => {
+            if value.len() != 4 {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!("ORIGINATOR_ID length {} (expected 4)", value.len()),
+                });
+            }
+            let addr = Ipv4Addr::new(value[0], value[1], value[2], value[3]);
+            Ok(PathAttribute::OriginatorId(addr))
+        }
+
+        attr_type::CLUSTER_LIST => {
+            if !value.len().is_multiple_of(4) {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!("CLUSTER_LIST length {} not a multiple of 4", value.len()),
+                });
+            }
+            let ids = value
+                .chunks_exact(4)
+                .map(|c| Ipv4Addr::new(c[0], c[1], c[2], c[3]))
+                .collect();
+            Ok(PathAttribute::ClusterList(ids))
         }
 
         attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value),
@@ -733,10 +770,13 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::NEXT_HOP
         | attr_type::LOCAL_PREF
         | attr_type::ATOMIC_AGGREGATE => Some(attr_flags::TRANSITIVE),
-        // Optional non-transitive (RFC 4760 §3/§4: MP_REACH/UNREACH are non-transitive)
-        attr_type::MULTI_EXIT_DISC | attr_type::MP_REACH_NLRI | attr_type::MP_UNREACH_NLRI => {
-            Some(attr_flags::OPTIONAL)
-        }
+        // Optional non-transitive (RFC 4760 §3/§4: MP_REACH/UNREACH are non-transitive;
+        // RFC 4456: ORIGINATOR_ID and CLUSTER_LIST are optional non-transitive)
+        attr_type::MULTI_EXIT_DISC
+        | attr_type::ORIGINATOR_ID
+        | attr_type::CLUSTER_LIST
+        | attr_type::MP_REACH_NLRI
+        | attr_type::MP_UNREACH_NLRI => Some(attr_flags::OPTIONAL),
         // Optional transitive
         attr_type::AGGREGATOR | attr_type::COMMUNITIES | attr_type::EXTENDED_COMMUNITIES => {
             Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE)
@@ -792,6 +832,18 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                 type_code = attr_type::EXTENDED_COMMUNITIES;
                 for &c in communities {
                     value.extend_from_slice(&c.as_u64().to_be_bytes());
+                }
+            }
+            PathAttribute::OriginatorId(addr) => {
+                flags = attr_flags::OPTIONAL;
+                type_code = attr_type::ORIGINATOR_ID;
+                value.extend_from_slice(&addr.octets());
+            }
+            PathAttribute::ClusterList(ids) => {
+                flags = attr_flags::OPTIONAL;
+                type_code = attr_type::CLUSTER_LIST;
+                for id in ids {
+                    value.extend_from_slice(&id.octets());
                 }
             }
             PathAttribute::MpReachNlri(mp) => {
@@ -1666,6 +1718,95 @@ mod tests {
             err,
             DecodeError::UpdateAttributeError {
                 subcode: 4, // ATTRIBUTE_FLAGS_ERROR
+                ..
+            }
+        ));
+    }
+
+    // --- ORIGINATOR_ID tests ---
+
+    #[test]
+    fn decode_originator_id() {
+        // flags=0x80 (optional), type=9, len=4, value=1.2.3.4
+        let buf = [0x80, 0x09, 0x04, 1, 2, 3, 4];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(
+            attrs[0],
+            PathAttribute::OriginatorId(Ipv4Addr::new(1, 2, 3, 4))
+        );
+    }
+
+    #[test]
+    fn originator_id_roundtrip() {
+        let attr = PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 1));
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded, vec![attr]);
+    }
+
+    #[test]
+    fn originator_id_wrong_length() {
+        // 3 bytes instead of 4
+        let buf = [0x80, 0x09, 0x03, 1, 2, 3];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: 5, // ATTRIBUTE_LENGTH_ERROR
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn originator_id_wrong_flags() {
+        // flags=0x40 (transitive) — should be 0x80 (optional)
+        let buf = [0x40, 0x09, 0x04, 1, 2, 3, 4];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: 4, // ATTRIBUTE_FLAGS_ERROR
+                ..
+            }
+        ));
+    }
+
+    // --- CLUSTER_LIST tests ---
+
+    #[test]
+    fn decode_cluster_list() {
+        // flags=0x80 (optional), type=10, len=8, two cluster IDs
+        let buf = [0x80, 0x0A, 0x08, 1, 2, 3, 4, 5, 6, 7, 8];
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(
+            attrs[0],
+            PathAttribute::ClusterList(vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8),])
+        );
+    }
+
+    #[test]
+    fn cluster_list_roundtrip() {
+        let attr = PathAttribute::ClusterList(vec![
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+        ]);
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded, vec![attr]);
+    }
+
+    #[test]
+    fn cluster_list_wrong_length() {
+        // 5 bytes — not a multiple of 4
+        let buf = [0x80, 0x0A, 0x05, 1, 2, 3, 4, 5];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: 5, // ATTRIBUTE_LENGTH_ERROR
                 ..
             }
         ));

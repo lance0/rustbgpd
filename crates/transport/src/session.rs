@@ -442,6 +442,7 @@ impl PeerSession {
                         export_policy: self.export_policy.clone(),
                         sendable_families,
                         is_ebgp,
+                        route_reflector_client: self.config.route_reflector_client,
                     });
                 }
                 Action::SessionDown => {
@@ -898,6 +899,60 @@ impl PeerSession {
             return;
         }
 
+        // Route reflector loop detection (RFC 4456 §8):
+        // - ORIGINATOR_ID matching our own router-id → loop
+        // - Our cluster_id already in CLUSTER_LIST → loop
+        //
+        // ORIGINATOR_ID must be checked even when we are not operating as an
+        // RR ourselves: a non-RR speaker can still receive reflected routes
+        // from some other RR in the AS.
+        let originator_loop = parsed.attributes.iter().any(|a| {
+            matches!(a, PathAttribute::OriginatorId(id) if *id == self.config.peer.local_router_id)
+        });
+        let cluster_loop = self.config.cluster_id.is_some_and(|cluster_id| {
+            parsed
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PathAttribute::ClusterList(ids) if ids.contains(&cluster_id)))
+        });
+        if originator_loop || cluster_loop {
+            let reason = if originator_loop {
+                "ORIGINATOR_ID"
+            } else {
+                "CLUSTER_LIST"
+            };
+            debug!(
+                peer = %self.peer_label,
+                reason,
+                "Route reflector loop detected — discarding announcements"
+            );
+            self.metrics.record_rr_loop_detected(&self.peer_label);
+
+            // Still process withdrawals (same pattern as AS_PATH loop)
+            let mut loop_withdrawn: Vec<Prefix> =
+                parsed.withdrawn.iter().map(|p| Prefix::V4(*p)).collect();
+            for attr in &parsed.attributes {
+                if let PathAttribute::MpUnreachNlri(mp) = attr {
+                    let family = (mp.afi, mp.safi);
+                    if self.negotiated_families.contains(&family) {
+                        loop_withdrawn.extend_from_slice(&mp.withdrawn);
+                    }
+                }
+            }
+            for prefix in &loop_withdrawn {
+                self.known_prefixes.remove(prefix);
+            }
+            if !loop_withdrawn.is_empty() {
+                let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
+                    peer: self.peer_ip,
+                    announced: vec![],
+                    withdrawn: loop_withdrawn,
+                });
+            }
+            self.drive_fsm(Event::UpdateReceived).await;
+            return;
+        }
+
         // Filter attributes: strip MP_REACH/MP_UNREACH before storing on routes
         // (they are per-UPDATE framing, not per-route attributes)
         let route_attrs: Vec<PathAttribute> = parsed
@@ -947,6 +1002,10 @@ impl PeerSession {
                 attributes: route_attrs.clone(),
                 received_at: now,
                 origin_type: route_origin,
+                peer_router_id: self
+                    .negotiated
+                    .as_ref()
+                    .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                 is_stale: false,
             })
             .collect();
@@ -991,6 +1050,10 @@ impl PeerSession {
                                 attributes: mp_route_attrs.clone(),
                                 received_at: now,
                                 origin_type: route_origin,
+                                peer_router_id: self
+                                    .negotiated
+                                    .as_ref()
+                                    .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                 is_stale: false,
                             });
                         }
@@ -1403,6 +1466,9 @@ impl PeerSession {
                 }
                 // Strip MP_REACH/MP_UNREACH — rebuilt per-UPDATE, not copied
                 PathAttribute::MpReachNlri(_) | PathAttribute::MpUnreachNlri(_) => {}
+                // Strip ORIGINATOR_ID and CLUSTER_LIST on eBGP outbound
+                // (optional non-transitive, must not leave the AS)
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
                 _ => {
                     attrs.push(attr.clone());
                 }
@@ -1423,6 +1489,37 @@ impl PeerSession {
             attrs.push(PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
             }));
+        }
+
+        // Route reflector attribute manipulation (RFC 4456 §8):
+        // Only when reflecting an iBGP-learned route to an iBGP target do we
+        // set ORIGINATOR_ID and prepend CLUSTER_LIST. Locally originated and
+        // eBGP-learned routes are advertised normally and are not "reflected"
+        // in the RFC 4456 sense.
+        if !is_ebgp
+            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
+            && let Some(cluster_id) = self.config.cluster_id
+        {
+            // ORIGINATOR_ID: set to source peer's router-id if not already present
+            if !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OriginatorId(_)))
+            {
+                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
+            }
+
+            // CLUSTER_LIST: prepend our cluster_id
+            let mut found = false;
+            for attr in &mut attrs {
+                if let PathAttribute::ClusterList(ids) = attr {
+                    ids.insert(0, cluster_id);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
+            }
         }
 
         attrs
@@ -1485,6 +1582,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }
@@ -1574,6 +1672,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
         let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
@@ -1583,5 +1682,76 @@ mod tests {
             _ => None,
         });
         assert_eq!(lp, Some(100));
+    }
+
+    #[test]
+    fn rr_does_not_add_originator_or_cluster_for_local_route() {
+        let mut session = make_test_session(65001, 65001);
+        session.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 9));
+
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            attributes: vec![PathAttribute::Origin(Origin::Igp)],
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+        };
+
+        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+
+        assert!(!attrs.iter().any(|a| matches!(
+            a,
+            PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+        )));
+    }
+
+    #[test]
+    fn rr_does_not_add_originator_or_cluster_for_ebgp_route() {
+        let mut session = make_test_session(65001, 65001);
+        session.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 9));
+
+        let route = make_route(100);
+        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+
+        assert!(!attrs.iter().any(|a| matches!(
+            a,
+            PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_)
+        )));
+    }
+
+    #[test]
+    fn rr_adds_originator_and_cluster_for_ibgp_route() {
+        let mut session = make_test_session(65001, 65001);
+        let cluster_id = Ipv4Addr::new(10, 0, 0, 9);
+        let source_id = Ipv4Addr::new(10, 0, 0, 42);
+        session.config.cluster_id = Some(cluster_id);
+
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            attributes: vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath { segments: vec![] }),
+            ],
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
+            peer_router_id: source_id,
+            is_stale: false,
+        };
+
+        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+
+        assert!(
+            attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OriginatorId(id) if *id == source_id))
+        );
+        assert!(attrs.iter().any(
+            |a| matches!(a, PathAttribute::ClusterList(ids) if ids.as_slice() == [cluster_id])
+        ));
     }
 }

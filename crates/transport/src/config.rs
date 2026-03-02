@@ -1,4 +1,4 @@
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use rustbgpd_fsm::PeerConfig;
@@ -25,6 +25,11 @@ pub struct TransportConfig {
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     /// Time to retain stale routes after peer restart (seconds). RFC 4724.
     pub gr_stale_routes_time: u64,
+    /// Whether this neighbor is a route reflector client (RFC 4456).
+    pub route_reflector_client: bool,
+    /// Local cluster ID for route reflection. `Some` means this speaker is a
+    /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
+    pub cluster_id: Option<Ipv4Addr>,
 }
 
 impl TransportConfig {
@@ -43,6 +48,8 @@ impl TransportConfig {
             ttl_security: false,
             local_ipv6_nexthop: None,
             gr_stale_routes_time: 360,
+            route_reflector_client: false,
+            cluster_id: None,
         }
     }
 }

@@ -17,6 +17,8 @@ use crate::route::Route;
 /// 3. Lowest ORIGIN — IGP < EGP < INCOMPLETE
 /// 4. Lowest MED (default 0; always-compare / deterministic MED)
 /// 5. eBGP over iBGP
+///    5.5. Shortest `CLUSTER_LIST` length (RFC 4456 §9)
+///    5.6. Lowest `ORIGINATOR_ID` (RFC 4456 §9) — only when both present
 /// 6. Lowest peer address (tiebreaker)
 #[must_use]
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
@@ -60,6 +62,20 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
         return cmp;
     }
 
+    // 5.5. Shortest CLUSTER_LIST length (RFC 4456 §9)
+    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // 5.6. Lowest ORIGINATOR_ID (RFC 4456 §9) — only when both present
+    if let (Some(a_oid), Some(b_oid)) = (a.originator_id(), b.originator_id()) {
+        let cmp = a_oid.cmp(&b_oid);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+
     // 6. Lowest peer address (final tiebreaker)
     a.peer.cmp(&b.peer)
 }
@@ -88,6 +104,7 @@ mod tests {
             ],
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }
@@ -238,6 +255,83 @@ mod tests {
         assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
         assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
     }
+
+    fn with_cluster_list(mut r: Route, ids: Vec<Ipv4Addr>) -> Route {
+        r.attributes
+            .retain(|a| !matches!(a, PathAttribute::ClusterList(_)));
+        r.attributes.push(PathAttribute::ClusterList(ids));
+        r
+    }
+
+    fn with_originator_id(mut r: Route, id: Ipv4Addr) -> Route {
+        r.attributes
+            .retain(|a| !matches!(a, PathAttribute::OriginatorId(_)));
+        r.attributes.push(PathAttribute::OriginatorId(id));
+        r
+    }
+
+    #[test]
+    fn shorter_cluster_list_wins() {
+        let a = with_cluster_list(
+            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            vec![Ipv4Addr::new(10, 0, 0, 1)],
+        );
+        let b = with_cluster_list(
+            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+        );
+        // a has shorter CLUSTER_LIST, wins despite higher peer address
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+        assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
+    }
+
+    #[test]
+    fn lower_originator_id_wins() {
+        let a = with_originator_id(
+            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        let b = with_originator_id(
+            base_route(Ipv4Addr::new(1, 0, 0, 1)),
+            Ipv4Addr::new(10, 0, 0, 2),
+        );
+        // a has lower ORIGINATOR_ID, wins despite higher peer address
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+        assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
+    }
+
+    #[test]
+    fn cluster_list_beats_originator_id() {
+        // Shorter CLUSTER_LIST should win even if ORIGINATOR_ID is higher
+        let a = with_originator_id(
+            with_cluster_list(
+                base_route(Ipv4Addr::new(1, 0, 0, 1)),
+                vec![Ipv4Addr::new(10, 0, 0, 1)],
+            ),
+            Ipv4Addr::new(10, 0, 0, 99),
+        );
+        let b = with_originator_id(
+            with_cluster_list(
+                base_route(Ipv4Addr::new(1, 0, 0, 1)),
+                vec![Ipv4Addr::new(10, 0, 0, 1), Ipv4Addr::new(10, 0, 0, 2)],
+            ),
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+    }
+
+    #[test]
+    fn originator_id_only_when_both_present() {
+        // When only one route has ORIGINATOR_ID, it should fall through
+        let a = with_originator_id(
+            base_route(Ipv4Addr::new(1, 0, 0, 2)),
+            Ipv4Addr::new(10, 0, 0, 99),
+        );
+        let b = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        // ORIGINATOR_ID tiebreaker skipped (b has none), falls to peer address
+        // b has lower peer → b wins
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Greater);
+    }
 }
 
 #[cfg(test)]
@@ -273,16 +367,15 @@ mod proptests {
             0u32..=500,                                // local_pref
             prop::collection::vec(1u32..=65535, 0..5), // as_path ASNs
             arb_origin(),
-            0u32..=1000,        // MED
-            arb_route_origin(), // origin_type
+            0u32..=1000,                   // MED
+            arb_route_origin(),            // origin_type
+            proptest::option::of(1u8..=4), // originator_id last octet
+            0u8..=3,                       // cluster_list length
         )
-            .prop_map(|(peer_oct, lp, asns, origin, med, origin_type)| {
-                let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
-                Route {
-                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
-                    next_hop: IpAddr::V4(peer),
-                    peer: IpAddr::V4(peer),
-                    attributes: vec![
+            .prop_map(
+                |(peer_oct, lp, asns, origin, med, origin_type, oid_oct, cl_len)| {
+                    let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
+                    let mut attributes = vec![
                         PathAttribute::LocalPref(lp),
                         PathAttribute::AsPath(AsPath {
                             segments: if asns.is_empty() {
@@ -293,12 +386,27 @@ mod proptests {
                         }),
                         PathAttribute::Origin(origin),
                         PathAttribute::Med(med),
-                    ],
-                    received_at: Instant::now(),
-                    origin_type,
-                    is_stale: false,
-                }
-            })
+                    ];
+                    if let Some(oct) = oid_oct {
+                        attributes.push(PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, oct)));
+                    }
+                    if cl_len > 0 {
+                        let ids: Vec<Ipv4Addr> =
+                            (1..=cl_len).map(|i| Ipv4Addr::new(10, 0, i, 1)).collect();
+                        attributes.push(PathAttribute::ClusterList(ids));
+                    }
+                    Route {
+                        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                        next_hop: IpAddr::V4(peer),
+                        peer: IpAddr::V4(peer),
+                        attributes,
+                        received_at: Instant::now(),
+                        origin_type,
+                        peer_router_id: Ipv4Addr::UNSPECIFIED,
+                        is_stale: false,
+                    }
+                },
+            )
     }
 
     proptest! {

@@ -132,6 +132,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }
@@ -144,6 +145,7 @@ mod tests {
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         }
     }
