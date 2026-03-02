@@ -415,7 +415,7 @@ Best-path rules (implemented), applied in order:
 **Implementation choices (ADR-0014):**
 - `best_path_cmp()` is a standalone function, not `Ord` on `Route`. Domain-specific ordering doesn't belong as a trait impl — multiple orderings may be needed.
 - Deterministic MED (always-compare) matches GoBGP default. Simpler and avoids ordering sensitivity.
-- `Route` carries `origin_type: RouteOrigin` (Ebgp/Ibgp/Local) for eBGP-over-iBGP preference (step 5) and iBGP split-horizon.
+- `Route` carries `origin_type: RouteOrigin` (Ebgp/Ibgp/Local) for eBGP-over-iBGP preference (step 5) and iBGP split-horizon. Note: `Local` sorts equal to iBGP at step 5 — local routes win via LOCAL_PREF or shorter AS_PATH, not an explicit origin preference.
 - `LocRib` lives inside `RibManager` — same single-task ownership pattern, no new locks.
 - Incremental recompute: only prefixes affected by each update are re-evaluated.
 

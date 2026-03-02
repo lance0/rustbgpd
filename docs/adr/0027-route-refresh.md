@@ -95,3 +95,10 @@ A single source of truth: `proto/rustbgpd.proto`. The API crate's
   teardown.
 - `SoftResetIn` gRPC returns the actual send outcome, not just whether
   the command was enqueued.
+- **Limitation:** Route refresh re-announces current Loc-RIB best paths
+  but does not explicitly withdraw prefixes that the peer previously
+  received but no longer pass policy. This is correct per RFC 2918 (the
+  peer replaces its view on receiving the re-advertisement), but
+  operators should be aware that if the peer does not support implicit
+  replacement, stale routes may linger until the next full table dump or
+  session reset.

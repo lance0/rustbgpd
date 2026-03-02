@@ -45,6 +45,12 @@ ordering sensitivity.
 5. eBGP over iBGP (`Route.origin_type: RouteOrigin`, Ebgp/Ibgp/Local)
 6. Lowest peer address (final tiebreaker)
 
+**Note on `RouteOrigin::Local`:** `is_ebgp()` returns `true` only for
+`Ebgp`, so locally injected routes sort equal to iBGP at step 5. Local
+routes typically win via LOCAL_PREF (if the API caller sets one) or
+shorter AS_PATH (empty). Some implementations add an explicit
+local-origin preference step; we may add this if operators need it.
+
 Router-id tiebreaker is deferred to post-v1.
 
 ## Consequences

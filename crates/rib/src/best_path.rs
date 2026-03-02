@@ -52,7 +52,9 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
         return cmp;
     }
 
-    // 5. eBGP over iBGP (only RouteOrigin::Ebgp; Local uses LOCAL_PREF/AS_PATH)
+    // 5. eBGP over iBGP (only RouteOrigin::Ebgp gets preference here;
+    //    RouteOrigin::Local sorts equal to iBGP — local routes win via
+    //    LOCAL_PREF or shorter AS_PATH, not an explicit origin preference)
     let cmp = b.is_ebgp().cmp(&a.is_ebgp());
     if cmp != Ordering::Equal {
         return cmp;
