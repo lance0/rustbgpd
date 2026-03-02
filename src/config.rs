@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use rustbgpd_fsm::PeerConfig;
-use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
+use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry, parse_community_match};
 use rustbgpd_transport::TransportConfig;
 use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
 use serde::Deserialize;
@@ -88,9 +88,13 @@ pub struct PolicyConfig {
 #[serde(deny_unknown_fields)]
 pub struct PrefixListEntryConfig {
     pub action: String,
-    pub prefix: String,
+    /// CIDR prefix to match. Optional when `match_community` is set.
+    pub prefix: Option<String>,
     pub ge: Option<u8>,
     pub le: Option<u8>,
+    /// Extended community match criteria, e.g. `["RT:65001:100"]`.
+    #[serde(default)]
+    pub match_community: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -117,6 +121,75 @@ pub enum ConfigError {
     InvalidGrConfig { reason: String },
 }
 
+/// Parse and validate a single CIDR prefix string with optional ge/le bounds.
+fn parse_prefix_entry(
+    prefix_str: &str,
+    ge: Option<u8>,
+    le: Option<u8>,
+) -> Result<Prefix, ConfigError> {
+    let parts: Vec<&str> = prefix_str.split('/').collect();
+    if parts.len() != 2 {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "invalid prefix {prefix_str:?}, expected CIDR notation (e.g. 10.0.0.0/8 or 2001:db8::/32)"
+            ),
+        });
+    }
+    let len: u8 = parts[1]
+        .parse()
+        .map_err(|_| ConfigError::InvalidPolicyEntry {
+            reason: format!("invalid prefix length in {prefix_str:?}"),
+        })?;
+
+    let (prefix, max_len) = if let Ok(v4) = parts[0].parse::<Ipv4Addr>() {
+        if len > 32 {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("prefix length {len} exceeds 32 in {prefix_str:?}"),
+            });
+        }
+        (Prefix::V4(Ipv4Prefix::new(v4, len)), 32u8)
+    } else if let Ok(v6) = parts[0].parse::<Ipv6Addr>() {
+        if len > 128 {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("prefix length {len} exceeds 128 in {prefix_str:?}"),
+            });
+        }
+        (Prefix::V6(Ipv6Prefix::new(v6, len)), 128u8)
+    } else {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!("invalid address in prefix {prefix_str:?}"),
+        });
+    };
+
+    if let Some(ge) = ge {
+        if ge > max_len {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("ge value {ge} exceeds {max_len} in {prefix_str:?}"),
+            });
+        }
+        if ge < len {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("ge value {ge} is less than prefix length {len} in {prefix_str:?}"),
+            });
+        }
+    }
+    if let Some(le) = le
+        && le > max_len
+    {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!("le value {le} exceeds {max_len} in {prefix_str:?}"),
+        });
+    }
+    if let (Some(ge), Some(le)) = (ge, le)
+        && ge > le
+    {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!("ge value {ge} exceeds le value {le} in {prefix_str:?}"),
+        });
+    }
+    Ok(prefix)
+}
+
 fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixList>, ConfigError> {
     if entries.is_empty() {
         return Ok(None);
@@ -132,76 +205,39 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
                 });
             }
         };
-        let parts: Vec<&str> = e.prefix.split('/').collect();
-        if parts.len() != 2 {
-            return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!(
-                    "invalid prefix {:?}, expected CIDR notation (e.g. 10.0.0.0/8 or 2001:db8::/32)",
-                    e.prefix
-                ),
-            });
-        }
-        let len: u8 = parts[1]
-            .parse()
-            .map_err(|_| ConfigError::InvalidPolicyEntry {
-                reason: format!("invalid prefix length in {:?}", e.prefix),
-            })?;
 
-        // Parse address as IPv4 or IPv6, determine max prefix length
-        let (prefix, max_len) = if let Ok(v4) = parts[0].parse::<Ipv4Addr>() {
-            if len > 32 {
-                return Err(ConfigError::InvalidPolicyEntry {
-                    reason: format!("prefix length {} exceeds 32 in {:?}", len, e.prefix),
-                });
-            }
-            (Prefix::V4(Ipv4Prefix::new(v4, len)), 32u8)
-        } else if let Ok(v6) = parts[0].parse::<Ipv6Addr>() {
-            if len > 128 {
-                return Err(ConfigError::InvalidPolicyEntry {
-                    reason: format!("prefix length {} exceeds 128 in {:?}", len, e.prefix),
-                });
-            }
-            (Prefix::V6(Ipv6Prefix::new(v6, len)), 128u8)
+        let match_community: Vec<_> = e
+            .match_community
+            .iter()
+            .map(|s| {
+                parse_community_match(s)
+                    .map_err(|reason| ConfigError::InvalidPolicyEntry { reason })
+            })
+            .collect::<Result<_, _>>()?;
+
+        let prefix = if let Some(ref prefix_str) = e.prefix {
+            Some(parse_prefix_entry(prefix_str, e.ge, e.le)?)
         } else {
-            return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!("invalid address in prefix {:?}", e.prefix),
-            });
+            if e.ge.is_some() || e.le.is_some() {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: "ge/le cannot be set without a prefix".to_string(),
+                });
+            }
+            None
         };
 
-        if let Some(ge) = e.ge {
-            if ge > max_len {
-                return Err(ConfigError::InvalidPolicyEntry {
-                    reason: format!("ge value {} exceeds {} in {:?}", ge, max_len, e.prefix),
-                });
-            }
-            if ge < len {
-                return Err(ConfigError::InvalidPolicyEntry {
-                    reason: format!(
-                        "ge value {} is less than prefix length {} in {:?}",
-                        ge, len, e.prefix
-                    ),
-                });
-            }
-        }
-        if let Some(le) = e.le
-            && le > max_len
-        {
+        if prefix.is_none() && match_community.is_empty() {
             return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!("le value {} exceeds {} in {:?}", le, max_len, e.prefix),
+                reason: "entry must have at least one of 'prefix' or 'match_community'".to_string(),
             });
         }
-        if let (Some(ge), Some(le)) = (e.ge, e.le)
-            && ge > le
-        {
-            return Err(ConfigError::InvalidPolicyEntry {
-                reason: format!("ge value {} exceeds le value {} in {:?}", ge, le, e.prefix),
-            });
-        }
+
         parsed.push(PrefixListEntry {
             prefix,
             ge: e.ge,
             le: e.le,
             action,
+            match_community,
         });
     }
 
@@ -1095,5 +1131,94 @@ remote_asn = 65002
         let config = parse(&toml).unwrap();
         let peers = config.to_peer_configs().unwrap();
         assert_eq!(peers[0].0.peer.families.len(), 2);
+    }
+
+    // --- Community match config tests ---
+
+    fn community_toml(policy_entries: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65000
+router_id = "1.2.3.4"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65001
+
+[[neighbors.import_policy]]
+{policy_entries}
+"#
+        )
+    }
+
+    #[test]
+    fn community_only_entry_parses() {
+        let toml = community_toml(
+            r#"action = "deny"
+            match_community = ["RT:65001:100"]"#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert_eq!(import.entries.len(), 1);
+        assert!(import.entries[0].prefix.is_none());
+        assert_eq!(import.entries[0].match_community.len(), 1);
+    }
+
+    #[test]
+    fn prefix_and_community_parses() {
+        let toml = community_toml(
+            r#"prefix = "10.0.0.0/8"
+            action = "deny"
+            match_community = ["RT:65001:100", "RO:65002:200"]"#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert!(import.entries[0].prefix.is_some());
+        assert_eq!(import.entries[0].match_community.len(), 2);
+    }
+
+    #[test]
+    fn ge_without_prefix_rejected() {
+        let toml = community_toml(
+            r#"action = "deny"
+ge = 16
+match_community = ["RT:65001:100"]"#,
+        );
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn neither_prefix_nor_community_rejected() {
+        let toml = community_toml(r#"action = "deny""#);
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn invalid_community_string_rejected() {
+        let toml = community_toml(
+            r#"action = "deny"
+match_community = ["INVALID"]"#,
+        );
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn ipv4_community_parses() {
+        let toml = community_toml(
+            r#"action = "deny"
+            match_community = ["RT:192.0.2.1:100"]"#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert_eq!(import.entries[0].match_community.len(), 1);
     }
 }

@@ -56,10 +56,10 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ## Planned Features
 
-### Next — Extended Communities Policy Matching
+### Completed — Extended Communities Policy Matching
 
-- [ ] Policy: match on extended community values (route target, route origin) in prefix lists
-- [ ] Config: TOML community-match clauses in import/export policy
+- [x] Policy: match on extended community values (route target, route origin) in prefix lists
+- [x] Config: TOML community-match clauses in import/export policy (ADR-0026)
 
 ### Completed — Extended Communities (RFC 4360)
 

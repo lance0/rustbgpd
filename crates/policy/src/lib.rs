@@ -9,4 +9,7 @@
 
 pub mod prefix_list;
 
-pub use prefix_list::{PolicyAction, PrefixList, PrefixListEntry, check_prefix_list};
+pub use prefix_list::{
+    CommunityMatch, PolicyAction, PrefixList, PrefixListEntry, check_prefix_list,
+    parse_community_match,
+};

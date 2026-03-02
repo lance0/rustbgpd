@@ -15,6 +15,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with helpers for type/sub-type extraction, route target, and route origin
   decoding. Full wire codec (type 16, Optional|Transitive), stored on
   routes, exposed via gRPC `Route` and `AddPath`. (ADR-0025)
+- **Extended Community Policy Matching.** Import/export policy can now match
+  on route target (`RT:`) and route origin (`RO:`) values via
+  `match_community` in prefix list entries. Encoding-agnostic matching
+  (2-octet AS, IPv4-specific, and 4-octet AS compare equal). Prefix is now
+  optional — entries can match community-only, prefix-only, or both (AND).
+  Multiple communities in one entry use OR logic. (ADR-0026)
 - **M12 interop test** — Extended communities validated against FRR 10.3.1.
   FRR route-map sets RT:65002:100, rustbgpd decodes/stores/exposes via gRPC.
   Injection round-trip verified. 14/14 tests pass.

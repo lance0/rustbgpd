@@ -787,6 +787,15 @@ impl PeerSession {
             .cloned()
             .collect();
 
+        // Extract extended communities for policy matching
+        let update_ecs: &[rustbgpd_wire::ExtendedCommunity] = route_attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[]);
+
         // Body NLRI routes (IPv4)
         let mut announced: Vec<Route> = parsed
             .announced
@@ -795,6 +804,7 @@ impl PeerSession {
                 rustbgpd_policy::check_prefix_list(
                     self.import_policy.as_ref(),
                     Prefix::V4(**prefix),
+                    update_ecs,
                 ) == rustbgpd_policy::PolicyAction::Permit
             })
             .map(|prefix| Route {
@@ -834,8 +844,11 @@ impl PeerSession {
                         continue;
                     }
                     for prefix in &mp.announced {
-                        if rustbgpd_policy::check_prefix_list(self.import_policy.as_ref(), *prefix)
-                            == rustbgpd_policy::PolicyAction::Permit
+                        if rustbgpd_policy::check_prefix_list(
+                            self.import_policy.as_ref(),
+                            *prefix,
+                            update_ecs,
+                        ) == rustbgpd_policy::PolicyAction::Permit
                         {
                             announced.push(Route {
                                 prefix: *prefix,

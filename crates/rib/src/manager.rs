@@ -226,7 +226,7 @@ impl RibManager {
                     }
 
                     // Export policy check (per-peer or global)
-                    if check_prefix_list(export_pol.as_ref(), *prefix)
+                    if check_prefix_list(export_pol.as_ref(), *prefix, best.extended_communities())
                         != rustbgpd_policy::PolicyAction::Permit
                     {
                         if rib_out.get(prefix).is_some() {
@@ -305,8 +305,11 @@ impl RibManager {
                 continue;
             }
             // Export policy (per-peer or global)
-            if check_prefix_list(export_pol.as_ref(), route.prefix)
-                != rustbgpd_policy::PolicyAction::Permit
+            if check_prefix_list(
+                export_pol.as_ref(),
+                route.prefix,
+                route.extended_communities(),
+            ) != rustbgpd_policy::PolicyAction::Permit
             {
                 continue;
             }
@@ -1477,10 +1480,11 @@ mod tests {
         let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
         let export_policy = PrefixList {
             entries: vec![PrefixListEntry {
-                prefix: Prefix::V4(denied_prefix),
+                prefix: Some(Prefix::V4(denied_prefix)),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
+                match_community: vec![],
             }],
             default_action: PolicyAction::Permit,
         };
@@ -1579,10 +1583,11 @@ mod tests {
         // Peer1 gets a deny policy on 10.0.0.0/8, peer2 has no per-peer policy
         let peer1_export = Some(PrefixList {
             entries: vec![PrefixListEntry {
-                prefix: Prefix::V4(denied_prefix),
+                prefix: Some(Prefix::V4(denied_prefix)),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
+                match_community: vec![],
             }],
             default_action: PolicyAction::Permit,
         });
@@ -1654,10 +1659,11 @@ mod tests {
         let (out_tx, _out_rx) = mpsc::channel(64);
         let policy = Some(PrefixList {
             entries: vec![PrefixListEntry {
-                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8)),
+                prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
+                match_community: vec![],
             }],
             default_action: PolicyAction::Permit,
         });
