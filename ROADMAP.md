@@ -48,29 +48,16 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
 - [x] Interop validated — FRR 10.3.1 (17/17 IPv4 + 6 dual-stack automated tests), BIRD 2.0.12
 - [x] Graceful Restart — receiving speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep
-- [x] 458 tests — unit, integration, property, fuzz
+- [x] Extended Communities (RFC 4360) — wire decode/encode, common subtypes (route target, route origin, 4-byte AS), RIB storage, gRPC API exposure (ADR-0025)
+- [x] Extended Communities Policy Matching — match on RT/RO values in prefix lists, TOML community-match clauses (ADR-0026)
+- [x] Route Refresh (RFC 2918) — inbound re-advertisement, outbound SoftResetIn gRPC, capability negotiation (ADR-0027)
+- [x] 488 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
 ---
 
 ## Planned Features
-
-### Completed — Extended Communities Policy Matching
-
-- [x] Policy: match on extended community values (route target, route origin) in prefix lists
-- [x] Config: TOML community-match clauses in import/export policy (ADR-0026)
-
-### Completed — Extended Communities (RFC 4360)
-
-- [x] Wire: Extended Communities attribute (type 16) decode/encode
-- [x] Wire: common subtypes (route target, route origin, 4-byte AS) via `ExtendedCommunity` newtype helpers
-- [x] RIB: store and expose in route data (`Route.extended_communities()`)
-- [x] API: extended communities in proto Route message and AddPath
-
----
-
-## Future Ideas
 
 *Prioritized by effort vs user impact. Quick wins first, then bigger lifts.*
 
@@ -83,16 +70,33 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ### Quick Wins (low effort, high impact)
 
+- [ ] **Standard communities policy matching** (RFC 1997) — filter on standard community values in import/export policy; reuses the EC matching pattern, most common operational filter
 - [ ] **Extended message support** (RFC 8654) — raise 4096-byte limit for large UPDATE messages; mainly a wire codec change
 - [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5; `setsockopt` change similar to existing MD5 code
-- [x] **Route refresh** (RFC 2918) — request peer to re-advertise all routes; useful after policy changes (ADR-0027)
 
 ### Medium Effort (moderate effort, high impact)
 
+- [ ] **Large communities** (RFC 8092) — full feature track for 4-byte ASN operators:
+  - Wire: 12-byte large community decode/encode
+  - RIB: storage and accessors on Route
+  - API: large communities in proto Route message and AddPath
+  - Policy: matching in import/export policy (after wire+storage)
 - [ ] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); standard for visibility into BGP state
 - [ ] **RPKI validation** — RTR client (RFC 8210) for route origin validation; growing regulatory requirement
-- [ ] **Large communities** (RFC 8092) — 12-byte communities for 4-byte ASN operators; increasingly common at IXPs
+
+### Performance & Scale
+
+- [ ] **RIB scale benchmarks** — large table import/export (100k+ prefixes), memory profiling, best-path convergence time
+- [ ] **Churn benchmarks** — route flap throughput, reconvergence latency under UPDATE storms
+- [ ] **CI regression tracking** — automated benchmark runs with threshold-based alerts
+
+### Soak & Chaos Testing
+
+- [ ] **Peer flap storms** — repeated session up/down under load; verify no resource leaks
+- [ ] **gRPC churn** — concurrent AddNeighbor/DeleteNeighbor/SoftResetIn calls; verify no deadlocks or panics
+- [ ] **Repeated GR recovery** — back-to-back graceful restart cycles; verify stale sweep correctness
+- [ ] **Long-duration stability** — multi-hour runs with active route exchange; monitor memory and fd usage
 
 ### Larger Projects (high effort, high impact)
 
