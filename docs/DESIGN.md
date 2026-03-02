@@ -409,7 +409,7 @@ Best-path rules (implemented), applied in order:
 2. Shortest AS_PATH (AS_SET counts as 1, per RFC 4271 §9.1.2.2)
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
 4. Lowest MED (deterministic — always-compare across all peers, not just same-AS)
-5. eBGP over iBGP (prefer external routes)
+5. eBGP over iBGP (only `RouteOrigin::Ebgp`; Local uses LOCAL_PREF/AS_PATH)
 6. Lowest peer address (final disambiguator — guarantees strict ordering)
 
 **Implementation choices (ADR-0014):**

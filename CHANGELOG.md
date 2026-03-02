@@ -74,6 +74,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **SoftResetIn returns actual send outcome.** `SendRouteRefresh` is now a
   request/reply command; the gRPC response reflects whether the message was
   sent, not just enqueued.
+- **AS_PATH loop fast-path: negotiated-family filter on withdrawals.** The
+  loop-detection branch now applies the same `negotiated_families` check to
+  `MP_UNREACH_NLRI` as the normal UPDATE path, preventing withdrawals for
+  unnegotiated address families from reaching the RIB.
+- **Best-path step 5 comment corrected.** The comment now accurately states
+  that only `RouteOrigin::Ebgp` is preferred over iBGP; `Local` routes do
+  not receive explicit preference at this step (they win via LOCAL_PREF or
+  shorter AS_PATH instead).
 
 ---
 

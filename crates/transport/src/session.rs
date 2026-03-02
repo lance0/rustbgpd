@@ -873,12 +873,15 @@ impl PeerSession {
             self.metrics
                 .record_as_path_loop_detected(&self.peer_label, rejected_count as u64);
 
-            // Still process withdrawals (body + MP_UNREACH)
+            // Still process withdrawals (body + MP_UNREACH with negotiated-family check)
             let mut loop_withdrawn: Vec<Prefix> =
                 parsed.withdrawn.iter().map(|p| Prefix::V4(*p)).collect();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
-                    loop_withdrawn.extend_from_slice(&mp.withdrawn);
+                    let family = (mp.afi, mp.safi);
+                    if self.negotiated_families.contains(&family) {
+                        loop_withdrawn.extend_from_slice(&mp.withdrawn);
+                    }
                 }
             }
             for prefix in &loop_withdrawn {
