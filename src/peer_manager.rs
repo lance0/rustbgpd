@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use rustbgpd_api::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
 use rustbgpd_fsm::{PeerConfig, SessionState};
-use rustbgpd_policy::PrefixList;
+use rustbgpd_policy::Policy;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{PeerHandle, SessionNotification, TransportConfig};
@@ -24,8 +24,8 @@ struct ManagedPeer {
     hold_time: Option<u16>,
     max_prefixes: Option<u32>,
     transport_config: TransportConfig,
-    import_policy: Option<PrefixList>,
-    export_policy: Option<PrefixList>,
+    import_policy: Option<Policy>,
+    export_policy: Option<Policy>,
     /// Pending inbound TCP stream waiting for collision resolution.
     pending_inbound: Option<TcpStream>,
 }

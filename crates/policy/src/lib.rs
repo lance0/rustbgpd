@@ -1,15 +1,16 @@
-//! rustbgpd-policy — Minimal policy engine
+//! rustbgpd-policy — Policy engine
 //!
-//! Prefix allow/deny lists, max-prefix enforcement, simple attribute
-//! set/clear. Enough to be operationally useful.
+//! Route filtering, matching, and attribute modification.
+//! Supports prefix lists, community matching, and route modifications.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
-pub mod prefix_list;
+pub mod engine;
 
-pub use prefix_list::{
-    CommunityMatch, PolicyAction, PrefixList, PrefixListEntry, check_prefix_list,
+pub use engine::{
+    AsPathRegex, CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyResult,
+    PolicyStatement, RouteModifications, apply_modifications, evaluate_policy,
     parse_community_match,
 };

@@ -140,7 +140,7 @@ See [ADR-0024](docs/adr/0024-graceful-restart.md).
 
 ### Per-neighbor policy
 
-Each neighbor can carry its own import and export prefix-list policy. These are
+Each neighbor can carry its own import and export policy. These are
 defined as nested arrays of tables within the `[[neighbors]]` entry.
 
 ```toml
@@ -158,20 +158,50 @@ action = "deny"
 prefix = "0.0.0.0/0"
 le = 24
 action = "permit"
+set_local_pref = 200
 
 [[neighbors.export_policy]]
 prefix = "192.168.0.0/16"
 action = "permit"
+set_as_path_prepend = { asn = 65001, count = 2 }
 ```
 
 See the [Policy entries](#policy-entries) section below for field details.
+
+### Route Reflector (RFC 4456)
+
+rustbgpd can act as a route reflector, relaxing the iBGP full-mesh requirement.
+When `cluster_id` is set and at least one neighbor has `route_reflector_client = true`,
+iBGP-learned routes from clients are reflected to all iBGP peers, while routes
+from non-clients go to clients only.
+
+```toml
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.1"    # enables route reflector mode
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_reflector_client = true    # this peer is a RR client
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65001
+# non-client -- receives reflected client routes only
+```
+
+See [ADR-0029](docs/adr/0029-route-reflector.md) for reflection rules and
+ORIGINATOR_ID/CLUSTER_LIST handling.
 
 ---
 
 ## `[policy]`
 
-Optional. Defines global import and export prefix-list policy that applies to
-all neighbors that do not declare their own per-neighbor policy.
+Optional. Defines global import and export policy that applies to all neighbors
+that do not declare their own per-neighbor policy.
 
 ```toml
 [[policy.import]]
@@ -179,6 +209,7 @@ prefix = "10.0.0.0/8"
 ge = 8
 le = 24
 action = "permit"
+set_local_pref = 150
 
 [[policy.import]]
 prefix = "0.0.0.0/0"
@@ -195,14 +226,63 @@ action = "deny"
 
 Both global (`[[policy.import]]` / `[[policy.export]]`) and per-neighbor
 (`[[neighbors.import_policy]]` / `[[neighbors.export_policy]]`) entries share
-the same schema:
+the same schema.
 
-| Field    | Type   | Required | Description                                           |
-|----------|--------|----------|-------------------------------------------------------|
-| `prefix` | string | yes      | Network prefix in CIDR notation (IPv4 or IPv6, e.g. `"10.0.0.0/8"` or `"2001:db8::/32"`) |
-| `ge`     | u8     | no       | Minimum prefix length to match (inclusive)            |
-| `le`     | u8     | no       | Maximum prefix length to match (inclusive)            |
-| `action` | string | yes      | `"permit"` or `"deny"`                                |
+### Match conditions
+
+Each entry must have at least one match condition. Multiple conditions on the
+same entry are ANDed.
+
+| Field             | Type     | Required | Description                                           |
+|-------------------|----------|----------|-------------------------------------------------------|
+| `prefix`          | string   | no*      | Network prefix in CIDR notation (IPv4 or IPv6)        |
+| `ge`              | u8       | no       | Minimum prefix length to match (inclusive)             |
+| `le`              | u8       | no       | Maximum prefix length to match (inclusive)             |
+| `match_community` | [string] | no*      | Community match criteria (see below). OR within list.  |
+| `match_as_path`   | string   | no*      | AS_PATH regex (Cisco/Quagga style, `_` = boundary)    |
+| `action`          | string   | yes      | `"permit"` or `"deny"`                                |
+
+*At least one of `prefix`, `match_community`, or `match_as_path` is required.
+
+### Route modifications (set actions)
+
+These fields modify matching routes. Only valid with `action = "permit"`.
+
+| Field                  | Type        | Description                                        |
+|------------------------|-------------|----------------------------------------------------|
+| `set_local_pref`       | u32         | Set LOCAL_PREF on matching routes                  |
+| `set_med`              | u32         | Set MED on matching routes                         |
+| `set_next_hop`         | string      | `"self"` or an IP address                          |
+| `set_community_add`    | [string]    | Communities to add (standard, EC, or LC format)    |
+| `set_community_remove` | [string]    | Communities to remove                              |
+| `set_as_path_prepend`  | table       | `{ asn = 65001, count = 3 }` (count 1-10)         |
+
+### Community formats
+
+The `match_community`, `set_community_add`, and `set_community_remove` fields
+accept these formats:
+
+| Format | Example | Type |
+|--------|---------|------|
+| `ASN:VALUE` | `"65001:100"` | Standard community |
+| Well-known name | `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"` | Standard community |
+| `RT:ASN:VALUE` | `"RT:65001:100"` | Extended community (route target) |
+| `RO:ASN:VALUE` | `"RO:65001:200"` | Extended community (route origin) |
+| `LC:G:L1:L2` | `"LC:65001:100:200"` | Large community (RFC 8092) |
+
+### AS_PATH regex
+
+The `match_as_path` field accepts regular expressions with the Cisco/Quagga `_`
+boundary convention. `_` expands to `(?:^| |$|[{}])` before compilation, matching
+the start of the string, a space between ASNs, the end of the string, or
+`AS_SET` delimiters (`{`/`}`).
+
+| Pattern | Matches |
+|---------|---------|
+| `^65100_` | AS_PATH starting with 65100 |
+| `_65200$` | AS_PATH ending with 65200 |
+| `_65300_` | AS_PATH containing 65300 |
+| `^65100$` | AS_PATH that is exactly 65100 |
 
 Entries are evaluated in order. The first matching entry wins. If no entry
 matches, the default action is **permit**.
@@ -242,7 +322,7 @@ the two are never merged.
 
 ## Complete example
 
-A realistic configuration with three peers and mixed policy:
+A realistic configuration with three peers, policy actions, and community matching:
 
 ```toml
 [global]
@@ -275,12 +355,18 @@ prefix = "192.168.0.0/16"
 le = 32
 action = "deny"
 
+# Prefer routes from AS 65100
+[[policy.import]]
+match_as_path = "^65100_"
+action = "permit"
+set_local_pref = 200
+
 [[policy.import]]
 prefix = "0.0.0.0/0"
 le = 24
 action = "permit"
 
-# Upstream provider -- uses global import policy, custom export
+# Upstream provider -- uses global import policy, custom export with prepend
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
@@ -291,6 +377,7 @@ max_prefixes = 50000
 [[neighbors.export_policy]]
 prefix = "192.168.1.0/24"
 action = "permit"
+set_as_path_prepend = { asn = 65001, count = 2 }
 
 [[neighbors.export_policy]]
 prefix = "192.168.2.0/24"
@@ -301,12 +388,19 @@ prefix = "0.0.0.0/0"
 le = 32
 action = "deny"
 
-# IXP route server -- no policy filtering
+# IXP route server -- tag routes with large community, next-hop self
 [[neighbors]]
 address = "10.0.1.2"
 remote_asn = 65100
 description = "ixp-rs1"
 hold_time = 90
+
+[[neighbors.export_policy]]
+action = "permit"
+prefix = "0.0.0.0/0"
+le = 24
+set_next_hop = "self"
+set_community_add = ["LC:65001:1:100"]
 
 # eBGP peer with MD5 auth -- per-peer import to reject specifics
 [[neighbors]]
@@ -328,6 +422,7 @@ action = "deny"
 prefix = "0.0.0.0/0"
 le = 24
 action = "permit"
+set_med = 50
 ```
 
 ---
@@ -349,6 +444,11 @@ starting:
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
+| Policy entry must have at least one match condition (`prefix`, `match_community`, or `match_as_path`) | `must have at least one match condition` |
+| `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
+| `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |
+| `match_as_path` must be a valid regex | `invalid regex` |
+| RT/RO extended community ASN must be <= 65535 (2-octet AS sub-type) | `ASN exceeds 65535` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
 ### Defaults applied at runtime

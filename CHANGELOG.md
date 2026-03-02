@@ -57,8 +57,60 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (set on reflection, stripped on eBGP). Best-path tiebreakers:
   shortest CLUSTER_LIST, lowest ORIGINATOR_ID (RFC 4456 §9). New
   metric: `bgp_rr_loop_detected_total`. (ADR-0029)
+- **Policy actions — route modification on import/export.** Policy
+  engine redesigned from accept/reject to full match+modify+filter.
+  `set_local_pref`, `set_med`, `set_next_hop` (self or IP),
+  `set_community_add`/`set_community_remove` (standard, extended,
+  large), `set_as_path_prepend` (ASN + count). Import modifications
+  stored on Route; export modifications clone Loc-RIB route. Policy
+  types renamed from prefix-list terminology to engine terminology.
+  (ADR-0030)
+- **AS_PATH regex matching.** `match_as_path` field in policy
+  statements supports Cisco/Quagga-style patterns (`^65100_`,
+  `_65200$`, `_65100_`). `_` expands to boundary anchor. ANDed with
+  existing prefix and community conditions. `AsPath::to_aspath_string()`
+  for regex-matchable format. (ADR-0030)
+- **Large Communities (RFC 8092).** 12-byte community values for
+  4-byte ASN operators. Wire codec (type 32, Optional|Transitive),
+  `Route::large_communities()` accessor, gRPC API fields on Route and
+  AddPath, policy matching (`LC:global:local1:local2` format in
+  `match_community`), and set/delete in policy actions. (ADR-0031)
 
 ### Fixed
+
+- **IPv4 `set_next_hop` now reaches the wire.** `apply_modifications()` updates
+  `PathAttribute::NextHop` directly for `Specific(V4)` addresses. Export path
+  carries full `NextHopAction` (not a boolean) so `prepare_outbound_attributes()`
+  can skip eBGP rewrite when policy explicitly sets an address. IPv6 policy
+  next-hop override also wired through.
+- **RT/RO extended community ASN validation.** `build_rt_ec()`/`build_ro_ec()`
+  now reject ASN > 65535 at config load time (2-octet AS-Specific sub-type only
+  carries u16). Previously silently truncated to u16.
+- **RT/RO impossible match specs rejected.** `parse_community_match()` rejects
+  RT/RO match patterns with local fields exceeding the encoding capacity (e.g.
+  `RT:192.0.2.1:70000` where IPv4-specific only allows u16 local).
+- **AS_PATH regex `_` now matches AS_SET braces.** Expanded from `(?:^| |$)` to
+  `(?:^| |$|[{}])` so patterns like `_65003_` match inside `{65003 65004}`.
+- **Zero-length LARGE_COMMUNITIES rejected.** Wire decoder now rejects
+  zero-length attribute value (must carry at least one 12-byte community).
+- **Extended community add/remove uses logical RT/RO equivalence.**
+  `set_community_remove` and `set_community_add` now compare RT/RO semantically,
+  not by raw bytes. Removes work across encodings (2-octet AS, 4-octet AS,
+  IPv4-specific) and adds avoid creating logical duplicates.
+- **AS_PATH prepend overflow guard.** `set_as_path_prepend` no longer creates
+  AS_SEQUENCE segments longer than 255 ASNs (wire segment length is u8). When
+  merging would exceed the limit, a separate leading AS_SEQUENCE is created.
+- **Proto `large_communities` format documented.** Added format comments
+  (`"global_admin:local_data1:local_data2"`) to `Route` and `AddPathRequest`
+  message fields.
+- **Dead code removed.** Deleted `prefix_list.rs` (969 lines of duplicated code
+  superseded by `engine.rs`). Removed 36 duplicate tests.
+
+### Known Limitations
+
+- **Large community duplicates preserved.** Duplicate large communities in
+  received UPDATEs are stored and re-advertised unchanged. Strict RFC 8092
+  normalization (dedup on receipt) is deferred as a hardening item.
 
 - **Proto: single source of truth.** Eliminated duplicate proto file;
   `crates/api/build.rs` now compiles from `proto/rustbgpd.proto` directly.

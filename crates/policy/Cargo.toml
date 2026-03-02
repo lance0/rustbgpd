@@ -10,6 +10,7 @@ categories.workspace = true
 description = "Minimal policy engine — prefix allow/deny, max-prefix enforcement, attribute filters"
 
 [dependencies]
+regex = "1"
 rustbgpd-wire.workspace = true
 thiserror.workspace = true
 

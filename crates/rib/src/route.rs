@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
-use rustbgpd_wire::{AsPath, ExtendedCommunity, Origin, PathAttribute, Prefix};
+use rustbgpd_wire::{AsPath, ExtendedCommunity, LargeCommunity, Origin, PathAttribute, Prefix};
 
 /// How a route was learned, used for best-path selection and iBGP split-horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +101,18 @@ impl Route {
             .iter()
             .find_map(|a| match a {
                 PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract LARGE COMMUNITIES (RFC 8092) values, returning empty slice if absent.
+    #[must_use]
+    pub fn large_communities(&self) -> &[LargeCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::LargeCommunities(c) => Some(c.as_slice()),
                 _ => None,
             })
             .unwrap_or(&[])

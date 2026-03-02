@@ -200,6 +200,8 @@ message Route {
   bool best = 9;
   repeated uint32 communities = 10;
   repeated uint64 extended_communities = 11;
+  // Format: "global_admin:local_data1:local_data2" (e.g. "65001:100:200").
+  repeated string large_communities = 12;
 }
 
 message WatchRoutesRequest {
@@ -244,6 +246,8 @@ message AddPathRequest {
   uint32 med = 7;
   repeated uint32 communities = 8;
   repeated uint64 extended_communities = 9;
+  // Format: "global_admin:local_data1:local_data2" (e.g. "65001:100:200").
+  repeated string large_communities = 10;
 }
 
 message AddPathResponse {

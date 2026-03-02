@@ -855,6 +855,7 @@ dependencies = [
 name = "rustbgpd-policy"
 version = "0.3.0"
 dependencies = [
+ "regex",
  "rustbgpd-wire",
  "thiserror 2.0.18",
 ]

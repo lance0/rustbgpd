@@ -76,6 +76,8 @@ pub mod attr_type {
     pub const CLUSTER_LIST: u8 = 10;
     /// RFC 4360: Extended Communities.
     pub const EXTENDED_COMMUNITIES: u8 = 16;
+    /// RFC 8092: Large Communities.
+    pub const LARGE_COMMUNITIES: u8 = 32;
     /// RFC 4760: `MP_REACH_NLRI`.
     pub const MP_REACH_NLRI: u8 = 14;
     /// RFC 4760: `MP_UNREACH_NLRI`.

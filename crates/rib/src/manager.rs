@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 
-use rustbgpd_policy::{PrefixList, check_prefix_list};
+use rustbgpd_policy::{Policy, PolicyAction, evaluate_policy};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
@@ -35,8 +35,8 @@ pub struct RibManager {
     loc_rib: LocRib,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
-    export_policy: Option<PrefixList>,
-    peer_export_policies: HashMap<IpAddr, Option<PrefixList>>,
+    export_policy: Option<Policy>,
+    peer_export_policies: HashMap<IpAddr, Option<Policy>>,
     /// Families the transport can actually serialize per peer.
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Whether each registered outbound peer is eBGP (true) or iBGP (false).
@@ -110,7 +110,7 @@ impl RibManager {
     #[must_use]
     pub fn new(
         rx: mpsc::Receiver<RibUpdate>,
-        export_policy: Option<PrefixList>,
+        export_policy: Option<Policy>,
         cluster_id: Option<Ipv4Addr>,
         metrics: BgpMetrics,
     ) -> Self {
@@ -138,7 +138,7 @@ impl RibManager {
     }
 
     /// Resolve the export policy for a peer: per-peer if set, else global.
-    fn export_policy_for(&self, peer: IpAddr) -> Option<&PrefixList> {
+    fn export_policy_for(&self, peer: IpAddr) -> Option<&Policy> {
         self.peer_export_policies
             .get(&peer)
             .and_then(|p| p.as_ref())
@@ -266,6 +266,7 @@ impl RibManager {
 
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
+            let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
 
             // Resolve export policy, sendable families, and RR state before
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
@@ -319,21 +320,35 @@ impl RibManager {
                     }
 
                     // Export policy check (per-peer or global)
-                    if check_prefix_list(
+                    let aspath_str = best
+                        .as_path()
+                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+                    let result = evaluate_policy(
                         export_pol.as_ref(),
                         *prefix,
                         best.extended_communities(),
                         best.communities(),
-                    ) != rustbgpd_policy::PolicyAction::Permit
-                    {
+                        best.large_communities(),
+                        &aspath_str,
+                    );
+                    if result.action != PolicyAction::Permit {
                         if rib_out.get(prefix).is_some() {
                             withdraw.push(*prefix);
                         }
                         continue;
                     }
 
-                    // Advertise (or re-advertise if already in Adj-RIB-Out)
-                    announce.push(best.clone());
+                    // Apply export modifications to a clone
+                    let mut modified = best.clone();
+                    let nh_action = rustbgpd_policy::apply_modifications(
+                        &mut modified.attributes,
+                        &result.modifications,
+                    );
+                    if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
+                        modified.next_hop = *addr;
+                    }
+                    nh_override_flags.push(nh_action);
+                    announce.push(modified);
                 } else {
                     // Best path removed — withdraw if previously advertised
                     if rib_out.get(prefix).is_some() {
@@ -357,6 +372,7 @@ impl RibManager {
                     vec![]
                 };
                 let update = OutboundRouteUpdate {
+                    next_hop_override: nh_override_flags.clone(),
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
                     end_of_rib: pending_eor.clone(),
@@ -406,6 +422,7 @@ impl RibManager {
     /// retry a full resync via the resync timer.
     fn send_initial_table(&mut self, peer: IpAddr) {
         let mut announce = Vec::new();
+        let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
 
         // Stage: collect eligible routes without mutating AdjRibOut
@@ -423,16 +440,30 @@ impl RibManager {
                 continue;
             }
             // Export policy (per-peer or global)
-            if check_prefix_list(
+            let aspath_str = route
+                .as_path()
+                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+            let result = evaluate_policy(
                 export_pol.as_ref(),
                 route.prefix,
                 route.extended_communities(),
                 route.communities(),
-            ) != rustbgpd_policy::PolicyAction::Permit
-            {
+                route.large_communities(),
+                &aspath_str,
+            );
+            if result.action != PolicyAction::Permit {
                 continue;
             }
-            announce.push(route.clone());
+            let mut modified = route.clone();
+            let nh_action = rustbgpd_policy::apply_modifications(
+                &mut modified.attributes,
+                &result.modifications,
+            );
+            if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
+                modified.next_hop = *addr;
+            }
+            nh_override_flags.push(nh_action);
+            announce.push(modified);
         }
 
         // Determine EoR families from this peer's sendable families
@@ -445,6 +476,7 @@ impl RibManager {
         if let Some(tx) = self.outbound_peers.get(&peer) {
             if !announce.is_empty() {
                 let update = OutboundRouteUpdate {
+                    next_hop_override: nh_override_flags.clone(),
                     announce: announce.clone(),
                     withdraw: vec![],
                     end_of_rib: vec![],
@@ -476,6 +508,7 @@ impl RibManager {
             // Send End-of-RIB markers for all sendable families
             if !eor_families.is_empty() {
                 let eor = OutboundRouteUpdate {
+                    next_hop_override: vec![],
                     announce: vec![],
                     withdraw: vec![],
                     end_of_rib: eor_families.clone(),
@@ -496,6 +529,7 @@ impl RibManager {
     fn send_route_refresh_response(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         let family = (afi, safi);
         let mut announce = Vec::new();
+        let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
 
         for route in self.loc_rib.iter() {
@@ -520,21 +554,36 @@ impl RibManager {
                 continue;
             }
             // Export policy
-            if check_prefix_list(
+            let aspath_str = route
+                .as_path()
+                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+            let result = evaluate_policy(
                 export_pol.as_ref(),
                 route.prefix,
                 route.extended_communities(),
                 route.communities(),
-            ) != rustbgpd_policy::PolicyAction::Permit
-            {
+                route.large_communities(),
+                &aspath_str,
+            );
+            if result.action != PolicyAction::Permit {
                 continue;
             }
-            announce.push(route.clone());
+            let mut modified = route.clone();
+            let nh_action = rustbgpd_policy::apply_modifications(
+                &mut modified.attributes,
+                &result.modifications,
+            );
+            if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
+                modified.next_hop = *addr;
+            }
+            nh_override_flags.push(nh_action);
+            announce.push(modified);
         }
 
         if let Some(tx) = self.outbound_peers.get(&peer) {
             if !announce.is_empty() {
                 let update = OutboundRouteUpdate {
+                    next_hop_override: nh_override_flags.clone(),
                     announce: announce.clone(),
                     withdraw: vec![],
                     end_of_rib: vec![],
@@ -563,6 +612,7 @@ impl RibManager {
 
             // Send EoR for the refreshed family
             let eor = OutboundRouteUpdate {
+                next_hop_override: vec![],
                 announce: vec![],
                 withdraw: vec![],
                 end_of_rib: vec![family],
@@ -590,6 +640,7 @@ impl RibManager {
             return;
         };
         let eor = OutboundRouteUpdate {
+            next_hop_override: vec![],
             announce: vec![],
             withdraw: vec![],
             end_of_rib: families.iter().copied().collect(),
@@ -2054,16 +2105,18 @@ mod tests {
 
     #[tokio::test]
     async fn export_policy_blocks_denied() {
-        use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
+        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
 
         let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
-        let export_policy = PrefixList {
-            entries: vec![PrefixListEntry {
+        let export_policy = Policy {
+            entries: vec![PolicyStatement {
                 prefix: Some(Prefix::V4(denied_prefix)),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
                 match_community: vec![],
+                match_as_path: None,
+                modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
         };
@@ -2158,19 +2211,21 @@ mod tests {
 
     #[tokio::test]
     async fn per_peer_export_policy() {
-        use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
+        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
 
         let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
         let allowed_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
         // Peer1 gets a deny policy on 10.0.0.0/8, peer2 has no per-peer policy
-        let peer1_export = Some(PrefixList {
-            entries: vec![PrefixListEntry {
+        let peer1_export = Some(Policy {
+            entries: vec![PolicyStatement {
                 prefix: Some(Prefix::V4(denied_prefix)),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
                 match_community: vec![],
+                match_as_path: None,
+                modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
         });
@@ -2236,7 +2291,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_down_cleans_up_export_policy() {
-        use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry};
+        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
 
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, None, BgpMetrics::new());
@@ -2244,13 +2299,15 @@ mod tests {
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let (out_tx, _out_rx) = mpsc::channel(64);
-        let policy = Some(PrefixList {
-            entries: vec![PrefixListEntry {
+        let policy = Some(Policy {
+            entries: vec![PolicyStatement {
                 prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
                 ge: None,
                 le: None,
                 action: PolicyAction::Deny,
                 match_community: vec![],
+                match_as_path: None,
+                modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
         });
@@ -2600,6 +2657,7 @@ mod tests {
         // Fill the channel so send_initial_table's try_send fails
         out_tx
             .send(OutboundRouteUpdate {
+                next_hop_override: vec![],
                 announce: vec![],
                 withdraw: vec![],
                 end_of_rib: vec![],

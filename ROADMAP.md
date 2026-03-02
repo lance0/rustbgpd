@@ -56,6 +56,11 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Standard Communities Policy Matching (RFC 1997) — filter on standard community values in import/export policy, well-known names (ADR-0028)
 - [x] Route Reflector (RFC 4456) — client/non-client reflection rules, ORIGINATOR_ID and CLUSTER_LIST attributes, inbound loop detection, best-path tiebreakers (ADR-0029)
 - [x] 530 tests — unit, integration, property, fuzz
+- [x] Policy Actions — route modification on import/export: `set_local_pref`, `set_med`, `set_next_hop`, `set_community_add/remove`, `set_as_path_prepend`. Policy engine renamed from prefix-list to engine terminology. (ADR-0030)
+- [x] AS_PATH regex matching — `match_as_path` in policy statements with Cisco/Quagga `_` boundary convention (ADR-0030)
+- [x] Large Communities (RFC 8092) — 12-byte wire codec, RIB accessor, gRPC API, policy matching and set/delete actions (ADR-0031)
+- [x] Review hardening: IPv4 NEXT_HOP wire path, RT/RO ASN validation, AS_PATH regex AS_SET braces, zero-length LC rejection, EC logical add/remove equivalence, AS_SEQUENCE overflow guard
+- [x] 568 tests
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -63,55 +68,72 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ## Planned Features
 
-*Prioritized by effort vs user impact. Quick wins first, then bigger lifts.*
+*Ordered by what unlocks production use. The policy engine is the critical
+path — without route manipulation, rustbgpd is observation-only.*
 
-### Interop Test Hardening
+*For GoBGP feature parity details, see [docs/gobgp-parity.md](docs/gobgp-parity.md).*
 
-- [ ] **`trap cleanup EXIT`** — auto-destroy topology on failure; guard with a `--deploy` flag so manual workflows aren't disrupted
-- [ ] **EoR detection by polling** — replace `sleep 10` in M11 test 3 with a `wait_eor()` loop that polls `bgp_gr_stale_routes` until 0
-- [ ] **Timestamps in log output** — `date +%H:%M:%S` in `log()`/`ok()`/`fail()` across all 5 scripts; especially useful for GR timing
-- [ ] **Pre-flight checks** — verify `grpcurl`, `docker`, `containerlab` exist before running any tests
+### P0 — Production Blockers (Complete)
 
-### Quick Wins (low effort, high impact)
+All P0 features shipped. See Completed section above.
 
-- [ ] **Extended message support** (RFC 8654) — raise 4096-byte limit for large UPDATE messages; mainly a wire codec change
-- [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
-- [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5; `setsockopt` change similar to existing MD5 code
+- [x] **Policy actions** — route modification on import/export (ADR-0030)
+- [x] **AS_PATH regex matching** — Cisco/Quagga-style patterns in policy (ADR-0030)
+- [x] **Large communities** (RFC 8092) — full feature track (ADR-0031)
 
-### Medium Effort (moderate effort, high impact)
+### Deferred Hardening
 
-- [ ] **Large communities** (RFC 8092) — full feature track for 4-byte ASN operators:
-  - Wire: 12-byte large community decode/encode
-  - RIB: storage and accessors on Route
-  - API: large communities in proto Route message and AddPath
-  - Policy: matching in import/export policy (after wire+storage)
-- [ ] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); standard for visibility into BGP state
+Items identified during review that are not correctness bugs but improve strictness.
+
+- [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
+
+### P1 — Core Protocol Gaps
+
+Features that close meaningful protocol gaps vs GoBGP.
+
+- [ ] **Add-Path** (RFC 7911) — advertise multiple paths per prefix; essential for route servers and IX operators
+- [ ] **Extended message support** (RFC 8654) — raise 4096-byte limit for large UPDATE messages; required for large community/attribute payloads
 - [ ] **RPKI validation** — RTR client (RFC 8210) for route origin validation; growing regulatory requirement
+- [ ] **FlowSpec** (RFC 5575/8955) — programmatic traffic filtering rules distributed via BGP; IPv4 and IPv6 unicast FlowSpec. Critical for prefixd integration
 
-### Performance & Scale
+### P2 — Operational Polish
+
+Features that improve day-to-day operations.
+
+- [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
+- [ ] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION
+- [ ] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); standard for visibility into BGP state
+- [ ] **MRT dump export** (RFC 6396) — TABLE_DUMP_V2 for offline analysis and archival
+
+### P3 — Scale & Hardening
+
+Prove it works under pressure before 1.0.
 
 - [ ] **RIB scale benchmarks** — large table import/export (100k+ prefixes), memory profiling, best-path convergence time
 - [ ] **Churn benchmarks** — route flap throughput, reconvergence latency under UPDATE storms
 - [ ] **CI regression tracking** — automated benchmark runs with threshold-based alerts
-
-### Soak & Chaos Testing
-
 - [ ] **Peer flap storms** — repeated session up/down under load; verify no resource leaks
 - [ ] **gRPC churn** — concurrent AddNeighbor/DeleteNeighbor/SoftResetIn calls; verify no deadlocks or panics
 - [ ] **Repeated GR recovery** — back-to-back graceful restart cycles; verify stale sweep correctness
 - [ ] **Long-duration stability** — multi-hour runs with active route exchange; monitor memory and fd usage
 
-### Larger Projects (high effort, high impact)
+### P4 — Nice to Have
 
-- [ ] **FlowSpec speaker mode** (RFC 5575) — programmatic traffic filtering rules distributed via BGP
-- [ ] **Add-Path** (RFC 7911) — advertise multiple paths per prefix; essential for route servers
+Valuable but not blocking production use or 1.0.
+
+- [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5 (GoBGP doesn't have it either)
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
-
-### Nice to Have
-
 - [ ] **CLI client** wrapping gRPC — convenience tool, not the primary interface
-- [ ] **MRT dump export** (RFC 6396) — TABLE_DUMP_V2 for offline analysis and archival
 - [ ] **YANG model / NETCONF** — alternative management interface for traditional NOC tooling
+
+### Interop Test Hardening
+
+Ongoing improvements to the test infrastructure.
+
+- [ ] **`trap cleanup EXIT`** — auto-destroy topology on failure; guard with a `--deploy` flag so manual workflows aren't disrupted
+- [ ] **EoR detection by polling** — replace `sleep 10` in M11 test 3 with a `wait_eor()` loop that polls `bgp_gr_stale_routes` until 0
+- [ ] **Timestamps in log output** — `date +%H:%M:%S` in `log()`/`ok()`/`fail()` across all 5 scripts; especially useful for GR timing
+- [ ] **Pre-flight checks** — verify `grpcurl`, `docker`, `containerlab` exist before running any tests
 
 ---
 
@@ -122,6 +144,8 @@ Quality gates before tagging 1.0.0:
 - [x] MP-BGP (at least IPv6 unicast)
 - [x] Graceful restart
 - [x] Extended communities
+- [x] Policy actions (match + modify + filter)
+- [x] Large communities (RFC 8092)
 - [ ] Real-world deployment feedback
 - [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
 - [ ] Comprehensive rustdoc for public API

@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv6Addr};
 
 use rustbgpd_fsm::SessionState;
-use rustbgpd_policy::PrefixList;
+use rustbgpd_policy::Policy;
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -56,8 +56,8 @@ pub struct PeerManagerNeighborConfig {
     pub gr_stale_routes_time: u64,
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     pub route_reflector_client: bool,
-    pub import_policy: Option<PrefixList>,
-    pub export_policy: Option<PrefixList>,
+    pub import_policy: Option<Policy>,
+    pub export_policy: Option<Policy>,
 }
 
 /// Snapshot of a peer's state for queries.

@@ -82,6 +82,32 @@ impl AsPath {
             AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns.contains(&asn),
         })
     }
+
+    /// Convert to a string representation for regex matching.
+    ///
+    /// `AS_SEQUENCE` segments produce space-separated ASNs.
+    /// `AS_SET` segments produce `{ASN1 ASN2}` (curly braces, space-separated).
+    /// Multiple segments are space-separated.
+    ///
+    /// Examples: `"65001 65002"`, `"65001 {65003 65004}"`, `""` (empty path).
+    #[must_use]
+    pub fn to_aspath_string(&self) -> String {
+        let mut parts = Vec::new();
+        for seg in &self.segments {
+            match seg {
+                AsPathSegment::AsSequence(asns) => {
+                    for asn in asns {
+                        parts.push(asn.to_string());
+                    }
+                }
+                AsPathSegment::AsSet(asns) => {
+                    let inner: Vec<String> = asns.iter().map(ToString::to_string).collect();
+                    parts.push(format!("{{{}}}", inner.join(" ")));
+                }
+            }
+        }
+        parts.join(" ")
+    }
 }
 
 /// RFC 4760 `MP_REACH_NLRI` attribute (type code 14).
@@ -232,6 +258,37 @@ impl fmt::Display for ExtendedCommunity {
     }
 }
 
+/// RFC 8092 Large Community — 12-byte value: `(global_admin, local_data1, local_data2)`.
+///
+/// Each field is a 32-bit unsigned integer. Display format: `"65001:100:200"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LargeCommunity {
+    pub global_admin: u32,
+    pub local_data1: u32,
+    pub local_data2: u32,
+}
+
+impl LargeCommunity {
+    #[must_use]
+    pub fn new(global_admin: u32, local_data1: u32, local_data2: u32) -> Self {
+        Self {
+            global_admin,
+            local_data1,
+            local_data2,
+        }
+    }
+}
+
+impl fmt::Display for LargeCommunity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}",
+            self.global_admin, self.local_data1, self.local_data2
+        )
+    }
+}
+
 /// A known path attribute or raw preserved bytes.
 ///
 /// Known attributes are decoded into typed variants. Unknown attributes
@@ -247,6 +304,8 @@ pub enum PathAttribute {
     Communities(Vec<u32>),
     /// RFC 4360 EXTENDED COMMUNITIES.
     ExtendedCommunities(Vec<ExtendedCommunity>),
+    /// RFC 8092 LARGE COMMUNITIES.
+    LargeCommunities(Vec<LargeCommunity>),
     /// RFC 4456 `ORIGINATOR_ID` — original router-id of the route.
     OriginatorId(Ipv4Addr),
     /// RFC 4456 `CLUSTER_LIST` — list of cluster-ids traversed.
@@ -273,6 +332,7 @@ impl PathAttribute {
             Self::OriginatorId(_) => attr_type::ORIGINATOR_ID,
             Self::ClusterList(_) => attr_type::CLUSTER_LIST,
             Self::ExtendedCommunities(_) => attr_type::EXTENDED_COMMUNITIES,
+            Self::LargeCommunities(_) => attr_type::LARGE_COMMUNITIES,
             Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
             Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
             Self::Unknown(raw) => raw.type_code,
@@ -291,7 +351,7 @@ impl PathAttribute {
             | Self::ClusterList(_)
             | Self::MpReachNlri(_)
             | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
-            Self::Communities(_) | Self::ExtendedCommunities(_) => {
+            Self::Communities(_) | Self::ExtendedCommunities(_) | Self::LargeCommunities(_) => {
                 attr_flags::OPTIONAL | attr_flags::TRANSITIVE
             }
             Self::Unknown(raw) => raw.flags,
@@ -537,6 +597,30 @@ fn decode_attribute_value(
             Ok(PathAttribute::ClusterList(ids))
         }
 
+        attr_type::LARGE_COMMUNITIES => {
+            if value.is_empty() || !value.len().is_multiple_of(12) {
+                return Err(DecodeError::UpdateAttributeError {
+                    subcode: update_subcode::ATTRIBUTE_LENGTH_ERROR,
+                    data: attr_error_data(flags, type_code, value),
+                    detail: format!(
+                        "LARGE_COMMUNITIES length {} invalid (must be non-zero multiple of 12)",
+                        value.len()
+                    ),
+                });
+            }
+            let communities = value
+                .chunks_exact(12)
+                .map(|c| {
+                    LargeCommunity::new(
+                        u32::from_be_bytes([c[0], c[1], c[2], c[3]]),
+                        u32::from_be_bytes([c[4], c[5], c[6], c[7]]),
+                        u32::from_be_bytes([c[8], c[9], c[10], c[11]]),
+                    )
+                })
+                .collect();
+            Ok(PathAttribute::LargeCommunities(communities))
+        }
+
         attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value),
         attr_type::MP_UNREACH_NLRI => decode_mp_unreach_nlri(value),
 
@@ -778,9 +862,10 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         | attr_type::MP_REACH_NLRI
         | attr_type::MP_UNREACH_NLRI => Some(attr_flags::OPTIONAL),
         // Optional transitive
-        attr_type::AGGREGATOR | attr_type::COMMUNITIES | attr_type::EXTENDED_COMMUNITIES => {
-            Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE)
-        }
+        attr_type::AGGREGATOR
+        | attr_type::COMMUNITIES
+        | attr_type::EXTENDED_COMMUNITIES
+        | attr_type::LARGE_COMMUNITIES => Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
         _ => None,
     }
 }
@@ -832,6 +917,15 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
                 type_code = attr_type::EXTENDED_COMMUNITIES;
                 for &c in communities {
                     value.extend_from_slice(&c.as_u64().to_be_bytes());
+                }
+            }
+            PathAttribute::LargeCommunities(communities) => {
+                flags = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
+                type_code = attr_type::LARGE_COMMUNITIES;
+                for &c in communities {
+                    value.extend_from_slice(&c.global_admin.to_be_bytes());
+                    value.extend_from_slice(&c.local_data1.to_be_bytes());
+                    value.extend_from_slice(&c.local_data2.to_be_bytes());
                 }
             }
             PathAttribute::OriginatorId(addr) => {
@@ -1810,5 +1904,152 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Large Communities (RFC 8092)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn large_community_display() {
+        let lc = LargeCommunity::new(65001, 100, 200);
+        assert_eq!(lc.to_string(), "65001:100:200");
+    }
+
+    #[test]
+    fn large_community_type_code_and_flags() {
+        let attr = PathAttribute::LargeCommunities(vec![LargeCommunity::new(1, 2, 3)]);
+        assert_eq!(attr.type_code(), attr_type::LARGE_COMMUNITIES);
+        assert_eq!(attr.flags(), attr_flags::OPTIONAL | attr_flags::TRANSITIVE);
+    }
+
+    #[test]
+    fn decode_large_community_single() {
+        // flags=0xC0 (Optional|Transitive), type=32, length=12
+        let mut buf = vec![0xC0, 32, 12];
+        buf.extend_from_slice(&65001u32.to_be_bytes());
+        buf.extend_from_slice(&100u32.to_be_bytes());
+        buf.extend_from_slice(&200u32.to_be_bytes());
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(attrs.len(), 1);
+        assert_eq!(
+            attrs[0],
+            PathAttribute::LargeCommunities(vec![LargeCommunity::new(65001, 100, 200)])
+        );
+    }
+
+    #[test]
+    fn decode_large_community_multiple() {
+        // Two LCs: 24 bytes total
+        let mut buf = vec![0xC0, 32, 24];
+        for (g, l1, l2) in [(65001u32, 100u32, 200u32), (65002, 300, 400)] {
+            buf.extend_from_slice(&g.to_be_bytes());
+            buf.extend_from_slice(&l1.to_be_bytes());
+            buf.extend_from_slice(&l2.to_be_bytes());
+        }
+        let attrs = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(
+            attrs[0],
+            PathAttribute::LargeCommunities(vec![
+                LargeCommunity::new(65001, 100, 200),
+                LargeCommunity::new(65002, 300, 400),
+            ])
+        );
+    }
+
+    #[test]
+    fn decode_large_community_bad_length() {
+        // 10 bytes — not a multiple of 12
+        let buf = [0xC0, 32, 10, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: 5, // ATTRIBUTE_LENGTH_ERROR
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decode_large_community_empty_rejected() {
+        // Zero-length LARGE_COMMUNITIES is rejected (must carry at least one community).
+        let buf = [0xC0, 32, 0];
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: 5, // ATTRIBUTE_LENGTH_ERROR
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn large_community_roundtrip() {
+        let lcs = vec![
+            LargeCommunity::new(65001, 100, 200),
+            LargeCommunity::new(0, u32::MAX, 42),
+        ];
+        let attr = PathAttribute::LargeCommunities(lcs.clone());
+        let mut buf = Vec::new();
+        encode_path_attributes(&[attr], &mut buf, true);
+        let decoded = decode_path_attributes(&buf, true).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], PathAttribute::LargeCommunities(lcs));
+    }
+
+    #[test]
+    fn large_community_expected_flags_validated() {
+        // Wrong flags: TRANSITIVE only (0x40) instead of OPTIONAL|TRANSITIVE (0xC0)
+        let mut buf = vec![0x40, 32, 12];
+        buf.extend_from_slice(&1u32.to_be_bytes());
+        buf.extend_from_slice(&2u32.to_be_bytes());
+        buf.extend_from_slice(&3u32.to_be_bytes());
+        let err = decode_path_attributes(&buf, true).unwrap_err();
+        assert!(matches!(
+            err,
+            DecodeError::UpdateAttributeError {
+                subcode: 4, // ATTRIBUTE_FLAGS_ERROR
+                ..
+            }
+        ));
+    }
+
+    // -----------------------------------------------------------------------
+    // AsPath::to_aspath_string()
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn aspath_string_sequence() {
+        let p = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65001, 65002, 65003])],
+        };
+        assert_eq!(p.to_aspath_string(), "65001 65002 65003");
+    }
+
+    #[test]
+    fn aspath_string_set() {
+        let p = AsPath {
+            segments: vec![AsPathSegment::AsSet(vec![65003, 65004])],
+        };
+        assert_eq!(p.to_aspath_string(), "{65003 65004}");
+    }
+
+    #[test]
+    fn aspath_string_mixed() {
+        let p = AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![65001, 65002]),
+                AsPathSegment::AsSet(vec![65003, 65004]),
+            ],
+        };
+        assert_eq!(p.to_aspath_string(), "65001 65002 {65003 65004}");
+    }
+
+    #[test]
+    fn aspath_string_empty() {
+        let p = AsPath { segments: vec![] };
+        assert_eq!(p.to_aspath_string(), "");
     }
 }

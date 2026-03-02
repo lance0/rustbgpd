@@ -3,8 +3,8 @@
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** Lance  
-**Status:** v0.2.0 — MP-BGP (IPv6 unicast) complete
-**Last updated:** 2026-02-28
+**Status:** v0.3.0+ — Policy actions, AS_PATH regex, Large Communities (P0 complete)
+**Last updated:** 2026-03-02
 
 ---
 
@@ -79,7 +79,7 @@ struct RawAttribute {
 
 **rib** — AdjRibIn per neighbor, LocRib best-path selection, AdjRibOut computed per neighbor. Route objects keyed by `Prefix` (IPv4 and IPv6 coexist in the same HashMap). See ADR-0023.
 
-**policy** (v1 minimal) — Prefix allow/deny lists, max-prefix enforcement, simple attribute set/clear. Enough to be operationally useful, not enough to invite bikeshedding.
+**policy** — Match+modify+filter engine: prefix (ge/le), community (standard, extended, large), AS_PATH regex matching. Route modifications: LOCAL_PREF, MED, next-hop, community add/remove, AS_PATH prepend. Extended community add/remove uses logical RT/RO equivalence across encodings.
 
 **api** — gRPC server exposing neighbor lifecycle, state queries, RIB queries, and route injection. Defined by `rustbgpd.proto` — our own types, not GoBGP's.
 
@@ -442,7 +442,7 @@ Inject and withdraw routes via gRPC (`AddPath` / `DeletePath`). Build Adj-RIB-Ou
 - eBGP outbound: prepend local ASN to AS_PATH, set NEXT_HOP to session's local IPv4 socket address (reachable, not router-id), strip LOCAL_PREF.
 - iBGP outbound: ensure LOCAL_PREF present (default 100), pass NEXT_HOP through.
 - TCP MD5 and GTSM require `socket2::Socket` for pre-connect `setsockopt` calls (ADR-0016). Only `unsafe` code in the project, isolated to `socket_opts` module.
-- Global prefix-list policy: first-match-wins evaluation, separate import/export lists.
+- Policy engine: first-match-wins evaluation with match conditions (prefix, community, AS_PATH regex) and route modifications (LOCAL_PREF, MED, communities, AS_PATH prepend, next-hop). Separate import/export policies.
 
 **Exit criteria:**
 - A client can programmatically announce a prefix and verify it appears on the peer.
@@ -619,7 +619,6 @@ rustbgpd/
 
 ## Roadmap Beyond v1
 
-- Extended communities
 - FlowSpec speaker mode (prefixd lineage)
 - BMP exporter
 - RPKI validation integration (RTR client)
@@ -653,7 +652,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | Route server mode (many peers) | — | M4 | FRR, BIRD, GoBGP | No transit by default |
 | MP-BGP (IPv6 unicast) | 4760 | v0.2.0 | FRR | `MP_REACH_NLRI` / `MP_UNREACH_NLRI`, `Prefix` enum, AFI/SAFI negotiation |
 | Communities (standard) | 1997 | M4 | FRR | Typed decode/encode, gRPC exposure |
-| Extended communities | 4360 | Post-v1 | — | Roadmap |
+| Extended communities | 4360 | v0.3.0+ | FRR | RT, RO, 4-byte AS (ADR-0025/0026) |
 | FlowSpec | 8955 | Post-v1 | — | Roadmap (prefixd lineage) |
 | Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
 | TCP-AO | 5925 | Post-v1 | — | Roadmap |

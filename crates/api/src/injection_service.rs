@@ -6,7 +6,8 @@ use tonic::{Request, Response, Status};
 use crate::proto;
 use rustbgpd_rib::{RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix,
+    AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Origin,
+    PathAttribute, Prefix,
 };
 
 pub struct InjectionService {
@@ -22,6 +23,70 @@ impl InjectionService {
 /// Sentinel peer address for locally-injected routes.
 const LOCAL_PEER: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
+/// Parse a prefix address + length + next-hop from a gRPC request.
+#[expect(clippy::result_large_err)]
+fn parse_prefix_and_nexthop(
+    prefix_str: &str,
+    prefix_length: u32,
+    next_hop_str: &str,
+) -> Result<(Prefix, IpAddr), Status> {
+    let addr: IpAddr = prefix_str
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
+    match addr {
+        IpAddr::V4(v4) => {
+            let len = u8::try_from(prefix_length)
+                .ok()
+                .filter(|&l| l <= 32)
+                .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
+            let nh: Ipv4Addr = next_hop_str
+                .parse()
+                .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+            if nh.is_unspecified() {
+                return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
+            }
+            if nh.is_multicast() {
+                return Err(Status::invalid_argument("next_hop must not be multicast"));
+            }
+            Ok((Prefix::V4(Ipv4Prefix::new(v4, len)), IpAddr::V4(nh)))
+        }
+        IpAddr::V6(v6) => {
+            let len = u8::try_from(prefix_length)
+                .ok()
+                .filter(|&l| l <= 128)
+                .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
+            let nh: Ipv6Addr = next_hop_str
+                .parse()
+                .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+            if nh.is_unspecified() {
+                return Err(Status::invalid_argument("next_hop must not be ::"));
+            }
+            if nh.is_multicast() {
+                return Err(Status::invalid_argument("next_hop must not be multicast"));
+            }
+            Ok((Prefix::V6(Ipv6Prefix::new(v6, len)), IpAddr::V6(nh)))
+        }
+    }
+}
+
+/// Parse a Large Community string in `"global:local1:local2"` format.
+fn parse_large_community(s: &str) -> Result<LargeCommunity, String> {
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        return Err("expected format global:local1:local2".to_string());
+    }
+    let global_admin: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("invalid global_admin {:?}", parts[0]))?;
+    let local_data1: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("invalid local_data1 {:?}", parts[1]))?;
+    let local_data2: u32 = parts[2]
+        .parse()
+        .map_err(|_| format!("invalid local_data2 {:?}", parts[2]))?;
+    Ok(LargeCommunity::new(global_admin, local_data1, local_data2))
+}
+
 #[tonic::async_trait]
 impl proto::injection_service_server::InjectionService for InjectionService {
     async fn add_path(
@@ -30,48 +95,8 @@ impl proto::injection_service_server::InjectionService for InjectionService {
     ) -> Result<Response<proto::AddPathResponse>, Status> {
         let req = request.into_inner();
 
-        // Parse prefix address as IPv4 or IPv6
-        let addr: IpAddr = req
-            .prefix
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
-
-        let (prefix, next_hop_ip) = match addr {
-            IpAddr::V4(v4) => {
-                let len = u8::try_from(req.prefix_length)
-                    .ok()
-                    .filter(|&l| l <= 32)
-                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
-                let nh: Ipv4Addr = req
-                    .next_hop
-                    .parse()
-                    .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
-                if nh.is_unspecified() {
-                    return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
-                }
-                if nh.is_multicast() {
-                    return Err(Status::invalid_argument("next_hop must not be multicast"));
-                }
-                (Prefix::V4(Ipv4Prefix::new(v4, len)), IpAddr::V4(nh))
-            }
-            IpAddr::V6(v6) => {
-                let len = u8::try_from(req.prefix_length)
-                    .ok()
-                    .filter(|&l| l <= 128)
-                    .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
-                let nh: Ipv6Addr = req
-                    .next_hop
-                    .parse()
-                    .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
-                if nh.is_unspecified() {
-                    return Err(Status::invalid_argument("next_hop must not be ::"));
-                }
-                if nh.is_multicast() {
-                    return Err(Status::invalid_argument("next_hop must not be multicast"));
-                }
-                (Prefix::V6(Ipv6Prefix::new(v6, len)), IpAddr::V6(nh))
-            }
-        };
+        let (prefix, next_hop_ip) =
+            parse_prefix_and_nexthop(&req.prefix, req.prefix_length, &req.next_hop)?;
 
         let origin = match req.origin {
             0 => Origin::Igp,
@@ -110,6 +135,16 @@ impl proto::injection_service_server::InjectionService for InjectionService {
                     .map(|&v| ExtendedCommunity::new(v))
                     .collect(),
             ));
+        }
+        if !req.large_communities.is_empty() {
+            let mut lcs = Vec::with_capacity(req.large_communities.len());
+            for s in &req.large_communities {
+                let lc = parse_large_community(s).map_err(|e| {
+                    Status::invalid_argument(format!("invalid large_community {s:?}: {e}"))
+                })?;
+                lcs.push(lc);
+            }
+            attributes.push(PathAttribute::LargeCommunities(lcs));
         }
 
         let route = Route {
@@ -209,6 +244,7 @@ mod tests {
             med: 0,
             communities: vec![],
             extended_communities: vec![],
+            large_communities: vec![],
         });
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -228,6 +264,7 @@ mod tests {
             med: 0,
             communities: vec![],
             extended_communities: vec![],
+            large_communities: vec![],
         });
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);

@@ -32,12 +32,14 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **RFC 4271 compliant** -- full FSM, path attribute validation, best-path selection, split horizon, Adj-RIB-In / Loc-RIB / Adj-RIB-Out
 - **Inbound + outbound peering** -- accepts incoming TCP connections and initiates outbound; passive peering supported
 - **Dynamic peer management** -- add, delete, enable, and disable neighbors at runtime via gRPC
-- **Per-peer policy** -- import/export prefix lists (IPv4 + IPv6) at global or neighbor level
+- **Policy engine** -- match + modify + filter: prefix, community, AS_PATH regex matching; set LOCAL_PREF, MED, communities, AS_PATH prepend, next-hop on import/export
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
 - **Graceful Restart** -- receiving speaker (RFC 4724): stale route preservation, per-family End-of-RIB, timer-based sweep, enabled by default
-- **448 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **Large communities** -- RFC 8092 wire codec, RIB, gRPC API, and policy matching for 4-byte ASN operators
+- **Route Reflector** -- RFC 4456 client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST, loop detection
+- **568 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -126,7 +128,7 @@ Seven crates with strict dependency rules:
 | `rustbgpd-fsm` | RFC 4271 state machine. Pure -- no tokio, no sockets, no tasks. |
 | `rustbgpd-transport` | Tokio TCP glue. The only crate that touches async I/O. |
 | `rustbgpd-rib` | Adj-RIB-In, Loc-RIB best-path, Adj-RIB-Out. Single-task ownership, no locks. |
-| `rustbgpd-policy` | Prefix allow/deny lists, per-peer or global, with ge/le matching. |
+| `rustbgpd-policy` | Policy engine: prefix/community/AS_PATH matching, route modifications. |
 | `rustbgpd-api` | gRPC server (tonic). Five services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 
@@ -174,11 +176,11 @@ The config file is TOML. All runtime changes go through gRPC -- the file is only
 
 **`[[neighbors]]`** -- One block per peer: `address`, `remote_asn`, optional `description`, `hold_time` (default 90), `max_prefixes`, `md5_password`, `ttl_security`, `families` (address families to negotiate, default `["ipv4_unicast"]`), `graceful_restart` (default `true`), `gr_restart_time` (default 120), `gr_stale_routes_time` (default 360).
 
-**`[policy]`** -- Global import/export prefix lists. Each entry has `action` (`permit`/`deny`), `prefix` (CIDR), optional `ge`/`le`.
+**`[policy]`** -- Global import/export policy. Each entry has `action` (`permit`/`deny`), match conditions (`prefix`, `match_community`, `match_as_path`), and optional route modifications (`set_local_pref`, `set_med`, `set_next_hop`, `set_community_add`/`remove`, `set_as_path_prepend`).
 
 **`[[neighbors.import_policy]]` / `[[neighbors.export_policy]]`** -- Per-neighbor policy overrides. Same format as global policy entries.
 
-Example with policy:
+Example with policy actions:
 
 ```toml
 [[neighbors]]
@@ -186,24 +188,24 @@ address = "10.0.0.2"
 remote_asn = 65002
 description = "transit"
 
-# Block RFC 1918 from this peer
+# Prefer routes from AS 65100
+[[neighbors.import_policy]]
+action = "permit"
+match_as_path = "^65100_"
+set_local_pref = 200
+
+# Block RFC 1918
 [[neighbors.import_policy]]
 action = "deny"
 prefix = "10.0.0.0/8"
-ge = 8
 le = 32
 
-[[neighbors.import_policy]]
-action = "deny"
-prefix = "172.16.0.0/12"
-ge = 12
-le = 32
-
-[[neighbors.import_policy]]
-action = "deny"
+# Prepend on export
+[[neighbors.export_policy]]
+action = "permit"
 prefix = "192.168.0.0/16"
-ge = 16
-le = 32
+set_as_path_prepend = { asn = 65001, count = 2 }
+set_community_add = ["65001:100"]
 ```
 
 Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Working examples: `tests/interop/configs/`.
@@ -247,7 +249,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 448 tests pass. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 568 tests pass. P0 production blockers complete. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -255,13 +257,16 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | RIB | v0.1.0 | Adj-RIB-In, Loc-RIB best-path (RFC 4271 §9.1.2), Adj-RIB-Out, split horizon |
 | gRPC API | v0.1.0 | 5 services: Global, Neighbor, RIB, Injection, Control |
 | Dynamic peers | v0.1.0 | Add/delete/enable/disable neighbors at runtime |
-| Policy | v0.1.0 | Prefix lists with ge/le matching, per-peer import/export |
 | Transport | v0.1.0 | Inbound listener, TCP MD5/GTSM, NLRI batching, collision detection |
 | Operations | v0.1.0 | Coordinated shutdown, gRPC supervision, Prometheus metrics |
-| **MP-BGP (IPv6)** | **v0.2.0** | **RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation** |
-| **Graceful Restart** | **v0.3.0** | **RFC 4724: receiving speaker, stale route demotion, End-of-RIB, timer sweep** |
+| MP-BGP (IPv6) | v0.2.0 | RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation |
+| Graceful Restart | v0.3.0 | RFC 4724: receiving speaker, stale route demotion, End-of-RIB, timer sweep |
+| **Policy actions** | **post-v0.3.0** | **Match + modify + filter: set LOCAL_PREF/MED/communities/AS_PATH, next-hop self** |
+| **AS_PATH regex** | **post-v0.3.0** | **Cisco/Quagga-style `_` boundary patterns in policy match conditions** |
+| **Large communities** | **post-v0.3.0** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |
+| **Route Reflector** | **post-v0.3.0** | **RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST** |
 
-Next: extended communities, BMP. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: Add-Path (RFC 7911), RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

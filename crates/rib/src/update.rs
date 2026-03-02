@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use rustbgpd_policy::PrefixList;
+use rustbgpd_policy::Policy;
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -13,6 +13,9 @@ pub struct OutboundRouteUpdate {
     pub withdraw: Vec<Prefix>,
     /// End-of-RIB markers to send for these families after the route updates.
     pub end_of_rib: Vec<(Afi, Safi)>,
+    /// Per-route next-hop override from export policy. Parallel to `announce` —
+    /// `next_hop_override[i]` applies to `announce[i]`.
+    pub next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -29,7 +32,7 @@ pub enum RibUpdate {
     PeerUp {
         peer: IpAddr,
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
-        export_policy: Option<PrefixList>,
+        export_policy: Option<Policy>,
         /// Address families that the transport can actually serialize for this
         /// peer. Routes whose AFI is not in this list are filtered out of
         /// Adj-RIB-Out, preventing divergence between RIB state and wire.

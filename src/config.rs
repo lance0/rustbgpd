@@ -1,9 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use rustbgpd_fsm::PeerConfig;
-use rustbgpd_policy::{PolicyAction, PrefixList, PrefixListEntry, parse_community_match};
+use rustbgpd_policy::{
+    CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyStatement, RouteModifications,
+    parse_community_match,
+};
 use rustbgpd_transport::TransportConfig;
-use rustbgpd_wire::{Afi, Ipv4Prefix, Ipv6Prefix, Prefix, Safi};
+use rustbgpd_wire::{Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix, Safi};
 use serde::Deserialize;
 
 const DEFAULT_HOLD_TIME: u16 = 90;
@@ -77,25 +80,25 @@ pub struct Neighbor {
     #[serde(default)]
     pub route_reflector_client: bool,
     #[serde(default)]
-    pub import_policy: Vec<PrefixListEntryConfig>,
+    pub import_policy: Vec<PolicyStatementConfig>,
     #[serde(default)]
-    pub export_policy: Vec<PrefixListEntryConfig>,
+    pub export_policy: Vec<PolicyStatementConfig>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     #[serde(default)]
-    pub import: Vec<PrefixListEntryConfig>,
+    pub import: Vec<PolicyStatementConfig>,
     #[serde(default)]
-    pub export: Vec<PrefixListEntryConfig>,
+    pub export: Vec<PolicyStatementConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PrefixListEntryConfig {
+pub struct PolicyStatementConfig {
     pub action: String,
-    /// CIDR prefix to match. Optional when `match_community` is set.
+    /// CIDR prefix to match. Optional when `match_community` or `match_as_path` is set.
     pub prefix: Option<String>,
     pub ge: Option<u8>,
     pub le: Option<u8>,
@@ -103,6 +106,29 @@ pub struct PrefixListEntryConfig {
     /// or `["NO_EXPORT"]`.
     #[serde(default)]
     pub match_community: Vec<String>,
+    /// `AS_PATH` regex pattern (Cisco/Quagga style: `_` = boundary anchor).
+    pub match_as_path: Option<String>,
+    /// Set `LOCAL_PREF` on matching routes.
+    pub set_local_pref: Option<u32>,
+    /// Set MED on matching routes.
+    pub set_med: Option<u32>,
+    /// Rewrite next-hop: `"self"` or an IP address.
+    pub set_next_hop: Option<String>,
+    /// Add communities to matching routes.
+    #[serde(default)]
+    pub set_community_add: Vec<String>,
+    /// Remove communities from matching routes.
+    #[serde(default)]
+    pub set_community_remove: Vec<String>,
+    /// Prepend `AS_PATH` on matching routes.
+    pub set_as_path_prepend: Option<AsPathPrependConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AsPathPrependConfig {
+    pub asn: u32,
+    pub count: u8,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -200,7 +226,7 @@ fn parse_prefix_entry(
     Ok(prefix)
 }
 
-fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixList>, ConfigError> {
+fn parse_policy(entries: &[PolicyStatementConfig]) -> Result<Option<Policy>, ConfigError> {
     if entries.is_empty() {
         return Ok(None);
     }
@@ -236,25 +262,187 @@ fn parse_prefix_list(entries: &[PrefixListEntryConfig]) -> Result<Option<PrefixL
             None
         };
 
-        if prefix.is_none() && match_community.is_empty() {
+        let match_as_path = if let Some(ref pat) = e.match_as_path {
+            Some(
+                rustbgpd_policy::AsPathRegex::new(pat)
+                    .map_err(|reason| ConfigError::InvalidPolicyEntry { reason })?,
+            )
+        } else {
+            None
+        };
+
+        if prefix.is_none() && match_community.is_empty() && match_as_path.is_none() {
             return Err(ConfigError::InvalidPolicyEntry {
-                reason: "entry must have at least one of 'prefix' or 'match_community'".to_string(),
+                reason: "entry must have at least one of 'prefix', 'match_community', or 'match_as_path'".to_string(),
             });
         }
 
-        parsed.push(PrefixListEntry {
+        // Build route modifications from set_* fields
+        let modifications = parse_modifications(e, action)?;
+
+        parsed.push(PolicyStatement {
             prefix,
             ge: e.ge,
             le: e.le,
             action,
             match_community,
+            match_as_path,
+            modifications,
         });
     }
 
-    Ok(Some(PrefixList {
+    Ok(Some(Policy {
         entries: parsed,
         default_action: PolicyAction::Permit,
     }))
+}
+
+/// Parse the `set_*` fields into `RouteModifications`, with validation.
+fn parse_modifications(
+    e: &PolicyStatementConfig,
+    action: PolicyAction,
+) -> Result<RouteModifications, ConfigError> {
+    let has_set_fields = e.set_local_pref.is_some()
+        || e.set_med.is_some()
+        || e.set_next_hop.is_some()
+        || !e.set_community_add.is_empty()
+        || !e.set_community_remove.is_empty()
+        || e.set_as_path_prepend.is_some();
+
+    if has_set_fields && action == PolicyAction::Deny {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: "set_* fields cannot be used with action = \"deny\"".to_string(),
+        });
+    }
+
+    if !has_set_fields {
+        return Ok(RouteModifications::default());
+    }
+
+    // Parse next-hop action
+    let set_next_hop = if let Some(ref nh) = e.set_next_hop {
+        match nh.as_str() {
+            "self" => Some(NextHopAction::Self_),
+            other => {
+                let addr: IpAddr = other.parse().map_err(|_| ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "invalid set_next_hop {other:?}: expected \"self\" or an IP address"
+                    ),
+                })?;
+                Some(NextHopAction::Specific(addr))
+            }
+        }
+    } else {
+        None
+    };
+
+    // Parse AS_PATH prepend
+    let as_path_prepend = if let Some(ref pp) = e.set_as_path_prepend {
+        if pp.count == 0 || pp.count > 10 {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("set_as_path_prepend count must be 1-10, got {}", pp.count),
+            });
+        }
+        Some((pp.asn, pp.count))
+    } else {
+        None
+    };
+
+    // Parse community add/remove values
+    let add = parse_community_values(&e.set_community_add)?;
+    let remove = parse_community_values(&e.set_community_remove)?;
+
+    Ok(RouteModifications {
+        set_local_pref: e.set_local_pref,
+        set_med: e.set_med,
+        set_next_hop,
+        communities_add: add.standard,
+        communities_remove: remove.standard,
+        extended_communities_add: add.extended,
+        extended_communities_remove: remove.extended,
+        large_communities_add: add.large,
+        large_communities_remove: remove.large,
+        as_path_prepend,
+    })
+}
+
+/// Classified community values parsed from config strings.
+struct CommunityValues {
+    standard: Vec<u32>,
+    extended: Vec<ExtendedCommunity>,
+    large: Vec<LargeCommunity>,
+}
+
+/// Parse community strings and classify into standard, extended, and large buckets.
+fn parse_community_values(strings: &[String]) -> Result<CommunityValues, ConfigError> {
+    let mut standard = Vec::new();
+    let mut extended = Vec::new();
+    let mut large = Vec::new();
+    for s in strings {
+        let cm = parse_community_match(s)
+            .map_err(|reason| ConfigError::InvalidPolicyEntry { reason })?;
+        match cm {
+            CommunityMatch::Standard { value } => standard.push(value),
+            CommunityMatch::RouteTarget { global, local } => {
+                extended.push(build_rt_ec(global, local)?);
+            }
+            CommunityMatch::RouteOrigin { global, local } => {
+                extended.push(build_ro_ec(global, local)?);
+            }
+            CommunityMatch::LargeCommunity {
+                global_admin,
+                local_data1,
+                local_data2,
+            } => {
+                large.push(LargeCommunity::new(global_admin, local_data1, local_data2));
+            }
+        }
+    }
+    Ok(CommunityValues {
+        standard,
+        extended,
+        large,
+    })
+}
+
+/// Build a 2-octet AS Route Target extended community.
+///
+/// Rejects `global` > 65535 since the 2-octet AS-Specific sub-type only
+/// carries a `u16` AS number.
+fn build_rt_ec(global: u32, local: u32) -> Result<ExtendedCommunity, ConfigError> {
+    let asn: u16 = global
+        .try_into()
+        .map_err(|_| ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "RT extended community ASN {global} exceeds 65535 (2-octet AS sub-type)"
+            ),
+        })?;
+    let mut b = [0u8; 8];
+    b[0] = 0x00; // Transitive Two-Octet AS-Specific
+    b[1] = 0x02; // Route Target
+    b[2..4].copy_from_slice(&asn.to_be_bytes());
+    b[4..8].copy_from_slice(&local.to_be_bytes());
+    Ok(ExtendedCommunity::new(u64::from_be_bytes(b)))
+}
+
+/// Build a 2-octet AS Route Origin extended community.
+///
+/// Rejects `global` > 65535 since the 2-octet AS-Specific sub-type only
+/// carries a `u16` AS number.
+fn build_ro_ec(global: u32, local: u32) -> Result<ExtendedCommunity, ConfigError> {
+    let asn: u16 = global
+        .try_into()
+        .map_err(|_| ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "RO extended community ASN {global} exceeds 65535 (2-octet AS sub-type)"
+            ),
+        })?;
+    let mut b = [0u8; 8];
+    b[0] = 0x00; // Transitive Two-Octet AS-Specific
+    b[1] = 0x03; // Route Origin
+    b[2..4].copy_from_slice(&asn.to_be_bytes());
+    b[4..8].copy_from_slice(&local.to_be_bytes());
+    Ok(ExtendedCommunity::new(u64::from_be_bytes(b)))
 }
 
 /// Parse a list of address family strings into `(Afi, Safi)` pairs.
@@ -327,8 +515,8 @@ impl Config {
             })?;
 
         // Eagerly validate all policies at load time
-        parse_prefix_list(&self.policy.import)?;
-        parse_prefix_list(&self.policy.export)?;
+        parse_policy(&self.policy.import)?;
+        parse_policy(&self.policy.export)?;
 
         for neighbor in &self.neighbors {
             neighbor.address.parse::<IpAddr>().map_err(|e| {
@@ -406,8 +594,8 @@ impl Config {
                 }
             }
 
-            parse_prefix_list(&neighbor.import_policy)?;
-            parse_prefix_list(&neighbor.export_policy)?;
+            parse_policy(&neighbor.import_policy)?;
+            parse_policy(&neighbor.export_policy)?;
         }
 
         Ok(())
@@ -455,12 +643,12 @@ impl Config {
         None
     }
 
-    pub fn import_policy(&self) -> Result<Option<PrefixList>, ConfigError> {
-        parse_prefix_list(&self.policy.import)
+    pub fn import_policy(&self) -> Result<Option<Policy>, ConfigError> {
+        parse_policy(&self.policy.import)
     }
 
-    pub fn export_policy(&self) -> Result<Option<PrefixList>, ConfigError> {
-        parse_prefix_list(&self.policy.export)
+    pub fn export_policy(&self) -> Result<Option<Policy>, ConfigError> {
+        parse_policy(&self.policy.export)
     }
 
     /// Returns `(TransportConfig, label, import_policy, export_policy)` per neighbor.
@@ -470,15 +658,7 @@ impl Config {
     #[expect(clippy::type_complexity)]
     pub fn to_peer_configs(
         &self,
-    ) -> Result<
-        Vec<(
-            TransportConfig,
-            String,
-            Option<PrefixList>,
-            Option<PrefixList>,
-        )>,
-        ConfigError,
-    > {
+    ) -> Result<Vec<(TransportConfig, String, Option<Policy>, Option<Policy>)>, ConfigError> {
         let router_id: Ipv4Addr = self
             .global
             .router_id
@@ -531,8 +711,8 @@ impl Config {
                 .unwrap_or_else(|| neighbor.address.clone());
 
             // Per-neighbor policy overrides global
-            let import = parse_prefix_list(&neighbor.import_policy)?.or(global_import.clone());
-            let export = parse_prefix_list(&neighbor.export_policy)?.or(global_export.clone());
+            let import = parse_policy(&neighbor.import_policy)?.or(global_import.clone());
+            let export = parse_policy(&neighbor.export_policy)?.or(global_export.clone());
 
             configs.push((transport, label, import, export));
         }
@@ -1378,5 +1558,83 @@ route_reflector_client = true
     fn no_rr_client_means_no_cluster_id() {
         let config = parse(valid_toml()).unwrap();
         assert_eq!(config.cluster_id(), None);
+    }
+
+    // --- AS_PATH regex config tests ---
+
+    #[test]
+    fn match_as_path_only_parses() {
+        let toml = community_toml(
+            r#"action = "permit"
+            match_as_path = "^65100_""#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert_eq!(import.entries.len(), 1);
+        assert!(import.entries[0].prefix.is_none());
+        assert!(import.entries[0].match_as_path.is_some());
+    }
+
+    #[test]
+    fn match_as_path_with_prefix_parses() {
+        let toml = community_toml(
+            r#"action = "deny"
+            prefix = "10.0.0.0/8"
+            match_as_path = "_65200_""#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert!(import.entries[0].prefix.is_some());
+        assert!(import.entries[0].match_as_path.is_some());
+    }
+
+    #[test]
+    fn match_as_path_invalid_regex_rejected() {
+        let toml = community_toml(
+            r#"action = "deny"
+            match_as_path = "[invalid""#,
+        );
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn neither_prefix_nor_community_nor_aspath_rejected() {
+        let toml = community_toml(r#"action = "deny""#);
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn set_community_rt_4byte_asn_rejected() {
+        // build_rt_ec only supports 2-octet AS — 4-byte ASN should fail at config time.
+        let toml = community_toml(
+            r#"action = "permit"
+            prefix = "10.0.0.0/8"
+            set_community_add = ["RT:100000:100"]"#,
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn set_community_ro_4byte_asn_rejected() {
+        let toml = community_toml(
+            r#"action = "permit"
+            prefix = "10.0.0.0/8"
+            set_community_remove = ["RO:100000:200"]"#,
+        );
+        let err = parse(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn set_community_rt_2byte_asn_accepted() {
+        let toml = community_toml(
+            r#"action = "permit"
+            prefix = "10.0.0.0/8"
+            set_community_add = ["RT:65535:100"]"#,
+        );
+        assert!(parse(&toml).is_ok());
     }
 }

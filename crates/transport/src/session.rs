@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
-use rustbgpd_policy::PrefixList;
+use rustbgpd_policy::Policy;
 use rustbgpd_rib::{OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -59,9 +59,9 @@ pub(crate) struct PeerSession {
     /// Sender clone held to give to RIB manager on `PeerUp`.
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     /// Import policy (prefix filter applied to inbound UPDATEs).
-    import_policy: Option<PrefixList>,
+    import_policy: Option<Policy>,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
-    export_policy: Option<PrefixList>,
+    export_policy: Option<Policy>,
     /// Channel to notify `PeerManager` of session state changes (collision detection).
     /// Unbounded so notifications are never dropped and never block (avoids
     /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
@@ -81,14 +81,34 @@ pub(crate) struct PeerSession {
 /// Outbound channel buffer size.
 const OUTBOUND_BUFFER: usize = 4096;
 
+/// Resolve next-hop for import policy modifications.
+///
+/// `NextHopAction::Self_` uses the local TCP address (or router-id as fallback).
+/// `NextHopAction::Specific` uses the given address.
+/// `None` keeps the original next-hop from the UPDATE.
+fn resolve_import_nexthop(
+    nh_action: Option<&rustbgpd_policy::NextHopAction>,
+    original: IpAddr,
+    stream: Option<&TcpStream>,
+    config: &TransportConfig,
+) -> IpAddr {
+    match nh_action {
+        Some(rustbgpd_policy::NextHopAction::Self_) => stream
+            .and_then(|s| s.local_addr().ok())
+            .map_or(IpAddr::V4(config.peer.local_router_id), |a| a.ip()),
+        Some(rustbgpd_policy::NextHopAction::Specific(addr)) => *addr,
+        None => original,
+    }
+}
+
 impl PeerSession {
     pub(crate) fn new(
         config: TransportConfig,
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<PrefixList>,
-        export_policy: Option<PrefixList>,
+        import_policy: Option<Policy>,
+        export_policy: Option<Policy>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
@@ -133,8 +153,8 @@ impl PeerSession {
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<PrefixList>,
-        export_policy: Option<PrefixList>,
+        import_policy: Option<Policy>,
+        export_policy: Option<Policy>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
@@ -983,30 +1003,60 @@ impl PeerSession {
             })
             .unwrap_or(&[]);
 
+        // Compute AS_PATH string for policy matching
+        let update_large_communities: &[rustbgpd_wire::LargeCommunity] = route_attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::LargeCommunities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[]);
+        let aspath_str: String = route_attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::AsPath(p) => Some(p.to_aspath_string()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
         // Body NLRI routes (IPv4)
         let mut announced: Vec<Route> = parsed
             .announced
             .iter()
-            .filter(|prefix| {
-                rustbgpd_policy::check_prefix_list(
+            .filter_map(|prefix| {
+                let result = rustbgpd_policy::evaluate_policy(
                     self.import_policy.as_ref(),
-                    Prefix::V4(**prefix),
+                    Prefix::V4(*prefix),
                     update_ecs,
                     update_communities,
-                ) == rustbgpd_policy::PolicyAction::Permit
-            })
-            .map(|prefix| Route {
-                prefix: Prefix::V4(*prefix),
-                next_hop: body_next_hop,
-                peer: self.peer_ip,
-                attributes: route_attrs.clone(),
-                received_at: now,
-                origin_type: route_origin,
-                peer_router_id: self
-                    .negotiated
-                    .as_ref()
-                    .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
-                is_stale: false,
+                    update_large_communities,
+                    &aspath_str,
+                );
+                if result.action != rustbgpd_policy::PolicyAction::Permit {
+                    return None;
+                }
+                let mut attrs = route_attrs.clone();
+                let nh_action =
+                    rustbgpd_policy::apply_modifications(&mut attrs, &result.modifications);
+                let next_hop = resolve_import_nexthop(
+                    nh_action.as_ref(),
+                    body_next_hop,
+                    self.stream.as_ref(),
+                    &self.config,
+                );
+                Some(Route {
+                    prefix: Prefix::V4(*prefix),
+                    next_hop,
+                    peer: self.peer_ip,
+                    attributes: attrs,
+                    received_at: now,
+                    origin_type: route_origin,
+                    peer_router_id: self
+                        .negotiated
+                        .as_ref()
+                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                    is_stale: false,
+                })
             })
             .collect();
 
@@ -1036,18 +1086,31 @@ impl PeerSession {
                         continue;
                     }
                     for prefix in &mp.announced {
-                        if rustbgpd_policy::check_prefix_list(
+                        let result = rustbgpd_policy::evaluate_policy(
                             self.import_policy.as_ref(),
                             *prefix,
                             update_ecs,
                             update_communities,
-                        ) == rustbgpd_policy::PolicyAction::Permit
-                        {
+                            update_large_communities,
+                            &aspath_str,
+                        );
+                        if result.action == rustbgpd_policy::PolicyAction::Permit {
+                            let mut attrs = mp_route_attrs.clone();
+                            let nh_action = rustbgpd_policy::apply_modifications(
+                                &mut attrs,
+                                &result.modifications,
+                            );
+                            let next_hop = resolve_import_nexthop(
+                                nh_action.as_ref(),
+                                mp.next_hop,
+                                self.stream.as_ref(),
+                                &self.config,
+                            );
                             announced.push(Route {
                                 prefix: *prefix,
-                                next_hop: mp.next_hop,
+                                next_hop,
                                 peer: self.peer_ip,
-                                attributes: mp_route_attrs.clone(),
+                                attributes: attrs,
                                 received_at: now,
                                 origin_type: route_origin,
                                 peer_router_id: self
@@ -1283,22 +1346,23 @@ impl PeerSession {
         }
 
         // Split announcements by address family, filtering by negotiated families
-        let mut v4_routes: Vec<&Route> = Vec::new();
-        let mut v6_routes: Vec<&Route> = Vec::new();
-        for route in &update.announce {
+        let mut v4_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
+        let mut v6_routes: Vec<(&Route, Option<&rustbgpd_policy::NextHopAction>)> = Vec::new();
+        for (i, route) in update.announce.iter().enumerate() {
             if !self.is_family_negotiated(&route.prefix) {
                 continue;
             }
+            let nh_override = update.next_hop_override.get(i).and_then(|o| o.as_ref());
             match route.prefix {
-                Prefix::V4(_) => v4_routes.push(route),
-                Prefix::V6(_) => v6_routes.push(route),
+                Prefix::V4(_) => v4_routes.push((route, nh_override)),
+                Prefix::V6(_) => v6_routes.push((route, nh_override)),
             }
         }
 
         // Send IPv4 announcements via body NLRI — batch by identical attributes
         let mut v4_groups: Vec<(Vec<PathAttribute>, Vec<Ipv4Prefix>)> = Vec::new();
-        for route in &v4_routes {
-            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
+        for (route, nh_override) in &v4_routes {
+            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
             if let Prefix::V4(v4) = route.prefix {
                 if let Some(group) = v4_groups.iter_mut().find(|(a, _)| *a == attrs) {
                     group.1.push(v4);
@@ -1348,11 +1412,26 @@ impl PeerSession {
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
         let mut v6_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<Prefix>)> = Vec::new();
-        for route in &v6_routes {
-            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4);
-            let nh = if is_ebgp {
-                // Safe: guarded above — ebgp_ipv6_nh is Some if we reach here
-                IpAddr::V6(ebgp_ipv6_nh.unwrap_or(Ipv6Addr::UNSPECIFIED))
+        for (route, nh_override) in &v6_routes {
+            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
+            let force_nh_self = matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
+            let policy_set_v6 = matches!(
+                nh_override,
+                Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_)))
+            );
+            let nh = if policy_set_v6 {
+                // Policy explicitly set an IPv6 next-hop — use it
+                route.next_hop
+            } else if is_ebgp || force_nh_self {
+                // For eBGP or next-hop-self, use local IPv6 address
+                if let Some(v6) = ebgp_ipv6_nh {
+                    IpAddr::V6(v6)
+                } else if is_ebgp {
+                    IpAddr::V6(ebgp_ipv6_nh.unwrap_or(Ipv6Addr::UNSPECIFIED))
+                } else {
+                    // iBGP next-hop-self but no IPv6 next-hop — keep original
+                    route.next_hop
+                }
             } else {
                 route.next_hop
             };
@@ -1419,7 +1498,14 @@ impl PeerSession {
         route: &Route,
         is_ebgp: bool,
         local_ipv4: Ipv4Addr,
+        nh_override: Option<&rustbgpd_policy::NextHopAction>,
     ) -> Vec<PathAttribute> {
+        let force_next_hop_self =
+            matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
+        let policy_set_specific = matches!(
+            nh_override,
+            Some(rustbgpd_policy::NextHopAction::Specific(_))
+        );
         let mut attrs = Vec::new();
 
         for attr in &route.attributes {
@@ -1452,7 +1538,10 @@ impl PeerSession {
                     }
                 }
                 PathAttribute::NextHop(_) => {
-                    if is_ebgp {
+                    if policy_set_specific {
+                        // Policy explicitly set a next-hop — preserve it
+                        attrs.push(attr.clone());
+                    } else if is_ebgp || force_next_hop_self {
                         attrs.push(PathAttribute::NextHop(local_ipv4));
                     } else {
                         attrs.push(attr.clone());
@@ -1591,7 +1680,8 @@ mod tests {
     fn ebgp_prepends_asn() {
         let session = make_test_session(65001, 65002);
         let route = make_route(100);
-        let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1));
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
 
         let as_path = attrs
             .iter()
@@ -1614,7 +1704,8 @@ mod tests {
     fn ebgp_strips_local_pref() {
         let session = make_test_session(65001, 65002);
         let route = make_route(200);
-        let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1));
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
 
         assert!(
             !attrs
@@ -1627,7 +1718,8 @@ mod tests {
     fn ibgp_preserves_local_pref() {
         let session = make_test_session(65001, 65001);
         let route = make_route(200);
-        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+        let attrs =
+            session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
         let lp = attrs.iter().find_map(|a| match a {
             PathAttribute::LocalPref(lp) => Some(*lp),
             _ => None,
@@ -1643,7 +1735,7 @@ mod tests {
         // address. Test sessions have no real stream, so the caller provides
         // the address directly. Here we simulate a real local address.
         let local_ipv4 = Ipv4Addr::new(172, 16, 0, 1);
-        let attrs = session.prepare_outbound_attributes(&route, true, local_ipv4);
+        let attrs = session.prepare_outbound_attributes(&route, true, local_ipv4, None);
 
         let nh = attrs
             .iter()
@@ -1675,7 +1767,8 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
         };
-        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+        let attrs =
+            session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
 
         let lp = attrs.iter().find_map(|a| match a {
             PathAttribute::LocalPref(lp) => Some(*lp),
@@ -1700,7 +1793,8 @@ mod tests {
             is_stale: false,
         };
 
-        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+        let attrs =
+            session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
 
         assert!(!attrs.iter().any(|a| matches!(
             a,
@@ -1714,7 +1808,8 @@ mod tests {
         session.config.cluster_id = Some(Ipv4Addr::new(10, 0, 0, 9));
 
         let route = make_route(100);
-        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+        let attrs =
+            session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
 
         assert!(!attrs.iter().any(|a| matches!(
             a,
@@ -1743,7 +1838,8 @@ mod tests {
             is_stale: false,
         };
 
-        let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));
+        let attrs =
+            session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
 
         assert!(
             attrs

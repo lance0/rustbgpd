@@ -55,8 +55,8 @@ pub use update::UpdateMessage;
 
 // Re-export attribute types
 pub use attribute::{
-    AsPath, AsPathSegment, ExtendedCommunity, MpReachNlri, MpUnreachNlri, Origin, PathAttribute,
-    RawAttribute,
+    AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MpReachNlri, MpUnreachNlri, Origin,
+    PathAttribute, RawAttribute,
 };
 pub use nlri::{Ipv4Prefix, Ipv6Prefix, Prefix};
 pub use update::ParsedUpdate;
