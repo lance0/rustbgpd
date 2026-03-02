@@ -441,6 +441,7 @@ impl PeerSession {
                         outbound_tx: self.outbound_tx.clone(),
                         export_policy: self.export_policy.clone(),
                         sendable_families,
+                        is_ebgp,
                     });
                 }
                 Action::SessionDown => {
@@ -836,6 +837,63 @@ impl PeerSession {
             });
 
         let now = Instant::now();
+        let route_origin = if is_ebgp {
+            rustbgpd_rib::RouteOrigin::Ebgp
+        } else {
+            rustbgpd_rib::RouteOrigin::Ibgp
+        };
+
+        // AS_PATH loop detection (RFC 4271 §9.1.2): discard all
+        // announcements if our local ASN appears in the AS_PATH.
+        // Withdrawals are still processed normally.
+        let as_path_loop = parsed.attributes.iter().any(|a| {
+            if let PathAttribute::AsPath(as_path) = a {
+                as_path.contains_asn(self.config.peer.local_asn)
+            } else {
+                false
+            }
+        });
+        if as_path_loop {
+            // Count rejected announced prefixes (body NLRI + MP_REACH_NLRI)
+            let rejected_count = parsed.announced.len()
+                + parsed
+                    .attributes
+                    .iter()
+                    .filter_map(|a| match a {
+                        PathAttribute::MpReachNlri(mp) => Some(mp.announced.len()),
+                        _ => None,
+                    })
+                    .sum::<usize>();
+            debug!(
+                peer = %self.peer_label,
+                local_asn = self.config.peer.local_asn,
+                rejected = rejected_count,
+                "AS_PATH loop detected — discarding announcements"
+            );
+            self.metrics
+                .record_as_path_loop_detected(&self.peer_label, rejected_count as u64);
+
+            // Still process withdrawals (body + MP_UNREACH)
+            let mut loop_withdrawn: Vec<Prefix> =
+                parsed.withdrawn.iter().map(|p| Prefix::V4(*p)).collect();
+            for attr in &parsed.attributes {
+                if let PathAttribute::MpUnreachNlri(mp) = attr {
+                    loop_withdrawn.extend_from_slice(&mp.withdrawn);
+                }
+            }
+            for prefix in &loop_withdrawn {
+                self.known_prefixes.remove(prefix);
+            }
+            if !loop_withdrawn.is_empty() {
+                let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
+                    peer: self.peer_ip,
+                    announced: vec![],
+                    withdrawn: loop_withdrawn,
+                });
+            }
+            self.drive_fsm(Event::UpdateReceived).await;
+            return;
+        }
 
         // Filter attributes: strip MP_REACH/MP_UNREACH before storing on routes
         // (they are per-UPDATE framing, not per-route attributes)
@@ -851,11 +909,18 @@ impl PeerSession {
             .cloned()
             .collect();
 
-        // Extract extended communities for policy matching
+        // Extract communities for policy matching
         let update_ecs: &[rustbgpd_wire::ExtendedCommunity] = route_attrs
             .iter()
             .find_map(|a| match a {
                 PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[]);
+        let update_communities: &[u32] = route_attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::Communities(c) => Some(c.as_slice()),
                 _ => None,
             })
             .unwrap_or(&[]);
@@ -869,6 +934,7 @@ impl PeerSession {
                     self.import_policy.as_ref(),
                     Prefix::V4(**prefix),
                     update_ecs,
+                    update_communities,
                 ) == rustbgpd_policy::PolicyAction::Permit
             })
             .map(|prefix| Route {
@@ -877,7 +943,7 @@ impl PeerSession {
                 peer: self.peer_ip,
                 attributes: route_attrs.clone(),
                 received_at: now,
-                is_ebgp,
+                origin_type: route_origin,
                 is_stale: false,
             })
             .collect();
@@ -912,6 +978,7 @@ impl PeerSession {
                             self.import_policy.as_ref(),
                             *prefix,
                             update_ecs,
+                            update_communities,
                         ) == rustbgpd_policy::PolicyAction::Permit
                         {
                             announced.push(Route {
@@ -920,7 +987,7 @@ impl PeerSession {
                                 peer: self.peer_ip,
                                 attributes: mp_route_attrs.clone(),
                                 received_at: now,
-                                is_ebgp,
+                                origin_type: route_origin,
                                 is_stale: false,
                             });
                         }
@@ -1414,7 +1481,7 @@ mod tests {
                 PathAttribute::LocalPref(local_pref),
             ],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             is_stale: false,
         }
     }
@@ -1503,7 +1570,7 @@ mod tests {
                 PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
             ],
             received_at: Instant::now(),
-            is_ebgp: false,
+            origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             is_stale: false,
         };
         let attrs = session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1));

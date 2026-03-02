@@ -42,7 +42,7 @@ ordering sensitivity.
 2. Shortest AS_PATH length (AS_SET counts as 1)
 3. Lowest ORIGIN (IGP < EGP < INCOMPLETE)
 4. Lowest MED (default 0 if absent; always-compare)
-5. eBGP over iBGP (`Route.is_ebgp: bool`, added in M7)
+5. eBGP over iBGP (`Route.origin_type: RouteOrigin`, Ebgp/Ibgp/Local)
 6. Lowest peer address (final tiebreaker)
 
 Router-id tiebreaker is deferred to post-v1.

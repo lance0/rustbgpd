@@ -34,6 +34,8 @@ pub enum RibUpdate {
         /// peer. Routes whose AFI is not in this list are filtered out of
         /// Adj-RIB-Out, preventing divergence between RIB state and wire.
         sendable_families: Vec<(Afi, Safi)>,
+        /// Whether this peer is eBGP (true) or iBGP (false).
+        is_ebgp: bool,
     },
     /// Inject a locally-originated route.
     InjectRoute {

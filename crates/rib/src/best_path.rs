@@ -52,8 +52,8 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
         return cmp;
     }
 
-    // 5. eBGP over iBGP (eBGP = true sorts Less = preferred)
-    let cmp = b.is_ebgp.cmp(&a.is_ebgp);
+    // 5. eBGP over iBGP (eBGP/Local preferred over iBGP)
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -70,7 +70,7 @@ mod tests {
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
     use super::*;
-    use crate::route::Route;
+    use crate::route::{Route, RouteOrigin};
 
     fn base_route(peer: Ipv4Addr) -> Route {
         Route {
@@ -85,7 +85,7 @@ mod tests {
                 PathAttribute::LocalPref(100),
             ],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: RouteOrigin::Ebgp,
             is_stale: false,
         }
     }
@@ -194,9 +194,9 @@ mod tests {
     #[test]
     fn ebgp_beats_ibgp() {
         let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
-        a.is_ebgp = true;
+        a.origin_type = RouteOrigin::Ebgp;
         let mut b = base_route(Ipv4Addr::new(1, 0, 0, 2));
-        b.is_ebgp = false;
+        b.origin_type = RouteOrigin::Ibgp;
         // eBGP route wins even though peer address is lower
         assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
         assert_eq!(best_path_cmp(&b, &a), Ordering::Greater);
@@ -247,7 +247,7 @@ mod proptests {
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
 
     use super::*;
-    use crate::route::Route;
+    use crate::route::{Route, RouteOrigin};
 
     fn arb_origin() -> impl Strategy<Value = Origin> {
         prop_oneof![
@@ -257,16 +257,24 @@ mod proptests {
         ]
     }
 
+    fn arb_route_origin() -> impl Strategy<Value = RouteOrigin> {
+        prop_oneof![
+            Just(RouteOrigin::Ebgp),
+            Just(RouteOrigin::Ibgp),
+            Just(RouteOrigin::Local),
+        ]
+    }
+
     fn arb_route() -> impl Strategy<Value = Route> {
         (
             1u8..=4,                                   // peer last octet
             0u32..=500,                                // local_pref
             prop::collection::vec(1u32..=65535, 0..5), // as_path ASNs
             arb_origin(),
-            0u32..=1000,   // MED
-            any::<bool>(), // is_ebgp
+            0u32..=1000,        // MED
+            arb_route_origin(), // origin_type
         )
-            .prop_map(|(peer_oct, lp, asns, origin, med, is_ebgp)| {
+            .prop_map(|(peer_oct, lp, asns, origin, med, origin_type)| {
                 let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
                 Route {
                     prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -285,7 +293,7 @@ mod proptests {
                         PathAttribute::Med(med),
                     ],
                     received_at: Instant::now(),
-                    is_ebgp,
+                    origin_type,
                     is_stale: false,
                 }
             })

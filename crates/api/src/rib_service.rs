@@ -361,7 +361,7 @@ mod tests {
             peer: "10.0.0.1".parse().unwrap(),
             attributes: vec![],
             received_at: std::time::Instant::now(),
-            is_ebgp: false,
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             is_stale: false,
         };
         let v6 = Route {
@@ -370,7 +370,7 @@ mod tests {
             peer: "2001:db8::1".parse().unwrap(),
             attributes: vec![],
             received_at: std::time::Instant::now(),
-            is_ebgp: false,
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             is_stale: false,
         };
 

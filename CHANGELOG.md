@@ -29,6 +29,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   trigger Loc-RIB re-advertisement for the requested family. Outbound:
   `SoftResetIn` gRPC RPC sends ROUTE-REFRESH to peers for soft inbound
   reset after policy changes. (ADR-0027)
+- **AS_PATH loop detection (RFC 4271 §9.1.2).** Routes containing the
+  local ASN in any AS_PATH segment (AS_SEQUENCE or AS_SET) are discarded
+  before RIB entry. Applies to all peers (eBGP and iBGP). Withdrawals
+  in the same UPDATE are still processed. New metric:
+  `bgp_as_path_loop_detected_total` (labeled by peer, counts rejected
+  prefixes).
+- **iBGP split-horizon (RFC 4271 §9.1.1).** Non-route-reflector speakers
+  no longer re-advertise iBGP-learned routes to other iBGP peers. Applies
+  to `distribute_changes()`, `send_initial_table()`, and route refresh
+  responses. Uses `RouteOrigin` enum (Ebgp/Ibgp/Local) instead of a
+  boolean — locally originated routes pass through to all peers.
+- **Standard Communities Policy Matching (RFC 1997).** Import/export
+  policy can now match on standard community values via `match_community`
+  in prefix list entries. Three formats: `ASN:VALUE` (e.g., `65001:100`),
+  well-known names (`NO_EXPORT`, `NO_ADVERTISE`, `NO_EXPORT_SUBCONFED`),
+  and existing extended community syntax (`RT:65001:100`). Standard and
+  extended community criteria use OR semantics within a single entry.
+  (ADR-0028)
 
 ### Fixed
 
@@ -390,8 +408,9 @@ detection, and interop validation against FRR 10.3.1 and BIRD 2.0.12.
 ### Added
 
 - `rustbgpd-rib`: eBGP-over-iBGP preference in best-path selection. `Route`
-  gains `is_ebgp: bool` field. Best-path step 5 (between MED and peer address
-  tiebreaker) prefers eBGP routes over iBGP per RFC 4271 §9.1.2. 3 tests.
+  gains `origin_type: RouteOrigin` field (Ebgp/Ibgp/Local). Best-path step 5
+  (between MED and peer address tiebreaker) prefers eBGP routes over iBGP per
+  RFC 4271 §9.1.2. 3 tests.
 
 ## M6 — "Compliance"
 

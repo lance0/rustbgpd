@@ -37,6 +37,9 @@ pub struct BgpMetrics {
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
 
+    // ── Loop detection ─────────────────────────────────────────
+    as_path_loop_detected: IntCounterVec,
+
     // ── Graceful Restart ──────────────────────────────────────
     gr_active_peers: IntGaugeVec,
     gr_stale_routes: IntGaugeVec,
@@ -168,6 +171,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let as_path_loop_detected = IntCounterVec::new(
+            Opts::new(
+                "bgp_as_path_loop_detected_total",
+                "Total prefixes rejected due to AS_PATH loop detection",
+            ),
+            &["peer"],
+        )
+        .expect("valid metric definition");
+
         let gr_active_peers = IntGaugeVec::new(
             Opts::new(
                 "bgp_gr_active_peers",
@@ -232,6 +244,9 @@ impl BgpMetrics {
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(as_path_loop_detected.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(gr_active_peers.clone()))
             .expect("metric not already registered");
         registry
@@ -255,6 +270,7 @@ impl BgpMetrics {
             rib_loc_prefixes,
             max_prefix_exceeded,
             outbound_route_drops,
+            as_path_loop_detected,
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
@@ -343,6 +359,13 @@ impl BgpMetrics {
     /// Record an outbound route update drop for a peer.
     pub fn record_outbound_route_drop(&self, peer: &str) {
         self.outbound_route_drops.with_label_values(&[peer]).inc();
+    }
+
+    /// Record `AS_PATH` loop detection: increment by the number of rejected prefixes.
+    pub fn record_as_path_loop_detected(&self, peer: &str, count: u64) {
+        self.as_path_loop_detected
+            .with_label_values(&[peer])
+            .inc_by(count);
     }
 
     /// Set the GR active flag for a peer (1 = in GR, 0 = not).

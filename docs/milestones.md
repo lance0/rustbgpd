@@ -424,7 +424,8 @@ Peer-visible bugs found during full-project code review.
 
 5. **Best-path omits eBGP-over-iBGP preference** (`crates/rib/src/best_path.rs`)
    - Added eBGP-over-iBGP preference as step 5 (between MED and peer
-     address tiebreaker). `Route` gains `is_ebgp: bool` field. 3 tests.
+     address tiebreaker). `Route` gains `origin_type: RouteOrigin` field
+     (Ebgp/Ibgp/Local). 3 tests.
 
 ### Exit criteria
 

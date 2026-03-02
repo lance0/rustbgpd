@@ -39,6 +39,8 @@ pub struct RibManager {
     peer_export_policies: HashMap<IpAddr, Option<PrefixList>>,
     /// Families the transport can actually serialize per peer.
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
+    /// Whether each registered outbound peer is eBGP (true) or iBGP (false).
+    peer_is_ebgp: HashMap<IpAddr, bool>,
     /// Peers that failed a `try_send()` and need a full export resync.
     dirty_peers: HashSet<IpAddr>,
     /// `EoR` markers that failed to enqueue and must be retried.
@@ -72,6 +74,7 @@ impl RibManager {
             export_policy,
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),
+            peer_is_ebgp: HashMap::new(),
             dirty_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             gr_peers: HashMap::new(),
@@ -216,6 +219,18 @@ impl RibManager {
                         continue;
                     }
 
+                    // iBGP split-horizon: non-route-reflector speaker must not
+                    // re-advertise iBGP-learned routes to iBGP peers
+                    // (RFC 4271 §9.1.1). Local routes are always advertisable.
+                    if best.origin_type == crate::route::RouteOrigin::Ibgp
+                        && !self.peer_is_ebgp.get(&peer).copied().unwrap_or(true)
+                    {
+                        if rib_out.get(prefix).is_some() {
+                            withdraw.push(*prefix);
+                        }
+                        continue;
+                    }
+
                     // Sendable family check: skip routes whose AFI the
                     // transport cannot serialize for this peer.
                     let family = match prefix {
@@ -230,8 +245,12 @@ impl RibManager {
                     }
 
                     // Export policy check (per-peer or global)
-                    if check_prefix_list(export_pol.as_ref(), *prefix, best.extended_communities())
-                        != rustbgpd_policy::PolicyAction::Permit
+                    if check_prefix_list(
+                        export_pol.as_ref(),
+                        *prefix,
+                        best.extended_communities(),
+                        best.communities(),
+                    ) != rustbgpd_policy::PolicyAction::Permit
                     {
                         if rib_out.get(prefix).is_some() {
                             withdraw.push(*prefix);
@@ -316,9 +335,14 @@ impl RibManager {
         let export_pol = self.export_policy_for(peer).cloned();
 
         // Stage: collect eligible routes without mutating AdjRibOut
+        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         for route in self.loc_rib.iter() {
             // Split horizon
             if route.peer == peer {
+                continue;
+            }
+            // iBGP split-horizon (local routes are always advertisable)
+            if route.origin_type == crate::route::RouteOrigin::Ibgp && !target_is_ebgp {
                 continue;
             }
             // Sendable family check
@@ -330,6 +354,7 @@ impl RibManager {
                 export_pol.as_ref(),
                 route.prefix,
                 route.extended_communities(),
+                route.communities(),
             ) != rustbgpd_policy::PolicyAction::Permit
             {
                 continue;
@@ -399,6 +424,7 @@ impl RibManager {
         let family = (afi, safi);
         let mut announce = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
+        let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
 
         for route in self.loc_rib.iter() {
             // Family filter
@@ -413,6 +439,10 @@ impl RibManager {
             if route.peer == peer {
                 continue;
             }
+            // iBGP split-horizon (local routes are always advertisable)
+            if route.origin_type == crate::route::RouteOrigin::Ibgp && !target_is_ebgp {
+                continue;
+            }
             // Sendable family check
             if !self.is_prefix_sendable(peer, &route.prefix) {
                 continue;
@@ -422,6 +452,7 @@ impl RibManager {
                 export_pol.as_ref(),
                 route.prefix,
                 route.extended_communities(),
+                route.communities(),
             ) != rustbgpd_policy::PolicyAction::Permit
             {
                 continue;
@@ -557,6 +588,7 @@ impl RibManager {
                 self.outbound_peers.remove(&peer);
                 self.peer_export_policies.remove(&peer);
                 self.peer_sendable_families.remove(&peer);
+                self.peer_is_ebgp.remove(&peer);
                 self.dirty_peers.remove(&peer);
                 self.pending_eor.remove(&peer);
             }
@@ -566,6 +598,7 @@ impl RibManager {
                 outbound_tx,
                 export_policy,
                 sendable_families,
+                is_ebgp,
             } => {
                 // If the peer re-establishes during graceful restart, keep
                 // routes stale and wait for End-of-RIB per family (RFC 4724
@@ -587,6 +620,7 @@ impl RibManager {
                 self.outbound_peers.insert(peer, outbound_tx);
                 self.peer_export_policies.insert(peer, export_policy);
                 self.peer_sendable_families.insert(peer, sendable_families);
+                self.peer_is_ebgp.insert(peer, is_ebgp);
                 self.send_initial_table(peer);
             }
 
@@ -779,6 +813,7 @@ impl RibManager {
                 self.adj_ribs_out.remove(&peer);
                 self.peer_export_policies.remove(&peer);
                 self.peer_sendable_families.remove(&peer);
+                self.peer_is_ebgp.remove(&peer);
                 self.dirty_peers.remove(&peer);
                 self.pending_eor.remove(&peer);
 
@@ -967,7 +1002,7 @@ mod tests {
             peer: IpAddr::V4(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         }
     }
@@ -985,7 +1020,7 @@ mod tests {
                 PathAttribute::LocalPref(local_pref),
             ],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         }
     }
@@ -1368,6 +1403,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1395,6 +1431,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1431,6 +1468,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1460,6 +1498,309 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// Like [`make_route`] but with iBGP origin (iBGP-learned route).
+    fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
+        Route {
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(next_hop),
+            peer: IpAddr::V4(next_hop),
+            attributes: vec![],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            is_stale: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn ibgp_route_not_sent_to_ibgp_peer() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        // Source: iBGP peer
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Target: iBGP peer (is_ebgp: false)
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // iBGP-learned route should NOT be sent to iBGP peer
+        assert!(out_rx.try_recv().is_err());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ibgp_route_sent_to_ebgp_peer() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        // Source: iBGP peer
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Target: eBGP peer (is_ebgp: true)
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+        })
+        .await
+        .unwrap();
+
+        // Initial dump includes the route (iBGP→eBGP is allowed)
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+
+        // Then EoR
+        drain_eor(&mut out_rx).await;
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ebgp_route_sent_to_ibgp_peer() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        // Source: eBGP peer
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Target: iBGP peer (is_ebgp: false)
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+        })
+        .await
+        .unwrap();
+
+        // Initial dump includes the route (eBGP→iBGP is allowed)
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+
+        // Then EoR
+        drain_eor(&mut out_rx).await;
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ibgp_split_horizon_withdraw_on_best_change() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        // Setup: eBGP source announces route, iBGP target receives it
+        let ebgp_source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ibgp_target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        // Register iBGP target peer
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: ibgp_target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // eBGP route → should be advertised to iBGP peer
+        tx.send(RibUpdate::RoutesReceived {
+            peer: ebgp_source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+
+        // Now the eBGP source goes down, replaced by iBGP source
+        tx.send(RibUpdate::PeerDown { peer: ebgp_source })
+            .await
+            .unwrap();
+
+        // Withdraw should be sent to iBGP target
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.withdraw.len(), 1);
+
+        // iBGP source announces the same prefix
+        let ibgp_source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        tx.send(RibUpdate::RoutesReceived {
+            peer: ibgp_source,
+            announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 3))],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Force serialization
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        // iBGP-learned route should NOT be sent to iBGP peer
+        assert!(out_rx.try_recv().is_err());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_route_sent_to_ibgp_peer() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        // Register iBGP target peer first
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // Inject a local route
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let route = Route {
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            peer: LOCAL_PEER,
+            attributes: vec![PathAttribute::Origin(Origin::Igp)],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Local,
+            is_stale: false,
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::InjectRoute {
+            route,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let _ = reply_rx.await;
+
+        // Local route SHOULD be sent to iBGP peer (unlike iBGP-learned routes)
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_route_in_initial_table_to_ibgp_peer() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        // Inject a local route first
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let route = Route {
+            prefix: Prefix::V4(prefix),
+            next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            peer: LOCAL_PEER,
+            attributes: vec![PathAttribute::Origin(Origin::Igp)],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Local,
+            is_stale: false,
+        };
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::InjectRoute {
+            route,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        let _ = reply_rx.await;
+
+        // Register iBGP target peer — should receive local route in initial dump
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: false,
+        })
+        .await
+        .unwrap();
+
+        // Initial dump should include the local route
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+
+        // Then EoR
+        drain_eor(&mut out_rx).await;
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
     #[tokio::test]
     async fn peer_down_cleans_up_outbound() {
         let (tx, rx) = mpsc::channel(64);
@@ -1473,6 +1814,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1508,6 +1850,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1523,7 +1866,7 @@ mod tests {
                 PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
             ],
             received_at: Instant::now(),
-            is_ebgp: false,
+            origin_type: crate::route::RouteOrigin::Local,
             is_stale: false,
         };
 
@@ -1566,6 +1909,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1578,7 +1922,7 @@ mod tests {
             peer: LOCAL_PEER,
             attributes: vec![PathAttribute::Origin(Origin::Igp)],
             received_at: Instant::now(),
-            is_ebgp: false,
+            origin_type: crate::route::RouteOrigin::Local,
             is_stale: false,
         };
 
@@ -1640,6 +1984,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1682,6 +2027,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1745,6 +2091,7 @@ mod tests {
             outbound_tx: send_filtered,
             export_policy: peer1_export,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1756,6 +2103,7 @@ mod tests {
             outbound_tx: send_unfiltered,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1813,6 +2161,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: policy,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1854,6 +2203,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -1985,6 +2335,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2096,6 +2447,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2157,6 +2509,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2597,6 +2950,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2676,6 +3030,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2739,6 +3094,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2755,7 +3111,7 @@ mod tests {
             peer: source,
             attributes: vec![],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         };
 
@@ -2809,7 +3165,7 @@ mod tests {
             peer: source,
             attributes: vec![],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         };
 
@@ -2831,6 +3187,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2876,7 +3233,7 @@ mod tests {
             peer: source,
             attributes: vec![],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         };
 
@@ -2897,6 +3254,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: dual_stack_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -2927,6 +3285,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -3126,6 +3485,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -3204,6 +3564,7 @@ mod tests {
             outbound_tx: out_tx,
             export_policy: None,
             sendable_families: ipv4_sendable(),
+            is_ebgp: true,
         })
         .await
         .unwrap();
@@ -3295,7 +3656,7 @@ mod tests {
             peer: source,
             attributes: vec![],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         };
         tx.send(RibUpdate::RoutesReceived {

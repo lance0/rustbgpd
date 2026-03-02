@@ -3,6 +3,17 @@ use std::time::Instant;
 
 use rustbgpd_wire::{AsPath, ExtendedCommunity, Origin, PathAttribute, Prefix};
 
+/// How a route was learned, used for best-path selection and iBGP split-horizon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteOrigin {
+    /// Learned from an eBGP peer (remote ASN != local ASN).
+    Ebgp,
+    /// Learned from an iBGP peer (remote ASN == local ASN).
+    Ibgp,
+    /// Locally originated (gRPC injection).
+    Local,
+}
+
 /// A single route stored in the Adj-RIB-In.
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -11,13 +22,19 @@ pub struct Route {
     pub peer: IpAddr,
     pub attributes: Vec<PathAttribute>,
     pub received_at: Instant,
-    /// Whether this route was learned via an eBGP session (local ASN != remote ASN).
-    pub is_ebgp: bool,
+    /// How this route was learned (eBGP, iBGP, or locally originated).
+    pub origin_type: RouteOrigin,
     /// Whether this route is stale due to a peer graceful restart.
     pub is_stale: bool,
 }
 
 impl Route {
+    /// Whether this route was learned via an eBGP session.
+    #[must_use]
+    pub fn is_ebgp(&self) -> bool {
+        self.origin_type == RouteOrigin::Ebgp
+    }
+
     /// Extract the ORIGIN attribute value, defaulting to Incomplete.
     #[must_use]
     pub fn origin(&self) -> Origin {

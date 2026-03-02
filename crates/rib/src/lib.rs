@@ -21,5 +21,5 @@ pub use best_path::best_path_cmp;
 pub use event::{RouteEvent, RouteEventType};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
-pub use route::Route;
+pub use route::{Route, RouteOrigin};
 pub use update::{OutboundRouteUpdate, RibUpdate};

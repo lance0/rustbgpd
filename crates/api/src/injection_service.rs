@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
-use rustbgpd_rib::{RibUpdate, Route};
+use rustbgpd_rib::{RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix,
 };
@@ -118,7 +118,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             peer: LOCAL_PEER,
             attributes,
             received_at: std::time::Instant::now(),
-            is_ebgp: false,
+            origin_type: RouteOrigin::Local,
             is_stale: false,
         };
 

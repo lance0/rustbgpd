@@ -131,7 +131,7 @@ mod tests {
             peer: IpAddr::V4(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         }
     }
@@ -143,7 +143,7 @@ mod tests {
             peer: IpAddr::V6(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         }
     }

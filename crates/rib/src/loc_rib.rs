@@ -97,7 +97,7 @@ mod tests {
                 PathAttribute::LocalPref(local_pref),
             ],
             received_at: Instant::now(),
-            is_ebgp: true,
+            origin_type: crate::route::RouteOrigin::Ebgp,
             is_stale: false,
         }
     }

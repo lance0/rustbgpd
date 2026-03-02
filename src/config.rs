@@ -92,7 +92,8 @@ pub struct PrefixListEntryConfig {
     pub prefix: Option<String>,
     pub ge: Option<u8>,
     pub le: Option<u8>,
-    /// Extended community match criteria, e.g. `["RT:65001:100"]`.
+    /// Community match criteria, e.g. `["65001:100"]`, `["RT:65001:100"]`,
+    /// or `["NO_EXPORT"]`.
     #[serde(default)]
     pub match_community: Vec<String>,
 }

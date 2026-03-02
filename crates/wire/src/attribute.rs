@@ -73,6 +73,15 @@ impl AsPath {
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
     }
+
+    /// Returns true if `asn` appears in any segment (`AS_SEQUENCE` or `AS_SET`).
+    /// Used for loop detection per RFC 4271 §9.1.2.
+    #[must_use]
+    pub fn contains_asn(&self, asn: u32) -> bool {
+        self.segments.iter().any(|seg| match seg {
+            AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns.contains(&asn),
+        })
+    }
 }
 
 /// RFC 4760 `MP_REACH_NLRI` attribute (type code 14).
@@ -925,6 +934,43 @@ mod tests {
         let path = AsPath { segments: vec![] };
         assert!(path.is_empty());
         assert_eq!(path.len(), 0);
+    }
+
+    #[test]
+    fn contains_asn_in_sequence() {
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65001, 65002, 65003])],
+        };
+        assert!(path.contains_asn(65002));
+        assert!(!path.contains_asn(65004));
+    }
+
+    #[test]
+    fn contains_asn_in_set() {
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSet(vec![65004, 65005])],
+        };
+        assert!(path.contains_asn(65005));
+        assert!(!path.contains_asn(65001));
+    }
+
+    #[test]
+    fn contains_asn_multiple_segments() {
+        let path = AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![65001, 65002]),
+                AsPathSegment::AsSet(vec![65003]),
+            ],
+        };
+        assert!(path.contains_asn(65001));
+        assert!(path.contains_asn(65003));
+        assert!(!path.contains_asn(65004));
+    }
+
+    #[test]
+    fn contains_asn_empty_path() {
+        let path = AsPath { segments: vec![] };
+        assert!(!path.contains_asn(65001));
     }
 
     #[test]

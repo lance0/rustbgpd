@@ -9,17 +9,19 @@ pub enum PolicyAction {
     Deny,
 }
 
-/// A match criterion for extended community values.
+/// A match criterion for community values (standard or extended).
 ///
-/// Matching is encoding-agnostic: a 2-octet AS RT, 4-octet AS RT, and
-/// IPv4-specific RT with the same decoded `(global, local)` all match
-/// the same `CommunityMatch::RouteTarget`.
+/// Extended community matching is encoding-agnostic: a 2-octet AS RT,
+/// 4-octet AS RT, and IPv4-specific RT with the same decoded
+/// `(global, local)` all match the same `CommunityMatch::RouteTarget`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommunityMatch {
-    /// Match Route Target (sub-type 0x02).
+    /// Match Route Target (sub-type 0x02) — extended community.
     RouteTarget { global: u32, local: u32 },
-    /// Match Route Origin (sub-type 0x03).
+    /// Match Route Origin (sub-type 0x03) — extended community.
     RouteOrigin { global: u32, local: u32 },
+    /// Match a standard community (RFC 1997) — raw u32 value.
+    Standard { value: u32 },
 }
 
 impl CommunityMatch {
@@ -33,57 +35,100 @@ impl CommunityMatch {
             CommunityMatch::RouteOrigin { global, local } => {
                 ec.route_origin() == Some((*global, *local))
             }
+            CommunityMatch::Standard { .. } => false,
+        }
+    }
+
+    /// Check whether a single standard community (u32) matches this criterion.
+    #[must_use]
+    pub fn matches_standard(&self, community: u32) -> bool {
+        match self {
+            CommunityMatch::Standard { value } => *value == community,
+            CommunityMatch::RouteTarget { .. } | CommunityMatch::RouteOrigin { .. } => false,
         }
     }
 }
 
-/// Parse a community match string like `"RT:65001:100"` or `"RO:192.0.2.1:200"`.
+/// Parse a community match string.
 ///
-/// Format: `{RT|RO}:{global}:{local}` where `global` is a decimal ASN (u32)
-/// or an IPv4 address (converted to u32), and `local` is a decimal u32.
+/// Supported formats:
+/// - Extended community: `"RT:65001:100"` or `"RO:192.0.2.1:200"`
+///   (`{RT|RO}:{global}:{local}`)
+/// - Standard community: `"65001:100"` (`{ASN}:{value}`, both u16)
+/// - Well-known names: `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`
 ///
 /// # Errors
 ///
-/// Returns an error if the string is not in the expected `TYPE:GLOBAL:LOCAL`
-/// format, if the type is not `RT` or `RO`, or if global/local values cannot
-/// be parsed.
+/// Returns an error if the string cannot be parsed as any of the above formats.
 pub fn parse_community_match(s: &str) -> Result<CommunityMatch, String> {
+    // Well-known community names (RFC 1997)
+    match s {
+        "NO_EXPORT" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF01 }),
+        "NO_ADVERTISE" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF02 }),
+        "NO_EXPORT_SUBCONFED" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF03 }),
+        _ => {}
+    }
+
     // Use splitn(3, ':') so that IPv4 addresses (containing dots, not colons)
     // work correctly: "RT:192.0.2.1:100" → ["RT", "192.0.2.1", "100"]
     let parts: Vec<&str> = s.splitn(3, ':').collect();
-    if parts.len() != 3 {
-        return Err(format!("expected format TYPE:GLOBAL:LOCAL, got {s:?}"));
-    }
 
-    let global: u32 = if let Ok(asn) = parts[1].parse::<u32>() {
-        asn
-    } else if let Ok(ipv4) = parts[1].parse::<Ipv4Addr>() {
-        u32::from(ipv4)
-    } else {
-        return Err(format!(
-            "invalid global admin {:?}: expected ASN (u32) or IPv4 address",
-            parts[1]
-        ));
-    };
+    match parts.len() {
+        // Standard community: "ASN:VALUE" (both u16)
+        2 => {
+            let asn: u16 = parts[0].parse().map_err(|_| {
+                format!(
+                    "invalid ASN {:?} in standard community: expected u16",
+                    parts[0]
+                )
+            })?;
+            let val: u16 = parts[1].parse().map_err(|_| {
+                format!(
+                    "invalid value {:?} in standard community: expected u16",
+                    parts[1]
+                )
+            })?;
+            Ok(CommunityMatch::Standard {
+                value: (u32::from(asn) << 16) | u32::from(val),
+            })
+        }
+        // Extended community: "TYPE:GLOBAL:LOCAL"
+        3 => {
+            let global: u32 = if let Ok(asn) = parts[1].parse::<u32>() {
+                asn
+            } else if let Ok(ipv4) = parts[1].parse::<Ipv4Addr>() {
+                u32::from(ipv4)
+            } else {
+                return Err(format!(
+                    "invalid global admin {:?}: expected ASN (u32) or IPv4 address",
+                    parts[1]
+                ));
+            };
 
-    let local: u32 = parts[2]
-        .parse()
-        .map_err(|_| format!("invalid local admin {:?}: expected u32", parts[2]))?;
+            let local: u32 = parts[2]
+                .parse()
+                .map_err(|_| format!("invalid local admin {:?}: expected u32", parts[2]))?;
 
-    match parts[0] {
-        "RT" => Ok(CommunityMatch::RouteTarget { global, local }),
-        "RO" => Ok(CommunityMatch::RouteOrigin { global, local }),
-        other => Err(format!(
-            "unknown community type {other:?}, expected \"RT\" or \"RO\""
+            match parts[0] {
+                "RT" => Ok(CommunityMatch::RouteTarget { global, local }),
+                "RO" => Ok(CommunityMatch::RouteOrigin { global, local }),
+                other => Err(format!(
+                    "unknown community type {other:?}, expected \"RT\" or \"RO\""
+                )),
+            }
+        }
+        _ => Err(format!(
+            "expected ASN:VALUE, TYPE:GLOBAL:LOCAL, or well-known name, got {s:?}"
         )),
     }
 }
 
 /// A single entry in a policy list.
 ///
-/// Entries can match on prefix, extended community, or both. When both are
-/// specified, both conditions must be true (AND). When multiple community
-/// values are listed, the route must carry at least one (OR).
+/// Entries can match on prefix, community, or both. When both are specified,
+/// both conditions must be true (AND). When multiple community values are
+/// listed, the route must carry at least one matching standard or extended
+/// community (OR within the list).
 #[derive(Debug, Clone)]
 pub struct PrefixListEntry {
     /// Prefix to match. If `None`, the entry matches any prefix.
@@ -95,14 +140,15 @@ pub struct PrefixListEntry {
     /// Only meaningful when `prefix` is `Some`.
     pub le: Option<u8>,
     pub action: PolicyAction,
-    /// Extended community match criteria. If non-empty, the route must carry
-    /// at least one EC matching ANY of these (OR within the list).
+    /// Community match criteria. If non-empty, the route must carry at least
+    /// one community matching ANY of these (OR within the list). Criteria
+    /// can target either standard (RFC 1997) or extended (RFC 4360) communities.
     pub match_community: Vec<CommunityMatch>,
 }
 
 impl PrefixListEntry {
-    /// Check whether a `(prefix, extended_communities)` pair matches this entry.
-    fn matches(&self, candidate: Prefix, ecs: &[ExtendedCommunity]) -> bool {
+    /// Check whether a `(prefix, communities)` tuple matches this entry.
+    fn matches(&self, candidate: Prefix, ecs: &[ExtendedCommunity], communities: &[u32]) -> bool {
         let prefix_ok = match self.prefix {
             Some(p) => self.matches_prefix(p, candidate),
             None => true,
@@ -111,9 +157,10 @@ impl PrefixListEntry {
         let community_ok = if self.match_community.is_empty() {
             true
         } else {
-            self.match_community
-                .iter()
-                .any(|cm| ecs.iter().any(|ec| cm.matches_ec(ec)))
+            self.match_community.iter().any(|cm| {
+                ecs.iter().any(|ec| cm.matches_ec(ec))
+                    || communities.iter().any(|c| cm.matches_standard(*c))
+            })
         };
 
         prefix_ok && community_ok
@@ -179,12 +226,17 @@ pub struct PrefixList {
 }
 
 impl PrefixList {
-    /// Evaluate a prefix and its extended communities against this list.
+    /// Evaluate a prefix and its communities against this list.
     /// First matching entry wins.
     #[must_use]
-    pub fn evaluate(&self, prefix: Prefix, ecs: &[ExtendedCommunity]) -> PolicyAction {
+    pub fn evaluate(
+        &self,
+        prefix: Prefix,
+        ecs: &[ExtendedCommunity],
+        communities: &[u32],
+    ) -> PolicyAction {
         for entry in &self.entries {
-            if entry.matches(prefix, ecs) {
+            if entry.matches(prefix, ecs, communities) {
                 return entry.action;
             }
         }
@@ -198,9 +250,10 @@ pub fn check_prefix_list(
     list: Option<&PrefixList>,
     prefix: Prefix,
     ecs: &[ExtendedCommunity],
+    communities: &[u32],
 ) -> PolicyAction {
     match list {
-        Some(pl) => pl.evaluate(prefix, ecs),
+        Some(pl) => pl.evaluate(prefix, ecs, communities),
         None => PolicyAction::Permit,
     }
 }
@@ -261,12 +314,12 @@ mod tests {
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[]),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Permit
         );
         // /24 inside 10.0.0.0/8 but exact match requires len==8
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 1, 0, 0], 24), &[]),
+            pl.evaluate(v4_prefix([10, 1, 0, 0], 24), &[], &[]),
             PolicyAction::Deny
         );
     }
@@ -284,19 +337,19 @@ mod tests {
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[]),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 1, 0, 0], 16), &[]),
+            pl.evaluate(v4_prefix([10, 1, 0, 0], 16), &[], &[]),
             PolicyAction::Permit
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 1, 2, 0], 24), &[]),
+            pl.evaluate(v4_prefix([10, 1, 2, 0], 24), &[], &[]),
             PolicyAction::Permit
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 1, 2, 0], 25), &[]),
+            pl.evaluate(v4_prefix([10, 1, 2, 0], 25), &[], &[]),
             PolicyAction::Deny
         );
     }
@@ -314,15 +367,15 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 1, 0], 24), &[]),
+            pl.evaluate(v4_prefix([192, 168, 1, 0], 24), &[], &[]),
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 1, 128], 32), &[]),
+            pl.evaluate(v4_prefix([192, 168, 1, 128], 32), &[], &[]),
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &[]),
+            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &[], &[]),
             PolicyAction::Permit
         );
     }
@@ -340,15 +393,15 @@ mod tests {
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([172, 16, 0, 0], 12), &[]),
+            pl.evaluate(v4_prefix([172, 16, 0, 0], 12), &[], &[]),
             PolicyAction::Permit
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([172, 16, 0, 0], 16), &[]),
+            pl.evaluate(v4_prefix([172, 16, 0, 0], 16), &[], &[]),
             PolicyAction::Permit
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([172, 16, 1, 0], 24), &[]),
+            pl.evaluate(v4_prefix([172, 16, 1, 0], 24), &[], &[]),
             PolicyAction::Deny
         );
     }
@@ -366,7 +419,7 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &[]),
+            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &[], &[]),
             PolicyAction::Permit
         );
     }
@@ -378,7 +431,7 @@ mod tests {
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[]),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Deny
         );
     }
@@ -405,7 +458,7 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[]),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Deny
         );
     }
@@ -413,7 +466,7 @@ mod tests {
     #[test]
     fn check_prefix_list_none_permits() {
         assert_eq!(
-            check_prefix_list(None, v4_prefix([10, 0, 0, 0], 8), &[]),
+            check_prefix_list(None, v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Permit
         );
     }
@@ -431,7 +484,7 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &[]),
+            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &[], &[]),
             PolicyAction::Permit
         );
     }
@@ -456,7 +509,8 @@ mod tests {
         assert_eq!(
             pl.evaluate(
                 Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
-                &[]
+                &[],
+                &[],
             ),
             PolicyAction::Deny
         );
@@ -464,7 +518,8 @@ mod tests {
         assert_eq!(
             pl.evaluate(
                 Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
-                &[]
+                &[],
+                &[],
             ),
             PolicyAction::Permit
         );
@@ -489,7 +544,7 @@ mod tests {
         };
         // IPv4 prefix doesn't match IPv6 entry
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[]),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Permit
         );
     }
@@ -576,11 +631,11 @@ mod tests {
         let ecs = [make_rt(65001, 100)];
         // Any prefix with the matching RT should be denied
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[]),
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &ecs),
+            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &ecs, &[]),
             PolicyAction::Deny
         );
     }
@@ -603,7 +658,7 @@ mod tests {
         // Route has RT:65002:200 — doesn't match RT:65001:100
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[]),
             PolicyAction::Permit
         );
     }
@@ -626,7 +681,7 @@ mod tests {
         let ecs = [make_rt(65001, 100)];
         // Both prefix and community match → deny
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[]),
             PolicyAction::Deny
         );
     }
@@ -649,7 +704,7 @@ mod tests {
         let ecs = [make_rt(65001, 100)];
         // Community matches but prefix doesn't → permit (default)
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &ecs),
+            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &ecs, &[]),
             PolicyAction::Permit
         );
     }
@@ -672,7 +727,7 @@ mod tests {
         // Prefix matches but community doesn't → permit (default)
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[]),
             PolicyAction::Permit
         );
     }
@@ -701,7 +756,7 @@ mod tests {
         // Route has RT:65001:200 — matches second criterion
         let ecs = [make_rt(65001, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[]),
             PolicyAction::Deny
         );
     }
@@ -724,13 +779,13 @@ mod tests {
         // RT doesn't match RO criterion
         let target_ecs = [make_rt(65001, 100)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &target_ecs),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &target_ecs, &[]),
             PolicyAction::Permit
         );
         // RO matches
         let origin_ecs = [make_ro(65001, 100)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &origin_ecs),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &origin_ecs, &[]),
             PolicyAction::Deny
         );
     }
@@ -749,7 +804,7 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[]),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Deny
         );
     }
@@ -771,7 +826,143 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[]),
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
+            PolicyAction::Permit
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Standard community parse tests (RFC 1997)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_community_match_standard_asn_value() {
+        let cm = parse_community_match("65001:100").unwrap();
+        assert_eq!(
+            cm,
+            CommunityMatch::Standard {
+                value: (65001 << 16) | 100
+            }
+        );
+    }
+
+    #[test]
+    fn parse_community_match_no_export() {
+        let cm = parse_community_match("NO_EXPORT").unwrap();
+        assert_eq!(cm, CommunityMatch::Standard { value: 0xFFFF_FF01 });
+    }
+
+    #[test]
+    fn parse_community_match_no_advertise() {
+        let cm = parse_community_match("NO_ADVERTISE").unwrap();
+        assert_eq!(cm, CommunityMatch::Standard { value: 0xFFFF_FF02 });
+    }
+
+    #[test]
+    fn parse_community_match_no_export_subconfed() {
+        let cm = parse_community_match("NO_EXPORT_SUBCONFED").unwrap();
+        assert_eq!(cm, CommunityMatch::Standard { value: 0xFFFF_FF03 });
+    }
+
+    #[test]
+    fn standard_community_match_hit() {
+        let community_val = (65001u32 << 16) | 100;
+        let pl = PrefixList {
+            entries: vec![PrefixListEntry {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![CommunityMatch::Standard {
+                    value: community_val,
+                }],
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        assert_eq!(
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[community_val]),
+            PolicyAction::Deny
+        );
+    }
+
+    #[test]
+    fn standard_community_match_miss() {
+        let pl = PrefixList {
+            entries: vec![PrefixListEntry {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![CommunityMatch::Standard {
+                    value: (65001 << 16) | 100,
+                }],
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        // Route has different community
+        assert_eq!(
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[(65002 << 16) | 200]),
+            PolicyAction::Permit
+        );
+    }
+
+    #[test]
+    fn standard_match_does_not_match_ec() {
+        // Standard CommunityMatch should not match extended communities
+        let cm = CommunityMatch::Standard {
+            value: (65001 << 16) | 100,
+        };
+        assert!(!cm.matches_ec(&make_rt(65001, 100)));
+    }
+
+    #[test]
+    fn ec_match_does_not_match_standard() {
+        // RT CommunityMatch should not match standard communities
+        let cm = CommunityMatch::RouteTarget {
+            global: 65001,
+            local: 100,
+        };
+        assert!(!cm.matches_standard((65001 << 16) | 100));
+    }
+
+    #[test]
+    fn mixed_standard_and_ec_or_semantics() {
+        let pl = PrefixList {
+            entries: vec![PrefixListEntry {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![
+                    CommunityMatch::Standard {
+                        value: (65001 << 16) | 100,
+                    },
+                    CommunityMatch::RouteTarget {
+                        global: 65002,
+                        local: 200,
+                    },
+                ],
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        let std_community = (65001u32 << 16) | 100;
+
+        // Route has matching standard community, no ECs → deny
+        assert_eq!(
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[std_community]),
+            PolicyAction::Deny
+        );
+
+        // Route has matching EC, no standard communities → deny
+        let ecs = [make_rt(65002, 200)];
+        assert_eq!(
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[]),
+            PolicyAction::Deny
+        );
+
+        // Route has neither → permit (default)
+        assert_eq!(
+            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[]),
             PolicyAction::Permit
         );
     }
