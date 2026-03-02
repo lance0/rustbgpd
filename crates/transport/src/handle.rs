@@ -40,7 +40,11 @@ pub enum PeerCommand {
         reply: oneshot::Sender<PeerSessionState>,
     },
     /// Send a ROUTE-REFRESH message to the peer (RFC 2918).
-    SendRouteRefresh { afi: Afi, safi: Safi },
+    SendRouteRefresh {
+        afi: Afi,
+        safi: Safi,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
 }
@@ -175,17 +179,26 @@ impl PeerHandle {
 
     /// Send a ROUTE-REFRESH message for the given address family.
     ///
+    /// Returns `Ok(())` only if the message was actually sent on the wire.
+    /// Returns an error if the session is not Established, the peer lacks
+    /// the Route Refresh capability, or the family is not negotiated.
+    ///
     /// # Errors
     ///
-    /// Returns an error if the session task has already exited.
-    pub async fn send_route_refresh(
-        &self,
-        afi: Afi,
-        safi: Safi,
-    ) -> Result<(), mpsc::error::SendError<PeerCommand>> {
+    /// Returns an error string describing why the message was not sent.
+    pub async fn send_route_refresh(&self, afi: Afi, safi: Safi) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
         self.commands
-            .send(PeerCommand::SendRouteRefresh { afi, safi })
+            .send(PeerCommand::SendRouteRefresh {
+                afi,
+                safi,
+                reply: reply_tx,
+            })
             .await
+            .map_err(|_| "session task exited".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "session task dropped reply".to_string())?
     }
 
     /// Query the current session state.

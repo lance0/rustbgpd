@@ -477,6 +477,13 @@ impl PeerSession {
                         self.flap_count += 1;
                     }
 
+                    // Recreate outbound channel to discard stale updates
+                    // from the dying session. The old sender held by RIB
+                    // manager is already invalidated by PeerDown/PeerGR.
+                    let (new_tx, new_rx) = mpsc::channel(OUTBOUND_BUFFER);
+                    self.outbound_tx = new_tx;
+                    self.outbound_rx = new_rx;
+
                     let rib_msg = gr_update.unwrap_or(RibUpdate::PeerDown { peer: self.peer_ip });
                     let _ = self.rib_tx.try_send(rib_msg);
                 }
@@ -599,6 +606,7 @@ impl PeerSession {
     }
 
     /// Drain complete messages from the read buffer and feed to FSM.
+    #[expect(clippy::too_many_lines)]
     async fn process_read_buffer(&mut self) {
         loop {
             match self.read_buf.try_decode() {
@@ -650,6 +658,7 @@ impl PeerSession {
                         Message::RouteRefresh(rr) => {
                             self.metrics
                                 .record_message_received(&self.peer_label, "route_refresh");
+                            // Check peer advertised Route Refresh capability
                             let peer_rr = self
                                 .negotiated
                                 .as_ref()
@@ -661,21 +670,45 @@ impl PeerSession {
                                 );
                                 continue;
                             }
+                            // Resolve typed AFI/SAFI — ignore unknown families
+                            let (Some(afi), Some(safi)) = (rr.afi(), rr.safi()) else {
+                                warn!(
+                                    peer = %self.peer_label,
+                                    afi_raw = rr.afi_raw,
+                                    safi_raw = rr.safi_raw,
+                                    "ignoring ROUTE-REFRESH for unknown AFI/SAFI"
+                                );
+                                continue;
+                            };
+                            // Ignore requests for unnegotiated families
+                            if !self.negotiated_families.contains(&(afi, safi)) {
+                                warn!(
+                                    peer = %self.peer_label,
+                                    ?afi, ?safi,
+                                    "ignoring ROUTE-REFRESH for unnegotiated family"
+                                );
+                                continue;
+                            }
                             info!(
                                 peer = %self.peer_label,
-                                afi = ?rr.afi,
-                                safi = ?rr.safi,
+                                ?afi, ?safi,
                                 "received ROUTE-REFRESH"
                             );
-                            let _ = self.rib_tx.try_send(RibUpdate::RouteRefreshRequest {
-                                peer: self.peer_ip,
-                                afi: rr.afi,
-                                safi: rr.safi,
-                            });
-                            Event::RouteRefreshReceived {
-                                afi: rr.afi,
-                                safi: rr.safi,
+                            if self
+                                .rib_tx
+                                .try_send(RibUpdate::RouteRefreshRequest {
+                                    peer: self.peer_ip,
+                                    afi,
+                                    safi,
+                                })
+                                .is_err()
+                            {
+                                warn!(
+                                    peer = %self.peer_label,
+                                    "RIB channel full — route refresh request dropped"
+                                );
                             }
+                            Event::RouteRefreshReceived { afi, safi }
                         }
                     };
                     self.drive_fsm(event).await;
@@ -995,21 +1028,31 @@ impl PeerSession {
                 let _ = reply.send(state);
                 ControlFlow::Continue(())
             }
-            PeerCommand::SendRouteRefresh { afi, safi } => {
+            PeerCommand::SendRouteRefresh { afi, safi, reply } => {
                 if self.fsm.state() != SessionState::Established {
-                    debug!(
-                        peer = %self.peer_label,
-                        "ignoring SendRouteRefresh: not Established"
-                    );
+                    let _ = reply.send(Err("session not Established".into()));
                     return ControlFlow::Continue(());
                 }
-                let msg = Message::RouteRefresh(RouteRefreshMessage { afi, safi });
+                if !self
+                    .negotiated
+                    .as_ref()
+                    .is_some_and(|n| n.peer_route_refresh)
+                {
+                    let _ = reply.send(Err("peer lacks Route Refresh capability".into()));
+                    return ControlFlow::Continue(());
+                }
+                if !self.negotiated_families.contains(&(afi, safi)) {
+                    let _ = reply.send(Err(format!("{afi:?}/{safi:?} not negotiated")));
+                    return ControlFlow::Continue(());
+                }
+                let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
                 if let Err(e) = self.send_message(&msg).await {
-                    warn!(peer = %self.peer_label, error = %e, "failed to send ROUTE-REFRESH");
+                    let _ = reply.send(Err(format!("send failed: {e}")));
                 } else {
                     info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
                     self.metrics
                         .record_message_sent(&self.peer_label, "route_refresh");
+                    let _ = reply.send(Ok(()));
                 }
                 ControlFlow::Continue(())
             }

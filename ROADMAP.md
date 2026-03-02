@@ -51,7 +51,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Extended Communities (RFC 4360) — wire decode/encode, common subtypes (route target, route origin, 4-byte AS), RIB storage, gRPC API exposure (ADR-0025)
 - [x] Extended Communities Policy Matching — match on RT/RO values in prefix lists, TOML community-match clauses (ADR-0026)
 - [x] Route Refresh (RFC 2918) — inbound re-advertisement, outbound SoftResetIn gRPC, capability negotiation (ADR-0027)
-- [x] 488 tests — unit, integration, property, fuzz
+- [x] 489 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 

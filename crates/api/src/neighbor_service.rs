@@ -298,7 +298,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
 
-        // Empty means "all negotiated families" — pass empty vec through.
+        // Empty means "all configured families" — pass empty vec through.
+        // Transport filters to negotiated families before sending.
         let families = if req.families.is_empty() {
             vec![]
         } else {
@@ -330,7 +331,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::not_found)?;
+            .map_err(|e| {
+                if e.starts_with("not found:") {
+                    Status::not_found(e)
+                } else {
+                    Status::internal(e)
+                }
+            })?;
 
         Ok(Response::new(proto::SoftResetInResponse {}))
     }

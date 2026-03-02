@@ -30,6 +30,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SoftResetIn` gRPC RPC sends ROUTE-REFRESH to peers for soft inbound
   reset after policy changes. (ADR-0027)
 
+### Fixed
+
+- **Proto: single source of truth.** Eliminated duplicate proto file;
+  `crates/api/build.rs` now compiles from `proto/rustbgpd.proto` directly.
+  `SoftResetIn` RPC is now in the public proto.
+- **ROUTE-REFRESH: unknown AFI/SAFI no longer tears down session.**
+  `RouteRefreshMessage` stores raw wire values; unknown families are logged
+  and ignored instead of triggering a decode error.
+- **ROUTE-REFRESH: outbound queue no longer leaks across reconnects.**
+  Outbound channel is recreated on `SessionDown` so stale updates from a
+  dying session cannot be sent on the next one.
+- **ROUTE-REFRESH: negotiated family/capability checks on both paths.**
+  Inbound and outbound ROUTE-REFRESH now verify the requested family is
+  negotiated and the peer advertised the capability.
+- **SoftResetIn: accurate gRPC error codes.** Peer-not-found returns
+  `NOT_FOUND`; send failures return `INTERNAL` (was all `NOT_FOUND`).
+- **SoftResetIn: docs corrected.** Empty families means "all configured"
+  (not "all negotiated"); transport filters to negotiated.
+- **Route refresh: backpressure observable.** RIB channel full and EoR
+  enqueue failures are now logged at `warn` level.
+- **EoR retry under backpressure.** Failed EoR markers are tracked in
+  `pending_eor` and retried on the next dirty-peer resync, so the protocol
+  completion signal is no longer permanently lost.
+- **SoftResetIn returns actual send outcome.** `SendRouteRefresh` is now a
+  request/reply command; the gRPC response reflects whether the message was
+  sent, not just enqueued.
+
 ---
 
 ## [0.3.0] — 2026-03-01

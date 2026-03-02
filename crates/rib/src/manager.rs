@@ -41,6 +41,8 @@ pub struct RibManager {
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Peers that failed a `try_send()` and need a full export resync.
     dirty_peers: HashSet<IpAddr>,
+    /// `EoR` markers that failed to enqueue and must be retried.
+    pending_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
     /// Value is the set of (AFI, SAFI) families still awaiting End-of-RIB.
     gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
@@ -71,6 +73,7 @@ impl RibManager {
             peer_export_policies: HashMap::new(),
             peer_sendable_families: HashMap::new(),
             dirty_peers: HashSet::new(),
+            pending_eor: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
             gr_stale_routes_time: HashMap::new(),
@@ -168,6 +171,7 @@ impl RibManager {
     /// so that Adj-RIB-Out only contains routes the transport can actually
     /// serialize for this peer. The transport retains `is_family_negotiated`
     /// as a safety net.
+    #[expect(clippy::too_many_lines)]
     fn distribute_changes(&mut self, changed_prefixes: &HashSet<Prefix>) {
         if changed_prefixes.is_empty() && self.dirty_peers.is_empty() {
             return;
@@ -248,10 +252,21 @@ impl RibManager {
             if (!announce.is_empty() || !withdraw.is_empty())
                 && let Some(tx) = self.outbound_peers.get(&peer)
             {
+                // If a prior initial dump / route-refresh EoR was deferred,
+                // piggyback it on the successful dirty resync update so it
+                // can't be starved behind the resync message on a small queue.
+                let pending_eor = if is_dirty {
+                    self.pending_eor
+                        .get(&peer)
+                        .map(|families| families.iter().copied().collect())
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
                 let update = OutboundRouteUpdate {
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
-                    end_of_rib: vec![],
+                    end_of_rib: pending_eor.clone(),
                 };
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full or closed — marking dirty for resync");
@@ -276,11 +291,17 @@ impl RibManager {
                     );
                     if is_dirty {
                         self.dirty_peers.remove(&peer);
+                        if pending_eor.is_empty() {
+                            self.flush_pending_eor(peer);
+                        } else {
+                            self.pending_eor.remove(&peer);
+                        }
                     }
                 }
             } else if is_dirty && announce.is_empty() && withdraw.is_empty() {
                 // Dirty peer with no diff — already in sync
                 self.dirty_peers.remove(&peer);
+                self.flush_pending_eor(peer);
             }
         }
     }
@@ -333,6 +354,9 @@ impl RibManager {
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
                     self.metrics.record_outbound_route_drop(&peer.to_string());
+                    for f in &eor_families {
+                        self.pending_eor.entry(peer).or_default().insert(*f);
+                    }
                     self.dirty_peers.insert(peer);
                     return;
                 }
@@ -356,10 +380,14 @@ impl RibManager {
                 let eor = OutboundRouteUpdate {
                     announce: vec![],
                     withdraw: vec![],
-                    end_of_rib: eor_families,
+                    end_of_rib: eor_families.clone(),
                 };
                 if tx.try_send(eor).is_err() {
-                    debug!(%peer, "outbound channel full — EoR will be sent on resync");
+                    warn!(%peer, "outbound channel full — `EoR` deferred");
+                    for f in &eor_families {
+                        self.pending_eor.entry(peer).or_default().insert(*f);
+                    }
+                    self.dirty_peers.insert(peer);
                 }
             }
         }
@@ -411,6 +439,7 @@ impl RibManager {
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full during route refresh response");
                     self.metrics.record_outbound_route_drop(&peer.to_string());
+                    self.pending_eor.entry(peer).or_default().insert(family);
                     self.dirty_peers.insert(peer);
                     return;
                 }
@@ -436,8 +465,36 @@ impl RibManager {
                 end_of_rib: vec![family],
             };
             if tx.try_send(eor).is_err() {
-                debug!(%peer, "outbound channel full — EoR will be sent on resync");
+                warn!(%peer, ?family, "outbound channel full — route refresh `EoR` deferred");
+                self.pending_eor.entry(peer).or_default().insert(family);
+                self.dirty_peers.insert(peer);
             }
+        }
+    }
+
+    /// Try to send any deferred `EoR` markers for a peer.
+    ///
+    /// Called after a successful dirty-peer resync. If the send fails again,
+    /// the peer is re-marked dirty for another attempt.
+    fn flush_pending_eor(&mut self, peer: IpAddr) {
+        let Some(families) = self.pending_eor.remove(&peer) else {
+            return;
+        };
+        if families.is_empty() {
+            return;
+        }
+        let Some(tx) = self.outbound_peers.get(&peer) else {
+            return;
+        };
+        let eor = OutboundRouteUpdate {
+            announce: vec![],
+            withdraw: vec![],
+            end_of_rib: families.iter().copied().collect(),
+        };
+        if tx.try_send(eor).is_err() {
+            warn!(%peer, "outbound channel full — `EoR` still deferred");
+            self.pending_eor.insert(peer, families);
+            self.dirty_peers.insert(peer);
         }
     }
 
@@ -501,6 +558,7 @@ impl RibManager {
                 self.peer_export_policies.remove(&peer);
                 self.peer_sendable_families.remove(&peer);
                 self.dirty_peers.remove(&peer);
+                self.pending_eor.remove(&peer);
             }
 
             RibUpdate::PeerUp {
@@ -722,6 +780,7 @@ impl RibManager {
                 self.peer_export_policies.remove(&peer);
                 self.peer_sendable_families.remove(&peer);
                 self.dirty_peers.remove(&peer);
+                self.pending_eor.remove(&peer);
 
                 // Initial timer = restart_time (window for session re-establishment).
                 // On PeerUp, this is reset to stale_routes_time for EoR.
@@ -2131,6 +2190,7 @@ mod tests {
         );
         assert_eq!(resync.announce[0].prefix, Prefix::V4(prefix));
         assert!(resync.withdraw.is_empty());
+        assert_eq!(resync.end_of_rib, ipv4_sendable());
 
         // AdjRibOut should now reflect Loc-RIB
         let (reply_tx, reply_rx) = oneshot::channel();

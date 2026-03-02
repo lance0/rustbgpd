@@ -13,20 +13,43 @@ const TOTAL_LEN: usize = HEADER_LEN + BODY_LEN;
 /// BGP ROUTE-REFRESH message (RFC 2918).
 ///
 /// Requests a peer to re-advertise its Adj-RIB-Out for the specified
-/// address family.
+/// address family. Raw wire values are stored so that unknown AFI/SAFI
+/// values can be decoded without error — the transport layer decides
+/// whether to act on or ignore them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteRefreshMessage {
-    pub afi: Afi,
-    pub safi: Safi,
+    pub afi_raw: u16,
+    pub safi_raw: u8,
 }
 
 impl RouteRefreshMessage {
+    /// Create from typed AFI/SAFI values.
+    #[must_use]
+    pub fn new(afi: Afi, safi: Safi) -> Self {
+        Self {
+            afi_raw: afi as u16,
+            safi_raw: safi as u8,
+        }
+    }
+
+    /// Try to interpret the raw AFI as a known address family.
+    #[must_use]
+    pub fn afi(&self) -> Option<Afi> {
+        Afi::from_u16(self.afi_raw)
+    }
+
+    /// Try to interpret the raw SAFI as a known sub-address family.
+    #[must_use]
+    pub fn safi(&self) -> Option<Safi> {
+        Safi::from_u8(self.safi_raw)
+    }
+
     /// Decode a ROUTE-REFRESH message body from a buffer.
     ///
     /// # Errors
     ///
-    /// Returns [`DecodeError`] if the body length is not exactly 4, or if
-    /// the AFI/SAFI values are unrecognized.
+    /// Returns [`DecodeError`] if the body length is not exactly 4.
+    /// Unknown AFI/SAFI values are preserved (not treated as errors).
     pub fn decode(buf: &mut impl Buf, body_len: usize) -> Result<Self, DecodeError> {
         if body_len != BODY_LEN {
             return Err(DecodeError::InvalidLength {
@@ -44,16 +67,7 @@ impl RouteRefreshMessage {
         let _reserved = buf.get_u8();
         let safi_raw = buf.get_u8();
 
-        let afi = Afi::from_u16(afi_raw).ok_or(DecodeError::MalformedOptionalParameter {
-            offset: 0,
-            detail: format!("unknown AFI {afi_raw} in ROUTE-REFRESH"),
-        })?;
-        let safi = Safi::from_u8(safi_raw).ok_or(DecodeError::MalformedOptionalParameter {
-            offset: 2,
-            detail: format!("unknown SAFI {safi_raw} in ROUTE-REFRESH"),
-        })?;
-
-        Ok(Self { afi, safi })
+        Ok(Self { afi_raw, safi_raw })
     }
 
     /// Encode a complete ROUTE-REFRESH message (header + body) into a buffer.
@@ -69,9 +83,9 @@ impl RouteRefreshMessage {
         buf.put_u16(TOTAL_LEN as u16);
         buf.put_u8(message_type::ROUTE_REFRESH);
         // Body
-        buf.put_u16(self.afi as u16);
+        buf.put_u16(self.afi_raw);
         buf.put_u8(0); // reserved
-        buf.put_u8(self.safi as u8);
+        buf.put_u8(self.safi_raw);
         Ok(())
     }
 
@@ -84,7 +98,16 @@ impl RouteRefreshMessage {
 
 impl std::fmt::Display for RouteRefreshMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ROUTE-REFRESH AFI={:?} SAFI={:?}", self.afi, self.safi)
+        match (self.afi(), self.safi()) {
+            (Some(afi), Some(safi)) => {
+                write!(f, "ROUTE-REFRESH AFI={afi:?} SAFI={safi:?}")
+            }
+            _ => write!(
+                f,
+                "ROUTE-REFRESH AFI={} SAFI={}",
+                self.afi_raw, self.safi_raw
+            ),
+        }
     }
 }
 
@@ -96,10 +119,7 @@ mod tests {
 
     #[test]
     fn roundtrip_ipv4_unicast() {
-        let msg = RouteRefreshMessage {
-            afi: Afi::Ipv4,
-            safi: Safi::Unicast,
-        };
+        let msg = RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast);
         let mut buf = BytesMut::with_capacity(TOTAL_LEN);
         msg.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), TOTAL_LEN);
@@ -109,14 +129,13 @@ mod tests {
         bytes.advance(HEADER_LEN);
         let decoded = RouteRefreshMessage::decode(&mut bytes, BODY_LEN).unwrap();
         assert_eq!(decoded, msg);
+        assert_eq!(decoded.afi(), Some(Afi::Ipv4));
+        assert_eq!(decoded.safi(), Some(Safi::Unicast));
     }
 
     #[test]
     fn roundtrip_ipv6_unicast() {
-        let msg = RouteRefreshMessage {
-            afi: Afi::Ipv6,
-            safi: Safi::Unicast,
-        };
+        let msg = RouteRefreshMessage::new(Afi::Ipv6, Safi::Unicast);
         let mut buf = BytesMut::with_capacity(TOTAL_LEN);
         msg.encode(&mut buf).unwrap();
 
@@ -124,6 +143,8 @@ mod tests {
         bytes.advance(HEADER_LEN);
         let decoded = RouteRefreshMessage::decode(&mut bytes, BODY_LEN).unwrap();
         assert_eq!(decoded, msg);
+        assert_eq!(decoded.afi(), Some(Afi::Ipv6));
+        assert_eq!(decoded.safi(), Some(Safi::Unicast));
     }
 
     #[test]
@@ -141,36 +162,47 @@ mod tests {
     }
 
     #[test]
-    fn reject_unknown_afi() {
+    fn decode_unknown_afi_succeeds() {
         let data: &[u8] = &[0, 99, 0, 1]; // AFI=99
         let mut buf = Bytes::copy_from_slice(data);
-        assert!(RouteRefreshMessage::decode(&mut buf, 4).is_err());
+        let msg = RouteRefreshMessage::decode(&mut buf, 4).unwrap();
+        assert_eq!(msg.afi_raw, 99);
+        assert_eq!(msg.afi(), None);
+        assert_eq!(msg.safi(), Some(Safi::Unicast));
     }
 
     #[test]
-    fn reject_unknown_safi() {
+    fn decode_unknown_safi_succeeds() {
         let data: &[u8] = &[0, 1, 0, 99]; // SAFI=99
         let mut buf = Bytes::copy_from_slice(data);
-        assert!(RouteRefreshMessage::decode(&mut buf, 4).is_err());
+        let msg = RouteRefreshMessage::decode(&mut buf, 4).unwrap();
+        assert_eq!(msg.safi_raw, 99);
+        assert_eq!(msg.safi(), None);
+        assert_eq!(msg.afi(), Some(Afi::Ipv4));
     }
 
     #[test]
     fn encoded_len_is_23() {
-        let msg = RouteRefreshMessage {
-            afi: Afi::Ipv4,
-            safi: Safi::Unicast,
-        };
+        let msg = RouteRefreshMessage::new(Afi::Ipv4, Safi::Unicast);
         assert_eq!(msg.encoded_len(), 23);
     }
 
     #[test]
-    fn display_format() {
-        let msg = RouteRefreshMessage {
-            afi: Afi::Ipv6,
-            safi: Safi::Unicast,
-        };
+    fn display_known_family() {
+        let msg = RouteRefreshMessage::new(Afi::Ipv6, Safi::Unicast);
         let s = format!("{msg}");
         assert!(s.contains("Ipv6"));
         assert!(s.contains("Unicast"));
+    }
+
+    #[test]
+    fn display_unknown_family() {
+        let msg = RouteRefreshMessage {
+            afi_raw: 99,
+            safi_raw: 42,
+        };
+        let s = format!("{msg}");
+        assert!(s.contains("99"));
+        assert!(s.contains("42"));
     }
 }

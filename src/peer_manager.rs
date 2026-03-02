@@ -252,7 +252,7 @@ impl PeerManager {
         let managed = self
             .peers
             .get(&address)
-            .ok_or_else(|| format!("peer {address} not found"))?;
+            .ok_or_else(|| format!("not found: peer {address}"))?;
 
         // Determine which families to request refresh for
         let target_families = if families.is_empty() {
@@ -265,7 +265,7 @@ impl PeerManager {
         for (afi, safi) in &target_families {
             if let Err(e) = managed.handle.send_route_refresh(*afi, *safi).await {
                 warn!(%address, error = %e, "failed to send route refresh");
-                return Err(format!("failed to send route refresh: {e}"));
+                return Err(format!("send failed: route refresh to {address}: {e}"));
             }
         }
 
