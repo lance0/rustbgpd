@@ -35,7 +35,7 @@ Last updated: 2026-03-03
 | Notification GR (RFC 8538) | Yes | No | |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | No | |
-| Add-Path (RFC 7911) | Yes | Yes | IPv4 unicast receive + multi-path send (route server mode) |
+| Add-Path (RFC 7911) | Yes | Yes | IPv4 unicast receive + IPv4 multi-path send (route server mode); IPv6 remains single-best |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
 | Extended Messages (RFC 8654) | No | Yes | rustbgpd supports it; GoBGP does not |

@@ -40,7 +40,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Large communities** -- RFC 8092 wire codec, RIB, gRPC API, and policy matching for 4-byte ASN operators
 - **Route Reflector** -- RFC 4456 client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST, loop detection
 - **Extended Messages** -- RFC 8654 raises the 4096-byte message limit to 65535 bytes
-- **Add-Path** -- RFC 7911 receive + multi-path send (route server mode); advertise multiple paths per prefix to Add-Path peers
+- **Add-Path** -- RFC 7911 receive + IPv4 multi-path send (route server mode); IPv6 remains single-best until MP-BGP Add-Path send is implemented
 - **RPKI origin validation** -- RFC 6811: poll-based RTR client (RFC 8210) connects to RPKI validators, stamps routes Valid/Invalid/NotFound, integrates into best-path and policy
 - **729 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
@@ -255,7 +255,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 729 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Add-Path receive + multi-path send (RFC 7911), and RPKI origin validation (RFC 6811, poll-based RTR) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 729 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Add-Path receive + IPv4 multi-path send (RFC 7911), and RPKI origin validation (RFC 6811, poll-based RTR) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|

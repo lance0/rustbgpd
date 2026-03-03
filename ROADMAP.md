@@ -61,7 +61,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Large Communities (RFC 8092) — 12-byte wire codec, RIB accessor, gRPC API, policy matching and set/delete actions (ADR-0031)
 - [x] Review hardening: IPv4 NEXT_HOP wire path, RT/RO ASN validation, AS_PATH regex AS_SET braces, zero-length LC rejection, EC logical add/remove equivalence, AS_SEQUENCE overflow guard
 - [x] Extended Messages (RFC 8654) — raise 4096-byte BGP message limit to 65535 bytes; capability code 6, unconditional advertisement, dynamic buffer sizing (ADR-0032)
-- [x] Add-Path (RFC 7911) — receive + multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
+- [x] Add-Path (RFC 7911) — receive + IPv4 multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
 - [x] 729 tests
 
@@ -97,7 +97,7 @@ Items identified during review that are not correctness bugs but improve strictn
 Features that close meaningful protocol gaps vs GoBGP.
 
 - [x] **Extended Messages** (RFC 8654) — raise 4096-byte limit to 65535; capability code 6 (ADR-0032)
-- [x] **Add-Path** (RFC 7911) — receive + multi-path send (route server mode); composite RIB keying, multi-candidate best-path, rank-based path IDs (ADR-0033)
+- [x] **Add-Path** (RFC 7911) — receive + IPv4 multi-path send (route server mode); composite RIB keying, multi-candidate best-path, rank-based path IDs (ADR-0033)
 - [x] **RPKI validation** — RTR client (RFC 8210) for route origin validation; VRP table, best-path step 0.5, policy matching (ADR-0034)
 - [ ] **FlowSpec** (RFC 5575/8955) — programmatic traffic filtering rules distributed via BGP; IPv4 and IPv6 unicast FlowSpec. Critical for prefixd integration
 

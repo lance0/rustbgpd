@@ -74,6 +74,16 @@ fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> bool {
     a.next_hop == b.next_hop && a.peer == b.peer && a.attributes == b.attributes
 }
 
+/// Whether route-server-style multi-path send is implemented for this prefix.
+///
+/// Multi-path send currently uses Add-Path path IDs only for IPv4 unicast body
+/// NLRI. MP-BGP Add-Path send for IPv6 (path IDs inside `MP_REACH`/`MP_UNREACH`)
+/// is not implemented yet, so IPv6 must continue to use single-best export
+/// even when a peer negotiates Add-Path receive.
+fn supports_multipath_send(prefix: &Prefix) -> bool {
+    matches!(prefix, Prefix::V4(_))
+}
+
 /// iBGP split-horizon / RFC 4456 reflection logic, extracted as a free
 /// function so it can be called when `self.adj_ribs_out` is mutably borrowed.
 ///
@@ -452,7 +462,7 @@ impl RibManager {
 
             // Stage: compute delta without mutating AdjRibOut
             for prefix in &effective_prefixes {
-                if send_max > 0 {
+                if send_max > 0 && supports_multipath_send(prefix) {
                     // Multi-path: collect all candidates, filter, sort, diff
                     Self::distribute_multipath_prefix(
                         &self.ribs,
@@ -620,7 +630,9 @@ impl RibManager {
 
         if send_max > 0 {
             // Multi-path initial dump: collect all unique prefixes, then
-            // use the same per-prefix logic as distribute_changes.
+            // use the same per-prefix logic as distribute_changes. This is
+            // IPv4-only today; IPv6 falls back to the normal single-best path
+            // until MP-BGP Add-Path send is implemented.
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
@@ -638,22 +650,72 @@ impl RibManager {
                 .or_insert_with(|| AdjRibOut::new(peer));
 
             for prefix in &all_prefixes {
-                Self::distribute_multipath_prefix(
-                    &self.ribs,
-                    rib_out,
-                    &self.peer_is_rr_client,
-                    prefix,
-                    peer,
-                    send_max,
-                    target_is_ebgp,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    export_pol.as_ref(),
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_override_flags,
-                );
+                if supports_multipath_send(prefix) {
+                    Self::distribute_multipath_prefix(
+                        &self.ribs,
+                        rib_out,
+                        &self.peer_is_rr_client,
+                        prefix,
+                        peer,
+                        send_max,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        export_pol.as_ref(),
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_override_flags,
+                    );
+                } else if let Some(best) = self.loc_rib.get(prefix) {
+                    // IPv6 still uses single-best export: MP-BGP Add-Path send
+                    // (path IDs inside MP_REACH / MP_UNREACH) is deferred.
+                    if best.peer == peer {
+                        continue;
+                    }
+                    if should_suppress_ibgp_inner(
+                        best,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        &self.peer_is_rr_client,
+                    ) {
+                        continue;
+                    }
+                    let family = match prefix {
+                        Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+                        Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+                    };
+                    if !sendable.as_ref().is_some_and(|f| f.contains(&family)) {
+                        continue;
+                    }
+                    let aspath_str = best
+                        .as_path()
+                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+                    let result = evaluate_policy(
+                        export_pol.as_ref(),
+                        *prefix,
+                        best.extended_communities(),
+                        best.communities(),
+                        best.large_communities(),
+                        &aspath_str,
+                        best.validation_state,
+                    );
+                    if result.action != PolicyAction::Permit {
+                        continue;
+                    }
+                    let mut modified = best.clone();
+                    let nh_action = rustbgpd_policy::apply_modifications(
+                        &mut modified.attributes,
+                        &result.modifications,
+                    );
+                    if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
+                        modified.next_hop = *addr;
+                    }
+                    modified.path_id = 0;
+                    nh_override_flags.push(nh_action);
+                    announce.push(modified);
+                }
             }
         } else {
             // Single-best initial dump (existing logic)
@@ -772,7 +834,7 @@ impl RibManager {
         let export_pol = self.export_policy_for(peer).cloned();
         let send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
 
-        if send_max > 0 {
+        if send_max > 0 && family == (Afi::Ipv4, Safi::Unicast) {
             // Multi-path route refresh: re-evaluate all prefixes for this family.
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -816,7 +878,9 @@ impl RibManager {
                 );
             }
         } else {
-            // Single-best route refresh
+            // Single-best route refresh. This is also used for IPv6 when
+            // Add-Path send is enabled because MP-BGP Add-Path send is not
+            // implemented yet.
             for route in self.loc_rib.iter() {
                 // Family filter
                 let route_family = match route.prefix {
@@ -1431,7 +1495,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use rustbgpd_wire::{
-        Afi, AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix, Safi,
+        Afi, AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, Safi,
     };
     use tokio::sync::oneshot;
 
@@ -5692,6 +5756,226 @@ mod tests {
         let single_update = single_rx.recv().await.unwrap();
         assert_eq!(single_update.announce.len(), 1);
         assert_eq!(single_update.announce[0].path_id, 0);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multipath_send_ipv6_falls_back_to_single_best() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48);
+
+        let mk = |peer_addr: Ipv4Addr, asn: u32, local_pref: u32| Route {
+            prefix: Prefix::V6(prefix),
+            next_hop: "2001:db8::1".parse().unwrap(),
+            peer: IpAddr::V4(peer_addr),
+            attributes: vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![AsPathSegment::AsSequence(vec![asn])],
+                }),
+                PathAttribute::LocalPref(local_pref),
+            ],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        };
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer1,
+            announced: vec![mk(Ipv4Addr::new(10, 0, 0, 1), 65001, 200)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer2,
+            announced: vec![mk(Ipv4Addr::new(10, 0, 0, 2), 65002, 100)],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: vec![(Afi::Ipv6, Safi::Unicast)],
+            is_ebgp: false,
+            route_reflector_client: false,
+            add_path_send_max: 5,
+        })
+        .await
+        .unwrap();
+
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].path_id, 0);
+        assert_eq!(update.announce[0].peer, peer1);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multipath_send_max_one_uses_path_id_one() {
+        // send_max=1 should behave like single-best but with path_id=1 (not 0).
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer1,
+            announced: vec![make_multipath_route(
+                prefix,
+                Ipv4Addr::new(10, 0, 0, 1),
+                vec![65001],
+                200,
+            )],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer2,
+            announced: vec![make_multipath_route(
+                prefix,
+                Ipv4Addr::new(10, 0, 0, 2),
+                vec![65002],
+                100,
+            )],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_max: 1,
+        })
+        .await
+        .unwrap();
+
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1, "send_max=1 sends only one route");
+        assert_eq!(
+            update.announce[0].path_id, 1,
+            "multi-path peer uses path_id=1 not 0"
+        );
+        assert_eq!(
+            update.announce[0].next_hop,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "should be the best route"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn multipath_all_candidates_denied_by_export_policy() {
+        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+
+        // Deny all prefixes in 192.168.0.0/16
+        let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16);
+        let export_policy = Policy {
+            entries: vec![PolicyStatement {
+                prefix: Some(Prefix::V4(denied_prefix)),
+                ge: None,
+                le: Some(32),
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: None,
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        };
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, Some(export_policy), None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        // Register multi-path target
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_max: 5,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // Inject 2 routes for the denied prefix
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer1,
+            announced: vec![make_multipath_route(
+                prefix,
+                Ipv4Addr::new(10, 0, 0, 1),
+                vec![65001],
+                200,
+            )],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        tx.send(RibUpdate::RoutesReceived {
+            peer: peer2,
+            announced: vec![make_multipath_route(
+                prefix,
+                Ipv4Addr::new(10, 0, 0, 2),
+                vec![65002],
+                100,
+            )],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Force serialization — query to ensure all RoutesReceived processed
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        let _ = reply_rx.await;
+
+        // No outbound updates should have been sent (all denied)
+        assert!(
+            out_rx.try_recv().is_err(),
+            "all candidates denied by export policy — nothing sent"
+        );
 
         drop(tx);
         handle.await.unwrap();
