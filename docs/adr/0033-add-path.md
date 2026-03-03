@@ -86,9 +86,8 @@ Send. `PeerConfig.add_path_send_max: u32` limits outbound paths.
 - Peers that advertise Add-Path can send multiple paths per prefix;
   all are stored in Adj-RIB-In with composite keying
 - Best-path selection considers all candidates from all peers
-- Outbound: IPv4 unicast uses multi-path send for peers with
-  `add_path_send = true`; IPv6 remains single-best until MP-BGP Add-Path
-  send is implemented. Non-Add-Path peers get no path_id encoding
+- Outbound: multi-path send for peers with `add_path_send = true`
+  (IPv4 and IPv6). Non-Add-Path peers get no path_id encoding
 - Non-Add-Path peers: behavior completely unchanged (path_id=0 throughout)
 - Route injection via gRPC supports explicit path_id for multiple
   injected paths per prefix
@@ -97,7 +96,7 @@ Send. `PeerConfig.add_path_send_max: u32` limits outbound paths.
 
 Multi-path send allows advertising multiple paths per prefix to peers
 that negotiate Add-Path receive. This is the core route server feature
-for IXP deployments, but only for IPv4 unicast in the current design.
+for IXP deployments.
 
 **Config:**
 
@@ -141,7 +140,6 @@ while single-best peers only care about best-path changes.
 `Vec<Prefix>` to `Vec<(Prefix, u32)>` to support per-path-id
 withdrawals.
 
-**IPv4 only:** Route-server-style multi-path send is limited to IPv4
-unicast. IPv6 MP-BGP Add-Path send (path IDs inside `MP_REACH_NLRI` /
-`MP_UNREACH_NLRI`) is not yet implemented, so IPv6 continues to use
-single-best export even when `add_path_send = true`.
+**Dual-stack:** Both IPv4 and IPv6 unicast support Add-Path send and
+receive. IPv4 uses body NLRI path IDs; IPv6 uses path IDs inside
+`MP_REACH_NLRI` / `MP_UNREACH_NLRI`.

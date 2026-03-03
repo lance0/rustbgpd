@@ -83,7 +83,6 @@ impl PeerConfig {
         };
         self.families
             .iter()
-            .filter(|&&(afi, safi)| afi == Afi::Ipv4 && safi == Safi::Unicast)
             .map(|&(afi, safi)| AddPathFamily {
                 afi,
                 safi,
@@ -196,25 +195,26 @@ mod tests {
     }
 
     #[test]
-    fn add_path_capabilities_ipv4_only_even_with_ipv6_configured() {
+    fn add_path_capabilities_dual_stack() {
         let mut cfg = test_config();
         cfg.add_path_receive = true;
         cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
         let caps = cfg.add_path_capabilities();
-        // Only IPv4 unicast — MP-BGP Add-Path not yet implemented
-        assert_eq!(caps.len(), 1);
+        assert_eq!(caps.len(), 2);
         assert_eq!(caps[0].afi, Afi::Ipv4);
-        assert_eq!(caps[0].safi, Safi::Unicast);
+        assert_eq!(caps[1].afi, Afi::Ipv6);
         assert_eq!(caps[0].send_receive, AddPathMode::Receive);
+        assert_eq!(caps[1].send_receive, AddPathMode::Receive);
     }
 
     #[test]
-    fn add_path_capabilities_empty_for_ipv6_only_peer() {
+    fn add_path_capabilities_ipv6_only_peer() {
         let mut cfg = test_config();
         cfg.add_path_receive = true;
         cfg.families = vec![(Afi::Ipv6, Safi::Unicast)];
         let caps = cfg.add_path_capabilities();
-        assert!(caps.is_empty());
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].afi, Afi::Ipv6);
     }
 
     #[test]
@@ -254,12 +254,13 @@ mod tests {
     }
 
     #[test]
-    fn add_path_capabilities_send_ipv4_only() {
+    fn add_path_capabilities_send_dual_stack() {
         let mut cfg = test_config();
         cfg.add_path_send = true;
         cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
         let caps = cfg.add_path_capabilities();
-        assert_eq!(caps.len(), 1);
+        assert_eq!(caps.len(), 2);
         assert_eq!(caps[0].afi, Afi::Ipv4);
+        assert_eq!(caps[1].afi, Afi::Ipv6);
     }
 }

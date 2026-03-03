@@ -223,7 +223,12 @@ impl UpdateMessage {
 
         let mut attrs_buf = Vec::new();
         if !attributes.is_empty() {
-            crate::attribute::encode_path_attributes(attributes, &mut attrs_buf, four_octet_as);
+            crate::attribute::encode_path_attributes(
+                attributes,
+                &mut attrs_buf,
+                four_octet_as,
+                add_path,
+            );
         }
 
         let mut nlri_buf = Vec::new();

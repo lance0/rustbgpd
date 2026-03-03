@@ -171,8 +171,7 @@ best-path preference. Paths are assigned rank-based path IDs (best=1,
 second=2, etc.). Split horizon, iBGP suppression, and per-candidate export
 policy are evaluated for each path.
 
-**IPv4 only:** Add-Path send and receive are currently limited to IPv4
-unicast. See [ADR-0033](docs/adr/0033-add-path.md).
+Both IPv4 and IPv6 unicast are supported. See [ADR-0033](docs/adr/0033-add-path.md).
 
 ### Per-neighbor policy
 

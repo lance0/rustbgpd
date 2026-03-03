@@ -63,9 +63,6 @@ resolved.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability
   (code 2) is always advertised. Inbound route refresh requests check
   peer capability, but there is no config option to disable the feature.
-- **Add-Path IPv4 only.** Add-Path receive and multi-path send are
-  limited to IPv4 unicast. IPv6 MP-BGP Add-Path codec is not yet
-  implemented.
 - **Add-Path via gRPC AddNeighbor defaults to disabled.** Dynamic peers
   created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive
   or send. TOML config with `[neighbors.add_path]` is the only way

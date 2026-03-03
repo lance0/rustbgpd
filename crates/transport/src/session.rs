@@ -1389,6 +1389,16 @@ impl PeerSession {
                     )
                 })
         });
+        let add_path_ipv6_send = self.negotiated.as_ref().is_some_and(|n| {
+            n.add_path_families
+                .get(&(Afi::Ipv6, Safi::Unicast))
+                .is_some_and(|m| {
+                    matches!(
+                        m,
+                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
+                    )
+                })
+        });
 
         // Extract TCP local addresses for NEXT_HOP rewrite
         let local_addr = self
@@ -1446,7 +1456,7 @@ impl PeerSession {
                 safi: Safi::Unicast,
                 withdrawn: v6_withdraw,
             })];
-            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
+            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, add_path_ipv6_send);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 withdrawal UPDATE");
@@ -1571,7 +1581,7 @@ impl PeerSession {
                 next_hop: nh,
                 announced: prefixes,
             }));
-            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
+            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, add_path_ipv6_send);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 announce UPDATE");
