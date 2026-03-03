@@ -67,9 +67,10 @@ impl PeerConfig {
 
     /// Build Add-Path capability entries for our outgoing OPEN message.
     ///
-    /// Advertises the appropriate mode (Receive, Send, or Both) based on
-    /// config. IPv4 unicast only — IPv6 (MP-BGP) Add-Path is not yet
-    /// implemented in the MP attribute codec.
+    /// Advertises the appropriate mode (Receive, Send, or Both) for all
+    /// configured families. The RIB applies the configured `send_max`
+    /// numerically per peer, but only to families that actually negotiate
+    /// Add-Path Send/Both.
     #[must_use]
     pub fn add_path_capabilities(&self) -> Vec<AddPathFamily> {
         if !self.add_path_receive && !self.add_path_send {

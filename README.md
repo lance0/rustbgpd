@@ -255,7 +255,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 729 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Add-Path receive + IPv4 multi-path send (RFC 7911), and RPKI origin validation (RFC 6811, poll-based RTR) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 735 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), dual-stack Add-Path receive + multi-path send (RFC 7911), and RPKI origin validation (RFC 6811, poll-based RTR) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|

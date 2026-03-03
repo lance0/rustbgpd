@@ -47,6 +47,9 @@ pub enum RibUpdate {
         is_ebgp: bool,
         /// Whether this peer is a route reflector client (RFC 4456).
         route_reflector_client: bool,
+        /// Families for which this peer negotiated Add-Path Send/Both.
+        /// Multi-path export is only enabled for these families.
+        add_path_send_families: Vec<(Afi, Safi)>,
         /// Maximum paths per prefix to send via Add-Path (0 = single-best only).
         add_path_send_max: u32,
     },

@@ -114,6 +114,10 @@ to `u32::MAX` after negotiation).
 **Capability advertisement:** `add_path_capabilities()` now advertises
 Send, Receive, or Both based on config. Transport computes the effective
 `add_path_send_max` from the intersection of negotiation and config.
+The RIB applies that numeric cap per peer, but only to families that
+actually negotiated Add-Path Send/Both, so a single session can
+simultaneously use multi-path export on one family and single-best
+export on another.
 
 **Distribution logic:**
 
@@ -142,4 +146,7 @@ withdrawals.
 
 **Dual-stack:** Both IPv4 and IPv6 unicast support Add-Path send and
 receive. IPv4 uses body NLRI path IDs; IPv6 uses path IDs inside
-`MP_REACH_NLRI` / `MP_UNREACH_NLRI`.
+`MP_REACH_NLRI` / `MP_UNREACH_NLRI`. Add-Path send is family-aware:
+if Send is negotiated for only a subset of the session's sendable
+families, rustbgpd uses multi-path export only for those families and
+keeps the others on single-best export.

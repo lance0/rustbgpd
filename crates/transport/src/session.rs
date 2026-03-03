@@ -471,20 +471,29 @@ impl PeerSession {
                             .set_max_message_len(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN);
                     }
 
-                    // Compute Add-Path send max: config must enable send AND
-                    // peer must have negotiated Receive (or Both) for at least
-                    // one family.
-                    let add_path_send_max = if self.config.peer.add_path_send
-                        && neg
-                            .add_path_families
-                            .values()
-                            .any(|m| matches!(m, AddPathMode::Send | AddPathMode::Both))
-                    {
-                        let max = self.config.peer.add_path_send_max;
-                        if max == 0 { u32::MAX } else { max }
-                    } else {
-                        0
-                    };
+                    // Compute the families for which we may send Add-Path.
+                    // The wire layer handles Add-Path per family; the RIB
+                    // receives the negotiated family set and applies the
+                    // configured send_max only to those families.
+                    let add_path_send_families: Vec<(Afi, Safi)> = neg
+                        .add_path_families
+                        .iter()
+                        .filter_map(|(family, mode)| {
+                            if matches!(mode, AddPathMode::Send | AddPathMode::Both) {
+                                Some(*family)
+                            } else {
+                                None
+                            }
+                        })
+                        .filter(|family| sendable_families.contains(family))
+                        .collect();
+                    let add_path_send_max =
+                        if self.config.peer.add_path_send && !add_path_send_families.is_empty() {
+                            let max = self.config.peer.add_path_send_max;
+                            if max == 0 { u32::MAX } else { max }
+                        } else {
+                            0
+                        };
 
                     self.negotiated = Some(neg);
                     self.established_at = Some(Instant::now());
@@ -496,6 +505,7 @@ impl PeerSession {
                         sendable_families,
                         is_ebgp,
                         route_reflector_client: self.config.route_reflector_client,
+                        add_path_send_families,
                         add_path_send_max,
                     });
                 }
