@@ -125,7 +125,7 @@ Last updated: 2026-03-03
 | TCP MD5 (RFC 2385) | Yes | Yes | |
 | TCP-AO (RFC 5925) | No | No | Neither; on rustbgpd roadmap |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
-| RPKI/RTR (RFC 6811/8210) | Yes | Yes | VRP table, RTR client, best-path integration |
+| RPKI/RTR (RFC 6811/8210) | Yes | Partial | Poll-based RTR client; Serial Notify + expiry deferred |
 | Private AS removal | Yes | No | |
 
 ## Operations
@@ -169,7 +169,7 @@ Last updated: 2026-03-03
 | Policy engine | 18 | 11 | ~61% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
 | Monitoring | 5 | 3 | 60% |
-| Security | 4 | 3 | 75% |
+| Security | 4 | 2.5 | ~63% |
 | Best-path steps | 11 | 10 | ~91% |
 
 ## Biggest Gaps for Target Users (IX operators, automation teams)

@@ -11,9 +11,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **RPKI Origin Validation (RFC 6811 + RFC 8210).** New `rustbgpd-rpki`
-  crate with RTR protocol codec, per-cache-server async client, and
-  multi-cache VRP aggregation. Routes stamped with `RpkiValidation`
+- **RPKI Origin Validation (RFC 6811).** New `rustbgpd-rpki`
+  crate with poll-based RTR client (RFC 8210), per-cache-server async
+  client, and multi-cache VRP aggregation. Routes stamped with `RpkiValidation`
   (Valid/Invalid/NotFound). Best-path step 0.5 prefers Valid > NotFound >
   Invalid. Policy `match_rpki_validation` enables rejection of invalid
   routes. Config `[rpki]` section with `[[rpki.cache_servers]]` for

@@ -227,7 +227,7 @@ ORIGINATOR_ID/CLUSTER_LIST handling.
 
 ## `[rpki]`
 
-Optional. Configures RPKI origin validation via the RTR protocol (RFC 8210).
+Optional. Configures RPKI origin validation via a poll-based RTR client (RFC 8210).
 rustbgpd connects to one or more RPKI cache validators and uses their VRP
 (Validated ROA Payload) data to classify routes as Valid, Invalid, or NotFound.
 
