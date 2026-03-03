@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use regex::Regex;
 use rustbgpd_wire::{
     AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
-    PathAttribute, Prefix,
+    PathAttribute, Prefix, RpkiValidation,
 };
 
 /// Action taken when a prefix matches a policy entry.
@@ -296,6 +296,8 @@ pub struct PolicyStatement {
     pub match_community: Vec<CommunityMatch>,
     /// `AS_PATH` regex match criterion.
     pub match_as_path: Option<AsPathRegex>,
+    /// RPKI validation state match criterion (RFC 6811).
+    pub match_rpki_validation: Option<RpkiValidation>,
     /// Route modifications to apply when this statement matches.
     pub modifications: RouteModifications,
 }
@@ -309,6 +311,7 @@ impl PolicyStatement {
         communities: &[u32],
         lcs: &[rustbgpd_wire::LargeCommunity],
         aspath_str: &str,
+        validation_state: RpkiValidation,
     ) -> bool {
         let prefix_ok = match self.prefix {
             Some(p) => self.matches_prefix(p, candidate),
@@ -330,7 +333,11 @@ impl PolicyStatement {
             None => true,
         };
 
-        prefix_ok && community_ok && aspath_ok
+        let rpki_ok = self
+            .match_rpki_validation
+            .is_none_or(|v| v == validation_state);
+
+        prefix_ok && community_ok && aspath_ok && rpki_ok
     }
 
     fn matches_prefix(&self, entry_prefix: Prefix, candidate: Prefix) -> bool {
@@ -401,9 +408,10 @@ impl Policy {
         communities: &[u32],
         lcs: &[rustbgpd_wire::LargeCommunity],
         aspath_str: &str,
+        validation_state: RpkiValidation,
     ) -> PolicyResult {
         for entry in &self.entries {
-            if entry.matches(prefix, ecs, communities, lcs, aspath_str) {
+            if entry.matches(prefix, ecs, communities, lcs, aspath_str, validation_state) {
                 return PolicyResult {
                     action: entry.action,
                     modifications: entry.modifications.clone(),
@@ -426,9 +434,10 @@ pub fn evaluate_policy(
     communities: &[u32],
     lcs: &[rustbgpd_wire::LargeCommunity],
     aspath_str: &str,
+    validation_state: RpkiValidation,
 ) -> PolicyResult {
     match policy {
-        Some(p) => p.evaluate(prefix, ecs, communities, lcs, aspath_str),
+        Some(p) => p.evaluate(prefix, ecs, communities, lcs, aspath_str, validation_state),
         None => PolicyResult::permit(),
     }
 }
@@ -671,6 +680,7 @@ mod tests {
             action,
             match_community: community,
             match_as_path: None,
+            match_rpki_validation: None,
             modifications: RouteModifications::default(),
         }
     }
@@ -722,7 +732,15 @@ mod tests {
 
     #[test]
     fn evaluate_policy_none_returns_permit() {
-        let r = evaluate_policy(None, v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "");
+        let r = evaluate_policy(
+            None,
+            v4_prefix([10, 0, 0, 0], 8),
+            &[],
+            &[],
+            &[],
+            "",
+            RpkiValidation::NotFound,
+        );
         assert_eq!(r.action, PolicyAction::Permit);
     }
 
@@ -741,13 +759,27 @@ mod tests {
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 1, 0, 0], 24), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 1, 0, 0], 24),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
     }
@@ -762,18 +794,33 @@ mod tests {
                 action: PolicyAction::Permit,
                 match_community: vec![],
                 match_as_path: None,
+                match_rpki_validation: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 1, 0, 0], 16), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 1, 0, 0], 16),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -789,8 +836,15 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([192, 168, 0, 0], 16),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -809,8 +863,15 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
     }
@@ -908,8 +969,15 @@ mod tests {
         };
         let ecs = [make_rt(65001, 100)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
     }
@@ -929,8 +997,15 @@ mod tests {
         };
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -950,14 +1025,28 @@ mod tests {
         };
         let ecs = [make_rt(65001, 100)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         // Prefix mismatch
         assert_eq!(
-            pl.evaluate(v4_prefix([192, 168, 0, 0], 16), &ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([192, 168, 0, 0], 16),
+                &ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -974,8 +1063,15 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[val], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[val],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
     }
@@ -1000,19 +1096,40 @@ mod tests {
         };
         let std_community = (65001u32 << 16) | 100;
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[std_community], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[std_community],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -1032,14 +1149,28 @@ mod tests {
         };
         let target_ecs = [make_rt(65001, 100)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &target_ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &target_ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
         let origin_ecs = [make_ro(65001, 100)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &origin_ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &origin_ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
     }
@@ -1059,6 +1190,7 @@ mod tests {
                 action: PolicyAction::Deny,
                 match_community: vec![],
                 match_as_path: None,
+                match_rpki_validation: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
@@ -1069,7 +1201,8 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                ""
+                "",
+                RpkiValidation::NotFound,
             )
             .action,
             PolicyAction::Deny
@@ -1080,7 +1213,8 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                ""
+                "",
+                RpkiValidation::NotFound,
             )
             .action,
             PolicyAction::Permit
@@ -1126,8 +1260,15 @@ mod tests {
         };
         let lcs = [LargeCommunity::new(65001, 100, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &lcs, "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &lcs,
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
     }
@@ -1148,8 +1289,15 @@ mod tests {
         };
         let lcs = [LargeCommunity::new(65001, 999, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &lcs, "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &lcs,
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -1191,28 +1339,56 @@ mod tests {
         // LC match
         let lcs = [LargeCommunity::new(65003, 300, 400)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &lcs, "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &lcs,
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         // EC match
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &ecs, &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &ecs,
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         // Standard match
         let std_c = (65001u32 << 16) | 100;
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[std_c], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[std_c],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         // No match
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -1231,6 +1407,7 @@ mod tests {
                 action: PolicyAction::Permit,
                 match_community: vec![],
                 match_as_path: None,
+                match_rpki_validation: None,
                 modifications: RouteModifications {
                     set_local_pref: Some(200),
                     ..RouteModifications::default()
@@ -1238,7 +1415,14 @@ mod tests {
             }],
             default_action: PolicyAction::Deny,
         };
-        let r = pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "");
+        let r = pl.evaluate(
+            v4_prefix([10, 0, 0, 0], 8),
+            &[],
+            &[],
+            &[],
+            "",
+            RpkiValidation::NotFound,
+        );
         assert_eq!(r.action, PolicyAction::Permit);
         assert_eq!(r.modifications.set_local_pref, Some(200));
     }
@@ -1320,18 +1504,33 @@ mod tests {
                 action: PolicyAction::Deny,
                 match_community: vec![],
                 match_as_path: Some(AsPathRegex::new("^65100").unwrap()),
+                match_rpki_validation: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "65100 65200")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "65100 65200",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "65200 65100")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "65200 65100",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -1346,20 +1545,35 @@ mod tests {
                 action: PolicyAction::Deny,
                 match_community: vec![],
                 match_as_path: Some(AsPathRegex::new("_65200_").unwrap()),
+                match_rpki_validation: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
         };
         // Both match → deny
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "65100 65200")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "65100 65200",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         // Prefix matches, aspath doesn't → permit
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "65100 65300")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "65100 65300",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
         // Aspath matches, prefix doesn't → permit
@@ -1369,7 +1583,8 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                "65100 65200"
+                "65100 65200",
+                RpkiValidation::NotFound,
             )
             .action,
             PolicyAction::Permit
@@ -1388,6 +1603,7 @@ mod tests {
                     value: (65001 << 16) | 100,
                 }],
                 match_as_path: Some(AsPathRegex::new("_65200_").unwrap()),
+                match_rpki_validation: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
@@ -1395,14 +1611,28 @@ mod tests {
         let std_c = (65001u32 << 16) | 100;
         // Both match → deny
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[std_c], &[], "65200")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[std_c],
+                &[],
+                "65200",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Deny
         );
         // Community matches, aspath doesn't → permit
         assert_eq!(
-            pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[std_c], &[], "65300")
-                .action,
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[std_c],
+                &[],
+                "65300",
+                RpkiValidation::NotFound
+            )
+            .action,
             PolicyAction::Permit
         );
     }
@@ -1639,5 +1869,222 @@ mod tests {
         let nh = apply_modifications(&mut attrs, &mods);
         assert!(nh.is_none());
         assert_eq!(attrs, orig);
+    }
+
+    // --- RPKI validation matching ---
+
+    #[test]
+    fn rpki_match_invalid_deny() {
+        let pl = Policy {
+            entries: vec![PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: Some(RpkiValidation::Invalid),
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        // Invalid route → matches deny rule
+        assert_eq!(
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::Invalid,
+            )
+            .action,
+            PolicyAction::Deny
+        );
+        // Valid route → doesn't match, falls through to permit
+        assert_eq!(
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::Valid,
+            )
+            .action,
+            PolicyAction::Permit
+        );
+        // NotFound route → doesn't match
+        assert_eq!(
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::NotFound,
+            )
+            .action,
+            PolicyAction::Permit
+        );
+    }
+
+    #[test]
+    fn rpki_match_valid_accept() {
+        let pl = Policy {
+            entries: vec![PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Permit,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: Some(RpkiValidation::Valid),
+                modifications: RouteModifications {
+                    set_local_pref: Some(200),
+                    ..RouteModifications::default()
+                },
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        // Valid route → matches, gets local_pref modification
+        let r = pl.evaluate(
+            v4_prefix([10, 0, 0, 0], 8),
+            &[],
+            &[],
+            &[],
+            "",
+            RpkiValidation::Valid,
+        );
+        assert_eq!(r.action, PolicyAction::Permit);
+        assert_eq!(r.modifications.set_local_pref, Some(200));
+
+        // NotFound route → doesn't match, gets default (no mods)
+        let r = pl.evaluate(
+            v4_prefix([10, 0, 0, 0], 8),
+            &[],
+            &[],
+            &[],
+            "",
+            RpkiValidation::NotFound,
+        );
+        assert_eq!(r.modifications.set_local_pref, None);
+    }
+
+    #[test]
+    fn rpki_match_not_found() {
+        let pl = Policy {
+            entries: vec![PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Permit,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: Some(RpkiValidation::NotFound),
+                modifications: RouteModifications {
+                    set_local_pref: Some(100),
+                    ..RouteModifications::default()
+                },
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        // NotFound → matches
+        let r = pl.evaluate(
+            v4_prefix([10, 0, 0, 0], 8),
+            &[],
+            &[],
+            &[],
+            "",
+            RpkiValidation::NotFound,
+        );
+        assert_eq!(r.modifications.set_local_pref, Some(100));
+    }
+
+    #[test]
+    fn rpki_match_none_matches_all() {
+        // No RPKI match criterion → matches any validation state
+        let pl = Policy {
+            entries: vec![PolicyStatement {
+                prefix: Some(v4_entry([10, 0, 0, 0], 8)),
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: None,
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        for state in [
+            RpkiValidation::Valid,
+            RpkiValidation::Invalid,
+            RpkiValidation::NotFound,
+        ] {
+            assert_eq!(
+                pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "", state)
+                    .action,
+                PolicyAction::Deny,
+                "state={state:?} should still match"
+            );
+        }
+    }
+
+    #[test]
+    fn rpki_combined_with_prefix() {
+        // Match: prefix 10.0.0.0/8 AND rpki=invalid → deny
+        let pl = Policy {
+            entries: vec![PolicyStatement {
+                prefix: Some(v4_entry([10, 0, 0, 0], 8)),
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: Some(RpkiValidation::Invalid),
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        };
+        // Both match → deny
+        assert_eq!(
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::Invalid,
+            )
+            .action,
+            PolicyAction::Deny
+        );
+        // Prefix matches, RPKI doesn't → permit
+        assert_eq!(
+            pl.evaluate(
+                v4_prefix([10, 0, 0, 0], 8),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::Valid,
+            )
+            .action,
+            PolicyAction::Permit
+        );
+        // RPKI matches, prefix doesn't → permit
+        assert_eq!(
+            pl.evaluate(
+                v4_prefix([192, 168, 0, 0], 16),
+                &[],
+                &[],
+                &[],
+                "",
+                RpkiValidation::Invalid,
+            )
+            .action,
+            PolicyAction::Permit
+        );
     }
 }

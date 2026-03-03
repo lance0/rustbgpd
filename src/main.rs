@@ -85,6 +85,54 @@ async fn run(config: Config) {
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
     tokio::spawn(RibManager::new(rib_rx, export_policy, cluster_id, metrics.clone()).run());
 
+    // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
+    if let Some(ref rpki_config) = config.rpki
+        && !rpki_config.cache_servers.is_empty()
+    {
+        let (vrp_update_tx, vrp_update_rx) = mpsc::channel(256);
+        let (rpki_table_tx, mut rpki_table_rx) = mpsc::channel(16);
+
+        // Spawn VRP manager
+        let vrp_mgr = rustbgpd_rpki::VrpManager::new(vrp_update_rx, rpki_table_tx);
+        tokio::spawn(vrp_mgr.run());
+
+        // Forward VRP table updates to RIB manager
+        let rpki_rib_tx = rib_tx.clone();
+        tokio::spawn(async move {
+            while let Some(update) = rpki_table_rx.recv().await {
+                let _ = rpki_rib_tx
+                    .send(RibUpdate::RpkiCacheUpdate {
+                        table: update.table,
+                    })
+                    .await;
+            }
+        });
+
+        // Spawn one RTR client per configured cache server
+        for server in &rpki_config.cache_servers {
+            let addr: std::net::SocketAddr = match server.address.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    error!(
+                        address = %server.address,
+                        error = %e,
+                        "invalid RPKI cache server address — skipping"
+                    );
+                    continue;
+                }
+            };
+            let client_config = rustbgpd_rpki::RtrClientConfig {
+                server_addr: addr,
+                refresh_interval: server.refresh_interval,
+                retry_interval: server.retry_interval,
+                expire_interval: server.expire_interval,
+            };
+            let client = rustbgpd_rpki::RtrClient::new(client_config, vrp_update_tx.clone());
+            info!(server = %addr, "spawning RTR client for RPKI cache");
+            tokio::spawn(client.run());
+        }
+    }
+
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let peer_mgr = PeerManager::new(

@@ -167,6 +167,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         extended_communities,
         large_communities,
         path_id: route.path_id,
+        validation_state: route.validation_state.to_string(),
     }
 }
 
@@ -372,6 +373,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
         let v6 = Route {
             prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
@@ -383,6 +385,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
 
         // Unspecified returns all

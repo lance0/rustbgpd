@@ -32,6 +32,16 @@ consequences so future contributors understand *why*, not just *what*.
 | [0022](0022-grpc-server-supervision.md) | gRPC server supervision — unexpected exit triggers shutdown | Accepted | 2026-02-28 |
 | [0023](0023-prefix-enum-afi-agnostic-rib.md) | Prefix enum and AFI-agnostic RIB for MP-BGP | Accepted | 2026-02-28 |
 | [0024](0024-graceful-restart.md) | Graceful Restart — Receiving Speaker (RFC 4724) | Accepted | 2026-03-01 |
+| [0025](0025-extended-communities.md) | Extended Communities (RFC 4360) | Accepted | 2026-03-01 |
+| [0026](0026-extended-community-policy.md) | Extended Community Policy Matching | Accepted | 2026-03-01 |
+| [0027](0027-route-refresh.md) | Route Refresh (RFC 2918) | Accepted | 2026-03-02 |
+| [0028](0028-standard-community-policy.md) | Standard Community Policy Matching (RFC 1997) | Accepted | 2026-03-02 |
+| [0029](0029-route-reflector.md) | Route Reflector (RFC 4456) | Accepted | 2026-03-02 |
+| [0030](0030-policy-actions.md) | Policy Actions and AS_PATH Regex | Accepted | 2026-03-02 |
+| [0031](0031-large-communities.md) | Large Communities (RFC 8092) | Accepted | 2026-03-02 |
+| [0032](0032-extended-messages.md) | Extended Messages (RFC 8654) | Accepted | 2026-03-02 |
+| [0033](0033-add-path.md) | Add-Path (RFC 7911) | Accepted | 2026-03-02 |
+| [0034](0034-rpki-origin-validation.md) | RPKI Origin Validation (RFC 6811 + RFC 8210) | Accepted | 2026-03-03 |
 
 ## Template
 

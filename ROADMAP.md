@@ -62,7 +62,8 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Review hardening: IPv4 NEXT_HOP wire path, RT/RO ASN validation, AS_PATH regex AS_SET braces, zero-length LC rejection, EC logical add/remove equivalence, AS_SEQUENCE overflow guard
 - [x] Extended Messages (RFC 8654) — raise 4096-byte BGP message limit to 65535 bytes; capability code 6, unconditional advertisement, dynamic buffer sizing (ADR-0032)
 - [x] Add-Path (RFC 7911) — receive + single-best send; capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, gRPC path_id fields (ADR-0033)
-- [x] 628 tests
+- [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
+- [x] 715 tests
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -88,6 +89,8 @@ All P0 features shipped. See Completed section above.
 Items identified during review that are not correctness bugs but improve strictness.
 
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
+- [ ] **RTR persistent session + Serial Notify** — RTR client currently disconnects after each EndOfData and reconnects after refresh_interval; keeping the TCP session open would allow receiving Serial Notify for faster cache-change propagation (RFC 8210 §8)
+- [ ] **RTR expire_interval enforcement** — config and server-advertised expire timers are accepted but not enforced; VRPs should be cleared if no fresh EndOfData arrives within the expiry window
 
 ### P1 — Core Protocol Gaps
 
@@ -96,7 +99,7 @@ Features that close meaningful protocol gaps vs GoBGP.
 - [x] **Extended Messages** (RFC 8654) — raise 4096-byte limit to 65535; capability code 6 (ADR-0032)
 - [x] **Add-Path** (RFC 7911) — receive + single-best send; composite RIB keying, multi-candidate best-path (ADR-0033)
 - [ ] **Add-Path multi-path send** — route server mode: advertise multiple paths per prefix to Add-Path peers (builds on receive landing)
-- [ ] **RPKI validation** — RTR client (RFC 8210) for route origin validation; growing regulatory requirement
+- [x] **RPKI validation** — RTR client (RFC 8210) for route origin validation; VRP table, best-path step 0.5, policy matching (ADR-0034)
 - [ ] **FlowSpec** (RFC 5575/8955) — programmatic traffic filtering rules distributed via BGP; IPv4 and IPv6 unicast FlowSpec. Critical for prefixd integration
 
 ### P2 — Operational Polish

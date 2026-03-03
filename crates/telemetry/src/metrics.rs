@@ -45,6 +45,9 @@ pub struct BgpMetrics {
     gr_active_peers: IntGaugeVec,
     gr_stale_routes: IntGaugeVec,
     gr_timer_expired: IntCounterVec,
+
+    // ── RPKI ───────────────────────────────────────────────────
+    rpki_vrp_count: IntGaugeVec,
 }
 
 impl BgpMetrics {
@@ -217,6 +220,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let rpki_vrp_count = IntGaugeVec::new(
+            Opts::new(
+                "bgp_rpki_vrp_count",
+                "Number of RPKI VRP entries by address family",
+            ),
+            &["af"],
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -268,6 +280,9 @@ impl BgpMetrics {
         registry
             .register(Box::new(gr_timer_expired.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(rpki_vrp_count.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -288,6 +303,7 @@ impl BgpMetrics {
             gr_active_peers,
             gr_stale_routes,
             gr_timer_expired,
+            rpki_vrp_count,
         }
     }
 
@@ -402,6 +418,11 @@ impl BgpMetrics {
     /// Record a GR timer expiration for a peer.
     pub fn record_gr_timer_expired(&self, peer: &str) {
         self.gr_timer_expired.with_label_values(&[peer]).inc();
+    }
+
+    /// Set RPKI VRP count by address family.
+    pub fn set_rpki_vrp_count(&self, af: &str, count: i64) {
+        self.rpki_vrp_count.with_label_values(&[af]).set(count);
     }
 }
 

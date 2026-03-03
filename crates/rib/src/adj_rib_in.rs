@@ -55,6 +55,10 @@ impl AdjRibIn {
         self.routes.values()
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route> {
+        self.routes.values_mut()
+    }
+
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
         self.routes.get(&(*prefix, path_id))
@@ -148,6 +152,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
     }
 
@@ -162,6 +167,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
     }
 

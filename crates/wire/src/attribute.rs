@@ -83,6 +83,19 @@ impl AsPath {
         })
     }
 
+    /// Extract the origin ASN from the `AS_PATH`.
+    ///
+    /// The origin AS is the last ASN in the rightmost `AS_SEQUENCE` segment.
+    /// Returns `None` if the path has no `AS_SEQUENCE` segments or all
+    /// `AS_SEQUENCE` segments are empty.
+    #[must_use]
+    pub fn origin_asn(&self) -> Option<u32> {
+        self.segments.iter().rev().find_map(|seg| match seg {
+            AsPathSegment::AsSequence(asns) => asns.last().copied(),
+            AsPathSegment::AsSet(_) => None,
+        })
+    }
+
     /// Convert to a string representation for regex matching.
     ///
     /// `AS_SEQUENCE` segments produce space-separated ASNs.

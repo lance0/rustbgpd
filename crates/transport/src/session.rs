@@ -1095,6 +1095,7 @@ impl PeerSession {
                     update_communities,
                     update_large_communities,
                     &aspath_str,
+                    rustbgpd_wire::RpkiValidation::NotFound,
                 );
                 if result.action != rustbgpd_policy::PolicyAction::Permit {
                     return None;
@@ -1121,6 +1122,7 @@ impl PeerSession {
                         .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                     is_stale: false,
                     path_id: entry.path_id,
+                    validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 })
             })
             .collect();
@@ -1162,6 +1164,7 @@ impl PeerSession {
                             update_communities,
                             update_large_communities,
                             &aspath_str,
+                            rustbgpd_wire::RpkiValidation::NotFound,
                         );
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
                             let mut attrs = mp_route_attrs.clone();
@@ -1188,6 +1191,7 @@ impl PeerSession {
                                     .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                 is_stale: false,
                                 path_id: entry.path_id,
+                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                             });
                         }
                     }
@@ -1775,6 +1779,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
     }
 
@@ -1880,6 +1885,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
         let attrs =
             session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
@@ -1906,6 +1912,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
 
         let attrs =
@@ -1952,6 +1959,7 @@ mod tests {
             peer_router_id: source_id,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
 
         let attrs =

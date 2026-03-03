@@ -54,6 +54,43 @@ pub use open::OpenMessage;
 pub use route_refresh::RouteRefreshMessage;
 pub use update::UpdateMessage;
 
+/// RPKI origin validation state per RFC 6811.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RpkiValidation {
+    /// A VRP covers the prefix and the origin AS matches.
+    Valid,
+    /// A VRP covers the prefix but the origin AS does not match.
+    Invalid,
+    /// No VRP covers the prefix.
+    #[default]
+    NotFound,
+}
+
+impl std::fmt::Display for RpkiValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Valid => write!(f, "valid"),
+            Self::Invalid => write!(f, "invalid"),
+            Self::NotFound => write!(f, "not_found"),
+        }
+    }
+}
+
+impl std::str::FromStr for RpkiValidation {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "valid" => Ok(Self::Valid),
+            "invalid" => Ok(Self::Invalid),
+            "not_found" => Ok(Self::NotFound),
+            other => Err(format!(
+                "unknown RPKI validation state {other:?}, expected \"valid\", \"invalid\", or \"not_found\""
+            )),
+        }
+    }
+}
+
 // Re-export attribute types
 pub use attribute::{
     AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MpReachNlri, MpUnreachNlri, Origin,
@@ -62,3 +99,6 @@ pub use attribute::{
 pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
 pub use update::ParsedUpdate;
 pub use validate::{UpdateError, is_valid_ipv6_nexthop};
+
+// Re-export RPKI types
+// (RpkiValidation is defined above in this file)

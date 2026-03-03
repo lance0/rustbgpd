@@ -204,6 +204,8 @@ message Route {
   repeated string large_communities = 12;
   // Add-Path path identifier (RFC 7911). 0 = no Add-Path.
   uint32 path_id = 13;
+  // RPKI validation state: "valid", "invalid", or "not_found".
+  string validation_state = 14;
 }
 
 message WatchRoutesRequest {

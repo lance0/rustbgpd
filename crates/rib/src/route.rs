@@ -1,7 +1,9 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
-use rustbgpd_wire::{AsPath, ExtendedCommunity, LargeCommunity, Origin, PathAttribute, Prefix};
+use rustbgpd_wire::{
+    AsPath, ExtendedCommunity, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
+};
 
 /// How a route was learned, used for best-path selection and iBGP split-horizon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +32,8 @@ pub struct Route {
     pub is_stale: bool,
     /// Add-Path path identifier (RFC 7911). 0 = no Add-Path / default path.
     pub path_id: u32,
+    /// RPKI origin validation state (RFC 6811). Default: `NotFound`.
+    pub validation_state: RpkiValidation,
 }
 
 impl Route {

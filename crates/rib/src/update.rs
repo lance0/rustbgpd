@@ -1,6 +1,8 @@
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use rustbgpd_policy::Policy;
+use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -93,4 +95,6 @@ pub enum RibUpdate {
     },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
     RouteRefreshRequest { peer: IpAddr, afi: Afi, safi: Safi },
+    /// RPKI cache update — new VRP table for origin validation.
+    RpkiCacheUpdate { table: Arc<VrpTable> },
 }

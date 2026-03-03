@@ -21,6 +21,37 @@ pub struct Config {
     pub neighbors: Vec<Neighbor>,
     #[serde(default)]
     pub policy: PolicyConfig,
+    #[serde(default)]
+    pub rpki: Option<RpkiConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RpkiConfig {
+    #[serde(default)]
+    pub cache_servers: Vec<CacheServer>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheServer {
+    pub address: String,
+    #[serde(default = "default_rpki_refresh")]
+    pub refresh_interval: u64,
+    #[serde(default = "default_rpki_retry")]
+    pub retry_interval: u64,
+    #[serde(default = "default_rpki_expire")]
+    pub expire_interval: u64,
+}
+
+fn default_rpki_refresh() -> u64 {
+    3600
+}
+fn default_rpki_retry() -> u64 {
+    600
+}
+fn default_rpki_expire() -> u64 {
+    7200
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,6 +149,8 @@ pub struct PolicyStatementConfig {
     pub match_community: Vec<String>,
     /// `AS_PATH` regex pattern (Cisco/Quagga style: `_` = boundary anchor).
     pub match_as_path: Option<String>,
+    /// RPKI validation state to match: `"valid"`, `"invalid"`, or `"not_found"`.
+    pub match_rpki_validation: Option<String>,
     /// Set `LOCAL_PREF` on matching routes.
     pub set_local_pref: Option<u32>,
     /// Set MED on matching routes.
@@ -165,6 +198,8 @@ pub enum ConfigError {
     InvalidGrConfig { reason: String },
     #[error("invalid route reflector config: {reason}")]
     InvalidRrConfig { reason: String },
+    #[error("invalid RPKI config: {reason}")]
+    InvalidRpkiConfig { reason: String },
 }
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
@@ -281,9 +316,25 @@ fn parse_policy(entries: &[PolicyStatementConfig]) -> Result<Option<Policy>, Con
             None
         };
 
-        if prefix.is_none() && match_community.is_empty() && match_as_path.is_none() {
+        let match_rpki_validation = if let Some(ref s) = e.match_rpki_validation {
+            Some(s.parse::<rustbgpd_wire::RpkiValidation>().map_err(|_| {
+                ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "invalid match_rpki_validation {s:?}: expected \"valid\", \"invalid\", or \"not_found\""
+                    ),
+                }
+            })?)
+        } else {
+            None
+        };
+
+        if prefix.is_none()
+            && match_community.is_empty()
+            && match_as_path.is_none()
+            && match_rpki_validation.is_none()
+        {
             return Err(ConfigError::InvalidPolicyEntry {
-                reason: "entry must have at least one of 'prefix', 'match_community', or 'match_as_path'".to_string(),
+                reason: "entry must have at least one of 'prefix', 'match_community', 'match_as_path', or 'match_rpki_validation'".to_string(),
             });
         }
 
@@ -297,6 +348,7 @@ fn parse_policy(entries: &[PolicyStatementConfig]) -> Result<Option<Policy>, Con
             action,
             match_community,
             match_as_path,
+            match_rpki_validation,
             modifications,
         });
     }
@@ -606,6 +658,41 @@ impl Config {
 
             parse_policy(&neighbor.import_policy)?;
             parse_policy(&neighbor.export_policy)?;
+        }
+
+        // Validate RPKI cache server config
+        if let Some(ref rpki) = self.rpki {
+            for (i, server) in rpki.cache_servers.iter().enumerate() {
+                if server.refresh_interval == 0 {
+                    return Err(ConfigError::InvalidRpkiConfig {
+                        reason: format!(
+                            "cache_server[{i}]: refresh_interval must be > 0"
+                        ),
+                    });
+                }
+                if server.retry_interval == 0 {
+                    return Err(ConfigError::InvalidRpkiConfig {
+                        reason: format!(
+                            "cache_server[{i}]: retry_interval must be > 0"
+                        ),
+                    });
+                }
+                if server.expire_interval == 0 {
+                    return Err(ConfigError::InvalidRpkiConfig {
+                        reason: format!(
+                            "cache_server[{i}]: expire_interval must be > 0"
+                        ),
+                    });
+                }
+                if server.expire_interval < server.refresh_interval {
+                    return Err(ConfigError::InvalidRpkiConfig {
+                        reason: format!(
+                            "cache_server[{i}]: expire_interval ({}) must be >= refresh_interval ({})",
+                            server.expire_interval, server.refresh_interval
+                        ),
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -1678,5 +1765,203 @@ receive = true
         let config = parse(valid_toml()).unwrap();
         let peers = config.to_peer_configs().unwrap();
         assert!(!peers[0].0.peer.add_path_receive);
+    }
+
+    // --- RPKI config tests ---
+
+    #[test]
+    fn rpki_single_cache_server_parses() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+"#;
+        let config = parse(toml_str).unwrap();
+        let rpki = config.rpki.as_ref().unwrap();
+        assert_eq!(rpki.cache_servers.len(), 1);
+        assert_eq!(rpki.cache_servers[0].address, "127.0.0.1:3323");
+        // Check defaults
+        assert_eq!(rpki.cache_servers[0].refresh_interval, 3600);
+        assert_eq!(rpki.cache_servers[0].retry_interval, 600);
+        assert_eq!(rpki.cache_servers[0].expire_interval, 7200);
+    }
+
+    #[test]
+    fn rpki_multiple_cache_servers_parses() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[rpki]
+[[rpki.cache_servers]]
+address = "10.0.0.10:3323"
+refresh_interval = 1800
+retry_interval = 300
+expire_interval = 3600
+
+[[rpki.cache_servers]]
+address = "10.0.0.11:8282"
+"#;
+        let config = parse(toml_str).unwrap();
+        let rpki = config.rpki.as_ref().unwrap();
+        assert_eq!(rpki.cache_servers.len(), 2);
+        assert_eq!(rpki.cache_servers[0].refresh_interval, 1800);
+        assert_eq!(rpki.cache_servers[0].retry_interval, 300);
+        assert_eq!(rpki.cache_servers[0].expire_interval, 3600);
+        // Second server uses defaults
+        assert_eq!(rpki.cache_servers[1].refresh_interval, 3600);
+    }
+
+    #[test]
+    fn rpki_absent_means_none() {
+        let config = parse(valid_toml()).unwrap();
+        assert!(config.rpki.is_none());
+    }
+
+    #[test]
+    fn rpki_policy_match_rpki_validation_parses() {
+        let toml = community_toml(
+            r#"action = "deny"
+            match_rpki_validation = "invalid""#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert_eq!(import.entries.len(), 1);
+        assert_eq!(
+            import.entries[0].match_rpki_validation,
+            Some(rustbgpd_wire::RpkiValidation::Invalid)
+        );
+    }
+
+    #[test]
+    fn rpki_policy_match_rpki_validation_valid() {
+        let toml = community_toml(
+            r#"action = "permit"
+            match_rpki_validation = "valid""#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert_eq!(
+            import.entries[0].match_rpki_validation,
+            Some(rustbgpd_wire::RpkiValidation::Valid)
+        );
+    }
+
+    #[test]
+    fn rpki_policy_match_rpki_validation_not_found() {
+        let toml = community_toml(
+            r#"action = "permit"
+            match_rpki_validation = "not_found""#,
+        );
+        let config = parse(&toml).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let import = peers[0].2.as_ref().unwrap();
+        assert_eq!(
+            import.entries[0].match_rpki_validation,
+            Some(rustbgpd_wire::RpkiValidation::NotFound)
+        );
+    }
+
+    #[test]
+    fn rpki_policy_match_rpki_validation_bad_value_rejected() {
+        let toml = community_toml(
+            r#"action = "deny"
+            match_rpki_validation = "unknown_state""#,
+        );
+        assert!(parse(&toml).is_err());
+    }
+
+    #[test]
+    fn rpki_policy_match_rpki_validation_standalone() {
+        // match_rpki_validation alone (without prefix/community/aspath) should be valid
+        let toml = community_toml(
+            r#"action = "deny"
+            match_rpki_validation = "invalid""#,
+        );
+        assert!(parse(&toml).is_ok());
+    }
+
+    fn rpki_toml(cache_fields: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+{cache_fields}
+"#
+        )
+    }
+
+    #[test]
+    fn rpki_zero_refresh_interval_rejected() {
+        let err = parse(&rpki_toml("refresh_interval = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    }
+
+    #[test]
+    fn rpki_zero_retry_interval_rejected() {
+        let err = parse(&rpki_toml("retry_interval = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    }
+
+    #[test]
+    fn rpki_zero_expire_interval_rejected() {
+        let err = parse(&rpki_toml("expire_interval = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    }
+
+    #[test]
+    fn rpki_expire_less_than_refresh_rejected() {
+        let err = parse(&rpki_toml(
+            "refresh_interval = 3600\nexpire_interval = 1800",
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRpkiConfig { .. }));
+    }
+
+    #[test]
+    fn rpki_expire_equals_refresh_accepted() {
+        assert!(parse(&rpki_toml(
+            "refresh_interval = 3600\nexpire_interval = 3600",
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn rpki_valid_custom_timers_accepted() {
+        let config = parse(&rpki_toml(
+            "refresh_interval = 1800\nretry_interval = 300\nexpire_interval = 3600",
+        ))
+        .unwrap();
+        let rpki = config.rpki.as_ref().unwrap();
+        assert_eq!(rpki.cache_servers[0].refresh_interval, 1800);
+        assert_eq!(rpki.cache_servers[0].retry_interval, 300);
+        assert_eq!(rpki.cache_servers[0].expire_interval, 3600);
     }
 }

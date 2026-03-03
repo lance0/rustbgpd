@@ -4,14 +4,24 @@
 
 use std::cmp::Ordering;
 
-use rustbgpd_wire::AsPath;
+use rustbgpd_wire::{AsPath, RpkiValidation};
 
 use crate::route::Route;
+
+/// Numeric preference for RPKI validation state: higher = more preferred.
+fn rpki_preference(v: RpkiValidation) -> u8 {
+    match v {
+        RpkiValidation::Valid => 2,
+        RpkiValidation::NotFound => 1,
+        RpkiValidation::Invalid => 0,
+    }
+}
 
 /// Compare two routes for best-path selection.
 ///
 /// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
 /// 0. Non-stale preferred over stale (RFC 4724 demotion)
+/// 0.5. RPKI validation: Valid > `NotFound` > Invalid (RFC 6811)
 /// 1. Highest `LOCAL_PREF` (default 100)
 /// 2. Shortest `AS_PATH` length (default 0)
 /// 3. Lowest ORIGIN — IGP < EGP < INCOMPLETE
@@ -24,6 +34,12 @@ use crate::route::Route;
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
     // 0. Non-stale preferred over stale (RFC 4724)
     let cmp = a.is_stale.cmp(&b.is_stale);
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // 0.5. RPKI validation: Valid > NotFound > Invalid (higher preference wins)
+    let cmp = rpki_preference(b.validation_state).cmp(&rpki_preference(a.validation_state));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -107,6 +123,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
     }
 
@@ -333,6 +350,65 @@ mod tests {
         // b has lower peer → b wins
         assert_eq!(best_path_cmp(&a, &b), Ordering::Greater);
     }
+
+    #[test]
+    fn rpki_valid_beats_not_found() {
+        let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        a.validation_state = RpkiValidation::Valid;
+        let b = base_route(Ipv4Addr::new(1, 0, 0, 2)); // NotFound (default)
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+    }
+
+    #[test]
+    fn rpki_not_found_beats_invalid() {
+        let a = base_route(Ipv4Addr::new(1, 0, 0, 1)); // NotFound (default)
+        let mut b = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        b.validation_state = RpkiValidation::Invalid;
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+    }
+
+    #[test]
+    fn rpki_valid_beats_invalid() {
+        let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        a.validation_state = RpkiValidation::Valid;
+        let mut b = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        b.validation_state = RpkiValidation::Invalid;
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+    }
+
+    #[test]
+    fn rpki_tie_falls_through_to_local_pref() {
+        // Both Valid — should fall through to LOCAL_PREF
+        let mut a = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 200);
+        a.validation_state = RpkiValidation::Valid;
+        let mut b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
+        b.validation_state = RpkiValidation::Valid;
+        // a has higher LP → a wins
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+    }
+
+    #[test]
+    fn rpki_beats_local_pref() {
+        // Valid with lower LOCAL_PREF beats NotFound with higher LOCAL_PREF
+        let mut a = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 1)), 50);
+        a.validation_state = RpkiValidation::Valid;
+        let b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 200);
+        // a is Valid, b is NotFound → a wins despite lower LP
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
+    }
+
+    #[test]
+    fn stale_beats_rpki() {
+        // Stale demotion (step 0) takes precedence over RPKI (step 0.5)
+        let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
+        a.validation_state = RpkiValidation::Valid;
+        a.is_stale = true;
+        let mut b = base_route(Ipv4Addr::new(1, 0, 0, 2));
+        b.validation_state = RpkiValidation::Invalid;
+        b.is_stale = false;
+        // b is non-stale → b wins despite Invalid RPKI
+        assert_eq!(best_path_cmp(&a, &b), Ordering::Greater);
+    }
 }
 
 #[cfg(test)]
@@ -406,6 +482,7 @@ mod proptests {
                         peer_router_id: Ipv4Addr::UNSPECIFIED,
                         is_stale: false,
                         path_id: 0,
+                        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                     }
                 },
             )

@@ -41,7 +41,8 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Route Reflector** -- RFC 4456 client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST, loop detection
 - **Extended Messages** -- RFC 8654 raises the 4096-byte message limit to 65535 bytes
 - **Add-Path** -- RFC 7911 receive + single-best send; multiple paths per prefix from Add-Path peers
-- **628 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **RPKI origin validation** -- RFC 6811/8210: RTR client connects to RPKI validators, stamps routes Valid/Invalid/NotFound, integrates into best-path and policy
+- **715 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -122,7 +123,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
                +-----+       +-----------+
 ```
 
-Seven crates with strict dependency rules:
+Eight crates with strict dependency rules:
 
 | Crate | Description |
 |-------|-------------|
@@ -131,6 +132,7 @@ Seven crates with strict dependency rules:
 | `rustbgpd-transport` | Tokio TCP glue. The only crate that touches async I/O. |
 | `rustbgpd-rib` | Adj-RIB-In, Loc-RIB best-path, Adj-RIB-Out. Single-task ownership, no locks. |
 | `rustbgpd-policy` | Policy engine: prefix/community/AS_PATH matching, route modifications. |
+| `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
 | `rustbgpd-api` | gRPC server (tonic). Five services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 
@@ -178,7 +180,9 @@ The config file is TOML. All runtime changes go through gRPC -- the file is only
 
 **`[[neighbors]]`** -- One block per peer: `address`, `remote_asn`, optional `description`, `hold_time` (default 90), `max_prefixes`, `md5_password`, `ttl_security`, `families` (address families to negotiate, default `["ipv4_unicast"]`), `graceful_restart` (default `true`), `gr_restart_time` (default 120), `gr_stale_routes_time` (default 360).
 
-**`[policy]`** -- Global import/export policy. Each entry has `action` (`permit`/`deny`), match conditions (`prefix`, `match_community`, `match_as_path`), and optional route modifications (`set_local_pref`, `set_med`, `set_next_hop`, `set_community_add`/`remove`, `set_as_path_prepend`).
+**`[rpki]`** -- RPKI origin validation. Connect to one or more RTR cache validators. Routes stamped Valid/Invalid/NotFound, integrated into best-path selection and policy matching.
+
+**`[policy]`** -- Global import/export policy. Each entry has `action` (`permit`/`deny`), match conditions (`prefix`, `match_community`, `match_as_path`, `match_rpki_validation`), and optional route modifications (`set_local_pref`, `set_med`, `set_next_hop`, `set_community_add`/`remove`, `set_as_path_prepend`).
 
 **`[[neighbors.import_policy]]` / `[[neighbors.export_policy]]`** -- Per-neighbor policy overrides. Same format as global policy entries.
 
@@ -251,7 +255,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 628 tests pass. P0 production blockers complete. Extended Messages (RFC 8654) and Add-Path receive (RFC 7911) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 715 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Add-Path receive (RFC 7911), and RPKI origin validation (RFC 6811/8210) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -268,7 +272,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | **Large communities** | **post-v0.3.0** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |
 | **Route Reflector** | **post-v0.3.0** | **RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST** |
 
-Next: Add-Path multi-path send, RPKI. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: Add-Path multi-path send, FlowSpec. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

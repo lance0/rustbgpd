@@ -157,6 +157,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: req.path_id,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();

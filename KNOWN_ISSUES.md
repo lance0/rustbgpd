@@ -71,6 +71,22 @@ resolved.
   created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive.
   TOML config with `[neighbors.add_path] receive = true` is the only way
   to enable it currently.
+- **TCP-AO not supported for RTR connections.** RPKI cache server
+  connections use plain TCP. TCP-AO (RFC 5925) is not supported for
+  either BGP or RTR sessions. Use network-level access controls or
+  SSH tunnels for RTR transport security.
+- **RTR client disconnects between refreshes.** The RTR client closes
+  the TCP connection after receiving EndOfData and reconnects after
+  `refresh_interval`. This means the cache server cannot push Serial
+  Notify events between polls, delaying cache-change visibility by up
+  to `refresh_interval`. Periodic Serial Query on reconnect still
+  ensures correctness. A persistent-session design is tracked as a
+  hardening item.
+- **RTR expire_interval is not enforced.** The `expire_interval` config
+  field and the server-advertised expire value in EndOfData are accepted
+  but not acted on. VRPs are only cleared on connection failure
+  (`ServerDown`), not on expiry timeout. A server that stays connected
+  but stops sending fresh data will retain stale VRPs indefinitely.
 - **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
   negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
   was not negotiated, the wire format is ambiguous — the 4-byte path ID

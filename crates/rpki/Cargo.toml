@@ -1,5 +1,5 @@
 [package]
-name = "rustbgpd-rib"
+name = "rustbgpd-rpki"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,19 +7,13 @@ license.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "RIB data structures — Adj-RIB-In, Loc-RIB best-path selection, Adj-RIB-Out"
+description = "RPKI origin validation — VRP table, RTR protocol client, cache management"
 
 [dependencies]
 rustbgpd-wire.workspace = true
-rustbgpd-policy.workspace = true
-rustbgpd-telemetry.workspace = true
-rustbgpd-rpki.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-tokio-stream.workspace = true
-
 [dev-dependencies]
-proptest = "1"
 tokio = { workspace = true, features = ["test-util"] }

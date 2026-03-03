@@ -101,6 +101,7 @@ mod tests {
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
             path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
     }
 

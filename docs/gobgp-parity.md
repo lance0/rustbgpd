@@ -71,7 +71,7 @@ Last updated: 2026-03-03
 | AS_PATH regex | Yes | Yes | Cisco/Quagga `_` convention |
 | AS_PATH length match | Yes | No | |
 | Neighbor set matching | Yes | No | |
-| RPKI validation result match | Yes | No | |
+| RPKI validation result match | Yes | Yes | `match_rpki_validation` in policy |
 | Route type match (int/ext/local) | Yes | No | |
 | MED / LOCAL_PREF comparison | Yes | No | |
 | Next-hop matching | Yes | No | |
@@ -98,7 +98,7 @@ Last updated: 2026-03-03
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | No | Config-file only |
-| RPKI management | Yes | No | |
+| RPKI management | Yes | Partial | VRP/cache status via metrics; no gRPC RPKI CRUD |
 | BMP management | Yes | No | |
 | MRT control | Yes | No | |
 | Zebra/FRR integration | Yes | No | |
@@ -125,7 +125,7 @@ Last updated: 2026-03-03
 | TCP MD5 (RFC 2385) | Yes | Yes | |
 | TCP-AO (RFC 5925) | No | No | Neither; on rustbgpd roadmap |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
-| RPKI/RTR (RFC 6811/8210) | Yes | No | On roadmap |
+| RPKI/RTR (RFC 6811/8210) | Yes | Yes | VRP table, RTR client, best-path integration |
 | Private AS removal | Yes | No | |
 
 ## Operations
@@ -155,6 +155,7 @@ Last updated: 2026-03-03
 | ORIGINATOR_ID | Yes | Yes | RFC 4456 §9 |
 | Lowest peer tiebreaker | Yes | Yes | |
 | Stale route demotion | Yes | Yes | GR step 0 |
+| RPKI preference | Yes | Yes | Step 0.5: Valid > NotFound > Invalid |
 | AIGP | Yes | No | |
 | Multipath/ECMP | Yes | No | |
 
@@ -165,16 +166,16 @@ Last updated: 2026-03-03
 | Address families | 15 | 2 | ~13% |
 | Core protocol | 14 | 9 | ~64% |
 | Path attributes | 13 | 9 | ~69% |
-| Policy engine | 18 | 10 | ~56% |
+| Policy engine | 18 | 11 | ~61% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
 | Monitoring | 5 | 3 | 60% |
-| Security | 4 | 2 | 50% |
-| Best-path steps | 10 | 9 | 90% |
+| Security | 4 | 3 | 75% |
+| Best-path steps | 11 | 10 | ~91% |
 
 ## Biggest Gaps for Target Users (IX operators, automation teams)
 
 1. **Add-Path multi-path send** — receive landing done; route server mode needs multi-path outbound
 2. **GR restarting speaker** — only receiving today
-3. **RPKI/RTR** — growing regulatory requirement
-4. **Policy chaining** — first-match-wins only, no multi-policy sequencing
-5. **Extended nexthop (RFC 8950)** — IPv6 next-hop for IPv4 NLRI
+3. **Policy chaining** — first-match-wins only, no multi-policy sequencing
+4. **Extended nexthop (RFC 8950)** — IPv6 next-hop for IPv4 NLRI
+5. **FlowSpec (RFC 5575/8955)** — programmatic traffic filtering rules

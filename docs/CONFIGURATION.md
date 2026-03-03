@@ -225,6 +225,102 @@ ORIGINATOR_ID/CLUSTER_LIST handling.
 
 ---
 
+## `[rpki]`
+
+Optional. Configures RPKI origin validation via the RTR protocol (RFC 8210).
+rustbgpd connects to one or more RPKI cache validators and uses their VRP
+(Validated ROA Payload) data to classify routes as Valid, Invalid, or NotFound.
+
+### Prerequisites
+
+You need a running RPKI validator that speaks RTR:
+
+| Validator | Default RTR Port | Notes |
+|-----------|:----------------:|-------|
+| [Routinator](https://nlnetlabs.nl/projects/routinator/) | 3323 | Rust, recommended |
+| [rpki-client](https://www.rpki-client.org/) | 8282 | OpenBSD origin |
+| [FORT](https://fortproject.net/) | 8323 | C, lightweight |
+| [OctoRPKI](https://github.com/cloudflare/cfrpki) | 8282 | Go, Cloudflare |
+
+### Basic setup
+
+```toml
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+```
+
+### Multiple cache servers (redundancy)
+
+For production, connect to 2+ caches. VRPs are merged (union) across all
+connected caches:
+
+```toml
+[rpki]
+[[rpki.cache_servers]]
+address = "rpki1.example.com:3323"
+
+[[rpki.cache_servers]]
+address = "rpki2.example.com:3323"
+```
+
+### Cache server options
+
+| Field | Type | Required | Default | Description |
+|-------|------|:--------:|:-------:|-------------|
+| `address` | string | yes | -- | Cache server `host:port` |
+| `refresh_interval` | u64 | no | 3600 | Seconds between Serial Queries |
+| `retry_interval` | u64 | no | 600 | Seconds before reconnect on failure |
+| `expire_interval` | u64 | no | 7200 | Seconds before discarding stale VRPs |
+
+### Validation states
+
+Every route receives a validation state based on RPKI data:
+
+| State | Meaning | Best-path effect |
+|-------|---------|------------------|
+| **Valid** | Origin AS matches a VRP covering the prefix | Preferred |
+| **NotFound** | No VRP covers the prefix | Neutral (default) |
+| **Invalid** | VRP covers the prefix but origin AS doesn't match | Deprioritized |
+
+### Policy integration
+
+Use `match_rpki_validation` in policy statements to filter routes by RPKI state.
+
+Drop RPKI-invalid routes (recommended):
+
+```toml
+[[policy.import]]
+match_rpki_validation = "invalid"
+action = "deny"
+```
+
+Prefer valid routes with higher LOCAL_PREF:
+
+```toml
+[[policy.import]]
+match_rpki_validation = "valid"
+action = "permit"
+set_local_pref = 200
+
+[[policy.import]]
+match_rpki_validation = "not_found"
+action = "permit"
+set_local_pref = 100
+```
+
+### Monitoring
+
+Prometheus metrics exposed at the configured metrics endpoint:
+
+| Metric | Description |
+|--------|-------------|
+| `bgp_rpki_vrp_count{af="ipv4\|ipv6"}` | Current VRP entries by address family |
+
+See [ADR-0034](docs/adr/0034-rpki-origin-validation.md) for design details.
+
+---
+
 ## `[policy]`
 
 Optional. Defines global import and export policy that applies to all neighbors
@@ -267,9 +363,10 @@ same entry are ANDed.
 | `le`              | u8       | no       | Maximum prefix length to match (inclusive)             |
 | `match_community` | [string] | no*      | Community match criteria (see below). OR within list.  |
 | `match_as_path`   | string   | no*      | AS_PATH regex (Cisco/Quagga style, `_` = boundary)    |
+| `match_rpki_validation` | string | no* | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` |
 | `action`          | string   | yes      | `"permit"` or `"deny"`                                |
 
-*At least one of `prefix`, `match_community`, or `match_as_path` is required.
+*At least one of `prefix`, `match_community`, `match_as_path`, or `match_rpki_validation` is required.
 
 ### Route modifications (set actions)
 
@@ -471,11 +568,13 @@ starting:
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
-| Policy entry must have at least one match condition (`prefix`, `match_community`, or `match_as_path`) | `must have at least one match condition` |
+| Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, or `match_rpki_validation`) | `must have at least one match condition` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |
 | `match_as_path` must be a valid regex | `invalid regex` |
 | RT/RO extended community ASN must be <= 65535 (2-octet AS sub-type) | `ASN exceeds 65535` |
+| RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |
+| RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
 ### Defaults applied at runtime

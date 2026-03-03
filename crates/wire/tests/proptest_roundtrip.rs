@@ -56,10 +56,10 @@ fn arb_capability() -> impl Strategy<Value = Capability> {
             }),
         any::<u32>().prop_map(|asn| Capability::FourOctetAs { asn }),
         // Unknown capabilities: code must not collide with known codes
-        // (1 = MultiProtocol, 2 = RouteRefresh, 64 = GracefulRestart,
-        // 65 = FourOctetAs), and data length fits in u8.
+        // (1 = MultiProtocol, 2 = RouteRefresh, 6 = ExtendedMessage,
+        // 64 = GracefulRestart, 65 = FourOctetAs, 69 = AddPath).
         (
-            prop_oneof![3..64u8, 66..=255u8],
+            prop_oneof![3..6u8, 7..64u8, 66..69u8, 70..=255u8],
             proptest::collection::vec(any::<u8>(), 0..32)
         )
             .prop_map(|(code, data)| Capability::Unknown {
