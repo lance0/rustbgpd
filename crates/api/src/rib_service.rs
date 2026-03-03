@@ -7,8 +7,8 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::proto;
-use rustbgpd_rib::{RibUpdate, Route, RouteEventType};
-use rustbgpd_wire::{AsPathSegment, PathAttribute, Prefix};
+use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteEventType};
+use rustbgpd_wire::{Afi, AsPathSegment, PathAttribute, Prefix};
 
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -48,12 +48,14 @@ impl RibService {
 }
 
 /// Validate the requested address family.
-/// 0 = UNSPECIFIED (treat as "any"), 1 = `IPV4_UNICAST`, 2 = `IPV6_UNICAST`.
+/// 0 = UNSPECIFIED (treat as "any"), 1-4 = valid families.
 #[allow(clippy::result_large_err)]
 fn validate_afi_safi(value: i32) -> Result<(), Status> {
     if value != 0
         && value != proto::AddressFamily::Ipv4Unicast as i32
         && value != proto::AddressFamily::Ipv6Unicast as i32
+        && value != proto::AddressFamily::Ipv4Flowspec as i32
+        && value != proto::AddressFamily::Ipv6Flowspec as i32
     {
         return Err(Status::invalid_argument("unsupported address family"));
     }
@@ -346,6 +348,238 @@ impl proto::rib_service_server::RibService for RibService {
 
         Ok(Response::new(Box::pin(stream)))
     }
+
+    async fn list_flow_spec_routes(
+        &self,
+        request: Request<proto::ListFlowSpecRequest>,
+    ) -> Result<Response<proto::ListFlowSpecResponse>, Status> {
+        let req = request.into_inner();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryFlowSpecRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let all_routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        // Filter by AFI if requested
+        let filtered: Vec<&FlowSpecRoute> = all_routes
+            .iter()
+            .filter(|r| {
+                if req.afi_safi == proto::AddressFamily::Ipv4Flowspec as i32 {
+                    r.afi == Afi::Ipv4
+                } else if req.afi_safi == proto::AddressFamily::Ipv6Flowspec as i32 {
+                    r.afi == Afi::Ipv6
+                } else {
+                    true // unspecified = all
+                }
+            })
+            .collect();
+
+        let routes: Vec<proto::FlowSpecRouteEntry> =
+            filtered.iter().map(|r| flowspec_route_to_proto(r)).collect();
+
+        Ok(Response::new(proto::ListFlowSpecResponse { routes }))
+    }
+}
+
+#[expect(clippy::too_many_lines)]
+fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
+    let mut as_path = Vec::new();
+    let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
+
+    for attr in &route.attributes {
+        match attr {
+            PathAttribute::AsPath(path) => {
+                for segment in &path.segments {
+                    let asns = match segment {
+                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                    };
+                    as_path.extend(asns);
+                }
+            }
+            PathAttribute::Communities(c) => communities.extend(c),
+            PathAttribute::ExtendedCommunities(ec) => {
+                extended_communities.extend(ec.iter().map(|c| c.as_u64()));
+            }
+            _ => {}
+        }
+    }
+
+    let components: Vec<proto::FlowSpecComponent> = route
+        .rule
+        .components
+        .iter()
+        .map(|c| {
+            use rustbgpd_wire::FlowSpecComponent as FC;
+            match c {
+                FC::DestinationPrefix(p) => proto::FlowSpecComponent {
+                    r#type: 1,
+                    prefix: format_flowspec_prefix(p),
+                    value: String::new(),
+                },
+                FC::SourcePrefix(p) => proto::FlowSpecComponent {
+                    r#type: 2,
+                    prefix: format_flowspec_prefix(p),
+                    value: String::new(),
+                },
+                FC::IpProtocol(ops) => proto::FlowSpecComponent {
+                    r#type: 3,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::Port(ops) => proto::FlowSpecComponent {
+                    r#type: 4,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::DestinationPort(ops) => proto::FlowSpecComponent {
+                    r#type: 5,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::SourcePort(ops) => proto::FlowSpecComponent {
+                    r#type: 6,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::IcmpType(ops) => proto::FlowSpecComponent {
+                    r#type: 7,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::IcmpCode(ops) => proto::FlowSpecComponent {
+                    r#type: 8,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::TcpFlags(ops) => proto::FlowSpecComponent {
+                    r#type: 9,
+                    prefix: String::new(),
+                    value: ops
+                        .iter()
+                        .map(|o| format!("0x{:04x}", o.value))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                },
+                FC::PacketLength(ops) => proto::FlowSpecComponent {
+                    r#type: 10,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::Dscp(ops) => proto::FlowSpecComponent {
+                    r#type: 11,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+                FC::Fragment(ops) => proto::FlowSpecComponent {
+                    r#type: 12,
+                    prefix: String::new(),
+                    value: ops
+                        .iter()
+                        .map(|o| format!("0x{:04x}", o.value))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                },
+                FC::FlowLabel(ops) => proto::FlowSpecComponent {
+                    r#type: 13,
+                    prefix: String::new(),
+                    value: format_numeric_ops(ops),
+                },
+            }
+        })
+        .collect();
+
+    // Extract FlowSpec actions from extended communities
+    let actions: Vec<proto::FlowSpecAction> = route
+        .attributes
+        .iter()
+        .filter_map(|attr| match attr {
+            PathAttribute::ExtendedCommunities(ecs) => Some(ecs),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|ec| {
+            use rustbgpd_wire::flowspec::FlowSpecAction as FA;
+            let action = ec.as_flowspec_action()?;
+            let inner = match action {
+                FA::TrafficRateBytes { rate, .. } => {
+                    proto::flow_spec_action::Action::TrafficRate(proto::FlowSpecTrafficRate {
+                        rate,
+                    })
+                }
+                FA::TrafficAction { sample, terminal } => {
+                    proto::flow_spec_action::Action::TrafficAction(
+                        proto::FlowSpecTrafficAction { sample, terminal },
+                    )
+                }
+                FA::TrafficMarking { dscp } => {
+                    proto::flow_spec_action::Action::TrafficMarking(
+                        proto::FlowSpecTrafficMarking {
+                            dscp: u32::from(dscp),
+                        },
+                    )
+                }
+                FA::Redirect2Octet { asn, value } => {
+                    proto::flow_spec_action::Action::Redirect(proto::FlowSpecRedirect {
+                        route_target: format!("{asn}:{value}"),
+                    })
+                }
+                _ => return None,
+            };
+            Some(proto::FlowSpecAction {
+                action: Some(inner),
+            })
+        })
+        .collect();
+
+    let afi_safi = match route.afi {
+        Afi::Ipv4 => proto::AddressFamily::Ipv4Flowspec,
+        Afi::Ipv6 => proto::AddressFamily::Ipv6Flowspec,
+    };
+
+    proto::FlowSpecRouteEntry {
+        components,
+        actions,
+        peer_address: route.peer.to_string(),
+        afi_safi: afi_safi.into(),
+        as_path,
+        communities,
+        extended_communities,
+    }
+}
+
+fn format_flowspec_prefix(p: &rustbgpd_wire::FlowSpecPrefix) -> String {
+    match p {
+        rustbgpd_wire::FlowSpecPrefix::V4(v4) => format!("{}/{}", v4.addr, v4.len),
+        rustbgpd_wire::FlowSpecPrefix::V6(v6) => {
+            format!("{}/{}", v6.prefix.addr, v6.prefix.len)
+        }
+    }
+}
+
+fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
+    ops.iter()
+        .map(|o| {
+            let mut s = String::new();
+            if o.eq {
+                s.push('=');
+            }
+            if o.lt {
+                s.push('<');
+            }
+            if o.gt {
+                s.push('>');
+            }
+            s.push_str(&o.value.to_string());
+            s
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]

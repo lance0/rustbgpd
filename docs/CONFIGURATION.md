@@ -82,6 +82,8 @@ the peer via MP-BGP capabilities. Supported values:
 
 - `"ipv4_unicast"` — IPv4 Unicast (AFI 1, SAFI 1)
 - `"ipv6_unicast"` — IPv6 Unicast (AFI 2, SAFI 1)
+- `"ipv4_flowspec"` — IPv4 FlowSpec (AFI 1, SAFI 133, RFC 8955)
+- `"ipv6_flowspec"` — IPv6 FlowSpec (AFI 2, SAFI 133, RFC 8956)
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:
@@ -172,6 +174,32 @@ second=2, etc.). Split horizon, iBGP suppression, and per-candidate export
 policy are evaluated for each path.
 
 Both IPv4 and IPv6 unicast are supported. See [ADR-0033](docs/adr/0033-add-path.md).
+
+### FlowSpec (RFC 8955)
+
+FlowSpec distributes traffic filtering rules via BGP. Enable it by adding
+FlowSpec families to the `families` list:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+families = ["ipv4_unicast", "ipv6_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+```
+
+FlowSpec rules have no next-hop (NH length = 0 in MP_REACH_NLRI). Traffic
+actions (rate-limit, redirect, DSCP mark) are encoded as extended communities
+per RFC 8955 section 7.
+
+FlowSpec routes are injected and queried via the gRPC API:
+
+- `InjectionService/AddFlowSpec` — inject a FlowSpec rule with match components and actions
+- `InjectionService/DeleteFlowSpec` — withdraw a FlowSpec rule
+- `RibService/ListFlowSpecRoutes` — query the FlowSpec Loc-RIB
+
+FlowSpec routes pass through the same policy engine as unicast routes:
+import/export policy, iBGP split-horizon, and route reflector rules all
+apply. See [ADR-0035](docs/adr/0035-flowspec.md).
 
 ### Per-neighbor policy
 
@@ -571,7 +599,7 @@ starting:
 | `prometheus_addr` must be a valid `ip:port` | `invalid prometheus_addr` |
 | `grpc_addr` must be a valid `ip:port` | `invalid grpc_addr` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
-| `families` entries must be `"ipv4_unicast"` or `"ipv6_unicast"` | `unsupported address family` |
+| `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, or `"ipv6_flowspec"` | `unsupported address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |

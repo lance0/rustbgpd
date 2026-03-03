@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{FlowSpecRule, Prefix};
 
-use crate::route::Route;
+use crate::route::{FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
@@ -12,6 +12,8 @@ use crate::route::Route;
 pub struct AdjRibOut {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
+    /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
+    flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
 }
 
 impl AdjRibOut {
@@ -20,6 +22,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: HashMap::new(),
+            flowspec_routes: HashMap::new(),
         }
     }
 
@@ -74,5 +77,33 @@ impl AdjRibOut {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty()
+    }
+
+    // --- FlowSpec methods ---
+
+    pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
+        self.flowspec_routes.insert(route.rule.clone(), route);
+    }
+
+    pub fn remove_flowspec(&mut self, rule: &FlowSpecRule) -> bool {
+        self.flowspec_routes.remove(rule).is_some()
+    }
+
+    #[must_use]
+    pub fn get_flowspec(&self, rule: &FlowSpecRule) -> Option<&FlowSpecRoute> {
+        self.flowspec_routes.get(rule)
+    }
+
+    pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {
+        self.flowspec_routes.values()
+    }
+
+    #[must_use]
+    pub fn flowspec_len(&self) -> usize {
+        self.flowspec_routes.len()
+    }
+
+    pub fn clear_flowspec(&mut self) {
+        self.flowspec_routes.clear();
     }
 }

@@ -99,7 +99,7 @@ Features that close meaningful protocol gaps vs GoBGP.
 - [x] **Extended Messages** (RFC 8654) — raise 4096-byte limit to 65535; capability code 6 (ADR-0032)
 - [x] **Add-Path** (RFC 7911) — dual-stack receive + family-aware multi-path send (route server mode); composite RIB keying, multi-candidate best-path, rank-based path IDs (ADR-0033)
 - [x] **RPKI validation** — RTR client (RFC 8210) for route origin validation; VRP table, best-path step 0.5, policy matching (ADR-0034)
-- [ ] **FlowSpec** (RFC 5575/8955) — programmatic traffic filtering rules distributed via BGP; IPv4 and IPv6 unicast FlowSpec. Critical for prefixd integration
+- [x] **FlowSpec** (RFC 8955/8956) — IPv4 and IPv6 unicast FlowSpec (SAFI 133); all 13 component types, numeric/bitmask operators, FlowSpec actions via extended communities, gRPC injection/query (ADR-0035)
 
 ### P2 — Operational Polish
 

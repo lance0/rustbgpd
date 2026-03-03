@@ -3,15 +3,18 @@
 //! Stores the single best route per prefix, selected via `best_path_cmp`.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{FlowSpecRule, Prefix};
 
 use crate::best_path::best_path_cmp;
-use crate::route::Route;
+use crate::route::{FlowSpecRoute, Route};
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
     routes: HashMap<Prefix, Route>,
+    /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
+    flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
 }
 
 impl LocRib {
@@ -19,6 +22,7 @@ impl LocRib {
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            flowspec_routes: HashMap::new(),
         }
     }
 
@@ -65,6 +69,68 @@ impl LocRib {
     #[must_use]
     pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
         self.routes.get(prefix)
+    }
+
+    // --- FlowSpec methods ---
+
+    /// Recompute the best `FlowSpec` route for a rule from the given candidates.
+    ///
+    /// Selection tiebreaker: lowest peer router-id, then lowest peer IP.
+    /// Returns `true` if the selection changed.
+    pub fn recompute_flowspec<'a>(
+        &mut self,
+        rule: FlowSpecRule,
+        candidates: impl Iterator<Item = &'a FlowSpecRoute>,
+    ) -> bool {
+        let best = candidates.min_by(|a, b| flowspec_tiebreak(a, b)).cloned();
+        match best {
+            Some(new_best) => {
+                let changed = self
+                    .flowspec_routes
+                    .get(&rule)
+                    .is_none_or(|old| old.peer != new_best.peer || old.path_id != new_best.path_id);
+                if changed {
+                    self.flowspec_routes.insert(rule, new_best);
+                }
+                changed
+            }
+            None => self.flowspec_routes.remove(&rule).is_some(),
+        }
+    }
+
+    #[must_use]
+    pub fn get_flowspec(&self, rule: &FlowSpecRule) -> Option<&FlowSpecRoute> {
+        self.flowspec_routes.get(rule)
+    }
+
+    pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {
+        self.flowspec_routes.values()
+    }
+
+    #[must_use]
+    pub fn flowspec_len(&self) -> usize {
+        self.flowspec_routes.len()
+    }
+
+    pub fn remove_flowspec(&mut self, rule: &FlowSpecRule) -> bool {
+        self.flowspec_routes.remove(rule).is_some()
+    }
+}
+
+/// Tiebreaker for `FlowSpec` routes: lowest peer router-id, then lowest peer IP.
+fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> std::cmp::Ordering {
+    a.peer_router_id
+        .cmp(&b.peer_router_id)
+        .then_with(|| cmp_ipaddr(&a.peer, &b.peer))
+}
+
+/// Compare two `IpAddr` values, treating V4 < V6.
+fn cmp_ipaddr(a: &IpAddr, b: &IpAddr) -> std::cmp::Ordering {
+    match (a, b) {
+        (IpAddr::V4(a4), IpAddr::V4(b4)) => a4.cmp(b4),
+        (IpAddr::V6(a6), IpAddr::V6(b6)) => a6.cmp(b6),
+        (IpAddr::V4(_), IpAddr::V6(_)) => std::cmp::Ordering::Less,
+        (IpAddr::V6(_), IpAddr::V4(_)) => std::cmp::Ordering::Greater,
     }
 }
 

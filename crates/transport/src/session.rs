@@ -6,13 +6,13 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::Policy;
-use rustbgpd_rib::{OutboundRouteUpdate, RibUpdate, Route};
+use rustbgpd_rib::{FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    AddPathMode, Afi, AsPath, AsPathSegment, Ipv4NlriEntry, Message, MpReachNlri, MpUnreachNlri,
-    NlriEntry, NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, Safi,
-    UpdateMessage,
+    AddPathMode, Afi, AsPath, AsPathSegment, FlowSpecRule, Ipv4NlriEntry, Message, MpReachNlri,
+    MpUnreachNlri, NlriEntry, NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage,
+    Safi, UpdateMessage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -904,10 +904,11 @@ impl PeerSession {
                 self.drive_fsm(Event::UpdateReceived).await;
                 return;
             }
-            // IPv6 EoR: UPDATE with only an empty MP_UNREACH_NLRI
+            // MP EoR: UPDATE with only an empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
             if parsed.attributes.len() == 1
                 && let Some(PathAttribute::MpUnreachNlri(mp)) = parsed.attributes.first()
                 && mp.withdrawn.is_empty()
+                && mp.flowspec_withdrawn.is_empty()
             {
                 info!(
                     peer = %self.peer_label,
@@ -984,22 +985,26 @@ impl PeerSession {
                 .iter()
                 .map(|e| (Prefix::V4(e.prefix), e.path_id))
                 .collect();
+            let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
                     if self.negotiated_families.contains(&family) {
                         loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
+                        loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
                     }
                 }
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.known_paths.remove(&(prefix, path_id));
             }
-            if !loop_withdrawn.is_empty() {
+            if !loop_withdrawn.is_empty() || !loop_fs_withdrawn.is_empty() {
                 let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
                     peer: self.peer_ip,
                     announced: vec![],
                     withdrawn: loop_withdrawn,
+                    flowspec_announced: vec![],
+                    flowspec_withdrawn: loop_fs_withdrawn,
                 });
             }
             self.drive_fsm(Event::UpdateReceived).await;
@@ -1041,22 +1046,26 @@ impl PeerSession {
                 .iter()
                 .map(|e| (Prefix::V4(e.prefix), e.path_id))
                 .collect();
+            let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
                     if self.negotiated_families.contains(&family) {
                         loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
+                        loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
                     }
                 }
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.known_paths.remove(&(prefix, path_id));
             }
-            if !loop_withdrawn.is_empty() {
+            if !loop_withdrawn.is_empty() || !loop_fs_withdrawn.is_empty() {
                 let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
                     peer: self.peer_ip,
                     announced: vec![],
                     withdrawn: loop_withdrawn,
+                    flowspec_announced: vec![],
+                    flowspec_withdrawn: loop_fs_withdrawn,
                 });
             }
             self.drive_fsm(Event::UpdateReceived).await;
@@ -1170,6 +1179,9 @@ impl PeerSession {
             .cloned()
             .collect();
 
+        let mut flowspec_announced: Vec<FlowSpecRoute> = Vec::new();
+        let mut flowspec_withdrawn: Vec<FlowSpecRule> = Vec::new();
+
         for attr in &parsed.attributes {
             match attr {
                 PathAttribute::MpReachNlri(mp) => {
@@ -1183,6 +1195,50 @@ impl PeerSession {
                         );
                         continue;
                     }
+
+                    if mp.safi == Safi::FlowSpec {
+                        // FlowSpec announced routes — no next-hop (NH len = 0)
+                        for rule in &mp.flowspec_announced {
+                            // Apply import policy using the destination prefix
+                            // component (if present) for prefix matching
+                            let dest_prefix = rule.destination_prefix();
+                            let result = rustbgpd_policy::evaluate_policy(
+                                self.import_policy.as_ref(),
+                                dest_prefix.unwrap_or(Prefix::V4(
+                                    rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+                                )),
+                                update_ecs,
+                                update_communities,
+                                update_large_communities,
+                                &aspath_str,
+                                rustbgpd_wire::RpkiValidation::NotFound,
+                            );
+                            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                                let mut attrs = mp_route_attrs.clone();
+                                let _nh_action = rustbgpd_policy::apply_modifications(
+                                    &mut attrs,
+                                    &result.modifications,
+                                );
+                                flowspec_announced.push(FlowSpecRoute {
+                                    rule: rule.clone(),
+                                    afi: mp.afi,
+                                    peer: self.peer_ip,
+                                    attributes: attrs,
+                                    received_at: now,
+                                    origin_type: route_origin,
+                                    peer_router_id: self
+                                        .negotiated
+                                        .as_ref()
+                                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                                    is_stale: false,
+                                    path_id: 0,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Unicast routes
                     for entry in &mp.announced {
                         let result = rustbgpd_policy::evaluate_policy(
                             self.import_policy.as_ref(),
@@ -1229,6 +1285,7 @@ impl PeerSession {
                         continue;
                     }
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
+                    flowspec_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
                 }
                 _ => {}
             }
@@ -1262,11 +1319,17 @@ impl PeerSession {
             return;
         }
 
-        if !announced.is_empty() || !withdrawn.is_empty() {
+        if !announced.is_empty()
+            || !withdrawn.is_empty()
+            || !flowspec_announced.is_empty()
+            || !flowspec_withdrawn.is_empty()
+        {
             let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
                 peer: self.peer_ip,
                 announced,
                 withdrawn,
+                flowspec_announced,
+                flowspec_withdrawn,
             });
         }
 
@@ -1465,6 +1528,7 @@ impl PeerSession {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 withdrawn: v6_withdraw,
+                flowspec_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, add_path_ipv6_send);
             let wire_msg = Message::Update(msg);
@@ -1590,6 +1654,7 @@ impl PeerSession {
                 safi: Safi::Unicast,
                 next_hop: nh,
                 announced: prefixes,
+                flowspec_announced: vec![],
             }));
             let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, add_path_ipv6_send);
             let wire_msg = Message::Update(msg);
@@ -1601,23 +1666,90 @@ impl PeerSession {
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
+        // Send FlowSpec withdrawals via MP_UNREACH_NLRI, grouped by AFI
+        if !update.flowspec_withdraw.is_empty() {
+            let mut v4_fs_withdraw: Vec<FlowSpecRule> = Vec::new();
+            let mut v6_fs_withdraw: Vec<FlowSpecRule> = Vec::new();
+            for rule in &update.flowspec_withdraw {
+                // Determine AFI from the rule's destination prefix component
+                let afi = if rule.destination_prefix().is_some_and(|p| matches!(p, Prefix::V6(_))) {
+                    Afi::Ipv6
+                } else {
+                    Afi::Ipv4
+                };
+                match afi {
+                    Afi::Ipv4 => v4_fs_withdraw.push(rule.clone()),
+                    Afi::Ipv6 => v6_fs_withdraw.push(rule.clone()),
+                }
+            }
+            for (afi, rules) in [(Afi::Ipv4, v4_fs_withdraw), (Afi::Ipv6, v6_fs_withdraw)] {
+                if rules.is_empty() {
+                    continue;
+                }
+                let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                    afi,
+                    safi: Safi::FlowSpec,
+                    withdrawn: vec![],
+                    flowspec_withdrawn: rules,
+                })];
+                let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
+                let wire_msg = Message::Update(msg);
+                if let Err(e) = self.send_message(&wire_msg).await {
+                    warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec withdrawal UPDATE");
+                    return;
+                }
+                self.updates_sent += 1;
+                self.metrics.record_message_sent(&self.peer_label, "update");
+            }
+        }
+
+        // Send FlowSpec announcements via MP_REACH_NLRI, grouped by (AFI, attributes)
+        if !update.flowspec_announce.is_empty() {
+            let mut fs_groups: Vec<(Afi, Vec<PathAttribute>, Vec<FlowSpecRule>)> = Vec::new();
+            for fs_route in &update.flowspec_announce {
+                let attrs = self.prepare_outbound_attributes_flowspec(fs_route, is_ebgp);
+                if let Some(group) = fs_groups
+                    .iter_mut()
+                    .find(|(a, ga, _)| *a == fs_route.afi && *ga == attrs)
+                {
+                    group.2.push(fs_route.rule.clone());
+                } else {
+                    fs_groups.push((fs_route.afi, attrs, vec![fs_route.rule.clone()]));
+                }
+            }
+            for (afi, mut attrs, rules) in fs_groups {
+                attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                    afi,
+                    safi: Safi::FlowSpec,
+                    next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED), // NH len = 0 for FlowSpec
+                    announced: vec![],
+                    flowspec_announced: rules,
+                }));
+                let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
+                let wire_msg = Message::Update(msg);
+                if let Err(e) = self.send_message(&wire_msg).await {
+                    warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec announce UPDATE");
+                    return;
+                }
+                self.updates_sent += 1;
+                self.metrics.record_message_sent(&self.peer_label, "update");
+            }
+        }
+
         // Send End-of-RIB markers
         for (afi, safi) in &update.end_of_rib {
-            let msg = match (afi, safi) {
+            let msg = if let (Afi::Ipv4, Safi::Unicast) = (afi, safi) {
                 // IPv4 Unicast EoR: empty UPDATE (no NLRI, no withdrawn, no attrs)
-                (Afi::Ipv4, Safi::Unicast) => {
-                    UpdateMessage::build(&[], &[], &[], four_octet_as, false)
-                }
-                // IPv6 Unicast EoR: UPDATE with empty MP_UNREACH_NLRI
-                (Afi::Ipv6, Safi::Unicast) => {
-                    let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                        afi: Afi::Ipv6,
-                        safi: Safi::Unicast,
-                        withdrawn: vec![],
-                    })];
-                    UpdateMessage::build(&[], &[], &attrs, four_octet_as, false)
-                }
-                _ => continue,
+                UpdateMessage::build(&[], &[], &[], four_octet_as, false)
+            } else {
+                // MP EoR: UPDATE with empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
+                let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                    afi: *afi,
+                    safi: *safi,
+                    withdrawn: vec![],
+                    flowspec_withdrawn: vec![],
+                })];
+                UpdateMessage::build(&[], &[], &attrs, four_octet_as, false)
             };
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
@@ -1739,6 +1871,101 @@ impl PeerSession {
             }
 
             // CLUSTER_LIST: prepend our cluster_id
+            let mut found = false;
+            for attr in &mut attrs {
+                if let PathAttribute::ClusterList(ids) = attr {
+                    ids.insert(0, cluster_id);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
+            }
+        }
+
+        attrs
+    }
+
+    /// Prepare path attributes for outbound `FlowSpec` advertisement.
+    ///
+    /// `FlowSpec` has no `NEXT_HOP`. For eBGP: prepend ASN, strip `LOCAL_PREF`.
+    /// For iBGP: ensure `LOCAL_PREF`. Route reflector attributes handled same as unicast.
+    fn prepare_outbound_attributes_flowspec(
+        &self,
+        route: &FlowSpecRoute,
+        is_ebgp: bool,
+    ) -> Vec<PathAttribute> {
+        let mut attrs = Vec::new();
+
+        for attr in &route.attributes {
+            match attr {
+                PathAttribute::AsPath(as_path) => {
+                    if is_ebgp {
+                        let mut new_segments =
+                            vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                        for seg in &as_path.segments {
+                            match seg {
+                                AsPathSegment::AsSequence(asns) => {
+                                    if let Some(AsPathSegment::AsSequence(first)) =
+                                        new_segments.first_mut()
+                                    {
+                                        first.extend(asns);
+                                    }
+                                }
+                                AsPathSegment::AsSet(asns) => {
+                                    new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                                }
+                            }
+                        }
+                        attrs.push(PathAttribute::AsPath(AsPath {
+                            segments: new_segments,
+                        }));
+                    } else {
+                        attrs.push(attr.clone());
+                    }
+                }
+                // No NEXT_HOP for FlowSpec — skip; also skip MP framing attrs
+                PathAttribute::NextHop(_)
+                | PathAttribute::MpReachNlri(_)
+                | PathAttribute::MpUnreachNlri(_) => {}
+                PathAttribute::LocalPref(_) => {
+                    if !is_ebgp {
+                        attrs.push(attr.clone());
+                    }
+                }
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
+                _ => {
+                    attrs.push(attr.clone());
+                }
+            }
+        }
+
+        if !is_ebgp
+            && !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
+        {
+            attrs.push(PathAttribute::LocalPref(100));
+        }
+
+        if is_ebgp && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))) {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
+            }));
+        }
+
+        // Route reflector attribute manipulation for FlowSpec (same as unicast)
+        if !is_ebgp
+            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
+            && let Some(cluster_id) = self.config.cluster_id
+        {
+            if !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OriginatorId(_)))
+            {
+                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
+            }
             let mut found = false;
             for attr in &mut attrs {
                 if let PathAttribute::ClusterList(ids) = attr {

@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **FlowSpec (RFC 8955/8956).** IPv4 and IPv6 unicast FlowSpec (SAFI 133)
+  with all 13 component types: destination/source prefix, IP protocol,
+  port, destination/source port, ICMP type/code, TCP flags, packet length,
+  DSCP, fragment, flow label. Numeric and bitmask operator encoding per
+  RFC 8955. `FlowSpecRule`/`FlowSpecRoute` parallel types preserve
+  `Prefix`'s `Copy` trait. FlowSpec actions (rate-limit, redirect, DSCP
+  mark) encoded as extended communities. Separate FlowSpec collections in
+  AdjRibIn/LocRib/AdjRibOut. Transport decode/encode via MP_REACH/MP_UNREACH
+  with NH length 0. gRPC `AddFlowSpec`/`DeleteFlowSpec`/`ListFlowSpecRoutes`
+  RPCs. Same policy/iBGP/RR infrastructure. Config families
+  `"ipv4_flowspec"` and `"ipv6_flowspec"`. (ADR-0035)
 - **RPKI Origin Validation (RFC 6811).** New `rustbgpd-rpki`
   crate with poll-based RTR client (RFC 8210), per-cache-server async
   client, and multi-cache VRP aggregation. Routes stamped with `RpkiValidation`

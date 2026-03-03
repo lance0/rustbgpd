@@ -4,10 +4,11 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
-use rustbgpd_rib::{RibUpdate, Route, RouteOrigin};
+use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Origin,
-    PathAttribute, Prefix,
+    Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix,
+    FlowSpecRule, Ipv4Prefix, Ipv6Prefix, LargeCommunity, NumericMatch, Origin, PathAttribute,
+    Prefix,
 };
 
 pub struct InjectionService {
@@ -222,6 +223,248 @@ impl proto::injection_service_server::InjectionService for InjectionService {
 
         Ok(Response::new(proto::DeletePathResponse {}))
     }
+
+    async fn add_flow_spec(
+        &self,
+        request: Request<proto::AddFlowSpecRequest>,
+    ) -> Result<Response<proto::AddFlowSpecResponse>, Status> {
+        let req = request.into_inner();
+        let afi = parse_flowspec_afi(req.afi_safi)?;
+
+        let components = parse_flowspec_components(&req.components, afi)?;
+        let rule = FlowSpecRule { components };
+        rule.validate()
+            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+
+        let mut attributes: Vec<PathAttribute> = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+        ];
+
+        // Build extended communities from FlowSpec actions
+        let mut ecs: Vec<ExtendedCommunity> = req
+            .extended_communities
+            .iter()
+            .map(|&v| ExtendedCommunity::new(v))
+            .collect();
+        for action in &req.actions {
+            if let Some(ec) = flowspec_action_to_ec(action)? {
+                ecs.push(ec);
+            }
+        }
+        if !ecs.is_empty() {
+            attributes.push(PathAttribute::ExtendedCommunities(ecs));
+        }
+        if !req.communities.is_empty() {
+            attributes.push(PathAttribute::Communities(req.communities));
+        }
+
+        let route = FlowSpecRoute {
+            rule,
+            afi,
+            peer: LOCAL_PEER,
+            attributes,
+            received_at: std::time::Instant::now(),
+            origin_type: RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            path_id: 0,
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::InjectFlowSpec {
+                route,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|e| Status::internal(format!("inject failed: {e}")))?;
+
+        Ok(Response::new(proto::AddFlowSpecResponse {}))
+    }
+
+    async fn delete_flow_spec(
+        &self,
+        request: Request<proto::DeleteFlowSpecRequest>,
+    ) -> Result<Response<proto::DeleteFlowSpecResponse>, Status> {
+        let req = request.into_inner();
+        let afi = parse_flowspec_afi(req.afi_safi)?;
+
+        let components = parse_flowspec_components(&req.components, afi)?;
+        let rule = FlowSpecRule { components };
+        rule.validate()
+            .map_err(|e| Status::invalid_argument(format!("invalid FlowSpec rule: {e}")))?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::WithdrawFlowSpec {
+                rule,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|e| Status::internal(format!("withdraw failed: {e}")))?;
+
+        Ok(Response::new(proto::DeleteFlowSpecResponse {}))
+    }
+}
+
+/// Parse the `AddressFamily` field for `FlowSpec` requests.
+#[expect(clippy::result_large_err)]
+fn parse_flowspec_afi(value: i32) -> Result<Afi, Status> {
+    match value {
+        x if x == proto::AddressFamily::Ipv4Flowspec as i32 => Ok(Afi::Ipv4),
+        x if x == proto::AddressFamily::Ipv6Flowspec as i32 => Ok(Afi::Ipv6),
+        _ => Err(Status::invalid_argument(
+            "afi_safi must be IPV4_FLOWSPEC or IPV6_FLOWSPEC",
+        )),
+    }
+}
+
+/// Convert proto `FlowSpecComponent` messages into wire types.
+#[expect(clippy::result_large_err)]
+fn parse_flowspec_components(
+    components: &[proto::FlowSpecComponent],
+    afi: Afi,
+) -> Result<Vec<FlowSpecComponent>, Status> {
+    if components.is_empty() {
+        return Err(Status::invalid_argument(
+            "at least one FlowSpec component is required",
+        ));
+    }
+    let mut result = Vec::with_capacity(components.len());
+    for c in components {
+        let comp = match c.r#type {
+            1 => {
+                // Destination prefix
+                let prefix = parse_flowspec_prefix(&c.prefix, afi, "destination prefix")?;
+                FlowSpecComponent::DestinationPrefix(prefix)
+            }
+            2 => {
+                // Source prefix
+                let prefix = parse_flowspec_prefix(&c.prefix, afi, "source prefix")?;
+                FlowSpecComponent::SourcePrefix(prefix)
+            }
+            3 => FlowSpecComponent::IpProtocol(parse_numeric_value(&c.value, "ip_protocol")?),
+            4 => FlowSpecComponent::Port(parse_numeric_value(&c.value, "port")?),
+            5 => {
+                FlowSpecComponent::DestinationPort(parse_numeric_value(&c.value, "dst_port")?)
+            }
+            6 => FlowSpecComponent::SourcePort(parse_numeric_value(&c.value, "src_port")?),
+            7 => FlowSpecComponent::IcmpType(parse_numeric_value(&c.value, "icmp_type")?),
+            8 => FlowSpecComponent::IcmpCode(parse_numeric_value(&c.value, "icmp_code")?),
+            10 => {
+                FlowSpecComponent::PacketLength(parse_numeric_value(&c.value, "packet_length")?)
+            }
+            11 => FlowSpecComponent::Dscp(parse_numeric_value(&c.value, "dscp")?),
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "unsupported FlowSpec component type {other}"
+                )));
+            }
+        };
+        result.push(comp);
+    }
+    Ok(result)
+}
+
+/// Parse a prefix string (e.g., "10.0.0.0/24") into a `FlowSpecPrefix`.
+#[expect(clippy::result_large_err)]
+fn parse_flowspec_prefix(s: &str, afi: Afi, label: &str) -> Result<FlowSpecPrefix, Status> {
+    let parts: Vec<&str> = s.splitn(2, '/').collect();
+    if parts.len() != 2 {
+        return Err(Status::invalid_argument(format!(
+            "{label}: expected format \"addr/len\""
+        )));
+    }
+    let addr: IpAddr = parts[0]
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("{label}: invalid address: {e}")))?;
+    let len: u8 = parts[1]
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("{label}: invalid prefix length: {e}")))?;
+
+    match (afi, addr) {
+        (Afi::Ipv4, IpAddr::V4(v4)) => Ok(FlowSpecPrefix::V4(Ipv4Prefix::new(v4, len))),
+        (Afi::Ipv6, IpAddr::V6(v6)) => Ok(FlowSpecPrefix::V6(
+            rustbgpd_wire::Ipv6PrefixOffset {
+                prefix: Ipv6Prefix::new(v6, len),
+                offset: 0,
+            },
+        )),
+        _ => Err(Status::invalid_argument(format!(
+            "{label}: address family mismatch"
+        ))),
+    }
+}
+
+/// Parse a simple numeric value string (e.g., "80" or "6") into a single `NumericMatch`.
+#[expect(clippy::result_large_err)]
+fn parse_numeric_value(s: &str, label: &str) -> Result<Vec<NumericMatch>, Status> {
+    let value: u64 = s
+        .trim_start_matches('=')
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("{label}: invalid value {s:?}: {e}")))?;
+    Ok(vec![NumericMatch {
+        end_of_list: true,
+        and_bit: false,
+        lt: false,
+        gt: false,
+        eq: true,
+        value,
+    }])
+}
+
+/// Convert a proto `FlowSpecAction` into a wire `ExtendedCommunity`.
+#[expect(clippy::result_large_err)]
+fn flowspec_action_to_ec(
+    action: &proto::FlowSpecAction,
+) -> Result<Option<ExtendedCommunity>, Status> {
+    use rustbgpd_wire::flowspec::FlowSpecAction;
+    let Some(ref inner) = action.action else {
+        return Ok(None);
+    };
+    let wire_action = match inner {
+        proto::flow_spec_action::Action::TrafficRate(r) => FlowSpecAction::TrafficRateBytes {
+            asn: 0,
+            rate: r.rate,
+        },
+        proto::flow_spec_action::Action::TrafficAction(a) => FlowSpecAction::TrafficAction {
+            sample: a.sample,
+            terminal: a.terminal,
+        },
+        proto::flow_spec_action::Action::TrafficMarking(m) => FlowSpecAction::TrafficMarking {
+            dscp: u8::try_from(m.dscp)
+                .map_err(|_| Status::invalid_argument("dscp must be 0..=63"))?,
+        },
+        proto::flow_spec_action::Action::Redirect(r) => {
+            let parts: Vec<&str> = r.route_target.splitn(2, ':').collect();
+            if parts.len() != 2 {
+                return Err(Status::invalid_argument(
+                    "redirect route_target must be \"ASN:value\"",
+                ));
+            }
+            let asn: u16 = parts[0]
+                .parse()
+                .map_err(|_| Status::invalid_argument("redirect ASN must be u16"))?;
+            let value: u32 = parts[1]
+                .parse()
+                .map_err(|_| Status::invalid_argument("redirect value must be u32"))?;
+            FlowSpecAction::Redirect2Octet { asn, value }
+        }
+    };
+    Ok(Some(ExtendedCommunity::from_flowspec_action(
+        &wire_action,
+    )))
 }
 
 #[cfg(test)]

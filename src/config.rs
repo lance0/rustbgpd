@@ -519,10 +519,13 @@ fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, ConfigError> 
         let family = match f.as_str() {
             "ipv4_unicast" => (Afi::Ipv4, Safi::Unicast),
             "ipv6_unicast" => (Afi::Ipv6, Safi::Unicast),
+            "ipv4_flowspec" => (Afi::Ipv4, Safi::FlowSpec),
+            "ipv6_flowspec" => (Afi::Ipv6, Safi::FlowSpec),
             other => {
                 return Err(ConfigError::InvalidPolicyEntry {
                     reason: format!(
-                        "unknown address family {other:?}, expected \"ipv4_unicast\" or \"ipv6_unicast\""
+                        "unknown address family {other:?}, expected one of: \
+                         \"ipv4_unicast\", \"ipv6_unicast\", \"ipv4_flowspec\", \"ipv6_flowspec\""
                     ),
                 });
             }

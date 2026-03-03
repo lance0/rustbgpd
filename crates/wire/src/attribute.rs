@@ -138,8 +138,13 @@ pub struct MpReachNlri {
     /// decoder extracts the first 16 bytes (global) and discards the
     /// link-local portion. `IpAddr` can only hold a single address, and
     /// link-local next-hops are not needed for routing decisions.
+    ///
+    /// For `FlowSpec` (SAFI 133), next-hop length is 0 and this field is
+    /// unused (defaults to `0.0.0.0`).
     pub next_hop: IpAddr,
     pub announced: Vec<NlriEntry>,
+    /// `FlowSpec` NLRI rules (RFC 8955). Populated only when `safi == FlowSpec`.
+    pub flowspec_announced: Vec<crate::flowspec::FlowSpecRule>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
@@ -151,6 +156,8 @@ pub struct MpUnreachNlri {
     pub afi: Afi,
     pub safi: Safi,
     pub withdrawn: Vec<NlriEntry>,
+    /// `FlowSpec` NLRI rules withdrawn (RFC 8955). Populated only when `safi == FlowSpec`.
+    pub flowspec_withdrawn: Vec<crate::flowspec::FlowSpecRule>,
 }
 
 /// RFC 4360 Extended Community — 8-byte value stored as `u64`.
@@ -659,6 +666,7 @@ fn decode_attribute_value(
 ///
 /// Wire layout (RFC 4760 §3):
 ///   AFI (2) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLRI (variable)
+#[expect(clippy::too_many_lines)]
 fn decode_mp_reach_nlri(
     value: &[u8],
     add_path_families: &[(Afi, Safi)],
@@ -695,40 +703,65 @@ fn decode_mp_reach_nlri(
     }
 
     let nh_bytes = &value[4..4 + nh_len];
-    let next_hop = match afi {
-        Afi::Ipv4 => {
-            if nh_len != 4 {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
-                    detail: format!("MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4)"),
-                });
-            }
-            IpAddr::V4(Ipv4Addr::new(
-                nh_bytes[0],
-                nh_bytes[1],
-                nh_bytes[2],
-                nh_bytes[3],
-            ))
+    // FlowSpec (SAFI 133): NH length is 0 — no next-hop for filter rules
+    let next_hop = if safi == Safi::FlowSpec {
+        if nh_len != 0 {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!("MP_REACH_NLRI FlowSpec next-hop length {nh_len} (expected 0)"),
+            });
         }
-        Afi::Ipv6 => {
-            if nh_len != 16 && nh_len != 32 {
-                return Err(DecodeError::MalformedField {
-                    message_type: "UPDATE",
-                    detail: format!(
-                        "MP_REACH_NLRI IPv6 next-hop length {nh_len} (expected 16 or 32)"
-                    ),
-                });
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        match afi {
+            Afi::Ipv4 => {
+                if nh_len != 4 {
+                    return Err(DecodeError::MalformedField {
+                        message_type: "UPDATE",
+                        detail: format!(
+                            "MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4)"
+                        ),
+                    });
+                }
+                IpAddr::V4(Ipv4Addr::new(
+                    nh_bytes[0],
+                    nh_bytes[1],
+                    nh_bytes[2],
+                    nh_bytes[3],
+                ))
             }
-            // Take first 16 bytes (global address); ignore link-local if 32
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(&nh_bytes[..16]);
-            IpAddr::V6(Ipv6Addr::from(octets))
+            Afi::Ipv6 => {
+                if nh_len != 16 && nh_len != 32 {
+                    return Err(DecodeError::MalformedField {
+                        message_type: "UPDATE",
+                        detail: format!(
+                            "MP_REACH_NLRI IPv6 next-hop length {nh_len} (expected 16 or 32)"
+                        ),
+                    });
+                }
+                // Take first 16 bytes (global address); ignore link-local if 32
+                let mut octets = [0u8; 16];
+                octets.copy_from_slice(&nh_bytes[..16]);
+                IpAddr::V6(Ipv6Addr::from(octets))
+            }
         }
     };
 
     // Skip reserved byte
     let nlri_start = 4 + nh_len + 1;
     let nlri_bytes = &value[nlri_start..];
+
+    // FlowSpec (SAFI 133): NLRI is FlowSpec rules, not prefixes
+    if safi == Safi::FlowSpec {
+        let flowspec_rules = crate::flowspec::decode_flowspec_nlri(nlri_bytes, afi)?;
+        return Ok(PathAttribute::MpReachNlri(MpReachNlri {
+            afi,
+            safi,
+            next_hop,
+            announced: vec![],
+            flowspec_announced: flowspec_rules,
+        }));
+    }
 
     let add_path = add_path_families.contains(&(afi, safi));
     let announced = match (afi, add_path) {
@@ -761,6 +794,7 @@ fn decode_mp_reach_nlri(
         safi,
         next_hop,
         announced,
+        flowspec_announced: vec![],
     }))
 }
 
@@ -792,6 +826,18 @@ fn decode_mp_unreach_nlri(
     })?;
 
     let withdrawn_bytes = &value[3..];
+
+    // FlowSpec (SAFI 133): withdrawn is FlowSpec rules
+    if safi == Safi::FlowSpec {
+        let flowspec_rules = crate::flowspec::decode_flowspec_nlri(withdrawn_bytes, afi)?;
+        return Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: vec![],
+            flowspec_withdrawn: flowspec_rules,
+        }));
+    }
+
     let add_path = add_path_families.contains(&(afi, safi));
     let withdrawn = match (afi, add_path) {
         (Afi::Ipv4, false) => crate::nlri::decode_nlri(withdrawn_bytes)?
@@ -822,6 +868,7 @@ fn decode_mp_unreach_nlri(
         afi,
         safi,
         withdrawn,
+        flowspec_withdrawn: vec![],
     }))
 }
 
@@ -1057,6 +1104,14 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>, add_path: bool) {
     buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
     buf.push(mp.safi as u8);
 
+    // FlowSpec: NH length = 0, reserved = 0, then FlowSpec NLRI
+    if mp.safi == Safi::FlowSpec {
+        buf.push(0); // NH-Len = 0
+        buf.push(0); // Reserved
+        crate::flowspec::encode_flowspec_nlri(&mp.flowspec_announced, buf, mp.afi);
+        return;
+    }
+
     match mp.next_hop {
         IpAddr::V4(addr) => {
             buf.push(4); // NH-Len
@@ -1088,6 +1143,12 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>, add_path: bool) {
 fn encode_mp_unreach_nlri(mp: &MpUnreachNlri, buf: &mut Vec<u8>, add_path: bool) {
     buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
     buf.push(mp.safi as u8);
+
+    // FlowSpec: encode FlowSpec NLRI rules
+    if mp.safi == Safi::FlowSpec {
+        crate::flowspec::encode_flowspec_nlri(&mp.flowspec_withdrawn, buf, mp.afi);
+        return;
+    }
 
     if add_path {
         crate::nlri::encode_ipv6_nlri_addpath(&mp.withdrawn, buf);
@@ -1778,6 +1839,7 @@ mod tests {
                     48,
                 ))),
             ],
+            flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -1800,6 +1862,7 @@ mod tests {
                 "2001:db8:1::".parse().unwrap(),
                 48,
             )))],
+            flowspec_withdrawn: vec![],
         };
         let attrs = vec![PathAttribute::MpUnreachNlri(mp.clone())];
 
@@ -1823,6 +1886,7 @@ mod tests {
                 Ipv4Addr::new(10, 1, 0, 0),
                 16,
             )))],
+            flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -1841,6 +1905,7 @@ mod tests {
             safi: Safi::Unicast,
             next_hop: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             announced: vec![],
+            flowspec_announced: vec![],
         });
         assert_eq!(attr.type_code(), 14);
         // RFC 4760 §3: MP_REACH_NLRI is optional non-transitive
@@ -1855,6 +1920,7 @@ mod tests {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             withdrawn: vec![],
+            flowspec_withdrawn: vec![],
         });
         assert_eq!(attr.type_code(), 15);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL);
@@ -1869,6 +1935,7 @@ mod tests {
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("fe80::1".parse().unwrap()),
             announced: vec![],
+            flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2031,6 +2098,7 @@ mod tests {
                 path_id: 0,
                 prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
             }],
+            flowspec_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 

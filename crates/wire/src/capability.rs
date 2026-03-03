@@ -28,6 +28,8 @@ impl Afi {
 pub enum Safi {
     Unicast = 1,
     Multicast = 2,
+    /// RFC 8955 `FlowSpec`.
+    FlowSpec = 133,
 }
 
 impl Safi {
@@ -36,6 +38,7 @@ impl Safi {
         match value {
             1 => Some(Self::Unicast),
             2 => Some(Self::Multicast),
+            133 => Some(Self::FlowSpec),
             _ => None,
         }
     }

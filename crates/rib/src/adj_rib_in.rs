@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{Afi, Prefix, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 
-use crate::route::Route;
+use crate::route::{FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
@@ -13,6 +13,8 @@ use crate::route::Route;
 pub struct AdjRibIn {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
+    /// `FlowSpec` routes keyed by `(rule, path_id)`.
+    flowspec_routes: HashMap<(FlowSpecRule, u32), FlowSpecRoute>,
 }
 
 impl AdjRibIn {
@@ -21,6 +23,7 @@ impl AdjRibIn {
         Self {
             peer,
             routes: HashMap::new(),
+            flowspec_routes: HashMap::new(),
         }
     }
 
@@ -120,6 +123,79 @@ impl AdjRibIn {
             self.routes.remove(key);
         }
         prefixes
+    }
+
+    // --- FlowSpec methods ---
+
+    pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
+        self.flowspec_routes
+            .insert((route.rule.clone(), route.path_id), route);
+    }
+
+    pub fn withdraw_flowspec(&mut self, rule: &FlowSpecRule, path_id: u32) -> bool {
+        self.flowspec_routes.remove(&(rule.clone(), path_id)).is_some()
+    }
+
+    pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {
+        self.flowspec_routes.values()
+    }
+
+    /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
+    pub fn iter_flowspec_rule(&self, rule: &FlowSpecRule) -> impl Iterator<Item = &FlowSpecRoute> {
+        let target = rule.clone();
+        self.flowspec_routes
+            .values()
+            .filter(move |r| r.rule == target)
+    }
+
+    #[must_use]
+    pub fn flowspec_len(&self) -> usize {
+        self.flowspec_routes.len()
+    }
+
+    /// Mark `FlowSpec` routes matching the given address family as stale.
+    pub fn mark_stale_flowspec(&mut self, family: (Afi, Safi)) {
+        if family.1 != Safi::FlowSpec {
+            return;
+        }
+        for route in self.flowspec_routes.values_mut() {
+            if route.afi == family.0 {
+                route.is_stale = true;
+            }
+        }
+    }
+
+    /// Remove all stale `FlowSpec` routes, returning their rules.
+    pub fn sweep_stale_flowspec(&mut self) -> Vec<FlowSpecRule> {
+        let stale: Vec<(FlowSpecRule, u32)> = self
+            .flowspec_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut rules = Vec::new();
+        for key in &stale {
+            rules.push(key.0.clone());
+            self.flowspec_routes.remove(key);
+        }
+        rules
+    }
+
+    /// Clear all `FlowSpec` routes.
+    pub fn clear_flowspec(&mut self) {
+        self.flowspec_routes.clear();
+    }
+
+    /// Clear the stale flag on `FlowSpec` routes matching the given family.
+    pub fn clear_stale_flowspec(&mut self, family: (Afi, Safi)) {
+        if family.1 != Safi::FlowSpec {
+            return;
+        }
+        for route in self.flowspec_routes.values_mut() {
+            if route.afi == family.0 {
+                route.is_stale = false;
+            }
+        }
     }
 }
 

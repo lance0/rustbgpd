@@ -31,6 +31,7 @@ pub mod attribute;
 pub mod capability;
 pub mod constants;
 pub mod error;
+pub mod flowspec;
 pub mod header;
 pub mod keepalive;
 pub mod message;
@@ -99,6 +100,12 @@ pub use attribute::{
 pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
 pub use update::ParsedUpdate;
 pub use validate::{UpdateError, is_valid_ipv6_nexthop};
+
+// Re-export FlowSpec types
+pub use flowspec::{
+    BitmaskMatch, FlowSpecAction, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
+    Ipv6PrefixOffset, NumericMatch,
+};
 
 // Re-export RPKI types
 // (RpkiValidation is defined above in this file)

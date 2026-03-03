@@ -272,7 +272,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | **Large communities** | **post-v0.3.0** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |
 | **Route Reflector** | **post-v0.3.0** | **RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST** |
 
-Next: Add-Path multi-path send, FlowSpec. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: config persistence, BMP exporter. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

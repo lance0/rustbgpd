@@ -2,7 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
 
 use rustbgpd_wire::{
-    AsPath, ExtendedCommunity, LargeCommunity, Origin, PathAttribute, Prefix, RpkiValidation,
+    Afi, AsPath, ExtendedCommunity, FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix,
+    RpkiValidation,
 };
 
 /// How a route was learned, used for best-path selection and iBGP split-horizon.
@@ -143,5 +144,97 @@ impl Route {
                 _ => None,
             })
             .unwrap_or(&[])
+    }
+}
+
+/// A `FlowSpec` route stored in the RIB (RFC 8955).
+///
+/// Parallel to [`Route`] but keyed by [`FlowSpecRule`] instead of [`Prefix`].
+/// `FlowSpec` rules are variable-length TLV structures, so they cannot be `Copy`
+/// and use separate storage in the RIB.
+#[derive(Debug, Clone)]
+pub struct FlowSpecRoute {
+    pub rule: FlowSpecRule,
+    pub afi: Afi,
+    pub peer: IpAddr,
+    pub attributes: Vec<PathAttribute>,
+    pub received_at: Instant,
+    pub origin_type: RouteOrigin,
+    pub peer_router_id: Ipv4Addr,
+    pub is_stale: bool,
+    pub path_id: u32,
+}
+
+impl FlowSpecRoute {
+    /// Extract the `AS_PATH` attribute, returning `None` if absent.
+    #[must_use]
+    pub fn as_path(&self) -> Option<&AsPath> {
+        self.attributes.iter().find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    /// Extract COMMUNITIES (RFC 1997) values, returning empty slice if absent.
+    #[must_use]
+    pub fn communities(&self) -> &[u32] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::Communities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract EXTENDED COMMUNITIES (RFC 4360) values, returning empty slice if absent.
+    #[must_use]
+    pub fn extended_communities(&self) -> &[ExtendedCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract LARGE COMMUNITIES (RFC 8092) values, returning empty slice if absent.
+    #[must_use]
+    pub fn large_communities(&self) -> &[LargeCommunity] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::LargeCommunities(c) => Some(c.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Extract `ORIGINATOR_ID` (RFC 4456) if present.
+    #[must_use]
+    pub fn originator_id(&self) -> Option<Ipv4Addr> {
+        self.attributes.iter().find_map(|a| match a {
+            PathAttribute::OriginatorId(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// Extract `CLUSTER_LIST` (RFC 4456), returning empty slice if absent.
+    #[must_use]
+    pub fn cluster_list(&self) -> &[Ipv4Addr] {
+        self.attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ClusterList(ids) => Some(ids.as_slice()),
+                _ => None,
+            })
+            .unwrap_or(&[])
+    }
+
+    /// Whether this route was learned via an eBGP session.
+    #[must_use]
+    pub fn is_ebgp(&self) -> bool {
+        self.origin_type == RouteOrigin::Ebgp
     }
 }

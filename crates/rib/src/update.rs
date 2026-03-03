@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use rustbgpd_policy::Policy;
 use rustbgpd_rpki::VrpTable;
-use rustbgpd_wire::{Afi, Prefix, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::event::RouteEvent;
-use crate::route::Route;
+use crate::route::{FlowSpecRoute, Route};
 
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
@@ -20,6 +20,10 @@ pub struct OutboundRouteUpdate {
     /// Per-route next-hop override from export policy. Parallel to `announce` —
     /// `next_hop_override[i]` applies to `announce[i]`.
     pub next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
+    /// `FlowSpec` routes to announce (RFC 8955).
+    pub flowspec_announce: Vec<FlowSpecRoute>,
+    /// `FlowSpec` rules to withdraw.
+    pub flowspec_withdraw: Vec<FlowSpecRule>,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -31,6 +35,10 @@ pub enum RibUpdate {
         /// Withdrawn prefixes with Add-Path path identifiers.
         /// `(prefix, path_id)` — `path_id = 0` for non-Add-Path peers.
         withdrawn: Vec<(Prefix, u32)>,
+        /// `FlowSpec` routes announced (RFC 8955).
+        flowspec_announced: Vec<FlowSpecRoute>,
+        /// `FlowSpec` rules withdrawn.
+        flowspec_withdrawn: Vec<FlowSpecRule>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown { peer: IpAddr },
@@ -104,4 +112,18 @@ pub enum RibUpdate {
     RouteRefreshRequest { peer: IpAddr, afi: Afi, safi: Safi },
     /// RPKI cache update — new VRP table for origin validation.
     RpkiCacheUpdate { table: Arc<VrpTable> },
+    /// Inject a locally-originated `FlowSpec` route.
+    InjectFlowSpec {
+        route: FlowSpecRoute,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Withdraw a locally-injected `FlowSpec` route.
+    WithdrawFlowSpec {
+        rule: FlowSpecRule,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query `FlowSpec` routes from the Loc-RIB.
+    QueryFlowSpecRoutes {
+        reply: oneshot::Sender<Vec<FlowSpecRoute>>,
+    },
 }

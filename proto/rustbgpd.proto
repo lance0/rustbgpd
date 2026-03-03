@@ -13,6 +13,8 @@ enum AddressFamily {
   ADDRESS_FAMILY_UNSPECIFIED = 0;
   ADDRESS_FAMILY_IPV4_UNICAST = 1;
   ADDRESS_FAMILY_IPV6_UNICAST = 2;
+  ADDRESS_FAMILY_IPV4_FLOWSPEC = 3;
+  ADDRESS_FAMILY_IPV6_FLOWSPEC = 4;
 }
 
 enum SessionState {
@@ -173,6 +175,7 @@ service RibService {
   rpc ListBestRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
+  rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
 }
 
 message ListRoutesRequest {
@@ -240,6 +243,8 @@ message RouteEvent {
 service InjectionService {
   rpc AddPath(AddPathRequest) returns (AddPathResponse);
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
+  rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
+  rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
 }
 
 message AddPathRequest {
@@ -271,6 +276,82 @@ message DeletePathRequest {
 }
 
 message DeletePathResponse {}
+
+// FlowSpec match component (RFC 8955).
+message FlowSpecComponent {
+  // Component type (1=destination, 2=source, 3=protocol, 4=port, etc.)
+  uint32 type = 1;
+  // For type 1/2: IP prefix string (e.g. "10.0.0.0/24" or "2001:db8::/32").
+  string prefix = 2;
+  // For numeric/bitmask types: human-readable operator expression
+  // (e.g. "=80", ">=1024 & <=65535", "=tcp").
+  string value = 3;
+}
+
+// FlowSpec traffic action (RFC 8955 extended communities).
+message FlowSpecAction {
+  oneof action {
+    FlowSpecTrafficRate traffic_rate = 1;
+    FlowSpecTrafficAction traffic_action = 2;
+    FlowSpecTrafficMarking traffic_marking = 3;
+    FlowSpecRedirect redirect = 4;
+  }
+}
+
+message FlowSpecTrafficRate {
+  float rate = 1; // bytes/sec; 0.0 = drop
+}
+
+message FlowSpecTrafficAction {
+  bool sample = 1;
+  bool terminal = 2;
+}
+
+message FlowSpecTrafficMarking {
+  uint32 dscp = 1;
+}
+
+message FlowSpecRedirect {
+  // Route target string: "ASN:value" (e.g. "65001:100").
+  string route_target = 1;
+}
+
+// FlowSpec route as seen in the RIB.
+message FlowSpecRouteEntry {
+  repeated FlowSpecComponent components = 1;
+  repeated FlowSpecAction actions = 2;
+  string peer_address = 3;
+  AddressFamily afi_safi = 4;
+  repeated uint32 as_path = 5;
+  repeated uint32 communities = 6;
+  repeated uint64 extended_communities = 7;
+}
+
+message AddFlowSpecRequest {
+  // Address family: IPV4_FLOWSPEC or IPV6_FLOWSPEC.
+  AddressFamily afi_safi = 1;
+  repeated FlowSpecComponent components = 2;
+  repeated FlowSpecAction actions = 3;
+  repeated uint32 communities = 4;
+  repeated uint64 extended_communities = 5;
+}
+
+message AddFlowSpecResponse {}
+
+message DeleteFlowSpecRequest {
+  AddressFamily afi_safi = 1;
+  repeated FlowSpecComponent components = 2;
+}
+
+message DeleteFlowSpecResponse {}
+
+message ListFlowSpecRequest {
+  AddressFamily afi_safi = 1;
+}
+
+message ListFlowSpecResponse {
+  repeated FlowSpecRouteEntry routes = 1;
+}
 
 // ---------------------------------------------------------------------------
 // ControlService — Daemon lifecycle and health

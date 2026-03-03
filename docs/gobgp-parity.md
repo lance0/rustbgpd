@@ -15,7 +15,7 @@ Last updated: 2026-03-03
 | VPNv4 / VPNv6 (RFC 4364) | Yes | No | |
 | L2VPN VPLS (RFC 4761) | Yes | No | |
 | L2VPN EVPN (RFC 7432) | Yes | No | Route types 1-5, 9 |
-| IPv4/IPv6 FlowSpec (RFC 5575) | Yes | No | On roadmap |
+| IPv4/IPv6 FlowSpec (RFC 8955) | Yes | Yes | SAFI 133, all 13 component types |
 | VPN FlowSpec | Yes | No | |
 | BGP-LS (RFC 7752) | Yes | No | |
 | SR Policy | Yes | No | |
@@ -163,7 +163,7 @@ Last updated: 2026-03-03
 
 | Category | GoBGP | rustbgpd | Parity |
 |----------|:-----:|:--------:|:------:|
-| Address families | 15 | 2 | ~13% |
+| Address families | 15 | 4 | ~27% |
 | Core protocol | 14 | 9 | ~64% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 11 | ~61% |
@@ -177,4 +177,3 @@ Last updated: 2026-03-03
 1. **GR restarting speaker** — only receiving today
 2. **Policy chaining** — first-match-wins only, no multi-policy sequencing
 3. **Extended nexthop (RFC 8950)** — IPv6 next-hop for IPv4 NLRI
-4. **FlowSpec (RFC 5575/8955)** — programmatic traffic filtering rules
