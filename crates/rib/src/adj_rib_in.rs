@@ -63,9 +63,7 @@ impl AdjRibIn {
     /// Iterate over all routes for a given prefix (all path IDs).
     pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> {
         let target = *prefix;
-        self.routes
-            .values()
-            .filter(move |r| r.prefix == target)
+        self.routes.values().filter(move |r| r.prefix == target)
     }
 
     /// Mark all routes matching the given address family as stale.

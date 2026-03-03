@@ -60,7 +60,8 @@ async fn read_bgp_message(stream: &mut tokio::net::TcpStream, buf: &mut BytesMut
             if buf.len() >= len {
                 let frame = buf.split_to(len);
                 let mut bytes = frame.freeze();
-                return decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN).expect("valid message");
+                return decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN)
+                    .expect("valid message");
             }
         }
         // Need more data

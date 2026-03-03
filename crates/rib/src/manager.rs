@@ -781,7 +781,11 @@ impl RibManager {
                 let _ = reply.send(Ok(()));
             }
 
-            RibUpdate::WithdrawInjected { prefix, path_id, reply } => {
+            RibUpdate::WithdrawInjected {
+                prefix,
+                path_id,
+                reply,
+            } => {
                 let rib = self
                     .ribs
                     .entry(LOCAL_PEER)
