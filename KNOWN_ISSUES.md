@@ -71,3 +71,8 @@ resolved.
   created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive.
   TOML config with `[neighbors.add_path] receive = true` is the only way
   to enable it currently.
+- **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
+  negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
+  was not negotiated, the wire format is ambiguous — the 4-byte path ID
+  can be misparsed as normal NLRI prefix encoding. Compliant peers will
+  never do this. Fixing it would require a deeper parser redesign.

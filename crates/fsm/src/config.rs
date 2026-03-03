@@ -187,10 +187,7 @@ mod tests {
     fn add_path_capabilities_ipv4_only_even_with_ipv6_configured() {
         let mut cfg = test_config();
         cfg.add_path_receive = true;
-        cfg.families = vec![
-            (Afi::Ipv4, Safi::Unicast),
-            (Afi::Ipv6, Safi::Unicast),
-        ];
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
         let caps = cfg.add_path_capabilities();
         // Only IPv4 unicast — MP-BGP Add-Path not yet implemented
         assert_eq!(caps.len(), 1);

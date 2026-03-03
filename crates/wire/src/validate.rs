@@ -377,10 +377,7 @@ mod tests {
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
                 announced: vec![NlriEntry {
                     path_id: 0,
-                    prefix: Prefix::V6(Ipv6Prefix::new(
-                        "2001:db8::".parse().unwrap(),
-                        32,
-                    )),
+                    prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
                 }],
             }),
         ];
@@ -406,10 +403,7 @@ mod tests {
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
                 announced: vec![NlriEntry {
                     path_id: 0,
-                    prefix: Prefix::V6(Ipv6Prefix::new(
-                        "2001:db8::".parse().unwrap(),
-                        32,
-                    )),
+                    prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
                 }],
             }),
         ];

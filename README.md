@@ -41,7 +41,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Route Reflector** -- RFC 4456 client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST, loop detection
 - **Extended Messages** -- RFC 8654 raises the 4096-byte message limit to 65535 bytes
 - **Add-Path** -- RFC 7911 receive + single-best send; multiple paths per prefix from Add-Path peers
-- **624 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **628 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -251,7 +251,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 624 tests pass. P0 production blockers complete. Extended Messages (RFC 8654) and Add-Path receive (RFC 7911) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 628 tests pass. P0 production blockers complete. Extended Messages (RFC 8654) and Add-Path receive (RFC 7911) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|

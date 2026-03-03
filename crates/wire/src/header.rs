@@ -233,13 +233,19 @@ mod tests {
 
     #[test]
     fn peek_returns_none_for_short_buffer() {
-        assert_eq!(peek_message_length(&[0xFF; 10], MAX_MESSAGE_LEN).unwrap(), None);
+        assert_eq!(
+            peek_message_length(&[0xFF; 10], MAX_MESSAGE_LEN).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn peek_returns_length_for_valid_header() {
         let buf = make_header(42, 1);
-        assert_eq!(peek_message_length(&buf, MAX_MESSAGE_LEN).unwrap(), Some(42));
+        assert_eq!(
+            peek_message_length(&buf, MAX_MESSAGE_LEN).unwrap(),
+            Some(42)
+        );
     }
 
     #[test]

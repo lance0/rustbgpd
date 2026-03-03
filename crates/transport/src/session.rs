@@ -65,8 +65,11 @@ pub(crate) struct PeerSession {
     /// Unbounded so notifications are never dropped and never block (avoids
     /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
     session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
-    /// Accepted prefixes for accurate count and dedup.
-    known_prefixes: HashSet<Prefix>,
+    /// Accepted paths keyed by `(prefix, path_id)`.
+    ///
+    /// Max-prefix enforcement still counts unique prefixes, so callers must
+    /// derive that count from this set instead of using `len()` directly.
+    known_paths: HashSet<(Prefix, u32)>,
     /// Session counters
     updates_received: u64,
     updates_sent: u64,
@@ -101,6 +104,14 @@ fn resolve_import_nexthop(
 }
 
 impl PeerSession {
+    fn known_prefix_count(&self) -> usize {
+        self.known_paths
+            .iter()
+            .map(|(prefix, _)| *prefix)
+            .collect::<HashSet<_>>()
+            .len()
+    }
+
     pub(crate) fn new(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -134,7 +145,7 @@ impl PeerSession {
             import_policy,
             export_policy,
             session_notify_tx,
-            known_prefixes: HashSet::new(),
+            known_paths: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -181,7 +192,7 @@ impl PeerSession {
             import_policy,
             export_policy,
             session_notify_tx,
-            known_prefixes: HashSet::new(),
+            known_paths: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -500,7 +511,7 @@ impl PeerSession {
 
                     self.negotiated = None;
                     self.negotiated_families.clear();
-                    self.known_prefixes.clear();
+                    self.known_paths.clear();
                     // Reset framing limit for the next session (RFC 8654 §2:
                     // extended messages are per-session, not persistent).
                     self.read_buf
@@ -797,7 +808,12 @@ impl PeerSession {
             .map(|n| {
                 n.add_path_families
                     .iter()
-                    .filter(|(_, m)| matches!(m, rustbgpd_wire::AddPathMode::Receive | rustbgpd_wire::AddPathMode::Both))
+                    .filter(|(_, m)| {
+                        matches!(
+                            m,
+                            rustbgpd_wire::AddPathMode::Receive | rustbgpd_wire::AddPathMode::Both
+                        )
+                    })
                     .map(|(&family, _)| family)
                     .collect()
             })
@@ -949,8 +965,8 @@ impl PeerSession {
                     }
                 }
             }
-            for &(prefix, _) in &loop_withdrawn {
-                self.known_prefixes.remove(&prefix);
+            for &(prefix, path_id) in &loop_withdrawn {
+                self.known_paths.remove(&(prefix, path_id));
             }
             if !loop_withdrawn.is_empty() {
                 let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
@@ -1006,8 +1022,8 @@ impl PeerSession {
                     }
                 }
             }
-            for &(prefix, _) in &loop_withdrawn {
-                self.known_prefixes.remove(&prefix);
+            for &(prefix, path_id) in &loop_withdrawn {
+                self.known_paths.remove(&(prefix, path_id));
             }
             if !loop_withdrawn.is_empty() {
                 let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
@@ -1188,19 +1204,20 @@ impl PeerSession {
         }
 
         // 4. Max-prefix enforcement — track via HashSet for accuracy
-        for &(prefix, _) in &withdrawn {
-            self.known_prefixes.remove(&prefix);
+        for &(prefix, path_id) in &withdrawn {
+            self.known_paths.remove(&(prefix, path_id));
         }
         for route in &announced {
-            self.known_prefixes.insert(route.prefix);
+            self.known_paths.insert((route.prefix, route.path_id));
         }
 
+        let prefix_count = self.known_prefix_count();
         if let Some(max) = self.config.max_prefixes
-            && self.known_prefixes.len() > max as usize
+            && prefix_count > max as usize
         {
             warn!(
                 peer = %self.peer_label,
-                count = self.known_prefixes.len(),
+                count = prefix_count,
                 max,
                 "max prefix exceeded"
             );
@@ -1263,7 +1280,7 @@ impl PeerSession {
                 let state = PeerSessionState {
                     fsm_state: self.fsm.state(),
                     peer_ip: self.peer_ip,
-                    prefix_count: self.known_prefixes.len(),
+                    prefix_count: self.known_prefix_count(),
                     negotiated_hold_time: neg.map(|n| n.hold_time),
                     four_octet_as: neg.map(|n| n.four_octet_as),
                     remote_router_id: neg.map(|n| n.peer_router_id),
@@ -1341,16 +1358,16 @@ impl PeerSession {
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
 
         // Check if Add-Path send is negotiated (we can send path IDs to this peer)
-        let add_path_ipv4_send = self
-            .negotiated
-            .as_ref()
-            .is_some_and(|n| {
-                n.add_path_families
-                    .get(&(Afi::Ipv4, Safi::Unicast))
-                    .is_some_and(|m| {
-                        matches!(m, rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both)
-                    })
-            });
+        let add_path_ipv4_send = self.negotiated.as_ref().is_some_and(|n| {
+            n.add_path_families
+                .get(&(Afi::Ipv4, Safi::Unicast))
+                .is_some_and(|m| {
+                    matches!(
+                        m,
+                        rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both
+                    )
+                })
+        });
 
         // Extract TCP local addresses for NEXT_HOP rewrite
         let local_addr = self
@@ -1390,7 +1407,8 @@ impl PeerSession {
 
         // Send IPv4 withdrawals via body NLRI
         if !v4_withdraw.is_empty() {
-            let msg = UpdateMessage::build(&[], &v4_withdraw, &[], four_octet_as, add_path_ipv4_send);
+            let msg =
+                UpdateMessage::build(&[], &v4_withdraw, &[], four_octet_as, add_path_ipv4_send);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
@@ -1782,6 +1800,17 @@ mod tests {
         } else {
             panic!("expected AS_SEQUENCE");
         }
+    }
+
+    #[test]
+    fn known_prefix_count_deduplicates_multiple_paths() {
+        let mut session = make_test_session(65001, 65002);
+        let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+
+        session.known_paths.insert((prefix, 1));
+        session.known_paths.insert((prefix, 2));
+
+        assert_eq!(session.known_prefix_count(), 1);
     }
 
     #[test]

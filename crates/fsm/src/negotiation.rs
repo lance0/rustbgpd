@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use bytes::Bytes;
 
 use rustbgpd_wire::notification::{NotificationCode, open_subcode};
-use rustbgpd_wire::{AddPathFamily, AddPathMode, Afi, Capability, NotificationMessage, OpenMessage, Safi};
+use rustbgpd_wire::{
+    AddPathFamily, AddPathMode, Afi, Capability, NotificationMessage, OpenMessage, Safi,
+};
 
 use crate::action::NegotiatedSession;
 use crate::config::PeerConfig;
@@ -107,11 +109,13 @@ pub fn validate_open(
     let peer_add_path_caps: Vec<AddPathFamily> = open
         .capabilities
         .iter()
-        .find_map(|c| match c {
-            Capability::AddPath(families) => Some(families.clone()),
+        .filter_map(|c| match c {
+            Capability::AddPath(families) => Some(families.as_slice()),
             _ => None,
         })
-        .unwrap_or_default();
+        .flatten()
+        .copied()
+        .collect();
     let add_path_families = negotiate_add_path(&our_add_path_caps, &peer_add_path_caps);
 
     Ok(NegotiatedSession {
@@ -220,9 +224,8 @@ pub fn negotiate_add_path(
             .find(|p| p.afi == ours.afi && p.safi == ours.safi)
         {
             // "We Receive" requires "Peer Send"
-            let we_receive =
-                matches!(ours.send_receive, AddPathMode::Receive | AddPathMode::Both)
-                    && matches!(peer.send_receive, AddPathMode::Send | AddPathMode::Both);
+            let we_receive = matches!(ours.send_receive, AddPathMode::Receive | AddPathMode::Both)
+                && matches!(peer.send_receive, AddPathMode::Send | AddPathMode::Both);
 
             // "We Send" requires "Peer Receive"
             let we_send = matches!(ours.send_receive, AddPathMode::Send | AddPathMode::Both)
@@ -519,10 +522,7 @@ mod tests {
         }];
         let result = negotiate_add_path(&ours, &peers);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result[&(Afi::Ipv4, Safi::Unicast)],
-            AddPathMode::Receive
-        );
+        assert_eq!(result[&(Afi::Ipv4, Safi::Unicast)], AddPathMode::Receive);
     }
 
     #[test]
@@ -540,10 +540,7 @@ mod tests {
         }];
         let result = negotiate_add_path(&ours, &peers);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result[&(Afi::Ipv4, Safi::Unicast)],
-            AddPathMode::Send
-        );
+        assert_eq!(result[&(Afi::Ipv4, Safi::Unicast)], AddPathMode::Send);
     }
 
     #[test]
@@ -561,10 +558,7 @@ mod tests {
         }];
         let result = negotiate_add_path(&ours, &peers);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result[&(Afi::Ipv4, Safi::Unicast)],
-            AddPathMode::Both
-        );
+        assert_eq!(result[&(Afi::Ipv4, Safi::Unicast)], AddPathMode::Both);
     }
 
     #[test]
@@ -623,10 +617,7 @@ mod tests {
         }];
         let result = negotiate_add_path(&ours, &peers);
         assert_eq!(result.len(), 1);
-        assert_eq!(
-            result[&(Afi::Ipv4, Safi::Unicast)],
-            AddPathMode::Receive
-        );
+        assert_eq!(result[&(Afi::Ipv4, Safi::Unicast)], AddPathMode::Receive);
         assert!(!result.contains_key(&(Afi::Ipv6, Safi::Unicast)));
     }
 
@@ -635,13 +626,12 @@ mod tests {
         let mut cfg = test_config();
         cfg.add_path_receive = true;
         let mut open = peer_open();
-        open.capabilities.push(Capability::AddPath(vec![
-            AddPathFamily {
+        open.capabilities
+            .push(Capability::AddPath(vec![AddPathFamily {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 send_receive: AddPathMode::Send,
-            },
-        ]));
+            }]));
         let neg = validate_open(&open, &cfg).unwrap();
         assert_eq!(neg.add_path_families.len(), 1);
         assert_eq!(
@@ -654,14 +644,33 @@ mod tests {
     fn validate_open_add_path_empty_when_disabled() {
         let cfg = test_config(); // add_path_receive = false
         let mut open = peer_open();
-        open.capabilities.push(Capability::AddPath(vec![
-            AddPathFamily {
+        open.capabilities
+            .push(Capability::AddPath(vec![AddPathFamily {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 send_receive: AddPathMode::Both,
-            },
-        ]));
+            }]));
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(neg.add_path_families.is_empty());
+    }
+
+    #[test]
+    fn validate_open_merges_multiple_add_path_capabilities() {
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        let mut open = peer_open();
+        open.capabilities.push(Capability::AddPath(vec![]));
+        open.capabilities
+            .push(Capability::AddPath(vec![AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Send,
+            }]));
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(
+            neg.add_path_families.get(&(Afi::Ipv4, Safi::Unicast)),
+            Some(&AddPathMode::Receive)
+        );
     }
 }

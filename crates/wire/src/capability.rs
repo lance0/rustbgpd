@@ -243,7 +243,10 @@ impl Capability {
                 if all_valid {
                     Ok(Capability::AddPath(families))
                 } else {
-                    Ok(Capability::Unknown { code, data: raw_data })
+                    Ok(Capability::Unknown {
+                        code,
+                        data: raw_data,
+                    })
                 }
             }
             capability_code::FOUR_OCTET_AS => {

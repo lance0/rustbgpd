@@ -442,7 +442,8 @@ pub fn decode_path_attributes(
         let value = &buf[..value_len];
         buf = &buf[value_len..];
 
-        let attr = decode_attribute_value(flags, type_code, value, four_octet_as, add_path_families)?;
+        let attr =
+            decode_attribute_value(flags, type_code, value, four_octet_as, add_path_families)?;
         attrs.push(attr);
     }
 
@@ -645,7 +646,10 @@ fn decode_attribute_value(
 ///
 /// Wire layout (RFC 4760 §3):
 ///   AFI (2) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLRI (variable)
-fn decode_mp_reach_nlri(value: &[u8], add_path_families: &[(Afi, Safi)]) -> Result<PathAttribute, DecodeError> {
+fn decode_mp_reach_nlri(
+    value: &[u8],
+    add_path_families: &[(Afi, Safi)],
+) -> Result<PathAttribute, DecodeError> {
     if value.len() < 5 {
         return Err(DecodeError::MalformedField {
             message_type: "UPDATE",
@@ -751,7 +755,10 @@ fn decode_mp_reach_nlri(value: &[u8], add_path_families: &[(Afi, Safi)]) -> Resu
 ///
 /// Wire layout (RFC 4760 §4):
 ///   AFI (2) | SAFI (1) | Withdrawn Routes (variable)
-fn decode_mp_unreach_nlri(value: &[u8], add_path_families: &[(Afi, Safi)]) -> Result<PathAttribute, DecodeError> {
+fn decode_mp_unreach_nlri(
+    value: &[u8],
+    add_path_families: &[(Afi, Safi)],
+) -> Result<PathAttribute, DecodeError> {
     if value.len() < 3 {
         return Err(DecodeError::MalformedField {
             message_type: "UPDATE",

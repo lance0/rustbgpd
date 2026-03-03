@@ -16,14 +16,17 @@ fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status>
     }
     let mut result = Vec::with_capacity(families.len());
     for f in families {
-        match f.as_str() {
-            "ipv4_unicast" => result.push((Afi::Ipv4, Safi::Unicast)),
-            "ipv6_unicast" => result.push((Afi::Ipv6, Safi::Unicast)),
+        let family = match f.as_str() {
+            "ipv4_unicast" => (Afi::Ipv4, Safi::Unicast),
+            "ipv6_unicast" => (Afi::Ipv6, Safi::Unicast),
             other => {
                 return Err(Status::invalid_argument(format!(
                     "unknown address family {other:?}, expected \"ipv4_unicast\" or \"ipv6_unicast\""
                 )));
             }
+        };
+        if !result.contains(&family) {
+            result.push(family);
         }
     }
     Ok(result)
@@ -305,19 +308,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         let families = if req.families.is_empty() {
             vec![]
         } else {
-            let mut result = Vec::with_capacity(req.families.len());
-            for f in &req.families {
-                match f.as_str() {
-                    "ipv4_unicast" => result.push((Afi::Ipv4, Safi::Unicast)),
-                    "ipv6_unicast" => result.push((Afi::Ipv6, Safi::Unicast)),
-                    other => {
-                        return Err(Status::invalid_argument(format!(
-                            "unknown address family {other:?}"
-                        )));
-                    }
-                }
-            }
-            result
+            parse_families_proto(&req.families)?
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -417,6 +408,53 @@ mod tests {
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("hold_time"));
+    }
+
+    #[test]
+    fn parse_families_proto_deduplicates() {
+        let families = vec![
+            "ipv4_unicast".to_string(),
+            "ipv4_unicast".to_string(),
+            "ipv6_unicast".to_string(),
+            "ipv6_unicast".to_string(),
+        ];
+        let parsed = parse_families_proto(&families).unwrap();
+        assert_eq!(
+            parsed,
+            vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+        );
+    }
+
+    #[tokio::test]
+    async fn soft_reset_in_deduplicates_requested_families() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(peer_tx, rib_tx);
+
+        tokio::spawn(async move {
+            if let Some(PeerManagerCommand::SoftResetIn {
+                families, reply, ..
+            }) = peer_rx.recv().await
+            {
+                assert_eq!(
+                    families,
+                    vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+                );
+                let _ = reply.send(Ok(()));
+            }
+        });
+
+        let req = Request::new(proto::SoftResetInRequest {
+            address: "10.0.0.2".into(),
+            families: vec![
+                "ipv4_unicast".into(),
+                "ipv4_unicast".into(),
+                "ipv6_unicast".into(),
+                "ipv6_unicast".into(),
+            ],
+        });
+        let resp = svc.soft_reset_in(req).await.unwrap();
+        let _ = resp.into_inner();
     }
 
     #[tokio::test]

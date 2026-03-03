@@ -766,12 +766,10 @@ mod tests {
 
     #[test]
     fn addpath_generic_ipv4_roundtrip() {
-        let entries = vec![
-            Ipv4NlriEntry {
-                path_id: 1,
-                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
-            },
-        ];
+        let entries = vec![Ipv4NlriEntry {
+            path_id: 1,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+        }];
         let mut buf = Vec::new();
         encode_nlri_addpath(&entries, &mut buf);
         let generic = decode_nlri_addpath_generic(&buf).unwrap();

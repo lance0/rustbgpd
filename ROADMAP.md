@@ -62,7 +62,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Review hardening: IPv4 NEXT_HOP wire path, RT/RO ASN validation, AS_PATH regex AS_SET braces, zero-length LC rejection, EC logical add/remove equivalence, AS_SEQUENCE overflow guard
 - [x] Extended Messages (RFC 8654) — raise 4096-byte BGP message limit to 65535 bytes; capability code 6, unconditional advertisement, dynamic buffer sizing (ADR-0032)
 - [x] Add-Path (RFC 7911) — receive + single-best send; capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, gRPC path_id fields (ADR-0033)
-- [x] 624 tests
+- [x] 628 tests
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 

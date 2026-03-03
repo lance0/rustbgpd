@@ -125,8 +125,11 @@ impl UpdateMessage {
                 .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
                 .collect()
         };
-        let attributes =
-            crate::attribute::decode_path_attributes(&self.path_attributes, four_octet_as, add_path_families)?;
+        let attributes = crate::attribute::decode_path_attributes(
+            &self.path_attributes,
+            four_octet_as,
+            add_path_families,
+        )?;
         let announced = if add_path_ipv4 {
             crate::nlri::decode_nlri_addpath(&self.nlri)?
         } else {

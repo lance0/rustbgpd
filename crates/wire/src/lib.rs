@@ -44,8 +44,8 @@ pub mod validate;
 
 // Re-export primary public API
 pub use capability::{AddPathFamily, AddPathMode, Afi, Capability, GracefulRestartFamily, Safi};
-pub use error::{DecodeError, EncodeError};
 pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
+pub use error::{DecodeError, EncodeError};
 pub use header::{BgpHeader, MessageType, peek_message_length};
 pub use message::{Message, decode_message, encode_message, encode_message_with_limit};
 pub use notification::NotificationCode;
