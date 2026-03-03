@@ -363,7 +363,7 @@ mod tests {
     fn mp_reach_nlri_no_body_next_hop_required_for_ebgp() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-        use crate::nlri::{Ipv6Prefix, Prefix};
+        use crate::nlri::{Ipv6Prefix, NlriEntry, Prefix};
 
         // eBGP UPDATE with MP_REACH_NLRI only (no body NLRI): NEXT_HOP not required
         let attrs = vec![
@@ -375,10 +375,13 @@ mod tests {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
-                announced: vec![Prefix::V6(Ipv6Prefix::new(
-                    "2001:db8::".parse().unwrap(),
-                    32,
-                ))],
+                announced: vec![NlriEntry {
+                    path_id: 0,
+                    prefix: Prefix::V6(Ipv6Prefix::new(
+                        "2001:db8::".parse().unwrap(),
+                        32,
+                    )),
+                }],
             }),
         ];
         // has_nlri=true, has_body_nlri=false (only MP NLRI), is_ebgp=true
@@ -389,7 +392,7 @@ mod tests {
     fn mixed_update_requires_body_next_hop_for_ebgp() {
         use crate::attribute::MpReachNlri;
         use crate::capability::{Afi, Safi};
-        use crate::nlri::{Ipv6Prefix, Prefix};
+        use crate::nlri::{Ipv6Prefix, NlriEntry, Prefix};
 
         // eBGP UPDATE with BOTH body NLRI and MP_REACH_NLRI but no NEXT_HOP attr
         let attrs = vec![
@@ -401,10 +404,13 @@ mod tests {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
-                announced: vec![Prefix::V6(Ipv6Prefix::new(
-                    "2001:db8::".parse().unwrap(),
-                    32,
-                ))],
+                announced: vec![NlriEntry {
+                    path_id: 0,
+                    prefix: Prefix::V6(Ipv6Prefix::new(
+                        "2001:db8::".parse().unwrap(),
+                        32,
+                    )),
+                }],
             }),
         ];
         // has_nlri=true, has_body_nlri=true (body IPv4 NLRI present), is_ebgp=true

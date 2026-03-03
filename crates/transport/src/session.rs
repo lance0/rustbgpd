@@ -10,9 +10,8 @@ use rustbgpd_rib::{OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, Ipv4Prefix, Message, MpReachNlri, MpUnreachNlri,
+    Afi, AsPath, AsPathSegment, Ipv4NlriEntry, Message, MpReachNlri, MpUnreachNlri, NlriEntry,
     NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, Safi, UpdateMessage,
-    encode_message,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -453,6 +452,13 @@ impl PeerSession {
                         neg.negotiated_families.clone()
                     };
 
+                    // If Extended Messages was negotiated, increase the
+                    // framing buffer limit from 4096 to 65535 (RFC 8654).
+                    if neg.peer_extended_message {
+                        self.read_buf
+                            .set_max_message_len(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN);
+                    }
+
                     self.negotiated = Some(neg);
                     self.established_at = Some(Instant::now());
                     // Register with RIB manager for outbound updates
@@ -495,6 +501,10 @@ impl PeerSession {
                     self.negotiated = None;
                     self.negotiated_families.clear();
                     self.known_prefixes.clear();
+                    // Reset framing limit for the next session (RFC 8654 §2:
+                    // extended messages are per-session, not persistent).
+                    self.read_buf
+                        .set_max_message_len(rustbgpd_wire::MAX_MESSAGE_LEN);
                     if self.established_at.take().is_some() {
                         self.flap_count += 1;
                     }
@@ -517,7 +527,8 @@ impl PeerSession {
 
     /// Encode and send a BGP message to the peer.
     async fn send_message(&mut self, msg: &Message) -> Result<(), TransportError> {
-        let encoded = encode_message(msg)?;
+        let max_len = self.max_message_len();
+        let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
         if let Some(stream) = self.stream.as_mut() {
             stream.write_all(&encoded).await?;
             stream.flush().await?;
@@ -750,6 +761,20 @@ impl PeerSession {
     }
 
     /// Check whether a prefix's address family is among the negotiated families.
+    /// Negotiated maximum message length: 65535 if Extended Messages was
+    /// negotiated, otherwise 4096.
+    fn max_message_len(&self) -> u16 {
+        if self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_extended_message)
+        {
+            rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN
+        } else {
+            rustbgpd_wire::MAX_MESSAGE_LEN
+        }
+    }
+
     fn is_family_negotiated(&self, prefix: &Prefix) -> bool {
         let family = match prefix {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
@@ -765,8 +790,24 @@ impl PeerSession {
     async fn process_update(&mut self, update: rustbgpd_wire::UpdateMessage) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
 
+        // Build Add-Path receive families for MP attribute decode context.
+        let add_path_recv_families: Vec<(Afi, Safi)> = self
+            .negotiated
+            .as_ref()
+            .map(|n| {
+                n.add_path_families
+                    .iter()
+                    .filter(|(_, m)| matches!(m, rustbgpd_wire::AddPathMode::Receive | rustbgpd_wire::AddPathMode::Both))
+                    .map(|(&family, _)| family)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Check if Add-Path receive is negotiated for IPv4 unicast (body NLRI)
+        let add_path_ipv4 = add_path_recv_families.contains(&(Afi::Ipv4, Safi::Unicast));
+
         // 1. Structural decode
-        let parsed = match update.parse(four_octet_as) {
+        let parsed = match update.parse(four_octet_as, add_path_ipv4, &add_path_recv_families) {
             Ok(p) => p,
             Err(e) => {
                 warn!(peer = %self.peer_label, error = %e, "UPDATE decode error");
@@ -895,18 +936,21 @@ impl PeerSession {
                 .record_as_path_loop_detected(&self.peer_label, rejected_count as u64);
 
             // Still process withdrawals (body + MP_UNREACH with negotiated-family check)
-            let mut loop_withdrawn: Vec<Prefix> =
-                parsed.withdrawn.iter().map(|p| Prefix::V4(*p)).collect();
+            let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
+                .withdrawn
+                .iter()
+                .map(|e| (Prefix::V4(e.prefix), e.path_id))
+                .collect();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
                     if self.negotiated_families.contains(&family) {
-                        loop_withdrawn.extend_from_slice(&mp.withdrawn);
+                        loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                     }
                 }
             }
-            for prefix in &loop_withdrawn {
-                self.known_prefixes.remove(prefix);
+            for &(prefix, _) in &loop_withdrawn {
+                self.known_prefixes.remove(&prefix);
             }
             if !loop_withdrawn.is_empty() {
                 let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
@@ -949,18 +993,21 @@ impl PeerSession {
             self.metrics.record_rr_loop_detected(&self.peer_label);
 
             // Still process withdrawals (same pattern as AS_PATH loop)
-            let mut loop_withdrawn: Vec<Prefix> =
-                parsed.withdrawn.iter().map(|p| Prefix::V4(*p)).collect();
+            let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
+                .withdrawn
+                .iter()
+                .map(|e| (Prefix::V4(e.prefix), e.path_id))
+                .collect();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
                     if self.negotiated_families.contains(&family) {
-                        loop_withdrawn.extend_from_slice(&mp.withdrawn);
+                        loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                     }
                 }
             }
-            for prefix in &loop_withdrawn {
-                self.known_prefixes.remove(prefix);
+            for &(prefix, _) in &loop_withdrawn {
+                self.known_prefixes.remove(&prefix);
             }
             if !loop_withdrawn.is_empty() {
                 let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
@@ -1023,10 +1070,11 @@ impl PeerSession {
         let mut announced: Vec<Route> = parsed
             .announced
             .iter()
-            .filter_map(|prefix| {
+            .filter_map(|entry| {
+                let prefix = Prefix::V4(entry.prefix);
                 let result = rustbgpd_policy::evaluate_policy(
                     self.import_policy.as_ref(),
-                    Prefix::V4(*prefix),
+                    prefix,
                     update_ecs,
                     update_communities,
                     update_large_communities,
@@ -1045,7 +1093,7 @@ impl PeerSession {
                     &self.config,
                 );
                 Some(Route {
-                    prefix: Prefix::V4(*prefix),
+                    prefix,
                     next_hop,
                     peer: self.peer_ip,
                     attributes: attrs,
@@ -1056,12 +1104,17 @@ impl PeerSession {
                         .as_ref()
                         .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                     is_stale: false,
+                    path_id: entry.path_id,
                 })
             })
             .collect();
 
-        // Body withdrawn routes (IPv4)
-        let mut withdrawn: Vec<Prefix> = parsed.withdrawn.iter().map(|p| Prefix::V4(*p)).collect();
+        // Body withdrawn routes (IPv4) — carry path_id for Add-Path peers
+        let mut withdrawn: Vec<(Prefix, u32)> = parsed
+            .withdrawn
+            .iter()
+            .map(|e| (Prefix::V4(e.prefix), e.path_id))
+            .collect();
 
         // MP-BGP NLRI from attributes
         // For IPv6 routes, also strip body NEXT_HOP — it's IPv4-specific and
@@ -1085,10 +1138,10 @@ impl PeerSession {
                         );
                         continue;
                     }
-                    for prefix in &mp.announced {
+                    for entry in &mp.announced {
                         let result = rustbgpd_policy::evaluate_policy(
                             self.import_policy.as_ref(),
-                            *prefix,
+                            entry.prefix,
                             update_ecs,
                             update_communities,
                             update_large_communities,
@@ -1107,7 +1160,7 @@ impl PeerSession {
                                 &self.config,
                             );
                             announced.push(Route {
-                                prefix: *prefix,
+                                prefix: entry.prefix,
                                 next_hop,
                                 peer: self.peer_ip,
                                 attributes: attrs,
@@ -1118,6 +1171,7 @@ impl PeerSession {
                                     .as_ref()
                                     .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                 is_stale: false,
+                                path_id: entry.path_id,
                             });
                         }
                     }
@@ -1127,15 +1181,15 @@ impl PeerSession {
                     if !self.negotiated_families.contains(&family) {
                         continue;
                     }
-                    withdrawn.extend_from_slice(&mp.withdrawn);
+                    withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                 }
                 _ => {}
             }
         }
 
         // 4. Max-prefix enforcement — track via HashSet for accuracy
-        for prefix in &withdrawn {
-            self.known_prefixes.remove(prefix);
+        for &(prefix, _) in &withdrawn {
+            self.known_prefixes.remove(&prefix);
         }
         for route in &announced {
             self.known_prefixes.insert(route.prefix);
@@ -1286,6 +1340,18 @@ impl PeerSession {
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
 
+        // Check if Add-Path send is negotiated (we can send path IDs to this peer)
+        let add_path_ipv4_send = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| {
+                n.add_path_families
+                    .get(&(Afi::Ipv4, Safi::Unicast))
+                    .is_some_and(|m| {
+                        matches!(m, rustbgpd_wire::AddPathMode::Send | rustbgpd_wire::AddPathMode::Both)
+                    })
+            });
+
         // Extract TCP local addresses for NEXT_HOP rewrite
         let local_addr = self
             .stream
@@ -1304,21 +1370,27 @@ impl PeerSession {
         });
 
         // Split withdrawals by address family, filtering by negotiated families
-        let mut v4_withdraw: Vec<Ipv4Prefix> = Vec::new();
-        let mut v6_withdraw: Vec<Prefix> = Vec::new();
+        let mut v4_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
+        let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
         for prefix in &update.withdraw {
             if !self.is_family_negotiated(prefix) {
                 continue;
             }
             match prefix {
-                Prefix::V4(v4) => v4_withdraw.push(*v4),
-                Prefix::V6(_) => v6_withdraw.push(*prefix),
+                Prefix::V4(v4) => v4_withdraw.push(Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: *v4,
+                }),
+                v6 @ Prefix::V6(_) => v6_withdraw.push(NlriEntry {
+                    path_id: 0,
+                    prefix: *v6,
+                }),
             }
         }
 
         // Send IPv4 withdrawals via body NLRI
         if !v4_withdraw.is_empty() {
-            let msg = UpdateMessage::build(&[], &v4_withdraw, &[], four_octet_as);
+            let msg = UpdateMessage::build(&[], &v4_withdraw, &[], four_octet_as, add_path_ipv4_send);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
@@ -1335,7 +1407,7 @@ impl PeerSession {
                 safi: Safi::Unicast,
                 withdrawn: v6_withdraw,
             })];
-            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as);
+            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 withdrawal UPDATE");
@@ -1360,20 +1432,24 @@ impl PeerSession {
         }
 
         // Send IPv4 announcements via body NLRI — batch by identical attributes
-        let mut v4_groups: Vec<(Vec<PathAttribute>, Vec<Ipv4Prefix>)> = Vec::new();
+        let mut v4_groups: Vec<(Vec<PathAttribute>, Vec<Ipv4NlriEntry>)> = Vec::new();
         for (route, nh_override) in &v4_routes {
             let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
             if let Prefix::V4(v4) = route.prefix {
+                let entry = Ipv4NlriEntry {
+                    path_id: route.path_id,
+                    prefix: v4,
+                };
                 if let Some(group) = v4_groups.iter_mut().find(|(a, _)| *a == attrs) {
-                    group.1.push(v4);
+                    group.1.push(entry);
                 } else {
-                    v4_groups.push((attrs, vec![v4]));
+                    v4_groups.push((attrs, vec![entry]));
                 }
             }
         }
 
         for (attrs, prefixes) in &v4_groups {
-            let msg = UpdateMessage::build(prefixes, &[], attrs, four_octet_as);
+            let msg = UpdateMessage::build(prefixes, &[], attrs, four_octet_as, add_path_ipv4_send);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
@@ -1411,7 +1487,7 @@ impl PeerSession {
 
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
-        let mut v6_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<Prefix>)> = Vec::new();
+        let mut v6_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<NlriEntry>)> = Vec::new();
         for (route, nh_override) in &v6_routes {
             let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
             let force_nh_self = matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
@@ -1435,13 +1511,17 @@ impl PeerSession {
             } else {
                 route.next_hop
             };
+            let nlri_entry = NlriEntry {
+                path_id: route.path_id,
+                prefix: route.prefix,
+            };
             if let Some(group) = v6_groups
                 .iter_mut()
                 .find(|(a, h, _)| *a == attrs && *h == nh)
             {
-                group.2.push(route.prefix);
+                group.2.push(nlri_entry);
             } else {
-                v6_groups.push((attrs, nh, vec![route.prefix]));
+                v6_groups.push((attrs, nh, vec![nlri_entry]));
             }
         }
 
@@ -1452,7 +1532,7 @@ impl PeerSession {
                 next_hop: nh,
                 announced: prefixes,
             }));
-            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as);
+            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 announce UPDATE");
@@ -1466,7 +1546,9 @@ impl PeerSession {
         for (afi, safi) in &update.end_of_rib {
             let msg = match (afi, safi) {
                 // IPv4 Unicast EoR: empty UPDATE (no NLRI, no withdrawn, no attrs)
-                (Afi::Ipv4, Safi::Unicast) => UpdateMessage::build(&[], &[], &[], four_octet_as),
+                (Afi::Ipv4, Safi::Unicast) => {
+                    UpdateMessage::build(&[], &[], &[], four_octet_as, false)
+                }
                 // IPv6 Unicast EoR: UPDATE with empty MP_UNREACH_NLRI
                 (Afi::Ipv6, Safi::Unicast) => {
                     let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
@@ -1474,7 +1556,7 @@ impl PeerSession {
                         safi: Safi::Unicast,
                         withdrawn: vec![],
                     })];
-                    UpdateMessage::build(&[], &[], &attrs, four_octet_as)
+                    UpdateMessage::build(&[], &[], &attrs, four_octet_as, false)
                 }
                 _ => continue,
             };
@@ -1633,7 +1715,7 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_fsm::PeerConfig;
-    use rustbgpd_wire::{AsPath, AsPathSegment, Origin, PathAttribute};
+    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute};
 
     use super::*;
 
@@ -1647,6 +1729,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            add_path_receive: false,
         };
         let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
         let metrics = BgpMetrics::new();
@@ -1673,6 +1756,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         }
     }
 
@@ -1766,6 +1850,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
         let attrs =
             session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
@@ -1791,6 +1876,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
 
         let attrs =
@@ -1836,6 +1922,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: source_id,
             is_stale: false,
+            path_id: 0,
         };
 
         let attrs =

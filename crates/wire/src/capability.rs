@@ -50,6 +50,35 @@ pub struct GracefulRestartFamily {
     pub forwarding_preserved: bool,
 }
 
+/// Add-Path send/receive mode per AFI/SAFI (RFC 7911 §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum AddPathMode {
+    Receive = 1,
+    Send = 2,
+    Both = 3,
+}
+
+impl AddPathMode {
+    #[must_use]
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Receive),
+            2 => Some(Self::Send),
+            3 => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
+/// Per-AFI/SAFI entry in the Add-Path capability (RFC 7911 §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AddPathFamily {
+    pub afi: Afi,
+    pub safi: Safi,
+    pub send_receive: AddPathMode,
+}
+
 /// BGP capability as negotiated in OPEN optional parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
@@ -67,6 +96,10 @@ pub enum Capability {
     },
     /// RFC 2918: Route Refresh.
     RouteRefresh,
+    /// RFC 8654: Extended Messages (raise max message length to 65535).
+    ExtendedMessage,
+    /// RFC 7911: Add-Path — advertise/receive multiple paths per prefix.
+    AddPath(Vec<AddPathFamily>),
     /// RFC 6793: 4-Byte AS Number.
     FourOctetAs { asn: u32 },
     /// Unknown or unrecognized capability, preserved for re-emission.
@@ -80,6 +113,7 @@ impl Capability {
     ///
     /// Returns [`DecodeError::MalformedOptionalParameter`] if the TLV is
     /// truncated or the claimed length exceeds the remaining bytes.
+    #[expect(clippy::too_many_lines)]
     pub fn decode(buf: &mut impl Buf) -> Result<Self, DecodeError> {
         if buf.remaining() < 2 {
             return Err(DecodeError::MalformedOptionalParameter {
@@ -134,6 +168,13 @@ impl Capability {
                 }
                 Ok(Capability::RouteRefresh)
             }
+            capability_code::EXTENDED_MESSAGE => {
+                if length != 0 {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                Ok(Capability::ExtendedMessage)
+            }
             capability_code::GRACEFUL_RESTART => {
                 // Minimum 2 bytes (restart flags/time). Each family is 4 bytes.
                 if length < 2 || !(length - 2).is_multiple_of(4) {
@@ -165,6 +206,45 @@ impl Capability {
                     restart_time,
                     families,
                 })
+            }
+            capability_code::ADD_PATH => {
+                // RFC 7911 §4: value is N entries of (AFI:2 + SAFI:1 + mode:1) = 4 bytes each
+                if length == 0 || !usize::from(length).is_multiple_of(4) {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                let entry_count = usize::from(length) / 4;
+                // Snapshot the raw bytes before parsing so we can fall back
+                // to Unknown if any entry would be discarded (lossless roundtrip).
+                let raw_data = buf.copy_to_bytes(usize::from(length));
+                let mut cursor = raw_data.clone();
+                let mut families = Vec::with_capacity(entry_count);
+                let mut all_valid = true;
+                for _ in 0..entry_count {
+                    let afi_raw = cursor.get_u16();
+                    let safi_raw = cursor.get_u8();
+                    let mode_raw = cursor.get_u8();
+                    if let (Some(afi), Some(safi), Some(mode)) = (
+                        Afi::from_u16(afi_raw),
+                        Safi::from_u8(safi_raw),
+                        AddPathMode::from_u8(mode_raw),
+                    ) {
+                        families.push(AddPathFamily {
+                            afi,
+                            safi,
+                            send_receive: mode,
+                        });
+                    } else {
+                        all_valid = false;
+                    }
+                }
+                // Preserve as Unknown if any entry was unrecognized, to avoid
+                // silently rewriting malformed capability data on re-encode.
+                if all_valid {
+                    Ok(Capability::AddPath(families))
+                } else {
+                    Ok(Capability::Unknown { code, data: raw_data })
+                }
             }
             capability_code::FOUR_OCTET_AS => {
                 if length != 4 {
@@ -200,6 +280,10 @@ impl Capability {
                 buf.put_u8(capability_code::ROUTE_REFRESH);
                 buf.put_u8(0); // zero-length value
             }
+            Capability::ExtendedMessage => {
+                buf.put_u8(capability_code::EXTENDED_MESSAGE);
+                buf.put_u8(0); // zero-length value
+            }
             Capability::GracefulRestart {
                 restart_state,
                 restart_time,
@@ -232,6 +316,23 @@ impl Capability {
                     buf.put_u8(if fam.forwarding_preserved { 0x80 } else { 0 });
                 }
             }
+            Capability::AddPath(families) => {
+                let value_len = families.len() * 4;
+                if value_len > 255 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "add_path_capability_length",
+                        value: value_len.to_string(),
+                    });
+                }
+                buf.put_u8(capability_code::ADD_PATH);
+                #[expect(clippy::cast_possible_truncation)]
+                buf.put_u8(value_len as u8);
+                for fam in families {
+                    buf.put_u16(fam.afi as u16);
+                    buf.put_u8(fam.safi as u8);
+                    buf.put_u8(fam.send_receive as u8);
+                }
+            }
             Capability::FourOctetAs { asn } => {
                 buf.put_u8(capability_code::FOUR_OCTET_AS);
                 buf.put_u8(4); // length
@@ -259,6 +360,8 @@ impl Capability {
         match self {
             Self::MultiProtocol { .. } => capability_code::MULTI_PROTOCOL,
             Self::RouteRefresh => capability_code::ROUTE_REFRESH,
+            Self::ExtendedMessage => capability_code::EXTENDED_MESSAGE,
+            Self::AddPath(_) => capability_code::ADD_PATH,
             Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
             Self::FourOctetAs { .. } => capability_code::FOUR_OCTET_AS,
             Self::Unknown { code, .. } => *code,
@@ -270,7 +373,8 @@ impl Capability {
     pub fn encoded_len(&self) -> usize {
         2 + match self {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
-            Self::RouteRefresh => 0,
+            Self::RouteRefresh | Self::ExtendedMessage => 0,
+            Self::AddPath(families) => families.len() * 4,
             Self::GracefulRestart { families, .. } => 2 + families.len() * 4,
             Self::Unknown { data, .. } => data.len(),
         }
@@ -737,5 +841,176 @@ mod tests {
         // length so the outer parser sees both parameters.
         let result = decode_optional_parameters(&mut buf, 8);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn decode_extended_message() {
+        let data: &[u8] = &[6, 0]; // code=6, len=0
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(cap, Capability::ExtendedMessage);
+    }
+
+    #[test]
+    fn roundtrip_extended_message() {
+        let original = Capability::ExtendedMessage;
+        let mut encoded = bytes::BytesMut::with_capacity(2);
+        original.encode(&mut encoded).unwrap();
+        let mut buf = encoded.freeze();
+        let decoded = Capability::decode(&mut buf).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn extended_message_code_and_len() {
+        let cap = Capability::ExtendedMessage;
+        assert_eq!(cap.code(), 6);
+        assert_eq!(cap.encoded_len(), 2);
+    }
+
+    #[test]
+    fn extended_message_bad_length_stored_as_unknown() {
+        let data: &[u8] = &[6, 1, 0xFF]; // code=6, len=1 (should be 0)
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert!(matches!(cap, Capability::Unknown { code: 6, .. }));
+    }
+
+    // --- Add-Path capability tests ---
+
+    #[test]
+    fn decode_add_path_single_family() {
+        // code=69, len=4, AFI=1(IPv4), SAFI=1(Unicast), mode=3(Both)
+        let data: &[u8] = &[69, 4, 0, 1, 1, 3];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            cap,
+            Capability::AddPath(vec![AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Both,
+            }])
+        );
+    }
+
+    #[test]
+    fn decode_add_path_multiple_families() {
+        let mut data = bytes::BytesMut::new();
+        data.put_u8(69); // code
+        data.put_u8(8); // len = 2 * 4
+        data.put_u16(1); // AFI IPv4
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(1); // Receive
+        data.put_u16(2); // AFI IPv6
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(2); // Send
+
+        let mut buf = data.freeze();
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            cap,
+            Capability::AddPath(vec![
+                AddPathFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    send_receive: AddPathMode::Receive,
+                },
+                AddPathFamily {
+                    afi: Afi::Ipv6,
+                    safi: Safi::Unicast,
+                    send_receive: AddPathMode::Send,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn roundtrip_add_path() {
+        let original = Capability::AddPath(vec![
+            AddPathFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Both,
+            },
+            AddPathFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                send_receive: AddPathMode::Receive,
+            },
+        ]);
+        let mut encoded = bytes::BytesMut::with_capacity(10);
+        original.encode(&mut encoded).unwrap();
+        let mut buf = encoded.freeze();
+        let decoded = Capability::decode(&mut buf).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn add_path_code_and_len() {
+        let cap = Capability::AddPath(vec![AddPathFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            send_receive: AddPathMode::Receive,
+        }]);
+        assert_eq!(cap.code(), 69);
+        // code(1) + length(1) + 1 family(4) = 6
+        assert_eq!(cap.encoded_len(), 6);
+    }
+
+    #[test]
+    fn add_path_bad_length_stored_as_unknown() {
+        // code=69, len=3 (not multiple of 4)
+        let data: &[u8] = &[69, 3, 0, 1, 1];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
+    }
+
+    #[test]
+    fn add_path_zero_length_stored_as_unknown() {
+        // code=69, len=0
+        let data: &[u8] = &[69, 0];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
+    }
+
+    #[test]
+    fn add_path_unknown_afi_preserved_as_unknown() {
+        // code=69, len=4, AFI=99(unknown), SAFI=1, mode=3
+        let data: &[u8] = &[69, 4, 0, 99, 1, 3];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        // Unrecognized entry → preserve as Unknown for lossless roundtrip
+        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
+    }
+
+    #[test]
+    fn add_path_invalid_mode_preserved_as_unknown() {
+        // code=69, len=4, AFI=1, SAFI=1, mode=0 (invalid)
+        let data: &[u8] = &[69, 4, 0, 1, 1, 0];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        // Invalid mode → preserve as Unknown for lossless roundtrip
+        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
+    }
+
+    #[test]
+    fn add_path_mixed_valid_and_invalid_preserved_as_unknown() {
+        // Two entries: valid IPv4/Unicast/Both + invalid AFI=99
+        let mut data = bytes::BytesMut::new();
+        data.put_u8(69); // code
+        data.put_u8(8); // len = 2 * 4
+        data.put_u16(1); // AFI IPv4
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(3); // Both (valid)
+        data.put_u16(99); // AFI unknown
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(3); // Both
+        let mut buf = data.freeze();
+        let cap = Capability::decode(&mut buf).unwrap();
+        // One invalid entry → entire capability preserved as Unknown
+        assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
     }
 }

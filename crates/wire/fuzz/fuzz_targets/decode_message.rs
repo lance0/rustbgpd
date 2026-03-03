@@ -7,5 +7,5 @@ use rustbgpd_wire::message::decode_message;
 fuzz_target!(|data: &[u8]| {
     let mut buf = Bytes::copy_from_slice(data);
     // Must never panic regardless of input
-    let _ = decode_message(&mut buf);
+    let _ = decode_message(&mut buf, rustbgpd_wire::constants::MAX_MESSAGE_LEN);
 });

@@ -85,6 +85,7 @@ impl PeerManager {
             families,
             graceful_restart: config.graceful_restart,
             gr_restart_time: config.gr_restart_time,
+            add_path_receive: config.add_path_receive,
         };
         let remote_addr = SocketAddr::new(config.address, BGP_PORT);
         let mut transport = TransportConfig::new(peer, remote_addr);
@@ -517,6 +518,7 @@ mod tests {
             gr_stale_routes_time: 360,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
+            add_path_receive: false,
             import_policy: None,
             export_policy: None,
         }

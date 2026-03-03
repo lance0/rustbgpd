@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use rustbgpd_wire::{
-    Afi, Capability, GracefulRestartFamily, NotificationMessage, OpenMessage, Safi,
+    AddPathMode, Afi, Capability, GracefulRestartFamily, NotificationMessage, OpenMessage, Safi,
 };
 
 use crate::state::SessionState;
@@ -40,6 +42,14 @@ pub struct NegotiatedSession {
     pub peer_gr_families: Vec<GracefulRestartFamily>,
     /// Whether the peer advertised Route Refresh capability (RFC 2918).
     pub peer_route_refresh: bool,
+    /// Whether both sides support Extended Messages (RFC 8654).
+    pub peer_extended_message: bool,
+    /// Per-AFI/SAFI Add-Path negotiated mode (RFC 7911).
+    ///
+    /// Only families where both sides agree are included. The mode
+    /// indicates what *we* can do: `Receive` means we accept Add-Path
+    /// from the peer, `Send` means we can send Add-Path, `Both` means both.
+    pub add_path_families: HashMap<(Afi, Safi), AddPathMode>,
 }
 
 /// Output actions produced by the FSM on each transition.

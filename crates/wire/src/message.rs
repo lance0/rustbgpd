@@ -52,14 +52,17 @@ impl std::fmt::Display for Message {
 /// framing — use [`peek_message_length`](crate::header::peek_message_length)
 /// to determine when a complete message is available.
 ///
+/// `max_message_len` is the negotiated maximum: 4096 normally, or 65535
+/// when Extended Messages (RFC 8654) has been negotiated.
+///
 /// Advances the buffer past the consumed bytes on success.
 ///
 /// # Errors
 ///
 /// Returns a [`DecodeError`] if the header is malformed or the message body
 /// fails validation for its type.
-pub fn decode_message(buf: &mut Bytes) -> Result<Message, DecodeError> {
-    let header = BgpHeader::decode(buf)?;
+pub fn decode_message(buf: &mut Bytes, max_message_len: u16) -> Result<Message, DecodeError> {
+    let header = BgpHeader::decode(buf, max_message_len)?;
     let body_len = usize::from(header.length) - HEADER_LEN;
 
     match header.message_type {
@@ -124,20 +127,62 @@ pub fn encode_message(msg: &Message) -> Result<BytesMut, EncodeError> {
     Ok(buf)
 }
 
+/// Encode a BGP message with a custom maximum message length.
+///
+/// Same as [`encode_message`] but uses `max_message_len` for UPDATE
+/// size validation (RFC 8654 Extended Messages).
+///
+/// # Errors
+///
+/// Returns an [`EncodeError`] if the message exceeds the negotiated maximum
+/// or a field value is out of range.
+pub fn encode_message_with_limit(
+    msg: &Message,
+    max_message_len: u16,
+) -> Result<BytesMut, EncodeError> {
+    let mut buf = BytesMut::with_capacity(match msg {
+        Message::Keepalive => keepalive::KEEPALIVE_LEN,
+        Message::Notification(n) => n.encoded_len(),
+        Message::Open(o) => o.encoded_len(),
+        Message::Update(u) => u.encoded_len(),
+        Message::RouteRefresh(rr) => rr.encoded_len(),
+    });
+
+    match msg {
+        Message::Keepalive => {
+            keepalive::encode_keepalive(&mut buf);
+        }
+        Message::Notification(n) => {
+            n.encode(&mut buf)?;
+        }
+        Message::Open(o) => {
+            o.encode(&mut buf)?;
+        }
+        Message::Update(u) => {
+            u.encode_with_limit(&mut buf, max_message_len)?;
+        }
+        Message::RouteRefresh(rr) => {
+            rr.encode(&mut buf)?;
+        }
+    }
+
+    Ok(buf)
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
     use crate::capability::{Afi, Capability, Safi};
-    use crate::constants::BGP_VERSION;
+    use crate::constants::{BGP_VERSION, MAX_MESSAGE_LEN};
     use crate::notification::NotificationCode;
 
     #[test]
     fn roundtrip_keepalive() {
         let encoded = encode_message(&Message::Keepalive).unwrap();
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).unwrap();
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, Message::Keepalive);
     }
 
@@ -150,7 +195,7 @@ mod tests {
         ));
         let encoded = encode_message(&msg).unwrap();
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).unwrap();
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, msg);
     }
 
@@ -165,7 +210,7 @@ mod tests {
         });
         let encoded = encode_message(&msg).unwrap();
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).unwrap();
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, msg);
     }
 
@@ -190,7 +235,7 @@ mod tests {
         });
         let encoded = encode_message(&msg).unwrap();
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).unwrap();
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, msg);
     }
 
@@ -203,7 +248,7 @@ mod tests {
         });
         let encoded = encode_message(&msg).unwrap();
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).unwrap();
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, msg);
     }
 
@@ -216,7 +261,7 @@ mod tests {
         });
         let encoded = encode_message(&msg).unwrap();
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).unwrap();
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(decoded, msg);
     }
 
@@ -237,14 +282,14 @@ mod tests {
     #[test]
     fn decode_rejects_garbage() {
         let mut buf = Bytes::from_static(&[0x00; 19]);
-        assert!(decode_message(&mut buf).is_err());
+        assert!(decode_message(&mut buf, MAX_MESSAGE_LEN).is_err());
     }
 
     #[test]
     fn decode_rejects_truncated() {
         let mut buf = Bytes::from_static(&[0xFF; 10]);
         assert!(matches!(
-            decode_message(&mut buf),
+            decode_message(&mut buf, MAX_MESSAGE_LEN),
             Err(DecodeError::Incomplete { .. })
         ));
     }

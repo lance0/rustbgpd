@@ -156,6 +156,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             origin_type: RouteOrigin::Local,
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: req.path_id,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -207,6 +208,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         self.rib_tx
             .send(RibUpdate::WithdrawInjected {
                 prefix,
+                path_id: req.path_id,
                 reply: reply_tx,
             })
             .await
@@ -245,6 +247,7 @@ mod tests {
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
+            path_id: 0,
         });
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -265,6 +268,7 @@ mod tests {
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
+            path_id: 0,
         });
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);

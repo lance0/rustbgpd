@@ -166,6 +166,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         communities,
         extended_communities,
         large_communities,
+        path_id: route.path_id,
     }
 }
 
@@ -333,6 +334,7 @@ impl proto::rib_service_server::RibService for RibService {
                     previous_peer_address: event
                         .previous_peer
                         .map_or_else(String::new, |p: IpAddr| p.to_string()),
+                    path_id: event.path_id,
                 }))
             }
             Err(_lagged) => {
@@ -369,6 +371,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
         let v6 = Route {
             prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
@@ -379,6 +382,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
 
         // Unspecified returns all

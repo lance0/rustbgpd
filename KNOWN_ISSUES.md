@@ -30,9 +30,9 @@ resolved.
   eBGP) is not yet fully distinguished. Will be enforced post-v1.
 - **No gRPC TLS.** Server listens in plaintext. TLS and mTLS are
   post-v1 scope. Default bind is localhost only.
-- **Injected routes keyed by prefix.** `InjectionService` supports one
-  injected route per prefix. Multiple distinct injected paths per prefix
-  are not supported (requires Add-Path, RFC 7911).
+- **Injected routes support multiple paths via path_id.** `InjectionService`
+  supports multiple injected routes per prefix using explicit `path_id`.
+  Path ID 0 is the default path.
 - **DisableNeighbor reason not propagated.** The `reason` field in
   `DisableNeighborRequest` is accepted but not included in the Cease
   NOTIFICATION sent to the peer.
@@ -63,3 +63,11 @@ resolved.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability
   (code 2) is always advertised. Inbound route refresh requests check
   peer capability, but there is no config option to disable the feature.
+- **Add-Path is receive + single-best send only.** Multi-path send
+  (route server mode) is not yet implemented. Add-Path peers receive
+  only the best path outbound with path_id encoding. Multiple outbound
+  paths per prefix per peer requires a follow-up implementation.
+- **Add-Path via gRPC AddNeighbor defaults to disabled.** Dynamic peers
+  created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive.
+  TOML config with `[neighbors.add_path] receive = true` is the only way
+  to enable it currently.

@@ -3,6 +3,24 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::error::DecodeError;
 
+/// An IPv4 NLRI entry with an optional Add-Path path ID (RFC 7911).
+///
+/// For non-Add-Path peers, `path_id` is always 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ipv4NlriEntry {
+    pub path_id: u32,
+    pub prefix: Ipv4Prefix,
+}
+
+/// A generic NLRI entry (IPv4 or IPv6) with an optional Add-Path path ID.
+///
+/// For non-Add-Path peers, `path_id` is always 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NlriEntry {
+    pub path_id: u32,
+    pub prefix: Prefix,
+}
+
 /// An IPv4 prefix (network address + prefix length).
 ///
 /// Stored in canonical form: host bits are always zero.
@@ -234,6 +252,177 @@ pub fn encode_ipv6_nlri(prefixes: &[Ipv6Prefix], buf: &mut Vec<u8>) {
     }
 }
 
+/// Decode a sequence of Add-Path IPv4 NLRI entries (RFC 7911 §3).
+///
+/// Wire format: `[4-byte path_id BE][prefix_len][prefix_bytes...]` per entry.
+///
+/// # Errors
+///
+/// Returns `DecodeError` if the buffer is truncated or a prefix length exceeds 32.
+pub fn decode_nlri_addpath(mut buf: &[u8]) -> Result<Vec<Ipv4NlriEntry>, DecodeError> {
+    let mut entries = Vec::new();
+
+    while !buf.is_empty() {
+        if buf.len() < 5 {
+            return Err(DecodeError::InvalidNetworkField {
+                detail: format!(
+                    "Add-Path NLRI truncated: need at least 5 bytes (path_id + prefix_len), have {}",
+                    buf.len()
+                ),
+                data: buf.to_vec(),
+            });
+        }
+
+        let path_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        buf = &buf[4..];
+
+        let field_start = buf;
+        let prefix_len = buf[0];
+        buf = &buf[1..];
+
+        if prefix_len > 32 {
+            let addr_bytes = usize::from(prefix_len.div_ceil(8)).min(buf.len());
+            return Err(DecodeError::InvalidNetworkField {
+                detail: format!("NLRI prefix length {prefix_len} exceeds 32"),
+                data: field_start[..=addr_bytes].to_vec(),
+            });
+        }
+
+        let byte_count = usize::from(prefix_len.div_ceil(8));
+        if buf.len() < byte_count {
+            return Err(DecodeError::InvalidNetworkField {
+                detail: format!(
+                    "NLRI truncated: prefix length {prefix_len} requires \
+                     {byte_count} bytes, have {}",
+                    buf.len()
+                ),
+                data: field_start[..=buf.len()].to_vec(),
+            });
+        }
+
+        let mut octets = [0u8; 4];
+        octets[..byte_count].copy_from_slice(&buf[..byte_count]);
+        buf = &buf[byte_count..];
+
+        entries.push(Ipv4NlriEntry {
+            path_id,
+            prefix: Ipv4Prefix::new(Ipv4Addr::from(octets), prefix_len),
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Encode a sequence of Add-Path IPv4 NLRI entries into wire format.
+pub fn encode_nlri_addpath(entries: &[Ipv4NlriEntry], buf: &mut Vec<u8>) {
+    for entry in entries {
+        buf.extend_from_slice(&entry.path_id.to_be_bytes());
+        buf.push(entry.prefix.len);
+        let byte_count = usize::from(entry.prefix.len.div_ceil(8));
+        let octets = entry.prefix.addr.octets();
+        buf.extend_from_slice(&octets[..byte_count]);
+    }
+}
+
+/// Decode a sequence of Add-Path IPv6 NLRI entries (RFC 7911 §3).
+///
+/// Wire format: `[4-byte path_id BE][prefix_len][prefix_bytes...]` per entry.
+///
+/// # Errors
+///
+/// Returns `DecodeError` if the buffer is truncated or a prefix length exceeds 128.
+pub fn decode_ipv6_nlri_addpath(mut buf: &[u8]) -> Result<Vec<NlriEntry>, DecodeError> {
+    let mut entries = Vec::new();
+
+    while !buf.is_empty() {
+        if buf.len() < 5 {
+            return Err(DecodeError::InvalidNetworkField {
+                detail: format!(
+                    "Add-Path NLRI truncated: need at least 5 bytes (path_id + prefix_len), have {}",
+                    buf.len()
+                ),
+                data: buf.to_vec(),
+            });
+        }
+
+        let path_id = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+        buf = &buf[4..];
+
+        let field_start = buf;
+        let prefix_len = buf[0];
+        buf = &buf[1..];
+
+        if prefix_len > 128 {
+            let addr_bytes = usize::from(prefix_len.div_ceil(8)).min(buf.len());
+            return Err(DecodeError::InvalidNetworkField {
+                detail: format!("NLRI prefix length {prefix_len} exceeds 128"),
+                data: field_start[..=addr_bytes].to_vec(),
+            });
+        }
+
+        let byte_count = usize::from(prefix_len.div_ceil(8));
+        if buf.len() < byte_count {
+            return Err(DecodeError::InvalidNetworkField {
+                detail: format!(
+                    "NLRI truncated: prefix length {prefix_len} requires \
+                     {byte_count} bytes, have {}",
+                    buf.len()
+                ),
+                data: field_start[..=buf.len()].to_vec(),
+            });
+        }
+
+        let mut octets = [0u8; 16];
+        octets[..byte_count].copy_from_slice(&buf[..byte_count]);
+        buf = &buf[byte_count..];
+
+        entries.push(NlriEntry {
+            path_id,
+            prefix: Prefix::V6(Ipv6Prefix::new(Ipv6Addr::from(octets), prefix_len)),
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Encode a sequence of Add-Path IPv6 NLRI entries into wire format.
+pub fn encode_ipv6_nlri_addpath(entries: &[NlriEntry], buf: &mut Vec<u8>) {
+    for entry in entries {
+        buf.extend_from_slice(&entry.path_id.to_be_bytes());
+        match entry.prefix {
+            Prefix::V6(p) => {
+                buf.push(p.len);
+                let byte_count = usize::from(p.len.div_ceil(8));
+                let octets = p.addr.octets();
+                buf.extend_from_slice(&octets[..byte_count]);
+            }
+            Prefix::V4(p) => {
+                buf.push(p.len);
+                let byte_count = usize::from(p.len.div_ceil(8));
+                let octets = p.addr.octets();
+                buf.extend_from_slice(&octets[..byte_count]);
+            }
+        }
+    }
+}
+
+/// Decode Add-Path IPv4 NLRI entries into generic `NlriEntry` (for `MP_REACH`/`MP_UNREACH`).
+///
+/// # Errors
+///
+/// Returns `DecodeError` if the buffer is truncated or a prefix length exceeds 32.
+pub fn decode_nlri_addpath_generic(buf: &[u8]) -> Result<Vec<NlriEntry>, DecodeError> {
+    decode_nlri_addpath(buf).map(|entries| {
+        entries
+            .into_iter()
+            .map(|e| NlriEntry {
+                path_id: e.path_id,
+                prefix: Prefix::V4(e.prefix),
+            })
+            .collect()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +643,143 @@ mod tests {
     fn prefix_display_v6() {
         let p = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
         assert_eq!(format!("{p}"), "2001:db8::/32");
+    }
+
+    // --- Add-Path IPv4 NLRI tests ---
+
+    #[test]
+    fn addpath_ipv4_roundtrip_single() {
+        let entry = Ipv4NlriEntry {
+            path_id: 42,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+        };
+        let mut buf = Vec::new();
+        encode_nlri_addpath(&[entry], &mut buf);
+        let decoded = decode_nlri_addpath(&buf).unwrap();
+        assert_eq!(decoded, vec![entry]);
+    }
+
+    #[test]
+    fn addpath_ipv4_roundtrip_multiple() {
+        let entries = vec![
+            Ipv4NlriEntry {
+                path_id: 1,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8),
+            },
+            Ipv4NlriEntry {
+                path_id: 2,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24),
+            },
+            Ipv4NlriEntry {
+                path_id: 0xFFFF_FFFF,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 12),
+            },
+        ];
+        let mut buf = Vec::new();
+        encode_nlri_addpath(&entries, &mut buf);
+        let decoded = decode_nlri_addpath(&buf).unwrap();
+        assert_eq!(decoded, entries);
+    }
+
+    #[test]
+    fn addpath_ipv4_empty() {
+        let decoded = decode_nlri_addpath(&[]).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn addpath_ipv4_truncated_path_id() {
+        // Only 3 bytes — not enough for a 4-byte path ID + prefix len
+        let buf = [0, 0, 0];
+        assert!(decode_nlri_addpath(&buf).is_err());
+    }
+
+    #[test]
+    fn addpath_ipv4_prefix_len_exceeds_32() {
+        // path_id=1, prefix_len=33
+        let buf = [0, 0, 0, 1, 33, 10, 0, 0, 0, 0];
+        assert!(decode_nlri_addpath(&buf).is_err());
+    }
+
+    #[test]
+    fn addpath_ipv4_truncated_prefix() {
+        // path_id=1, prefix_len=24, but only 2 address bytes (need 3)
+        let buf = [0, 0, 0, 1, 24, 10, 0];
+        assert!(decode_nlri_addpath(&buf).is_err());
+    }
+
+    #[test]
+    fn addpath_ipv4_wire_format() {
+        let entry = Ipv4NlriEntry {
+            path_id: 1,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+        };
+        let mut buf = Vec::new();
+        encode_nlri_addpath(&[entry], &mut buf);
+        // 4-byte path_id (BE) + 1-byte len + 3-byte addr
+        assert_eq!(buf, vec![0, 0, 0, 1, 24, 10, 0, 0]);
+    }
+
+    // --- Add-Path IPv6 NLRI tests ---
+
+    #[test]
+    fn addpath_ipv6_roundtrip_single() {
+        let entry = NlriEntry {
+            path_id: 7,
+            prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+        };
+        let mut buf = Vec::new();
+        encode_ipv6_nlri_addpath(&[entry], &mut buf);
+        let decoded = decode_ipv6_nlri_addpath(&buf).unwrap();
+        assert_eq!(decoded, vec![entry]);
+    }
+
+    #[test]
+    fn addpath_ipv6_roundtrip_multiple() {
+        let entries = vec![
+            NlriEntry {
+                path_id: 1,
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
+            },
+            NlriEntry {
+                path_id: 2,
+                prefix: Prefix::V6(Ipv6Prefix::new("fd00::".parse().unwrap(), 64)),
+            },
+        ];
+        let mut buf = Vec::new();
+        encode_ipv6_nlri_addpath(&entries, &mut buf);
+        let decoded = decode_ipv6_nlri_addpath(&buf).unwrap();
+        assert_eq!(decoded, entries);
+    }
+
+    #[test]
+    fn addpath_ipv6_empty() {
+        let decoded = decode_ipv6_nlri_addpath(&[]).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn addpath_ipv6_truncated() {
+        let buf = [0, 0, 0];
+        assert!(decode_ipv6_nlri_addpath(&buf).is_err());
+    }
+
+    #[test]
+    fn addpath_generic_ipv4_roundtrip() {
+        let entries = vec![
+            Ipv4NlriEntry {
+                path_id: 1,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24),
+            },
+        ];
+        let mut buf = Vec::new();
+        encode_nlri_addpath(&entries, &mut buf);
+        let generic = decode_nlri_addpath_generic(&buf).unwrap();
+        assert_eq!(generic.len(), 1);
+        assert_eq!(generic[0].path_id, 1);
+        assert_eq!(
+            generic[0].prefix,
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24))
+        );
     }
 }

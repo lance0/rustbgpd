@@ -37,6 +37,7 @@ mod tests {
     use bytes::BytesMut;
 
     use super::*;
+    use crate::constants::MAX_MESSAGE_LEN;
     use crate::header::BgpHeader;
 
     #[test]
@@ -51,7 +52,7 @@ mod tests {
         let mut buf = BytesMut::with_capacity(KEEPALIVE_LEN);
         encode_keepalive(&mut buf);
         let mut bytes = buf.freeze();
-        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(header.message_type, MessageType::Keepalive);
         assert_eq!(header.length, 19);
         validate_keepalive(&header).unwrap();

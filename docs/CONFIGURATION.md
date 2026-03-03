@@ -73,6 +73,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
+| `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 
 ### Address families
 
@@ -137,6 +138,32 @@ graceful_restart = false
 only. It preserves a restarting peer's routes but does not advertise its own
 restart state (R-bit) or preserve its own forwarding state on daemon restart.
 See [ADR-0024](docs/adr/0024-graceful-restart.md).
+
+### Add-Path (RFC 7911)
+
+Add-Path allows accepting multiple paths per prefix from a peer. Enable it
+per-neighbor with the `[neighbors.add_path]` table:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[neighbors.add_path]
+receive = true    # accept multiple paths per prefix from this peer
+```
+
+| Field     | Type | Required | Default | Description                               |
+|-----------|------|----------|---------|-------------------------------------------|
+| `receive` | bool | no       | false   | Accept multiple paths per prefix from peer |
+
+When `receive` is true, the Add-Path capability (code 69) is advertised in
+OPEN for all configured address families with `Receive` mode. The peer must
+advertise `Send` (or `Both`) for the capability to take effect.
+
+**Current limitation:** Only receive + single-best outbound is implemented.
+Multi-path send (route server mode) is planned for a future release. See
+[ADR-0033](docs/adr/0033-add-path.md).
 
 ### Per-neighbor policy
 

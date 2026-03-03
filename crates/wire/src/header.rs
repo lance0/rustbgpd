@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut};
 
-use crate::constants::{self, HEADER_LEN, MARKER, MARKER_LEN, MAX_MESSAGE_LEN, MIN_MESSAGE_LEN};
+use crate::constants::{self, HEADER_LEN, MARKER, MARKER_LEN, MIN_MESSAGE_LEN};
 use crate::error::DecodeError;
 
 /// BGP message type codes.
@@ -56,11 +56,15 @@ impl BgpHeader {
     /// Decode a BGP header from a buffer. Validates marker, length, and type.
     /// Advances the buffer by 19 bytes on success.
     ///
+    /// `max_message_len` is the negotiated maximum message length: 4096
+    /// normally, or 65535 when Extended Messages (RFC 8654) has been
+    /// negotiated.
+    ///
     /// # Errors
     ///
     /// Returns a [`DecodeError`] if the buffer is too short, the marker is
     /// invalid, the length is out of range, or the message type is unknown.
-    pub fn decode(buf: &mut impl Buf) -> Result<Self, DecodeError> {
+    pub fn decode(buf: &mut impl Buf, max_message_len: u16) -> Result<Self, DecodeError> {
         if buf.remaining() < HEADER_LEN {
             return Err(DecodeError::Incomplete {
                 needed: HEADER_LEN,
@@ -76,7 +80,7 @@ impl BgpHeader {
         }
 
         let length = buf.get_u16();
-        if !(MIN_MESSAGE_LEN..=MAX_MESSAGE_LEN).contains(&length) {
+        if !(MIN_MESSAGE_LEN..=max_message_len).contains(&length) {
             return Err(DecodeError::InvalidLength { length });
         }
 
@@ -104,13 +108,16 @@ impl BgpHeader {
 /// needs `length` bytes. Returns `Ok(None)` if fewer than 19 bytes are
 /// available. Returns `Err` if the header is malformed.
 ///
+/// `max_message_len` is the negotiated maximum message length: 4096
+/// normally, or 65535 when Extended Messages (RFC 8654) has been negotiated.
+///
 /// Does NOT advance the buffer.
 ///
 /// # Errors
 ///
 /// Returns a [`DecodeError`] if the marker is invalid, the length is out
 /// of range, or the message type is unknown.
-pub fn peek_message_length(buf: &[u8]) -> Result<Option<u16>, DecodeError> {
+pub fn peek_message_length(buf: &[u8], max_message_len: u16) -> Result<Option<u16>, DecodeError> {
     if buf.len() < HEADER_LEN {
         return Ok(None);
     }
@@ -121,7 +128,7 @@ pub fn peek_message_length(buf: &[u8]) -> Result<Option<u16>, DecodeError> {
     }
 
     let length = u16::from_be_bytes([buf[16], buf[17]]);
-    if !(MIN_MESSAGE_LEN..=MAX_MESSAGE_LEN).contains(&length) {
+    if !(MIN_MESSAGE_LEN..=max_message_len).contains(&length) {
         return Err(DecodeError::InvalidLength { length });
     }
 
@@ -138,6 +145,7 @@ mod tests {
     use bytes::BytesMut;
 
     use super::*;
+    use crate::constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
 
     fn make_header(length: u16, msg_type: u8) -> BytesMut {
         let mut buf = BytesMut::with_capacity(HEADER_LEN);
@@ -150,7 +158,7 @@ mod tests {
     #[test]
     fn decode_valid_keepalive_header() {
         let mut buf = make_header(19, 4).freeze();
-        let hdr = BgpHeader::decode(&mut buf).unwrap();
+        let hdr = BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(hdr.length, 19);
         assert_eq!(hdr.message_type, MessageType::Keepalive);
         assert_eq!(buf.remaining(), 0);
@@ -159,7 +167,7 @@ mod tests {
     #[test]
     fn decode_valid_open_header() {
         let mut buf = make_header(29, 1).freeze();
-        let hdr = BgpHeader::decode(&mut buf).unwrap();
+        let hdr = BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(hdr.message_type, MessageType::Open);
     }
 
@@ -169,7 +177,7 @@ mod tests {
         data[0] = 0x00; // corrupt marker
         let mut buf = data.freeze();
         assert!(matches!(
-            BgpHeader::decode(&mut buf),
+            BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN),
             Err(DecodeError::InvalidMarker)
         ));
     }
@@ -178,7 +186,7 @@ mod tests {
     fn reject_length_too_small() {
         let mut buf = make_header(18, 4).freeze();
         assert!(matches!(
-            BgpHeader::decode(&mut buf),
+            BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN),
             Err(DecodeError::InvalidLength { length: 18 })
         ));
     }
@@ -187,7 +195,7 @@ mod tests {
     fn reject_length_too_large() {
         let mut buf = make_header(4097, 4).freeze();
         assert!(matches!(
-            BgpHeader::decode(&mut buf),
+            BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN),
             Err(DecodeError::InvalidLength { length: 4097 })
         ));
     }
@@ -196,7 +204,7 @@ mod tests {
     fn reject_unknown_type() {
         let mut buf = make_header(19, 99).freeze();
         assert!(matches!(
-            BgpHeader::decode(&mut buf),
+            BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN),
             Err(DecodeError::UnknownMessageType(99))
         ));
     }
@@ -205,7 +213,7 @@ mod tests {
     fn reject_incomplete_buffer() {
         let mut buf = bytes::Bytes::from_static(&[0xFF; 10]);
         assert!(matches!(
-            BgpHeader::decode(&mut buf),
+            BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN),
             Err(DecodeError::Incomplete { .. })
         ));
     }
@@ -219,19 +227,19 @@ mod tests {
         let mut encoded = BytesMut::with_capacity(HEADER_LEN);
         original.encode(&mut encoded);
         let mut buf = encoded.freeze();
-        let decoded = BgpHeader::decode(&mut buf).unwrap();
+        let decoded = BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(original, decoded);
     }
 
     #[test]
     fn peek_returns_none_for_short_buffer() {
-        assert_eq!(peek_message_length(&[0xFF; 10]).unwrap(), None);
+        assert_eq!(peek_message_length(&[0xFF; 10], MAX_MESSAGE_LEN).unwrap(), None);
     }
 
     #[test]
     fn peek_returns_length_for_valid_header() {
         let buf = make_header(42, 1);
-        assert_eq!(peek_message_length(&buf).unwrap(), Some(42));
+        assert_eq!(peek_message_length(&buf, MAX_MESSAGE_LEN).unwrap(), Some(42));
     }
 
     #[test]
@@ -239,8 +247,42 @@ mod tests {
         let mut data = make_header(19, 4);
         data[15] = 0x00;
         assert!(matches!(
-            peek_message_length(&data),
+            peek_message_length(&data, MAX_MESSAGE_LEN),
             Err(DecodeError::InvalidMarker)
+        ));
+    }
+
+    #[test]
+    fn extended_accepts_4097() {
+        let mut buf = make_header(4097, 2).freeze();
+        let hdr = BgpHeader::decode(&mut buf, EXTENDED_MAX_MESSAGE_LEN).unwrap();
+        assert_eq!(hdr.length, 4097);
+    }
+
+    #[test]
+    fn standard_rejects_4097() {
+        let mut buf = make_header(4097, 2).freeze();
+        assert!(matches!(
+            BgpHeader::decode(&mut buf, MAX_MESSAGE_LEN),
+            Err(DecodeError::InvalidLength { length: 4097 })
+        ));
+    }
+
+    #[test]
+    fn peek_extended_accepts_large() {
+        let buf = make_header(5000, 2);
+        assert_eq!(
+            peek_message_length(&buf, EXTENDED_MAX_MESSAGE_LEN).unwrap(),
+            Some(5000)
+        );
+    }
+
+    #[test]
+    fn peek_standard_rejects_large() {
+        let buf = make_header(5000, 2);
+        assert!(matches!(
+            peek_message_length(&buf, MAX_MESSAGE_LEN),
+            Err(DecodeError::InvalidLength { length: 5000 })
         ));
     }
 }

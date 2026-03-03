@@ -10,6 +10,9 @@ pub const MIN_MESSAGE_LEN: u16 = 19;
 /// Maximum valid BGP message length per RFC 4271 §4.1.
 pub const MAX_MESSAGE_LEN: u16 = 4096;
 
+/// Maximum BGP message length with Extended Messages (RFC 8654).
+pub const EXTENDED_MAX_MESSAGE_LEN: u16 = 65535;
+
 /// Size of the marker field in the header.
 pub const MARKER_LEN: usize = 16;
 
@@ -56,6 +59,10 @@ pub mod capability_code {
     pub const ROUTE_REFRESH: u8 = 2;
     /// RFC 4724: Graceful Restart.
     pub const GRACEFUL_RESTART: u8 = 64;
+    /// RFC 8654: Extended Messages.
+    pub const EXTENDED_MESSAGE: u8 = 6;
+    /// RFC 7911: Add-Path.
+    pub const ADD_PATH: u8 = 69;
     /// RFC 6793: 4-Byte AS Number.
     pub const FOUR_OCTET_AS: u8 = 65;
 }

@@ -515,6 +515,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            add_path_receive: false,
         }
     }
 

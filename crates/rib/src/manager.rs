@@ -179,17 +179,17 @@ impl RibManager {
     fn recompute_best(&mut self, affected: &HashSet<Prefix>) -> HashSet<Prefix> {
         let mut changed = HashSet::new();
         for prefix in affected {
-            let previous_best_peer = self.loc_rib.get(prefix).map(|r| r.peer);
+            let previous_best = self.loc_rib.get(prefix).map(|r| (r.peer, r.path_id));
             let candidates: Vec<_> = self
                 .ribs
                 .values()
-                .filter_map(|rib| rib.get(prefix))
+                .flat_map(|rib| rib.iter_prefix(prefix))
                 .collect();
             let did_change = self.loc_rib.recompute(*prefix, candidates.into_iter());
             if did_change {
                 changed.insert(*prefix);
                 let current_best = self.loc_rib.get(prefix);
-                match (previous_best_peer, current_best) {
+                match (previous_best, current_best) {
                     (None, Some(best)) => {
                         debug!(%prefix, peer = %best.peer, "best path added");
                         let _ = self.route_events_tx.send(RouteEvent {
@@ -198,9 +198,10 @@ impl RibManager {
                             peer: Some(best.peer),
                             previous_peer: None,
                             timestamp: crate::event::unix_timestamp_now(),
+                            path_id: best.path_id,
                         });
                     }
-                    (Some(old_peer), None) => {
+                    (Some((old_peer, old_path_id)), None) => {
                         debug!(%prefix, "best path removed");
                         let _ = self.route_events_tx.send(RouteEvent {
                             event_type: RouteEventType::Withdrawn,
@@ -208,9 +209,10 @@ impl RibManager {
                             peer: None,
                             previous_peer: Some(old_peer),
                             timestamp: crate::event::unix_timestamp_now(),
+                            path_id: old_path_id,
                         });
                     }
-                    (Some(old_peer), Some(best)) => {
+                    (Some((old_peer, _old_path_id)), Some(best)) => {
                         debug!(%prefix, peer = %best.peer, "best path changed");
                         let _ = self.route_events_tx.send(RouteEvent {
                             event_type: RouteEventType::BestChanged,
@@ -218,6 +220,7 @@ impl RibManager {
                             peer: Some(best.peer),
                             previous_peer: Some(old_peer),
                             timestamp: crate::event::unix_timestamp_now(),
+                            path_id: best.path_id,
                         });
                     }
                     (None, None) => {}
@@ -286,7 +289,7 @@ impl RibManager {
                 if let Some(best) = self.loc_rib.get(prefix) {
                     // Split horizon: don't send route back to its source
                     if best.peer == peer {
-                        if rib_out.get(prefix).is_some() {
+                        if rib_out.get(prefix, 0).is_some() {
                             withdraw.push(*prefix);
                         }
                         continue;
@@ -300,7 +303,7 @@ impl RibManager {
                         cluster_id,
                         &self.peer_is_rr_client,
                     ) {
-                        if rib_out.get(prefix).is_some() {
+                        if rib_out.get(prefix, 0).is_some() {
                             withdraw.push(*prefix);
                         }
                         continue;
@@ -313,7 +316,7 @@ impl RibManager {
                         Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
                     };
                     if !sendable.as_ref().is_some_and(|f| f.contains(&family)) {
-                        if rib_out.get(prefix).is_some() {
+                        if rib_out.get(prefix, 0).is_some() {
                             withdraw.push(*prefix);
                         }
                         continue;
@@ -332,7 +335,7 @@ impl RibManager {
                         &aspath_str,
                     );
                     if result.action != PolicyAction::Permit {
-                        if rib_out.get(prefix).is_some() {
+                        if rib_out.get(prefix, 0).is_some() {
                             withdraw.push(*prefix);
                         }
                         continue;
@@ -347,11 +350,16 @@ impl RibManager {
                     if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
                         modified.next_hop = *addr;
                     }
+                    // Single-best send uses a sender-assigned default path ID.
+                    // Even when the best path was learned via Add-Path, we only
+                    // advertise one path per prefix today, so outbound state is
+                    // tracked canonically as path_id=0.
+                    modified.path_id = 0;
                     nh_override_flags.push(nh_action);
                     announce.push(modified);
                 } else {
                     // Best path removed — withdraw if previously advertised
-                    if rib_out.get(prefix).is_some() {
+                    if rib_out.get(prefix, 0).is_some() {
                         withdraw.push(*prefix);
                     }
                 }
@@ -391,7 +399,7 @@ impl RibManager {
                         rib_out.insert(route.clone());
                     }
                     for prefix in &withdraw {
-                        rib_out.withdraw(prefix);
+                        rib_out.withdraw(prefix, 0);
                     }
                     self.metrics.set_adj_rib_out_prefixes(
                         &peer.to_string(),
@@ -462,6 +470,8 @@ impl RibManager {
             if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
                 modified.next_hop = *addr;
             }
+            // Single-best send uses a sender-assigned default path ID.
+            modified.path_id = 0;
             nh_override_flags.push(nh_action);
             announce.push(modified);
         }
@@ -576,6 +586,8 @@ impl RibManager {
             if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
                 modified.next_hop = *addr;
             }
+            // Single-best send uses a sender-assigned default path ID.
+            modified.path_id = 0;
             nh_override_flags.push(nh_action);
             announce.push(modified);
         }
@@ -664,10 +676,10 @@ impl RibManager {
                 let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
                 let mut affected = HashSet::new();
 
-                for prefix in &withdrawn {
-                    if rib.withdraw(prefix) {
-                        debug!(%peer, %prefix, "withdrawn");
-                        affected.insert(*prefix);
+                for &(prefix, path_id) in &withdrawn {
+                    if rib.withdraw(&prefix, path_id) {
+                        debug!(%peer, %prefix, path_id, "withdrawn");
+                        affected.insert(prefix);
                     }
                 }
 
@@ -769,12 +781,12 @@ impl RibManager {
                 let _ = reply.send(Ok(()));
             }
 
-            RibUpdate::WithdrawInjected { prefix, reply } => {
+            RibUpdate::WithdrawInjected { prefix, path_id, reply } => {
                 let rib = self
                     .ribs
                     .entry(LOCAL_PEER)
                     .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-                if rib.withdraw(&prefix) {
+                if rib.withdraw(&prefix, path_id) {
                     debug!(%prefix, "withdrawn injected route");
                     self.metrics.set_rib_prefixes(
                         &LOCAL_PEER.to_string(),
@@ -1132,6 +1144,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         }
     }
 
@@ -1151,6 +1164,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         }
     }
 
@@ -1247,7 +1261,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer,
             announced: vec![],
-            withdrawn: vec![Prefix::V4(prefix1)],
+            withdrawn: vec![(Prefix::V4(prefix1), 0)],
         })
         .await
         .unwrap();
@@ -1429,7 +1443,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer: peer2,
             announced: vec![],
-            withdrawn: vec![Prefix::V4(prefix)],
+            withdrawn: vec![(Prefix::V4(prefix), 0)],
         })
         .await
         .unwrap();
@@ -1587,6 +1601,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_best_send_normalizes_path_id_to_zero() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        route.path_id = 42;
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: route.peer,
+            announced: vec![route],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let update = out_rx.recv().await.unwrap();
+        assert_eq!(update.announce.len(), 1);
+        assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+        assert_eq!(update.announce[0].path_id, 0);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn split_horizon_prevents_echo() {
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, None, BgpMetrics::new());
@@ -1641,6 +1696,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         }
     }
 
@@ -1870,6 +1926,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RibUpdate::InjectRoute {
@@ -1906,6 +1963,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RibUpdate::InjectRoute {
@@ -2012,6 +2070,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -2070,6 +2129,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -2088,6 +2148,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(RibUpdate::WithdrawInjected {
             prefix: Prefix::V4(prefix),
+            path_id: 0,
             reply: reply_tx,
         })
         .await
@@ -2405,7 +2466,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer: source,
             announced: vec![],
-            withdrawn: vec![Prefix::V4(prefix1)],
+            withdrawn: vec![(Prefix::V4(prefix1), 0)],
         })
         .await
         .unwrap();
@@ -2513,7 +2574,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer: source,
             announced: vec![],
-            withdrawn: vec![Prefix::V4(prefix1)],
+            withdrawn: vec![(Prefix::V4(prefix1), 0)],
         })
         .await
         .unwrap();
@@ -2788,7 +2849,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer,
             announced: vec![],
-            withdrawn: vec![Prefix::V4(prefix)],
+            withdrawn: vec![(Prefix::V4(prefix), 0)],
         })
         .await
         .unwrap();
@@ -2894,7 +2955,7 @@ mod tests {
         tx.send(RibUpdate::RoutesReceived {
             peer,
             announced: vec![],
-            withdrawn: vec![Prefix::V4(prefix)],
+            withdrawn: vec![(Prefix::V4(prefix), 0)],
         })
         .await
         .unwrap();
@@ -2998,6 +3059,36 @@ mod tests {
         assert_eq!(event.event_type, RouteEventType::Added);
         assert_eq!(event.peer, Some(peer));
         assert!(event.previous_peer.is_none());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_event_carries_best_path_id() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let mut events_rx = subscribe_events(&tx).await;
+
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        route.path_id = 42;
+        let peer = route.peer;
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route],
+            withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let event = events_rx.recv().await.unwrap();
+        assert_eq!(event.event_type, RouteEventType::Added);
+        assert_eq!(event.peer, Some(peer));
+        assert_eq!(event.path_id, 42);
 
         drop(tx);
         handle.await.unwrap();
@@ -3279,6 +3370,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
 
         // Send both IPv4 and IPv6 routes
@@ -3334,6 +3426,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
 
         // Pre-populate Loc-RIB with both IPv4 and IPv6 routes
@@ -3404,6 +3497,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
 
         // Pre-populate Loc-RIB
@@ -3832,6 +3926,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
         tx.send(RibUpdate::RoutesReceived {
             peer: source,
@@ -4166,6 +4261,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         };
         let (reply_tx, _) = oneshot::channel();
         tx.send(RibUpdate::InjectRoute {

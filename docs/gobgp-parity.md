@@ -35,10 +35,10 @@ Last updated: 2026-03-02
 | Notification GR (RFC 8538) | Yes | No | |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | No | |
-| Add-Path (RFC 7911) | Yes | No | On roadmap |
+| Add-Path (RFC 7911) | Yes | Partial | Receive + single-best send; multi-path send deferred |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
-| Extended Messages (RFC 8654) | No | No | Neither supports it |
+| Extended Messages (RFC 8654) | No | Yes | rustbgpd supports it; GoBGP does not |
 | Extended Nexthop (RFC 8950) | Yes | No | IPv6 NH for IPv4 NLRI |
 | Admin Shutdown Comm (RFC 8203) | Yes | No | Reason text in NOTIFICATION |
 
@@ -163,7 +163,7 @@ Last updated: 2026-03-02
 | Category | GoBGP | rustbgpd | Parity |
 |----------|:-----:|:--------:|:------:|
 | Address families | ~26 | 2 | ~8% |
-| Core protocol RFCs | ~15 | 9 | ~60% |
+| Core protocol RFCs | ~15 | 11 | ~73% |
 | Path attributes | ~15 | 11 | ~73% |
 | Policy engine | ~17 features | 10 | ~59% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
@@ -173,8 +173,8 @@ Last updated: 2026-03-02
 
 ## Biggest Gaps for Target Users (IX operators, automation teams)
 
-1. **Add-Path** — essential for route servers (RFC 7911)
+1. **Add-Path multi-path send** — receive landing done; route server mode needs multi-path outbound
 2. **GR restarting speaker** — only receiving today
 3. **RPKI/RTR** — growing regulatory requirement
-4. **Extended messages (RFC 8654)** — needed for large attribute payloads
-5. **Policy chaining** — first-match-wins only, no multi-policy sequencing
+4. **Policy chaining** — first-match-wins only, no multi-policy sequencing
+5. **Extended nexthop (RFC 8950)** — IPv6 next-hop for IPv4 NLRI

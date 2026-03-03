@@ -9,14 +9,26 @@ use rustbgpd_wire::{DecodeError, Message, decode_message, peek_message_length};
 /// parsing.
 pub struct ReadBuffer {
     pub(crate) buf: BytesMut,
+    max_message_len: u16,
 }
 
 impl ReadBuffer {
-    /// Create a new read buffer with capacity for one max-size BGP message.
+    /// Create a new read buffer with capacity for one standard-size BGP message.
     #[must_use]
     pub fn new() -> Self {
         Self {
             buf: BytesMut::with_capacity(MAX_MESSAGE_LEN.into()),
+            max_message_len: MAX_MESSAGE_LEN,
+        }
+    }
+
+    /// Update the maximum message length (e.g., after Extended Messages negotiation).
+    /// Reserves additional capacity if the new limit exceeds current capacity.
+    pub fn set_max_message_len(&mut self, len: u16) {
+        self.max_message_len = len;
+        let needed = usize::from(len);
+        if self.buf.capacity() < needed {
+            self.buf.reserve(needed - self.buf.capacity());
         }
     }
 
@@ -30,7 +42,7 @@ impl ReadBuffer {
     /// Returns [`DecodeError`] if the header is malformed or the message
     /// body fails validation.
     pub fn try_decode(&mut self) -> Result<Option<Message>, DecodeError> {
-        let len = match peek_message_length(&self.buf)? {
+        let len = match peek_message_length(&self.buf, self.max_message_len)? {
             Some(len) => usize::from(len),
             None => return Ok(None),
         };
@@ -41,7 +53,7 @@ impl ReadBuffer {
 
         let frame = self.buf.split_to(len);
         let mut bytes = frame.freeze();
-        let msg = decode_message(&mut bytes)?;
+        let msg = decode_message(&mut bytes, self.max_message_len)?;
         Ok(Some(msg))
     }
 

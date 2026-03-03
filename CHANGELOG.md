@@ -75,6 +75,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Route::large_communities()` accessor, gRPC API fields on Route and
   AddPath, policy matching (`LC:global:local1:local2` format in
   `match_community`), and set/delete in policy actions. (ADR-0031)
+- **Extended Messages (RFC 8654).** Raises the 4096-byte BGP message
+  limit to 65535 bytes. Capability code 6 advertised unconditionally.
+  Negotiated per-session; dynamic buffer sizing on establishment.
+  `max_message_len` parameter threaded through header decode, message
+  decode, and UPDATE encode. (ADR-0032)
+- **Add-Path (RFC 7911) — receive + single-best send.** Accept multiple
+  paths per prefix from Add-Path peers. Capability code 69 with
+  `AddPathMode` (Receive/Send/Both) negotiation. `NlriEntry` and
+  `Ipv4NlriEntry` structs for path-id-aware NLRI. RIB re-keyed with
+  composite `(Prefix, path_id)` keys in Adj-RIB-In and Adj-RIB-Out.
+  `iter_prefix()` for multi-candidate best-path selection. TOML config:
+  `[neighbors.add_path] receive = true`. gRPC API: `path_id` on Route,
+  RouteEvent, AddPathRequest, DeletePathRequest. (ADR-0033)
 
 ### Fixed
 

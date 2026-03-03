@@ -100,6 +100,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            path_id: 0,
         }
     }
 

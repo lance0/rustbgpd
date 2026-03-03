@@ -31,6 +31,7 @@ fn test_peer_config() -> PeerConfig {
         families: vec![(Afi::Ipv4, Safi::Unicast)],
         graceful_restart: false,
         gr_restart_time: 120,
+        add_path_receive: false,
     }
 }
 
@@ -54,12 +55,12 @@ fn mock_open() -> OpenMessage {
 async fn read_bgp_message(stream: &mut tokio::net::TcpStream, buf: &mut BytesMut) -> Message {
     loop {
         // Check if we have a complete message
-        if let Ok(Some(len)) = peek_message_length(buf) {
+        if let Ok(Some(len)) = peek_message_length(buf, rustbgpd_wire::MAX_MESSAGE_LEN) {
             let len = usize::from(len);
             if buf.len() >= len {
                 let frame = buf.split_to(len);
                 let mut bytes = frame.freeze();
-                return decode_message(&mut bytes).expect("valid message");
+                return decode_message(&mut bytes, rustbgpd_wire::MAX_MESSAGE_LEN).expect("valid message");
             }
         }
         // Need more data

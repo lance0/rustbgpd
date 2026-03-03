@@ -1,7 +1,7 @@
 use std::net::Ipv4Addr;
 
 use rustbgpd_wire::constants::AS_TRANS;
-use rustbgpd_wire::{Afi, Capability, GracefulRestartFamily, Safi};
+use rustbgpd_wire::{AddPathFamily, AddPathMode, Afi, Capability, GracefulRestartFamily, Safi};
 
 /// Configuration for a single BGP peer session.
 #[derive(Debug, Clone)]
@@ -22,6 +22,8 @@ pub struct PeerConfig {
     pub graceful_restart: bool,
     /// Restart time advertised in GR capability (seconds, max 4095).
     pub gr_restart_time: u16,
+    /// Accept multiple paths per prefix from this peer (RFC 7911).
+    pub add_path_receive: bool,
 }
 
 impl PeerConfig {
@@ -47,11 +49,37 @@ impl PeerConfig {
                     .collect(),
             });
         }
+        let add_path_caps = self.add_path_capabilities();
+        if !add_path_caps.is_empty() {
+            caps.push(Capability::AddPath(add_path_caps));
+        }
         caps.push(Capability::RouteRefresh);
+        caps.push(Capability::ExtendedMessage);
         caps.push(Capability::FourOctetAs {
             asn: self.local_asn,
         });
         caps
+    }
+
+    /// Build Add-Path capability entries for our outgoing OPEN message.
+    ///
+    /// When `add_path_receive` is enabled, advertises `Receive` mode for
+    /// IPv4 unicast only. IPv6 (MP-BGP) Add-Path is not yet implemented in
+    /// the MP attribute codec, so advertising it would cause misparsing.
+    #[must_use]
+    pub fn add_path_capabilities(&self) -> Vec<AddPathFamily> {
+        if !self.add_path_receive {
+            return Vec::new();
+        }
+        self.families
+            .iter()
+            .filter(|&&(afi, safi)| afi == Afi::Ipv4 && safi == Safi::Unicast)
+            .map(|&(afi, safi)| AddPathFamily {
+                afi,
+                safi,
+                send_receive: AddPathMode::Receive,
+            })
+            .collect()
     }
 
     /// The 2-byte `my_as` field for the OPEN wire format.
@@ -82,14 +110,15 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            add_path_receive: false,
         }
     }
 
     #[test]
-    fn local_capabilities_includes_families_rr_and_four_octet() {
+    fn local_capabilities_includes_families_rr_ext_msg_and_four_octet() {
         let cfg = test_config();
         let caps = cfg.local_capabilities();
-        assert_eq!(caps.len(), 3);
+        assert_eq!(caps.len(), 4);
         assert!(matches!(
             caps[0],
             Capability::MultiProtocol {
@@ -98,7 +127,8 @@ mod tests {
             }
         ));
         assert!(matches!(caps[1], Capability::RouteRefresh));
-        assert!(matches!(caps[2], Capability::FourOctetAs { asn: 65001 }));
+        assert!(matches!(caps[2], Capability::ExtendedMessage));
+        assert!(matches!(caps[3], Capability::FourOctetAs { asn: 65001 }));
     }
 
     #[test]
@@ -120,8 +150,8 @@ mod tests {
         cfg.graceful_restart = true;
         cfg.gr_restart_time = 120;
         let caps = cfg.local_capabilities();
-        // MultiProtocol + GracefulRestart + RouteRefresh + FourOctetAs
-        assert_eq!(caps.len(), 4);
+        // MultiProtocol + GracefulRestart + RouteRefresh + ExtendedMessage + FourOctetAs
+        assert_eq!(caps.len(), 5);
         assert!(matches!(
             &caps[1],
             Capability::GracefulRestart {
@@ -139,11 +169,59 @@ mod tests {
     fn local_capabilities_omits_graceful_restart_when_disabled() {
         let cfg = test_config(); // graceful_restart = false
         let caps = cfg.local_capabilities();
-        assert_eq!(caps.len(), 3); // MultiProtocol + RouteRefresh + FourOctetAs
+        assert_eq!(caps.len(), 4); // MultiProtocol + RouteRefresh + ExtendedMessage + FourOctetAs
         assert!(
             !caps
                 .iter()
                 .any(|c| matches!(c, Capability::GracefulRestart { .. }))
         );
+    }
+
+    #[test]
+    fn add_path_capabilities_empty_when_disabled() {
+        let cfg = test_config(); // add_path_receive = false
+        assert!(cfg.add_path_capabilities().is_empty());
+    }
+
+    #[test]
+    fn add_path_capabilities_ipv4_only_even_with_ipv6_configured() {
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        cfg.families = vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv6, Safi::Unicast),
+        ];
+        let caps = cfg.add_path_capabilities();
+        // Only IPv4 unicast — MP-BGP Add-Path not yet implemented
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].afi, Afi::Ipv4);
+        assert_eq!(caps[0].safi, Safi::Unicast);
+        assert_eq!(caps[0].send_receive, AddPathMode::Receive);
+    }
+
+    #[test]
+    fn add_path_capabilities_empty_for_ipv6_only_peer() {
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        cfg.families = vec![(Afi::Ipv6, Safi::Unicast)];
+        let caps = cfg.add_path_capabilities();
+        assert!(caps.is_empty());
+    }
+
+    #[test]
+    fn local_capabilities_includes_add_path_when_enabled() {
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        let caps = cfg.local_capabilities();
+        // MultiProtocol + AddPath + RouteRefresh + ExtendedMessage + FourOctetAs
+        assert_eq!(caps.len(), 5);
+        assert!(matches!(&caps[1], Capability::AddPath(families) if families.len() == 1));
+    }
+
+    #[test]
+    fn local_capabilities_omits_add_path_when_disabled() {
+        let cfg = test_config(); // add_path_receive = false
+        let caps = cfg.local_capabilities();
+        assert!(!caps.iter().any(|c| matches!(c, Capability::AddPath(..))));
     }
 }

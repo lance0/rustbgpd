@@ -24,7 +24,9 @@ pub enum RibUpdate {
     RoutesReceived {
         peer: IpAddr,
         announced: Vec<Route>,
-        withdrawn: Vec<Prefix>,
+        /// Withdrawn prefixes with Add-Path path identifiers.
+        /// `(prefix, path_id)` — `path_id = 0` for non-Add-Path peers.
+        withdrawn: Vec<(Prefix, u32)>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown { peer: IpAddr },
@@ -50,6 +52,8 @@ pub enum RibUpdate {
     /// Withdraw a locally-injected route.
     WithdrawInjected {
         prefix: Prefix,
+        /// Add-Path path identifier (0 = default path).
+        path_id: u32,
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query: return all received routes, optionally filtered by peer.

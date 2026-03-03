@@ -5,4 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc afe25ebfdb0550e14504cec37e1194164f12019189cc1ecd94f73ba70da5c259 # shrinks to msg = Open(OpenMessage { version: 4, my_as: 0, hold_time: 0, bgp_identifier: 0.0.0.0, capabilities: [Unknown { code: 64, data: b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0" }] })
-cc b57990eac349522943f8b5462042f8c4e7a56fe342276f5cec58cc6354ec88ed # shrinks to open = OpenMessage { version: 4, my_as: 0, hold_time: 0, bgp_identifier: 0.0.0.0, capabilities: [Unknown { code: 2, data: b"" }] }
+cc e71df94ea8115045c3be0cf421063022ada489251ab41981051260a26d95cc7d # shrinks to msg = Open(OpenMessage { version: 4, my_as: 0, hold_time: 0, bgp_identifier: 0.0.0.0, capabilities: [Unknown { code: 69, data: b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0" }] })

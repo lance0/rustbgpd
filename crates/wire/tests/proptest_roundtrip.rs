@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 use bytes::Bytes;
 use proptest::prelude::*;
 use rustbgpd_wire::capability::{Afi, Capability, GracefulRestartFamily, Safi};
-use rustbgpd_wire::constants::BGP_VERSION;
+use rustbgpd_wire::constants::{BGP_VERSION, MAX_MESSAGE_LEN};
 use rustbgpd_wire::message::{Message, decode_message, encode_message};
 use rustbgpd_wire::notification::NotificationCode;
 use rustbgpd_wire::notification_msg::NotificationMessage;
@@ -190,7 +190,7 @@ proptest! {
     fn roundtrip_any_message(msg in arb_message()) {
         let encoded = encode_message(&msg).expect("encode should succeed");
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).expect("decode should succeed");
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).expect("decode should succeed");
         prop_assert_eq!(msg, decoded);
     }
 
@@ -199,7 +199,7 @@ proptest! {
         let msg = Message::Open(open);
         let encoded = encode_message(&msg).expect("encode should succeed");
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).expect("decode should succeed");
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).expect("decode should succeed");
         prop_assert_eq!(msg, decoded);
     }
 
@@ -208,7 +208,7 @@ proptest! {
         let msg = Message::Update(update);
         let encoded = encode_message(&msg).expect("encode should succeed");
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).expect("decode should succeed");
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).expect("decode should succeed");
         prop_assert_eq!(msg, decoded);
     }
 
@@ -217,7 +217,7 @@ proptest! {
         let msg = Message::Notification(notif);
         let encoded = encode_message(&msg).expect("encode should succeed");
         let mut bytes = encoded.freeze();
-        let decoded = decode_message(&mut bytes).expect("decode should succeed");
+        let decoded = decode_message(&mut bytes, MAX_MESSAGE_LEN).expect("decode should succeed");
         prop_assert_eq!(msg, decoded);
     }
 
@@ -225,7 +225,7 @@ proptest! {
     fn decode_never_panics(data in proptest::collection::vec(any::<u8>(), 0..4096)) {
         let mut buf = Bytes::from(data);
         // We don't care about the result, just that it doesn't panic
-        let _ = decode_message(&mut buf);
+        let _ = decode_message(&mut buf, MAX_MESSAGE_LEN);
     }
 
     /// Encode a valid message, flip one bit, decode — must not panic.
@@ -238,7 +238,7 @@ proptest! {
         let encoded = encode_message(&msg).expect("encode should succeed");
         let corrupted = corrupt::bit_flip(&encoded, byte_idx, bit_idx);
         let mut buf = Bytes::from(corrupted);
-        let _ = decode_message(&mut buf); // Ok or Err, never panic
+        let _ = decode_message(&mut buf, MAX_MESSAGE_LEN); // Ok or Err, never panic
     }
 
     /// Encode a valid message, truncate it, decode — must not panic.
@@ -250,7 +250,7 @@ proptest! {
         let encoded = encode_message(&msg).expect("encode should succeed");
         let corrupted = corrupt::truncate(&encoded, new_len);
         let mut buf = Bytes::from(corrupted);
-        let _ = decode_message(&mut buf);
+        let _ = decode_message(&mut buf, MAX_MESSAGE_LEN);
     }
 
     /// Encode a valid message, insert a random byte, decode — must not panic.
@@ -263,7 +263,7 @@ proptest! {
         let encoded = encode_message(&msg).expect("encode should succeed");
         let corrupted = corrupt::insert_byte(&encoded, pos, byte);
         let mut buf = Bytes::from(corrupted);
-        let _ = decode_message(&mut buf);
+        let _ = decode_message(&mut buf, MAX_MESSAGE_LEN);
     }
 
     /// Encode a valid message, overwrite a section, decode — must not panic.
@@ -277,7 +277,7 @@ proptest! {
         let encoded = encode_message(&msg).expect("encode should succeed");
         let corrupted = corrupt::overwrite(&encoded, start, val, count);
         let mut buf = Bytes::from(corrupted);
-        let _ = decode_message(&mut buf);
+        let _ = decode_message(&mut buf, MAX_MESSAGE_LEN);
     }
 
     /// Encode a valid message, append garbage, decode — must not panic.
@@ -289,6 +289,6 @@ proptest! {
         let encoded = encode_message(&msg).expect("encode should succeed");
         let corrupted = corrupt::extend(&encoded, &garbage);
         let mut buf = Bytes::from(corrupted);
-        let _ = decode_message(&mut buf);
+        let _ = decode_message(&mut buf, MAX_MESSAGE_LEN);
     }
 }

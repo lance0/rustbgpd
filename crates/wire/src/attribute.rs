@@ -6,7 +6,7 @@ use bytes::Bytes;
 use crate::capability::{Afi, Safi};
 use crate::constants::{as_path_segment, attr_flags, attr_type};
 use crate::error::DecodeError;
-use crate::nlri::Prefix;
+use crate::nlri::{NlriEntry, Prefix};
 use crate::notification::update_subcode;
 
 /// Origin attribute values per RFC 4271 §5.1.1.
@@ -111,6 +111,9 @@ impl AsPath {
 }
 
 /// RFC 4760 `MP_REACH_NLRI` attribute (type code 14).
+///
+/// Uses [`NlriEntry`] to carry Add-Path path IDs alongside each prefix.
+/// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MpReachNlri {
     pub afi: Afi,
@@ -123,15 +126,18 @@ pub struct MpReachNlri {
     /// link-local portion. `IpAddr` can only hold a single address, and
     /// link-local next-hops are not needed for routing decisions.
     pub next_hop: IpAddr,
-    pub announced: Vec<Prefix>,
+    pub announced: Vec<NlriEntry>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
+///
+/// Uses [`NlriEntry`] to carry Add-Path path IDs alongside each prefix.
+/// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MpUnreachNlri {
     pub afi: Afi,
     pub safi: Safi,
-    pub withdrawn: Vec<Prefix>,
+    pub withdrawn: Vec<NlriEntry>,
 }
 
 /// RFC 4360 Extended Community — 8-byte value stored as `u64`.
@@ -383,6 +389,7 @@ pub struct RawAttribute {
 pub fn decode_path_attributes(
     mut buf: &[u8],
     four_octet_as: bool,
+    add_path_families: &[(Afi, Safi)],
 ) -> Result<Vec<PathAttribute>, DecodeError> {
     let mut attrs = Vec::new();
 
@@ -435,7 +442,7 @@ pub fn decode_path_attributes(
         let value = &buf[..value_len];
         buf = &buf[value_len..];
 
-        let attr = decode_attribute_value(flags, type_code, value, four_octet_as)?;
+        let attr = decode_attribute_value(flags, type_code, value, four_octet_as, add_path_families)?;
         attrs.push(attr);
     }
 
@@ -449,6 +456,7 @@ fn decode_attribute_value(
     type_code: u8,
     value: &[u8],
     four_octet_as: bool,
+    add_path_families: &[(Afi, Safi)],
 ) -> Result<PathAttribute, DecodeError> {
     // Validate Optional + Transitive flags for known attribute types (RFC 4271 §6.3).
     let flags_mask = attr_flags::OPTIONAL | attr_flags::TRANSITIVE;
@@ -621,8 +629,8 @@ fn decode_attribute_value(
             Ok(PathAttribute::LargeCommunities(communities))
         }
 
-        attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value),
-        attr_type::MP_UNREACH_NLRI => decode_mp_unreach_nlri(value),
+        attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value, add_path_families),
+        attr_type::MP_UNREACH_NLRI => decode_mp_unreach_nlri(value, add_path_families),
 
         // ATOMIC_AGGREGATE, AGGREGATOR, and any unknown type → RawAttribute
         _ => Ok(PathAttribute::Unknown(RawAttribute {
@@ -637,7 +645,7 @@ fn decode_attribute_value(
 ///
 /// Wire layout (RFC 4760 §3):
 ///   AFI (2) | SAFI (1) | NH-Len (1) | Next Hop (variable) | Reserved (1) | NLRI (variable)
-fn decode_mp_reach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
+fn decode_mp_reach_nlri(value: &[u8], add_path_families: &[(Afi, Safi)]) -> Result<PathAttribute, DecodeError> {
     if value.len() < 5 {
         return Err(DecodeError::MalformedField {
             message_type: "UPDATE",
@@ -705,15 +713,30 @@ fn decode_mp_reach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
     let nlri_start = 4 + nh_len + 1;
     let nlri_bytes = &value[nlri_start..];
 
-    let announced = match afi {
-        Afi::Ipv4 => crate::nlri::decode_nlri(nlri_bytes)?
+    let add_path = add_path_families.contains(&(afi, safi));
+    let announced = match (afi, add_path) {
+        (Afi::Ipv4, false) => crate::nlri::decode_nlri(nlri_bytes)?
             .into_iter()
-            .map(Prefix::V4)
+            .map(|p| NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V4(p),
+            })
             .collect(),
-        Afi::Ipv6 => crate::nlri::decode_ipv6_nlri(nlri_bytes)?
+        (Afi::Ipv4, true) => crate::nlri::decode_nlri_addpath(nlri_bytes)?
             .into_iter()
-            .map(Prefix::V6)
+            .map(|e| NlriEntry {
+                path_id: e.path_id,
+                prefix: Prefix::V4(e.prefix),
+            })
             .collect(),
+        (Afi::Ipv6, false) => crate::nlri::decode_ipv6_nlri(nlri_bytes)?
+            .into_iter()
+            .map(|p| NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(p),
+            })
+            .collect(),
+        (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(nlri_bytes)?,
     };
 
     Ok(PathAttribute::MpReachNlri(MpReachNlri {
@@ -728,7 +751,7 @@ fn decode_mp_reach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
 ///
 /// Wire layout (RFC 4760 §4):
 ///   AFI (2) | SAFI (1) | Withdrawn Routes (variable)
-fn decode_mp_unreach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
+fn decode_mp_unreach_nlri(value: &[u8], add_path_families: &[(Afi, Safi)]) -> Result<PathAttribute, DecodeError> {
     if value.len() < 3 {
         return Err(DecodeError::MalformedField {
             message_type: "UPDATE",
@@ -749,15 +772,30 @@ fn decode_mp_unreach_nlri(value: &[u8]) -> Result<PathAttribute, DecodeError> {
     })?;
 
     let withdrawn_bytes = &value[3..];
-    let withdrawn = match afi {
-        Afi::Ipv4 => crate::nlri::decode_nlri(withdrawn_bytes)?
+    let add_path = add_path_families.contains(&(afi, safi));
+    let withdrawn = match (afi, add_path) {
+        (Afi::Ipv4, false) => crate::nlri::decode_nlri(withdrawn_bytes)?
             .into_iter()
-            .map(Prefix::V4)
+            .map(|p| NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V4(p),
+            })
             .collect(),
-        Afi::Ipv6 => crate::nlri::decode_ipv6_nlri(withdrawn_bytes)?
+        (Afi::Ipv4, true) => crate::nlri::decode_nlri_addpath(withdrawn_bytes)?
             .into_iter()
-            .map(Prefix::V6)
+            .map(|e| NlriEntry {
+                path_id: e.path_id,
+                prefix: Prefix::V4(e.prefix),
+            })
             .collect(),
+        (Afi::Ipv6, false) => crate::nlri::decode_ipv6_nlri(withdrawn_bytes)?
+            .into_iter()
+            .map(|p| NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(p),
+            })
+            .collect(),
+        (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(withdrawn_bytes)?,
     };
 
     Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
@@ -983,6 +1021,10 @@ pub fn encode_path_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>, four_o
 }
 
 /// Encode `MP_REACH_NLRI` value bytes.
+///
+/// Path IDs are not encoded in MP attributes here — Add-Path encoding
+/// for `MP_REACH`/`MP_UNREACH` will be handled when `add_path_families` is
+/// wired through. For now, only the prefix is encoded.
 fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
     buf.push(mp.safi as u8);
@@ -1000,11 +1042,11 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>) {
 
     buf.push(0); // Reserved
 
-    // Encode NLRI
-    for prefix in &mp.announced {
-        match prefix {
-            Prefix::V4(p) => crate::nlri::encode_nlri(&[*p], buf),
-            Prefix::V6(p) => crate::nlri::encode_ipv6_nlri(&[*p], buf),
+    // Encode NLRI (without path IDs — Add-Path MP encoding is Phase 5)
+    for entry in &mp.announced {
+        match entry.prefix {
+            Prefix::V4(p) => crate::nlri::encode_nlri(&[p], buf),
+            Prefix::V6(p) => crate::nlri::encode_ipv6_nlri(&[p], buf),
         }
     }
 }
@@ -1014,10 +1056,10 @@ fn encode_mp_unreach_nlri(mp: &MpUnreachNlri, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&(mp.afi as u16).to_be_bytes());
     buf.push(mp.safi as u8);
 
-    for prefix in &mp.withdrawn {
-        match prefix {
-            Prefix::V4(p) => crate::nlri::encode_nlri(&[*p], buf),
-            Prefix::V6(p) => crate::nlri::encode_ipv6_nlri(&[*p], buf),
+    for entry in &mp.withdrawn {
+        match entry.prefix {
+            Prefix::V4(p) => crate::nlri::encode_nlri(&[p], buf),
+            Prefix::V6(p) => crate::nlri::encode_ipv6_nlri(&[p], buf),
         }
     }
 }
@@ -1123,7 +1165,7 @@ mod tests {
     fn decode_origin_igp() {
         // flags=0x40 (transitive), type=1, len=1, value=0 (IGP)
         let buf = [0x40, 0x01, 0x01, 0x00];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0], PathAttribute::Origin(Origin::Igp));
     }
@@ -1131,7 +1173,7 @@ mod tests {
     #[test]
     fn decode_origin_egp() {
         let buf = [0x40, 0x01, 0x01, 0x01];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::Origin(Origin::Egp));
     }
 
@@ -1139,7 +1181,7 @@ mod tests {
     fn decode_origin_invalid_value() {
         // ORIGIN with value 5 — not a valid Origin (only 0-2 are defined)
         let buf = [0x40, 0x01, 0x01, 0x05];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         match &err {
             DecodeError::UpdateAttributeError { subcode, .. } => {
                 assert_eq!(*subcode, update_subcode::INVALID_ORIGIN);
@@ -1152,7 +1194,7 @@ mod tests {
     fn decode_next_hop() {
         // flags=0x40, type=3, len=4, value=10.0.0.1
         let buf = [0x40, 0x03, 0x04, 10, 0, 0, 1];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)));
     }
 
@@ -1160,7 +1202,7 @@ mod tests {
     fn decode_med() {
         // flags=0x80 (optional), type=4, len=4, value=100
         let buf = [0x80, 0x04, 0x04, 0, 0, 0, 100];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::Med(100));
     }
 
@@ -1168,7 +1210,7 @@ mod tests {
     fn decode_local_pref() {
         // flags=0x40, type=5, len=4, value=200
         let buf = [0x40, 0x05, 0x04, 0, 0, 0, 200];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::LocalPref(200));
     }
 
@@ -1182,7 +1224,7 @@ mod tests {
             0x00, 0x00, 0xFD, 0xE9, // 65001
             0x00, 0x00, 0xFD, 0xEA, // 65002
         ];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(
             attrs[0],
             PathAttribute::AsPath(AsPath {
@@ -1201,7 +1243,7 @@ mod tests {
             0x00, 0x64, // 100
             0x00, 0xC8, // 200
         ];
-        let attrs = decode_path_attributes(&buf, false).unwrap();
+        let attrs = decode_path_attributes(&buf, false, &[]).unwrap();
         assert_eq!(
             attrs[0],
             PathAttribute::AsPath(AsPath {
@@ -1214,7 +1256,7 @@ mod tests {
     fn decode_unknown_attribute_preserved() {
         // flags=0xC0 (optional+transitive), type=99, len=3, data=[1,2,3]
         let buf = [0xC0, 99, 0x03, 1, 2, 3];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(
             attrs[0],
             PathAttribute::Unknown(RawAttribute {
@@ -1229,7 +1271,7 @@ mod tests {
     fn decode_atomic_aggregate_as_unknown() {
         // ATOMIC_AGGREGATE: flags=0x40, type=6, len=0
         let buf = [0x40, 0x06, 0x00];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert!(matches!(attrs[0], PathAttribute::Unknown(_)));
     }
 
@@ -1243,7 +1285,7 @@ mod tests {
             0x00, 0x00, 0xFD, 0xE9, // 65001
             0x00, 0x00, 0xFD, 0xEA, // 65002
         ];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(
             attrs[0],
             PathAttribute::AsPath(AsPath {
@@ -1262,7 +1304,7 @@ mod tests {
         // AS_PATH empty
         buf.extend_from_slice(&[0x40, 0x02, 0x00]);
 
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs.len(), 3);
         assert_eq!(attrs[0], PathAttribute::Origin(Origin::Igp));
         assert_eq!(attrs[1], PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)));
@@ -1283,7 +1325,7 @@ mod tests {
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded, attrs);
     }
 
@@ -1299,28 +1341,28 @@ mod tests {
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, false);
-        let decoded = decode_path_attributes(&buf, false).unwrap();
+        let decoded = decode_path_attributes(&buf, false, &[]).unwrap();
         assert_eq!(decoded, attrs);
     }
 
     #[test]
     fn reject_truncated_attribute_header() {
         let buf = [0x40]; // only 1 byte
-        assert!(decode_path_attributes(&buf, true).is_err());
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
 
     #[test]
     fn reject_truncated_attribute_value() {
         // ORIGIN claims 1 byte value but nothing follows
         let buf = [0x40, 0x01, 0x01];
-        assert!(decode_path_attributes(&buf, true).is_err());
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
 
     #[test]
     fn reject_bad_origin_length() {
         // ORIGIN with 2-byte value
         let buf = [0x40, 0x01, 0x02, 0x00, 0x00];
-        assert!(decode_path_attributes(&buf, true).is_err());
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
 
     #[test]
@@ -1335,7 +1377,7 @@ mod tests {
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded, attrs);
     }
 
@@ -1346,7 +1388,7 @@ mod tests {
         let community: u32 = (65001 << 16) | 100;
         let bytes = community.to_be_bytes();
         let buf = [0xC0, 0x08, 0x04, bytes[0], bytes[1], bytes[2], bytes[3]];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0], PathAttribute::Communities(vec![community]));
     }
@@ -1360,7 +1402,7 @@ mod tests {
         let buf = [
             0xC0, 0x08, 0x08, b1[0], b1[1], b1[2], b1[3], b2[0], b2[1], b2[2], b2[3],
         ];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::Communities(vec![c1, c2]));
     }
 
@@ -1368,7 +1410,7 @@ mod tests {
     fn decode_communities_empty() {
         // flags=0xC0, type=8, len=0
         let buf = [0xC0, 0x08, 0x00];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::Communities(vec![]));
     }
 
@@ -1376,7 +1418,7 @@ mod tests {
     fn decode_communities_odd_length_rejected() {
         // flags=0xC0, type=8, len=3, only 3 bytes (not multiple of 4)
         let buf = [0xC0, 0x08, 0x03, 0x01, 0x02, 0x03];
-        assert!(decode_path_attributes(&buf, true).is_err());
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
 
     #[test]
@@ -1387,7 +1429,7 @@ mod tests {
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded, attrs);
     }
 
@@ -1409,7 +1451,7 @@ mod tests {
             0xC0, 0x10, 0x08, bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
             bytes[7],
         ];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs.len(), 1);
         assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![ec]));
     }
@@ -1423,14 +1465,14 @@ mod tests {
         let mut buf = vec![0xC0, 0x10, 16]; // flags, type=16, len=16
         buf.extend_from_slice(&b1);
         buf.extend_from_slice(&b2);
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![ec1, ec2]));
     }
 
     #[test]
     fn decode_extended_communities_empty() {
         let buf = [0xC0, 0x10, 0x00];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs[0], PathAttribute::ExtendedCommunities(vec![]));
     }
 
@@ -1438,7 +1480,7 @@ mod tests {
     fn decode_extended_communities_bad_length() {
         // length 5 is not a multiple of 8
         let buf = [0xC0, 0x10, 0x05, 0x01, 0x02, 0x03, 0x04, 0x05];
-        assert!(decode_path_attributes(&buf, true).is_err());
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
     }
 
     #[test]
@@ -1449,7 +1491,7 @@ mod tests {
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded, attrs);
     }
 
@@ -1538,7 +1580,7 @@ mod tests {
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(
             decoded,
             vec![PathAttribute::Unknown(RawAttribute {
@@ -1553,7 +1595,7 @@ mod tests {
     fn origin_with_optional_flag_rejected() {
         // ORIGIN with flags 0xC0 (Optional+Transitive) — should be 0x40 (Transitive only)
         let buf = [0xC0, 0x01, 0x01, 0x00];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         match &err {
             DecodeError::UpdateAttributeError { subcode, .. } => {
                 assert_eq!(*subcode, update_subcode::ATTRIBUTE_FLAGS_ERROR);
@@ -1566,7 +1608,7 @@ mod tests {
     fn med_with_transitive_flag_rejected() {
         // MED with flags 0xC0 (Optional+Transitive) — should be 0x80 (Optional only)
         let buf = [0xC0, 0x04, 0x04, 0, 0, 0, 100];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         match &err {
             DecodeError::UpdateAttributeError { subcode, .. } => {
                 assert_eq!(*subcode, update_subcode::ATTRIBUTE_FLAGS_ERROR);
@@ -1579,7 +1621,7 @@ mod tests {
     fn communities_without_optional_rejected() {
         // COMMUNITIES with flags 0x40 (Transitive only) — should be 0xC0 (Optional+Transitive)
         let buf = [0x40, 0x08, 0x04, 0, 0, 0, 100];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         match &err {
             DecodeError::UpdateAttributeError { subcode, .. } => {
                 assert_eq!(*subcode, update_subcode::ATTRIBUTE_FLAGS_ERROR);
@@ -1592,7 +1634,7 @@ mod tests {
     fn next_hop_length_error_subcode() {
         // NEXT_HOP with 3 bytes instead of 4
         let buf = [0x40, 0x03, 0x03, 10, 0, 0];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         match &err {
             DecodeError::UpdateAttributeError { subcode, .. } => {
                 assert_eq!(*subcode, update_subcode::ATTRIBUTE_LENGTH_ERROR);
@@ -1605,7 +1647,7 @@ mod tests {
     fn invalid_origin_value_subcode() {
         // ORIGIN with value 5 → subcode 6 (INVALID_ORIGIN)
         let buf = [0x40, 0x01, 0x01, 0x05];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         match &err {
             DecodeError::UpdateAttributeError { subcode, .. } => {
                 assert_eq!(*subcode, update_subcode::INVALID_ORIGIN);
@@ -1622,7 +1664,7 @@ mod tests {
             0x05, 0x01, // unknown segment type 5, count 1
             0x00, 0x00, 0xFD, 0xE9, // ASN 65001
         ];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         match &err {
             DecodeError::UpdateAttributeError { subcode, .. } => {
                 assert_eq!(*subcode, update_subcode::MALFORMED_AS_PATH);
@@ -1675,6 +1717,11 @@ mod tests {
 
     // --- MP_REACH_NLRI / MP_UNREACH_NLRI tests ---
 
+    /// Helper to create a `NlriEntry` with `path_id=0`.
+    fn nlri(prefix: Prefix) -> NlriEntry {
+        NlriEntry { path_id: 0, prefix }
+    }
+
     #[test]
     fn mp_reach_nlri_ipv6_roundtrip() {
         use crate::capability::{Afi, Safi};
@@ -1685,15 +1732,21 @@ mod tests {
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
             announced: vec![
-                Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
-                Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48)),
+                nlri(Prefix::V6(Ipv6Prefix::new(
+                    "2001:db8:1::".parse().unwrap(),
+                    48,
+                ))),
+                nlri(Prefix::V6(Ipv6Prefix::new(
+                    "2001:db8:2::".parse().unwrap(),
+                    48,
+                ))),
             ],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
     }
@@ -1706,16 +1759,16 @@ mod tests {
         let mp = MpUnreachNlri {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
-            withdrawn: vec![Prefix::V6(Ipv6Prefix::new(
+            withdrawn: vec![nlri(Prefix::V6(Ipv6Prefix::new(
                 "2001:db8:1::".parse().unwrap(),
                 48,
-            ))],
+            )))],
         };
         let attrs = vec![PathAttribute::MpUnreachNlri(mp.clone())];
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], PathAttribute::MpUnreachNlri(mp));
     }
@@ -1729,16 +1782,16 @@ mod tests {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-            announced: vec![Prefix::V4(crate::nlri::Ipv4Prefix::new(
+            announced: vec![nlri(Prefix::V4(crate::nlri::Ipv4Prefix::new(
                 Ipv4Addr::new(10, 1, 0, 0),
                 16,
-            ))],
+            )))],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
     }
 
@@ -1784,7 +1837,7 @@ mod tests {
 
         let mut buf = Vec::new();
         encode_path_attributes(&attrs, &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
     }
 
@@ -1807,7 +1860,7 @@ mod tests {
         buf.push(value.len() as u8);
         buf.extend_from_slice(&value);
 
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UpdateAttributeError {
@@ -1817,13 +1870,148 @@ mod tests {
         ));
     }
 
+    // --- MP Add-Path decode tests ---
+
+    #[test]
+    #[expect(clippy::cast_possible_truncation)]
+    fn mp_reach_nlri_ipv4_addpath_decode() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::Prefix;
+
+        // Build MP_REACH_NLRI with Add-Path-encoded IPv4 NLRI:
+        // path_id(4) + prefix_len(1) + prefix_bytes
+        let mut value = Vec::new();
+        value.extend_from_slice(&1u16.to_be_bytes()); // AFI IPv4
+        value.push(1); // SAFI Unicast
+        value.push(4); // NH-Len
+        value.extend_from_slice(&[10, 0, 0, 1]); // Next Hop
+        value.push(0); // Reserved
+        // Add-Path NLRI: path_id=42, 10.1.0.0/16
+        value.extend_from_slice(&42u32.to_be_bytes());
+        value.push(16);
+        value.extend_from_slice(&[10, 1]);
+
+        let mut buf = Vec::new();
+        buf.push(0x90); // flags: Optional + Extended Length
+        buf.push(14); // type: MP_REACH_NLRI
+        buf.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&value);
+
+        // With Add-Path for IPv4 unicast → decode path_id
+        let decoded = decode_path_attributes(&buf, true, &[(Afi::Ipv4, Safi::Unicast)]).unwrap();
+        let PathAttribute::MpReachNlri(mp) = &decoded[0] else {
+            panic!("expected MpReachNlri");
+        };
+        assert_eq!(mp.announced.len(), 1);
+        assert_eq!(mp.announced[0].path_id, 42);
+        assert!(matches!(mp.announced[0].prefix, Prefix::V4(p) if p.len == 16));
+
+        // Without Add-Path → plain decoder misinterprets the path_id bytes
+        // as prefix encoding and rejects the garbled data.
+        assert!(decode_path_attributes(&buf, true, &[]).is_err());
+    }
+
+    #[test]
+    #[expect(clippy::cast_possible_truncation)]
+    fn mp_reach_nlri_ipv6_addpath_decode() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::{Ipv6Prefix, Prefix};
+
+        // Build MP_REACH_NLRI with Add-Path-encoded IPv6 NLRI
+        let mut value = Vec::new();
+        value.extend_from_slice(&2u16.to_be_bytes()); // AFI IPv6
+        value.push(1); // SAFI Unicast
+        value.push(16); // NH-Len
+        value.extend_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+        value.push(0); // Reserved
+        // Add-Path NLRI: path_id=99, 2001:db8:1::/48
+        value.extend_from_slice(&99u32.to_be_bytes());
+        value.push(48);
+        value.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+
+        let mut buf = Vec::new();
+        buf.push(0x90); // flags: Optional + Extended Length
+        buf.push(14); // type: MP_REACH_NLRI
+        buf.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&value);
+
+        let decoded = decode_path_attributes(&buf, true, &[(Afi::Ipv6, Safi::Unicast)]).unwrap();
+        let PathAttribute::MpReachNlri(mp) = &decoded[0] else {
+            panic!("expected MpReachNlri");
+        };
+        assert_eq!(mp.announced.len(), 1);
+        assert_eq!(mp.announced[0].path_id, 99);
+        assert_eq!(
+            mp.announced[0].prefix,
+            Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48))
+        );
+    }
+
+    #[test]
+    #[expect(clippy::cast_possible_truncation)]
+    fn mp_unreach_nlri_ipv6_addpath_decode() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::{Ipv6Prefix, Prefix};
+
+        // Build MP_UNREACH_NLRI with Add-Path-encoded IPv6 NLRI
+        let mut value = Vec::new();
+        value.extend_from_slice(&2u16.to_be_bytes()); // AFI IPv6
+        value.push(1); // SAFI Unicast
+        // Add-Path NLRI: path_id=7, 2001:db8:2::/48
+        value.extend_from_slice(&7u32.to_be_bytes());
+        value.push(48);
+        value.extend_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02]);
+
+        let mut buf = Vec::new();
+        buf.push(0x90); // flags: Optional + Extended Length
+        buf.push(15); // type: MP_UNREACH_NLRI
+        buf.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        buf.extend_from_slice(&value);
+
+        let decoded = decode_path_attributes(&buf, true, &[(Afi::Ipv6, Safi::Unicast)]).unwrap();
+        let PathAttribute::MpUnreachNlri(mp) = &decoded[0] else {
+            panic!("expected MpUnreachNlri");
+        };
+        assert_eq!(mp.withdrawn.len(), 1);
+        assert_eq!(mp.withdrawn[0].path_id, 7);
+        assert_eq!(
+            mp.withdrawn[0].prefix,
+            Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 48))
+        );
+    }
+
+    #[test]
+    fn mp_reach_addpath_only_applies_to_matching_family() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::{Ipv6Prefix, Prefix};
+
+        // Build plain (non-Add-Path) MP_REACH_NLRI for IPv6
+        let mp = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
+            }],
+        };
+        let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true);
+
+        // Add-Path enabled for IPv4 only — IPv6 should still decode as plain
+        let decoded = decode_path_attributes(&buf, true, &[(Afi::Ipv4, Safi::Unicast)]).unwrap();
+        assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
+    }
+
     // --- ORIGINATOR_ID tests ---
 
     #[test]
     fn decode_originator_id() {
         // flags=0x80 (optional), type=9, len=4, value=1.2.3.4
         let buf = [0x80, 0x09, 0x04, 1, 2, 3, 4];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(
             attrs[0],
             PathAttribute::OriginatorId(Ipv4Addr::new(1, 2, 3, 4))
@@ -1835,7 +2023,7 @@ mod tests {
         let attr = PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 1));
         let mut buf = Vec::new();
         encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded, vec![attr]);
     }
 
@@ -1843,7 +2031,7 @@ mod tests {
     fn originator_id_wrong_length() {
         // 3 bytes instead of 4
         let buf = [0x80, 0x09, 0x03, 1, 2, 3];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UpdateAttributeError {
@@ -1857,7 +2045,7 @@ mod tests {
     fn originator_id_wrong_flags() {
         // flags=0x40 (transitive) — should be 0x80 (optional)
         let buf = [0x40, 0x09, 0x04, 1, 2, 3, 4];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UpdateAttributeError {
@@ -1873,7 +2061,7 @@ mod tests {
     fn decode_cluster_list() {
         // flags=0x80 (optional), type=10, len=8, two cluster IDs
         let buf = [0x80, 0x0A, 0x08, 1, 2, 3, 4, 5, 6, 7, 8];
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(
             attrs[0],
             PathAttribute::ClusterList(vec![Ipv4Addr::new(1, 2, 3, 4), Ipv4Addr::new(5, 6, 7, 8),])
@@ -1888,7 +2076,7 @@ mod tests {
         ]);
         let mut buf = Vec::new();
         encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded, vec![attr]);
     }
 
@@ -1896,7 +2084,7 @@ mod tests {
     fn cluster_list_wrong_length() {
         // 5 bytes — not a multiple of 4
         let buf = [0x80, 0x0A, 0x05, 1, 2, 3, 4, 5];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UpdateAttributeError {
@@ -1930,7 +2118,7 @@ mod tests {
         buf.extend_from_slice(&65001u32.to_be_bytes());
         buf.extend_from_slice(&100u32.to_be_bytes());
         buf.extend_from_slice(&200u32.to_be_bytes());
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(attrs.len(), 1);
         assert_eq!(
             attrs[0],
@@ -1947,7 +2135,7 @@ mod tests {
             buf.extend_from_slice(&l1.to_be_bytes());
             buf.extend_from_slice(&l2.to_be_bytes());
         }
-        let attrs = decode_path_attributes(&buf, true).unwrap();
+        let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(
             attrs[0],
             PathAttribute::LargeCommunities(vec![
@@ -1961,7 +2149,7 @@ mod tests {
     fn decode_large_community_bad_length() {
         // 10 bytes — not a multiple of 12
         let buf = [0xC0, 32, 10, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UpdateAttributeError {
@@ -1975,7 +2163,7 @@ mod tests {
     fn decode_large_community_empty_rejected() {
         // Zero-length LARGE_COMMUNITIES is rejected (must carry at least one community).
         let buf = [0xC0, 32, 0];
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UpdateAttributeError {
@@ -1994,7 +2182,7 @@ mod tests {
         let attr = PathAttribute::LargeCommunities(lcs.clone());
         let mut buf = Vec::new();
         encode_path_attributes(&[attr], &mut buf, true);
-        let decoded = decode_path_attributes(&buf, true).unwrap();
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0], PathAttribute::LargeCommunities(lcs));
     }
@@ -2006,7 +2194,7 @@ mod tests {
         buf.extend_from_slice(&1u32.to_be_bytes());
         buf.extend_from_slice(&2u32.to_be_bytes());
         buf.extend_from_slice(&3u32.to_be_bytes());
-        let err = decode_path_attributes(&buf, true).unwrap_err();
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
         assert!(matches!(
             err,
             DecodeError::UpdateAttributeError {

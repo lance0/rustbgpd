@@ -104,6 +104,7 @@ mod tests {
     use bytes::BytesMut;
 
     use super::*;
+    use crate::constants::MAX_MESSAGE_LEN;
 
     #[test]
     fn decode_notification_no_data() {
@@ -146,7 +147,7 @@ mod tests {
 
         // Decode: skip header, then decode body
         let mut bytes = encoded.freeze();
-        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(header.message_type, MessageType::Notification);
 
         let decoded =

@@ -19,6 +19,8 @@ pub struct RouteEvent {
     pub peer: Option<IpAddr>,
     pub previous_peer: Option<IpAddr>,
     pub timestamp: String,
+    /// Add-Path path identifier (RFC 7911). 0 = no Add-Path.
+    pub path_id: u32,
 }
 
 /// Returns the current Unix epoch time as a string.

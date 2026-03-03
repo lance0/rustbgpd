@@ -4,7 +4,8 @@ use crate::attribute::PathAttribute;
 use crate::constants::{HEADER_LEN, MAX_MESSAGE_LEN};
 use crate::error::{DecodeError, EncodeError};
 use crate::header::{BgpHeader, MessageType};
-use crate::nlri::Ipv4Prefix;
+use crate::nlri::{Ipv4NlriEntry, Ipv4Prefix};
+use crate::{Afi, Safi};
 
 /// A decoded BGP UPDATE message (RFC 4271 §4.3).
 ///
@@ -21,11 +22,14 @@ pub struct UpdateMessage {
 }
 
 /// A fully parsed UPDATE message with decoded prefixes and attributes.
+///
+/// Uses [`Ipv4NlriEntry`] to carry Add-Path path IDs alongside each prefix.
+/// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedUpdate {
-    pub withdrawn: Vec<Ipv4Prefix>,
+    pub withdrawn: Vec<Ipv4NlriEntry>,
     pub attributes: Vec<PathAttribute>,
-    pub announced: Vec<Ipv4Prefix>,
+    pub announced: Vec<Ipv4NlriEntry>,
 }
 
 impl UpdateMessage {
@@ -101,14 +105,36 @@ impl UpdateMessage {
     /// `four_octet_as` controls whether AS numbers in `AS_PATH` are 2 or 4 bytes
     /// wide (determined by capability negotiation).
     ///
+    /// `add_path_ipv4` indicates whether the peer is sending Add-Path path IDs
+    /// for IPv4 body NLRI (RFC 7911). When false, decoded entries have `path_id = 0`.
+    ///
     /// # Errors
     ///
     /// Returns `DecodeError` if NLRI or attribute data is malformed.
-    pub fn parse(&self, four_octet_as: bool) -> Result<ParsedUpdate, DecodeError> {
-        let withdrawn = crate::nlri::decode_nlri(&self.withdrawn_routes)?;
+    pub fn parse(
+        &self,
+        four_octet_as: bool,
+        add_path_ipv4: bool,
+        add_path_families: &[(Afi, Safi)],
+    ) -> Result<ParsedUpdate, DecodeError> {
+        let withdrawn = if add_path_ipv4 {
+            crate::nlri::decode_nlri_addpath(&self.withdrawn_routes)?
+        } else {
+            crate::nlri::decode_nlri(&self.withdrawn_routes)?
+                .into_iter()
+                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
+                .collect()
+        };
         let attributes =
-            crate::attribute::decode_path_attributes(&self.path_attributes, four_octet_as)?;
-        let announced = crate::nlri::decode_nlri(&self.nlri)?;
+            crate::attribute::decode_path_attributes(&self.path_attributes, four_octet_as, add_path_families)?;
+        let announced = if add_path_ipv4 {
+            crate::nlri::decode_nlri_addpath(&self.nlri)?
+        } else {
+            crate::nlri::decode_nlri(&self.nlri)?
+                .into_iter()
+                .map(|prefix| Ipv4NlriEntry { path_id: 0, prefix })
+                .collect()
+        };
 
         Ok(ParsedUpdate {
             withdrawn,
@@ -119,16 +145,23 @@ impl UpdateMessage {
 
     /// Encode a complete UPDATE message (header + body) into a buffer.
     ///
+    /// `max_message_len` is the negotiated maximum: 4096 normally, or 65535
+    /// when Extended Messages (RFC 8654) has been negotiated.
+    ///
     /// # Errors
     ///
     /// Returns [`EncodeError::MessageTooLong`] if the encoded message exceeds
-    /// the maximum BGP message size.
-    pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
+    /// the negotiated maximum message size.
+    pub fn encode_with_limit(
+        &self,
+        buf: &mut impl BufMut,
+        max_message_len: u16,
+    ) -> Result<(), EncodeError> {
         let body_len =
             2 + self.withdrawn_routes.len() + 2 + self.path_attributes.len() + self.nlri.len();
         let total_len = HEADER_LEN + body_len;
 
-        if total_len > usize::from(MAX_MESSAGE_LEN) {
+        if total_len > usize::from(max_message_len) {
             return Err(EncodeError::MessageTooLong { size: total_len });
         }
 
@@ -152,19 +185,38 @@ impl UpdateMessage {
         Ok(())
     }
 
+    /// Encode using the standard 4096-byte limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::MessageTooLong`] if the encoded message exceeds
+    /// the standard 4096-byte maximum.
+    pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
+        self.encode_with_limit(buf, MAX_MESSAGE_LEN)
+    }
+
     /// Build an `UpdateMessage` from structured data.
     ///
     /// Encodes NLRI, withdrawn routes, and path attributes into the raw
     /// `Bytes` fields that `encode()` expects.
+    ///
+    /// When `add_path` is true, path IDs are included in the wire encoding.
+    /// When false, only the prefix is encoded (path IDs are ignored).
     #[must_use]
     pub fn build(
-        announced: &[Ipv4Prefix],
-        withdrawn: &[Ipv4Prefix],
+        announced: &[Ipv4NlriEntry],
+        withdrawn: &[Ipv4NlriEntry],
         attributes: &[PathAttribute],
         four_octet_as: bool,
+        add_path: bool,
     ) -> Self {
         let mut withdrawn_buf = Vec::new();
-        crate::nlri::encode_nlri(withdrawn, &mut withdrawn_buf);
+        if add_path {
+            crate::nlri::encode_nlri_addpath(withdrawn, &mut withdrawn_buf);
+        } else {
+            let prefixes: Vec<Ipv4Prefix> = withdrawn.iter().map(|e| e.prefix).collect();
+            crate::nlri::encode_nlri(&prefixes, &mut withdrawn_buf);
+        }
 
         let mut attrs_buf = Vec::new();
         if !attributes.is_empty() {
@@ -172,7 +224,12 @@ impl UpdateMessage {
         }
 
         let mut nlri_buf = Vec::new();
-        crate::nlri::encode_nlri(announced, &mut nlri_buf);
+        if add_path {
+            crate::nlri::encode_nlri_addpath(announced, &mut nlri_buf);
+        } else {
+            let prefixes: Vec<Ipv4Prefix> = announced.iter().map(|e| e.prefix).collect();
+            crate::nlri::encode_nlri(&prefixes, &mut nlri_buf);
+        }
 
         Self {
             withdrawn_routes: Bytes::from(withdrawn_buf),
@@ -198,6 +255,7 @@ mod tests {
     use bytes::BytesMut;
 
     use super::*;
+    use crate::constants::MAX_MESSAGE_LEN;
 
     #[test]
     fn decode_minimal_update() {
@@ -272,7 +330,7 @@ mod tests {
         original.encode(&mut encoded).unwrap();
 
         let mut bytes = encoded.freeze();
-        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(header.message_type, MessageType::Update);
 
         let body_len = usize::from(header.length) - HEADER_LEN;
@@ -280,13 +338,18 @@ mod tests {
         assert_eq!(original, decoded);
     }
 
+    /// Helper to create an `Ipv4NlriEntry` with `path_id=0`.
+    fn entry(prefix: Ipv4Prefix) -> Ipv4NlriEntry {
+        Ipv4NlriEntry { path_id: 0, prefix }
+    }
+
     #[test]
     fn build_roundtrip() {
         use crate::attribute::{AsPath, AsPathSegment, Origin};
 
         let announced = vec![
-            Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24),
-            Ipv4Prefix::new(std::net::Ipv4Addr::new(192, 168, 1, 0), 24),
+            entry(Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24)),
+            entry(Ipv4Prefix::new(std::net::Ipv4Addr::new(192, 168, 1, 0), 24)),
         ];
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
@@ -296,8 +359,8 @@ mod tests {
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
 
-        let msg = UpdateMessage::build(&announced, &[], &attrs, true);
-        let parsed = msg.parse(true).unwrap();
+        let msg = UpdateMessage::build(&announced, &[], &attrs, true, false);
+        let parsed = msg.parse(true, false, &[]).unwrap();
         assert_eq!(parsed.announced, announced);
         assert!(parsed.withdrawn.is_empty());
         assert_eq!(parsed.attributes, attrs);
@@ -305,9 +368,12 @@ mod tests {
 
     #[test]
     fn build_withdrawal_only() {
-        let withdrawn = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24)];
-        let msg = UpdateMessage::build(&[], &withdrawn, &[], true);
-        let parsed = msg.parse(true).unwrap();
+        let withdrawn = vec![entry(Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(10, 0, 0, 0),
+            24,
+        ))];
+        let msg = UpdateMessage::build(&[], &withdrawn, &[], true, false);
+        let parsed = msg.parse(true, false, &[]).unwrap();
         assert!(parsed.announced.is_empty());
         assert_eq!(parsed.withdrawn, withdrawn);
         assert!(parsed.attributes.is_empty());
@@ -317,22 +383,25 @@ mod tests {
     fn build_announce_only() {
         use crate::attribute::Origin;
 
-        let announced = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 1, 0, 0), 16)];
+        let announced = vec![entry(Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(10, 1, 0, 0),
+            16,
+        ))];
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
-        let msg = UpdateMessage::build(&announced, &[], &attrs, true);
+        let msg = UpdateMessage::build(&announced, &[], &attrs, true, false);
 
         // Verify it encodes and decodes properly
         let mut encoded = BytesMut::with_capacity(msg.encoded_len());
         msg.encode(&mut encoded).unwrap();
 
         let mut bytes = encoded.freeze();
-        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         let body_len = usize::from(header.length) - HEADER_LEN;
         let decoded = UpdateMessage::decode(&mut bytes, body_len).unwrap();
-        let parsed = decoded.parse(true).unwrap();
+        let parsed = decoded.parse(true, false, &[]).unwrap();
         assert_eq!(parsed.announced, announced);
         assert_eq!(parsed.attributes, attrs);
     }
@@ -341,15 +410,54 @@ mod tests {
     fn build_mixed() {
         use crate::attribute::Origin;
 
-        let announced = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24)];
-        let withdrawn = vec![Ipv4Prefix::new(std::net::Ipv4Addr::new(172, 16, 0, 0), 16)];
+        let announced = vec![entry(Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(10, 0, 0, 0),
+            24,
+        ))];
+        let withdrawn = vec![entry(Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(172, 16, 0, 0),
+            16,
+        ))];
         let attrs = vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
 
-        let msg = UpdateMessage::build(&announced, &withdrawn, &attrs, true);
-        let parsed = msg.parse(true).unwrap();
+        let msg = UpdateMessage::build(&announced, &withdrawn, &attrs, true, false);
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        assert_eq!(parsed.announced, announced);
+        assert_eq!(parsed.withdrawn, withdrawn);
+        assert_eq!(parsed.attributes, attrs);
+    }
+
+    #[test]
+    fn build_roundtrip_with_add_path() {
+        use crate::attribute::{AsPath, AsPathSegment, Origin};
+
+        let announced = vec![
+            Ipv4NlriEntry {
+                path_id: 1,
+                prefix: Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24),
+            },
+            Ipv4NlriEntry {
+                path_id: 2,
+                prefix: Ipv4Prefix::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 24),
+            },
+        ];
+        let withdrawn = vec![Ipv4NlriEntry {
+            path_id: 3,
+            prefix: Ipv4Prefix::new(std::net::Ipv4Addr::new(192, 168, 0, 0), 16),
+        }];
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
+        ];
+
+        let msg = UpdateMessage::build(&announced, &withdrawn, &attrs, true, true);
+        let parsed = msg.parse(true, true, &[]).unwrap();
         assert_eq!(parsed.announced, announced);
         assert_eq!(parsed.withdrawn, withdrawn);
         assert_eq!(parsed.attributes, attrs);

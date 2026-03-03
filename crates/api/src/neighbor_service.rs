@@ -161,6 +161,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             gr_stale_routes_time: 360,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
+            add_path_receive: false,
             import_policy: None,
             export_policy: None,
         };

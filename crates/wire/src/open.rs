@@ -153,6 +153,7 @@ mod tests {
     use super::*;
     use crate::capability::Afi;
     use crate::capability::Safi;
+    use crate::constants::MAX_MESSAGE_LEN;
 
     fn minimal_open() -> OpenMessage {
         OpenMessage {
@@ -171,7 +172,7 @@ mod tests {
         original.encode(&mut encoded).unwrap();
 
         let mut bytes = encoded.freeze();
-        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         assert_eq!(header.message_type, MessageType::Open);
         assert_eq!(header.length, 29); // 19 + 10, no caps
 
@@ -200,7 +201,7 @@ mod tests {
         original.encode(&mut encoded).unwrap();
 
         let mut bytes = encoded.freeze();
-        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         let body_len = usize::from(header.length) - HEADER_LEN;
         let decoded = OpenMessage::decode(&mut bytes, body_len).unwrap();
         assert_eq!(original, decoded);
@@ -283,7 +284,7 @@ mod tests {
         original.encode(&mut encoded).unwrap();
 
         let mut bytes = encoded.freeze();
-        let header = BgpHeader::decode(&mut bytes).unwrap();
+        let header = BgpHeader::decode(&mut bytes, MAX_MESSAGE_LEN).unwrap();
         let body_len = usize::from(header.length) - HEADER_LEN;
         let decoded = OpenMessage::decode(&mut bytes, body_len).unwrap();
         assert_eq!(original, decoded);

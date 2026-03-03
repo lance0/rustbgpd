@@ -79,10 +79,20 @@ pub struct Neighbor {
     /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
     #[serde(default)]
     pub route_reflector_client: bool,
+    /// Add-Path (RFC 7911) configuration for this neighbor.
+    pub add_path: Option<AddPathConfig>,
     #[serde(default)]
     pub import_policy: Vec<PolicyStatementConfig>,
     #[serde(default)]
     pub export_policy: Vec<PolicyStatementConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddPathConfig {
+    /// Accept multiple paths per prefix from this peer (RFC 7911).
+    #[serde(default)]
+    pub receive: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -692,6 +702,7 @@ impl Config {
                 families,
                 graceful_restart: neighbor.graceful_restart.unwrap_or(true),
                 gr_restart_time: neighbor.gr_restart_time.unwrap_or(120),
+                add_path_receive: neighbor.add_path.as_ref().is_some_and(|c| c.receive),
             };
 
             let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
@@ -1636,5 +1647,36 @@ route_reflector_client = true
             set_community_add = ["RT:65535:100"]"#,
         );
         assert!(parse(&toml).is_ok());
+    }
+
+    #[test]
+    fn add_path_config_receive_enabled() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[neighbors.add_path]
+receive = true
+"#;
+        let config = parse(toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert!(peers[0].0.peer.add_path_receive);
+    }
+
+    #[test]
+    fn add_path_config_defaults_to_disabled() {
+        let config = parse(valid_toml()).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert!(!peers[0].0.peer.add_path_receive);
     }
 }

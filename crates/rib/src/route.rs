@@ -28,6 +28,8 @@ pub struct Route {
     pub peer_router_id: Ipv4Addr,
     /// Whether this route is stale due to a peer graceful restart.
     pub is_stale: bool,
+    /// Add-Path path identifier (RFC 7911). 0 = no Add-Path / default path.
+    pub path_id: u32,
 }
 
 impl Route {

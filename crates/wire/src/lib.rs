@@ -43,10 +43,11 @@ pub mod update;
 pub mod validate;
 
 // Re-export primary public API
-pub use capability::{Afi, Capability, GracefulRestartFamily, Safi};
+pub use capability::{AddPathFamily, AddPathMode, Afi, Capability, GracefulRestartFamily, Safi};
 pub use error::{DecodeError, EncodeError};
+pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
 pub use header::{BgpHeader, MessageType, peek_message_length};
-pub use message::{Message, decode_message, encode_message};
+pub use message::{Message, decode_message, encode_message, encode_message_with_limit};
 pub use notification::NotificationCode;
 pub use notification_msg::NotificationMessage;
 pub use open::OpenMessage;
@@ -58,6 +59,6 @@ pub use attribute::{
     AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MpReachNlri, MpUnreachNlri, Origin,
     PathAttribute, RawAttribute,
 };
-pub use nlri::{Ipv4Prefix, Ipv6Prefix, Prefix};
+pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
 pub use update::ParsedUpdate;
 pub use validate::{UpdateError, is_valid_ipv6_nexthop};
