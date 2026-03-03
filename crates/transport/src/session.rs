@@ -10,8 +10,9 @@ use rustbgpd_rib::{OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, Ipv4NlriEntry, Message, MpReachNlri, MpUnreachNlri, NlriEntry,
-    NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, Safi, UpdateMessage,
+    AddPathMode, Afi, AsPath, AsPathSegment, Ipv4NlriEntry, Message, MpReachNlri, MpUnreachNlri,
+    NlriEntry, NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, Safi,
+    UpdateMessage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -470,6 +471,21 @@ impl PeerSession {
                             .set_max_message_len(rustbgpd_wire::EXTENDED_MAX_MESSAGE_LEN);
                     }
 
+                    // Compute Add-Path send max: config must enable send AND
+                    // peer must have negotiated Receive (or Both) for at least
+                    // one family.
+                    let add_path_send_max = if self.config.peer.add_path_send
+                        && neg
+                            .add_path_families
+                            .values()
+                            .any(|m| matches!(m, AddPathMode::Send | AddPathMode::Both))
+                    {
+                        let max = self.config.peer.add_path_send_max;
+                        if max == 0 { u32::MAX } else { max }
+                    } else {
+                        0
+                    };
+
                     self.negotiated = Some(neg);
                     self.established_at = Some(Instant::now());
                     // Register with RIB manager for outbound updates
@@ -480,6 +496,7 @@ impl PeerSession {
                         sendable_families,
                         is_ebgp,
                         route_reflector_client: self.config.route_reflector_client,
+                        add_path_send_max,
                     });
                 }
                 Action::SessionDown => {
@@ -1393,17 +1410,17 @@ impl PeerSession {
         // Split withdrawals by address family, filtering by negotiated families
         let mut v4_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
         let mut v6_withdraw: Vec<NlriEntry> = Vec::new();
-        for prefix in &update.withdraw {
+        for &(ref prefix, path_id) in &update.withdraw {
             if !self.is_family_negotiated(prefix) {
                 continue;
             }
             match prefix {
                 Prefix::V4(v4) => v4_withdraw.push(Ipv4NlriEntry {
-                    path_id: 0,
+                    path_id,
                     prefix: *v4,
                 }),
                 v6 @ Prefix::V6(_) => v6_withdraw.push(NlriEntry {
-                    path_id: 0,
+                    path_id,
                     prefix: *v6,
                 }),
             }
@@ -1752,6 +1769,8 @@ mod tests {
             graceful_restart: false,
             gr_restart_time: 120,
             add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
         };
         let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
         let metrics = BgpMetrics::new();

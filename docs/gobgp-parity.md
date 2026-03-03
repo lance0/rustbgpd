@@ -35,7 +35,7 @@ Last updated: 2026-03-03
 | Notification GR (RFC 8538) | Yes | No | |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | No | |
-| Add-Path (RFC 7911) | Yes | Partial | IPv4 unicast receive + single-best send; multi-path send deferred |
+| Add-Path (RFC 7911) | Yes | Yes | IPv4 unicast receive + multi-path send (route server mode) |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
 | Extended Messages (RFC 8654) | No | Yes | rustbgpd supports it; GoBGP does not |
@@ -157,7 +157,7 @@ Last updated: 2026-03-03
 | Stale route demotion | Yes | Yes | GR step 0 |
 | RPKI preference | Yes | Yes | Step 0.5: Valid > NotFound > Invalid |
 | AIGP | Yes | No | |
-| Multipath/ECMP | Yes | No | |
+| Multipath/ECMP | Yes | Partial | Add-Path multi-path send; no FIB ECMP |
 
 ## Summary
 
@@ -174,8 +174,7 @@ Last updated: 2026-03-03
 
 ## Biggest Gaps for Target Users (IX operators, automation teams)
 
-1. **Add-Path multi-path send** — receive landing done; route server mode needs multi-path outbound
-2. **GR restarting speaker** — only receiving today
-3. **Policy chaining** — first-match-wins only, no multi-policy sequencing
-4. **Extended nexthop (RFC 8950)** — IPv6 next-hop for IPv4 NLRI
-5. **FlowSpec (RFC 5575/8955)** — programmatic traffic filtering rules
+1. **GR restarting speaker** — only receiving today
+2. **Policy chaining** — first-match-wins only, no multi-policy sequencing
+3. **Extended nexthop (RFC 8950)** — IPv6 next-hop for IPv4 NLRI
+4. **FlowSpec (RFC 5575/8955)** — programmatic traffic filtering rules

@@ -24,6 +24,10 @@ pub struct PeerConfig {
     pub gr_restart_time: u16,
     /// Accept multiple paths per prefix from this peer (RFC 7911).
     pub add_path_receive: bool,
+    /// Advertise multiple paths per prefix to this peer (RFC 7911).
+    pub add_path_send: bool,
+    /// Maximum paths per prefix to advertise (0 = unlimited).
+    pub add_path_send_max: u32,
 }
 
 impl PeerConfig {
@@ -63,21 +67,27 @@ impl PeerConfig {
 
     /// Build Add-Path capability entries for our outgoing OPEN message.
     ///
-    /// When `add_path_receive` is enabled, advertises `Receive` mode for
-    /// IPv4 unicast only. IPv6 (MP-BGP) Add-Path is not yet implemented in
-    /// the MP attribute codec, so advertising it would cause misparsing.
+    /// Advertises the appropriate mode (Receive, Send, or Both) based on
+    /// config. IPv4 unicast only — IPv6 (MP-BGP) Add-Path is not yet
+    /// implemented in the MP attribute codec.
     #[must_use]
     pub fn add_path_capabilities(&self) -> Vec<AddPathFamily> {
-        if !self.add_path_receive {
+        if !self.add_path_receive && !self.add_path_send {
             return Vec::new();
         }
+        let mode = match (self.add_path_send, self.add_path_receive) {
+            (true, true) => AddPathMode::Both,
+            (true, false) => AddPathMode::Send,
+            (false, true) => AddPathMode::Receive,
+            (false, false) => unreachable!(),
+        };
         self.families
             .iter()
             .filter(|&&(afi, safi)| afi == Afi::Ipv4 && safi == Safi::Unicast)
             .map(|&(afi, safi)| AddPathFamily {
                 afi,
                 safi,
-                send_receive: AddPathMode::Receive,
+                send_receive: mode,
             })
             .collect()
     }
@@ -111,6 +121,8 @@ mod tests {
             graceful_restart: false,
             gr_restart_time: 120,
             add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
         }
     }
 
@@ -220,5 +232,34 @@ mod tests {
         let cfg = test_config(); // add_path_receive = false
         let caps = cfg.local_capabilities();
         assert!(!caps.iter().any(|c| matches!(c, Capability::AddPath(..))));
+    }
+
+    #[test]
+    fn add_path_capabilities_send_only() {
+        let mut cfg = test_config();
+        cfg.add_path_send = true;
+        let caps = cfg.add_path_capabilities();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].send_receive, AddPathMode::Send);
+    }
+
+    #[test]
+    fn add_path_capabilities_both() {
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        cfg.add_path_send = true;
+        let caps = cfg.add_path_capabilities();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].send_receive, AddPathMode::Both);
+    }
+
+    #[test]
+    fn add_path_capabilities_send_ipv4_only() {
+        let mut cfg = test_config();
+        cfg.add_path_send = true;
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        let caps = cfg.add_path_capabilities();
+        assert_eq!(caps.len(), 1);
+        assert_eq!(caps[0].afi, Afi::Ipv4);
     }
 }

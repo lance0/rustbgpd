@@ -141,8 +141,8 @@ See [ADR-0024](docs/adr/0024-graceful-restart.md).
 
 ### Add-Path (RFC 7911)
 
-Add-Path allows accepting multiple paths per prefix from a peer. Enable it
-per-neighbor with the `[neighbors.add_path]` table:
+Add-Path allows accepting and advertising multiple paths per prefix.
+Configure it per-neighbor with the `[neighbors.add_path]` table:
 
 ```toml
 [[neighbors]]
@@ -151,19 +151,28 @@ remote_asn = 65002
 
 [neighbors.add_path]
 receive = true    # accept multiple paths per prefix from this peer
+send = true       # advertise multiple paths per prefix to this peer
+send_max = 4      # limit to top 4 candidates (omit for unlimited)
 ```
 
-| Field     | Type | Required | Default | Description                               |
-|-----------|------|----------|---------|-------------------------------------------|
-| `receive` | bool | no       | false   | Accept multiple paths per prefix from peer |
+| Field      | Type    | Required | Default | Description                                |
+|------------|---------|----------|---------|--------------------------------------------|
+| `receive`  | bool    | no       | false   | Accept multiple paths per prefix from peer  |
+| `send`     | bool    | no       | false   | Advertise multiple paths per prefix to peer |
+| `send_max` | integer | no       | —       | Max paths per prefix (omit for unlimited)   |
 
 When `receive` is true, the Add-Path capability (code 69) is advertised in
-OPEN for all configured address families with `Receive` mode. The peer must
-advertise `Send` (or `Both`) for the capability to take effect.
+OPEN with `Receive` mode. When `send` is true, `Send` mode is advertised.
+If both are enabled, `Both` is advertised.
 
-**Current limitation:** Only receive + single-best outbound is implemented.
-Multi-path send (route server mode) is planned for a future release. See
-[ADR-0033](docs/adr/0033-add-path.md).
+**Multi-path send (route server mode):** When `send = true`, the RIB
+distributes multiple candidate paths per prefix to this peer, sorted by
+best-path preference. Paths are assigned rank-based path IDs (best=1,
+second=2, etc.). Split horizon, iBGP suppression, and per-candidate export
+policy are evaluated for each path.
+
+**IPv4 only:** Add-Path send and receive are currently limited to IPv4
+unicast. See [ADR-0033](docs/adr/0033-add-path.md).
 
 ### Per-neighbor policy
 

@@ -89,13 +89,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Negotiated per-session; dynamic buffer sizing on establishment.
   `max_message_len` parameter threaded through header decode, message
   decode, and UPDATE encode. (ADR-0032)
-- **Add-Path (RFC 7911) — receive + single-best send.** Accept multiple
-  paths per prefix from Add-Path peers. Capability code 69 with
+- **Add-Path (RFC 7911) — receive + multi-path send.** Accept and
+  advertise multiple paths per prefix. Capability code 69 with
   `AddPathMode` (Receive/Send/Both) negotiation. `NlriEntry` and
   `Ipv4NlriEntry` structs for path-id-aware NLRI. RIB re-keyed with
   composite `(Prefix, path_id)` keys in Adj-RIB-In and Adj-RIB-Out.
-  `iter_prefix()` for multi-candidate best-path selection. TOML config:
-  `[neighbors.add_path] receive = true`. gRPC API: `path_id` on Route,
+  Multi-path send (route server mode): `distribute_multipath_prefix()`
+  collects all candidates, applies per-candidate export policy, assigns
+  rank-based path IDs. TOML config: `[neighbors.add_path] receive = true`,
+  `send = true`, `send_max = N`. gRPC API: `path_id` on Route,
   RouteEvent, AddPathRequest, DeletePathRequest. (ADR-0033)
 
 ### Fixed

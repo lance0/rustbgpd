@@ -66,10 +66,13 @@ NLRI — no parallel variants. For wire-level IPv4 body NLRI,
 ```toml
 [neighbors.add_path]
 receive = true
+send = true
+send_max = 4
 ```
 
 `PeerConfig.add_path_receive: bool` controls whether Add-Path Receive
-is advertised in OPEN for the peer's configured families.
+is advertised in OPEN. `PeerConfig.add_path_send: bool` controls
+Send. `PeerConfig.add_path_send_max: u32` limits outbound paths.
 
 ### gRPC API
 
@@ -83,21 +86,59 @@ is advertised in OPEN for the peer's configured families.
 - Peers that advertise Add-Path can send multiple paths per prefix;
   all are stored in Adj-RIB-In with composite keying
 - Best-path selection considers all candidates from all peers
-- Outbound: single best path with path_id encoding for Add-Path peers,
-  no path_id encoding for non-Add-Path peers
+- Outbound: multi-path send for peers with `add_path_send = true`,
+  single-best for others. Non-Add-Path peers get no path_id encoding
 - Non-Add-Path peers: behavior completely unchanged (path_id=0 throughout)
 - Route injection via gRPC supports explicit path_id for multiple
   injected paths per prefix
 
-### Deferred: Multi-Path Send (Route Server Mode)
+### Multi-Path Send (Route Server Mode)
 
-Multi-path send is explicitly deferred. It requires:
-- `distribute_changes()` collecting all candidates, not just best
-- Per-candidate export policy + split horizon evaluation
-- Stable outbound path ID assignment per (target, prefix, source)
-- AdjRibOut tracking multiple paths per prefix per peer
-- Config: `send = true`, `send_max = N`
+Multi-path send allows advertising multiple paths per prefix to peers
+that negotiate Add-Path receive. This is the core route server feature
+for IXP deployments.
 
-The receive + single-best landing validates the hard foundation
-(capability negotiation, wire codec, NlriEntry, composite keying,
-backward compatibility). Multi-path send builds on it.
+**Config:**
+
+```toml
+[neighbors.add_path]
+send = true       # advertise multiple paths per prefix
+send_max = 4      # limit to top 4 candidates (omit for unlimited)
+```
+
+`PeerConfig.add_path_send: bool` controls whether Add-Path Send is
+advertised in OPEN. `PeerConfig.add_path_send_max: u32` limits the
+number of paths per prefix (0 = unlimited at transport layer, mapped
+to `u32::MAX` after negotiation).
+
+**Capability advertisement:** `add_path_capabilities()` now advertises
+Send, Receive, or Both based on config. Transport computes the effective
+`add_path_send_max` from the intersection of negotiation and config.
+
+**Distribution logic:**
+
+`distribute_multipath_prefix()` is a static method on `RibManager` that:
+1. Collects all candidates from all Adj-RIB-In entries for a prefix
+2. Filters by split horizon, iBGP/RR suppression, sendable families
+3. Sorts by `best_path_cmp` (deterministic ordering)
+4. Takes top N candidates (limited by `send_max`)
+5. Evaluates export policy per-candidate
+6. Assigns rank-based path IDs (1-indexed: best=1, second=2, etc.)
+7. Diffs against AdjRibOut to minimize wire churn
+
+**Path ID assignment:** Rank-based (1-indexed). Path ID = candidate's
+position in the best_path_cmp sorted order. This is simple and
+deterministic; rank shifts on route changes cause re-announcements
+for affected path IDs.
+
+**Dual prefix tracking:** `distribute_changes()` takes both
+`best_changed` (for single-best peers) and `all_affected` (for
+multi-path peers). Any candidate change matters for multi-path peers,
+while single-best peers only care about best-path changes.
+
+**Withdrawal type:** `OutboundRouteUpdate.withdraw` changed from
+`Vec<Prefix>` to `Vec<(Prefix, u32)>` to support per-path-id
+withdrawals.
+
+**IPv4 only:** Same limitation as receive — IPv6 MP-BGP Add-Path
+codec not yet implemented.

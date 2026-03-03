@@ -63,13 +63,12 @@ resolved.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability
   (code 2) is always advertised. Inbound route refresh requests check
   peer capability, but there is no config option to disable the feature.
-- **Add-Path is receive + single-best send only.** Multi-path send
-  (route server mode) is not yet implemented. Add-Path peers receive
-  only the best path outbound with path_id encoding. Multiple outbound
-  paths per prefix per peer requires a follow-up implementation.
+- **Add-Path IPv4 only.** Add-Path receive and multi-path send are
+  limited to IPv4 unicast. IPv6 MP-BGP Add-Path codec is not yet
+  implemented.
 - **Add-Path via gRPC AddNeighbor defaults to disabled.** Dynamic peers
-  created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive.
-  TOML config with `[neighbors.add_path] receive = true` is the only way
+  created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive
+  or send. TOML config with `[neighbors.add_path]` is the only way
   to enable it currently.
 - **TCP-AO not supported for RTR connections.** RPKI cache server
   connections use plain TCP. TCP-AO (RFC 5925) is not supported for

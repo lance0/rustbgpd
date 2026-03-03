@@ -44,6 +44,7 @@ pub enum PeerManagerCommand {
 }
 
 /// Configuration for adding a peer dynamically.
+#[expect(clippy::struct_excessive_bools)]
 pub struct PeerManagerNeighborConfig {
     pub address: IpAddr,
     pub remote_asn: u32,
@@ -57,6 +58,8 @@ pub struct PeerManagerNeighborConfig {
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     pub route_reflector_client: bool,
     pub add_path_receive: bool,
+    pub add_path_send: bool,
+    pub add_path_send_max: u32,
     pub import_policy: Option<Policy>,
     pub export_policy: Option<Policy>,
 }

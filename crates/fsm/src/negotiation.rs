@@ -266,6 +266,8 @@ mod tests {
             graceful_restart: false,
             gr_restart_time: 120,
             add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
         }
     }
 

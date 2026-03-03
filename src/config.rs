@@ -124,6 +124,11 @@ pub struct AddPathConfig {
     /// Accept multiple paths per prefix from this peer (RFC 7911).
     #[serde(default)]
     pub receive: bool,
+    /// Advertise multiple paths per prefix to this peer (RFC 7911).
+    #[serde(default)]
+    pub send: bool,
+    /// Maximum number of paths to advertise per prefix (0 or absent = unlimited).
+    pub send_max: Option<u32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -665,23 +670,17 @@ impl Config {
             for (i, server) in rpki.cache_servers.iter().enumerate() {
                 if server.refresh_interval == 0 {
                     return Err(ConfigError::InvalidRpkiConfig {
-                        reason: format!(
-                            "cache_server[{i}]: refresh_interval must be > 0"
-                        ),
+                        reason: format!("cache_server[{i}]: refresh_interval must be > 0"),
                     });
                 }
                 if server.retry_interval == 0 {
                     return Err(ConfigError::InvalidRpkiConfig {
-                        reason: format!(
-                            "cache_server[{i}]: retry_interval must be > 0"
-                        ),
+                        reason: format!("cache_server[{i}]: retry_interval must be > 0"),
                     });
                 }
                 if server.expire_interval == 0 {
                     return Err(ConfigError::InvalidRpkiConfig {
-                        reason: format!(
-                            "cache_server[{i}]: expire_interval must be > 0"
-                        ),
+                        reason: format!("cache_server[{i}]: expire_interval must be > 0"),
                     });
                 }
                 if server.expire_interval < server.refresh_interval {
@@ -790,6 +789,12 @@ impl Config {
                 graceful_restart: neighbor.graceful_restart.unwrap_or(true),
                 gr_restart_time: neighbor.gr_restart_time.unwrap_or(120),
                 add_path_receive: neighbor.add_path.as_ref().is_some_and(|c| c.receive),
+                add_path_send: neighbor.add_path.as_ref().is_some_and(|c| c.send),
+                add_path_send_max: neighbor
+                    .add_path
+                    .as_ref()
+                    .and_then(|c| c.send_max)
+                    .unwrap_or(0),
             };
 
             let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
@@ -1767,6 +1772,68 @@ receive = true
         assert!(!peers[0].0.peer.add_path_receive);
     }
 
+    #[test]
+    fn add_path_config_send_enabled() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[neighbors.add_path]
+send = true
+send_max = 4
+"#;
+        let config = parse(toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert!(peers[0].0.peer.add_path_send);
+        assert_eq!(peers[0].0.peer.add_path_send_max, 4);
+    }
+
+    #[test]
+    fn add_path_config_send_and_receive() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+
+[neighbors.add_path]
+receive = true
+send = true
+"#;
+        let config = parse(toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert!(peers[0].0.peer.add_path_receive);
+        assert!(peers[0].0.peer.add_path_send);
+        // No send_max → defaults to 0 (unlimited at transport layer)
+        assert_eq!(peers[0].0.peer.add_path_send_max, 0);
+    }
+
+    #[test]
+    fn add_path_config_send_defaults_to_disabled() {
+        let config = parse(valid_toml()).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert!(!peers[0].0.peer.add_path_send);
+        assert_eq!(peers[0].0.peer.add_path_send_max, 0);
+    }
+
     // --- RPKI config tests ---
 
     #[test]
@@ -1947,10 +2014,12 @@ address = "127.0.0.1:3323"
 
     #[test]
     fn rpki_expire_equals_refresh_accepted() {
-        assert!(parse(&rpki_toml(
-            "refresh_interval = 3600\nexpire_interval = 3600",
-        ))
-        .is_ok());
+        assert!(
+            parse(&rpki_toml(
+                "refresh_interval = 3600\nexpire_interval = 3600",
+            ))
+            .is_ok()
+        );
     }
 
     #[test]

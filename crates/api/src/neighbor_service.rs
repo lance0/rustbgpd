@@ -165,6 +165,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             local_ipv6_nexthop: None,
             route_reflector_client: false,
             add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
             import_policy: None,
             export_policy: None,
         };

@@ -45,6 +45,23 @@ impl AdjRibOut {
         self.routes.values()
     }
 
+    /// Iterate over all routes for a given prefix (all path IDs).
+    pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> {
+        let target = *prefix;
+        self.routes.values().filter(move |r| r.prefix == target)
+    }
+
+    /// Return all path IDs currently advertised for a given prefix.
+    #[must_use]
+    pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> Vec<u32> {
+        let target = *prefix;
+        self.routes
+            .keys()
+            .filter(|(p, _)| *p == target)
+            .map(|(_, id)| *id)
+            .collect()
+    }
+
     pub fn clear(&mut self) {
         self.routes.clear();
     }

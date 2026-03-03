@@ -12,7 +12,9 @@ use crate::route::Route;
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
     pub announce: Vec<Route>,
-    pub withdraw: Vec<Prefix>,
+    /// Withdrawn routes with their path IDs. For non-Add-Path peers,
+    /// `path_id` is always 0.
+    pub withdraw: Vec<(Prefix, u32)>,
     /// End-of-RIB markers to send for these families after the route updates.
     pub end_of_rib: Vec<(Afi, Safi)>,
     /// Per-route next-hop override from export policy. Parallel to `announce` —
@@ -45,6 +47,8 @@ pub enum RibUpdate {
         is_ebgp: bool,
         /// Whether this peer is a route reflector client (RFC 4456).
         route_reflector_client: bool,
+        /// Maximum paths per prefix to send via Add-Path (0 = single-best only).
+        add_path_send_max: u32,
     },
     /// Inject a locally-originated route.
     InjectRoute {
