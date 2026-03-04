@@ -172,8 +172,47 @@ Last updated: 2026-03-03
 | Security | 4 | 2.5 | ~63% |
 | Best-path steps | 11 | 10 | ~91% |
 
-## Biggest Gaps for Target Users (IX operators, automation teams)
+## Weighted Parity Estimates
 
-1. **GR restarting speaker** — only receiving today
-2. **Policy chaining** — first-match-wins only, no multi-policy sequencing
-3. **Extended nexthop (RFC 8950)** — IPv6 next-hop for IPv4 NLRI
+### IX Route Server Use Case (~70-75% parity)
+
+The primary target deployment. Weighted toward what matters:
+
+- **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
+- **Best-path:** 91%, missing piece (AIGP) rarely used at IXes
+- **Policy:** 61% but covers the most common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
+- **Core protocol:** GR receiving-only covers the IX route server case well
+- **Add-Path send:** critical for route servers, fully implemented with multi-path
+
+### General-Purpose BGP Speaker (~45-50% parity)
+
+Competing head-to-head with GoBGP for all use cases:
+
+- Missing address families hurt badly (EVPN, VPN)
+- No confederation support limits SP deployments
+- GR restarting speaker needed for router role
+- No CLI tool limits adoption by network engineers
+
+## Advantages Over GoBGP
+
+- **Extended Messages (RFC 8654)** — rustbgpd has it, GoBGP doesn't
+- **Zero unsafe in application logic** — `deny(unsafe_code)` per-crate
+- **Fuzz testing + property testing** — GoBGP has neither
+- **Interop test suite** — Containerlab + FRR/BIRD shipped; GoBGP doesn't ship one
+- **Structured logging** — tracing-subscriber JSON vs GoBGP's unstructured logs
+- **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
+
+## Top 5 Gaps for Maximum Parity Gain
+
+1. **GR restarting speaker** — core protocol 64% → 71%, unlocks router deployments
+2. **Policy chaining + named policies** — policy 61% → 72%, table stakes for production
+3. **Extended nexthop (RFC 8950)** — IPv6 NH for IPv4 NLRI, increasingly common in modern networks
+4. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
+5. **Admin shutdown communication (RFC 8203)** — low-effort, high-visibility operational feature
+
+Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
+
+## Pre-1.0 Tech Debt
+
+- **manager.rs at ~6,300 lines** — well-tested but hard to review; splitting into distribution.rs, revalidation.rs, graceful_restart.rs submodules would help
+- **RTR expire_interval not enforced** — config accepts it, EndOfData PDU parses it, but no timer actually expires VRPs if the cache goes silent without disconnecting; a real deployment behind a flaky network could hold stale VRPs indefinitely

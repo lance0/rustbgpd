@@ -100,12 +100,22 @@ Features that close meaningful protocol gaps vs GoBGP.
 - [x] **RPKI validation** — RTR client (RFC 8210) for route origin validation; VRP table, best-path step 0.5, policy matching (ADR-0034)
 - [x] **FlowSpec** (RFC 8955/8956) — IPv4 and IPv6 unicast FlowSpec (SAFI 133); all 13 component types, numeric/bitmask operators, FlowSpec actions via extended communities, gRPC injection/query (ADR-0035)
 
-### P2 — Operational Polish
+### P2 — High-Impact Parity Gaps
+
+Features that close the most impactful gaps vs GoBGP for the target user base.
+Each moves overall parity 3-5% while disproportionately improving real-world usability.
+
+- [ ] **GR restarting speaker** — currently receiving-only; restarting speaker unlocks router deployments (core protocol 64% → 71%)
+- [ ] **Policy chaining + named policies** — first-match-wins today, no multi-policy sequencing; table stakes for production policy (policy 61% → 72%)
+- [ ] **Extended nexthop** (RFC 8950) — IPv6 next-hop for IPv4 NLRI; increasingly common in modern dual-stack networks
+- [ ] **CLI tool** — `rustbgpctl` wrapping gRPC; grpcurl is a poor substitute for `gobgp` CLI; TUI mode as a follow-on
+- [ ] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; low-effort, high-visibility
+
+### P2.5 — Operational Polish
 
 Features that improve day-to-day operations.
 
 - [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
-- [ ] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION
 - [ ] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); standard for visibility into BGP state
 - [ ] **MRT dump export** (RFC 6396) — TABLE_DUMP_V2 for offline analysis and archival
 
@@ -127,7 +137,7 @@ Valuable but not blocking production use or 1.0.
 
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5 (GoBGP doesn't have it either)
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
-- [ ] **CLI client** wrapping gRPC — convenience tool, not the primary interface
+- [ ] **TUI mode** for `rustbgpctl` — interactive terminal UI for monitoring and management; follow-on to CLI
 - [ ] **YANG model / NETCONF** — alternative management interface for traditional NOC tooling
 
 ### Interop Test Hardening
@@ -154,6 +164,8 @@ Quality gates before tagging 1.0.0:
 - [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
 - [ ] Comprehensive rustdoc for public API
 - [ ] Security audit of gRPC surface
+- [ ] **manager.rs split** — currently ~6,300 lines; split into distribution.rs, revalidation.rs, graceful_restart.rs submodules for reviewability
+- [ ] **RTR expire_interval enforcement** — VRPs should be cleared if no fresh EndOfData arrives within the expiry window; currently accepted but not enforced
 
 ---
 
