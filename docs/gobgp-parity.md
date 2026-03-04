@@ -165,34 +165,35 @@ Last updated: 2026-03-04
 | Category | GoBGP | rustbgpd | Parity |
 |----------|:-----:|:--------:|:------:|
 | Address families | 15 | 4 | ~27% |
-| Core protocol | 14 | 9 | ~64% |
+| Core protocol | 14 | 11.5 | ~82% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 13 | ~72% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
 | Monitoring | 5 | 3 | 60% |
 | Security | 4 | 2.5 | ~63% |
-| Best-path steps | 11 | 10 | ~91% |
+| Best-path steps | 11 | 10.5 | ~95% |
 
 ## Weighted Parity Estimates
 
-### IX Route Server Use Case (~70-75% parity)
+### IX Route Server Use Case (~80% parity)
 
 The primary target deployment. Weighted toward what matters:
 
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
-- **Best-path:** 91%, missing piece (AIGP) rarely used at IXes
+- **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
+- **Core protocol:** 82% — GR helper + restarting speaker, Enhanced RR, Add-Path, Extended Nexthop all landed
 - **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
-- **Core protocol:** GR helper mode is solid, and minimal restarting-speaker signaling now covers planned restarts
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
+- **Route server client mode:** transparent eBGP with NEXT_HOP preservation
 
-### General-Purpose BGP Speaker (~45-50% parity)
+### General-Purpose BGP Speaker (~55% parity)
 
 Competing head-to-head with GoBGP for all use cases:
 
 - Missing address families hurt badly (EVPN, VPN)
 - No confederation support limits SP deployments
-- GR restarting speaker needed for router role
 - No CLI tool limits adoption by network engineers
+- gRPC API covers ~36% of GoBGP's RPC surface
 
 ## Advantages Over GoBGP
 
@@ -205,11 +206,11 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Top 5 Gaps for Maximum Parity Gain
 
-1. **GR restarting speaker** — core protocol 64% → 71%, unlocks router deployments
-2. ~~**Policy chaining + named policies**~~ — done
-3. ~~**Extended nexthop (RFC 8950)**~~ — done
-4. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
-5. **BMP exporter (RFC 7854)** — standard route monitoring export for visibility and external collectors
+1. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
+2. **BMP exporter (RFC 7854)** — standard route monitoring export for visibility and external collectors
+3. **Long-Lived GR (RFC 9494)** — per-AFI stale timers; important for large-scale iBGP
+4. **Confederation (RFC 5065)** — required for service provider deployments
+5. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 
