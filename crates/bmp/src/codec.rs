@@ -152,8 +152,15 @@ fn put_ipaddr_16(buf: &mut BytesMut, addr: IpAddr) {
 /// Encode BMP Initiation message (Type 4, RFC 7854 §4.3).
 #[must_use]
 pub fn encode_initiation(sys_name: &str, sys_descr: &str) -> Bytes {
-    let tlv_len = if sys_name.is_empty() { 0 } else { 4 + sys_name.len() }
-        + if sys_descr.is_empty() { 0 } else { 4 + sys_descr.len() };
+    let tlv_len = if sys_name.is_empty() {
+        0
+    } else {
+        4 + sys_name.len()
+    } + if sys_descr.is_empty() {
+        0
+    } else {
+        4 + sys_descr.len()
+    };
     let total = BMP_COMMON_HEADER_LEN + tlv_len;
 
     let mut buf = BytesMut::with_capacity(total);
@@ -175,8 +182,8 @@ pub fn encode_peer_up(
     local_open: &[u8],
     remote_open: &[u8],
 ) -> Bytes {
-    let total = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 20
-        + local_open.len() + remote_open.len();
+    let total =
+        BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 20 + local_open.len() + remote_open.len();
 
     let mut buf = BytesMut::with_capacity(total);
     buf.put_bytes(0, BMP_COMMON_HEADER_LEN);
@@ -315,7 +322,11 @@ pub fn encode_stats_report(
 #[must_use]
 pub fn encode_termination(reason: u16, message: &str) -> Bytes {
     let reason_tlv_len = 4 + 2; // type(2) + len(2) + value(2)
-    let msg_tlv_len = if message.is_empty() { 0 } else { 4 + message.len() };
+    let msg_tlv_len = if message.is_empty() {
+        0
+    } else {
+        4 + message.len()
+    };
     let total = BMP_COMMON_HEADER_LEN + reason_tlv_len + msg_tlv_len;
 
     let mut buf = BytesMut::with_capacity(total);
@@ -405,7 +416,10 @@ mod tests {
         );
         verify_common_header(&msg, BMP_MSG_PEER_UP);
         verify_per_peer_header(&msg[BMP_COMMON_HEADER_LEN..], &info);
-        assert_eq!(msg.len(), BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 20 + 58);
+        assert_eq!(
+            msg.len(),
+            BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN + 20 + 58
+        );
     }
 
     #[test]
@@ -440,16 +454,25 @@ mod tests {
     #[test]
     fn stats_report_encoding() {
         let info = sample_peer_info();
-        let counters = vec![
-            StatCounter { stat_type: 0, value: 42 },
-        ];
-        let afi_counters = vec![
-            AfiStatCounter { stat_type: 9, afi: 1, safi: 1, value: 1000 },
-        ];
+        let counters = vec![StatCounter {
+            stat_type: 0,
+            value: 42,
+        }];
+        let afi_counters = vec![AfiStatCounter {
+            stat_type: 9,
+            afi: 1,
+            safi: 1,
+            value: 1000,
+        }];
         let msg = encode_stats_report(&info, &counters, &afi_counters);
         verify_common_header(&msg, BMP_MSG_STATS_REPORT);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
-        let count = u32::from_be_bytes([msg[count_offset], msg[count_offset + 1], msg[count_offset + 2], msg[count_offset + 3]]);
+        let count = u32::from_be_bytes([
+            msg[count_offset],
+            msg[count_offset + 1],
+            msg[count_offset + 2],
+            msg[count_offset + 3],
+        ]);
         assert_eq!(count, 2);
     }
 
@@ -457,12 +480,18 @@ mod tests {
     fn stats_report_skips_mismatched_types() {
         let info = sample_peer_info();
         // Put AFI-type in simple list — should be skipped
-        let counters = vec![
-            StatCounter { stat_type: 9, value: 42 },
-        ];
+        let counters = vec![StatCounter {
+            stat_type: 9,
+            value: 42,
+        }];
         let msg = encode_stats_report(&info, &counters, &[]);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
-        let count = u32::from_be_bytes([msg[count_offset], msg[count_offset + 1], msg[count_offset + 2], msg[count_offset + 3]]);
+        let count = u32::from_be_bytes([
+            msg[count_offset],
+            msg[count_offset + 1],
+            msg[count_offset + 2],
+            msg[count_offset + 3],
+        ]);
         assert_eq!(count, 0);
     }
 
@@ -515,8 +544,16 @@ mod tests {
         let addr_offset = BMP_COMMON_HEADER_LEN + 2 + 8;
         let addr_bytes = &msg[addr_offset..addr_offset + 16];
         // First 12 bytes must be all zeros (NOT 0x0000_FFFF pattern)
-        assert_eq!(&addr_bytes[..12], &[0u8; 12], "first 12 bytes must be zero for IPv4");
-        assert_eq!(&addr_bytes[12..], &[10, 0, 0, 2], "last 4 bytes must be IPv4 address");
+        assert_eq!(
+            &addr_bytes[..12],
+            &[0u8; 12],
+            "first 12 bytes must be zero for IPv4"
+        );
+        assert_eq!(
+            &addr_bytes[12..],
+            &[10, 0, 0, 2],
+            "last 4 bytes must be IPv4 address"
+        );
     }
 
     #[test]
@@ -545,20 +582,36 @@ mod tests {
         // Local address is right after per-peer header
         let local_addr_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
         let local_addr = &msg[local_addr_offset..local_addr_offset + 16];
-        assert_eq!(&local_addr[..12], &[0u8; 12], "local IPv4: first 12 bytes zero");
-        assert_eq!(&local_addr[12..], &[10, 0, 0, 1], "local IPv4: last 4 bytes");
+        assert_eq!(
+            &local_addr[..12],
+            &[0u8; 12],
+            "local IPv4: first 12 bytes zero"
+        );
+        assert_eq!(
+            &local_addr[12..],
+            &[10, 0, 0, 1],
+            "local IPv4: last 4 bytes"
+        );
     }
 
     #[test]
     fn afi_stat_counter_encoding() {
         let info = sample_peer_info();
-        let afi_counters = vec![
-            AfiStatCounter { stat_type: 9, afi: 1, safi: 1, value: 500 },
-        ];
+        let afi_counters = vec![AfiStatCounter {
+            stat_type: 9,
+            afi: 1,
+            safi: 1,
+            value: 500,
+        }];
         let msg = encode_stats_report(&info, &[], &afi_counters);
         verify_common_header(&msg, BMP_MSG_STATS_REPORT);
         let count_offset = BMP_COMMON_HEADER_LEN + PER_PEER_HEADER_LEN;
-        let count = u32::from_be_bytes([msg[count_offset], msg[count_offset + 1], msg[count_offset + 2], msg[count_offset + 3]]);
+        let count = u32::from_be_bytes([
+            msg[count_offset],
+            msg[count_offset + 1],
+            msg[count_offset + 2],
+            msg[count_offset + 3],
+        ]);
         assert_eq!(count, 1);
         // Verify AFI/SAFI payload: type(2) + len(2) + AFI(2) + SAFI(1) + value(8)
         let stat_offset = count_offset + 4;
