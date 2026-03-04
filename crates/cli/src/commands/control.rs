@@ -7,10 +7,7 @@ use crate::proto::{HealthRequest, MetricsRequest, ShutdownRequest};
 
 pub async fn health(channel: Channel, json: bool) -> Result<(), CliError> {
     let mut client = ControlServiceClient::new(channel);
-    let resp = client
-        .get_health(HealthRequest {})
-        .await?
-        .into_inner();
+    let resp = client.get_health(HealthRequest {}).await?.into_inner();
 
     if json {
         let out = JsonHealth {
@@ -34,15 +31,16 @@ pub async fn health(channel: Channel, json: bool) -> Result<(), CliError> {
 
 pub async fn metrics(channel: Channel) -> Result<(), CliError> {
     let mut client = ControlServiceClient::new(channel);
-    let resp = client
-        .get_metrics(MetricsRequest {})
-        .await?
-        .into_inner();
+    let resp = client.get_metrics(MetricsRequest {}).await?.into_inner();
     print!("{}", resp.prometheus_text);
     Ok(())
 }
 
-pub async fn shutdown(channel: Channel, reason: Option<String>, json: bool) -> Result<(), CliError> {
+pub async fn shutdown(
+    channel: Channel,
+    reason: Option<String>,
+    json: bool,
+) -> Result<(), CliError> {
     let mut client = ControlServiceClient::new(channel);
     client
         .shutdown(ShutdownRequest {

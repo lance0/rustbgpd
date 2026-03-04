@@ -6,10 +6,7 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{AddPathRequest, DeletePathRequest, ListRoutesRequest};
 
-fn make_route_request(
-    neighbor: Option<&str>,
-    family: Option<i32>,
-) -> ListRoutesRequest {
+fn make_route_request(neighbor: Option<&str>, family: Option<i32>) -> ListRoutesRequest {
     ListRoutesRequest {
         neighbor_address: neighbor.unwrap_or("").to_string(),
         afi_safi: family.unwrap_or(0),
@@ -28,7 +25,11 @@ fn route_to_json(r: &crate::proto::Route) -> JsonRoute {
         origin: output::format_origin(r.origin).to_string(),
         best: r.best,
         peer_address: r.peer_address.clone(),
-        communities: r.communities.iter().map(|c| output::format_community(*c)).collect(),
+        communities: r
+            .communities
+            .iter()
+            .map(|c| output::format_community(*c))
+            .collect(),
         large_communities: r.large_communities.clone(),
         path_id: r.path_id,
         validation_state: r.validation_state.clone(),
@@ -49,11 +50,7 @@ fn print_routes(routes: &[crate::proto::Route], json: bool) {
     }
 }
 
-pub async fn best(
-    channel: Channel,
-    family: Option<i32>,
-    json: bool,
-) -> Result<(), CliError> {
+pub async fn best(channel: Channel, family: Option<i32>, json: bool) -> Result<(), CliError> {
     let mut client = RibServiceClient::new(channel);
     let resp = client
         .list_best_routes(make_route_request(None, family))
@@ -146,6 +143,11 @@ pub async fn delete_route(
             path_id: path_id.unwrap_or(0),
         })
         .await?;
-    output::print_result(json, "delete_route", prefix, &format!("Route {prefix} deleted"));
+    output::print_result(
+        json,
+        "delete_route",
+        prefix,
+        &format!("Route {prefix} deleted"),
+    );
     Ok(())
 }

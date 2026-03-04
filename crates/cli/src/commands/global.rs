@@ -2,15 +2,12 @@ use tonic::transport::Channel;
 
 use crate::error::CliError;
 use crate::output::JsonGlobal;
-use crate::proto::global_service_client::GlobalServiceClient;
 use crate::proto::GetGlobalRequest;
+use crate::proto::global_service_client::GlobalServiceClient;
 
 pub async fn run(channel: Channel, json: bool) -> Result<(), CliError> {
     let mut client = GlobalServiceClient::new(channel);
-    let resp = client
-        .get_global(GetGlobalRequest {})
-        .await?
-        .into_inner();
+    let resp = client.get_global(GetGlobalRequest {}).await?.into_inner();
 
     if json {
         let out = JsonGlobal {

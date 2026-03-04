@@ -879,7 +879,10 @@ impl Config {
             for (i, collector) in bmp.collectors.iter().enumerate() {
                 collector.address.parse::<SocketAddr>().map_err(|e| {
                     ConfigError::InvalidBmpCollector {
-                        reason: format!("collectors[{i}]: invalid address {:?}: {e}", collector.address),
+                        reason: format!(
+                            "collectors[{i}]: invalid address {:?}: {e}",
+                            collector.address
+                        ),
                     }
                 })?;
                 if collector.reconnect_interval == 0 {

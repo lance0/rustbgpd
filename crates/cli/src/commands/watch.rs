@@ -2,8 +2,8 @@ use tonic::transport::Channel;
 
 use crate::error::CliError;
 use crate::output::{self, JsonRouteEvent};
-use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::WatchRoutesRequest;
+use crate::proto::rib_service_client::RibServiceClient;
 
 fn format_event_type(t: i32) -> &'static str {
     match t {

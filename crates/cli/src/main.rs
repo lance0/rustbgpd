@@ -16,7 +16,13 @@ use crate::output::parse_family;
 #[command(name = "rustbgpctl", about = "CLI for rustbgpd", version)]
 struct Cli {
     /// gRPC server address
-    #[arg(long, short = 's', default_value = "127.0.0.1:50051", env = "RUSTBGPD_ADDR", global = true)]
+    #[arg(
+        long,
+        short = 's',
+        default_value = "127.0.0.1:50051",
+        env = "RUSTBGPD_ADDR",
+        global = true
+    )]
     addr: String,
 
     /// Output in JSON format
@@ -232,8 +238,12 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
     let (high, low) = s
         .split_once(':')
         .ok_or_else(|| format!("invalid community: {s} (expected ASN:value)"))?;
-    let h: u32 = high.parse().map_err(|_| format!("invalid community ASN: {high}"))?;
-    let l: u32 = low.parse().map_err(|_| format!("invalid community value: {low}"))?;
+    let h: u32 = high
+        .parse()
+        .map_err(|_| format!("invalid community ASN: {high}"))?;
+    let l: u32 = low
+        .parse()
+        .map_err(|_| format!("invalid community value: {low}"))?;
     if h > 65535 || l > 65535 {
         return Err(format!("community values must be <= 65535: {s}"));
     }
@@ -260,13 +270,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Neighbor { address, action } => match (address, action) {
             (None, None) => commands::neighbor::list(channel, json).await,
             (Some(addr), None) => commands::neighbor::show(channel, &addr, json).await,
-            (Some(addr), Some(NeighborAction::Add {
-                asn,
-                description,
-                hold_time,
-                max_prefixes,
-                families,
-            })) => {
+            (
+                Some(addr),
+                Some(NeighborAction::Add {
+                    asn,
+                    description,
+                    hold_time,
+                    max_prefixes,
+                    families,
+                }),
+            ) => {
                 commands::neighbor::add(
                     channel,
                     &addr,
@@ -302,11 +315,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let family_val = resolve_family(&family)?;
             match action {
                 None => commands::rib::best(channel, family_val, json).await,
-                Some(RibAction::Received { address, family: fam }) => {
+                Some(RibAction::Received {
+                    address,
+                    family: fam,
+                }) => {
                     let f = resolve_family(&fam.or(family))?;
                     commands::rib::received(channel, &address, f, json).await
                 }
-                Some(RibAction::Advertised { address, family: fam }) => {
+                Some(RibAction::Advertised {
+                    address,
+                    family: fam,
+                }) => {
                     let f = resolve_family(&fam.or(family))?;
                     commands::rib::advertised(channel, &address, f, json).await
                 }
@@ -349,9 +368,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
         }
 
-        Command::Watch {
-            address, family,
-        } => {
+        Command::Watch { address, family } => {
             let family_val = resolve_family(&family)?;
             commands::watch::run(channel, address, family_val, json).await
         }
@@ -489,7 +506,9 @@ mod tests {
         ])
         .unwrap();
         if let Command::Rib {
-            action: Some(RibAction::Add { prefix, nexthop, .. }),
+            action: Some(RibAction::Add {
+                prefix, nexthop, ..
+            }),
             ..
         } = cli.command
         {
@@ -532,7 +551,10 @@ mod tests {
 
     #[test]
     fn test_parse_community_str() {
-        assert_eq!(parse_community_str("65001:100").unwrap(), (65001 << 16) | 100);
+        assert_eq!(
+            parse_community_str("65001:100").unwrap(),
+            (65001 << 16) | 100
+        );
         assert!(parse_community_str("invalid").is_err());
         assert!(parse_community_str("70000:1").is_err());
     }

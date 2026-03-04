@@ -58,12 +58,8 @@ pub fn format_state(state: i32) -> &'static str {
 /// Map address family string to proto enum value.
 pub fn parse_family(family: &str) -> Option<i32> {
     match family {
-        "ipv4_unicast" | "ipv4-unicast" | "ipv4" => {
-            Some(proto::AddressFamily::Ipv4Unicast as i32)
-        }
-        "ipv6_unicast" | "ipv6-unicast" | "ipv6" => {
-            Some(proto::AddressFamily::Ipv6Unicast as i32)
-        }
+        "ipv4_unicast" | "ipv4-unicast" | "ipv4" => Some(proto::AddressFamily::Ipv4Unicast as i32),
+        "ipv6_unicast" | "ipv6-unicast" | "ipv6" => Some(proto::AddressFamily::Ipv6Unicast as i32),
         "ipv4_flowspec" | "ipv4-flowspec" => Some(proto::AddressFamily::Ipv4Flowspec as i32),
         "ipv6_flowspec" | "ipv6-flowspec" => Some(proto::AddressFamily::Ipv6Flowspec as i32),
         _ => None,
@@ -231,7 +227,9 @@ pub fn print_result(json: bool, action: &str, target: &str, message: &str) {
 /// Parse "prefix/length" or "prefix" (for host routes) into (prefix, length).
 pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
     if let Some((addr, len)) = s.split_once('/') {
-        let length: u32 = len.parse().map_err(|_| format!("invalid prefix length: {len}"))?;
+        let length: u32 = len
+            .parse()
+            .map_err(|_| format!("invalid prefix length: {len}"))?;
         // Basic validation
         if addr.contains(':') {
             if length > 128 {

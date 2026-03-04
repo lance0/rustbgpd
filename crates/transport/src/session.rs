@@ -588,21 +588,18 @@ impl PeerSession {
 
                     // Emit BMP Peer Up event
                     if self.bmp_tx.is_some() {
-                        let (local_addr, local_port, remote_port) = self
-                            .stream
-                            .as_ref()
-                            .map_or(
-                                (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-                                |s| {
-                                    let local = s.local_addr().ok();
-                                    let remote = s.peer_addr().ok();
-                                    (
-                                        local.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip()),
-                                        local.map_or(0, |a| a.port()),
-                                        remote.map_or(0, |a| a.port()),
-                                    )
-                                },
-                            );
+                        let (local_addr, local_port, remote_port) = self.stream.as_ref().map_or(
+                            (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
+                            |s| {
+                                let local = s.local_addr().ok();
+                                let remote = s.peer_addr().ok();
+                                (
+                                    local.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip()),
+                                    local.map_or(0, |a| a.port()),
+                                    remote.map_or(0, |a| a.port()),
+                                )
+                            },
+                        );
                         self.emit_bmp_event(BmpEvent::PeerUp {
                             peer_info: self.build_bmp_peer_info(),
                             local_open: self.local_open_pdu.clone().unwrap_or_default(),
@@ -2031,8 +2028,7 @@ impl PeerSession {
         for (route, nh_override) in &v6_routes {
             let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
             let force_nh_self = matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
-            let nh = if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh_override
-            {
+            let nh = if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh_override {
                 // Policy explicitly set a next-hop — use it
                 *addr
             } else if force_nh_self {

@@ -74,10 +74,22 @@ pub async fn show(channel: Channel, address: &str, json: bool) -> Result<(), Cli
         };
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
     } else {
-        println!("Neighbor:              {}", cfg.map(|c| c.address.as_str()).unwrap_or(""));
-        println!("Remote ASN:            {}", cfg.map(|c| c.remote_asn).unwrap_or(0));
-        println!("Description:           {}", cfg.map(|c| c.description.as_str()).unwrap_or(""));
-        println!("Hold Time:             {}", cfg.map(|c| c.hold_time).unwrap_or(0));
+        println!(
+            "Neighbor:              {}",
+            cfg.map(|c| c.address.as_str()).unwrap_or("")
+        );
+        println!(
+            "Remote ASN:            {}",
+            cfg.map(|c| c.remote_asn).unwrap_or(0)
+        );
+        println!(
+            "Description:           {}",
+            cfg.map(|c| c.description.as_str()).unwrap_or("")
+        );
+        println!(
+            "Hold Time:             {}",
+            cfg.map(|c| c.hold_time).unwrap_or(0)
+        );
         println!(
             "Families:              {}",
             cfg.map(|c| c.families.join(", ")).unwrap_or_default()
@@ -128,7 +140,12 @@ pub async fn add(
             }),
         })
         .await?;
-    output::print_result(json, "add_neighbor", address, &format!("Neighbor {address} added"));
+    output::print_result(
+        json,
+        "add_neighbor",
+        address,
+        &format!("Neighbor {address} added"),
+    );
     Ok(())
 }
 
@@ -139,7 +156,12 @@ pub async fn delete(channel: Channel, address: &str, json: bool) -> Result<(), C
             address: address.to_string(),
         })
         .await?;
-    output::print_result(json, "delete_neighbor", address, &format!("Neighbor {address} deleted"));
+    output::print_result(
+        json,
+        "delete_neighbor",
+        address,
+        &format!("Neighbor {address} deleted"),
+    );
     Ok(())
 }
 
@@ -150,7 +172,12 @@ pub async fn enable(channel: Channel, address: &str, json: bool) -> Result<(), C
             address: address.to_string(),
         })
         .await?;
-    output::print_result(json, "enable_neighbor", address, &format!("Neighbor {address} enabled"));
+    output::print_result(
+        json,
+        "enable_neighbor",
+        address,
+        &format!("Neighbor {address} enabled"),
+    );
     Ok(())
 }
 
@@ -167,7 +194,12 @@ pub async fn disable(
             reason: reason.unwrap_or_default(),
         })
         .await?;
-    output::print_result(json, "disable_neighbor", address, &format!("Neighbor {address} disabled"));
+    output::print_result(
+        json,
+        "disable_neighbor",
+        address,
+        &format!("Neighbor {address} disabled"),
+    );
     Ok(())
 }
 
@@ -184,6 +216,11 @@ pub async fn softreset(
             families: family.into_iter().collect(),
         })
         .await?;
-    output::print_result(json, "softreset", address, &format!("Soft reset requested for {address}"));
+    output::print_result(
+        json,
+        "softreset",
+        address,
+        &format!("Soft reset requested for {address}"),
+    );
     Ok(())
 }
