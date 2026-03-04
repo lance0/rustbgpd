@@ -110,6 +110,14 @@ remote_asn = 65003
 description = "ipv6-peer"
 ```
 
+**Extended Next Hop (RFC 8950):** When both `"ipv4_unicast"` and
+`"ipv6_unicast"` are configured for a neighbor, rustbgpd automatically
+advertises the Extended Next Hop capability. If negotiated, IPv4 unicast
+routes may be exchanged via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` using an
+IPv6 next hop. For eBGP exports, `local_ipv6_nexthop` (if configured) is
+used as the IPv6 self next-hop; otherwise the local IPv6 socket address is
+used when available.
+
 ### Graceful Restart (RFC 4724)
 
 Graceful Restart is enabled by default (receiving speaker mode). When a peer

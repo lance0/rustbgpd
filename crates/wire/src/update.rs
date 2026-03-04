@@ -7,6 +7,16 @@ use crate::header::{BgpHeader, MessageType};
 use crate::nlri::{Ipv4NlriEntry, Ipv4Prefix};
 use crate::{Afi, Safi};
 
+/// How IPv4 unicast NLRI should be encoded in an outbound UPDATE.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ipv4UnicastMode {
+    /// Encode IPv4 announcements/withdrawals in the legacy body NLRI fields.
+    Body,
+    /// Encode IPv4 announcements/withdrawals in `MP_REACH_NLRI` /
+    /// `MP_UNREACH_NLRI` attributes instead of the body fields.
+    MpReach,
+}
+
 /// A decoded BGP UPDATE message (RFC 4271 §4.3).
 ///
 /// Stores the three variable-length sections as raw `Bytes`.
@@ -212,13 +222,16 @@ impl UpdateMessage {
         attributes: &[PathAttribute],
         four_octet_as: bool,
         add_path: bool,
+        ipv4_unicast_mode: Ipv4UnicastMode,
     ) -> Self {
         let mut withdrawn_buf = Vec::new();
-        if add_path {
-            crate::nlri::encode_nlri_addpath(withdrawn, &mut withdrawn_buf);
-        } else {
-            let prefixes: Vec<Ipv4Prefix> = withdrawn.iter().map(|e| e.prefix).collect();
-            crate::nlri::encode_nlri(&prefixes, &mut withdrawn_buf);
+        if matches!(ipv4_unicast_mode, Ipv4UnicastMode::Body) {
+            if add_path {
+                crate::nlri::encode_nlri_addpath(withdrawn, &mut withdrawn_buf);
+            } else {
+                let prefixes: Vec<Ipv4Prefix> = withdrawn.iter().map(|e| e.prefix).collect();
+                crate::nlri::encode_nlri(&prefixes, &mut withdrawn_buf);
+            }
         }
 
         let mut attrs_buf = Vec::new();
@@ -232,11 +245,13 @@ impl UpdateMessage {
         }
 
         let mut nlri_buf = Vec::new();
-        if add_path {
-            crate::nlri::encode_nlri_addpath(announced, &mut nlri_buf);
-        } else {
-            let prefixes: Vec<Ipv4Prefix> = announced.iter().map(|e| e.prefix).collect();
-            crate::nlri::encode_nlri(&prefixes, &mut nlri_buf);
+        if matches!(ipv4_unicast_mode, Ipv4UnicastMode::Body) {
+            if add_path {
+                crate::nlri::encode_nlri_addpath(announced, &mut nlri_buf);
+            } else {
+                let prefixes: Vec<Ipv4Prefix> = announced.iter().map(|e| e.prefix).collect();
+                crate::nlri::encode_nlri(&prefixes, &mut nlri_buf);
+            }
         }
 
         Self {
@@ -264,6 +279,7 @@ mod tests {
 
     use super::*;
     use crate::constants::MAX_MESSAGE_LEN;
+    use crate::{NlriEntry, Prefix};
 
     #[test]
     fn decode_minimal_update() {
@@ -367,11 +383,66 @@ mod tests {
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
 
-        let msg = UpdateMessage::build(&announced, &[], &attrs, true, false);
+        let msg = UpdateMessage::build(&announced, &[], &attrs, true, false, Ipv4UnicastMode::Body);
         let parsed = msg.parse(true, false, &[]).unwrap();
         assert_eq!(parsed.announced, announced);
         assert!(parsed.withdrawn.is_empty());
         assert_eq!(parsed.attributes, attrs);
+    }
+
+    #[test]
+    fn build_ipv4_mp_mode_omits_body_nlri() {
+        use std::net::{IpAddr, Ipv6Addr};
+
+        use crate::attribute::{AsPath, AsPathSegment, MpReachNlri, Origin};
+
+        let announced = vec![entry(Ipv4Prefix::new(
+            std::net::Ipv4Addr::new(10, 0, 0, 0),
+            24,
+        ))];
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                next_hop: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                announced: vec![NlriEntry {
+                    path_id: 0,
+                    prefix: Prefix::V4(announced[0].prefix),
+                }],
+                flowspec_announced: vec![],
+            }),
+        ];
+
+        let msg = UpdateMessage::build(
+            &announced,
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::MpReach,
+        );
+        assert!(msg.withdrawn_routes.is_empty());
+        assert!(msg.nlri.is_empty());
+
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        assert!(parsed.announced.is_empty());
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|attr| match attr {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(mp.afi, Afi::Ipv4);
+        assert_eq!(mp.safi, Safi::Unicast);
+        assert_eq!(mp.announced.len(), 1);
+        assert_eq!(mp.announced[0].prefix, Prefix::V4(announced[0].prefix));
+        assert_eq!(mp.next_hop, IpAddr::V6(Ipv6Addr::LOCALHOST));
     }
 
     #[test]
@@ -380,7 +451,7 @@ mod tests {
             std::net::Ipv4Addr::new(10, 0, 0, 0),
             24,
         ))];
-        let msg = UpdateMessage::build(&[], &withdrawn, &[], true, false);
+        let msg = UpdateMessage::build(&[], &withdrawn, &[], true, false, Ipv4UnicastMode::Body);
         let parsed = msg.parse(true, false, &[]).unwrap();
         assert!(parsed.announced.is_empty());
         assert_eq!(parsed.withdrawn, withdrawn);
@@ -399,7 +470,7 @@ mod tests {
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
-        let msg = UpdateMessage::build(&announced, &[], &attrs, true, false);
+        let msg = UpdateMessage::build(&announced, &[], &attrs, true, false, Ipv4UnicastMode::Body);
 
         // Verify it encodes and decodes properly
         let mut encoded = BytesMut::with_capacity(msg.encoded_len());
@@ -431,7 +502,14 @@ mod tests {
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
 
-        let msg = UpdateMessage::build(&announced, &withdrawn, &attrs, true, false);
+        let msg = UpdateMessage::build(
+            &announced,
+            &withdrawn,
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        );
         let parsed = msg.parse(true, false, &[]).unwrap();
         assert_eq!(parsed.announced, announced);
         assert_eq!(parsed.withdrawn, withdrawn);
@@ -464,7 +542,14 @@ mod tests {
             PathAttribute::NextHop(std::net::Ipv4Addr::new(10, 0, 0, 1)),
         ];
 
-        let msg = UpdateMessage::build(&announced, &withdrawn, &attrs, true, true);
+        let msg = UpdateMessage::build(
+            &announced,
+            &withdrawn,
+            &attrs,
+            true,
+            true,
+            Ipv4UnicastMode::Body,
+        );
         let parsed = msg.parse(true, true, &[]).unwrap();
         assert_eq!(parsed.announced, announced);
         assert_eq!(parsed.withdrawn, withdrawn);

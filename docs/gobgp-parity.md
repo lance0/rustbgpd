@@ -39,7 +39,7 @@ Last updated: 2026-03-04
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
 | Extended Messages (RFC 8654) | No | Yes | rustbgpd supports it; GoBGP does not |
-| Extended Nexthop (RFC 8950) | Yes | No | IPv6 NH for IPv4 NLRI |
+| Extended Nexthop (RFC 8950) | Yes | Yes | IPv4 unicast over IPv6 next hop |
 | Admin Shutdown Comm (RFC 8203) | Yes | Yes | Reason text in NOTIFICATION |
 
 ## Path Attributes
@@ -206,9 +206,9 @@ Competing head-to-head with GoBGP for all use cases:
 
 1. **GR restarting speaker** — core protocol 64% → 71%, unlocks router deployments
 2. ~~**Policy chaining + named policies**~~ — done
-3. **Extended nexthop (RFC 8950)** — IPv6 NH for IPv4 NLRI, increasingly common in modern networks
+3. ~~**Extended nexthop (RFC 8950)**~~ — done
 4. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
-5. ~~**Admin shutdown communication (RFC 8203)**~~ — done
+5. **Enhanced Route Refresh (RFC 7313)** — BoRR/EoRR markers for more explicit soft reset boundaries
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 

@@ -39,9 +39,21 @@ fn arb_gr_family() -> impl Strategy<Value = GracefulRestartFamily> {
     })
 }
 
+fn arb_extended_nexthop_family() -> impl Strategy<Value = rustbgpd_wire::ExtendedNextHopFamily> {
+    (arb_afi(), arb_safi(), arb_afi()).prop_map(|(nlri_afi, nlri_safi, next_hop_afi)| {
+        rustbgpd_wire::ExtendedNextHopFamily {
+            nlri_afi,
+            nlri_safi,
+            next_hop_afi,
+        }
+    })
+}
+
 fn arb_capability() -> impl Strategy<Value = Capability> {
     prop_oneof![
         (arb_afi(), arb_safi()).prop_map(|(afi, safi)| Capability::MultiProtocol { afi, safi }),
+        proptest::collection::vec(arb_extended_nexthop_family(), 0..=4)
+            .prop_map(Capability::ExtendedNextHop),
         (
             any::<bool>(),
             (0..=4095u16),
@@ -56,10 +68,11 @@ fn arb_capability() -> impl Strategy<Value = Capability> {
             }),
         any::<u32>().prop_map(|asn| Capability::FourOctetAs { asn }),
         // Unknown capabilities: code must not collide with known codes
-        // (1 = MultiProtocol, 2 = RouteRefresh, 6 = ExtendedMessage,
-        // 64 = GracefulRestart, 65 = FourOctetAs, 69 = AddPath).
+        // (1 = MultiProtocol, 2 = RouteRefresh, 5 = ExtendedNextHop,
+        // 6 = ExtendedMessage, 64 = GracefulRestart, 65 = FourOctetAs,
+        // 69 = AddPath).
         (
-            prop_oneof![3..6u8, 7..64u8, 66..69u8, 70..=255u8],
+            prop_oneof![3..5u8, 7..64u8, 66..69u8, 70..=255u8],
             proptest::collection::vec(any::<u8>(), 0..32)
         )
             .prop_map(|(code, data)| Capability::Unknown {

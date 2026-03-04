@@ -139,6 +139,9 @@ pub struct MpReachNlri {
     /// link-local portion. `IpAddr` can only hold a single address, and
     /// link-local next-hops are not needed for routing decisions.
     ///
+    /// RFC 8950 allows IPv4 unicast NLRI to use an IPv6 next hop in
+    /// `MP_REACH_NLRI`, so this field may be IPv6 even when `afi == Ipv4`.
+    ///
     /// For `FlowSpec` (SAFI 133), next-hop length is 0 and this field is
     /// unused (defaults to `0.0.0.0`).
     pub next_hop: IpAddr,
@@ -714,20 +717,27 @@ fn decode_mp_reach_nlri(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     } else {
         match afi {
-            Afi::Ipv4 => {
-                if nh_len != 4 {
-                    return Err(DecodeError::MalformedField {
-                        message_type: "UPDATE",
-                        detail: format!("MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4)"),
-                    });
-                }
-                IpAddr::V4(Ipv4Addr::new(
+            Afi::Ipv4 => match nh_len {
+                4 => IpAddr::V4(Ipv4Addr::new(
                     nh_bytes[0],
                     nh_bytes[1],
                     nh_bytes[2],
                     nh_bytes[3],
-                ))
-            }
+                )),
+                16 | 32 => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&nh_bytes[..16]);
+                    IpAddr::V6(Ipv6Addr::from(octets))
+                }
+                _ => {
+                    return Err(DecodeError::MalformedField {
+                        message_type: "UPDATE",
+                        detail: format!(
+                            "MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4, 16, or 32)"
+                        ),
+                    });
+                }
+            },
             Afi::Ipv6 => {
                 if nh_len != 16 && nh_len != 32 {
                     return Err(DecodeError::MalformedField {
@@ -1880,6 +1890,29 @@ mod tests {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            announced: vec![nlri(Prefix::V4(crate::nlri::Ipv4Prefix::new(
+                Ipv4Addr::new(10, 1, 0, 0),
+                16,
+            )))],
+            flowspec_announced: vec![],
+        };
+        let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true, false);
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
+        assert_eq!(decoded[0], PathAttribute::MpReachNlri(mp));
+    }
+
+    #[test]
+    fn mp_reach_nlri_ipv4_with_ipv6_nexthop_roundtrip() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::Prefix;
+
+        let mp = MpReachNlri {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
             announced: vec![nlri(Prefix::V4(crate::nlri::Ipv4Prefix::new(
                 Ipv4Addr::new(10, 1, 0, 0),
                 16,

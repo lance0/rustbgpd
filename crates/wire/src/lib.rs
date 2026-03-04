@@ -44,7 +44,9 @@ pub mod update;
 pub mod validate;
 
 // Re-export primary public API
-pub use capability::{AddPathFamily, AddPathMode, Afi, Capability, GracefulRestartFamily, Safi};
+pub use capability::{
+    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily, Safi,
+};
 pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
 pub use error::{DecodeError, EncodeError};
 pub use header::{BgpHeader, MessageType, peek_message_length};
@@ -53,7 +55,7 @@ pub use notification::NotificationCode;
 pub use notification_msg::NotificationMessage;
 pub use open::OpenMessage;
 pub use route_refresh::RouteRefreshMessage;
-pub use update::UpdateMessage;
+pub use update::{Ipv4UnicastMode, UpdateMessage};
 
 /// RPKI origin validation state per RFC 6811.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

@@ -82,11 +82,24 @@ pub struct AddPathFamily {
     pub send_receive: AddPathMode,
 }
 
+/// Per-family entry in the Extended Next Hop Encoding capability (RFC 8950).
+///
+/// Each tuple advertises that NLRI for `(nlri_afi, nlri_safi)` may use the
+/// specified `next_hop_afi` in `MP_REACH_NLRI`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExtendedNextHopFamily {
+    pub nlri_afi: Afi,
+    pub nlri_safi: Safi,
+    pub next_hop_afi: Afi,
+}
+
 /// BGP capability as negotiated in OPEN optional parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
     /// RFC 4760: Multi-Protocol Extensions.
     MultiProtocol { afi: Afi, safi: Safi },
+    /// RFC 8950: Extended Next Hop Encoding.
+    ExtendedNextHop(Vec<ExtendedNextHopFamily>),
     /// RFC 4724: Graceful Restart.
     GracefulRestart {
         /// R-bit: the sender has restarted and its forwarding state
@@ -170,6 +183,46 @@ impl Capability {
                     return Ok(Capability::Unknown { code, data });
                 }
                 Ok(Capability::RouteRefresh)
+            }
+            capability_code::EXTENDED_NEXT_HOP => {
+                // RFC 8950: repeated tuples of
+                // NLRI AFI (2) | NLRI SAFI (2) | Next Hop AFI (2)
+                if !usize::from(length).is_multiple_of(6) {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                let entry_count = usize::from(length) / 6;
+                let raw_data = buf.copy_to_bytes(usize::from(length));
+                let mut cursor = raw_data.clone();
+                let mut families = Vec::with_capacity(entry_count);
+                let mut all_valid = true;
+                for _ in 0..entry_count {
+                    let nlri_afi_raw = cursor.get_u16();
+                    let nlri_safi_field = cursor.get_u16();
+                    let next_hop_afi_raw = cursor.get_u16();
+                    let nlri_safi = u8::try_from(nlri_safi_field).ok().and_then(Safi::from_u8);
+                    if let (Some(nlri_afi), Some(nlri_safi), Some(next_hop_afi)) = (
+                        Afi::from_u16(nlri_afi_raw),
+                        nlri_safi,
+                        Afi::from_u16(next_hop_afi_raw),
+                    ) {
+                        families.push(ExtendedNextHopFamily {
+                            nlri_afi,
+                            nlri_safi,
+                            next_hop_afi,
+                        });
+                    } else {
+                        all_valid = false;
+                    }
+                }
+                if all_valid {
+                    Ok(Capability::ExtendedNextHop(families))
+                } else {
+                    Ok(Capability::Unknown {
+                        code,
+                        data: raw_data,
+                    })
+                }
             }
             capability_code::EXTENDED_MESSAGE => {
                 if length != 0 {
@@ -273,6 +326,10 @@ impl Capability {
     ///
     /// Returns [`EncodeError::ValueOutOfRange`] if the capability value
     /// exceeds the 255-byte limit of the single-octet length field.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Capability encode keeps all TLV variants in one exhaustive wire encoder"
+    )]
     pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
         match self {
             Capability::MultiProtocol { afi, safi } => {
@@ -285,6 +342,23 @@ impl Capability {
             Capability::RouteRefresh => {
                 buf.put_u8(capability_code::ROUTE_REFRESH);
                 buf.put_u8(0); // zero-length value
+            }
+            Capability::ExtendedNextHop(families) => {
+                let value_len = families.len() * 6;
+                if value_len > 255 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "extended_next_hop_capability_length",
+                        value: value_len.to_string(),
+                    });
+                }
+                buf.put_u8(capability_code::EXTENDED_NEXT_HOP);
+                #[expect(clippy::cast_possible_truncation)]
+                buf.put_u8(value_len as u8);
+                for fam in families {
+                    buf.put_u16(fam.nlri_afi as u16);
+                    buf.put_u16(u16::from(fam.nlri_safi as u8));
+                    buf.put_u16(fam.next_hop_afi as u16);
+                }
             }
             Capability::ExtendedMessage => {
                 buf.put_u8(capability_code::EXTENDED_MESSAGE);
@@ -366,6 +440,7 @@ impl Capability {
         match self {
             Self::MultiProtocol { .. } => capability_code::MULTI_PROTOCOL,
             Self::RouteRefresh => capability_code::ROUTE_REFRESH,
+            Self::ExtendedNextHop(_) => capability_code::EXTENDED_NEXT_HOP,
             Self::ExtendedMessage => capability_code::EXTENDED_MESSAGE,
             Self::AddPath(_) => capability_code::ADD_PATH,
             Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
@@ -380,6 +455,7 @@ impl Capability {
         2 + match self {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
             Self::RouteRefresh | Self::ExtendedMessage => 0,
+            Self::ExtendedNextHop(families) => families.len() * 6,
             Self::AddPath(families) => families.len() * 4,
             Self::GracefulRestart { families, .. } => 2 + families.len() * 4,
             Self::Unknown { data, .. } => data.len(),
@@ -880,6 +956,48 @@ mod tests {
         let mut buf = Bytes::copy_from_slice(data);
         let cap = Capability::decode(&mut buf).unwrap();
         assert!(matches!(cap, Capability::Unknown { code: 6, .. }));
+    }
+
+    // --- Extended Next Hop capability tests ---
+
+    #[test]
+    fn decode_extended_nexthop_single_family() {
+        // code=5, len=6,
+        // NLRI AFI=1 (IPv4), NLRI SAFI=1 (Unicast), NH AFI=2 (IPv6)
+        let data: &[u8] = &[5, 6, 0, 1, 0, 1, 0, 2];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            cap,
+            Capability::ExtendedNextHop(vec![ExtendedNextHopFamily {
+                nlri_afi: Afi::Ipv4,
+                nlri_safi: Safi::Unicast,
+                next_hop_afi: Afi::Ipv6,
+            }])
+        );
+    }
+
+    #[test]
+    fn roundtrip_extended_nexthop() {
+        let original = Capability::ExtendedNextHop(vec![ExtendedNextHopFamily {
+            nlri_afi: Afi::Ipv4,
+            nlri_safi: Safi::Unicast,
+            next_hop_afi: Afi::Ipv6,
+        }]);
+        let mut encoded = bytes::BytesMut::with_capacity(8);
+        original.encode(&mut encoded).unwrap();
+        let mut buf = encoded.freeze();
+        let decoded = Capability::decode(&mut buf).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn extended_nexthop_bad_length_stored_as_unknown() {
+        // code=5, len=4 (must be multiple of 6)
+        let data: &[u8] = &[5, 4, 0, 1, 0, 1];
+        let mut buf = Bytes::copy_from_slice(data);
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert!(matches!(cap, Capability::Unknown { code: 5, .. }));
     }
 
     // --- Add-Path capability tests ---

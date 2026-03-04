@@ -4,7 +4,8 @@ use bytes::Bytes;
 
 use rustbgpd_wire::notification::{NotificationCode, open_subcode};
 use rustbgpd_wire::{
-    AddPathFamily, AddPathMode, Afi, Capability, NotificationMessage, OpenMessage, Safi,
+    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, NotificationMessage,
+    OpenMessage, Safi,
 };
 
 use crate::action::NegotiatedSession;
@@ -104,6 +105,20 @@ pub fn validate_open(
         .iter()
         .any(|c| matches!(c, Capability::ExtendedMessage));
 
+    let our_extended_nexthop_caps = config.extended_nexthop_capabilities();
+    let peer_extended_nexthop_caps: Vec<ExtendedNextHopFamily> = open
+        .capabilities
+        .iter()
+        .filter_map(|c| match c {
+            Capability::ExtendedNextHop(families) => Some(families.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .copied()
+        .collect();
+    let extended_nexthop_families =
+        negotiate_extended_nexthop(&our_extended_nexthop_caps, &peer_extended_nexthop_caps);
+
     // Negotiate Add-Path (RFC 7911)
     let our_add_path_caps = config.add_path_capabilities();
     let peer_add_path_caps: Vec<AddPathFamily> = open
@@ -132,6 +147,7 @@ pub fn validate_open(
         peer_gr_families,
         peer_route_refresh,
         peer_extended_message,
+        extended_nexthop_families,
         add_path_families,
     })
 }
@@ -241,6 +257,27 @@ pub fn negotiate_add_path(
             if let Some(m) = mode {
                 result.insert(family, m);
             }
+        }
+    }
+
+    result
+}
+
+/// Negotiate Extended Next Hop Encoding tuples (RFC 8950).
+///
+/// The result maps NLRI family to the negotiated next-hop AFI. Only exact
+/// tuple matches between our local capability and the peer's capability are
+/// retained.
+#[must_use]
+pub fn negotiate_extended_nexthop(
+    our_caps: &[ExtendedNextHopFamily],
+    peer_caps: &[ExtendedNextHopFamily],
+) -> HashMap<(Afi, Safi), Afi> {
+    let mut result = HashMap::new();
+
+    for ours in our_caps {
+        if peer_caps.iter().any(|peer| peer == ours) {
+            result.insert((ours.nlri_afi, ours.nlri_safi), ours.next_hop_afi);
         }
     }
 
@@ -674,5 +711,45 @@ mod tests {
             neg.add_path_families.get(&(Afi::Ipv4, Safi::Unicast)),
             Some(&AddPathMode::Receive)
         );
+    }
+
+    #[test]
+    fn validate_open_negotiates_extended_nexthop() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        let mut open = peer_open();
+        open.capabilities.push(Capability::MultiProtocol {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+        });
+        open.capabilities
+            .push(Capability::ExtendedNextHop(vec![ExtendedNextHopFamily {
+                nlri_afi: Afi::Ipv4,
+                nlri_safi: Safi::Unicast,
+                next_hop_afi: Afi::Ipv6,
+            }]));
+
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(
+            neg.extended_nexthop_families
+                .get(&(Afi::Ipv4, Safi::Unicast)),
+            Some(&Afi::Ipv6)
+        );
+    }
+
+    #[test]
+    fn negotiate_extended_nexthop_requires_exact_tuple_match() {
+        let ours = vec![ExtendedNextHopFamily {
+            nlri_afi: Afi::Ipv4,
+            nlri_safi: Safi::Unicast,
+            next_hop_afi: Afi::Ipv6,
+        }];
+        let peers = vec![ExtendedNextHopFamily {
+            nlri_afi: Afi::Ipv4,
+            nlri_safi: Safi::Unicast,
+            next_hop_afi: Afi::Ipv4,
+        }];
+        let result = negotiate_extended_nexthop(&ours, &peers);
+        assert!(result.is_empty());
     }
 }

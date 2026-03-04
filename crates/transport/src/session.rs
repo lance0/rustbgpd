@@ -10,9 +10,9 @@ use rustbgpd_rib::{FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    AddPathMode, Afi, AsPath, AsPathSegment, FlowSpecRule, Ipv4NlriEntry, Message, MpReachNlri,
-    MpUnreachNlri, NlriEntry, NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage,
-    Safi, UpdateMessage,
+    AddPathMode, Afi, AsPath, AsPathSegment, FlowSpecRule, Ipv4NlriEntry, Ipv4UnicastMode, Message,
+    MpReachNlri, MpUnreachNlri, NlriEntry, NotificationMessage, PathAttribute, Prefix,
+    RouteRefreshMessage, Safi, UpdateMessage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -836,6 +836,14 @@ impl PeerSession {
         self.negotiated_families.contains(&family)
     }
 
+    fn use_extended_nexthop_ipv4(&self) -> bool {
+        self.negotiated.as_ref().is_some_and(|n| {
+            n.extended_nexthop_families
+                .get(&(Afi::Ipv4, Safi::Unicast))
+                .is_some_and(|afi| *afi == Afi::Ipv6)
+        })
+    }
+
     /// Parse an UPDATE message, validate attributes, apply import policy,
     /// enforce max-prefix limit, send routes to RIB, and feed the
     /// appropriate event to the FSM.
@@ -1211,6 +1219,14 @@ impl PeerSession {
                         continue;
                     }
 
+                    if family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4() {
+                        warn!(
+                            peer = %self.peer_label,
+                            "Ignoring IPv4 MP_REACH_NLRI without negotiated Extended Next Hop"
+                        );
+                        continue;
+                    }
+
                     if mp.safi == Safi::FlowSpec {
                         // FlowSpec announced routes — no next-hop (NH len = 0)
                         for rule in &mp.flowspec_announced {
@@ -1298,6 +1314,13 @@ impl PeerSession {
                 PathAttribute::MpUnreachNlri(mp) => {
                     let family = (mp.afi, mp.safi);
                     if !self.negotiated_families.contains(&family) {
+                        continue;
+                    }
+                    if family == (Afi::Ipv4, Safi::Unicast) && !self.use_extended_nexthop_ipv4() {
+                        warn!(
+                            peer = %self.peer_label,
+                            "Ignoring IPv4 MP_UNREACH_NLRI without negotiated Extended Next Hop"
+                        );
                         continue;
                     }
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
@@ -1488,6 +1511,7 @@ impl PeerSession {
                     )
                 })
         });
+        let use_extended_nexthop_ipv4 = self.use_extended_nexthop_ipv4();
 
         // Extract TCP local addresses for NEXT_HOP rewrite
         let local_addr = self
@@ -1525,10 +1549,40 @@ impl PeerSession {
             }
         }
 
-        // Send IPv4 withdrawals via body NLRI
+        // Send IPv4 withdrawals via body NLRI or IPv4 MP_UNREACH_NLRI,
+        // depending on Extended Next Hop negotiation.
         if !v4_withdraw.is_empty() {
-            let msg =
-                UpdateMessage::build(&[], &v4_withdraw, &[], four_octet_as, add_path_ipv4_send);
+            let msg = if use_extended_nexthop_ipv4 {
+                let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    withdrawn: v4_withdraw
+                        .iter()
+                        .map(|entry| NlriEntry {
+                            path_id: entry.path_id,
+                            prefix: Prefix::V4(entry.prefix),
+                        })
+                        .collect(),
+                    flowspec_withdrawn: vec![],
+                })];
+                UpdateMessage::build(
+                    &[],
+                    &[],
+                    &attrs,
+                    four_octet_as,
+                    add_path_ipv4_send,
+                    Ipv4UnicastMode::MpReach,
+                )
+            } else {
+                UpdateMessage::build(
+                    &[],
+                    &v4_withdraw,
+                    &[],
+                    four_octet_as,
+                    add_path_ipv4_send,
+                    Ipv4UnicastMode::Body,
+                )
+            };
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
@@ -1546,7 +1600,14 @@ impl PeerSession {
                 withdrawn: v6_withdraw,
                 flowspec_withdrawn: vec![],
             })];
-            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, add_path_ipv6_send);
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                add_path_ipv6_send,
+                Ipv4UnicastMode::Body,
+            );
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 withdrawal UPDATE");
@@ -1570,32 +1631,116 @@ impl PeerSession {
             }
         }
 
-        // Send IPv4 announcements via body NLRI — batch by identical attributes
-        let mut v4_groups: Vec<(Vec<PathAttribute>, Vec<Ipv4NlriEntry>)> = Vec::new();
-        for (route, nh_override) in &v4_routes {
-            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
-            if let Prefix::V4(v4) = route.prefix {
-                let entry = Ipv4NlriEntry {
-                    path_id: route.path_id,
-                    prefix: v4,
+        // Send IPv4 announcements via body NLRI or IPv4 MP_REACH_NLRI,
+        // depending on Extended Next Hop negotiation.
+        if use_extended_nexthop_ipv4 {
+            let ebgp_ipv6_nh = self
+                .config
+                .local_ipv6_nexthop
+                .or(local_ipv6)
+                .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
+            let mut v4_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<NlriEntry>)> = Vec::new();
+            for (route, nh_override) in &v4_routes {
+                let attrs_with_next_hop =
+                    self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
+                let attrs: Vec<PathAttribute> = attrs_with_next_hop
+                    .into_iter()
+                    .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
+                    .collect();
+                let force_nh_self =
+                    matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
+                let next_hop = match nh_override {
+                    Some(rustbgpd_policy::NextHopAction::Specific(addr)) => *addr,
+                    _ if is_ebgp => {
+                        let Some(v6) = ebgp_ipv6_nh else {
+                            warn!(
+                                peer = %self.peer_label,
+                                prefix = %route.prefix,
+                                "cannot send IPv4 route with Extended Next Hop: no usable local IPv6 next-hop"
+                            );
+                            continue;
+                        };
+                        IpAddr::V6(v6)
+                    }
+                    _ if force_nh_self => local_addr.unwrap_or(IpAddr::V4(local_ipv4)),
+                    _ => route.next_hop,
                 };
-                if let Some(group) = v4_groups.iter_mut().find(|(a, _)| *a == attrs) {
-                    group.1.push(entry);
+                let entry = NlriEntry {
+                    path_id: route.path_id,
+                    prefix: route.prefix,
+                };
+                if let Some(group) =
+                    v4_groups
+                        .iter_mut()
+                        .find(|(existing_attrs, existing_nh, _)| {
+                            *existing_attrs == attrs && *existing_nh == next_hop
+                        })
+                {
+                    group.2.push(entry);
                 } else {
-                    v4_groups.push((attrs, vec![entry]));
+                    v4_groups.push((attrs, next_hop, vec![entry]));
                 }
             }
-        }
 
-        for (attrs, prefixes) in &v4_groups {
-            let msg = UpdateMessage::build(prefixes, &[], attrs, four_octet_as, add_path_ipv4_send);
-            let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
-                warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
-                return;
+            for (mut attrs, next_hop, prefixes) in v4_groups {
+                attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    next_hop,
+                    announced: prefixes,
+                    flowspec_announced: vec![],
+                }));
+                let msg = UpdateMessage::build(
+                    &[],
+                    &[],
+                    &attrs,
+                    four_octet_as,
+                    add_path_ipv4_send,
+                    Ipv4UnicastMode::MpReach,
+                );
+                let wire_msg = Message::Update(msg);
+                if let Err(e) = self.send_message(&wire_msg).await {
+                    warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
+                    return;
+                }
+                self.updates_sent += 1;
+                self.metrics.record_message_sent(&self.peer_label, "update");
             }
-            self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
+        } else {
+            let mut v4_groups: Vec<(Vec<PathAttribute>, Vec<Ipv4NlriEntry>)> = Vec::new();
+            for (route, nh_override) in &v4_routes {
+                let attrs =
+                    self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
+                if let Prefix::V4(v4) = route.prefix {
+                    let entry = Ipv4NlriEntry {
+                        path_id: route.path_id,
+                        prefix: v4,
+                    };
+                    if let Some(group) = v4_groups.iter_mut().find(|(a, _)| *a == attrs) {
+                        group.1.push(entry);
+                    } else {
+                        v4_groups.push((attrs, vec![entry]));
+                    }
+                }
+            }
+
+            for (attrs, prefixes) in &v4_groups {
+                let msg = UpdateMessage::build(
+                    prefixes,
+                    &[],
+                    attrs,
+                    four_octet_as,
+                    add_path_ipv4_send,
+                    Ipv4UnicastMode::Body,
+                );
+                let wire_msg = Message::Update(msg);
+                if let Err(e) = self.send_message(&wire_msg).await {
+                    warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
+                    return;
+                }
+                self.updates_sent += 1;
+                self.metrics.record_message_sent(&self.peer_label, "update");
+            }
         }
 
         // Resolve IPv6 eBGP next-hop: config override > socket address > suppress.
@@ -1672,7 +1817,14 @@ impl PeerSession {
                 announced: prefixes,
                 flowspec_announced: vec![],
             }));
-            let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, add_path_ipv6_send);
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                add_path_ipv6_send,
+                Ipv4UnicastMode::Body,
+            );
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 announce UPDATE");
@@ -1711,7 +1863,14 @@ impl PeerSession {
                     withdrawn: vec![],
                     flowspec_withdrawn: rules,
                 })];
-                let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
+                let msg = UpdateMessage::build(
+                    &[],
+                    &[],
+                    &attrs,
+                    four_octet_as,
+                    false,
+                    Ipv4UnicastMode::Body,
+                );
                 let wire_msg = Message::Update(msg);
                 if let Err(e) = self.send_message(&wire_msg).await {
                     warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec withdrawal UPDATE");
@@ -1744,7 +1903,14 @@ impl PeerSession {
                     announced: vec![],
                     flowspec_announced: rules,
                 }));
-                let msg = UpdateMessage::build(&[], &[], &attrs, four_octet_as, false);
+                let msg = UpdateMessage::build(
+                    &[],
+                    &[],
+                    &attrs,
+                    four_octet_as,
+                    false,
+                    Ipv4UnicastMode::Body,
+                );
                 let wire_msg = Message::Update(msg);
                 if let Err(e) = self.send_message(&wire_msg).await {
                     warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec announce UPDATE");
@@ -1759,7 +1925,7 @@ impl PeerSession {
         for (afi, safi) in &update.end_of_rib {
             let msg = if let (Afi::Ipv4, Safi::Unicast) = (afi, safi) {
                 // IPv4 Unicast EoR: empty UPDATE (no NLRI, no withdrawn, no attrs)
-                UpdateMessage::build(&[], &[], &[], four_octet_as, false)
+                UpdateMessage::build(&[], &[], &[], four_octet_as, false, Ipv4UnicastMode::Body)
             } else {
                 // MP EoR: UPDATE with empty MP_UNREACH_NLRI (IPv6 unicast, FlowSpec, etc.)
                 let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
@@ -1768,7 +1934,14 @@ impl PeerSession {
                     withdrawn: vec![],
                     flowspec_withdrawn: vec![],
                 })];
-                UpdateMessage::build(&[], &[], &attrs, four_octet_as, false)
+                UpdateMessage::build(
+                    &[],
+                    &[],
+                    &attrs,
+                    four_octet_as,
+                    false,
+                    Ipv4UnicastMode::Body,
+                )
             };
             let wire_msg = Message::Update(msg);
             if let Err(e) = self.send_message(&wire_msg).await {
@@ -2016,6 +2189,7 @@ async fn read_tcp(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::net::Ipv4Addr;
     use std::time::Instant;
 
@@ -2044,6 +2218,58 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(64);
 
         PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None)
+    }
+
+    fn make_test_session_with_rib(
+        local_asn: u32,
+        remote_asn: u32,
+    ) -> (PeerSession, mpsc::Receiver<RibUpdate>) {
+        let peer_config = PeerConfig {
+            local_asn,
+            remote_asn,
+            local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+            hold_time: 90,
+            connect_retry_secs: 30,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+            graceful_restart: false,
+            gr_restart_time: 120,
+            add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
+        };
+        let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+        let metrics = BgpMetrics::new();
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+
+        (
+            PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None),
+            rib_rx,
+        )
+    }
+
+    fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSession {
+        let mut extended_nexthop_families = HashMap::new();
+        if extended_nexthop {
+            extended_nexthop_families.insert((Afi::Ipv4, Safi::Unicast), Afi::Ipv6);
+        }
+        NegotiatedSession {
+            peer_asn: remote_asn,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            hold_time: 90,
+            keepalive_interval: 30,
+            peer_capabilities: vec![],
+            four_octet_as: true,
+            negotiated_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_gr_capable: false,
+            peer_restart_state: false,
+            peer_restart_time: 0,
+            peer_gr_families: vec![],
+            peer_route_refresh: false,
+            peer_extended_message: false,
+            extended_nexthop_families,
+            add_path_families: HashMap::new(),
+        }
     }
 
     fn make_route(local_pref: u32) -> Route {
@@ -2258,5 +2484,130 @@ mod tests {
         assert!(attrs.iter().any(
             |a| matches!(a, PathAttribute::ClusterList(ids) if ids.as_slice() == [cluster_id])
         ));
+    }
+
+    #[tokio::test]
+    async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let negotiated = negotiated_session(65002, false);
+        session
+            .negotiated_families
+            .clone_from(&negotiated.negotiated_families);
+        session.negotiated = Some(negotiated);
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+                announced: vec![NlriEntry {
+                    path_id: 0,
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                }],
+                flowspec_announced: vec![],
+            }),
+        ];
+        let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+        session.process_update(update).await;
+
+        assert!(rib_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let negotiated = negotiated_session(65002, true);
+        session
+            .negotiated_families
+            .clone_from(&negotiated.negotiated_families);
+        session.negotiated = Some(negotiated);
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+                announced: vec![NlriEntry {
+                    path_id: 0,
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                }],
+                flowspec_announced: vec![],
+            }),
+        ];
+        let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+        session.process_update(update).await;
+
+        let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected RoutesReceived");
+        };
+        assert_eq!(announced.len(), 1);
+        assert_eq!(
+            announced[0].prefix,
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24))
+        );
+        assert_eq!(
+            announced[0].next_hop,
+            IpAddr::V6("2001:db8::1".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut negotiated = negotiated_session(65002, true);
+        // Enable Add-Path receive for IPv4 unicast
+        negotiated
+            .add_path_families
+            .insert((Afi::Ipv4, Safi::Unicast), AddPathMode::Both);
+        session
+            .negotiated_families
+            .clone_from(&negotiated.negotiated_families);
+        session.negotiated = Some(negotiated);
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+                announced: vec![NlriEntry {
+                    path_id: 42,
+                    prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                }],
+                flowspec_announced: vec![],
+            }),
+        ];
+        // Build with Add-Path enabled and MP encoding
+        let update =
+            UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::MpReach);
+
+        session.process_update(update).await;
+
+        let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+            panic!("expected RoutesReceived");
+        };
+        assert_eq!(announced.len(), 1);
+        assert_eq!(
+            announced[0].prefix,
+            Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24))
+        );
+        assert_eq!(
+            announced[0].next_hop,
+            IpAddr::V6("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(announced[0].path_id, 42);
     }
 }

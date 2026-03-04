@@ -44,6 +44,12 @@ pub struct NegotiatedSession {
     pub peer_route_refresh: bool,
     /// Whether both sides support Extended Messages (RFC 8654).
     pub peer_extended_message: bool,
+    /// Per-AFI/SAFI negotiated Extended Next Hop encoding (RFC 8950).
+    ///
+    /// The key is the NLRI family, and the value is the negotiated next-hop
+    /// AFI for that family. For this implementation the meaningful negotiated
+    /// mapping is IPv4 unicast -> IPv6.
+    pub extended_nexthop_families: HashMap<(Afi, Safi), Afi>,
     /// Per-AFI/SAFI Add-Path negotiated mode (RFC 7911).
     ///
     /// Only families where both sides agree are included. The mode

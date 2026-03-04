@@ -1,7 +1,9 @@
 use std::net::Ipv4Addr;
 
 use rustbgpd_wire::constants::AS_TRANS;
-use rustbgpd_wire::{AddPathFamily, AddPathMode, Afi, Capability, GracefulRestartFamily, Safi};
+use rustbgpd_wire::{
+    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily, Safi,
+};
 
 /// Configuration for a single BGP peer session.
 #[derive(Debug, Clone)]
@@ -59,6 +61,10 @@ impl PeerConfig {
         }
         caps.push(Capability::RouteRefresh);
         caps.push(Capability::ExtendedMessage);
+        let extended_nexthop_caps = self.extended_nexthop_capabilities();
+        if !extended_nexthop_caps.is_empty() {
+            caps.push(Capability::ExtendedNextHop(extended_nexthop_caps));
+        }
         caps.push(Capability::FourOctetAs {
             asn: self.local_asn,
         });
@@ -93,6 +99,27 @@ impl PeerConfig {
                 send_receive: mode,
             })
             .collect()
+    }
+
+    /// Build Extended Next Hop capability entries for our outgoing OPEN
+    /// message (RFC 8950).
+    ///
+    /// The capability is advertised automatically when both IPv4 and IPv6
+    /// unicast are configured. We advertise support for IPv4 unicast NLRI
+    /// using an IPv6 next hop.
+    #[must_use]
+    pub fn extended_nexthop_capabilities(&self) -> Vec<ExtendedNextHopFamily> {
+        let has_ipv4 = self.families.contains(&(Afi::Ipv4, Safi::Unicast));
+        let has_ipv6 = self.families.contains(&(Afi::Ipv6, Safi::Unicast));
+        if has_ipv4 && has_ipv6 {
+            vec![ExtendedNextHopFamily {
+                nlri_afi: Afi::Ipv4,
+                nlri_safi: Safi::Unicast,
+                next_hop_afi: Afi::Ipv6,
+            }]
+        } else {
+            Vec::new()
+        }
     }
 
     /// The 2-byte `my_as` field for the OPEN wire format.
@@ -144,6 +171,33 @@ mod tests {
         assert!(matches!(caps[1], Capability::RouteRefresh));
         assert!(matches!(caps[2], Capability::ExtendedMessage));
         assert!(matches!(caps[3], Capability::FourOctetAs { asn: 65001 }));
+    }
+
+    #[test]
+    fn local_capabilities_include_extended_nexthop_when_dual_stack() {
+        let mut cfg = test_config();
+        cfg.families = vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)];
+        let caps = cfg.local_capabilities();
+        assert!(caps.iter().any(|cap| matches!(
+            cap,
+            Capability::ExtendedNextHop(families)
+                if families == &[ExtendedNextHopFamily {
+                    nlri_afi: Afi::Ipv4,
+                    nlri_safi: Safi::Unicast,
+                    next_hop_afi: Afi::Ipv6,
+                }]
+        )));
+    }
+
+    #[test]
+    fn local_capabilities_omit_extended_nexthop_without_dual_stack() {
+        let cfg = test_config();
+        let caps = cfg.local_capabilities();
+        assert!(
+            !caps
+                .iter()
+                .any(|cap| matches!(cap, Capability::ExtendedNextHop(_)))
+        );
     }
 
     #[test]

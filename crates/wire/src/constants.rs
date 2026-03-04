@@ -57,6 +57,8 @@ pub mod capability_code {
     pub const MULTI_PROTOCOL: u8 = 1;
     /// RFC 2918: Route Refresh.
     pub const ROUTE_REFRESH: u8 = 2;
+    /// RFC 8950: Extended Next Hop Encoding.
+    pub const EXTENDED_NEXT_HOP: u8 = 5;
     /// RFC 4724: Graceful Restart.
     pub const GRACEFUL_RESTART: u8 = 64;
     /// RFC 8654: Extended Messages.

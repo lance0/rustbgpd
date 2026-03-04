@@ -11,6 +11,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Extended Next Hop (RFC 8950).** Capability code 5 is now advertised
+  automatically for dual-stack unicast peers. IPv4 unicast NLRI can be
+  received and advertised via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` with an
+  IPv6 next hop. Existing peers that do not negotiate RFC 8950 keep the
+  legacy body-NLRI + `NEXT_HOP` encoding. Add-Path for IPv4 unicast remains
+  compatible in both legacy and RFC 8950 MP-encoding modes. (ADR-0037)
+
 - **Policy chaining + named policies (ADR-0036).** Named policy definitions
   in TOML with configurable `default_action` (permit or deny). Policy chains
   reference named policies by name in ordered sequences. GoBGP-style chain
