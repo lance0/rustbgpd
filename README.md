@@ -179,6 +179,10 @@ The config file is TOML. All runtime changes go through gRPC -- the file is only
 
 **`[global]`** -- ASN, router ID, listen port.
 
+`[global.runtime_state_dir]` defaults to `/var/lib/rustbgpd` and must be
+writable by the daemon process. In containers or non-root deployments, point it
+at a writable mounted path.
+
 **`[global.telemetry]`** -- Prometheus bind address, log format (`json`), gRPC bind address (default `127.0.0.1:50051`).
 
 **`[[neighbors]]`** -- One block per peer: `address`, `remote_asn`, optional `description`, `hold_time` (default 90), `max_prefixes`, `md5_password`, `ttl_security`, `families` (address families to negotiate, default `["ipv4_unicast"]`), `graceful_restart` (default `true`), `gr_restart_time` (default 120), `gr_stale_routes_time` (default 360).

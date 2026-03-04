@@ -32,6 +32,10 @@ listen_port = 179
 runtime_state_dir = "/var/lib/rustbgpd"
 ```
 
+`runtime_state_dir` must be writable by the rustbgpd process. In containers or
+non-root deployments, override the default to a mounted writable path (for
+example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
+
 ---
 
 ## `[global.telemetry]`

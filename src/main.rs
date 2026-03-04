@@ -128,10 +128,14 @@ async fn run(config: Config) {
                 info!(
                     marker = %gr_restart_marker_path.display(),
                     restart_time_secs = remaining.as_secs(),
-                    "detected graceful-restart marker — enabling restarting-speaker mode"
+                    "detected GR restart marker — static peers will advertise R=1 until the restart window expires"
                 );
                 Some(deadline)
             } else {
+                info!(
+                    marker = %gr_restart_marker_path.display(),
+                    "ignoring expired GR restart marker"
+                );
                 if let Err(e) = remove_gr_restart_marker(&gr_restart_marker_path) {
                     warn!(
                         marker = %gr_restart_marker_path.display(),
@@ -147,7 +151,7 @@ async fn run(config: Config) {
             warn!(
                 marker = %gr_restart_marker_path.display(),
                 error = %e,
-                "failed to read GR restart marker — starting without restarting-speaker mode"
+                "ignoring invalid GR restart marker — starting without restarting-speaker mode"
             );
             if let Err(remove_err) = remove_gr_restart_marker(&gr_restart_marker_path) {
                 warn!(
@@ -410,7 +414,13 @@ async fn run(config: Config) {
             warn!(
                 marker = %gr_restart_marker_path.display(),
                 error = %e,
-                "failed to write GR restart marker"
+                "failed to write GR restart marker — restarting-speaker mode will be unavailable on the next start (check runtime_state_dir permissions)"
+            );
+        } else {
+            info!(
+                marker = %gr_restart_marker_path.display(),
+                restart_time_secs,
+                "wrote GR restart marker for coordinated shutdown"
             );
         }
     } else if let Err(e) = remove_gr_restart_marker(&gr_restart_marker_path) {
