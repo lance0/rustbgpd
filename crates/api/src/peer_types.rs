@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv6Addr};
 
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
-use rustbgpd_policy::Policy;
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -63,8 +63,8 @@ pub struct PeerManagerNeighborConfig {
     pub add_path_receive: bool,
     pub add_path_send: bool,
     pub add_path_send_max: u32,
-    pub import_policy: Option<Policy>,
-    pub export_policy: Option<Policy>,
+    pub import_policy: Option<PolicyChain>,
+    pub export_policy: Option<PolicyChain>,
 }
 
 /// Snapshot of a peer's state for queries.

@@ -1,9 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use rustbgpd_fsm::PeerConfig;
+use std::collections::HashMap;
+
 use rustbgpd_policy::{
-    CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyStatement, RouteModifications,
-    parse_community_match,
+    CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
+    RouteModifications, parse_community_match,
 };
 use rustbgpd_transport::TransportConfig;
 use rustbgpd_wire::{Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix, Safi};
@@ -116,6 +118,12 @@ pub struct Neighbor {
     pub import_policy: Vec<PolicyStatementConfig>,
     #[serde(default)]
     pub export_policy: Vec<PolicyStatementConfig>,
+    /// Named policy chain for import (mutually exclusive with `import_policy`).
+    #[serde(default)]
+    pub import_policy_chain: Vec<String>,
+    /// Named policy chain for export (mutually exclusive with `export_policy`).
+    #[serde(default)]
+    pub export_policy_chain: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +146,30 @@ pub struct PolicyConfig {
     pub import: Vec<PolicyStatementConfig>,
     #[serde(default)]
     pub export: Vec<PolicyStatementConfig>,
+    /// Named policy definitions, reusable across neighbors and directions.
+    #[serde(default)]
+    pub definitions: HashMap<String, NamedPolicyConfig>,
+    /// Global import policy chain (references named definitions).
+    #[serde(default)]
+    pub import_chain: Vec<String>,
+    /// Global export policy chain (references named definitions).
+    #[serde(default)]
+    pub export_chain: Vec<String>,
+}
+
+/// A named policy definition with configurable default action.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedPolicyConfig {
+    /// Default action when no statement matches: `"permit"` (default) or `"deny"`.
+    #[serde(default = "default_policy_action_str")]
+    pub default_action: String,
+    #[serde(default)]
+    pub statements: Vec<PolicyStatementConfig>,
+}
+
+fn default_policy_action_str() -> String {
+    "permit".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +237,8 @@ pub enum ConfigError {
     InvalidRrConfig { reason: String },
     #[error("invalid RPKI config: {reason}")]
     InvalidRpkiConfig { reason: String },
+    #[error("undefined policy {name:?} referenced in chain")]
+    UndefinedPolicy { name: String },
 }
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
@@ -276,10 +310,10 @@ fn parse_prefix_entry(
     Ok(prefix)
 }
 
-fn parse_policy(entries: &[PolicyStatementConfig]) -> Result<Option<Policy>, ConfigError> {
-    if entries.is_empty() {
-        return Ok(None);
-    }
+/// Parse a list of statement configs into `PolicyStatement`s.
+fn parse_policy_statements(
+    entries: &[PolicyStatementConfig],
+) -> Result<Vec<PolicyStatement>, ConfigError> {
     let mut parsed = Vec::with_capacity(entries.len());
     for e in entries {
         let action = match e.action.as_str() {
@@ -357,11 +391,59 @@ fn parse_policy(entries: &[PolicyStatementConfig]) -> Result<Option<Policy>, Con
             modifications,
         });
     }
+    Ok(parsed)
+}
 
+/// Parse inline policy entries into a single `Policy` with `default_action=Permit`.
+fn parse_policy(entries: &[PolicyStatementConfig]) -> Result<Option<Policy>, ConfigError> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let parsed = parse_policy_statements(entries)?;
     Ok(Some(Policy {
         entries: parsed,
         default_action: PolicyAction::Permit,
     }))
+}
+
+/// Parse a named policy definition with configurable default action.
+fn parse_named_policy(name: &str, cfg: &NamedPolicyConfig) -> Result<Policy, ConfigError> {
+    let default_action = match cfg.default_action.as_str() {
+        "permit" => PolicyAction::Permit,
+        "deny" => PolicyAction::Deny,
+        other => {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!(
+                    "policy {name:?}: unknown default_action {other:?}, expected \"permit\" or \"deny\""
+                ),
+            });
+        }
+    };
+    let entries = parse_policy_statements(&cfg.statements)?;
+    Ok(Policy {
+        entries,
+        default_action,
+    })
+}
+
+/// Resolve a list of policy names to a `PolicyChain`.
+fn resolve_chain(
+    names: &[String],
+    definitions: &HashMap<String, NamedPolicyConfig>,
+) -> Result<Option<PolicyChain>, ConfigError> {
+    if names.is_empty() {
+        return Ok(None);
+    }
+    let policies = names
+        .iter()
+        .map(|name| {
+            definitions
+                .get(name.as_str())
+                .ok_or_else(|| ConfigError::UndefinedPolicy { name: name.clone() })
+                .and_then(|cfg| parse_named_policy(name, cfg))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(PolicyChain::new(policies)))
 }
 
 /// Parse the `set_*` fields into `RouteModifications`, with validation.
@@ -588,6 +670,15 @@ impl Config {
         parse_policy(&self.policy.import)?;
         parse_policy(&self.policy.export)?;
 
+        // Validate named policy definitions
+        for (name, cfg) in &self.policy.definitions {
+            parse_named_policy(name, cfg)?;
+        }
+
+        // Validate global chains
+        resolve_chain(&self.policy.import_chain, &self.policy.definitions)?;
+        resolve_chain(&self.policy.export_chain, &self.policy.definitions)?;
+
         for neighbor in &self.neighbors {
             neighbor.address.parse::<IpAddr>().map_err(|e| {
                 ConfigError::InvalidNeighborAddress {
@@ -666,6 +757,26 @@ impl Config {
 
             parse_policy(&neighbor.import_policy)?;
             parse_policy(&neighbor.export_policy)?;
+
+            // Inline and chain are mutually exclusive
+            if !neighbor.import_policy.is_empty() && !neighbor.import_policy_chain.is_empty() {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "neighbor {}: import_policy and import_policy_chain are mutually exclusive",
+                        neighbor.address
+                    ),
+                });
+            }
+            if !neighbor.export_policy.is_empty() && !neighbor.export_policy_chain.is_empty() {
+                return Err(ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "neighbor {}: export_policy and export_policy_chain are mutually exclusive",
+                        neighbor.address
+                    ),
+                });
+            }
+            resolve_chain(&neighbor.import_policy_chain, &self.policy.definitions)?;
+            resolve_chain(&neighbor.export_policy_chain, &self.policy.definitions)?;
         }
 
         // Validate RPKI cache server config
@@ -742,30 +853,51 @@ impl Config {
         None
     }
 
-    pub fn import_policy(&self) -> Result<Option<Policy>, ConfigError> {
-        parse_policy(&self.policy.import)
+    /// Resolve the global import policy chain.
+    ///
+    /// If `import_chain` is set, resolves named policies. Otherwise wraps
+    /// the inline `import` entries as a single-policy chain.
+    pub fn import_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
+        if self.policy.import_chain.is_empty() {
+            Ok(parse_policy(&self.policy.import)?.map(|p| PolicyChain::new(vec![p])))
+        } else {
+            resolve_chain(&self.policy.import_chain, &self.policy.definitions)
+        }
     }
 
-    pub fn export_policy(&self) -> Result<Option<Policy>, ConfigError> {
-        parse_policy(&self.policy.export)
+    /// Resolve the global export policy chain.
+    pub fn export_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
+        if self.policy.export_chain.is_empty() {
+            Ok(parse_policy(&self.policy.export)?.map(|p| PolicyChain::new(vec![p])))
+        } else {
+            resolve_chain(&self.policy.export_chain, &self.policy.definitions)
+        }
     }
 
-    /// Returns `(TransportConfig, label, import_policy, export_policy)` per neighbor.
+    /// Returns `(TransportConfig, label, import_chain, export_chain)` per neighbor.
     ///
     /// Per-neighbor policy overrides global; if neighbor has no policy entries,
     /// the corresponding value is `None` (caller falls back to global).
     #[expect(clippy::type_complexity)]
     pub fn to_peer_configs(
         &self,
-    ) -> Result<Vec<(TransportConfig, String, Option<Policy>, Option<Policy>)>, ConfigError> {
+    ) -> Result<
+        Vec<(
+            TransportConfig,
+            String,
+            Option<PolicyChain>,
+            Option<PolicyChain>,
+        )>,
+        ConfigError,
+    > {
         let router_id: Ipv4Addr = self
             .global
             .router_id
             .parse()
             .expect("validated in Config::load");
 
-        let global_import = self.import_policy()?;
-        let global_export = self.export_policy()?;
+        let global_import = self.import_chain()?;
+        let global_export = self.export_chain()?;
 
         let mut configs = Vec::with_capacity(self.neighbors.len());
         for neighbor in &self.neighbors {
@@ -816,9 +948,19 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| neighbor.address.clone());
 
-            // Per-neighbor policy overrides global
-            let import = parse_policy(&neighbor.import_policy)?.or(global_import.clone());
-            let export = parse_policy(&neighbor.export_policy)?.or(global_export.clone());
+            // Per-neighbor policy: chain > inline > global fallback
+            let import = if neighbor.import_policy_chain.is_empty() {
+                parse_policy(&neighbor.import_policy)?.map(|p| PolicyChain::new(vec![p]))
+            } else {
+                resolve_chain(&neighbor.import_policy_chain, &self.policy.definitions)?
+            }
+            .or_else(|| global_import.clone());
+            let export = if neighbor.export_policy_chain.is_empty() {
+                parse_policy(&neighbor.export_policy)?.map(|p| PolicyChain::new(vec![p]))
+            } else {
+                resolve_chain(&neighbor.export_policy_chain, &self.policy.definitions)?
+            }
+            .or_else(|| global_export.clone());
 
             configs.push((transport, label, import, export));
         }
@@ -1033,17 +1175,17 @@ action = "permit"
 prefix = "192.168.0.0/16"
 "#;
         let config = parse(toml_str).unwrap();
-        let import = config.import_policy().unwrap().unwrap();
-        assert_eq!(import.entries.len(), 1);
-        let export = config.export_policy().unwrap().unwrap();
-        assert_eq!(export.entries.len(), 1);
+        let import = config.import_chain().unwrap().unwrap();
+        assert_eq!(import.policies[0].entries.len(), 1);
+        let export = config.export_chain().unwrap().unwrap();
+        assert_eq!(export.policies[0].entries.len(), 1);
     }
 
     #[test]
     fn empty_policy_returns_none() {
         let config = parse(valid_toml()).unwrap();
-        assert!(config.import_policy().unwrap().is_none());
-        assert!(config.export_policy().unwrap().is_none());
+        assert!(config.import_chain().unwrap().is_none());
+        assert!(config.export_chain().unwrap().is_none());
     }
 
     #[test]
@@ -1228,11 +1370,11 @@ remote_asn = 65003
 
         // First neighbor: has per-neighbor export → uses that
         let export1 = peers[0].3.as_ref().unwrap();
-        assert_eq!(export1.entries[0].action, PolicyAction::Permit);
+        assert_eq!(export1.policies[0].entries[0].action, PolicyAction::Permit);
 
         // Second neighbor: no per-neighbor → falls back to global deny
         let export2 = peers[1].3.as_ref().unwrap();
-        assert_eq!(export2.entries[0].action, PolicyAction::Deny);
+        assert_eq!(export2.policies[0].entries[0].action, PolicyAction::Deny);
     }
 
     #[test]
@@ -1500,9 +1642,9 @@ remote_asn = 65001
         let config = parse(&toml).unwrap();
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
-        assert_eq!(import.entries.len(), 1);
-        assert!(import.entries[0].prefix.is_none());
-        assert_eq!(import.entries[0].match_community.len(), 1);
+        assert_eq!(import.policies[0].entries.len(), 1);
+        assert!(import.policies[0].entries[0].prefix.is_none());
+        assert_eq!(import.policies[0].entries[0].match_community.len(), 1);
     }
 
     #[test]
@@ -1515,8 +1657,8 @@ remote_asn = 65001
         let config = parse(&toml).unwrap();
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
-        assert!(import.entries[0].prefix.is_some());
-        assert_eq!(import.entries[0].match_community.len(), 2);
+        assert!(import.policies[0].entries[0].prefix.is_some());
+        assert_eq!(import.policies[0].entries[0].match_community.len(), 2);
     }
 
     #[test]
@@ -1553,7 +1695,7 @@ match_community = ["INVALID"]"#,
         let config = parse(&toml).unwrap();
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
-        assert_eq!(import.entries[0].match_community.len(), 1);
+        assert_eq!(import.policies[0].entries[0].match_community.len(), 1);
     }
 
     // --- Route Reflector config tests ---
@@ -1677,9 +1819,9 @@ route_reflector_client = true
         let config = parse(&toml).unwrap();
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
-        assert_eq!(import.entries.len(), 1);
-        assert!(import.entries[0].prefix.is_none());
-        assert!(import.entries[0].match_as_path.is_some());
+        assert_eq!(import.policies[0].entries.len(), 1);
+        assert!(import.policies[0].entries[0].prefix.is_none());
+        assert!(import.policies[0].entries[0].match_as_path.is_some());
     }
 
     #[test]
@@ -1692,8 +1834,8 @@ route_reflector_client = true
         let config = parse(&toml).unwrap();
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
-        assert!(import.entries[0].prefix.is_some());
-        assert!(import.entries[0].match_as_path.is_some());
+        assert!(import.policies[0].entries[0].prefix.is_some());
+        assert!(import.policies[0].entries[0].match_as_path.is_some());
     }
 
     #[test]
@@ -1912,9 +2054,9 @@ address = "10.0.0.11:8282"
         let config = parse(&toml).unwrap();
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
-        assert_eq!(import.entries.len(), 1);
+        assert_eq!(import.policies[0].entries.len(), 1);
         assert_eq!(
-            import.entries[0].match_rpki_validation,
+            import.policies[0].entries[0].match_rpki_validation,
             Some(rustbgpd_wire::RpkiValidation::Invalid)
         );
     }
@@ -1929,7 +2071,7 @@ address = "10.0.0.11:8282"
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
         assert_eq!(
-            import.entries[0].match_rpki_validation,
+            import.policies[0].entries[0].match_rpki_validation,
             Some(rustbgpd_wire::RpkiValidation::Valid)
         );
     }
@@ -1944,7 +2086,7 @@ address = "10.0.0.11:8282"
         let peers = config.to_peer_configs().unwrap();
         let import = peers[0].2.as_ref().unwrap();
         assert_eq!(
-            import.entries[0].match_rpki_validation,
+            import.policies[0].entries[0].match_rpki_validation,
             Some(rustbgpd_wire::RpkiValidation::NotFound)
         );
     }
@@ -2035,5 +2177,241 @@ address = "127.0.0.1:3323"
         assert_eq!(rpki.cache_servers[0].refresh_interval, 1800);
         assert_eq!(rpki.cache_servers[0].retry_interval, 300);
         assert_eq!(rpki.cache_servers[0].expire_interval, 3600);
+    }
+
+    // -----------------------------------------------------------------------
+    // Named policies + policy chaining
+    // -----------------------------------------------------------------------
+
+    fn named_policy_toml() -> String {
+        format!(
+            r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.reject-bogons]
+default_action = "deny"
+[[policy.definitions.reject-bogons.statements]]
+action = "permit"
+prefix = "0.0.0.0/0"
+ge = 8
+le = 24
+
+[policy.definitions.set-lp]
+[[policy.definitions.set-lp.statements]]
+action = "permit"
+prefix = "10.0.0.0/8"
+set_local_pref = 200
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+            GLOBAL_HEADER = valid_toml()
+        )
+    }
+
+    #[test]
+    fn named_policy_parses() {
+        let config = parse(&named_policy_toml()).unwrap();
+        assert_eq!(config.policy.definitions.len(), 2);
+        assert!(config.policy.definitions.contains_key("reject-bogons"));
+        assert!(config.policy.definitions.contains_key("set-lp"));
+    }
+
+    #[test]
+    fn named_policy_default_deny() {
+        let config = parse(&named_policy_toml()).unwrap();
+        let def = &config.policy.definitions["reject-bogons"];
+        assert_eq!(def.default_action, "deny");
+        let policy = parse_named_policy("reject-bogons", def).unwrap();
+        assert_eq!(policy.default_action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn empty_statements_deny_is_valid() {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.deny-all]
+default_action = "deny"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let config = parse(&toml_str).unwrap();
+        let def = &config.policy.definitions["deny-all"];
+        let policy = parse_named_policy("deny-all", def).unwrap();
+        assert_eq!(policy.entries.len(), 0);
+        assert_eq!(policy.default_action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn undefined_policy_in_chain_is_error() {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[policy]
+import_chain = ["nonexistent"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let err = parse(&toml_str).unwrap_err();
+        assert!(err.to_string().contains("nonexistent"));
+    }
+
+    #[test]
+    fn global_import_chain_works() {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.set-lp]
+[[policy.definitions.set-lp.statements]]
+action = "permit"
+prefix = "10.0.0.0/8"
+set_local_pref = 200
+
+[policy]
+import_chain = ["set-lp"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let config = parse(&toml_str).unwrap();
+        let chain = config.import_chain().unwrap().unwrap();
+        assert_eq!(chain.policies.len(), 1);
+        assert_eq!(chain.policies[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn neighbor_import_chain_overrides_global() {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.global-pol]
+[[policy.definitions.global-pol.statements]]
+action = "deny"
+prefix = "10.0.0.0/8"
+
+[policy.definitions.peer-pol]
+[[policy.definitions.peer-pol.statements]]
+action = "permit"
+prefix = "192.168.0.0/16"
+set_local_pref = 300
+
+[policy]
+import_chain = ["global-pol"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+import_policy_chain = ["peer-pol"]
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let config = parse(&toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let (_, _, import, _) = &peers[1]; // skip the first neighbor from valid_toml
+        let chain = import.as_ref().unwrap();
+        // Peer chain should have peer-pol, not global-pol
+        assert_eq!(
+            chain.policies[0].entries[0].modifications.set_local_pref,
+            Some(300)
+        );
+    }
+
+    #[test]
+    fn inline_and_chain_mutually_exclusive() {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.some-pol]
+[[policy.definitions.some-pol.statements]]
+action = "permit"
+prefix = "10.0.0.0/8"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+import_policy_chain = ["some-pol"]
+
+[[neighbors.import_policy]]
+action = "deny"
+prefix = "192.168.0.0/16"
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let err = parse(&toml_str).unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn inline_policy_still_works() {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+
+[[neighbors.import_policy]]
+action = "deny"
+prefix = "192.168.0.0/16"
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let config = parse(&toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        let (_, _, import, _) = &peers[1];
+        let chain = import.as_ref().unwrap();
+        assert_eq!(chain.policies.len(), 1);
+        assert_eq!(chain.policies[0].entries[0].action, PolicyAction::Deny);
+    }
+
+    #[test]
+    fn no_policy_falls_back_to_global_chain() {
+        let toml_str = format!(
+            r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.global-pol]
+[[policy.definitions.global-pol.statements]]
+action = "permit"
+prefix = "10.0.0.0/8"
+set_local_pref = 150
+
+[policy]
+import_chain = ["global-pol"]
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+"#,
+            GLOBAL_HEADER = valid_toml()
+        );
+        let config = parse(&toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        // Second neighbor (first is from valid_toml) has no per-peer policy
+        let (_, _, import, _) = &peers[1];
+        let chain = import.as_ref().unwrap();
+        assert_eq!(
+            chain.policies[0].entries[0].modifications.set_local_pref,
+            Some(150)
+        );
     }
 }

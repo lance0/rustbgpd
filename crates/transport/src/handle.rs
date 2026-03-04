@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
-use rustbgpd_policy::Policy;
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Safi};
@@ -91,8 +91,8 @@ impl PeerHandle {
         config: TransportConfig,
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<Policy>,
-        export_policy: Option<Policy>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
@@ -120,8 +120,8 @@ impl PeerHandle {
         config: TransportConfig,
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<Policy>,
-        export_policy: Option<Policy>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {

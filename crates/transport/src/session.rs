@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
-use rustbgpd_policy::Policy;
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
@@ -59,9 +59,9 @@ pub(crate) struct PeerSession {
     /// Sender clone held to give to RIB manager on `PeerUp`.
     outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
     /// Import policy (prefix filter applied to inbound UPDATEs).
-    import_policy: Option<Policy>,
+    import_policy: Option<PolicyChain>,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
-    export_policy: Option<Policy>,
+    export_policy: Option<PolicyChain>,
     /// Channel to notify `PeerManager` of session state changes (collision detection).
     /// Unbounded so notifications are never dropped and never block (avoids
     /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
@@ -118,8 +118,8 @@ impl PeerSession {
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<Policy>,
-        export_policy: Option<Policy>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
@@ -164,8 +164,8 @@ impl PeerSession {
         metrics: BgpMetrics,
         commands: mpsc::Receiver<PeerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
-        import_policy: Option<Policy>,
-        export_policy: Option<Policy>,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     ) -> Self {
@@ -1139,7 +1139,7 @@ impl PeerSession {
             .iter()
             .filter_map(|entry| {
                 let prefix = Prefix::V4(entry.prefix);
-                let result = rustbgpd_policy::evaluate_policy(
+                let result = rustbgpd_policy::evaluate_chain(
                     self.import_policy.as_ref(),
                     prefix,
                     update_ecs,
@@ -1217,7 +1217,7 @@ impl PeerSession {
                             // Apply import policy using the destination prefix
                             // component (if present) for prefix matching
                             let dest_prefix = rule.destination_prefix();
-                            let result = rustbgpd_policy::evaluate_policy(
+                            let result = rustbgpd_policy::evaluate_chain(
                                 self.import_policy.as_ref(),
                                 dest_prefix.unwrap_or(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
                                     Ipv4Addr::UNSPECIFIED,
@@ -1256,7 +1256,7 @@ impl PeerSession {
 
                     // Unicast routes
                     for entry in &mp.announced {
-                        let result = rustbgpd_policy::evaluate_policy(
+                        let result = rustbgpd_policy::evaluate_chain(
                             self.import_policy.as_ref(),
                             entry.prefix,
                             update_ecs,

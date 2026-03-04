@@ -80,8 +80,8 @@ Last updated: 2026-03-04
 | LOCAL_PREF set | Yes | Yes | set_local_pref |
 | AS_PATH prepend | Yes | Yes | set_as_path_prepend |
 | Next-hop set/self | Yes | Yes | set_next_hop = "self" or IP |
-| Named policy definitions | Yes | No | Statement-based, not named |
-| Policy chaining | Yes | No | First-match-wins |
+| Named policy definitions | Yes | Yes | TOML definitions with configurable default_action |
+| Policy chaining | Yes | Yes | GoBGP-style: permit=continue, deny=stop, implicit permit |
 
 ## gRPC API
 
@@ -166,7 +166,7 @@ Last updated: 2026-03-04
 | Address families | 15 | 4 | ~27% |
 | Core protocol | 14 | 9 | ~64% |
 | Path attributes | 13 | 9 | ~69% |
-| Policy engine | 18 | 11 | ~61% |
+| Policy engine | 18 | 13 | ~72% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
 | Monitoring | 5 | 3 | 60% |
 | Security | 4 | 2.5 | ~63% |
@@ -180,7 +180,7 @@ The primary target deployment. Weighted toward what matters:
 
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 91%, missing piece (AIGP) rarely used at IXes
-- **Policy:** 61% but covers the most common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
+- **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
 - **Core protocol:** GR receiving-only covers the IX route server case well
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 
@@ -205,7 +205,7 @@ Competing head-to-head with GoBGP for all use cases:
 ## Top 5 Gaps for Maximum Parity Gain
 
 1. **GR restarting speaker** — core protocol 64% → 71%, unlocks router deployments
-2. **Policy chaining + named policies** — policy 61% → 72%, table stakes for production
+2. ~~**Policy chaining + named policies**~~ — done
 3. **Extended nexthop (RFC 8950)** — IPv6 NH for IPv4 NLRI, increasingly common in modern networks
 4. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
 5. ~~**Admin shutdown communication (RFC 8203)**~~ — done

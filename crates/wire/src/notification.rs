@@ -130,6 +130,7 @@ pub fn encode_shutdown_communication(reason: &str) -> bytes::Bytes {
 /// Decode a shutdown communication reason string from NOTIFICATION data (RFC 8203).
 ///
 /// Returns `None` if the data is empty or the length prefix is inconsistent.
+/// Extra trailing bytes after the declared shutdown-communication string are ignored.
 /// Invalid UTF-8 is replaced with the Unicode replacement character.
 #[must_use]
 pub fn decode_shutdown_communication(data: &[u8]) -> Option<String> {
@@ -137,10 +138,10 @@ pub fn decode_shutdown_communication(data: &[u8]) -> Option<String> {
         return None;
     }
     let len = data[0] as usize;
-    if data.len() != 1 + len {
+    if data.len() < 1 + len {
         return None;
     }
-    let raw = &data[1..];
+    let raw = &data[1..=len];
     Some(String::from_utf8_lossy(raw).into_owned())
 }
 
@@ -285,8 +286,8 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_communication_rejects_trailing_bytes() {
+    fn shutdown_communication_ignores_trailing_bytes() {
         let data = [3, b'f', b'o', b'o', b'x'];
-        assert_eq!(decode_shutdown_communication(&data), None);
+        assert_eq!(decode_shutdown_communication(&data).as_deref(), Some("foo"));
     }
 }

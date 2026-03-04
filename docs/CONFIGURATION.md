@@ -362,6 +362,8 @@ See [ADR-0034](docs/adr/0034-rpki-origin-validation.md) for design details.
 Optional. Defines global import and export policy that applies to all neighbors
 that do not declare their own per-neighbor policy.
 
+### Inline policy (original syntax)
+
 ```toml
 [[policy.import]]
 prefix = "10.0.0.0/8"
@@ -378,6 +380,72 @@ action = "deny"
 prefix = "172.16.0.0/12"
 action = "deny"
 ```
+
+### Named policy definitions
+
+Named policies are reusable policy blocks defined under `[policy.definitions]`.
+Each has a name, optional `default_action` (default: `"permit"`), and a list of
+statements.
+
+```toml
+[policy.definitions.reject-bogons]
+default_action = "deny"
+[[policy.definitions.reject-bogons.statements]]
+action = "permit"
+prefix = "0.0.0.0/0"
+ge = 8
+le = 24
+
+[policy.definitions.set-lp-customer]
+[[policy.definitions.set-lp-customer.statements]]
+action = "permit"
+set_local_pref = 150
+
+[policy.definitions.tag-ixp]
+[[policy.definitions.tag-ixp.statements]]
+action = "permit"
+set_community_add = ["LC:65001:1:100"]
+set_next_hop = "self"
+```
+
+| Field            | Type   | Required | Default    | Description                             |
+|------------------|--------|----------|------------|-----------------------------------------|
+| `default_action` | string | no       | `"permit"` | Action when no statement matches (`"permit"` or `"deny"`) |
+| `statements`     | array  | no       | `[]`       | Policy statements (same schema as inline entries) |
+
+### Policy chains
+
+Policy chains reference named definitions by name, evaluated in order with
+GoBGP-style semantics:
+
+- **Permit** — accumulate route modifications, continue to next policy
+- **Deny** — reject immediately, stop the chain
+- **After all policies** — implicit permit with all accumulated modifications
+
+Global chains:
+
+```toml
+[policy]
+import_chain = ["reject-bogons", "set-lp-customer"]
+export_chain = ["tag-ixp"]
+```
+
+Per-neighbor chains (override global):
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+import_policy_chain = ["reject-bogons", "set-lp-customer"]
+export_policy_chain = ["tag-ixp"]
+```
+
+When multiple policies in a chain both set a scalar value (e.g. `set_local_pref`),
+the later policy wins. List values (community add/remove) accumulate across the
+chain.
+
+**Mutual exclusion:** Inline policy and policy chain cannot both be set for the
+same direction on the same neighbor. This is a config validation error.
 
 ---
 
@@ -469,14 +537,18 @@ action = "deny"
 
 For each neighbor, import and export policies are resolved independently:
 
-1. If the neighbor has per-neighbor policy entries (`[[neighbors.import_policy]]`
-   or `[[neighbors.export_policy]]`), those are used.
-2. Otherwise, the corresponding global policy (`[[policy.import]]` or
-   `[[policy.export]]`) is used.
-3. If neither exists, all routes are permitted (no filtering).
+1. If the neighbor has a per-neighbor **policy chain** (`import_policy_chain` /
+   `export_policy_chain`), that chain is used.
+2. If the neighbor has per-neighbor **inline policy** (`[[neighbors.import_policy]]`
+   or `[[neighbors.export_policy]]`), those are wrapped in a single-element chain.
+3. Otherwise, the global **chain** (`import_chain` / `export_chain`) is used.
+4. Otherwise, the global **inline policy** (`[[policy.import]]` / `[[policy.export]]`)
+   is wrapped in a single-element chain.
+5. If none of the above exist, all routes are permitted (no filtering).
 
 Per-neighbor policy completely replaces the global policy for that direction --
-the two are never merged.
+the two are never merged. Inline and chain on the same neighbor/direction is a
+config error.
 
 ---
 
@@ -611,6 +683,8 @@ starting:
 | RT/RO extended community ASN must be <= 65535 (2-octet AS sub-type) | `ASN exceeds 65535` |
 | RPKI `refresh_interval`, `retry_interval`, `expire_interval` must be > 0 | `must be > 0` |
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
+| Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
+| Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
 ### Defaults applied at runtime

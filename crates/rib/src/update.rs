@@ -1,7 +1,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use rustbgpd_policy::Policy;
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -46,7 +46,7 @@ pub enum RibUpdate {
     PeerUp {
         peer: IpAddr,
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
-        export_policy: Option<Policy>,
+        export_policy: Option<PolicyChain>,
         /// Address families that the transport can actually serialize for this
         /// peer. Routes whose AFI is not in this list are filtered out of
         /// Adj-RIB-Out, preventing divergence between RIB state and wire.

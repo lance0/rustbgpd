@@ -74,8 +74,8 @@ async fn run(config: Config) {
         metrics_server::serve_metrics(prometheus_addr, metrics_clone).await;
     });
 
-    // Build global export policy for RIB manager fallback
-    let export_policy = config.export_policy().unwrap_or_else(|e| {
+    // Build global export policy chain for RIB manager fallback
+    let export_policy = config.export_chain().unwrap_or_else(|e| {
         error!("invalid global export policy: {e}");
         process::exit(1);
     });

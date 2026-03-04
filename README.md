@@ -32,7 +32,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **RFC 4271 compliant** -- full FSM, path attribute validation, best-path selection, split horizon, Adj-RIB-In / Loc-RIB / Adj-RIB-Out
 - **Inbound + outbound peering** -- accepts incoming TCP connections and initiates outbound; passive peering supported
 - **Dynamic peer management** -- add, delete, enable, and disable neighbors at runtime via gRPC
-- **Policy engine** -- match + modify + filter: prefix, community, AS_PATH regex matching; set LOCAL_PREF, MED, communities, AS_PATH prepend, next-hop on import/export
+- **Policy engine** -- match + modify + filter with named policies and chaining: prefix, community, AS_PATH regex matching; set LOCAL_PREF, MED, communities, AS_PATH prepend, next-hop on import/export
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
@@ -42,7 +42,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Extended Messages** -- RFC 8654 raises the 4096-byte message limit to 65535 bytes
 - **Add-Path** -- RFC 7911 dual-stack receive + multi-path send (route server mode) for IPv4 and IPv6 unicast
 - **RPKI origin validation** -- RFC 6811: poll-based RTR client (RFC 8210) connects to RPKI validators, stamps routes Valid/Invalid/NotFound, integrates into best-path and policy
-- **786 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **808 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -182,7 +182,7 @@ The config file is TOML. All runtime changes go through gRPC -- the file is only
 
 **`[rpki]`** -- RPKI origin validation. Connect to one or more RTR cache validators. Routes stamped Valid/Invalid/NotFound, integrated into best-path selection and policy matching.
 
-**`[policy]`** -- Global import/export policy. Each entry has `action` (`permit`/`deny`), match conditions (`prefix`, `match_community`, `match_as_path`, `match_rpki_validation`), and optional route modifications (`set_local_pref`, `set_med`, `set_next_hop`, `set_community_add`/`remove`, `set_as_path_prepend`).
+**`[policy]`** -- Global import/export policy. Inline entries or named definitions with chain references. Each entry has `action` (`permit`/`deny`), match conditions (`prefix`, `match_community`, `match_as_path`, `match_rpki_validation`), and optional route modifications (`set_local_pref`, `set_med`, `set_next_hop`, `set_community_add`/`remove`, `set_as_path_prepend`). Named policies are defined under `[policy.definitions.*]` and chained via `import_chain`/`export_chain`.
 
 **`[[neighbors.import_policy]]` / `[[neighbors.export_policy]]`** -- Per-neighbor policy overrides. Same format as global policy entries.
 
@@ -255,7 +255,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 786 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 808 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|

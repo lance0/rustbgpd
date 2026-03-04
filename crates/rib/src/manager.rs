@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use rustbgpd_policy::{Policy, PolicyAction, evaluate_policy};
+use rustbgpd_policy::{PolicyAction, PolicyChain, evaluate_chain};
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RpkiValidation, Safi};
@@ -37,8 +37,8 @@ pub struct RibManager {
     loc_rib: LocRib,
     adj_ribs_out: HashMap<IpAddr, AdjRibOut>,
     outbound_peers: HashMap<IpAddr, mpsc::Sender<OutboundRouteUpdate>>,
-    export_policy: Option<Policy>,
-    peer_export_policies: HashMap<IpAddr, Option<Policy>>,
+    export_policy: Option<PolicyChain>,
+    peer_export_policies: HashMap<IpAddr, Option<PolicyChain>>,
     /// Families the transport can actually serialize per peer.
     peer_sendable_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Whether each registered outbound peer is eBGP (true) or iBGP (false).
@@ -144,7 +144,7 @@ impl RibManager {
     #[must_use]
     pub fn new(
         rx: mpsc::Receiver<RibUpdate>,
-        export_policy: Option<Policy>,
+        export_policy: Option<PolicyChain>,
         cluster_id: Option<Ipv4Addr>,
         metrics: BgpMetrics,
     ) -> Self {
@@ -202,7 +202,7 @@ impl RibManager {
     }
 
     /// Resolve the export policy for a peer: per-peer if set, else global.
-    fn export_policy_for(&self, peer: IpAddr) -> Option<&Policy> {
+    fn export_policy_for(&self, peer: IpAddr) -> Option<&PolicyChain> {
         self.peer_export_policies
             .get(&peer)
             .and_then(|p| p.as_ref())
@@ -285,7 +285,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
-        export_pol: Option<&Policy>,
+        export_pol: Option<&PolicyChain>,
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
@@ -347,7 +347,7 @@ impl RibManager {
             let aspath_str = candidate
                 .as_path()
                 .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
-            let result = evaluate_policy(
+            let result = evaluate_chain(
                 export_pol,
                 *prefix,
                 candidate.extended_communities(),
@@ -402,7 +402,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
-        export_pol: Option<&Policy>,
+        export_pol: Option<&PolicyChain>,
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
@@ -451,7 +451,7 @@ impl RibManager {
         let aspath_str = best
             .as_path()
             .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
-        let result = evaluate_policy(
+        let result = evaluate_chain(
             export_pol,
             *prefix,
             best.extended_communities(),
@@ -509,7 +509,7 @@ impl RibManager {
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
         sendable: Option<&Vec<(Afi, Safi)>>,
-        export_pol: Option<&Policy>,
+        export_pol: Option<&PolicyChain>,
         fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
         fs_withdraw: &mut Vec<FlowSpecRule>,
     ) {
@@ -559,7 +559,7 @@ impl RibManager {
                 let aspath_str = best
                     .as_path()
                     .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
-                let result = rustbgpd_policy::evaluate_policy(
+                let result = rustbgpd_policy::evaluate_chain(
                     export_pol,
                     prefix_for_policy,
                     best.extended_communities(),
@@ -3029,10 +3029,12 @@ mod tests {
 
     #[tokio::test]
     async fn export_policy_blocks_denied() {
-        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+        use rustbgpd_policy::{
+            Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+        };
 
         let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
-        let export_policy = Policy {
+        let export_policy = PolicyChain::new(vec![Policy {
             entries: vec![PolicyStatement {
                 prefix: Some(Prefix::V4(denied_prefix)),
                 ge: None,
@@ -3044,7 +3046,7 @@ mod tests {
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
-        };
+        }]);
 
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, Some(export_policy), None, BgpMetrics::new());
@@ -3144,13 +3146,15 @@ mod tests {
 
     #[tokio::test]
     async fn per_peer_export_policy() {
-        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+        use rustbgpd_policy::{
+            Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+        };
 
         let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
         let allowed_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
 
         // Peer1 gets a deny policy on 10.0.0.0/8, peer2 has no per-peer policy
-        let peer1_export = Some(Policy {
+        let peer1_export = Some(PolicyChain::new(vec![Policy {
             entries: vec![PolicyStatement {
                 prefix: Some(Prefix::V4(denied_prefix)),
                 ge: None,
@@ -3162,7 +3166,7 @@ mod tests {
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
-        });
+        }]));
 
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, None, BgpMetrics::new());
@@ -3231,7 +3235,9 @@ mod tests {
 
     #[tokio::test]
     async fn peer_down_cleans_up_export_policy() {
-        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+        use rustbgpd_policy::{
+            Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+        };
 
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, None, None, BgpMetrics::new());
@@ -3239,7 +3245,7 @@ mod tests {
 
         let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let (out_tx, _out_rx) = mpsc::channel(64);
-        let policy = Some(Policy {
+        let policy = Some(PolicyChain::new(vec![Policy {
             entries: vec![PolicyStatement {
                 prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
                 ge: None,
@@ -3251,7 +3257,7 @@ mod tests {
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
-        });
+        }]));
 
         tx.send(RibUpdate::PeerUp {
             peer,
@@ -7015,11 +7021,13 @@ mod tests {
 
     #[tokio::test]
     async fn multipath_all_candidates_denied_by_export_policy() {
-        use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+        use rustbgpd_policy::{
+            Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
+        };
 
         // Deny all prefixes in 192.168.0.0/16
         let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16);
-        let export_policy = Policy {
+        let export_policy = PolicyChain::new(vec![Policy {
             entries: vec![PolicyStatement {
                 prefix: Some(Prefix::V4(denied_prefix)),
                 ge: None,
@@ -7031,7 +7039,7 @@ mod tests {
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
-        };
+        }]);
 
         let (tx, rx) = mpsc::channel(64);
         let manager = RibManager::new(rx, Some(export_policy), None, BgpMetrics::new());

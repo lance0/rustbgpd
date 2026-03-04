@@ -10,7 +10,7 @@
 pub mod engine;
 
 pub use engine::{
-    AsPathRegex, CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyResult,
-    PolicyStatement, RouteModifications, apply_modifications, evaluate_policy,
+    AsPathRegex, CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyResult,
+    PolicyStatement, RouteModifications, apply_modifications, evaluate_chain, evaluate_policy,
     parse_community_match,
 };

@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Policy chaining + named policies (ADR-0036).** Named policy definitions
+  in TOML with configurable `default_action` (permit or deny). Policy chains
+  reference named policies by name in ordered sequences. GoBGP-style chain
+  semantics: permit accumulates modifications and continues, deny stops
+  immediately, implicit permit after all policies. Backward compatible —
+  existing inline `import_policy`/`export_policy` entries still work.
+  `RouteModifications::merge_from()` accumulates across chain steps (scalars:
+  later wins; lists accumulate, with later conflicting add/remove operations
+  winning). New TOML syntax: `[policy.definitions.*]`,
+  `import_chain`/`export_chain` on global and per-neighbor.
+
 - **Admin shutdown communication (RFC 8203).** DisableNeighbor gRPC reason
   field is now propagated through to the Cease/2 (Administrative Shutdown)
   NOTIFICATION data as a 1-byte length + UTF-8 string (max 128 bytes).
@@ -818,4 +829,3 @@ detection, and interop validation against FRR 10.3.1 and BIRD 2.0.12.
   truncation, insertion, overwrite, trailing garbage) verify decoder never panics
 - `rustbgpd-wire`: Fuzz harness for `decode_message` via cargo-fuzz / libfuzzer
 - Malformed OPEN interop test config (`rustbgpd-frr-badopen.toml`)
-
