@@ -266,6 +266,7 @@ async fn run(config: Config) {
         && !bmp_config.collectors.is_empty()
     {
         let (bmp_event_tx, bmp_event_rx) = mpsc::channel(4096);
+        let (bmp_control_tx, bmp_control_rx) = mpsc::channel(256);
         let sys_name = bmp_config.sys_name.clone();
         let sys_descr = if bmp_config.sys_descr.is_empty() {
             format!("rustbgpd {}", env!("CARGO_PKG_VERSION"))
@@ -274,7 +275,7 @@ async fn run(config: Config) {
         };
 
         let mut collector_txs = Vec::new();
-        for collector in &bmp_config.collectors {
+        for (collector_id, collector) in bmp_config.collectors.iter().enumerate() {
             let addr: std::net::SocketAddr = match collector.address.parse() {
                 Ok(a) => a,
                 Err(e) => {
@@ -290,18 +291,20 @@ async fn run(config: Config) {
             collector_txs.push(msg_tx);
             let client = rustbgpd_bmp::BmpClient::new(
                 rustbgpd_bmp::BmpClientConfig {
+                    collector_id,
                     collector_addr: addr,
                     reconnect_interval: collector.reconnect_interval,
                 },
                 msg_rx,
                 sys_name.clone(),
                 sys_descr.clone(),
+                Some(bmp_control_tx.clone()),
             );
             info!(collector = %addr, "spawning BMP client");
             tokio::spawn(client.run());
         }
 
-        let mgr = rustbgpd_bmp::BmpManager::new(bmp_event_rx, collector_txs);
+        let mgr = rustbgpd_bmp::BmpManager::new(bmp_event_rx, bmp_control_rx, collector_txs);
         tokio::spawn(mgr.run());
 
         Some(bmp_event_tx)

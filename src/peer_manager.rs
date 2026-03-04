@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use rustbgpd_api::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
-use rustbgpd_bmp::BmpEvent;
+use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 const DEFAULT_HOLD_TIME: u16 = 90;
 const DEFAULT_CONNECT_RETRY_SECS: u32 = 30;
 const BGP_PORT: u16 = 179;
+const BMP_STATS_INTERVAL_SECS: u64 = 60;
 
 struct ManagedPeer {
     handle: PeerHandle,
@@ -461,8 +462,73 @@ impl PeerManager {
         }
     }
 
+    fn bmp_peer_info(
+        &self,
+        peer_addr: IpAddr,
+        remote_asn: u32,
+        remote_router_id: Option<Ipv4Addr>,
+        four_octet_as: Option<bool>,
+    ) -> BmpPeerInfo {
+        BmpPeerInfo {
+            peer_addr,
+            peer_asn: remote_asn,
+            peer_bgp_id: remote_router_id.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            peer_type: BmpPeerType::Global,
+            is_ipv6: peer_addr.is_ipv6(),
+            is_post_policy: false,
+            is_as4: four_octet_as.unwrap_or(true),
+            timestamp: std::time::SystemTime::now(),
+        }
+    }
+
+    async fn emit_periodic_bmp_stats(&self) {
+        let Some(ref bmp_tx) = self.bmp_tx else {
+            return;
+        };
+
+        for (&peer_addr, managed) in &self.peers {
+            let Some(state) = managed.handle.query_state().await else {
+                continue;
+            };
+            if state.fsm_state != SessionState::Established {
+                continue;
+            }
+
+            let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
+            let event = BmpEvent::StatsReport {
+                peer_info: self.bmp_peer_info(
+                    peer_addr,
+                    managed.remote_asn,
+                    state.remote_router_id,
+                    state.four_octet_as,
+                ),
+                adj_rib_in_routes: prefix_count,
+            };
+
+            if let Err(e) = bmp_tx.try_send(event) {
+                warn!(
+                    peer = %peer_addr,
+                    error = %e,
+                    "BMP event channel full or closed, dropping periodic stats report"
+                );
+            }
+        }
+    }
+
     /// Run the `PeerManager` event loop until shutdown or channel close.
     pub async fn run(mut self) {
+        let mut bmp_stats_interval = self.bmp_tx.as_ref().map(|_| {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(BMP_STATS_INTERVAL_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval
+        });
+        // Consume the immediate first tick so the first report is emitted
+        // after one full interval.
+        if let Some(interval) = bmp_stats_interval.as_mut() {
+            interval.tick().await;
+        }
+
         loop {
             tokio::select! {
                 cmd = self.rx.recv() => {
@@ -520,6 +586,15 @@ impl PeerManager {
                     if let Some(notification) = notification {
                         self.handle_session_notification(notification).await;
                     }
+                }
+                () = async {
+                    if let Some(interval) = bmp_stats_interval.as_mut() {
+                        interval.tick().await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    self.emit_periodic_bmp_stats().await;
                 }
             }
         }

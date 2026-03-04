@@ -185,7 +185,7 @@ The primary target deployment. Weighted toward what matters:
 - **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
-- **BMP exporter:** RFC 7854 streaming to collectors now implemented; collector reconnect replay deferred
+- **BMP exporter:** RFC 7854 streaming to collectors implemented, including collector reconnect replay and periodic Stats Report export
 
 ### General-Purpose BGP Speaker (~55% parity)
 

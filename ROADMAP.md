@@ -90,14 +90,14 @@ Items identified during review that are not correctness bugs but improve strictn
 
 - [ ] **Unknown FlowSpec component forward compatibility** — component types >13 currently cause hard decode errors; should skip unknown types to allow future RFC extensions without breaking interop
 - [x] **FlowSpec fuzz target** — `decode_flowspec` fuzz target added for direct FlowSpec NLRI decoding coverage
-- [ ] **Policy engine test modularization** — 70 tests now exist in `engine.rs`; split into focused test modules/files by match/action family to improve maintainability and reviewability
+- [x] **Policy engine test modularization** — extracted the `merge_from` + `PolicyChain` test cluster into `engine/tests/chain.rs` to reduce monolithic test sprawl while preserving behavior
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
 - [x] **RTR persistent session + Serial Notify** — RTR client now keeps the TCP session open after EndOfData, honors Serial Notify for immediate updates, and uses refresh_interval as a fallback serial-poll timer (RFC 8210 §8)
 - [x] **RTR expire_interval enforcement** — config and server-advertised expire timers are now enforced; VRPs are cleared if no fresh EndOfData arrives before the expiry window
 - [ ] **ERR metrics** — no gauge for active enhanced route refresh windows or pending refresh-stale route count; would improve operational visibility during soft resets
 - [ ] **Inbound BoRR/EoRR retry on channel-full** — inbound BoRR/EoRR markers are silently dropped (with warning) when the RIB channel is full; unlike outbound responses which have `pending_refresh` retry, inbound markers have no recovery path
-- [ ] **BMP collector reconnect replay** — on reconnect, collectors should receive Peer Up for all currently Established peers; currently only new events after reconnect are sent
-- [ ] **BMP periodic Stats Report** — Stats Report encoding is implemented in codec but periodic sending from transport metrics is not wired
+- [x] **BMP collector reconnect replay** — `BmpManager` caches live Peer Up state and replays it only to the collector that just reconnected
+- [x] **BMP periodic Stats Report** — `PeerManager` now emits per-peer periodic BMP Stats Report messages (type 7: Adj-RIB-In routes) every 60 seconds
 - [ ] **BMP Termination on daemon shutdown** — client sends Termination on its own shutdown, but coordinated daemon shutdown doesn't explicitly trigger BMP Termination before TCP close
 
 ### P1 — Core Protocol Gaps

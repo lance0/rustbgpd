@@ -14,4 +14,6 @@ pub mod types;
 
 pub use client::BmpClient;
 pub use manager::BmpManager;
-pub use types::{BmpClientConfig, BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason};
+pub use types::{
+    BmpClientConfig, BmpControlEvent, BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason,
+};

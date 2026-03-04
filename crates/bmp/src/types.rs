@@ -28,6 +28,27 @@ pub enum BmpEvent {
         /// Raw UPDATE PDU bytes (including 19-byte BGP header).
         update_pdu: Bytes,
     },
+    /// Periodic per-peer statistics report.
+    StatsReport {
+        peer_info: BmpPeerInfo,
+        /// RFC 7854 type 7: routes in Adj-RIB-In.
+        adj_rib_in_routes: u64,
+    },
+}
+
+/// Control-plane events sent from BMP clients to the BMP manager.
+#[derive(Debug, Clone, Copy)]
+pub enum BmpControlEvent {
+    /// A collector connected and successfully completed BMP Initiation.
+    CollectorConnected {
+        collector_id: usize,
+        collector_addr: SocketAddr,
+    },
+    /// A collector disconnected after previously being connected.
+    CollectorDisconnected {
+        collector_id: usize,
+        collector_addr: SocketAddr,
+    },
 }
 
 /// Information about a monitored peer, used to build the BMP per-peer header.
@@ -70,6 +91,8 @@ pub enum PeerDownReason {
 /// Configuration for a single BMP collector.
 #[derive(Debug, Clone)]
 pub struct BmpClientConfig {
+    /// Stable collector index assigned at startup.
+    pub collector_id: usize,
     pub collector_addr: SocketAddr,
     /// Seconds between reconnection attempts (default: 30).
     pub reconnect_interval: u64,

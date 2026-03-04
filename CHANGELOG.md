@@ -73,6 +73,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Route Monitoring and Peer Up messages. TOML config: `[bmp]` section with
   `[[bmp.collectors]]`. Near-zero overhead when BMP is not configured (raw
   frame capture uses `Bytes` refcount clones, not data copies). (ADR-0041)
+- **Periodic BMP Stats Report.** `PeerManager` now emits periodic per-peer BMP
+  Statistics Report messages every 60 seconds (RFC 7854 type 7: routes in
+  Adj-RIB-In), using current `prefix_count` from transport session state.
 - **CLI tool (`rustbgpctl`).** New `crates/cli/` crate providing a command-line
   interface wrapping the gRPC API. Client-only proto codegen — no dependency on
   internal crates. Commands: `global`, `neighbor` (list/show/add/delete/enable/
@@ -88,6 +91,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sendable_families`, silently preventing IPv6 route advertisement to
   `route_server_client` peers that preserve the original next-hop. Fixed by
   including route-server clients in the filter condition.
+- **BMP collector reconnect replay.** `BmpManager` now caches live Peer Up
+  state and replays it only to the collector that just reconnected, instead of
+  requiring fresh session transitions to rebuild collector state.
+- **Policy engine test modularization.** Extracted the `RouteModifications::merge_from`
+  and `PolicyChain` test cluster into `crates/policy/src/engine/tests/chain.rs`
+  to reduce monolithic test sprawl in `engine.rs`.
 - **Export policy IPv6 next-hop discarded on MP path.** When export policy set
   `NextHopAction::Specific(IpAddr::V6(addr))`, the IPv6 MP_REACH send path
   detected the policy but used `route.next_hop` instead of extracting the

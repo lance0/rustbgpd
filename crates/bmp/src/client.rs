@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::codec;
-use crate::types::BmpClientConfig;
+use crate::types::{BmpClientConfig, BmpControlEvent};
 
 /// Per-collector BMP client.
 ///
@@ -25,6 +25,7 @@ pub struct BmpClient {
     rx: mpsc::Receiver<Bytes>,
     sys_name: String,
     sys_descr: String,
+    control_tx: Option<mpsc::Sender<BmpControlEvent>>,
 }
 
 impl BmpClient {
@@ -34,12 +35,14 @@ impl BmpClient {
         rx: mpsc::Receiver<Bytes>,
         sys_name: String,
         sys_descr: String,
+        control_tx: Option<mpsc::Sender<BmpControlEvent>>,
     ) -> Self {
         Self {
             config,
             rx,
             sys_name,
             sys_descr,
+            control_tx,
         }
     }
 
@@ -47,6 +50,7 @@ impl BmpClient {
     /// Returns when the mpsc channel is closed (daemon shutdown).
     pub async fn run(mut self) {
         let addr = self.config.collector_addr;
+        let id = self.config.collector_id;
         let max_backoff = Duration::from_secs(self.config.reconnect_interval.max(1));
 
         loop {
@@ -74,6 +78,15 @@ impl BmpClient {
                 continue; // reconnect
             }
 
+            // Collector is now ready to receive BMP messages.
+            if let Some(ref control_tx) = self.control_tx {
+                let _ = control_tx
+                    .try_send(BmpControlEvent::CollectorConnected {
+                        collector_id: id,
+                        collector_addr: addr,
+                    });
+            }
+
             // Stream messages until error or channel close
             loop {
                 let Some(msg) = self.rx.recv().await else {
@@ -87,9 +100,70 @@ impl BmpClient {
 
                 if let Err(e) = stream.write_all(&msg).await {
                     warn!(collector = %addr, error = %e, "BMP write failed, reconnecting");
+                    if let Some(ref control_tx) = self.control_tx {
+                        let _ = control_tx
+                            .try_send(BmpControlEvent::CollectorDisconnected {
+                                collector_id: id,
+                                collector_addr: addr,
+                            });
+                    }
                     break; // reconnect
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn emits_collector_connected_after_initiation() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (_msg_tx, msg_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 1,
+            },
+            msg_rx,
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            Some(control_tx),
+        );
+        let handle = tokio::spawn(client.run());
+
+        // Accept TCP connection and read a little data so initiation write path runs.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 64];
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(2), control_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev {
+            BmpControlEvent::CollectorConnected {
+                collector_id,
+                collector_addr,
+            } => {
+                assert_eq!(collector_id, 7);
+                assert_eq!(collector_addr, addr);
+            }
+            other => panic!("expected CollectorConnected, got {other:?}"),
+        }
+
+        handle.abort();
     }
 }

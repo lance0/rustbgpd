@@ -89,6 +89,9 @@ reconnect_interval = 30
   no message-data copies)
 - Fan-out architecture supports multiple collectors with independent
   reconnect
+- Collector reconnect replay for currently Established peers (targeted to the
+  collector that reconnected)
+- Periodic per-peer Stats Report export (type 7, Adj-RIB-In route count)
 
 ### Negative
 
@@ -103,7 +106,5 @@ reconnect_interval = 30
 - Adj-RIB-Out monitoring (RFC 7854 §5, flag `O=1`)
 - Route Mirroring (Type 6)
 - Post-policy Route Monitoring
-- Collector reconnect replay (Peer Up for all Established peers)
 - gRPC BMP management (runtime add/remove collectors)
 - TLS for collector connections
-- Periodic Stats Report sending from transport metrics
