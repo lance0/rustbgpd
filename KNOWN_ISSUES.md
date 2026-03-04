@@ -44,10 +44,12 @@ resolved.
   unicast is implicitly added when not explicitly negotiated via
   MultiProtocol capability. A `disable_ipv4_unicast` config option
   would be needed for true IPv6-only operation — future work.
-- **Receiving speaker only (graceful restart).** RFC 4724 is implemented
-  as receiving speaker only — we preserve a restarting peer's routes.
-  Restarting speaker mode (advertising `R=1`, preserving our own forwarding
-  state during restart) requires FIB integration and is deferred.
+- **Graceful Restart: no forwarding-state preservation.** RFC 4724 is
+  implemented as helper (receiving speaker) plus minimal restarting speaker
+  (`R=1` after coordinated restart via marker file, ADR-0040). However,
+  `forwarding_preserved` is always false because rustbgpd does not own or
+  verify the FIB. Full forwarding-state preservation is deferred until FIB
+  integration exists.
 - **Large community duplicates preserved.** Duplicate large communities
   in received UPDATEs are stored and re-advertised unchanged. Strict
   RFC 8092 normalization (dedup on receipt and before encode) is deferred
@@ -77,18 +79,6 @@ resolved.
   connections use plain TCP. TCP-AO (RFC 5925) is not supported for
   either BGP or RTR sessions. Use network-level access controls or
   SSH tunnels for RTR transport security.
-- **RTR client disconnects between refreshes.** The RTR client closes
-  the TCP connection after receiving EndOfData and reconnects after
-  `refresh_interval`. This means the cache server cannot push Serial
-  Notify events between polls, delaying cache-change visibility by up
-  to `refresh_interval`. Periodic Serial Query on reconnect still
-  ensures correctness. A persistent-session design is tracked as a
-  hardening item.
-- **RTR expire_interval is not enforced.** The `expire_interval` config
-  field and the server-advertised expire value in EndOfData are accepted
-  but not acted on. VRPs are only cleared on connection failure
-  (`ServerDown`), not on expiry timeout. A server that stays connected
-  but stops sending fresh data will retain stale VRPs indefinitely.
 - **Non-negotiated Add-Path NLRI is not detected.** If a peer violates
   negotiation and sends Add-Path-encoded NLRI for a family where Add-Path
   was not negotiated, the wire format is ambiguous — the 4-byte path ID

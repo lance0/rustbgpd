@@ -125,7 +125,7 @@ Last updated: 2026-03-04
 | TCP MD5 (RFC 2385) | Yes | Yes | |
 | TCP-AO (RFC 5925) | No | No | Neither; on rustbgpd roadmap |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
-| RPKI/RTR (RFC 6811/8210) | Yes | Partial | Poll-based RTR client; Serial Notify + expiry deferred |
+| RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
 | Private AS removal | Yes | No | |
 
 ## Operations
@@ -137,7 +137,7 @@ Last updated: 2026-03-04
 | Config persistence | No | No | On rustbgpd roadmap |
 | Prefix limits | Yes | Yes | Cease/1 enforcement |
 | Embeddable library | Yes (Go) | No | Wire crate is standalone |
-| CLI tool | Yes (gobgp) | No | grpcurl works |
+| CLI tool | Yes (gobgp) | Yes | `rustbgpctl` wraps gRPC API |
 | Docker image | Yes | Yes | |
 | Route server client mode | Yes | Partial | Transparent eBGP unicast mode via `route_server_client`; FlowSpec transparency deferred |
 | Fuzz testing | No | Yes | Wire decoder fuzzing |
@@ -170,7 +170,7 @@ Last updated: 2026-03-04
 | Policy engine | 18 | 13 | ~72% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
 | Monitoring | 5 | 3 | 60% |
-| Security | 4 | 2.5 | ~63% |
+| Security | 4 | 3 | 75% |
 | Best-path steps | 11 | 10.5 | ~95% |
 
 ## Weighted Parity Estimates
@@ -192,7 +192,7 @@ Competing head-to-head with GoBGP for all use cases:
 
 - Missing address families hurt badly (EVPN, VPN)
 - No confederation support limits SP deployments
-- No CLI tool limits adoption by network engineers
+- `rustbgpctl` ships but has fewer subcommands than `gobgp`
 - gRPC API covers ~36% of GoBGP's RPC surface
 
 ## Advantages Over GoBGP
@@ -206,11 +206,11 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Top 5 Gaps for Maximum Parity Gain
 
-1. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
-2. **BMP exporter (RFC 7854)** — standard route monitoring export for visibility and external collectors
-3. **Long-Lived GR (RFC 9494)** — per-AFI stale timers; important for large-scale iBGP
-4. **Confederation (RFC 5065)** — required for service provider deployments
-5. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
+1. **BMP exporter (RFC 7854)** — standard route monitoring export for visibility and external collectors
+2. **Long-Lived GR (RFC 9494)** — per-AFI stale timers; important for large-scale iBGP
+3. **Confederation (RFC 5065)** — required for service provider deployments
+4. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
+5. **Config persistence** — write gRPC mutations back to TOML so they survive restarts
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 
@@ -221,6 +221,6 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 | HIGH | manager.rs at ~7,700 lines | Hardest file to review; split into distribution.rs, flowspec.rs, revalidation.rs, graceful_restart.rs |
 | HIGH | Policy engine has 0 unit tests | 57 tests exist but all indirect through engine.rs; needs dedicated test module |
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
-| MEDIUM | RTR expire_interval not enforced | Stale VRPs persist indefinitely if cache goes silent without disconnecting |
+| ~~MEDIUM~~ | ~~RTR expire_interval not enforced~~ | Done — stale VRPs now expire and are withdrawn if no fresh EndOfData arrives before the effective expiry timer |
 | MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |
-| LOW | RTR client polling-only | No Serial Notify; deferred by design |
+| ~~LOW~~ | ~~RTR client polling-only~~ | Done — RTR sessions stay connected and honor Serial Notify |

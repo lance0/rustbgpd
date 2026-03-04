@@ -44,8 +44,9 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Enhanced Route Refresh** -- RFC 7313 `BoRR` / `EoRR` markers with inbound family replacement semantics for `SoftResetIn`
 - **Add-Path** -- RFC 7911 dual-stack receive + multi-path send (route server mode) for IPv4 and IPv6 unicast
 - **Transparent route server mode** -- config-driven eBGP unicast transparency preserves original next hop and skips automatic local-AS prepend for IX route-server clients
-- **RPKI origin validation** -- RFC 6811: poll-based RTR client (RFC 8210) connects to RPKI validators, stamps routes Valid/Invalid/NotFound, integrates into best-path and policy
-- **850 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **RPKI origin validation** -- RFC 6811: persistent RTR client (RFC 8210) keeps sessions open, honors `SerialNotify`, enforces expiry, stamps routes Valid/Invalid/NotFound, and integrates into best-path and policy
+- **CLI tool** -- `rustbgpctl` wraps the gRPC API with human-readable tables and `--json` structured output
+- **877 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -53,7 +54,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 
 - **Rust 1.88+** (edition 2024)
 - **protobuf-compiler** (`apt-get install protobuf-compiler` on Debian/Ubuntu)
-- **grpcurl** (optional, for verifying the gRPC API)
+- **grpcurl** (optional, for verifying the gRPC API directly)
 
 ### Build
 
@@ -104,6 +105,12 @@ The daemon starts the BGP sessions, gRPC server, and Prometheus endpoint. Ctrl+C
 ### Verify
 
 ```bash
+# Using rustbgpctl (recommended)
+rustbgpctl health
+rustbgpctl neighbor
+rustbgpctl rib
+
+# Or using grpcurl directly
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.NeighborService/ListNeighbors
 ```
@@ -126,7 +133,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
                +-----+       +-----------+
 ```
 
-Eight crates with strict dependency rules:
+Nine crates with strict dependency rules:
 
 | Crate | Description |
 |-------|-------------|
@@ -138,6 +145,7 @@ Eight crates with strict dependency rules:
 | `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
 | `rustbgpd-api` | gRPC server (tonic). Five services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
+| `rustbgpctl` | CLI tool. Client-only gRPC stubs, no internal crate deps. |
 
 ### How data flows
 
@@ -262,7 +270,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 850 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 877 tests pass. P0+P1+P2 complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -279,7 +287,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | **Large communities** | **post-v0.3.0** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |
 | **Route Reflector** | **post-v0.3.0** | **RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST** |
 
-Next: config persistence, BMP exporter. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: config persistence, BMP exporter, MRT dump. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

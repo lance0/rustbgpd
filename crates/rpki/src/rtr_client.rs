@@ -9,6 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Instant as TokioInstant;
 use tracing::{debug, info, warn};
 
 use crate::rtr_codec::{RtrDecodeError, RtrPdu};
@@ -17,8 +18,14 @@ use crate::vrp::VrpEntry;
 /// Maximum read buffer size (256 KiB).
 const MAX_READ_BUF: usize = 256 * 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryKind {
+    Reset,
+    Serial,
+}
+
 /// Update messages sent from an RTR client to the VRP manager.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum VrpUpdate {
     /// Full table replacement from a Reset Query response.
     FullTable {
@@ -55,6 +62,9 @@ pub struct RtrClient {
     vrp_tx: mpsc::Sender<VrpUpdate>,
     refresh_interval: Duration,
     retry_interval: Duration,
+    expire_interval: Duration,
+    last_end_of_data_at: Option<TokioInstant>,
+    data_expires_at: Option<TokioInstant>,
 }
 
 impl RtrClient {
@@ -64,6 +74,9 @@ impl RtrClient {
         Self {
             refresh_interval: Duration::from_secs(config.refresh_interval),
             retry_interval: Duration::from_secs(config.retry_interval),
+            expire_interval: Duration::from_secs(config.expire_interval),
+            last_end_of_data_at: None,
+            data_expires_at: None,
             vrp_tx,
             config,
             session_id: None,
@@ -71,18 +84,33 @@ impl RtrClient {
         }
     }
 
-    /// Main event loop — connects, fetches VRPs, sleeps, repeats.
+    /// Main event loop — connects, keeps the RTR session open, and reconnects
+    /// on failure.
     pub async fn run(mut self) {
         loop {
-            match self.connect_and_fetch().await {
-                Ok(()) => {
-                    // Successful cycle — wait for refresh_interval before next Serial Query
-                    debug!(
-                        server = %self.config.server_addr,
-                        interval = ?self.refresh_interval,
-                        "RTR refresh cycle complete, sleeping"
-                    );
-                    tokio::time::sleep(self.refresh_interval).await;
+            match TcpStream::connect(self.config.server_addr).await {
+                Ok(stream) => {
+                    info!(server = %self.config.server_addr, "RTR connected");
+                    if let Err(e) = self.run_session(stream).await {
+                        warn!(
+                            server = %self.config.server_addr,
+                            error = %e,
+                            "RTR session ended"
+                        );
+                        let _ = self
+                            .vrp_tx
+                            .send(VrpUpdate::ServerDown {
+                                server: self.config.server_addr,
+                            })
+                            .await;
+                        self.last_end_of_data_at = None;
+                        self.data_expires_at = None;
+                        if matches!(e, RtrError::Expired) {
+                            self.session_id = None;
+                            self.serial = None;
+                        }
+                        tokio::time::sleep(self.retry_interval).await;
+                    }
                 }
                 Err(e) => {
                     warn!(
@@ -96,208 +124,350 @@ impl RtrClient {
                             server: self.config.server_addr,
                         })
                         .await;
+                    self.last_end_of_data_at = None;
+                    self.data_expires_at = None;
                     tokio::time::sleep(self.retry_interval).await;
                 }
             }
         }
     }
 
-    /// Single connect-fetch cycle.
-    #[expect(clippy::too_many_lines)]
-    async fn connect_and_fetch(&mut self) -> Result<(), RtrError> {
-        let mut stream = TcpStream::connect(self.config.server_addr)
-            .await
-            .map_err(RtrError::Io)?;
-
-        info!(server = %self.config.server_addr, "RTR connected");
-
-        // Send initial query
-        let query = if let (Some(session_id), Some(serial)) = (self.session_id, self.serial) {
-            RtrPdu::SerialQuery { session_id, serial }
+    fn current_query_kind(&self) -> QueryKind {
+        if self.session_id.is_some() && self.serial.is_some() {
+            QueryKind::Serial
         } else {
-            RtrPdu::ResetQuery
-        };
+            QueryKind::Reset
+        }
+    }
 
+    fn build_query_pdu(&self, query: QueryKind) -> RtrPdu {
+        match (query, self.session_id, self.serial) {
+            (QueryKind::Serial, Some(session_id), Some(serial)) => {
+                RtrPdu::SerialQuery { session_id, serial }
+            }
+            _ => RtrPdu::ResetQuery,
+        }
+    }
+
+    async fn send_query(&self, stream: &mut TcpStream, query: QueryKind) -> Result<bool, RtrError> {
+        let query_pdu = self.build_query_pdu(query);
+        let is_reset = matches!(query_pdu, RtrPdu::ResetQuery);
         let mut send_buf = Vec::new();
-        query.encode(&mut send_buf);
+        query_pdu.encode(&mut send_buf);
         stream.write_all(&send_buf).await.map_err(RtrError::Io)?;
+        Ok(is_reset)
+    }
 
-        // Read response
+    async fn run_session(&mut self, mut stream: TcpStream) -> Result<(), RtrError> {
         let mut read_buf = vec![0u8; 8192];
         let mut parse_buf = Vec::new();
-        let mut collecting = false;
-        let mut is_reset = !matches!(query, RtrPdu::SerialQuery { .. });
-        let mut announced = Vec::new();
-        let mut withdrawn = Vec::new();
+        let mut next_query = self.current_query_kind();
 
         loop {
-            let n = stream.read(&mut read_buf).await.map_err(RtrError::Io)?;
-            if n == 0 {
-                return Err(RtrError::ConnectionClosed);
+            self.fetch_until_end_of_data(&mut stream, &mut read_buf, &mut parse_buf, next_query)
+                .await?;
+            next_query = self
+                .wait_for_next_query(&mut stream, &mut read_buf, &mut parse_buf)
+                .await?;
+        }
+    }
+
+    async fn handle_idle_pdus(
+        &mut self,
+        parse_buf: &mut Vec<u8>,
+    ) -> Result<Option<QueryKind>, RtrError> {
+        let mut next_query = None;
+
+        loop {
+            if parse_buf.len() < 8 {
+                break;
             }
-            parse_buf.extend_from_slice(&read_buf[..n]);
-
-            if parse_buf.len() > MAX_READ_BUF {
-                return Err(RtrError::BufferOverflow);
+            let Some(pdu_len) = RtrPdu::peek_length(parse_buf) else {
+                break;
+            };
+            if parse_buf.len() < pdu_len as usize {
+                break;
             }
 
-            // Parse as many PDUs as available
-            loop {
-                if parse_buf.len() < 8 {
-                    break;
-                }
-                let Some(pdu_len) = RtrPdu::peek_length(&parse_buf) else {
-                    break;
-                };
-                if parse_buf.len() < pdu_len as usize {
-                    break;
-                }
-                let (pdu, consumed) = RtrPdu::decode(&parse_buf).map_err(RtrError::Decode)?;
-                parse_buf.drain(..consumed);
+            let (pdu, consumed) = RtrPdu::decode(parse_buf).map_err(RtrError::Decode)?;
+            parse_buf.drain(..consumed);
 
-                match pdu {
-                    RtrPdu::CacheResponse { session_id } => {
-                        self.session_id = Some(session_id);
-                        collecting = true;
-                        announced.clear();
-                        withdrawn.clear();
-                    }
-                    RtrPdu::Ipv4Prefix {
-                        flags,
-                        prefix_len,
-                        max_len,
-                        prefix,
-                        asn,
-                    } if collecting => {
-                        let entry = VrpEntry {
-                            prefix: std::net::IpAddr::V4(prefix),
-                            prefix_len,
-                            max_len,
-                            origin_asn: asn,
-                        };
-                        if flags & 1 == 1 {
-                            announced.push(entry);
-                        } else {
-                            withdrawn.push(entry);
-                        }
-                    }
-                    RtrPdu::Ipv6Prefix {
-                        flags,
-                        prefix_len,
-                        max_len,
-                        prefix,
-                        asn,
-                    } if collecting => {
-                        let entry = VrpEntry {
-                            prefix: std::net::IpAddr::V6(prefix),
-                            prefix_len,
-                            max_len,
-                            origin_asn: asn,
-                        };
-                        if flags & 1 == 1 {
-                            announced.push(entry);
-                        } else {
-                            withdrawn.push(entry);
-                        }
-                    }
-                    RtrPdu::EndOfData {
+            match pdu {
+                RtrPdu::SerialNotify { session_id, serial } => {
+                    debug!(
+                        server = %self.config.server_addr,
                         session_id,
                         serial,
-                        refresh,
-                        retry,
-                        expire: _,
-                    } => {
-                        self.session_id = Some(session_id);
-                        self.serial = Some(serial);
-                        // Update timers from server hints
-                        if refresh > 0 {
-                            self.refresh_interval = Duration::from_secs(u64::from(refresh));
-                        }
-                        if retry > 0 {
-                            self.retry_interval = Duration::from_secs(u64::from(retry));
-                        }
+                        "RTR Serial Notify received"
+                    );
+                    let query = if self.session_id == Some(session_id) && self.serial.is_some() {
+                        QueryKind::Serial
+                    } else {
+                        QueryKind::Reset
+                    };
+                    if !matches!(next_query, Some(QueryKind::Reset)) {
+                        next_query = Some(query);
+                    }
+                }
+                RtrPdu::CacheReset => {
+                    info!(
+                        server = %self.config.server_addr,
+                        "RTR cache reset received while idle, sending Reset Query"
+                    );
+                    let _ = self
+                        .vrp_tx
+                        .send(VrpUpdate::FullTable {
+                            server: self.config.server_addr,
+                            entries: vec![],
+                        })
+                        .await;
+                    self.session_id = None;
+                    self.serial = None;
+                    self.last_end_of_data_at = None;
+                    self.data_expires_at = None;
+                    next_query = Some(QueryKind::Reset);
+                }
+                RtrPdu::ErrorReport { code, text, .. } => {
+                    warn!(
+                        server = %self.config.server_addr,
+                        code,
+                        text = %text,
+                        "RTR error report received"
+                    );
+                    return Err(RtrError::ServerError { code, text });
+                }
+                _ => {
+                    debug!(
+                        server = %self.config.server_addr,
+                        ?pdu,
+                        "unexpected RTR PDU while idle (ignored)"
+                    );
+                }
+            }
+        }
 
-                        let update = if is_reset {
+        Ok(next_query)
+    }
+
+    async fn wait_for_next_query(
+        &mut self,
+        stream: &mut TcpStream,
+        read_buf: &mut [u8],
+        parse_buf: &mut Vec<u8>,
+    ) -> Result<QueryKind, RtrError> {
+        let refresh_deadline = TokioInstant::now() + self.refresh_interval;
+        let mut refresh_sleep = Box::pin(tokio::time::sleep_until(refresh_deadline));
+        let has_expiry = self.data_expires_at.is_some();
+        let fallback_expiry = refresh_deadline + Duration::from_secs(365 * 24 * 60 * 60);
+        let mut expire_sleep = Box::pin(tokio::time::sleep_until(
+            self.data_expires_at.unwrap_or(fallback_expiry),
+        ));
+
+        loop {
+            if let Some(query) = self.handle_idle_pdus(parse_buf).await? {
+                return Ok(query);
+            }
+
+            tokio::select! {
+                read = stream.read(read_buf) => {
+                    let n = read.map_err(RtrError::Io)?;
+                    if n == 0 {
+                        return Err(RtrError::ConnectionClosed);
+                    }
+                    parse_buf.extend_from_slice(&read_buf[..n]);
+                    if parse_buf.len() > MAX_READ_BUF {
+                        return Err(RtrError::BufferOverflow);
+                    }
+                }
+                () = refresh_sleep.as_mut() => {
+                    debug!(
+                        server = %self.config.server_addr,
+                        interval = ?self.refresh_interval,
+                        "RTR refresh timer fired, requesting update"
+                    );
+                    return Ok(self.current_query_kind());
+                }
+                () = expire_sleep.as_mut(), if has_expiry => {
+                    return Err(RtrError::Expired);
+                }
+            }
+        }
+    }
+
+    /// Fetch VRPs until `EndOfData`, then publish the resulting update.
+    #[expect(clippy::too_many_lines)]
+    async fn fetch_until_end_of_data(
+        &mut self,
+        stream: &mut TcpStream,
+        read_buf: &mut [u8],
+        parse_buf: &mut Vec<u8>,
+        mut query: QueryKind,
+    ) -> Result<(), RtrError> {
+        'fetch: loop {
+            let mut collecting = false;
+            let mut announced = Vec::new();
+            let mut withdrawn = Vec::new();
+            let is_reset = self.send_query(stream, query).await?;
+
+            loop {
+                while parse_buf.len() >= 8 {
+                    let Some(pdu_len) = RtrPdu::peek_length(parse_buf) else {
+                        break;
+                    };
+                    if parse_buf.len() < pdu_len as usize {
+                        break;
+                    }
+
+                    let (pdu, consumed) = RtrPdu::decode(parse_buf).map_err(RtrError::Decode)?;
+                    parse_buf.drain(..consumed);
+
+                    match pdu {
+                        RtrPdu::CacheResponse { session_id } => {
+                            self.session_id = Some(session_id);
+                            collecting = true;
+                            announced.clear();
+                            withdrawn.clear();
+                        }
+                        RtrPdu::Ipv4Prefix {
+                            flags,
+                            prefix_len,
+                            max_len,
+                            prefix,
+                            asn,
+                        } if collecting => {
+                            let entry = VrpEntry {
+                                prefix: std::net::IpAddr::V4(prefix),
+                                prefix_len,
+                                max_len,
+                                origin_asn: asn,
+                            };
+                            if flags & 1 == 1 {
+                                announced.push(entry);
+                            } else {
+                                withdrawn.push(entry);
+                            }
+                        }
+                        RtrPdu::Ipv6Prefix {
+                            flags,
+                            prefix_len,
+                            max_len,
+                            prefix,
+                            asn,
+                        } if collecting => {
+                            let entry = VrpEntry {
+                                prefix: std::net::IpAddr::V6(prefix),
+                                prefix_len,
+                                max_len,
+                                origin_asn: asn,
+                            };
+                            if flags & 1 == 1 {
+                                announced.push(entry);
+                            } else {
+                                withdrawn.push(entry);
+                            }
+                        }
+                        RtrPdu::EndOfData {
+                            session_id,
+                            serial,
+                            refresh,
+                            retry,
+                            expire,
+                        } => {
+                            self.session_id = Some(session_id);
+                            self.serial = Some(serial);
+                            if refresh > 0 {
+                                self.refresh_interval = Duration::from_secs(u64::from(refresh));
+                            }
+                            if retry > 0 {
+                                self.retry_interval = Duration::from_secs(u64::from(retry));
+                            }
+                            if expire > 0 {
+                                self.expire_interval = Duration::from_secs(u64::from(expire));
+                            }
+                            let now = TokioInstant::now();
+                            self.last_end_of_data_at = Some(now);
+                            self.data_expires_at = Some(now + self.expire_interval);
+
+                            let update = if is_reset {
+                                info!(
+                                    server = %self.config.server_addr,
+                                    serial,
+                                    entries = announced.len(),
+                                    "RTR full table received"
+                                );
+                                VrpUpdate::FullTable {
+                                    server: self.config.server_addr,
+                                    entries: std::mem::take(&mut announced),
+                                }
+                            } else {
+                                info!(
+                                    server = %self.config.server_addr,
+                                    serial,
+                                    announced = announced.len(),
+                                    withdrawn = withdrawn.len(),
+                                    "RTR incremental update received"
+                                );
+                                VrpUpdate::IncrementalUpdate {
+                                    server: self.config.server_addr,
+                                    announced: std::mem::take(&mut announced),
+                                    withdrawn: std::mem::take(&mut withdrawn),
+                                }
+                            };
+
+                            let _ = self.vrp_tx.send(update).await;
+                            return Ok(());
+                        }
+                        RtrPdu::CacheReset => {
                             info!(
                                 server = %self.config.server_addr,
-                                serial,
-                                entries = announced.len(),
-                                "RTR full table received"
+                                "RTR cache reset received, sending Reset Query"
                             );
-                            VrpUpdate::FullTable {
-                                server: self.config.server_addr,
-                                entries: std::mem::take(&mut announced),
-                            }
-                        } else {
-                            info!(
+                            let _ = self
+                                .vrp_tx
+                                .send(VrpUpdate::FullTable {
+                                    server: self.config.server_addr,
+                                    entries: vec![],
+                                })
+                                .await;
+                            self.session_id = None;
+                            self.serial = None;
+                            self.last_end_of_data_at = None;
+                            self.data_expires_at = None;
+                            query = QueryKind::Reset;
+                            continue 'fetch;
+                        }
+                        RtrPdu::SerialNotify { .. } => {
+                            debug!(
                                 server = %self.config.server_addr,
-                                serial,
-                                announced = announced.len(),
-                                withdrawn = withdrawn.len(),
-                                "RTR incremental update received"
+                                "RTR Serial Notify received during fetch (ignored)"
                             );
-                            VrpUpdate::IncrementalUpdate {
-                                server: self.config.server_addr,
-                                announced: std::mem::take(&mut announced),
-                                withdrawn: std::mem::take(&mut withdrawn),
-                            }
-                        };
+                        }
+                        RtrPdu::ErrorReport { code, text, .. } => {
+                            warn!(
+                                server = %self.config.server_addr,
+                                code,
+                                text = %text,
+                                "RTR error report received"
+                            );
+                            return Err(RtrError::ServerError { code, text });
+                        }
+                        _ => {
+                            debug!(
+                                server = %self.config.server_addr,
+                                ?pdu,
+                                "unexpected RTR PDU during fetch (ignored)"
+                            );
+                        }
+                    }
+                }
 
-                        let _ = self.vrp_tx.send(update).await;
-                        return Ok(());
-                    }
-                    RtrPdu::CacheReset => {
-                        // Server says do a full reset
-                        info!(
-                            server = %self.config.server_addr,
-                            "RTR cache reset received, sending Reset Query"
-                        );
-                        // A Cache Reset invalidates all data previously learned
-                        // from this server. Clear its contribution immediately
-                        // so stale VRPs are not retained until the replacement
-                        // full table arrives.
-                        let _ = self
-                            .vrp_tx
-                            .send(VrpUpdate::FullTable {
-                                server: self.config.server_addr,
-                                entries: vec![],
-                            })
-                            .await;
-                        self.session_id = None;
-                        self.serial = None;
-                        is_reset = true;
-                        collecting = false;
-                        announced.clear();
-                        withdrawn.clear();
-
-                        send_buf.clear();
-                        RtrPdu::ResetQuery.encode(&mut send_buf);
-                        stream.write_all(&send_buf).await.map_err(RtrError::Io)?;
-                    }
-                    RtrPdu::SerialNotify { .. } => {
-                        // Ignore during data exchange — we're already fetching
-                        debug!(
-                            server = %self.config.server_addr,
-                            "RTR Serial Notify received during fetch (ignored)"
-                        );
-                    }
-                    RtrPdu::ErrorReport { code, text, .. } => {
-                        warn!(
-                            server = %self.config.server_addr,
-                            code,
-                            text = %text,
-                            "RTR error report received"
-                        );
-                        return Err(RtrError::ServerError { code, text });
-                    }
-                    _ => {
-                        // Unexpected PDU type during collection — ignore
-                        debug!(
-                            server = %self.config.server_addr,
-                            ?pdu,
-                            "unexpected RTR PDU (ignored)"
-                        );
-                    }
+                let n = stream.read(read_buf).await.map_err(RtrError::Io)?;
+                if n == 0 {
+                    return Err(RtrError::ConnectionClosed);
+                }
+                parse_buf.extend_from_slice(&read_buf[..n]);
+                if parse_buf.len() > MAX_READ_BUF {
+                    return Err(RtrError::BufferOverflow);
                 }
             }
         }
@@ -315,6 +485,445 @@ pub enum RtrError {
     ConnectionClosed,
     #[error("read buffer overflow")]
     BufferOverflow,
+    #[error("cache data expired")]
+    Expired,
     #[error("server error (code {code}): {text}")]
     ServerError { code: u16, text: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use tokio::net::TcpListener;
+    use tokio::time::{advance, timeout};
+
+    use super::*;
+
+    fn test_config(
+        server_addr: SocketAddr,
+        refresh: u64,
+        retry: u64,
+        expire: u64,
+    ) -> RtrClientConfig {
+        RtrClientConfig {
+            server_addr,
+            refresh_interval: refresh,
+            retry_interval: retry,
+            expire_interval: expire,
+        }
+    }
+
+    fn entry(addr: Ipv4Addr, prefix_len: u8, max_len: u8, asn: u32) -> VrpEntry {
+        VrpEntry {
+            prefix: std::net::IpAddr::V4(addr),
+            prefix_len,
+            max_len,
+            origin_asn: asn,
+        }
+    }
+
+    async fn read_pdu(stream: &mut TcpStream) -> RtrPdu {
+        let mut header = [0u8; 8];
+        stream.read_exact(&mut header).await.unwrap();
+        let len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
+        let mut buf = header.to_vec();
+        if len > header.len() {
+            let mut body = vec![0u8; len - header.len()];
+            stream.read_exact(&mut body).await.unwrap();
+            buf.extend_from_slice(&body);
+        }
+        let (pdu, consumed) = RtrPdu::decode(&buf).unwrap();
+        assert_eq!(consumed, len);
+        pdu
+    }
+
+    async fn write_pdu(stream: &mut TcpStream, pdu: RtrPdu) {
+        let mut buf = Vec::new();
+        pdu.encode(&mut buf);
+        stream.write_all(&buf).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serial_notify_triggers_incremental_refresh_without_reconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 65001)],
+            }
+        );
+
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 101,
+            },
+        )
+        .await;
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 114, 0),
+                asn: 65002,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 101,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::IncrementalUpdate {
+                server: addr,
+                announced: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
+                withdrawn: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_refresh_uses_serial_query_on_existing_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 10, 5, 30), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 10,
+                retry: 5,
+                expire: 30,
+            },
+        )
+        .await;
+
+        let _ = vrp_rx.recv().await.unwrap();
+
+        advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            read_pdu(&mut stream).await,
+            RtrPdu::SerialQuery {
+                session_id: 7,
+                serial: 100,
+            }
+        );
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 101,
+                refresh: 10,
+                retry: 5,
+                expire: 30,
+            },
+        )
+        .await;
+
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::IncrementalUpdate {
+                server: addr,
+                announced: vec![],
+                withdrawn: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn expire_interval_clears_server_entries_and_reconnects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 2, 10), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream1, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream1).await, RtrPdu::ResetQuery);
+
+        write_pdu(&mut stream1, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream1,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream1,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 60,
+                retry: 2,
+                expire: 10,
+            },
+        )
+        .await;
+
+        let _ = vrp_rx.recv().await.unwrap();
+
+        advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        let update = vrp_rx.recv().await.unwrap();
+        assert_eq!(update, VrpUpdate::ServerDown { server: addr });
+
+        advance(Duration::from_secs(2)).await;
+        tokio::task::yield_now().await;
+
+        drop(stream1);
+        let (mut stream2, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream2).await, RtrPdu::ResetQuery);
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test]
+    async fn cache_reset_clears_entries_and_refetches_on_same_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let _ = vrp_rx.recv().await.unwrap();
+
+        write_pdu(&mut stream, RtrPdu::CacheReset).await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![],
+            }
+        );
+
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 8 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 114, 0),
+                asn: 65002,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 8,
+                serial: 200,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test]
+    async fn unexpected_serial_notify_during_fetch_is_ignored() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(read_pdu(&mut stream).await, RtrPdu::ResetQuery);
+
+        write_pdu(&mut stream, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::SerialNotify {
+                session_id: 7,
+                serial: 101,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let _ = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(100), read_pdu(&mut stream))
+                .await
+                .is_err()
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
 }

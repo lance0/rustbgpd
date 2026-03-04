@@ -480,7 +480,11 @@ impl PeerSession {
                             .is_some();
                         neg.negotiated_families
                             .iter()
-                            .filter(|f| **f != (Afi::Ipv6, Safi::Unicast) || has_v6_nh)
+                            .filter(|f| {
+                                **f != (Afi::Ipv6, Safi::Unicast)
+                                    || has_v6_nh
+                                    || self.config.route_server_client
+                            })
                             .copied()
                             .collect()
                     } else {
@@ -1906,13 +1910,10 @@ impl PeerSession {
         for (route, nh_override) in &v6_routes {
             let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
             let force_nh_self = matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
-            let policy_set_v6 = matches!(
-                nh_override,
-                Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_)))
-            );
-            let nh = if policy_set_v6 {
-                // Policy explicitly set an IPv6 next-hop — use it
-                route.next_hop
+            let nh = if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh_override
+            {
+                // Policy explicitly set a next-hop — use it
+                *addr
             } else if force_nh_self {
                 // For next-hop-self, use local IPv6 address when available.
                 if let Some(v6) = ebgp_ipv6_nh {
@@ -2223,6 +2224,24 @@ impl PeerSession {
         {
             let next_hop = match nh_override {
                 Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(nh))) => Some(*nh),
+                Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(_))) => {
+                    // IPv6 next-hop is not encodable in classic IPv4 NEXT_HOP
+                    // attribute. Requires RFC 8950 Extended Next Hop negotiation.
+                    // Fall through to default next-hop selection.
+                    tracing::warn!(
+                        prefix = %route.prefix,
+                        "export policy set IPv6 next-hop for classic IPv4 NLRI; \
+                         requires Extended Next Hop (RFC 8950) — using default next-hop instead"
+                    );
+                    if is_ebgp && !route_server_client {
+                        Some(local_ipv4)
+                    } else {
+                        match route.next_hop {
+                            IpAddr::V4(nh) => Some(nh),
+                            IpAddr::V6(_) => None,
+                        }
+                    }
+                }
                 Some(rustbgpd_policy::NextHopAction::Self_) => Some(local_ipv4),
                 _ if is_ebgp && !route_server_client => Some(local_ipv4),
                 _ => match route.next_hop {

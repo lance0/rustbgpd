@@ -63,8 +63,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **FlowSpec fuzz target.** New `decode_flowspec` fuzz target exercises
   FlowSpec NLRI decoding directly with both IPv4 and IPv6 AFIs, complementing
   the existing `decode_message` and `decode_update` targets.
+- **CLI tool (`rustbgpctl`).** New `crates/cli/` crate providing a command-line
+  interface wrapping the gRPC API. Client-only proto codegen — no dependency on
+  internal crates. Commands: `global`, `neighbor` (list/show/add/delete/enable/
+  disable/softreset), `rib` (best/received/advertised/add/delete), `watch`
+  (streaming), `flowspec` (list/add/delete), `health`, `metrics`, `shutdown`.
+  Global `--json` flag for structured output on all commands. Global `--addr`
+  flag with `RUSTBGPD_ADDR` env var support.
 
 ### Fixed
+
+- **`sendable_families` excluded IPv6 for route-server clients.** eBGP peers
+  without a local IPv6 next-hop had IPv6 unicast filtered from
+  `sendable_families`, silently preventing IPv6 route advertisement to
+  `route_server_client` peers that preserve the original next-hop. Fixed by
+  including route-server clients in the filter condition.
+- **Export policy IPv6 next-hop discarded on MP path.** When export policy set
+  `NextHopAction::Specific(IpAddr::V6(addr))`, the IPv6 MP_REACH send path
+  detected the policy but used `route.next_hop` instead of extracting the
+  policy address. Fixed by matching `Specific(addr)` directly.
+- **IPv6 policy next-hop on classic IPv4 body-NLRI now warns.** Setting an IPv6
+  next-hop via export policy for a non-RFC-8950 peer is unencodable in the
+  classic `NEXT_HOP` attribute. This now logs a warning and falls through to
+  default next-hop selection instead of silently discarding the policy address.
 
 - **Cease subcode constants.** `ADMINISTRATIVE_RESET` (4) added,
   `OUT_OF_RESOURCES` corrected from 4 to 8 per RFC 4486. Description
@@ -82,8 +103,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RPCs. Same policy/iBGP/RR infrastructure. Config families
   `"ipv4_flowspec"` and `"ipv6_flowspec"`. (ADR-0035)
 - **RPKI Origin Validation (RFC 6811).** New `rustbgpd-rpki`
-  crate with poll-based RTR client (RFC 8210), per-cache-server async
-  client, and multi-cache VRP aggregation. Routes stamped with `RpkiValidation`
+  crate with persistent RTR client (RFC 8210), per-cache-server async
+  client, `SerialNotify`-triggered refreshes, enforced expiry timers,
+  and multi-cache VRP aggregation. Routes stamped with `RpkiValidation`
   (Valid/Invalid/NotFound). Best-path step 0.5 prefers Valid > NotFound >
   Invalid. Policy `match_rpki_validation` enables rejection of invalid
   routes. Config `[rpki]` section with `[[rpki.cache_servers]]` for
