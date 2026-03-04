@@ -576,6 +576,7 @@ fn flowspec_prefix_offset(p: &rustbgpd_wire::FlowSpecPrefix) -> u32 {
 }
 
 fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
+    use std::fmt::Write;
     let mut rendered = String::new();
     for (idx, o) in ops.iter().enumerate() {
         if idx > 0 {
@@ -585,24 +586,22 @@ fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
                 rendered.push_str(", ");
             }
         }
-        let term = {
-            let cmp = match (o.lt, o.gt, o.eq) {
-                (false, false, true) => "==",
-                (true, false, false) => "<",
-                (false, true, false) => ">",
-                (true, false, true) => "<=",
-                (false, true, true) => ">=",
-                (true, true, false) => "!=",
-                _ => "?",
-            };
-            format!("{cmp}{}", o.value)
+        let cmp = match (o.lt, o.gt, o.eq) {
+            (false, false, true) => "==",
+            (true, false, false) => "<",
+            (false, true, false) => ">",
+            (true, false, true) => "<=",
+            (false, true, true) => ">=",
+            (true, true, false) => "!=",
+            _ => "?",
         };
-        rendered.push_str(&term);
+        let _ = write!(rendered, "{cmp}{}", o.value);
     }
     rendered
 }
 
 fn format_bitmask_ops(ops: &[rustbgpd_wire::BitmaskMatch]) -> String {
+    use std::fmt::Write;
     let mut rendered = String::new();
     for (idx, o) in ops.iter().enumerate() {
         if idx > 0 {
@@ -615,7 +614,7 @@ fn format_bitmask_ops(ops: &[rustbgpd_wire::BitmaskMatch]) -> String {
         if o.not_bit {
             rendered.push('!');
         }
-        rendered.push_str(&format!("0x{:04x}", o.value));
+        let _ = write!(rendered, "0x{:04x}", o.value);
         if o.match_bit {
             rendered.push_str("/match");
         }
