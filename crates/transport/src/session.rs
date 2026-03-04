@@ -2396,11 +2396,14 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_fsm::PeerConfig;
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
     use rustbgpd_wire::{
-        AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Message, Origin, PathAttribute,
+        AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Message, Origin,
+        PathAttribute,
     };
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
 
     use super::*;
 
@@ -3016,6 +3019,268 @@ mod tests {
         assert_eq!(mp.afi, Afi::Ipv6);
         assert_eq!(mp.safi, Safi::Unicast);
         assert_eq!(mp.next_hop, IpAddr::V6(v6_nh));
+    }
+
+    /// Import policy is applied before `RoutesReceived` reaches the RIB.
+    /// Denied routes are filtered locally in transport and never forwarded.
+    #[tokio::test]
+    async fn import_policy_denied_routes_do_not_reach_rib() {
+        // Create a session with import policy that denies 198.51.100.0/24
+        let peer_config = PeerConfig {
+            local_asn: 65001,
+            remote_asn: 65002,
+            local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+            hold_time: 90,
+            connect_retry_secs: 30,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+            graceful_restart: false,
+            gr_restart_time: 120,
+            add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
+        };
+        let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+        let metrics = BgpMetrics::new();
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+        let (rib_tx, mut rib_rx) = mpsc::channel(64);
+
+        let deny_policy = PolicyChain::new(vec![Policy {
+            entries: vec![PolicyStatement {
+                prefix: Some(Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::new(198, 51, 100, 0),
+                    24,
+                ))),
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: None,
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        }]);
+
+        let mut session = PeerSession::new(
+            config,
+            metrics,
+            cmd_rx,
+            rib_tx,
+            Some(deny_policy),
+            None,
+            None,
+        );
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.peer_enhanced_route_refresh = true;
+        session
+            .negotiated_families
+            .clone_from(&negotiated.negotiated_families);
+        session.negotiated = Some(negotiated);
+
+        // Send an UPDATE with 198.51.100.0/24 — should be denied by import policy
+        let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+
+        // Both prefixes in one UPDATE: one permitted, one denied
+        let denied_nlri = Ipv4NlriEntry {
+            path_id: 0,
+            prefix: denied_prefix,
+        };
+        let permitted_nlri = Ipv4NlriEntry {
+            path_id: 0,
+            prefix: permitted_prefix,
+        };
+        let update = UpdateMessage::build(
+            &[denied_nlri, permitted_nlri],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        );
+        session.process_update(update).await;
+
+        // Drain any messages — there may be zero or one RoutesReceived
+        let mut all_announced = vec![];
+        while let Ok(msg) = rib_rx.try_recv() {
+            if let RibUpdate::RoutesReceived { announced, .. } = msg {
+                all_announced.extend(announced);
+            }
+        }
+        // Only the permitted prefix should reach the RIB; denied prefix filtered
+        assert_eq!(
+            all_announced.len(),
+            1,
+            "expected exactly 1 announced route, got {}: {all_announced:?}",
+            all_announced.len()
+        );
+        assert_eq!(all_announced[0].prefix, Prefix::V4(permitted_prefix));
+    }
+
+    /// End-to-end ERR + import policy interaction:
+    /// a stale route that is "replaced" by an inbound UPDATE denied by import
+    /// policy is not reinstalled, so the stale entry is swept at `EoRR`.
+    #[expect(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn err_denied_replacement_is_swept_at_eorr() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (rib_tx, rib_rx) = mpsc::channel(64);
+        let manager = rustbgpd_rib::RibManager::new(rib_rx, None, None, BgpMetrics::new());
+        let manager_handle = tokio::spawn(manager.run());
+
+        let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        let permitted_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+
+        // Seed the RIB with an existing route that will become refresh-stale.
+        rib_tx
+            .send(RibUpdate::RoutesReceived {
+                peer,
+                announced: vec![Route {
+                    prefix: Prefix::V4(denied_prefix),
+                    next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                    peer,
+                    attributes: vec![
+                        PathAttribute::Origin(Origin::Igp),
+                        PathAttribute::AsPath(AsPath {
+                            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                        }),
+                        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+                    ],
+                    received_at: Instant::now(),
+                    origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+                    peer_router_id: Ipv4Addr::UNSPECIFIED,
+                    is_stale: false,
+                    path_id: 0,
+                    validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                }],
+                withdrawn: vec![],
+                flowspec_announced: vec![],
+                flowspec_withdrawn: vec![],
+            })
+            .await
+            .unwrap();
+
+        // Start the ERR refresh window for IPv4 unicast.
+        rib_tx
+            .send(RibUpdate::BeginRouteRefresh {
+                peer,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            })
+            .await
+            .unwrap();
+
+        // Session import policy denies the stale prefix, but permits the new one.
+        let peer_config = PeerConfig {
+            local_asn: 65001,
+            remote_asn: 65002,
+            local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+            hold_time: 90,
+            connect_retry_secs: 30,
+            families: vec![(Afi::Ipv4, Safi::Unicast)],
+            graceful_restart: false,
+            gr_restart_time: 120,
+            add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
+        };
+        let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+        let metrics = BgpMetrics::new();
+        let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+
+        let deny_policy = PolicyChain::new(vec![Policy {
+            entries: vec![PolicyStatement {
+                prefix: Some(Prefix::V4(denied_prefix)),
+                ge: None,
+                le: None,
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: None,
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        }]);
+
+        let mut session = PeerSession::new(
+            config,
+            metrics,
+            cmd_rx,
+            rib_tx.clone(),
+            Some(deny_policy),
+            None,
+            None,
+        );
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.peer_enhanced_route_refresh = true;
+        session
+            .negotiated_families
+            .clone_from(&negotiated.negotiated_families);
+        session.negotiated = Some(negotiated);
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+
+        // The denied prefix is filtered by import policy, so only the permitted
+        // replacement reaches the RIB during the refresh window.
+        let update = UpdateMessage::build(
+            &[
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: denied_prefix,
+                },
+                Ipv4NlriEntry {
+                    path_id: 0,
+                    prefix: permitted_prefix,
+                },
+            ],
+            &[],
+            &attrs,
+            true,
+            false,
+            Ipv4UnicastMode::Body,
+        );
+        session.process_update(update).await;
+
+        // Close the refresh window; the unreplaced stale route should be swept.
+        rib_tx
+            .send(RibUpdate::EndRouteRefresh {
+                peer,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            })
+            .await
+            .unwrap();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        rib_tx
+            .send(RibUpdate::QueryReceivedRoutes {
+                peer: Some(peer),
+                reply: reply_tx,
+            })
+            .await
+            .unwrap();
+        let received = reply_rx.await.unwrap();
+
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].prefix, Prefix::V4(permitted_prefix));
+
+        drop(session);
+        drop(rib_tx);
+        manager_handle.await.unwrap();
     }
 
     #[tokio::test]

@@ -217,7 +217,7 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 
 | Priority | Item | Impact |
 |----------|------|--------|
-| HIGH | manager.rs at ~7,100 lines | Hardest file to review; split into distribution.rs, flowspec.rs, revalidation.rs, graceful_restart.rs |
+| HIGH | manager.rs at ~7,700 lines | Hardest file to review; split into distribution.rs, flowspec.rs, revalidation.rs, graceful_restart.rs |
 | HIGH | Policy engine has 0 unit tests | 57 tests exist but all indirect through engine.rs; needs dedicated test module |
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | MEDIUM | RTR expire_interval not enforced | Stale VRPs persist indefinitely if cache goes silent without disconnecting |

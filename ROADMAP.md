@@ -172,7 +172,7 @@ Quality gates before tagging 1.0.0:
 - [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
 - [ ] Comprehensive rustdoc for public API
 - [ ] Security audit of gRPC surface
-- [ ] **manager.rs split** — currently ~6,300 lines; split into distribution.rs, revalidation.rs, graceful_restart.rs submodules for reviewability
+- [ ] **manager.rs split** — currently ~7,700 lines; split into distribution.rs, revalidation.rs, graceful_restart.rs submodules for reviewability
 - [ ] **RTR expire_interval enforcement** — VRPs should be cleared if no fresh EndOfData arrives within the expiry window; currently accepted but not enforced
 
 ---
