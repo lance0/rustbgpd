@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-03-03
+Last updated: 2026-03-04
 
 ## Address Families
 
@@ -214,5 +214,11 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 
 ## Pre-1.0 Tech Debt
 
-- **manager.rs at ~6,300 lines** — well-tested but hard to review; splitting into distribution.rs, revalidation.rs, graceful_restart.rs submodules would help
-- **RTR expire_interval not enforced** — config accepts it, EndOfData PDU parses it, but no timer actually expires VRPs if the cache goes silent without disconnecting; a real deployment behind a flaky network could hold stale VRPs indefinitely
+| Priority | Item | Impact |
+|----------|------|--------|
+| HIGH | manager.rs at ~7,100 lines | Hardest file to review; split into distribution.rs, flowspec.rs, revalidation.rs, graceful_restart.rs |
+| HIGH | Policy engine has 0 unit tests | 57 tests exist but all indirect through engine.rs; needs dedicated test module |
+| MEDIUM | No FlowSpec fuzz target | Wire-level FlowSpec parsing should have its own fuzz target for coverage |
+| MEDIUM | RTR expire_interval not enforced | Stale VRPs persist indefinitely if cache goes silent without disconnecting |
+| MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |
+| LOW | RTR client polling-only | No Serial Notify; deferred by design |

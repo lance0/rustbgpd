@@ -89,3 +89,19 @@ resolved.
   was not negotiated, the wire format is ambiguous — the 4-byte path ID
   can be misparsed as normal NLRI prefix encoding. Compliant peers will
   never do this. Fixing it would require a deeper parser redesign.
+- **Unknown FlowSpec component types are rejected.** Component types >13
+  (or any future RFC extension) cause a hard decode error rather than
+  being preserved or skipped. This breaks forward compatibility if a
+  future RFC defines type 14+. Should switch to skip-unknown behavior.
+- **FlowSpec `encode_numeric_ops()` overwrites `end_of_list` flag.**
+  The encoder computes `end_of_list` from position (last element gets
+  `true`), silently discarding the original flag on round-trip. This is
+  safe for all normal use but means a decode→encode cycle is not
+  perfectly lossless for malformed inputs with incorrect flags.
+- **FlowSpec AFI defaults to IPv4 when no destination prefix component.**
+  A FlowSpec rule with no destination prefix component (e.g., "drop all
+  UDP") received on an IPv6 FlowSpec session is stored with
+  `afi: Afi::Ipv4` implicitly via the MpReachNlri AFI. This is correct
+  per wire semantics (the AFI comes from the MP_REACH attribute, not the
+  rule itself) but worth noting — the AFI is always set correctly from
+  the MP_REACH/MP_UNREACH framing.

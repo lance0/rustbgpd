@@ -87,6 +87,9 @@ All P0 features shipped. See Completed section above.
 
 Items identified during review that are not correctness bugs but improve strictness.
 
+- [ ] **Unknown FlowSpec component forward compatibility** — component types >13 currently cause hard decode errors; should skip unknown types to allow future RFC extensions without breaking interop
+- [ ] **FlowSpec fuzz target** — existing fuzz targets cover `decode_message` and `decode_update` but FlowSpec MP_REACH paths may not get deep coverage; add dedicated `fuzz_target_flowspec` for FlowSpec NLRI decoding
+- [ ] **Policy engine unit tests** — 57 tests exist but all indirect via engine.rs integration tests; needs dedicated test module with isolated unit tests per match/action type
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
 - [ ] **RTR persistent session + Serial Notify** — RTR client currently disconnects after each EndOfData and reconnects after refresh_interval; keeping the TCP session open would allow receiving Serial Notify for faster cache-change propagation (RFC 8210 §8)
 - [ ] **RTR expire_interval enforcement** — config and server-advertised expire timers are accepted but not enforced; VRPs should be cleared if no fresh EndOfData arrives within the expiry window
