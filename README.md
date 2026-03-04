@@ -36,7 +36,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Real-time streaming** -- `WatchRoutes` delivers add/withdraw/best-change events over server-streaming RPC
 - **Observable by default** -- Prometheus metrics, structured JSON logging, per-peer counters
 - **Interop validated** -- automated test suites against FRR 10.3.1 and BIRD 2.0.12 via containerlab
-- **Graceful Restart** -- receiving speaker (RFC 4724): stale route preservation, per-family End-of-RIB, timer-based sweep, enabled by default
+- **Graceful Restart** -- RFC 4724 helper mode plus minimal restarting-speaker signaling: stale route preservation, per-family End-of-RIB, timer-based sweep, `R=1` after coordinated restart, enabled by default
 - **Large communities** -- RFC 8092 wire codec, RIB, gRPC API, and policy matching for 4-byte ASN operators
 - **Route Reflector** -- RFC 4456 client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST, loop detection
 - **Extended Messages** -- RFC 8654 raises the 4096-byte message limit to 65535 bytes
@@ -45,7 +45,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Add-Path** -- RFC 7911 dual-stack receive + multi-path send (route server mode) for IPv4 and IPv6 unicast
 - **Transparent route server mode** -- config-driven eBGP unicast transparency preserves original next hop and skips automatic local-AS prepend for IX route-server clients
 - **RPKI origin validation** -- RFC 6811: poll-based RTR client (RFC 8210) connects to RPKI validators, stamps routes Valid/Invalid/NotFound, integrates into best-path and policy
-- **841 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **850 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -258,7 +258,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 841 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 850 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -269,7 +269,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | Transport | v0.1.0 | Inbound listener, TCP MD5/GTSM, NLRI batching, collision detection |
 | Operations | v0.1.0 | Coordinated shutdown, gRPC supervision, Prometheus metrics |
 | MP-BGP (IPv6) | v0.2.0 | RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation |
-| Graceful Restart | v0.3.0 | RFC 4724: receiving speaker, stale route demotion, End-of-RIB, timer sweep |
+| Graceful Restart | v0.3.0 | RFC 4724: helper mode, stale route demotion, End-of-RIB, timer sweep, minimal restarting-speaker `R=1` after coordinated restart |
 | **Policy actions** | **post-v0.3.0** | **Match + modify + filter: set LOCAL_PREF/MED/communities/AS_PATH, next-hop self** |
 | **AS_PATH regex** | **post-v0.3.0** | **Cisco/Quagga-style `_` boundary patterns in policy match conditions** |
 | **Large communities** | **post-v0.3.0** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |

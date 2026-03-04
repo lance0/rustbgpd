@@ -1,5 +1,5 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
 
@@ -25,6 +25,9 @@ pub struct TransportConfig {
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     /// Time to retain stale routes after peer restart (seconds). RFC 4724.
     pub gr_stale_routes_time: u64,
+    /// Local restarting-speaker GR window. When set, outbound OPEN messages
+    /// advertise `restart_state = true` until this deadline.
+    pub gr_restart_until: Option<Instant>,
     /// Whether this neighbor is a route reflector client (RFC 4456).
     pub route_reflector_client: bool,
     /// Whether this eBGP neighbor is a transparent route-server client.
@@ -50,6 +53,7 @@ impl TransportConfig {
             ttl_security: false,
             local_ipv6_nexthop: None,
             gr_stale_routes_time: 360,
+            gr_restart_until: None,
             route_reflector_client: false,
             route_server_client: false,
             cluster_id: None,

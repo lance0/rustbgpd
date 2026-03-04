@@ -47,6 +47,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0037](0037-extended-nexthop.md) | Extended Next Hop Encoding (RFC 8950) | Accepted | 2026-03-04 |
 | [0038](0038-enhanced-route-refresh.md) | Enhanced Route Refresh (RFC 7313) | Accepted | 2026-03-04 |
 | [0039](0039-transparent-route-server.md) | Transparent Route Server Mode | Accepted | 2026-03-04 |
+| [0040](0040-gr-restarting-speaker.md) | Graceful Restart — Minimal Restarting Speaker Mode | Accepted | 2026-03-04 |
 
 ## Template
 

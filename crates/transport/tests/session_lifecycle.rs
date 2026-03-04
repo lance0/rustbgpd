@@ -1,7 +1,7 @@
 //! Integration tests for the transport layer using a mock BGP peer.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use rustbgpd_fsm::PeerConfig;
@@ -90,6 +90,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         ttl_security: false,
         local_ipv6_nexthop: None,
         gr_stale_routes_time: 360,
+        gr_restart_until: None,
         route_reflector_client: false,
         route_server_client: false,
         cluster_id: None,
@@ -140,6 +141,68 @@ async fn full_handshake_reaches_established() {
     assert!(established.is_some(), "established metric should exist");
 
     // Clean shutdown
+    handle.shutdown().await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn open_sets_gr_restart_state_during_restart_window() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = BgpMetrics::new();
+
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut cfg = transport_config(addr);
+    cfg.peer.graceful_restart = true;
+    cfg.gr_restart_until = Some(Instant::now() + Duration::from_secs(30));
+    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None);
+    handle.start().await.unwrap();
+
+    let (mut peer_stream, _) = listener.accept().await.unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
+    let Message::Open(open) = msg else {
+        panic!("expected OPEN");
+    };
+    assert!(open.capabilities.iter().any(|cap| matches!(
+        cap,
+        Capability::GracefulRestart {
+            restart_state: true,
+            ..
+        }
+    )));
+
+    drop(peer_stream);
+    handle.shutdown().await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn open_clears_gr_restart_state_after_restart_window_expires() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let metrics = BgpMetrics::new();
+
+    let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+    let mut cfg = transport_config(addr);
+    cfg.peer.graceful_restart = true;
+    cfg.gr_restart_until = Some(Instant::now() - Duration::from_secs(1));
+    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None);
+    handle.start().await.unwrap();
+
+    let (mut peer_stream, _) = listener.accept().await.unwrap();
+    let mut buf = BytesMut::with_capacity(4096);
+    let msg = read_bgp_message(&mut peer_stream, &mut buf).await;
+    let Message::Open(open) = msg else {
+        panic!("expected OPEN");
+    };
+    assert!(open.capabilities.iter().any(|cap| matches!(
+        cap,
+        Capability::GracefulRestart {
+            restart_state: false,
+            ..
+        }
+    )));
+
+    drop(peer_stream);
     handle.shutdown().await.unwrap().unwrap();
 }
 

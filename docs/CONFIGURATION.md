@@ -17,17 +17,19 @@ all peers are managed via gRPC.
 
 Required. Defines the local BGP speaker identity.
 
-| Field         | Type   | Required | Default | Description                        |
-|---------------|--------|----------|---------|------------------------------------|
-| `asn`         | u32    | yes      | --      | Local autonomous system number     |
-| `router_id`   | string | yes      | --      | BGP router ID (must be valid IPv4) |
-| `listen_port` | u16    | yes      | --      | TCP port to listen on (typically 179) |
+| Field               | Type   | Required | Default              | Description                        |
+|---------------------|--------|----------|----------------------|------------------------------------|
+| `asn`               | u32    | yes      | --                   | Local autonomous system number     |
+| `router_id`         | string | yes      | --                   | BGP router ID (must be valid IPv4) |
+| `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179) |
+| `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker today) |
 
 ```toml
 [global]
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
+runtime_state_dir = "/var/lib/rustbgpd"
 ```
 
 ---
@@ -121,11 +123,19 @@ used when available.
 
 ### Graceful Restart (RFC 4724)
 
-Graceful Restart is enabled by default (receiving speaker mode). When a peer
-with GR capability restarts, its routes are preserved as stale during the
-restart window instead of being immediately withdrawn. End-of-RIB markers
-from the peer clear stale flags per address family; if the timer expires
-before all End-of-RIB markers arrive, remaining stale routes are swept.
+Graceful Restart is enabled by default. rustbgpd implements:
+
+- **Helper mode (receiving speaker):** when a peer with GR capability
+  restarts, its routes are preserved as stale during the restart window
+  instead of being immediately withdrawn. End-of-RIB markers from the peer
+  clear stale flags per address family; if the timer expires before all
+  End-of-RIB markers arrive, remaining stale routes are swept.
+- **Minimal restarting-speaker mode:** after a coordinated daemon restart,
+  rustbgpd can temporarily advertise `restart_state = true` to static peers
+  restored from config, using a marker file under `runtime_state_dir`.
+  This helps peers retain our routes while we reconnect, but
+  `forwarding_preserved` remains false because rustbgpd does not yet own or
+  verify the FIB.
 
 ```toml
 [[neighbors]]
@@ -145,9 +155,10 @@ remote_asn = 65003
 graceful_restart = false
 ```
 
-**Implementation note:** rustbgpd implements the *receiving speaker* role
-only. It preserves a restarting peer's routes but does not advertise its own
-restart state (R-bit) or preserve its own forwarding state on daemon restart.
+**Implementation note:** restarting-speaker mode is deliberately minimal and
+honest. The daemon may advertise `R=1` after a planned restart, but it does
+not claim forwarding-state preservation (`forwarding_preserved = false`) and
+does not persist route state across restarts.
 See [ADR-0024](docs/adr/0024-graceful-restart.md).
 
 ### Add-Path (RFC 7911)

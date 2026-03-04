@@ -11,11 +11,14 @@ mod metrics_server;
 mod peer_manager;
 
 use std::net::Ipv4Addr;
+use std::path::Path;
 use std::process;
+use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::BgpListener;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{error, info, warn};
 
@@ -24,6 +27,73 @@ use rustbgpd_api::server::ServeConfig;
 
 use crate::config::Config;
 use crate::peer_manager::PeerManager;
+
+const GR_RESTART_MARKER_VERSION: u8 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GrRestartMarker {
+    version: u8,
+    expires_at_unix: u64,
+}
+
+fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
+    config
+        .neighbors
+        .iter()
+        .filter(|neighbor| neighbor.graceful_restart.unwrap_or(true))
+        .map(|neighbor| u64::from(neighbor.gr_restart_time.unwrap_or(120)))
+        .max()
+}
+
+fn marker_expires_at(marker: &GrRestartMarker) -> Result<SystemTime, String> {
+    if marker.version != GR_RESTART_MARKER_VERSION {
+        return Err(format!(
+            "unsupported marker version {} (expected {})",
+            marker.version, GR_RESTART_MARKER_VERSION
+        ));
+    }
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(marker.expires_at_unix))
+        .ok_or_else(|| "marker expiry overflows system clock".to_string())
+}
+
+fn read_gr_restart_marker(path: &Path) -> Result<Option<SystemTime>, String> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let marker: GrRestartMarker = toml::from_str(&content).map_err(|e| e.to_string())?;
+    marker_expires_at(&marker).map(Some)
+}
+
+fn write_gr_restart_marker(path: &Path, expires_at: SystemTime) -> std::io::Result<()> {
+    let expires_at_unix = expires_at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .as_secs();
+    let marker = GrRestartMarker {
+        version: GR_RESTART_MARKER_VERSION,
+        expires_at_unix,
+    };
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "restart marker path has no parent directory",
+        )
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let encoded = toml::to_string(&marker).map_err(|e| std::io::Error::other(e.to_string()))?;
+    std::fs::write(path, encoded)
+}
+
+fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
 
 fn main() {
     let config_path = std::env::args()
@@ -50,6 +120,60 @@ fn main() {
 #[expect(clippy::too_many_lines)]
 async fn run(config: Config) {
     let start_time = tokio::time::Instant::now();
+    let gr_restart_marker_path = config.gr_restart_marker_path();
+    let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
+        Ok(Some(expires_at)) => {
+            if let Ok(remaining) = expires_at.duration_since(SystemTime::now()) {
+                let deadline = StdInstant::now() + remaining;
+                info!(
+                    marker = %gr_restart_marker_path.display(),
+                    restart_time_secs = remaining.as_secs(),
+                    "detected graceful-restart marker — enabling restarting-speaker mode"
+                );
+                Some(deadline)
+            } else {
+                if let Err(e) = remove_gr_restart_marker(&gr_restart_marker_path) {
+                    warn!(
+                        marker = %gr_restart_marker_path.display(),
+                        error = %e,
+                        "failed to remove expired GR restart marker"
+                    );
+                }
+                None
+            }
+        }
+        Ok(None) => None,
+        Err(e) => {
+            warn!(
+                marker = %gr_restart_marker_path.display(),
+                error = %e,
+                "failed to read GR restart marker — starting without restarting-speaker mode"
+            );
+            if let Err(remove_err) = remove_gr_restart_marker(&gr_restart_marker_path) {
+                warn!(
+                    marker = %gr_restart_marker_path.display(),
+                    error = %remove_err,
+                    "failed to remove malformed GR restart marker"
+                );
+            }
+            None
+        }
+    };
+
+    if let Some(deadline) = local_gr_restart_until {
+        let marker_path = gr_restart_marker_path.clone();
+        let sleep_for = deadline.saturating_duration_since(StdInstant::now());
+        tokio::spawn(async move {
+            tokio::time::sleep(sleep_for).await;
+            if let Err(e) = remove_gr_restart_marker(&marker_path) {
+                warn!(
+                    marker = %marker_path.display(),
+                    error = %e,
+                    "failed to remove expired GR restart marker"
+                );
+            }
+        });
+    }
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -140,6 +264,7 @@ async fn run(config: Config) {
         config.global.asn,
         router_id,
         cluster_id,
+        local_gr_restart_until,
         metrics.clone(),
         rib_tx.clone(),
     );
@@ -239,6 +364,7 @@ async fn run(config: Config) {
                     graceful_restart: transport_config.peer.graceful_restart,
                     gr_restart_time: transport_config.peer.gr_restart_time,
                     gr_stale_routes_time: transport_config.gr_stale_routes_time,
+                    gr_restart_eligible: true,
                     local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
                     route_reflector_client: transport_config.route_reflector_client,
                     route_server_client: transport_config.route_server_client,
@@ -278,6 +404,22 @@ async fn run(config: Config) {
     // Coordinated shutdown:
     // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)
     info!("initiating coordinated shutdown");
+    if let Some(restart_time_secs) = max_gr_restart_time_secs(&config) {
+        let expires_at = SystemTime::now() + Duration::from_secs(restart_time_secs);
+        if let Err(e) = write_gr_restart_marker(&gr_restart_marker_path, expires_at) {
+            warn!(
+                marker = %gr_restart_marker_path.display(),
+                error = %e,
+                "failed to write GR restart marker"
+            );
+        }
+    } else if let Err(e) = remove_gr_restart_marker(&gr_restart_marker_path) {
+        warn!(
+            marker = %gr_restart_marker_path.display(),
+            error = %e,
+            "failed to clear GR restart marker"
+        );
+    }
     let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
 
     // 2. Wait for PeerManager to finish draining all peers
@@ -289,4 +431,128 @@ async fn run(config: Config) {
     let _ = grpc_shutdown_tx.send(());
 
     info!("rustbgpd exiting");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("rustbgpd-{name}-{suffix}.toml"))
+    }
+
+    #[test]
+    fn gr_restart_marker_round_trip() {
+        let path = unique_temp_path("gr-restart-marker");
+        let expires_at = SystemTime::now() + Duration::from_secs(120);
+        write_gr_restart_marker(&path, expires_at).unwrap();
+        let read_back = read_gr_restart_marker(&path).unwrap().unwrap();
+        let diff = read_back
+            .duration_since(expires_at)
+            .unwrap_or_else(|e| e.duration());
+        assert!(diff < Duration::from_secs(1));
+        remove_gr_restart_marker(&path).unwrap();
+    }
+
+    #[test]
+    fn gr_restart_marker_invalid_version_rejected() {
+        let path = unique_temp_path("gr-restart-bad-version");
+        std::fs::write(&path, "version = 2\nexpires_at_unix = 1\n").unwrap();
+        let err = read_gr_restart_marker(&path).unwrap_err();
+        assert!(err.contains("unsupported marker version"));
+        remove_gr_restart_marker(&path).unwrap();
+    }
+
+    #[test]
+    fn max_gr_restart_time_uses_largest_enabled_peer() {
+        let config = crate::config::Config {
+            global: crate::config::Global {
+                asn: 65001,
+                router_id: "10.0.0.1".to_string(),
+                listen_port: 179,
+                cluster_id: None,
+                runtime_state_dir: "/tmp".to_string(),
+                telemetry: crate::config::TelemetryConfig {
+                    prometheus_addr: "127.0.0.1:9179".to_string(),
+                    log_format: "json".to_string(),
+                    grpc_addr: "127.0.0.1:50051".to_string(),
+                },
+            },
+            neighbors: vec![
+                crate::config::Neighbor {
+                    address: "10.0.0.2".to_string(),
+                    remote_asn: 65002,
+                    description: None,
+                    hold_time: None,
+                    max_prefixes: None,
+                    md5_password: None,
+                    ttl_security: false,
+                    families: Vec::new(),
+                    graceful_restart: Some(true),
+                    gr_restart_time: Some(90),
+                    gr_stale_routes_time: None,
+                    local_ipv6_nexthop: None,
+                    route_reflector_client: false,
+                    route_server_client: false,
+                    add_path: None,
+                    import_policy: Vec::new(),
+                    export_policy: Vec::new(),
+                    import_policy_chain: Vec::new(),
+                    export_policy_chain: Vec::new(),
+                },
+                crate::config::Neighbor {
+                    address: "10.0.0.3".to_string(),
+                    remote_asn: 65003,
+                    description: None,
+                    hold_time: None,
+                    max_prefixes: None,
+                    md5_password: None,
+                    ttl_security: false,
+                    families: Vec::new(),
+                    graceful_restart: Some(true),
+                    gr_restart_time: Some(180),
+                    gr_stale_routes_time: None,
+                    local_ipv6_nexthop: None,
+                    route_reflector_client: false,
+                    route_server_client: false,
+                    add_path: None,
+                    import_policy: Vec::new(),
+                    export_policy: Vec::new(),
+                    import_policy_chain: Vec::new(),
+                    export_policy_chain: Vec::new(),
+                },
+                crate::config::Neighbor {
+                    address: "10.0.0.4".to_string(),
+                    remote_asn: 65004,
+                    description: None,
+                    hold_time: None,
+                    max_prefixes: None,
+                    md5_password: None,
+                    ttl_security: false,
+                    families: Vec::new(),
+                    graceful_restart: Some(false),
+                    gr_restart_time: Some(300),
+                    gr_stale_routes_time: None,
+                    local_ipv6_nexthop: None,
+                    route_reflector_client: false,
+                    route_server_client: false,
+                    add_path: None,
+                    import_policy: Vec::new(),
+                    export_policy: Vec::new(),
+                    import_policy_chain: Vec::new(),
+                    export_policy_chain: Vec::new(),
+                },
+            ],
+            policy: crate::config::PolicyConfig::default(),
+            rpki: None,
+        };
+
+        assert_eq!(max_gr_restart_time_secs(&config), Some(180));
+    }
 }

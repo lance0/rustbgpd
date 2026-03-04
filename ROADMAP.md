@@ -47,7 +47,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
 - [x] Interop validated — FRR 10.3.1 (17/17 IPv4 + 6 dual-stack automated tests), BIRD 2.0.12
-- [x] Graceful Restart — receiving speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep
+- [x] Graceful Restart — helper mode + minimal restarting speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep, coordinated-restart `R=1` signaling
 - [x] Extended Communities (RFC 4360) — wire decode/encode, common subtypes (route target, route origin, 4-byte AS), RIB storage, gRPC API exposure (ADR-0025)
 - [x] Extended Communities Policy Matching — match on RT/RO values in prefix lists, TOML community-match clauses (ADR-0026)
 - [x] Route Refresh (RFC 2918) + Enhanced Route Refresh (RFC 7313) — inbound re-advertisement, outbound SoftResetIn gRPC, BoRR/EoRR refresh windows, capability negotiation (ADR-0027, ADR-0038)
@@ -63,7 +63,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Add-Path (RFC 7911) — dual-stack receive + multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
 - [x] Extended nexthop (RFC 8950) — capability code 5; automatic dual-stack capability advertisement, IPv4 unicast NLRI over IPv6 next hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
-- [x] 841 tests — unit, integration, property, fuzz
+- [x] 850 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -112,7 +112,7 @@ Features that close the most impactful gaps vs GoBGP for the target user base.
 Each moves overall parity 3-5% while disproportionately improving real-world usability.
 
 - [x] **Transparent route server mode** — `route_server_client` per neighbor: skip automatic local ASN prepend, preserve original NEXT_HOP on eBGP unicast re-advertisement for IX route-server clients; FlowSpec transparency remains deferred (ADR-0039)
-- [ ] **GR restarting speaker** — currently receiving-only; restarting speaker unlocks router deployments (core protocol 64% → 71%)
+- [x] **GR restarting speaker** — minimal honest mode: static peers advertise `R=1` after coordinated restart via persisted marker file; `forwarding_preserved` remains false until FIB integration exists (ADR-0040)
 - [x] **Policy chaining + named policies** — named TOML definitions, GoBGP-style chain evaluation (permit=continue, deny=stop), configurable default_action (ADR-0036)
 - [x] **Extended nexthop** (RFC 8950) — capability code 5, automatic dual-stack negotiation, IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [ ] **CLI tool** — `rustbgpctl` wrapping gRPC; grpcurl is a poor substitute for `gobgp` CLI; TUI mode as a follow-on

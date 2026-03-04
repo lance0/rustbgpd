@@ -54,6 +54,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Explicit export-policy next-hop overrides still win. RFC 8950 IPv4 over
   IPv6 next-hop and IPv6 unicast both honor the same transparent behavior.
   FlowSpec transparency remains deferred. (ADR-0039)
+- **Graceful Restart restarting speaker (minimal mode).** Static peers now
+  advertise GR `restart_state = true` after a coordinated daemon restart
+  when a persisted marker file is present in `global.runtime_state_dir`.
+  This is an honest helper-to-speaker bridge only: `forwarding_preserved`
+  remains false for all families, and dynamic gRPC-added peers do not
+  participate in the restart window. (ADR-0040)
 - **FlowSpec fuzz target.** New `decode_flowspec` fuzz target exercises
   FlowSpec NLRI decoding directly with both IPv4 and IPv6 AFIs, complementing
   the existing `decode_message` and `decode_update` targets.

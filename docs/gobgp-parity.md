@@ -30,7 +30,7 @@ Last updated: 2026-03-04
 | 4-byte ASN (RFC 6793) | Yes | Yes | AS_TRANS mapping |
 | Capability negotiation (RFC 5492) | Yes | Yes | |
 | TCP collision detection (RFC 4271 §6.8) | Yes | Yes | |
-| Graceful Restart (RFC 4724) | Yes | Partial | Receiving speaker only; GoBGP does both + restarting |
+| Graceful Restart (RFC 4724) | Yes | Partial | Helper mode + minimal restarting-speaker `R=1`; no forwarding-preserved support yet |
 | Long-Lived GR (RFC 9494) | Yes | No | Per-AFI timers |
 | Notification GR (RFC 8538) | Yes | No | |
 | Route Refresh (RFC 2918) | Yes | Yes | |
@@ -182,7 +182,7 @@ The primary target deployment. Weighted toward what matters:
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 91%, missing piece (AIGP) rarely used at IXes
 - **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
-- **Core protocol:** GR receiving-only covers the IX route server case well
+- **Core protocol:** GR helper mode is solid, and minimal restarting-speaker signaling now covers planned restarts
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 
 ### General-Purpose BGP Speaker (~45-50% parity)

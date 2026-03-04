@@ -1,6 +1,6 @@
-# ADR-0024: Graceful Restart — Receiving Speaker (RFC 4724)
+# ADR-0024: Graceful Restart — Receiving Speaker / Helper Mode (RFC 4724)
 
-**Status:** Accepted
+**Status:** Accepted (superseded in part by ADR-0040 for restarting-speaker mode)
 **Date:** 2026-03-01
 
 ## Context
@@ -15,10 +15,10 @@ require planned maintenance without route churn.
 
 Key constraints:
 
-1. **Receiving speaker only.** When a *peer* restarts, we preserve their
-   routes. Restarting speaker mode (advertising `R=1` and preserving our
-   own forwarding state) is deferred — it requires FIB integration that
-   doesn't exist yet.
+1. **Primary focus: receiving speaker / helper mode.** When a *peer*
+   restarts, we preserve their routes. Restarting-speaker behavior is
+   covered separately by ADR-0040; that mode is intentionally minimal and
+   does not claim forwarding-state preservation.
 2. **Single-task RIB ownership** (ADR-0013). GR timers and stale state
    must live inside `RibManager`, not in transport or FSM.
 3. **Stale route demotion** must be visible in best-path selection so
@@ -34,8 +34,10 @@ Capability code 64 with `GracefulRestart` variant on `Capability` enum.
 Fields: `restart_state` (R-bit), `restart_time` (12-bit seconds),
 `families` (per-AFI/SAFI with forwarding-preserved flag).
 
-Receiving speaker advertises `restart_state: false` and
-`forwarding_preserved: false` for all configured families.
+Receiving-speaker helper mode advertises `restart_state: false` and
+`forwarding_preserved: false` for all configured families. See ADR-0040
+for the separate restarting-speaker marker-file design that temporarily
+advertises `restart_state: true` after coordinated daemon restart.
 
 ### Stale Route Demotion
 
@@ -110,7 +112,7 @@ the safest behavior during a restart window.
 
 - Receiving speaker works immediately — peers running GoBGP, FRR, or BIRD
   with GR enabled will have their routes preserved during restarts.
-- Restarting speaker deferred — rustbgpd itself will still cause route flaps
-  when it restarts. This requires FIB preservation which is out of scope.
+- Restarting speaker is intentionally separate — helper mode lives here;
+  minimal restarting-speaker signaling is documented in ADR-0040.
 - Default enabled (`graceful_restart = true`) — matches operator expectations
   for production use.

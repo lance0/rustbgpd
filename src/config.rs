@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::PathBuf;
 
 use rustbgpd_fsm::PeerConfig;
 use std::collections::HashMap;
@@ -65,7 +66,14 @@ pub struct Global {
     /// Cluster ID for route reflection (RFC 4456). Defaults to `router_id`
     /// when any neighbor is configured as a route reflector client.
     pub cluster_id: Option<String>,
+    /// Directory for daemon-owned runtime state files.
+    #[serde(default = "default_runtime_state_dir")]
+    pub runtime_state_dir: String,
     pub telemetry: TelemetryConfig,
+}
+
+fn default_runtime_state_dir() -> String {
+    "/var/lib/rustbgpd".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,6 +252,8 @@ pub enum ConfigError {
     InvalidRrConfig { reason: String },
     #[error("invalid route server config: {reason}")]
     InvalidRouteServerConfig { reason: String },
+    #[error("invalid runtime_state_dir {value:?}: {reason}")]
+    InvalidRuntimeStateDir { value: String, reason: String },
     #[error("invalid RPKI config: {reason}")]
     InvalidRpkiConfig { reason: String },
     #[error("undefined policy {name:?} referenced in chain")]
@@ -655,6 +665,13 @@ impl Config {
                 })?;
         }
 
+        if self.global.runtime_state_dir.trim().is_empty() {
+            return Err(ConfigError::InvalidRuntimeStateDir {
+                value: self.global.runtime_state_dir.clone(),
+                reason: "must not be empty".to_string(),
+            });
+        }
+
         // Validate prometheus_addr is a valid SocketAddr
         self.global
             .telemetry
@@ -850,6 +867,18 @@ impl Config {
             .grpc_addr
             .parse()
             .expect("validated in Config::load")
+    }
+
+    /// Directory for daemon-owned runtime state files.
+    #[must_use]
+    pub fn runtime_state_dir(&self) -> PathBuf {
+        PathBuf::from(&self.global.runtime_state_dir)
+    }
+
+    /// Marker file used for restarting-speaker Graceful Restart.
+    #[must_use]
+    pub fn gr_restart_marker_path(&self) -> PathBuf {
+        self.runtime_state_dir().join("gr-restart.toml")
     }
 
     /// Resolve the effective cluster ID.
@@ -1113,6 +1142,36 @@ remote_asn = 65002
         assert_eq!(
             config.prometheus_addr(),
             "0.0.0.0:9179".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn runtime_state_dir_defaults_to_var_lib() {
+        let config = parse(valid_toml()).unwrap();
+        assert_eq!(
+            config.runtime_state_dir(),
+            PathBuf::from("/var/lib/rustbgpd")
+        );
+        assert_eq!(
+            config.gr_restart_marker_path(),
+            PathBuf::from("/var/lib/rustbgpd/gr-restart.toml")
+        );
+    }
+
+    #[test]
+    fn runtime_state_dir_override_is_used() {
+        let toml_str = valid_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nruntime_state_dir = \"/tmp/rustbgpd-test\"",
+        );
+        let config = parse(&toml_str).unwrap();
+        assert_eq!(
+            config.runtime_state_dir(),
+            PathBuf::from("/tmp/rustbgpd-test")
+        );
+        assert_eq!(
+            config.gr_restart_marker_path(),
+            PathBuf::from("/tmp/rustbgpd-test/gr-restart.toml")
         );
     }
 

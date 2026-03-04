@@ -58,6 +58,9 @@ pub struct PeerManagerNeighborConfig {
     pub graceful_restart: bool,
     pub gr_restart_time: u16,
     pub gr_stale_routes_time: u64,
+    /// Whether this peer should participate in the current local
+    /// restarting-speaker GR window (static startup peers only).
+    pub gr_restart_eligible: bool,
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     pub route_reflector_client: bool,
     pub route_server_client: bool,

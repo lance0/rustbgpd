@@ -162,6 +162,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             graceful_restart: true,
             gr_restart_time: 120,
             gr_stale_routes_time: 360,
+            gr_restart_eligible: false,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
             route_server_client: false,

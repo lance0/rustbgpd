@@ -10,9 +10,9 @@ use rustbgpd_rib::{FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    AddPathMode, Afi, AsPath, AsPathSegment, FlowSpecRule, Ipv4NlriEntry, Ipv4UnicastMode, Message,
-    MpReachNlri, MpUnreachNlri, NlriEntry, NotificationMessage, PathAttribute, Prefix,
-    RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage,
+    AddPathMode, Afi, AsPath, AsPathSegment, Capability, FlowSpecRule, Ipv4NlriEntry,
+    Ipv4UnicastMode, Message, MpReachNlri, MpUnreachNlri, NlriEntry, NotificationMessage,
+    PathAttribute, Prefix, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -105,6 +105,28 @@ fn resolve_import_nexthop(
 }
 
 impl PeerSession {
+    fn local_gr_restart_active(&mut self) -> bool {
+        if let Some(deadline) = self.config.gr_restart_until {
+            if Instant::now() < deadline {
+                return true;
+            }
+            self.config.gr_restart_until = None;
+        }
+        false
+    }
+
+    fn apply_local_gr_restart_state(&mut self, open: &mut rustbgpd_wire::OpenMessage) {
+        let restart_state = self.local_gr_restart_active();
+        for capability in &mut open.capabilities {
+            if let Capability::GracefulRestart {
+                restart_state: r, ..
+            } = capability
+            {
+                *r = restart_state;
+            }
+        }
+    }
+
     fn known_prefix_count(&self) -> usize {
         self.known_paths
             .iter()
@@ -310,7 +332,8 @@ impl PeerSession {
 
         for action in actions {
             match action {
-                Action::SendOpen(open) => {
+                Action::SendOpen(mut open) => {
+                    self.apply_local_gr_restart_state(&mut open);
                     let msg = Message::Open(open);
                     if let Err(e) = self.send_message(&msg).await {
                         warn!(peer = %self.peer_label, error = %e, "failed to send OPEN");
