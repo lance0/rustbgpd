@@ -34,7 +34,7 @@ Last updated: 2026-03-04
 | Long-Lived GR (RFC 9494) | Yes | No | Per-AFI timers |
 | Notification GR (RFC 8538) | Yes | No | |
 | Route Refresh (RFC 2918) | Yes | Yes | |
-| Enhanced Route Refresh (RFC 7313) | Yes | No | |
+| Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
 | Add-Path (RFC 7911) | Yes | Yes | Dual-stack receive + multi-path send (route server mode) |
 | Route Reflector (RFC 4456) | Yes | Yes | |
 | Confederation (RFC 5065) | Yes | No | |
@@ -208,7 +208,7 @@ Competing head-to-head with GoBGP for all use cases:
 2. ~~**Policy chaining + named policies**~~ — done
 3. ~~**Extended nexthop (RFC 8950)**~~ — done
 4. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
-5. **Enhanced Route Refresh (RFC 7313)** — BoRR/EoRR markers for more explicit soft reset boundaries
+5. **BMP exporter (RFC 7854)** — standard route monitoring export for visibility and external collectors
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 

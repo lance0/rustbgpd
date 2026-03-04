@@ -60,6 +60,7 @@ impl PeerConfig {
             caps.push(Capability::AddPath(add_path_caps));
         }
         caps.push(Capability::RouteRefresh);
+        caps.push(Capability::EnhancedRouteRefresh);
         caps.push(Capability::ExtendedMessage);
         let extended_nexthop_caps = self.extended_nexthop_capabilities();
         if !extended_nexthop_caps.is_empty() {
@@ -160,7 +161,7 @@ mod tests {
     fn local_capabilities_includes_families_rr_ext_msg_and_four_octet() {
         let cfg = test_config();
         let caps = cfg.local_capabilities();
-        assert_eq!(caps.len(), 4);
+        assert_eq!(caps.len(), 5);
         assert!(matches!(
             caps[0],
             Capability::MultiProtocol {
@@ -169,8 +170,9 @@ mod tests {
             }
         ));
         assert!(matches!(caps[1], Capability::RouteRefresh));
-        assert!(matches!(caps[2], Capability::ExtendedMessage));
-        assert!(matches!(caps[3], Capability::FourOctetAs { asn: 65001 }));
+        assert!(matches!(caps[2], Capability::EnhancedRouteRefresh));
+        assert!(matches!(caps[3], Capability::ExtendedMessage));
+        assert!(matches!(caps[4], Capability::FourOctetAs { asn: 65001 }));
     }
 
     #[test]
@@ -220,7 +222,7 @@ mod tests {
         cfg.gr_restart_time = 120;
         let caps = cfg.local_capabilities();
         // MultiProtocol + GracefulRestart + RouteRefresh + ExtendedMessage + FourOctetAs
-        assert_eq!(caps.len(), 5);
+        assert_eq!(caps.len(), 6);
         assert!(matches!(
             &caps[1],
             Capability::GracefulRestart {
@@ -238,7 +240,7 @@ mod tests {
     fn local_capabilities_omits_graceful_restart_when_disabled() {
         let cfg = test_config(); // graceful_restart = false
         let caps = cfg.local_capabilities();
-        assert_eq!(caps.len(), 4); // MultiProtocol + RouteRefresh + ExtendedMessage + FourOctetAs
+        assert_eq!(caps.len(), 5); // MultiProtocol + RouteRefresh + EnhancedRouteRefresh + ExtendedMessage + FourOctetAs
         assert!(
             !caps
                 .iter()
@@ -280,8 +282,9 @@ mod tests {
         let mut cfg = test_config();
         cfg.add_path_receive = true;
         let caps = cfg.local_capabilities();
-        // MultiProtocol + AddPath + RouteRefresh + ExtendedMessage + FourOctetAs
-        assert_eq!(caps.len(), 5);
+        // MultiProtocol + AddPath + RouteRefresh + EnhancedRouteRefresh
+        // + ExtendedMessage + FourOctetAs
+        assert_eq!(caps.len(), 6);
         assert!(matches!(&caps[1], Capability::AddPath(families) if families.len() == 1));
     }
 

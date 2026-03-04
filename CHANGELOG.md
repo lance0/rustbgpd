@@ -11,6 +11,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Enhanced Route Refresh (RFC 7313).** Capability code 70 is now
+  advertised alongside RFC 2918 Route Refresh. ROUTE-REFRESH message type 5
+  now models subtype `0/1/2` (Normal/BoRR/EoRR). `SoftResetIn` gains
+  family-scoped replacement semantics for ERR-capable peers: inbound `BoRR`
+  marks current routes refresh-stale, refreshed announcements/withdrawals
+  clear replaced entries, and inbound `EoRR` sweeps unreplaced state.
+  Active ERR windows now also have a fixed 5-minute timeout, which performs
+  the same unreplaced-state sweep if `EoRR` never arrives.
+  Outbound route-refresh responses emit `BoRR -> routes -> EoRR` for ERR
+  peers while preserving existing `routes -> EndOfRib` behavior for
+  RFC 2918-only peers. (ADR-0038)
+
 - **Extended Next Hop (RFC 8950).** Capability code 5 is now advertised
   automatically for dual-stack unicast peers. IPv4 unicast NLRI can be
   received and advertised via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` with an

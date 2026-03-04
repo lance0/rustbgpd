@@ -23,6 +23,10 @@ use crate::config::PeerConfig;
 /// Returns a [`NotificationMessage`] when the OPEN fails validation:
 /// unsupported version, unacceptable hold time, bad BGP identifier, or
 /// peer ASN mismatch.
+#[expect(
+    clippy::too_many_lines,
+    reason = "OPEN validation keeps negotiation logic together for protocol correctness"
+)]
 pub fn validate_open(
     open: &OpenMessage,
     config: &PeerConfig,
@@ -100,6 +104,11 @@ pub fn validate_open(
         .iter()
         .any(|c| matches!(c, Capability::RouteRefresh));
 
+    let peer_enhanced_route_refresh = open
+        .capabilities
+        .iter()
+        .any(|c| matches!(c, Capability::EnhancedRouteRefresh));
+
     let peer_extended_message = open
         .capabilities
         .iter()
@@ -146,6 +155,7 @@ pub fn validate_open(
         peer_restart_time,
         peer_gr_families,
         peer_route_refresh,
+        peer_enhanced_route_refresh,
         peer_extended_message,
         extended_nexthop_families,
         add_path_families,

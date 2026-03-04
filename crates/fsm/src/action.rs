@@ -42,6 +42,8 @@ pub struct NegotiatedSession {
     pub peer_gr_families: Vec<GracefulRestartFamily>,
     /// Whether the peer advertised Route Refresh capability (RFC 2918).
     pub peer_route_refresh: bool,
+    /// Whether the peer advertised Enhanced Route Refresh (RFC 7313).
+    pub peer_enhanced_route_refresh: bool,
     /// Whether both sides support Extended Messages (RFC 8654).
     pub peer_extended_message: bool,
     /// Per-AFI/SAFI negotiated Extended Next Hop encoding (RFC 8950).

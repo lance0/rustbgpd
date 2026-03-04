@@ -41,9 +41,10 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Route Reflector** -- RFC 4456 client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST, loop detection
 - **Extended Messages** -- RFC 8654 raises the 4096-byte message limit to 65535 bytes
 - **Extended Next Hop** -- RFC 8950 advertises and accepts IPv4 unicast NLRI over IPv6 next hop for dual-stack peers
+- **Enhanced Route Refresh** -- RFC 7313 `BoRR` / `EoRR` markers with inbound family replacement semantics for `SoftResetIn`
 - **Add-Path** -- RFC 7911 dual-stack receive + multi-path send (route server mode) for IPv4 and IPv6 unicast
 - **RPKI origin validation** -- RFC 6811: poll-based RTR client (RFC 8210) connects to RPKI validators, stamps routes Valid/Invalid/NotFound, integrates into best-path and policy
-- **820 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **829 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -256,7 +257,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 820 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 829 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|

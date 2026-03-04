@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rustbgpd_policy::{PolicyAction, PolicyChain, evaluate_chain};
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RpkiValidation, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, RpkiValidation, Safi};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -21,6 +21,10 @@ const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// How long to wait before retrying distribution to dirty peers.
 const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long to wait for an inbound enhanced route refresh window to complete
+/// before sweeping unreplaced state.
+const ERR_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Safe cast from usize to i64 for gauge metrics.
 #[expect(clippy::cast_possible_wrap)]
@@ -51,6 +55,16 @@ pub struct RibManager {
     dirty_peers: HashSet<IpAddr>,
     /// `EoR` markers that failed to enqueue and must be retried.
     pending_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Families with an outstanding enhanced route refresh response retry.
+    pending_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Active inbound enhanced route refresh windows by peer/family.
+    refresh_in_progress: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Per-peer/per-family deadlines for active enhanced route refresh windows.
+    refresh_deadlines: HashMap<(IpAddr, Afi, Safi), tokio::time::Instant>,
+    /// Unicast routes still awaiting replacement during an inbound refresh.
+    refresh_stale_routes: HashMap<IpAddr, HashSet<(Prefix, u32)>>,
+    /// `FlowSpec` routes still awaiting replacement during an inbound refresh.
+    refresh_stale_flowspec: HashMap<IpAddr, HashSet<(Afi, FlowSpecRule, u32)>>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
     /// Value is the set of (AFI, SAFI) families still awaiting End-of-RIB.
     gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
@@ -162,6 +176,11 @@ impl RibManager {
             cluster_id,
             dirty_peers: HashSet::new(),
             pending_eor: HashMap::new(),
+            pending_refresh: HashMap::new(),
+            refresh_in_progress: HashMap::new(),
+            refresh_deadlines: HashMap::new(),
+            refresh_stale_routes: HashMap::new(),
+            refresh_stale_flowspec: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
             gr_stale_routes_time: HashMap::new(),
@@ -207,6 +226,16 @@ impl RibManager {
             .get(&peer)
             .and_then(|p| p.as_ref())
             .or(self.export_policy.as_ref())
+    }
+
+    /// Clear all enhanced route refresh state for a peer.
+    fn clear_peer_refresh_state(&mut self, peer: IpAddr) {
+        self.pending_refresh.remove(&peer);
+        self.refresh_in_progress.remove(&peer);
+        self.refresh_stale_routes.remove(&peer);
+        self.refresh_stale_flowspec.remove(&peer);
+        self.refresh_deadlines
+            .retain(|(stale_peer, _, _), _| *stale_peer != peer);
     }
 
     /// Recompute Loc-RIB best path for a set of affected prefixes.
@@ -756,6 +785,7 @@ impl RibManager {
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
                     end_of_rib: pending_eor.clone(),
+                    refresh_markers: vec![],
                     flowspec_announce: fs_announce.clone(),
                     flowspec_withdraw: fs_withdraw.clone(),
                 };
@@ -798,6 +828,7 @@ impl RibManager {
                         } else {
                             self.pending_eor.remove(&peer);
                         }
+                        self.retry_pending_refresh(peer);
                     }
                 }
             } else if is_dirty
@@ -809,6 +840,7 @@ impl RibManager {
                 // Dirty peer with no diff — already in sync
                 self.dirty_peers.remove(&peer);
                 self.flush_pending_eor(peer);
+                self.retry_pending_refresh(peer);
             }
         }
     }
@@ -888,6 +920,7 @@ impl RibManager {
                     announce: vec![],
                     withdraw: vec![],
                     end_of_rib: vec![],
+                    refresh_markers: vec![],
                     next_hop_override: vec![],
                     flowspec_announce: fs_announce.clone(),
                     flowspec_withdraw: fs_withdraw.clone(),
@@ -1034,6 +1067,7 @@ impl RibManager {
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
                     end_of_rib: vec![],
+                    refresh_markers: vec![],
                     flowspec_announce: fs_announce.clone(),
                     flowspec_withdraw: fs_withdraw.clone(),
                 };
@@ -1082,6 +1116,7 @@ impl RibManager {
                     announce: vec![],
                     withdraw: vec![],
                     end_of_rib: eor_families.clone(),
+                    refresh_markers: vec![],
                     flowspec_announce: vec![],
                     flowspec_withdraw: vec![],
                 };
@@ -1207,69 +1242,57 @@ impl RibManager {
         }
 
         if let Some(tx) = self.outbound_peers.get(&peer) {
-            if !announce.is_empty()
-                || !withdraw.is_empty()
-                || !fs_announce.is_empty()
-                || !fs_withdraw.is_empty()
-            {
-                let update = OutboundRouteUpdate {
-                    next_hop_override: nh_override_flags.clone(),
-                    announce: announce.clone(),
-                    withdraw: withdraw.clone(),
-                    end_of_rib: vec![],
-                    flowspec_announce: fs_announce.clone(),
-                    flowspec_withdraw: fs_withdraw.clone(),
-                };
-                if tx.try_send(update).is_err() {
-                    warn!(%peer, "outbound channel full during route refresh response");
-                    self.metrics.record_outbound_route_drop(&peer.to_string());
-                    self.pending_eor.entry(peer).or_default().insert(family);
-                    self.dirty_peers.insert(peer);
-                    return;
-                }
-                // Update AdjRibOut
-                let rib_out = self
-                    .adj_ribs_out
-                    .entry(peer)
-                    .or_insert_with(|| AdjRibOut::new(peer));
-                for route in &announce {
-                    rib_out.insert(route.clone());
-                }
-                for (prefix, path_id) in &withdraw {
-                    rib_out.withdraw(prefix, *path_id);
-                }
-                for route in &fs_announce {
-                    rib_out.insert_flowspec(route.clone());
-                }
-                for rule in &fs_withdraw {
-                    rib_out.remove_flowspec(rule);
-                }
-                self.metrics.set_adj_rib_out_prefixes(
-                    &peer.to_string(),
-                    "all",
-                    gauge_val(rib_out.len()),
-                );
-                self.metrics.set_adj_rib_out_prefixes(
-                    &peer.to_string(),
-                    "flowspec",
-                    gauge_val(rib_out.flowspec_len()),
-                );
-            }
-
-            // Send EoR for the refreshed family
-            let eor = OutboundRouteUpdate {
-                next_hop_override: vec![],
-                announce: vec![],
-                withdraw: vec![],
+            let update = OutboundRouteUpdate {
+                next_hop_override: nh_override_flags.clone(),
+                announce: announce.clone(),
+                withdraw: withdraw.clone(),
                 end_of_rib: vec![family],
-                flowspec_announce: vec![],
-                flowspec_withdraw: vec![],
+                refresh_markers: vec![
+                    (afi, safi, RouteRefreshSubtype::BoRR),
+                    (afi, safi, RouteRefreshSubtype::EoRR),
+                ],
+                flowspec_announce: fs_announce.clone(),
+                flowspec_withdraw: fs_withdraw.clone(),
             };
-            if tx.try_send(eor).is_err() {
-                warn!(%peer, ?family, "outbound channel full — route refresh `EoR` deferred");
-                self.pending_eor.entry(peer).or_default().insert(family);
+            if tx.try_send(update).is_err() {
+                warn!(%peer, ?family, "outbound channel full during route refresh response");
+                self.metrics.record_outbound_route_drop(&peer.to_string());
+                self.pending_refresh.entry(peer).or_default().insert(family);
                 self.dirty_peers.insert(peer);
+                return;
             }
+            self.pending_refresh
+                .entry(peer)
+                .or_default()
+                .remove(&family);
+
+            // Update AdjRibOut
+            let rib_out = self
+                .adj_ribs_out
+                .entry(peer)
+                .or_insert_with(|| AdjRibOut::new(peer));
+            for route in &announce {
+                rib_out.insert(route.clone());
+            }
+            for (prefix, path_id) in &withdraw {
+                rib_out.withdraw(prefix, *path_id);
+            }
+            for route in &fs_announce {
+                rib_out.insert_flowspec(route.clone());
+            }
+            for rule in &fs_withdraw {
+                rib_out.remove_flowspec(rule);
+            }
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer.to_string(),
+                "all",
+                gauge_val(rib_out.len()),
+            );
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer.to_string(),
+                "flowspec",
+                gauge_val(rib_out.flowspec_len()),
+            );
         }
     }
 
@@ -1292,6 +1315,7 @@ impl RibManager {
             announce: vec![],
             withdraw: vec![],
             end_of_rib: families.iter().copied().collect(),
+            refresh_markers: vec![],
             flowspec_announce: vec![],
             flowspec_withdraw: vec![],
         };
@@ -1299,6 +1323,126 @@ impl RibManager {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
             self.pending_eor.insert(peer, families);
             self.dirty_peers.insert(peer);
+        }
+    }
+
+    /// Retry any deferred enhanced route refresh responses for a peer.
+    fn retry_pending_refresh(&mut self, peer: IpAddr) {
+        let Some(families) = self.pending_refresh.remove(&peer) else {
+            return;
+        };
+        for (afi, safi) in families {
+            self.send_route_refresh_response(peer, afi, safi);
+        }
+    }
+
+    /// Finish an active inbound enhanced route refresh window for a peer/family.
+    ///
+    /// When `timed_out` is true, treats the timeout as an implicit end-of-
+    /// refresh sweep and logs a warning before cleaning up unreplaced state.
+    fn finish_route_refresh(&mut self, peer: IpAddr, afi: Afi, safi: Safi, timed_out: bool) {
+        let family = (afi, safi);
+        self.refresh_deadlines.remove(&(peer, afi, safi));
+
+        let active = self
+            .refresh_in_progress
+            .get(&peer)
+            .is_some_and(|families| families.contains(&family));
+        if !active {
+            debug!(%peer, ?afi, ?safi, "End-of-RIB-Refresh without active refresh state, ignoring");
+            return;
+        }
+        if timed_out {
+            warn!(
+                %peer,
+                ?afi,
+                ?safi,
+                timeout_secs = ERR_REFRESH_TIMEOUT.as_secs(),
+                "enhanced route refresh timed out — sweeping unreplaced routes"
+            );
+        }
+
+        let stale_route_keys: Vec<(Prefix, u32)> = self
+            .refresh_stale_routes
+            .get(&peer)
+            .map(|stale| {
+                stale
+                    .iter()
+                    .copied()
+                    .filter(|(prefix, _)| prefix_family(prefix) == family)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let stale_flowspec_keys: Vec<(FlowSpecRule, u32)> = self
+            .refresh_stale_flowspec
+            .get(&peer)
+            .map(|stale| {
+                stale
+                    .iter()
+                    .filter(|(stale_afi, _, _)| *stale_afi == afi && safi == Safi::FlowSpec)
+                    .map(|(_, rule, path_id)| (rule.clone(), *path_id))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut affected = HashSet::new();
+        let mut fs_affected = HashSet::new();
+        if let Some(rib) = self.ribs.get_mut(&peer) {
+            for (prefix, path_id) in &stale_route_keys {
+                if rib.withdraw(prefix, *path_id) {
+                    affected.insert(*prefix);
+                }
+            }
+            for (rule, path_id) in &stale_flowspec_keys {
+                if rib.withdraw_flowspec(rule, *path_id) {
+                    fs_affected.insert(rule.clone());
+                }
+            }
+            self.metrics
+                .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+            self.metrics.set_rib_prefixes(
+                &peer.to_string(),
+                "flowspec",
+                gauge_val(rib.flowspec_len()),
+            );
+        }
+
+        let clear_route_stale_entry = if let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
+        {
+            stale.retain(|(prefix, _)| prefix_family(prefix) != family);
+            stale.is_empty()
+        } else {
+            false
+        };
+        if clear_route_stale_entry {
+            self.refresh_stale_routes.remove(&peer);
+        }
+
+        let clear_flowspec_stale_entry =
+            if let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer) {
+                stale.retain(|(stale_afi, _, _)| !(*stale_afi == afi && safi == Safi::FlowSpec));
+                stale.is_empty()
+            } else {
+                false
+            };
+        if clear_flowspec_stale_entry {
+            self.refresh_stale_flowspec.remove(&peer);
+        }
+
+        let clear_refresh_entry = if let Some(families) = self.refresh_in_progress.get_mut(&peer) {
+            families.remove(&family);
+            families.is_empty()
+        } else {
+            false
+        };
+        if clear_refresh_entry {
+            self.refresh_in_progress.remove(&peer);
+        }
+
+        let changed = self.recompute_best(&affected);
+        self.distribute_changes(&changed, &affected);
+        if !fs_affected.is_empty() {
+            self.recompute_and_distribute_flowspec(&fs_affected);
         }
     }
 
@@ -1313,6 +1457,11 @@ impl RibManager {
                 flowspec_announced,
                 flowspec_withdrawn,
             } => {
+                let active_refresh = self
+                    .refresh_in_progress
+                    .get(&peer)
+                    .cloned()
+                    .unwrap_or_default();
                 let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
                 let mut affected = HashSet::new();
 
@@ -1320,6 +1469,11 @@ impl RibManager {
                     if rib.withdraw(&prefix, path_id) {
                         debug!(%peer, %prefix, path_id, "withdrawn");
                         affected.insert(prefix);
+                    }
+                    if active_refresh.contains(&prefix_family(&prefix))
+                        && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
+                    {
+                        stale.remove(&(prefix, path_id));
                     }
                 }
 
@@ -1329,7 +1483,14 @@ impl RibManager {
                     }
                     debug!(%peer, prefix = %route.prefix, "announced");
                     affected.insert(route.prefix);
+                    let prefix = route.prefix;
+                    let path_id = route.path_id;
                     rib.insert(route);
+                    if active_refresh.contains(&prefix_family(&prefix))
+                        && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
+                    {
+                        stale.remove(&(prefix, path_id));
+                    }
                 }
 
                 // FlowSpec routes
@@ -1339,11 +1500,23 @@ impl RibManager {
                         debug!(%peer, rule = %rule, "flowspec withdrawn");
                         fs_affected.insert(rule.clone());
                     }
+                    if active_refresh.iter().any(|(afi, safi)| {
+                        *safi == Safi::FlowSpec && matches!(afi, Afi::Ipv4 | Afi::Ipv6)
+                    }) && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
+                    {
+                        stale.retain(|(_, stale_rule, _)| stale_rule != rule);
+                    }
                 }
                 for route in flowspec_announced {
                     debug!(%peer, rule = %route.rule, "flowspec announced");
+                    let stale_key = (route.afi, route.rule.clone(), route.path_id);
                     fs_affected.insert(route.rule.clone());
                     rib.insert_flowspec(route);
+                    if active_refresh.contains(&(stale_key.0, Safi::FlowSpec))
+                        && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
+                    {
+                        stale.remove(&stale_key);
+                    }
                 }
 
                 debug!(%peer, routes = rib.len(), "rib updated");
@@ -1403,6 +1576,7 @@ impl RibManager {
                 self.peer_add_path_send_families.remove(&peer);
                 self.dirty_peers.remove(&peer);
                 self.pending_eor.remove(&peer);
+                self.clear_peer_refresh_state(peer);
             }
 
             RibUpdate::PeerUp {
@@ -1593,6 +1767,40 @@ impl RibManager {
                 self.send_route_refresh_response(peer, afi, safi);
             }
 
+            RibUpdate::BeginRouteRefresh { peer, afi, safi } => {
+                info!(%peer, ?afi, ?safi, "beginning enhanced route refresh");
+                self.refresh_in_progress
+                    .entry(peer)
+                    .or_default()
+                    .insert((afi, safi));
+                self.refresh_deadlines.insert(
+                    (peer, afi, safi),
+                    tokio::time::Instant::now() + ERR_REFRESH_TIMEOUT,
+                );
+                if let Some(rib) = self.ribs.get(&peer) {
+                    if safi == Safi::FlowSpec {
+                        let stale = self.refresh_stale_flowspec.entry(peer).or_default();
+                        stale.retain(|(stale_afi, _, _)| *stale_afi != afi);
+                        for route in rib.iter_flowspec().filter(|route| route.afi == afi) {
+                            stale.insert((route.afi, route.rule.clone(), route.path_id));
+                        }
+                    } else {
+                        let stale = self.refresh_stale_routes.entry(peer).or_default();
+                        stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
+                        for route in rib
+                            .iter()
+                            .filter(|route| prefix_family(&route.prefix) == (afi, safi))
+                        {
+                            stale.insert((route.prefix, route.path_id));
+                        }
+                    }
+                }
+            }
+
+            RibUpdate::EndRouteRefresh { peer, afi, safi } => {
+                self.finish_route_refresh(peer, afi, safi, false);
+            }
+
             RibUpdate::PeerGracefulRestart {
                 peer,
                 restart_time,
@@ -1642,6 +1850,7 @@ impl RibManager {
                 self.peer_add_path_send_families.remove(&peer);
                 self.dirty_peers.remove(&peer);
                 self.pending_eor.remove(&peer);
+                self.clear_peer_refresh_state(peer);
 
                 // Initial timer = restart_time (window for session re-establishment).
                 // On PeerUp, this is reset to stale_routes_time for EoR.
@@ -1766,6 +1975,26 @@ impl RibManager {
         self.gr_stale_deadlines.values().copied().min()
     }
 
+    /// Find the nearest enhanced route refresh deadline, if any.
+    fn next_refresh_deadline(&self) -> Option<tokio::time::Instant> {
+        self.refresh_deadlines.values().copied().min()
+    }
+
+    /// Sweep any inbound enhanced route refresh windows whose deadline has
+    /// expired.
+    fn expire_refresh_windows(&mut self) {
+        let now = tokio::time::Instant::now();
+        let expired: Vec<(IpAddr, Afi, Safi)> = self
+            .refresh_deadlines
+            .iter()
+            .filter(|&(_, &deadline)| deadline <= now)
+            .map(|(&(peer, afi, safi), _)| (peer, afi, safi))
+            .collect();
+        for (peer, afi, safi) in expired {
+            self.finish_route_refresh(peer, afi, safi, true);
+        }
+    }
+
     /// Run the RIB manager event loop until the channel is closed.
     ///
     /// When dirty peers exist (from failed outbound sends), a persistent
@@ -1785,6 +2014,11 @@ impl RibManager {
         let gr_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
         tokio::pin!(gr_sleep);
 
+        // Enhanced route refresh timer — reset each iteration to the nearest
+        // active refresh deadline.
+        let refresh_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        tokio::pin!(refresh_sleep);
+
         loop {
             // Arm the resync timer when dirty_peers transitions empty → non-empty.
             if !self.dirty_peers.is_empty() && !resync_armed {
@@ -1802,7 +2036,14 @@ impl RibManager {
                 false
             };
 
-            let needs_timers = resync_armed || has_gr_timers;
+            let has_refresh_timers = if let Some(deadline) = self.next_refresh_deadline() {
+                refresh_sleep.as_mut().reset(deadline);
+                true
+            } else {
+                false
+            };
+
+            let needs_timers = resync_armed || has_gr_timers || has_refresh_timers;
 
             if needs_timers {
                 tokio::select! {
@@ -1840,6 +2081,9 @@ impl RibManager {
                         for peer in expired {
                             self.sweep_gr_stale(peer);
                         }
+                    }
+                    () = refresh_sleep.as_mut(), if has_refresh_timers => {
+                        self.expire_refresh_windows();
                     }
                 }
             } else {
@@ -1897,11 +2141,45 @@ mod tests {
         assert!(!eor.end_of_rib.is_empty());
     }
 
+    async fn query_best_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<Route> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .unwrap();
+        reply_rx.await.unwrap()
+    }
+
+    async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Vec<Route> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryReceivedRoutes {
+            peer: Some(peer),
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    }
+
     fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         Route {
             prefix: Prefix::V4(prefix),
             next_hop: IpAddr::V4(next_hop),
             peer: IpAddr::V4(next_hop),
+            attributes: vec![],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        }
+    }
+
+    fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
+        Route {
+            prefix: Prefix::V6(prefix),
+            next_hop: IpAddr::V6(next_hop),
+            peer: IpAddr::V6(next_hop),
             attributes: vec![],
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
@@ -3635,6 +3913,7 @@ mod tests {
                 announce: vec![],
                 withdraw: vec![],
                 end_of_rib: vec![],
+                refresh_markers: vec![],
                 flowspec_announce: vec![],
                 flowspec_withdraw: vec![],
             })
@@ -4605,9 +4884,330 @@ mod tests {
         assert_eq!(update.flowspec_announce.len(), 1);
         assert_eq!(update.flowspec_announce[0].rule, fs_rule);
         assert!(update.flowspec_withdraw.is_empty());
+        assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::FlowSpec)]);
 
-        let eor = out_rx.recv().await.unwrap();
-        assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::FlowSpec)]);
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::BeginRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::EndRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].prefix, Prefix::V4(prefix));
+
+        let received = query_received_routes(&tx, peer).await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].prefix, Prefix::V4(prefix));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        let route1 = make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1));
+        let route2 = make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1));
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route1.clone(), route2],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::BeginRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route1],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(RibUpdate::EndRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].prefix, Prefix::V4(prefix1));
+
+        let received = query_received_routes(&tx, peer).await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].prefix, Prefix::V4(prefix1));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route.clone()],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        for _ in 0..2 {
+            tx.send(RibUpdate::BeginRouteRefresh {
+                peer,
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+            })
+            .await
+            .unwrap();
+        }
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::EndRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].prefix, Prefix::V4(prefix));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+        let route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::EndRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].prefix, Prefix::V4(prefix));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix1 = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        let prefix2 = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+        let route1 = make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1));
+        let route2 = make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1));
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route1.clone(), route2],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::BeginRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![route1],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tokio::time::advance(ERR_REFRESH_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].prefix, Prefix::V4(prefix1));
+
+        let received = query_received_routes(&tx, peer).await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].prefix, Prefix::V4(prefix1));
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enhanced_route_refresh_timeout_is_family_isolated() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let v4_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        let v6_prefix = Ipv6Prefix::new(Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 0), 64);
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![
+                make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)),
+                make_v6_route(v6_prefix, Ipv6Addr::new(0x2001, 0xdb8, 1, 0, 0, 0, 0, 1)),
+            ],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::BeginRouteRefresh {
+            peer,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(ERR_REFRESH_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].prefix, Prefix::V6(v6_prefix));
+
+        let received = query_received_routes(&tx, peer).await;
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].prefix, Prefix::V6(v6_prefix));
 
         drop(tx);
         handle.await.unwrap();
@@ -6923,8 +7523,7 @@ mod tests {
         let mut v4_path_ids: Vec<u32> = v4_routes.iter().map(|r| r.path_id).collect();
         v4_path_ids.sort_unstable();
         assert_eq!(v4_path_ids, vec![1, 2]);
-        let eor = out_rx.recv().await.unwrap();
-        assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
+        assert_eq!(update.end_of_rib, vec![(Afi::Ipv4, Safi::Unicast)]);
 
         tx.send(RibUpdate::RouteRefreshRequest {
             peer: target,
@@ -6941,8 +7540,7 @@ mod tests {
             .collect();
         assert_eq!(v6_routes.len(), 1, "IPv6 refresh should be single-best");
         assert_eq!(v6_routes[0].path_id, 0);
-        let eor = out_rx.recv().await.unwrap();
-        assert_eq!(eor.end_of_rib, vec![(Afi::Ipv6, Safi::Unicast)]);
+        assert_eq!(update.end_of_rib, vec![(Afi::Ipv6, Safi::Unicast)]);
 
         drop(tx);
         handle.await.unwrap();

@@ -112,6 +112,8 @@ pub enum Capability {
     },
     /// RFC 2918: Route Refresh.
     RouteRefresh,
+    /// RFC 7313: Enhanced Route Refresh.
+    EnhancedRouteRefresh,
     /// RFC 8654: Extended Messages (raise max message length to 65535).
     ExtendedMessage,
     /// RFC 7911: Add-Path — advertise/receive multiple paths per prefix.
@@ -183,6 +185,13 @@ impl Capability {
                     return Ok(Capability::Unknown { code, data });
                 }
                 Ok(Capability::RouteRefresh)
+            }
+            capability_code::ENHANCED_ROUTE_REFRESH => {
+                if length != 0 {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                Ok(Capability::EnhancedRouteRefresh)
             }
             capability_code::EXTENDED_NEXT_HOP => {
                 // RFC 8950: repeated tuples of
@@ -343,6 +352,10 @@ impl Capability {
                 buf.put_u8(capability_code::ROUTE_REFRESH);
                 buf.put_u8(0); // zero-length value
             }
+            Capability::EnhancedRouteRefresh => {
+                buf.put_u8(capability_code::ENHANCED_ROUTE_REFRESH);
+                buf.put_u8(0); // zero-length value
+            }
             Capability::ExtendedNextHop(families) => {
                 let value_len = families.len() * 6;
                 if value_len > 255 {
@@ -440,6 +453,7 @@ impl Capability {
         match self {
             Self::MultiProtocol { .. } => capability_code::MULTI_PROTOCOL,
             Self::RouteRefresh => capability_code::ROUTE_REFRESH,
+            Self::EnhancedRouteRefresh => capability_code::ENHANCED_ROUTE_REFRESH,
             Self::ExtendedNextHop(_) => capability_code::EXTENDED_NEXT_HOP,
             Self::ExtendedMessage => capability_code::EXTENDED_MESSAGE,
             Self::AddPath(_) => capability_code::ADD_PATH,
@@ -454,7 +468,7 @@ impl Capability {
     pub fn encoded_len(&self) -> usize {
         2 + match self {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
-            Self::RouteRefresh | Self::ExtendedMessage => 0,
+            Self::RouteRefresh | Self::EnhancedRouteRefresh | Self::ExtendedMessage => 0,
             Self::ExtendedNextHop(families) => families.len() * 6,
             Self::AddPath(families) => families.len() * 4,
             Self::GracefulRestart { families, .. } => 2 + families.len() * 4,

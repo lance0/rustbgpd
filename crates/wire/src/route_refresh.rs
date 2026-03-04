@@ -4,30 +4,70 @@ use crate::capability::{Afi, Safi};
 use crate::constants::{HEADER_LEN, MARKER, message_type};
 use crate::error::{DecodeError, EncodeError};
 
-/// ROUTE-REFRESH message body length (AFI u16 + Reserved u8 + SAFI u8).
+/// ROUTE-REFRESH message body length (AFI u16 + subtype u8 + SAFI u8).
 const BODY_LEN: usize = 4;
 
 /// Total wire length of a ROUTE-REFRESH message (header + body).
 const TOTAL_LEN: usize = HEADER_LEN + BODY_LEN;
 
-/// BGP ROUTE-REFRESH message (RFC 2918).
+/// ROUTE-REFRESH demarcation subtype (RFC 7313).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RouteRefreshSubtype {
+    Normal,
+    BoRR,
+    EoRR,
+    Unknown(u8),
+}
+
+impl RouteRefreshSubtype {
+    #[must_use]
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Normal,
+            1 => Self::BoRR,
+            2 => Self::EoRR,
+            other => Self::Unknown(other),
+        }
+    }
+
+    #[must_use]
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::BoRR => 1,
+            Self::EoRR => 2,
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+/// BGP ROUTE-REFRESH message (RFC 2918 + RFC 7313).
 ///
 /// Requests a peer to re-advertise its Adj-RIB-Out for the specified
-/// address family. Raw wire values are stored so that unknown AFI/SAFI
-/// values can be decoded without error — the transport layer decides
+/// address family. RFC 7313 reuses the third octet as a demarcation subtype
+/// (BoRR/EoRR). Raw wire values are stored so that unknown AFI/SAFI or
+/// subtype values can be decoded without error — the transport layer decides
 /// whether to act on or ignore them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteRefreshMessage {
     pub afi_raw: u16,
+    pub subtype_raw: u8,
     pub safi_raw: u8,
 }
 
 impl RouteRefreshMessage {
-    /// Create from typed AFI/SAFI values.
+    /// Create a normal (subtype 0) ROUTE-REFRESH from typed AFI/SAFI values.
     #[must_use]
     pub fn new(afi: Afi, safi: Safi) -> Self {
+        Self::new_with_subtype(afi, safi, RouteRefreshSubtype::Normal)
+    }
+
+    /// Create a ROUTE-REFRESH with an explicit subtype.
+    #[must_use]
+    pub fn new_with_subtype(afi: Afi, safi: Safi, subtype: RouteRefreshSubtype) -> Self {
         Self {
             afi_raw: afi as u16,
+            subtype_raw: subtype.as_u8(),
             safi_raw: safi as u8,
         }
     }
@@ -44,12 +84,18 @@ impl RouteRefreshMessage {
         Safi::from_u8(self.safi_raw)
     }
 
+    /// Decode the demarcation subtype.
+    #[must_use]
+    pub fn subtype(&self) -> RouteRefreshSubtype {
+        RouteRefreshSubtype::from_u8(self.subtype_raw)
+    }
+
     /// Decode a ROUTE-REFRESH message body from a buffer.
     ///
     /// # Errors
     ///
     /// Returns [`DecodeError`] if the body length is not exactly 4.
-    /// Unknown AFI/SAFI values are preserved (not treated as errors).
+    /// Unknown AFI/SAFI values and unknown subtypes are preserved.
     pub fn decode(buf: &mut impl Buf, body_len: usize) -> Result<Self, DecodeError> {
         if body_len != BODY_LEN {
             return Err(DecodeError::InvalidLength {
@@ -64,27 +110,29 @@ impl RouteRefreshMessage {
         }
 
         let afi_raw = buf.get_u16();
-        let _reserved = buf.get_u8();
+        let subtype_raw = buf.get_u8();
         let safi_raw = buf.get_u8();
 
-        Ok(Self { afi_raw, safi_raw })
+        Ok(Self {
+            afi_raw,
+            subtype_raw,
+            safi_raw,
+        })
     }
 
     /// Encode a complete ROUTE-REFRESH message (header + body) into a buffer.
     ///
     /// # Errors
     ///
-    /// This encoding is infallible for valid AFI/SAFI combinations, but
-    /// returns [`EncodeError`] for API consistency.
+    /// This encoding is infallible for valid values, but returns
+    /// [`EncodeError`] for API consistency.
     pub fn encode(&self, buf: &mut impl BufMut) -> Result<(), EncodeError> {
-        // Header
         buf.put_slice(&MARKER);
         #[expect(clippy::cast_possible_truncation)]
         buf.put_u16(TOTAL_LEN as u16);
         buf.put_u8(message_type::ROUTE_REFRESH);
-        // Body
         buf.put_u16(self.afi_raw);
-        buf.put_u8(0); // reserved
+        buf.put_u8(self.subtype_raw);
         buf.put_u8(self.safi_raw);
         Ok(())
     }
@@ -98,13 +146,23 @@ impl RouteRefreshMessage {
 
 impl std::fmt::Display for RouteRefreshMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let subtype = match self.subtype() {
+            RouteRefreshSubtype::Normal => "Normal".to_string(),
+            RouteRefreshSubtype::BoRR => "BoRR".to_string(),
+            RouteRefreshSubtype::EoRR => "EoRR".to_string(),
+            RouteRefreshSubtype::Unknown(value) => format!("Unknown({value})"),
+        };
+
         match (self.afi(), self.safi()) {
             (Some(afi), Some(safi)) => {
-                write!(f, "ROUTE-REFRESH AFI={afi:?} SAFI={safi:?}")
+                write!(
+                    f,
+                    "ROUTE-REFRESH subtype={subtype} AFI={afi:?} SAFI={safi:?}"
+                )
             }
             _ => write!(
                 f,
-                "ROUTE-REFRESH AFI={} SAFI={}",
+                "ROUTE-REFRESH subtype={subtype} AFI={} SAFI={}",
                 self.afi_raw, self.safi_raw
             ),
         }
@@ -124,13 +182,13 @@ mod tests {
         msg.encode(&mut buf).unwrap();
         assert_eq!(buf.len(), TOTAL_LEN);
 
-        // Skip header for decode
         let mut bytes = buf.freeze();
         bytes.advance(HEADER_LEN);
         let decoded = RouteRefreshMessage::decode(&mut bytes, BODY_LEN).unwrap();
         assert_eq!(decoded, msg);
         assert_eq!(decoded.afi(), Some(Afi::Ipv4));
         assert_eq!(decoded.safi(), Some(Safi::Unicast));
+        assert_eq!(decoded.subtype(), RouteRefreshSubtype::Normal);
     }
 
     #[test]
@@ -145,11 +203,44 @@ mod tests {
         assert_eq!(decoded, msg);
         assert_eq!(decoded.afi(), Some(Afi::Ipv6));
         assert_eq!(decoded.safi(), Some(Safi::Unicast));
+        assert_eq!(decoded.subtype(), RouteRefreshSubtype::Normal);
+    }
+
+    #[test]
+    fn roundtrip_borr() {
+        let msg = RouteRefreshMessage::new_with_subtype(
+            Afi::Ipv4,
+            Safi::Unicast,
+            RouteRefreshSubtype::BoRR,
+        );
+        let mut buf = BytesMut::with_capacity(TOTAL_LEN);
+        msg.encode(&mut buf).unwrap();
+        let mut bytes = buf.freeze();
+        bytes.advance(HEADER_LEN);
+        let decoded = RouteRefreshMessage::decode(&mut bytes, BODY_LEN).unwrap();
+        assert_eq!(decoded, msg);
+        assert_eq!(decoded.subtype(), RouteRefreshSubtype::BoRR);
+    }
+
+    #[test]
+    fn roundtrip_eorr() {
+        let msg = RouteRefreshMessage::new_with_subtype(
+            Afi::Ipv6,
+            Safi::Unicast,
+            RouteRefreshSubtype::EoRR,
+        );
+        let mut buf = BytesMut::with_capacity(TOTAL_LEN);
+        msg.encode(&mut buf).unwrap();
+        let mut bytes = buf.freeze();
+        bytes.advance(HEADER_LEN);
+        let decoded = RouteRefreshMessage::decode(&mut bytes, BODY_LEN).unwrap();
+        assert_eq!(decoded, msg);
+        assert_eq!(decoded.subtype(), RouteRefreshSubtype::EoRR);
     }
 
     #[test]
     fn reject_wrong_body_length() {
-        let data: &[u8] = &[0, 1, 0, 1, 0xFF]; // 5 bytes
+        let data: &[u8] = &[0, 1, 0, 1, 0xFF];
         let mut buf = Bytes::copy_from_slice(data);
         assert!(RouteRefreshMessage::decode(&mut buf, 5).is_err());
     }
@@ -163,22 +254,32 @@ mod tests {
 
     #[test]
     fn decode_unknown_afi_succeeds() {
-        let data: &[u8] = &[0, 99, 0, 1]; // AFI=99
+        let data: &[u8] = &[0, 99, 0, 1];
         let mut buf = Bytes::copy_from_slice(data);
         let msg = RouteRefreshMessage::decode(&mut buf, 4).unwrap();
         assert_eq!(msg.afi_raw, 99);
         assert_eq!(msg.afi(), None);
         assert_eq!(msg.safi(), Some(Safi::Unicast));
+        assert_eq!(msg.subtype(), RouteRefreshSubtype::Normal);
     }
 
     #[test]
     fn decode_unknown_safi_succeeds() {
-        let data: &[u8] = &[0, 1, 0, 99]; // SAFI=99
+        let data: &[u8] = &[0, 1, 0, 99];
         let mut buf = Bytes::copy_from_slice(data);
         let msg = RouteRefreshMessage::decode(&mut buf, 4).unwrap();
         assert_eq!(msg.safi_raw, 99);
         assert_eq!(msg.safi(), None);
         assert_eq!(msg.afi(), Some(Afi::Ipv4));
+        assert_eq!(msg.subtype(), RouteRefreshSubtype::Normal);
+    }
+
+    #[test]
+    fn decode_unknown_subtype_succeeds() {
+        let data: &[u8] = &[0, 1, 9, 1];
+        let mut buf = Bytes::copy_from_slice(data);
+        let msg = RouteRefreshMessage::decode(&mut buf, 4).unwrap();
+        assert_eq!(msg.subtype(), RouteRefreshSubtype::Unknown(9));
     }
 
     #[test]
@@ -193,16 +294,19 @@ mod tests {
         let s = format!("{msg}");
         assert!(s.contains("Ipv6"));
         assert!(s.contains("Unicast"));
+        assert!(s.contains("Normal"));
     }
 
     #[test]
     fn display_unknown_family() {
         let msg = RouteRefreshMessage {
             afi_raw: 99,
+            subtype_raw: 7,
             safi_raw: 42,
         };
         let s = format!("{msg}");
         assert!(s.contains("99"));
         assert!(s.contains("42"));
+        assert!(s.contains("Unknown(7)"));
     }
 }

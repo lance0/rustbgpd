@@ -50,7 +50,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Graceful Restart — receiving speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep
 - [x] Extended Communities (RFC 4360) — wire decode/encode, common subtypes (route target, route origin, 4-byte AS), RIB storage, gRPC API exposure (ADR-0025)
 - [x] Extended Communities Policy Matching — match on RT/RO values in prefix lists, TOML community-match clauses (ADR-0026)
-- [x] Route Refresh (RFC 2918) — inbound re-advertisement, outbound SoftResetIn gRPC, capability negotiation (ADR-0027)
+- [x] Route Refresh (RFC 2918) + Enhanced Route Refresh (RFC 7313) — inbound re-advertisement, outbound SoftResetIn gRPC, BoRR/EoRR refresh windows, capability negotiation (ADR-0027, ADR-0038)
 - [x] AS_PATH loop detection (RFC 4271 §9.1.2) — routes containing local ASN discarded before RIB entry (all peers)
 - [x] iBGP split-horizon (RFC 4271 §9.1.1) — non-route-reflector speaker suppresses iBGP-to-iBGP re-advertisement
 - [x] Standard Communities Policy Matching (RFC 1997) — filter on standard community values in import/export policy, well-known names (ADR-0028)
@@ -63,7 +63,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Add-Path (RFC 7911) — dual-stack receive + multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
 - [x] Extended nexthop (RFC 8950) — capability code 5; automatic dual-stack capability advertisement, IPv4 unicast NLRI over IPv6 next hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
-- [x] 820 tests — unit, integration, property, fuzz
+- [x] 829 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -94,6 +94,8 @@ Items identified during review that are not correctness bugs but improve strictn
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
 - [ ] **RTR persistent session + Serial Notify** — RTR client currently disconnects after each EndOfData and reconnects after refresh_interval; keeping the TCP session open would allow receiving Serial Notify for faster cache-change propagation (RFC 8210 §8)
 - [ ] **RTR expire_interval enforcement** — config and server-advertised expire timers are accepted but not enforced; VRPs should be cleared if no fresh EndOfData arrives within the expiry window
+- [ ] **ERR metrics** — no gauge for active enhanced route refresh windows or pending refresh-stale route count; would improve operational visibility during soft resets
+- [ ] **Inbound BoRR/EoRR retry on channel-full** — inbound BoRR/EoRR markers are silently dropped (with warning) when the RIB channel is full; unlike outbound responses which have `pending_refresh` retry, inbound markers have no recovery path
 
 ### P1 — Core Protocol Gaps
 
@@ -114,6 +116,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [x] **Extended nexthop** (RFC 8950) — capability code 5, automatic dual-stack negotiation, IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [ ] **CLI tool** — `rustbgpctl` wrapping gRPC; grpcurl is a poor substitute for `gobgp` CLI; TUI mode as a follow-on
 - [x] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; threaded from gRPC DisableNeighbor through transport
+- [x] **Enhanced Route Refresh** (RFC 7313) — BoRR/EoRR demarcation and inbound family replacement semantics for `SoftResetIn`
 
 ### P2.5 — Operational Polish
 

@@ -12,7 +12,7 @@ use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
     AddPathMode, Afi, AsPath, AsPathSegment, FlowSpecRule, Ipv4NlriEntry, Ipv4UnicastMode, Message,
     MpReachNlri, MpUnreachNlri, NlriEntry, NotificationMessage, PathAttribute, Prefix,
-    RouteRefreshMessage, Safi, UpdateMessage,
+    RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -775,24 +775,101 @@ impl PeerSession {
                                 );
                                 continue;
                             }
-                            info!(
-                                peer = %self.peer_label,
-                                ?afi, ?safi,
-                                "received ROUTE-REFRESH"
-                            );
-                            if self
-                                .rib_tx
-                                .try_send(RibUpdate::RouteRefreshRequest {
-                                    peer: self.peer_ip,
-                                    afi,
-                                    safi,
-                                })
-                                .is_err()
-                            {
-                                warn!(
-                                    peer = %self.peer_label,
-                                    "RIB channel full — route refresh request dropped"
-                                );
+                            match rr.subtype() {
+                                RouteRefreshSubtype::Normal => {
+                                    info!(
+                                        peer = %self.peer_label,
+                                        ?afi, ?safi,
+                                        "received ROUTE-REFRESH"
+                                    );
+                                    if self
+                                        .rib_tx
+                                        .try_send(RibUpdate::RouteRefreshRequest {
+                                            peer: self.peer_ip,
+                                            afi,
+                                            safi,
+                                        })
+                                        .is_err()
+                                    {
+                                        warn!(
+                                            peer = %self.peer_label,
+                                            "RIB channel full — route refresh request dropped"
+                                        );
+                                    }
+                                }
+                                RouteRefreshSubtype::BoRR => {
+                                    let peer_err_capable = self
+                                        .negotiated
+                                        .as_ref()
+                                        .is_some_and(|n| n.peer_enhanced_route_refresh);
+                                    if !peer_err_capable {
+                                        warn!(
+                                            peer = %self.peer_label,
+                                            ?afi, ?safi,
+                                            "ignoring BoRR from peer without Enhanced Route Refresh"
+                                        );
+                                    } else if self
+                                        .rib_tx
+                                        .try_send(RibUpdate::BeginRouteRefresh {
+                                            peer: self.peer_ip,
+                                            afi,
+                                            safi,
+                                        })
+                                        .is_err()
+                                    {
+                                        warn!(
+                                            peer = %self.peer_label,
+                                            "RIB channel full — BeginRouteRefresh dropped"
+                                        );
+                                    } else {
+                                        info!(
+                                            peer = %self.peer_label,
+                                            ?afi, ?safi,
+                                            "received Beginning-of-RIB-Refresh"
+                                        );
+                                    }
+                                }
+                                RouteRefreshSubtype::EoRR => {
+                                    let peer_err_capable = self
+                                        .negotiated
+                                        .as_ref()
+                                        .is_some_and(|n| n.peer_enhanced_route_refresh);
+                                    if !peer_err_capable {
+                                        warn!(
+                                            peer = %self.peer_label,
+                                            ?afi, ?safi,
+                                            "ignoring EoRR from peer without Enhanced Route Refresh"
+                                        );
+                                    } else if self
+                                        .rib_tx
+                                        .try_send(RibUpdate::EndRouteRefresh {
+                                            peer: self.peer_ip,
+                                            afi,
+                                            safi,
+                                        })
+                                        .is_err()
+                                    {
+                                        warn!(
+                                            peer = %self.peer_label,
+                                            "RIB channel full — EndRouteRefresh dropped"
+                                        );
+                                    } else {
+                                        info!(
+                                            peer = %self.peer_label,
+                                            ?afi, ?safi,
+                                            "received End-of-RIB-Refresh"
+                                        );
+                                    }
+                                }
+                                RouteRefreshSubtype::Unknown(subtype) => {
+                                    warn!(
+                                        peer = %self.peer_label,
+                                        ?afi,
+                                        ?safi,
+                                        subtype,
+                                        "ignoring ROUTE-REFRESH with unknown subtype"
+                                    );
+                                }
                             }
                             Event::RouteRefreshReceived { afi, safi }
                         }
@@ -1489,6 +1566,10 @@ impl PeerSession {
             .negotiated
             .as_ref()
             .is_some_and(|n| n.peer_asn != self.config.peer.local_asn);
+        let peer_err = self
+            .negotiated
+            .as_ref()
+            .is_some_and(|n| n.peer_enhanced_route_refresh);
 
         // Check if Add-Path send is negotiated (we can send path IDs to this peer)
         let add_path_ipv4_send = self.negotiated.as_ref().is_some_and(|n| {
@@ -1511,6 +1592,29 @@ impl PeerSession {
                     )
                 })
         });
+
+        if peer_err {
+            for (afi, safi, subtype) in update
+                .refresh_markers
+                .iter()
+                .copied()
+                .filter(|(_, _, subtype)| matches!(subtype, RouteRefreshSubtype::BoRR))
+            {
+                let msg = Message::RouteRefresh(RouteRefreshMessage::new_with_subtype(
+                    afi, safi, subtype,
+                ));
+                if let Err(e) = self.send_message(&msg).await {
+                    warn!(
+                        peer = %self.peer_label,
+                        error = %e,
+                        "failed to send Beginning-of-RIB-Refresh"
+                    );
+                    return;
+                }
+                self.metrics
+                    .record_message_sent(&self.peer_label, "route_refresh");
+            }
+        }
         let use_extended_nexthop_ipv4 = self.use_extended_nexthop_ipv4();
 
         // Extract TCP local addresses for NEXT_HOP rewrite
@@ -1921,8 +2025,46 @@ impl PeerSession {
             }
         }
 
+        if peer_err {
+            for (afi, safi, subtype) in update
+                .refresh_markers
+                .iter()
+                .copied()
+                .filter(|(_, _, subtype)| matches!(subtype, RouteRefreshSubtype::EoRR))
+            {
+                let msg = Message::RouteRefresh(RouteRefreshMessage::new_with_subtype(
+                    afi, safi, subtype,
+                ));
+                if let Err(e) = self.send_message(&msg).await {
+                    warn!(
+                        peer = %self.peer_label,
+                        error = %e,
+                        "failed to send End-of-RIB-Refresh"
+                    );
+                    return;
+                }
+                self.metrics
+                    .record_message_sent(&self.peer_label, "route_refresh");
+            }
+        }
+
         // Send End-of-RIB markers
         for (afi, safi) in &update.end_of_rib {
+            if peer_err
+                && update
+                    .refresh_markers
+                    .iter()
+                    .any(|(m_afi, m_safi, subtype)| {
+                        *m_afi == *afi
+                            && *m_safi == *safi
+                            && matches!(
+                                subtype,
+                                RouteRefreshSubtype::BoRR | RouteRefreshSubtype::EoRR
+                            )
+                    })
+            {
+                continue;
+            }
             let msg = if let (Afi::Ipv4, Safi::Unicast) = (afi, safi) {
                 // IPv4 Unicast EoR: empty UPDATE (no NLRI, no withdrawn, no attrs)
                 UpdateMessage::build(&[], &[], &[], four_octet_as, false, Ipv4UnicastMode::Body)
@@ -2266,6 +2408,7 @@ mod tests {
             peer_restart_time: 0,
             peer_gr_families: vec![],
             peer_route_refresh: false,
+            peer_enhanced_route_refresh: false,
             peer_extended_message: false,
             extended_nexthop_families,
             add_path_families: HashMap::new(),
@@ -2591,8 +2734,7 @@ mod tests {
             }),
         ];
         // Build with Add-Path enabled and MP encoding
-        let update =
-            UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::MpReach);
+        let update = UpdateMessage::build(&[], &[], &attrs, true, true, Ipv4UnicastMode::MpReach);
 
         session.process_update(update).await;
 

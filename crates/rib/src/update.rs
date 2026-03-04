@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::VrpTable;
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::event::RouteEvent;
@@ -17,6 +17,9 @@ pub struct OutboundRouteUpdate {
     pub withdraw: Vec<(Prefix, u32)>,
     /// End-of-RIB markers to send for these families after the route updates.
     pub end_of_rib: Vec<(Afi, Safi)>,
+    /// RFC 7313 route-refresh demarcation markers to emit around the update.
+    /// `BoRR` markers are sent before route payloads; `EoRR` markers after.
+    pub refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
     /// Per-route next-hop override from export policy. Parallel to `announce` —
     /// `next_hop_override[i]` applies to `announce[i]`.
     pub next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
@@ -110,6 +113,10 @@ pub enum RibUpdate {
     },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
     RouteRefreshRequest { peer: IpAddr, afi: Afi, safi: Safi },
+    /// Peer sent Beginning-of-RIB-Refresh (RFC 7313) for this family.
+    BeginRouteRefresh { peer: IpAddr, afi: Afi, safi: Safi },
+    /// Peer sent End-of-RIB-Refresh (RFC 7313) for this family.
+    EndRouteRefresh { peer: IpAddr, afi: Afi, safi: Safi },
     /// RPKI cache update — new VRP table for origin validation.
     RpkiCacheUpdate { table: Arc<VrpTable> },
     /// Inject a locally-originated `FlowSpec` route.

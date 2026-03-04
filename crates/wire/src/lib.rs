@@ -54,7 +54,7 @@ pub use message::{Message, decode_message, encode_message, encode_message_with_l
 pub use notification::NotificationCode;
 pub use notification_msg::NotificationMessage;
 pub use open::OpenMessage;
-pub use route_refresh::RouteRefreshMessage;
+pub use route_refresh::{RouteRefreshMessage, RouteRefreshSubtype};
 pub use update::{Ipv4UnicastMode, UpdateMessage};
 
 /// RPKI origin validation state per RFC 6811.

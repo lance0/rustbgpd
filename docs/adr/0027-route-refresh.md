@@ -3,6 +3,10 @@
 **Status:** Accepted
 **Date:** 2026-03-02
 
+> Note: the original RFC 2918 transport + responder design remains the base
+> implementation. Family-scoped replacement semantics for ERR-capable peers
+> are extended by [ADR-0038](0038-enhanced-route-refresh.md).
+
 ## Context
 
 Operators need to re-evaluate routes after policy changes without tearing
@@ -14,8 +18,9 @@ This is the standard mechanism for "soft reset inbound".
 
 ### Wire format
 
-ROUTE-REFRESH is message type 5 with a 4-byte body: AFI (u16) + Reserved
-(u8, must be 0) + SAFI (u8). Total wire length: 23 bytes.
+ROUTE-REFRESH is message type 5 with a 4-byte body: AFI (u16) + third octet
+(`0` for plain RFC 2918 requests; RFC 7313 later repurposes it as a subtype)
++ SAFI (u8). Total wire length: 23 bytes.
 
 ### Capability
 
@@ -95,10 +100,7 @@ A single source of truth: `proto/rustbgpd.proto`. The API crate's
   teardown.
 - `SoftResetIn` gRPC returns the actual send outcome, not just whether
   the command was enqueued.
-- **Limitation:** Route refresh re-announces current Loc-RIB best paths
-  but does not explicitly withdraw prefixes that the peer previously
-  received but no longer pass policy. This is correct per RFC 2918 (the
-  peer replaces its view on receiving the re-advertisement), but
-  operators should be aware that if the peer does not support implicit
-  replacement, stale routes may linger until the next full table dump or
-  session reset.
+- **Limitation (2918-only peers):** plain RFC 2918 peers still receive
+  re-advertisement plus `EndOfRib` only. Family-scoped replacement using
+  `BoRR` / `EoRR` is implemented only when both sides negotiate Enhanced
+  Route Refresh (RFC 7313; ADR-0038).

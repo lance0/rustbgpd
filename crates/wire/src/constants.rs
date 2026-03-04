@@ -65,6 +65,8 @@ pub mod capability_code {
     pub const EXTENDED_MESSAGE: u8 = 6;
     /// RFC 7911: Add-Path.
     pub const ADD_PATH: u8 = 69;
+    /// RFC 7313: Enhanced Route Refresh.
+    pub const ENHANCED_ROUTE_REFRESH: u8 = 70;
     /// RFC 6793: 4-Byte AS Number.
     pub const FOUR_OCTET_AS: u8 = 65;
 }

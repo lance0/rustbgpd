@@ -45,6 +45,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0035](0035-flowspec.md) | FlowSpec (RFC 8955 / RFC 8956) | Accepted | 2026-03-03 |
 | [0036](0036-policy-chaining.md) | Policy Chaining + Named Policies | Accepted | 2026-03-04 |
 | [0037](0037-extended-nexthop.md) | Extended Next Hop Encoding (RFC 8950) | Accepted | 2026-03-04 |
+| [0038](0038-enhanced-route-refresh.md) | Enhanced Route Refresh (RFC 7313) | Accepted | 2026-03-04 |
 
 ## Template
 
