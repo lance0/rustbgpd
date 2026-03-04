@@ -241,6 +241,7 @@ async fn run(config: Config) {
                     gr_stale_routes_time: transport_config.gr_stale_routes_time,
                     local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
                     route_reflector_client: transport_config.route_reflector_client,
+                    route_server_client: transport_config.route_server_client,
                     add_path_receive: transport_config.peer.add_path_receive,
                     add_path_send: transport_config.peer.add_path_send,
                     add_path_send_max: transport_config.peer.add_path_send_max,

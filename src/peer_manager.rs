@@ -95,6 +95,7 @@ impl PeerManager {
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport.gr_stale_routes_time = config.gr_stale_routes_time;
         transport.route_reflector_client = config.route_reflector_client;
+        transport.route_server_client = config.route_server_client;
         transport.cluster_id = self.cluster_id;
         transport
     }
@@ -524,6 +525,7 @@ mod tests {
             gr_stale_routes_time: 360,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
+            route_server_client: false,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
@@ -749,6 +751,20 @@ mod tests {
 
         let transport = mgr.build_transport_config(&config);
         assert_eq!(transport.local_ipv6_nexthop, Some(nh));
+    }
+
+    #[test]
+    fn build_transport_config_preserves_route_server_client() {
+        let (_, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mgr = PeerManager::new(rx, 65001, Ipv4Addr::new(10, 0, 0, 1), None, metrics, rib_tx);
+
+        let mut config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
+        config.route_server_client = true;
+
+        let transport = mgr.build_transport_config(&config);
+        assert!(transport.route_server_client);
     }
 
     #[test]

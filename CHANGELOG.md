@@ -47,6 +47,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Inbound Cease/2 and Cease/4 NOTIFICATIONs with shutdown communication
   are decoded and logged. Wire helpers: `encode_shutdown_communication()`
   and `decode_shutdown_communication()` in the notification module.
+- **Transparent route server mode.** Static neighbor config now supports
+  `route_server_client = true` for eBGP peers. Outbound unicast
+  advertisements to route-server clients preserve the original next hop and
+  skip the automatic local-AS prepend normally applied on eBGP export.
+  Explicit export-policy next-hop overrides still win. RFC 8950 IPv4 over
+  IPv6 next-hop and IPv6 unicast both honor the same transparent behavior.
+  FlowSpec transparency remains deferred. (ADR-0039)
 - **FlowSpec fuzz target.** New `decode_flowspec` fuzz target exercises
   FlowSpec NLRI decoding directly with both IPv4 and IPv6 AFIs, complementing
   the existing `decode_message` and `decode_update` targets.

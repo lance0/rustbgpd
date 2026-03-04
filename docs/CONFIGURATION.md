@@ -73,6 +73,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
+| `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP unicast peers (see below) |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 
 ### Address families
@@ -182,6 +183,39 @@ second=2, etc.). Split horizon, iBGP suppression, and per-candidate export
 policy are evaluated for each path.
 
 Both IPv4 and IPv6 unicast are supported. See [ADR-0033](docs/adr/0033-add-path.md).
+
+### Transparent Route Server Mode
+
+For IX route-server clients, you can make eBGP export transparent by setting
+`route_server_client = true` on the neighbor:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+```
+
+When enabled, outbound **unicast** advertisements to that peer:
+
+- preserve the original next hop by default
+- skip the automatic local-AS prepend normally applied on eBGP export
+- still strip `LOCAL_PREF` (the peer is still eBGP)
+- still honor explicit export-policy next-hop rewrites (`set_next_hop`)
+
+This applies to:
+
+- classic IPv4 unicast (`NEXT_HOP`)
+- IPv4 unicast over IPv6 next hop (RFC 8950)
+- IPv6 unicast (`MP_REACH_NLRI`)
+
+`route_server_client` is only valid for eBGP neighbors. Config validation
+rejects it on iBGP peers.
+
+**Current scope:** transparent route-server behavior is implemented for
+unicast only. FlowSpec still uses the standard eBGP automatic AS_PATH prepend
+behavior and does not yet have a transparent mode.
 
 ### FlowSpec (RFC 8955)
 
@@ -693,6 +727,7 @@ starting:
 | RPKI `expire_interval` must be >= `refresh_interval` | `expire_interval must be >= refresh_interval` |
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
+| `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
 ### Defaults applied at runtime
@@ -708,4 +743,5 @@ starting:
 | `gr_restart_time` | 120 seconds |
 | `gr_stale_routes_time` | 360 seconds |
 | `description` | peer address used as label |
+| `route_server_client` | `false` |
 | Policy default action | permit (when no entry matches) |

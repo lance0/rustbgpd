@@ -63,7 +63,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Add-Path (RFC 7911) — dual-stack receive + multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
 - [x] Extended nexthop (RFC 8950) — capability code 5; automatic dual-stack capability advertisement, IPv4 unicast NLRI over IPv6 next hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
-- [x] 829 tests — unit, integration, property, fuzz
+- [x] 841 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -111,6 +111,7 @@ Features that close meaningful protocol gaps vs GoBGP.
 Features that close the most impactful gaps vs GoBGP for the target user base.
 Each moves overall parity 3-5% while disproportionately improving real-world usability.
 
+- [x] **Transparent route server mode** — `route_server_client` per neighbor: skip automatic local ASN prepend, preserve original NEXT_HOP on eBGP unicast re-advertisement for IX route-server clients; FlowSpec transparency remains deferred (ADR-0039)
 - [ ] **GR restarting speaker** — currently receiving-only; restarting speaker unlocks router deployments (core protocol 64% → 71%)
 - [x] **Policy chaining + named policies** — named TOML definitions, GoBGP-style chain evaluation (permit=continue, deny=stop), configurable default_action (ADR-0036)
 - [x] **Extended nexthop** (RFC 8950) — capability code 5, automatic dual-stack negotiation, IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)

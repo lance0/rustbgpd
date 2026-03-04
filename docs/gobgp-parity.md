@@ -139,6 +139,7 @@ Last updated: 2026-03-04
 | Embeddable library | Yes (Go) | No | Wire crate is standalone |
 | CLI tool | Yes (gobgp) | No | grpcurl works |
 | Docker image | Yes | Yes | |
+| Route server client mode | Yes | Partial | Transparent eBGP unicast mode via `route_server_client`; FlowSpec transparency deferred |
 | Fuzz testing | No | Yes | Wire decoder fuzzing |
 | Interop test suite | No | Yes | Containerlab + FRR/BIRD |
 

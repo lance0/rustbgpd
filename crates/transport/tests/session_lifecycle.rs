@@ -91,6 +91,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         local_ipv6_nexthop: None,
         gr_stale_routes_time: 360,
         route_reflector_client: false,
+        route_server_client: false,
         cluster_id: None,
     }
 }

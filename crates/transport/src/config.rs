@@ -27,6 +27,8 @@ pub struct TransportConfig {
     pub gr_stale_routes_time: u64,
     /// Whether this neighbor is a route reflector client (RFC 4456).
     pub route_reflector_client: bool,
+    /// Whether this eBGP neighbor is a transparent route-server client.
+    pub route_server_client: bool,
     /// Local cluster ID for route reflection. `Some` means this speaker is a
     /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
     pub cluster_id: Option<Ipv4Addr>,
@@ -49,6 +51,7 @@ impl TransportConfig {
             local_ipv6_nexthop: None,
             gr_stale_routes_time: 360,
             route_reflector_client: false,
+            route_server_client: false,
             cluster_id: None,
         }
     }

@@ -65,6 +65,14 @@ resolved.
   created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive
   or send. TOML config with `[neighbors.add_path]` is the only way
   to enable it currently.
+- **Transparent route-server mode is unicast-only.** `route_server_client`
+  preserves original next hop and skips automatic local-AS prepend for
+  eBGP unicast export only. FlowSpec still uses the standard eBGP prepend
+  behavior. Transparent FlowSpec export is deferred.
+- **`route_server_client` not exposed via gRPC.** Dynamic peers created
+  via `AddNeighbor` always default to `route_server_client = false`.
+  Only static TOML neighbors can enable transparent route-server mode.
+  Exposing it in the proto and `NeighborService` is a small follow-up.
 - **TCP-AO not supported for RTR connections.** RPKI cache server
   connections use plain TCP. TCP-AO (RFC 5925) is not supported for
   either BGP or RTR sessions. Use network-level access controls or

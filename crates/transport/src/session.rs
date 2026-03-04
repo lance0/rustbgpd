@@ -1755,7 +1755,8 @@ impl PeerSession {
                     matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
                 let next_hop = match nh_override {
                     Some(rustbgpd_policy::NextHopAction::Specific(addr)) => *addr,
-                    _ if is_ebgp => {
+                    _ if force_nh_self => local_addr.unwrap_or(IpAddr::V4(local_ipv4)),
+                    _ if is_ebgp && !self.config.route_server_client => {
                         let Some(v6) = ebgp_ipv6_nh else {
                             warn!(
                                 peer = %self.peer_label,
@@ -1766,7 +1767,6 @@ impl PeerSession {
                         };
                         IpAddr::V6(v6)
                     }
-                    _ if force_nh_self => local_addr.unwrap_or(IpAddr::V4(local_ipv4)),
                     _ => route.next_hop,
                 };
                 let entry = NlriEntry {
@@ -1859,7 +1859,11 @@ impl PeerSession {
 
         // Guard: if eBGP has no valid IPv6 NH, skip all v6 routes. The RIB's
         // sendable_families filter should prevent this, but defend in depth.
-        if is_ebgp && ebgp_ipv6_nh.is_none() && !v6_routes.is_empty() {
+        if is_ebgp
+            && !self.config.route_server_client
+            && ebgp_ipv6_nh.is_none()
+            && !v6_routes.is_empty()
+        {
             debug_assert!(
                 false,
                 "RIB sent {} IPv6 routes to eBGP peer with no valid IPv6 next-hop",
@@ -1886,14 +1890,18 @@ impl PeerSession {
             let nh = if policy_set_v6 {
                 // Policy explicitly set an IPv6 next-hop — use it
                 route.next_hop
-            } else if is_ebgp || force_nh_self {
-                // For eBGP or next-hop-self, use local IPv6 address
+            } else if force_nh_self {
+                // For next-hop-self, use local IPv6 address when available.
                 if let Some(v6) = ebgp_ipv6_nh {
                     IpAddr::V6(v6)
-                } else if is_ebgp {
-                    IpAddr::V6(ebgp_ipv6_nh.unwrap_or(Ipv6Addr::UNSPECIFIED))
                 } else {
-                    // iBGP next-hop-self but no IPv6 next-hop — keep original
+                    route.next_hop
+                }
+            } else if is_ebgp && !self.config.route_server_client {
+                // Non-transparent eBGP uses next-hop-self.
+                if let Some(v6) = ebgp_ipv6_nh {
+                    IpAddr::V6(v6)
+                } else {
                     route.next_hop
                 }
             } else {
@@ -2098,8 +2106,11 @@ impl PeerSession {
 
     /// Prepare path attributes for outbound advertisement.
     ///
-    /// For eBGP: prepend our ASN, set `NEXT_HOP` to local addr, strip `LOCAL_PREF`.
-    /// For iBGP: ensure `LOCAL_PREF` present (default 100), pass `NEXT_HOP` through.
+    /// For standard eBGP: prepend our ASN, set `NEXT_HOP` to local addr, strip
+    /// `LOCAL_PREF`. For route-server clients, preserve `AS_PATH` and
+    /// `NEXT_HOP` by default. For iBGP: ensure `LOCAL_PREF` present (default
+    /// 100), pass `NEXT_HOP` through.
+    #[expect(clippy::too_many_lines)]
     fn prepare_outbound_attributes(
         &self,
         route: &Route,
@@ -2113,12 +2124,13 @@ impl PeerSession {
             nh_override,
             Some(rustbgpd_policy::NextHopAction::Specific(_))
         );
+        let route_server_client = self.config.route_server_client;
         let mut attrs = Vec::new();
 
         for attr in &route.attributes {
             match attr {
                 PathAttribute::AsPath(as_path) => {
-                    if is_ebgp {
+                    if is_ebgp && !route_server_client {
                         // Prepend our ASN
                         let mut new_segments =
                             vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
@@ -2148,7 +2160,7 @@ impl PeerSession {
                     if policy_set_specific {
                         // Policy explicitly set a next-hop — preserve it
                         attrs.push(attr.clone());
-                    } else if is_ebgp || force_next_hop_self {
+                    } else if force_next_hop_self || (is_ebgp && !route_server_client) {
                         attrs.push(PathAttribute::NextHop(local_ipv4));
                     } else {
                         attrs.push(attr.clone());
@@ -2180,8 +2192,31 @@ impl PeerSession {
             attrs.push(PathAttribute::LocalPref(100));
         }
 
-        // For eBGP, ensure AS_PATH is present (even if empty)
-        if is_ebgp && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))) {
+        // Ensure classic IPv4 body-NLRI exports carry a NEXT_HOP. This also
+        // preserves the route's original next hop for transparent route-server
+        // clients when the attribute was absent on the stored route.
+        if matches!(route.prefix, Prefix::V4(_))
+            && !attrs.iter().any(|a| matches!(a, PathAttribute::NextHop(_)))
+        {
+            let next_hop = match nh_override {
+                Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V4(nh))) => Some(*nh),
+                Some(rustbgpd_policy::NextHopAction::Self_) => Some(local_ipv4),
+                _ if is_ebgp && !route_server_client => Some(local_ipv4),
+                _ => match route.next_hop {
+                    IpAddr::V4(nh) => Some(nh),
+                    IpAddr::V6(_) => None,
+                },
+            };
+            if let Some(next_hop) = next_hop {
+                attrs.push(PathAttribute::NextHop(next_hop));
+            }
+        }
+
+        // For standard eBGP, ensure AS_PATH is present (even if empty).
+        if is_ebgp
+            && !route_server_client
+            && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
+        {
             attrs.push(PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
             }));
@@ -2224,7 +2259,8 @@ impl PeerSession {
     /// Prepare path attributes for outbound `FlowSpec` advertisement.
     ///
     /// `FlowSpec` has no `NEXT_HOP`. For eBGP: prepend ASN, strip `LOCAL_PREF`.
-    /// For iBGP: ensure `LOCAL_PREF`. Route reflector attributes handled same as unicast.
+    /// For iBGP: ensure `LOCAL_PREF`. Route reflector attributes handled same
+    /// as unicast. Transparent route-server behavior is deferred for `FlowSpec`.
     fn prepare_outbound_attributes_flowspec(
         &self,
         route: &FlowSpecRoute,
@@ -2331,12 +2367,17 @@ async fn read_tcp(
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
     use std::collections::HashMap;
-    use std::net::Ipv4Addr;
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::Instant;
 
     use rustbgpd_fsm::PeerConfig;
-    use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute};
+    use rustbgpd_wire::{
+        AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Message, Origin, PathAttribute,
+    };
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
 
     use super::*;
 
@@ -2437,6 +2478,26 @@ mod tests {
         }
     }
 
+    async fn connected_stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, server) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        (client.unwrap(), server.unwrap().0)
+    }
+
+    async fn read_single_bgp_message(stream: &mut TcpStream) -> Message {
+        let mut header = [0_u8; 19];
+        stream.read_exact(&mut header).await.unwrap();
+        let msg_len = usize::from(u16::from_be_bytes([header[16], header[17]]));
+        let mut body = vec![0_u8; msg_len - header.len()];
+        stream.read_exact(&mut body).await.unwrap();
+
+        let mut raw = header.to_vec();
+        raw.extend_from_slice(&body);
+        let mut buf = Bytes::from(raw);
+        rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+    }
+
     #[test]
     fn ebgp_prepends_asn() {
         let session = make_test_session(65001, 65002);
@@ -2459,6 +2520,57 @@ mod tests {
         } else {
             panic!("expected AS_SEQUENCE");
         }
+    }
+
+    #[test]
+    fn route_server_client_ebgp_does_not_prepend_asn() {
+        let mut session = make_test_session(65001, 65002);
+        session.config.route_server_client = true;
+        let route = make_route(100);
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+
+        let as_path = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::AsPath(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            as_path.segments,
+            vec![AsPathSegment::AsSequence(vec![65002])],
+        );
+    }
+
+    #[test]
+    fn route_server_client_ebgp_does_not_synthesize_as_path() {
+        let mut session = make_test_session(65001, 65002);
+        session.config.route_server_client = true;
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            attributes: vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            ],
+            received_at: Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Local,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        };
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+
+        assert!(!attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))));
+        assert!(attrs.iter().any(|a| matches!(
+            a,
+            PathAttribute::NextHop(nh) if *nh == Ipv4Addr::new(10, 0, 0, 2)
+        )));
     }
 
     #[test]
@@ -2518,6 +2630,64 @@ mod tests {
             .unwrap();
 
         assert_eq!(nh, local_ipv4);
+    }
+
+    #[test]
+    fn route_server_client_ebgp_preserves_next_hop() {
+        let mut session = make_test_session(65001, 65002);
+        session.config.route_server_client = true;
+        let route = make_route(100);
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(172, 16, 0, 1), None);
+
+        let nh = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::NextHop(nh) => Some(*nh),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(nh, Ipv4Addr::new(10, 0, 0, 2));
+    }
+
+    #[test]
+    fn route_server_client_force_next_hop_self_still_wins() {
+        let mut session = make_test_session(65001, 65002);
+        session.config.route_server_client = true;
+        let route = make_route(100);
+        let local_ipv4 = Ipv4Addr::new(172, 16, 0, 1);
+        let attrs = session.prepare_outbound_attributes(
+            &route,
+            true,
+            local_ipv4,
+            Some(&rustbgpd_policy::NextHopAction::Self_),
+        );
+
+        let nh = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::NextHop(nh) => Some(*nh),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(nh, local_ipv4);
+    }
+
+    #[test]
+    fn route_server_client_still_strips_local_pref() {
+        let mut session = make_test_session(65001, 65002);
+        session.config.route_server_client = true;
+        let route = make_route(200);
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+
+        assert!(
+            !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
+        );
     }
 
     #[test]
@@ -2702,6 +2872,127 @@ mod tests {
             announced[0].next_hop,
             IpAddr::V6("2001:db8::1".parse().unwrap())
         );
+    }
+
+    #[tokio::test]
+    async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.stream = Some(client);
+        session.config.route_server_client = true;
+
+        let negotiated = negotiated_session(65002, true);
+        session
+            .negotiated_families
+            .clone_from(&negotiated.negotiated_families);
+        session.negotiated = Some(negotiated);
+
+        let v6_nh: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let update = OutboundRouteUpdate {
+            announce: vec![Route {
+                prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+                next_hop: IpAddr::V6(v6_nh),
+                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                attributes: vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                    }),
+                ],
+                received_at: Instant::now(),
+                origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                is_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            }],
+            withdraw: vec![],
+            end_of_rib: vec![],
+            refresh_markers: vec![],
+            next_hop_override: vec![None],
+            flowspec_announce: vec![],
+            flowspec_withdraw: vec![],
+        };
+
+        session.send_route_update(update).await;
+
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(mp.afi, Afi::Ipv4);
+        assert_eq!(mp.safi, Safi::Unicast);
+        assert_eq!(mp.next_hop, IpAddr::V6(v6_nh));
+    }
+
+    #[tokio::test]
+    async fn route_server_client_ipv6_preserves_next_hop() {
+        let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+        let (client, mut server) = connected_stream_pair().await;
+        session.stream = Some(client);
+        session.config.route_server_client = true;
+
+        let mut negotiated = negotiated_session(65002, false);
+        negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+        session
+            .negotiated_families
+            .clone_from(&negotiated.negotiated_families);
+        session.negotiated = Some(negotiated);
+
+        let v6_nh: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let update = OutboundRouteUpdate {
+            announce: vec![Route {
+                prefix: Prefix::V6(Ipv6Prefix::new(v6_nh, 64)),
+                next_hop: IpAddr::V6(v6_nh),
+                peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                attributes: vec![
+                    PathAttribute::Origin(Origin::Igp),
+                    PathAttribute::AsPath(AsPath {
+                        segments: vec![AsPathSegment::AsSequence(vec![65002])],
+                    }),
+                ],
+                received_at: Instant::now(),
+                origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+                peer_router_id: Ipv4Addr::UNSPECIFIED,
+                is_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            }],
+            withdraw: vec![],
+            end_of_rib: vec![],
+            refresh_markers: vec![],
+            next_hop_override: vec![None],
+            flowspec_announce: vec![],
+            flowspec_withdraw: vec![],
+        };
+
+        session.send_route_update(update).await;
+
+        let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+            panic!("expected UPDATE");
+        };
+        let parsed = msg.parse(true, false, &[]).unwrap();
+        let mp = parsed
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::MpReachNlri(mp) => Some(mp),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(mp.afi, Afi::Ipv6);
+        assert_eq!(mp.safi, Safi::Unicast);
+        assert_eq!(mp.next_hop, IpAddr::V6(v6_nh));
     }
 
     #[tokio::test]

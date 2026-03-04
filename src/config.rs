@@ -112,6 +112,13 @@ pub struct Neighbor {
     /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
     #[serde(default)]
     pub route_reflector_client: bool,
+    /// Mark this eBGP neighbor as a transparent route-server client.
+    ///
+    /// When enabled, outbound unicast advertisements preserve the original
+    /// next hop and suppress automatic local-AS prepend. Explicit export
+    /// policy next-hop rewrites still apply.
+    #[serde(default)]
+    pub route_server_client: bool,
     /// Add-Path (RFC 7911) configuration for this neighbor.
     pub add_path: Option<AddPathConfig>,
     #[serde(default)]
@@ -235,6 +242,8 @@ pub enum ConfigError {
     InvalidGrConfig { reason: String },
     #[error("invalid route reflector config: {reason}")]
     InvalidRrConfig { reason: String },
+    #[error("invalid route server config: {reason}")]
+    InvalidRouteServerConfig { reason: String },
     #[error("invalid RPKI config: {reason}")]
     InvalidRpkiConfig { reason: String },
     #[error("undefined policy {name:?} referenced in chain")]
@@ -702,6 +711,15 @@ impl Config {
                 });
             }
 
+            if neighbor.route_server_client && neighbor.remote_asn == self.global.asn {
+                return Err(ConfigError::InvalidRouteServerConfig {
+                    reason: format!(
+                        "route_server_client requires eBGP (remote_asn {} == local asn {})",
+                        neighbor.remote_asn, self.global.asn
+                    ),
+                });
+            }
+
             // Validate families if explicitly configured
             if !neighbor.families.is_empty() {
                 parse_families(&neighbor.families)?;
@@ -942,6 +960,7 @@ impl Config {
                 .as_ref()
                 .map(|s| s.parse::<Ipv6Addr>().expect("validated in Config::load"));
             transport.gr_stale_routes_time = neighbor.gr_stale_routes_time.unwrap_or(360);
+            transport.route_server_client = neighbor.route_server_client;
 
             let label = neighbor
                 .description
@@ -1743,6 +1762,54 @@ route_reflector_client = true
     }
 
     #[test]
+    fn route_server_client_on_ebgp_accepted() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_server_client = true
+"#;
+        let config = parse(toml_str).unwrap();
+        assert!(config.neighbors[0].route_server_client);
+    }
+
+    #[test]
+    fn route_server_client_on_ibgp_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+route_server_client = true
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRouteServerConfig { .. }));
+    }
+
+    #[test]
+    fn route_server_client_defaults_to_false() {
+        let config = parse(valid_toml()).unwrap();
+        assert!(!config.neighbors[0].route_server_client);
+    }
+
+    #[test]
     fn cluster_id_invalid_rejected() {
         let toml_str = r#"
 [global]
@@ -1977,6 +2044,28 @@ send = true
         let peers = config.to_peer_configs().unwrap();
         assert!(!peers[0].0.peer.add_path_send);
         assert_eq!(peers[0].0.peer.add_path_send_max, 0);
+    }
+
+    #[test]
+    fn to_peer_configs_maps_route_server_client() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+route_server_client = true
+"#;
+        let config = parse(toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert!(peers[0].0.route_server_client);
     }
 
     // --- RPKI config tests ---
