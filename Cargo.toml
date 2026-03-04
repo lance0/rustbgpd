@@ -9,6 +9,7 @@ members = [
     "crates/telemetry",
     "crates/rpki",
     "crates/cli",
+    "crates/bmp",
 ]
 resolver = "2"
 
@@ -31,6 +32,7 @@ rustbgpd-policy = { path = "crates/policy", version = "0.3.0" }
 rustbgpd-api = { path = "crates/api", version = "0.3.0" }
 rustbgpd-telemetry = { path = "crates/telemetry", version = "0.3.0" }
 rustbgpd-rpki = { path = "crates/rpki", version = "0.3.0" }
+rustbgpd-bmp = { path = "crates/bmp", version = "0.3.0" }
 
 # External dependencies — pinned across workspace
 bytes = "1"
@@ -70,6 +72,7 @@ rustbgpd-policy.workspace = true
 rustbgpd-api.workspace = true
 rustbgpd-telemetry.workspace = true
 rustbgpd-rpki.workspace = true
+rustbgpd-bmp.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -26,6 +26,8 @@ pub struct Config {
     pub policy: PolicyConfig,
     #[serde(default)]
     pub rpki: Option<RpkiConfig>,
+    #[serde(default)]
+    pub bmp: Option<BmpConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +47,33 @@ pub struct CacheServer {
     pub retry_interval: u64,
     #[serde(default = "default_rpki_expire")]
     pub expire_interval: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BmpConfig {
+    #[serde(default = "default_bmp_sys_name")]
+    pub sys_name: String,
+    #[serde(default)]
+    pub sys_descr: String,
+    #[serde(default)]
+    pub collectors: Vec<BmpCollector>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BmpCollector {
+    pub address: String,
+    #[serde(default = "default_bmp_reconnect")]
+    pub reconnect_interval: u64,
+}
+
+fn default_bmp_sys_name() -> String {
+    "rustbgpd".to_string()
+}
+
+fn default_bmp_reconnect() -> u64 {
+    30
 }
 
 fn default_rpki_refresh() -> u64 {
@@ -258,6 +287,8 @@ pub enum ConfigError {
     InvalidRpkiConfig { reason: String },
     #[error("undefined policy {name:?} referenced in chain")]
     UndefinedPolicy { name: String },
+    #[error("invalid BMP collector config: {reason}")]
+    InvalidBmpCollector { reason: String },
 }
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
@@ -838,6 +869,22 @@ impl Config {
                             "cache_server[{i}]: expire_interval ({}) must be >= refresh_interval ({})",
                             server.expire_interval, server.refresh_interval
                         ),
+                    });
+                }
+            }
+        }
+
+        // Validate BMP collector addresses
+        if let Some(ref bmp) = self.bmp {
+            for (i, collector) in bmp.collectors.iter().enumerate() {
+                collector.address.parse::<SocketAddr>().map_err(|e| {
+                    ConfigError::InvalidBmpCollector {
+                        reason: format!("collectors[{i}]: invalid address {:?}: {e}", collector.address),
+                    }
+                })?;
+                if collector.reconnect_interval == 0 {
+                    return Err(ConfigError::InvalidBmpCollector {
+                        reason: format!("collectors[{i}]: reconnect_interval must be > 0"),
                     });
                 }
             }

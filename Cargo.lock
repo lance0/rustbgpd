@@ -929,6 +929,7 @@ dependencies = [
  "bytes",
  "prometheus",
  "rustbgpd-api",
+ "rustbgpd-bmp",
  "rustbgpd-fsm",
  "rustbgpd-policy",
  "rustbgpd-rib",
@@ -962,6 +963,16 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+ "tracing",
+]
+
+[[package]]
+name = "rustbgpd-bmp"
+version = "0.3.0"
+dependencies = [
+ "bytes",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 
@@ -1026,6 +1037,7 @@ dependencies = [
  "bytes",
  "libc",
  "prometheus",
+ "rustbgpd-bmp",
  "rustbgpd-fsm",
  "rustbgpd-policy",
  "rustbgpd-rib",

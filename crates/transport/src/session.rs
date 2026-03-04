@@ -2,8 +2,10 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::ops::ControlFlow;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
+use bytes::Bytes;
+use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason};
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::{FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
@@ -66,6 +68,15 @@ pub(crate) struct PeerSession {
     /// Unbounded so notifications are never dropped and never block (avoids
     /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
     session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+    /// Optional BMP event sender (None when BMP not configured).
+    bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+    /// Cached local OPEN PDU bytes for BMP Peer Up.
+    local_open_pdu: Option<Bytes>,
+    /// Cached remote OPEN PDU bytes for BMP Peer Up.
+    remote_open_pdu: Option<Bytes>,
+    /// Last session-down cause for BMP Peer Down reason classification.
+    /// Set by `SendNotification` (local) or inbound Notification (remote).
+    last_down_reason: Option<PeerDownReason>,
     /// Accepted paths keyed by `(prefix, path_id)`.
     ///
     /// Max-prefix enforcement still counts unique prefixes, so callers must
@@ -135,6 +146,7 @@ impl PeerSession {
             .len()
     }
 
+    #[expect(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -143,6 +155,7 @@ impl PeerSession {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -168,6 +181,10 @@ impl PeerSession {
             import_policy,
             export_policy,
             session_notify_tx,
+            bmp_tx,
+            local_open_pdu: None,
+            remote_open_pdu: None,
+            last_down_reason: None,
             known_paths: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
@@ -190,6 +207,7 @@ impl PeerSession {
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -215,6 +233,10 @@ impl PeerSession {
             import_policy,
             export_policy,
             session_notify_tx,
+            bmp_tx,
+            local_open_pdu: None,
+            remote_open_pdu: None,
+            last_down_reason: None,
             known_paths: HashSet::new(),
             updates_received: 0,
             updates_sent: 0,
@@ -223,6 +245,32 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+        }
+    }
+
+    fn build_bmp_peer_info(&self) -> BmpPeerInfo {
+        let is_as4 = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
+        let peer_bgp_id = self
+            .negotiated
+            .as_ref()
+            .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id);
+        BmpPeerInfo {
+            peer_addr: self.peer_ip,
+            peer_asn: self.config.peer.remote_asn,
+            peer_bgp_id,
+            peer_type: BmpPeerType::Global,
+            is_ipv6: self.peer_ip.is_ipv6(),
+            is_post_policy: false,
+            is_as4,
+            timestamp: SystemTime::now(),
+        }
+    }
+
+    fn emit_bmp_event(&self, event: BmpEvent) {
+        if let Some(ref tx) = self.bmp_tx
+            && let Err(e) = tx.try_send(event)
+        {
+            debug!(peer = %self.peer_label, error = %e, "BMP event channel full or closed");
         }
     }
 
@@ -335,6 +383,12 @@ impl PeerSession {
                 Action::SendOpen(mut open) => {
                     self.apply_local_gr_restart_state(&mut open);
                     let msg = Message::Open(open);
+                    // Cache raw OPEN PDU for BMP Peer Up
+                    if self.bmp_tx.is_some()
+                        && let Ok(encoded) = rustbgpd_wire::encode_message(&msg)
+                    {
+                        self.local_open_pdu = Some(Bytes::from(encoded));
+                    }
                     if let Err(e) = self.send_message(&msg).await {
                         warn!(peer = %self.peer_label, error = %e, "failed to send OPEN");
                         self.handle_tcp_disconnect();
@@ -357,6 +411,13 @@ impl PeerSession {
                     let code = notif.code;
                     let subcode = notif.subcode;
                     let msg = Message::Notification(notif);
+                    // Cache raw NOTIFICATION PDU for BMP Peer Down (reason 1: local sent NOTIFICATION)
+                    if self.bmp_tx.is_some()
+                        && let Ok(encoded) = rustbgpd_wire::encode_message(&msg)
+                    {
+                        self.last_down_reason =
+                            Some(PeerDownReason::LocalNotification(Bytes::from(encoded)));
+                    }
                     if let Err(e) = self.send_message(&msg).await {
                         warn!(peer = %self.peer_label, error = %e, "failed to send NOTIFICATION");
                         // Continue — we're tearing down anyway
@@ -524,6 +585,34 @@ impl PeerSession {
 
                     self.negotiated = Some(neg);
                     self.established_at = Some(Instant::now());
+
+                    // Emit BMP Peer Up event
+                    if self.bmp_tx.is_some() {
+                        let (local_addr, local_port, remote_port) = self
+                            .stream
+                            .as_ref()
+                            .map_or(
+                                (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
+                                |s| {
+                                    let local = s.local_addr().ok();
+                                    let remote = s.peer_addr().ok();
+                                    (
+                                        local.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip()),
+                                        local.map_or(0, |a| a.port()),
+                                        remote.map_or(0, |a| a.port()),
+                                    )
+                                },
+                            );
+                        self.emit_bmp_event(BmpEvent::PeerUp {
+                            peer_info: self.build_bmp_peer_info(),
+                            local_open: self.local_open_pdu.clone().unwrap_or_default(),
+                            remote_open: self.remote_open_pdu.clone().unwrap_or_default(),
+                            local_addr,
+                            local_port,
+                            remote_port,
+                        });
+                    }
+
                     // Register with RIB manager for outbound updates
                     let _ = self.rib_tx.try_send(RibUpdate::PeerUp {
                         peer: self.peer_ip,
@@ -538,6 +627,19 @@ impl PeerSession {
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
+
+                    // Emit BMP Peer Down event before clearing state
+                    if self.bmp_tx.is_some() && self.established_at.is_some() {
+                        let reason = self
+                            .last_down_reason
+                            .take()
+                            .unwrap_or(PeerDownReason::RemoteNoNotification);
+                        self.emit_bmp_event(BmpEvent::PeerDown {
+                            peer_info: self.build_bmp_peer_info(),
+                            reason,
+                        });
+                    }
+
                     // Check GR state before clearing negotiated info.
                     // RFC 4724 §4.2: retain routes if the peer previously
                     // advertised Graceful Restart capability and our config
@@ -566,6 +668,9 @@ impl PeerSession {
                     self.negotiated = None;
                     self.negotiated_families.clear();
                     self.known_paths.clear();
+                    self.local_open_pdu = None;
+                    self.remote_open_pdu = None;
+                    self.last_down_reason = None;
                     // Reset framing limit for the next session (RFC 8654 §2:
                     // extended messages are per-session, not persistent).
                     self.read_buf
@@ -708,9 +813,13 @@ impl PeerSession {
     async fn process_read_buffer(&mut self) {
         loop {
             match self.read_buf.try_decode() {
-                Ok(Some(msg)) => {
+                Ok(Some((msg, raw_pdu))) => {
                     let event = match msg {
                         Message::Open(open) => {
+                            // Cache raw OPEN PDU for BMP Peer Up
+                            if self.bmp_tx.is_some() {
+                                self.remote_open_pdu = Some(raw_pdu);
+                            }
                             self.metrics
                                 .record_message_received(&self.peer_label, "open");
                             let gr_cap_count = open
@@ -735,6 +844,11 @@ impl PeerSession {
                             Event::KeepaliveReceived
                         }
                         Message::Notification(notif) => {
+                            // Cache raw NOTIFICATION PDU for BMP Peer Down (reason 3: remote sent NOTIFICATION)
+                            if self.bmp_tx.is_some() {
+                                self.last_down_reason =
+                                    Some(PeerDownReason::RemoteNotification(raw_pdu.clone()));
+                            }
                             self.notifications_received += 1;
                             self.last_error = format!("{}/{}", notif.code.as_u8(), notif.subcode);
                             self.metrics.record_notification_received(
@@ -765,6 +879,13 @@ impl PeerSession {
                             self.updates_received += 1;
                             self.metrics
                                 .record_message_received(&self.peer_label, "update");
+                            // Emit BMP RouteMonitoring with raw UPDATE PDU
+                            if self.bmp_tx.is_some() {
+                                self.emit_bmp_event(BmpEvent::RouteMonitoring {
+                                    peer_info: self.build_bmp_peer_info(),
+                                    update_pdu: raw_pdu,
+                                });
+                            }
                             self.process_update(update).await;
                             continue;
                         }
@@ -2445,7 +2566,7 @@ mod tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel(8);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
 
-        PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None)
+        PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None, None)
     }
 
     fn make_test_session_with_rib(
@@ -2471,7 +2592,7 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel(64);
 
         (
-            PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None),
+            PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None, None),
             rib_rx,
         )
     }
@@ -3088,6 +3209,7 @@ mod tests {
             Some(deny_policy),
             None,
             None,
+            None,
         );
         let mut negotiated = negotiated_session(65002, false);
         negotiated.peer_enhanced_route_refresh = true;
@@ -3235,6 +3357,7 @@ mod tests {
             cmd_rx,
             rib_tx.clone(),
             Some(deny_policy),
+            None,
             None,
             None,
         );

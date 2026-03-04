@@ -138,26 +138,26 @@ implementations.
 ### Cease Subcode Fallback
 
 When tearing down a session due to resource exhaustion (e.g., global
-route limit exceeded), rustbgpd sends NOTIFICATION Cease with subcode 4
+route limit exceeded), rustbgpd sends NOTIFICATION Cease with subcode 8
 (Out of Resources) per RFC 4486 §3.
 
 **Fallback:** If interop testing reveals a peer that rejects unknown
 Cease subcodes, the fallback is generic Cease (code 6, subcode 0).
 Documented per-peer in INTEROP.md.
 
-### Strict 4096-Byte Maximum Message Size
+### Message Size Limits (RFC 4271 + RFC 8654)
 
-RFC 4271 §4.1 specifies a maximum message size of 4096 bytes. rustbgpd
-enforces this strictly:
+RFC 4271 §4.1 defines a 4096-byte maximum unless Extended Messages
+(RFC 8654) are negotiated. rustbgpd enforces negotiated limits:
 
-- **Inbound:** Any message with a length field > 4096 is rejected with
+- **Inbound:** Message length > negotiated max is rejected with
   NOTIFICATION (1, 2) — Bad Message Length. The raw length value is
   included in the NOTIFICATION data field.
-- **Outbound:** Any attempt to encode a message > 4096 bytes is an
-  internal error (not a protocol error). This is caught at encode time
-  and produces a structured error event. The message is not sent.
-- **No extended message support in v1.** RFC 8654 (Extended Message
-  Support) is a post-v1 roadmap item. Until then, 4096 is a hard limit.
+- **Outbound:** Encode attempts beyond the negotiated max return an
+  internal encode error and the message is not sent.
+- **Negotiation behavior:** Sessions start at 4096-byte framing. If both
+  peers advertise capability code 6, max message length is raised to
+  65535 for that session; on session-down it resets to 4096.
 
 ### Hold Time Floor
 

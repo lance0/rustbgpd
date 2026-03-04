@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use rustbgpd_wire::constants::MAX_MESSAGE_LEN;
 use rustbgpd_wire::{DecodeError, Message, decode_message, peek_message_length};
 
@@ -36,12 +36,14 @@ impl ReadBuffer {
     ///
     /// Returns `Ok(None)` if the buffer doesn't yet contain a complete
     /// message. On success, the consumed bytes are removed from the buffer.
+    /// The returned tuple contains the decoded message and the raw PDU bytes
+    /// (including the 19-byte BGP header), needed for BMP Route Monitoring.
     ///
     /// # Errors
     ///
     /// Returns [`DecodeError`] if the header is malformed or the message
     /// body fails validation.
-    pub fn try_decode(&mut self) -> Result<Option<Message>, DecodeError> {
+    pub fn try_decode(&mut self) -> Result<Option<(Message, Bytes)>, DecodeError> {
         let len = match peek_message_length(&self.buf, self.max_message_len)? {
             Some(len) => usize::from(len),
             None => return Ok(None),
@@ -51,10 +53,11 @@ impl ReadBuffer {
             return Ok(None);
         }
 
-        let frame = self.buf.split_to(len);
-        let mut bytes = frame.freeze();
+        let frame = self.buf.split_to(len).freeze();
+        let raw = frame.clone(); // Bytes::clone is refcount-only, no data copy
+        let mut bytes = frame;
         let msg = decode_message(&mut bytes, self.max_message_len)?;
-        Ok(Some(msg))
+        Ok(Some((msg, raw)))
     }
 
     /// Clear all buffered data (e.g., after TCP disconnect).
@@ -95,8 +98,9 @@ mod tests {
         let encoded = encode_message(&Message::Keepalive).unwrap();
         rb.buf.put_slice(&encoded);
 
-        let msg = rb.try_decode().unwrap().unwrap();
+        let (msg, raw) = rb.try_decode().unwrap().unwrap();
         assert_eq!(msg, Message::Keepalive);
+        assert_eq!(&raw[..], &encoded[..]);
         assert!(rb.buf.is_empty());
     }
 
@@ -108,8 +112,8 @@ mod tests {
         rb.buf.put_slice(&ka1);
         rb.buf.put_slice(&ka2);
 
-        assert_eq!(rb.try_decode().unwrap().unwrap(), Message::Keepalive);
-        assert_eq!(rb.try_decode().unwrap().unwrap(), Message::Keepalive);
+        assert_eq!(rb.try_decode().unwrap().unwrap().0, Message::Keepalive);
+        assert_eq!(rb.try_decode().unwrap().unwrap().0, Message::Keepalive);
         assert!(rb.try_decode().unwrap().is_none());
     }
 
@@ -141,7 +145,7 @@ mod tests {
 
         // Second chunk: rest of message
         rb.buf.put_slice(&encoded[10..]);
-        assert_eq!(rb.try_decode().unwrap().unwrap(), Message::Keepalive);
+        assert_eq!(rb.try_decode().unwrap().unwrap().0, Message::Keepalive);
     }
 
     #[test]

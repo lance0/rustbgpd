@@ -261,6 +261,54 @@ async fn run(config: Config) {
         }
     }
 
+    // Spawn BMP subsystem (manager + per-collector clients)
+    let bmp_tx = if let Some(ref bmp_config) = config.bmp
+        && !bmp_config.collectors.is_empty()
+    {
+        let (bmp_event_tx, bmp_event_rx) = mpsc::channel(4096);
+        let sys_name = bmp_config.sys_name.clone();
+        let sys_descr = if bmp_config.sys_descr.is_empty() {
+            format!("rustbgpd {}", env!("CARGO_PKG_VERSION"))
+        } else {
+            bmp_config.sys_descr.clone()
+        };
+
+        let mut collector_txs = Vec::new();
+        for collector in &bmp_config.collectors {
+            let addr: std::net::SocketAddr = match collector.address.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    error!(
+                        address = %collector.address,
+                        error = %e,
+                        "invalid BMP collector address — skipping"
+                    );
+                    continue;
+                }
+            };
+            let (msg_tx, msg_rx) = mpsc::channel(4096);
+            collector_txs.push(msg_tx);
+            let client = rustbgpd_bmp::BmpClient::new(
+                rustbgpd_bmp::BmpClientConfig {
+                    collector_addr: addr,
+                    reconnect_interval: collector.reconnect_interval,
+                },
+                msg_rx,
+                sys_name.clone(),
+                sys_descr.clone(),
+            );
+            info!(collector = %addr, "spawning BMP client");
+            tokio::spawn(client.run());
+        }
+
+        let mgr = rustbgpd_bmp::BmpManager::new(bmp_event_rx, collector_txs);
+        tokio::spawn(mgr.run());
+
+        Some(bmp_event_tx)
+    } else {
+        None
+    };
+
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let peer_mgr = PeerManager::new(
@@ -271,6 +319,7 @@ async fn run(config: Config) {
         local_gr_restart_until,
         metrics.clone(),
         rib_tx.clone(),
+        bmp_tx,
     );
     let peer_mgr_handle = tokio::spawn(peer_mgr.run());
 
@@ -561,6 +610,7 @@ mod tests {
             ],
             policy: crate::config::PolicyConfig::default(),
             rpki: None,
+            bmp: None,
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));

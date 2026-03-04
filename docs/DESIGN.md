@@ -3,8 +3,8 @@
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
 **Author:** Lance  
-**Status:** v0.3.0+ — Policy actions, AS_PATH regex, Large Communities (P0 complete)
-**Last updated:** 2026-03-02
+**Status:** pre-1.0 hardening — P0/P1/P2 complete, P2.5 in progress
+**Last updated:** 2026-03-04
 
 ---
 
@@ -38,7 +38,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **Make invalid states unrepresentable.** Types and enums for message and attribute invariants. If the type system can prevent a bug, it should.
 
-**Limits everywhere.** Max prefixes per peer, max attribute sizes, max message size, bounded channels. Every resource has an explicit cap, and exceeding it produces a structured error, not a crash.
+**Limits everywhere.** Max prefixes per peer, max attribute sizes, max message size, explicit queueing policy. Every resource has a defined behavior under pressure, and exceeding limits produces a structured error, not a crash.
 
 **Interop test before "feature complete."** Correctness is measured by real peers in containers, not unit tests alone.
 
@@ -75,7 +75,7 @@ struct RawAttribute {
 
 **fsm** (session state machine) — RFC 4271 FSM: Idle, Connect, Active, OpenSent, OpenConfirm, Established. Timers modeled as inputs (not spawned internally). Negotiation result struct: negotiated caps, AFI/SAFI set, peer ASN, peer ID. Depends on `wire` types only.
 
-**transport** — TCP connection management via tokio. Read loop → decode → FSM input. FSM output → encode → write loop. Backpressure via bounded queues. This is the only crate that touches async I/O. Depends on `wire` and `fsm`.
+**transport** — TCP connection management via tokio. Read loop → decode → FSM input. FSM output → encode → write loop. Most paths use bounded queues; the session-notification channel used for collision handling is intentionally unbounded to avoid query/notification deadlock. This is the only crate that touches async I/O. Depends on `wire` and `fsm`.
 
 **rib** — AdjRibIn per neighbor, LocRib best-path selection, AdjRibOut computed per neighbor. Route objects keyed by `Prefix` (IPv4 and IPv6 coexist in the same HashMap). See ADR-0023.
 
@@ -89,8 +89,8 @@ struct RawAttribute {
 
 ```
 transport ──► fsm ──► wire
-    │
-    ▼
+    │    │
+    ▼    └──► bmp
    rib ◄── policy
     │
     ▼
@@ -107,7 +107,7 @@ Hard rules:
 
 ### Runtime Model
 
-One tokio task per neighbor session, internally split into reader and writer subtasks. A central RIB task processes updates from all sessions sequentially via a bounded `tokio::mpsc` channel. The API layer pushes commands into the neighbor manager and RIB via channels.
+One tokio task per neighbor session, driven by a `tokio::select!` loop over socket I/O, timers, and commands. A central RIB task processes updates from all sessions sequentially via a bounded `tokio::mpsc` channel. The API layer pushes commands into the neighbor manager and RIB via channels.
 
 **Data flow:**
 
@@ -545,7 +545,9 @@ This section defines the security stance for rustbgpd. Not all items are v1 impl
 
 ### Memory Exhaustion Guards
 
-- All channels are bounded. No unbounded queues anywhere in the system.
+- Channels are bounded by default. One intentional exception exists for
+  collision-resolution session notifications (unbounded) to avoid bounded-send
+  deadlock with synchronous peer-state queries.
 - Per-peer prefix limits enforced at Adj-RIB-In insertion. Exceeding the limit produces NOTIFICATION (Cease, Maximum Number of Prefixes Reached) and session teardown.
 - Total route limit enforced at the RIB level (see Global Route Limit Policy below).
 - UPDATE attribute size limits enforced at decode time. Oversized attributes are rejected before allocation.
@@ -553,9 +555,9 @@ This section defines the security stance for rustbgpd. Not all items are v1 impl
 
 ### Global Route Limit Policy
 
-When `max_total_routes` is exceeded, the offending session is torn down with NOTIFICATION Cease (Out of Resources, subcode 4) as defined in RFC 4486 §3. The structured event includes the peer address, the route that triggered the limit, and the current total count.
+When `max_total_routes` is exceeded, the offending session is torn down with NOTIFICATION Cease (Out of Resources, subcode 8) as defined in RFC 4486 §3. The structured event includes the peer address, the route that triggered the limit, and the current total count.
 
-**Interop note:** Cease subcodes are defined in RFC 4486, not RFC 4271. Some older implementations may not recognize subcode 4. If interop testing reveals a peer that rejects unknown Cease subcodes, the fallback is generic Cease (code 6, subcode 0). This is documented in INTEROP.md per peer.
+**Interop note:** Cease subcodes are defined in RFC 4486, not RFC 4271. If interop testing reveals a peer that rejects unknown Cease subcodes, the fallback is generic Cease (code 6, subcode 0). This is documented in INTEROP.md per peer.
 
 This is a deliberate choice. The alternative — partial acceptance (reject individual prefixes while keeping the session established) — introduces per-UPDATE partial semantics that generate subtle correctness bugs and are difficult to reason about operationally. Option A (tear down the session) is explainable, safe, and what operators expect.
 
@@ -564,8 +566,11 @@ If the global limit is hit, it means either the limit is configured too low or t
 ### gRPC Security (v1)
 
 - gRPC listens on a configurable address (default: localhost only).
-- TLS for gRPC: optional in v1, strongly recommended for non-localhost. mTLS is a roadmap item.
-- No authentication/authorization model in v1 — the service split (five separate gRPC services) is designed to support per-service auth policies when added.
+- No built-in TLS in v1. For non-loopback exposure, front rustbgpd with an
+  mTLS/TLS-authenticated proxy.
+- No built-in authentication/authorization in v1 — the service split (five
+  separate gRPC services) is designed to support per-service auth policies when
+  added.
 
 ---
 
@@ -575,7 +580,7 @@ If the global limit is hit, it means either the limit is configured too low or t
 
 | Limit | Default | Notes |
 |---|---|---|
-| Max message size | 4096 bytes | RFC 4271 strict; NOTIFICATION + disconnect on violation |
+| Max message size | 4096 bytes (65535 with RFC 8654) | 4096 by default; raised per-session only when Extended Messages is negotiated |
 | Max attributes per UPDATE | 256 | Safety bound |
 | Max prefixes per neighbor | 1,000,000 | NOTIFICATION on exceed |
 | Max total routes | 10,000,000 | Backpressure, not crash |
@@ -597,10 +602,13 @@ rustbgpd/
     wire/               # BGP codec (zero internal deps)
     fsm/                # RFC 4271 FSM + timer model (depends on wire)
     rib/                # RIB data structures and best-path
-    policy/             # simple filters
+    policy/             # policy engine (match + modify + chain)
     api/                # gRPC server, tonic bindings
     telemetry/          # metrics + structured logging
     transport/          # tokio TCP, read/write loops, session runtime
+    bmp/                # BMP exporter (RFC 7854) — codec, client, manager
+    rpki/               # RTR client + VRP table + aggregation (RFC 8210/6811)
+    cli/                # rustbgpctl gRPC CLI
   proto/
     rustbgpd.proto      # our own proto definitions
   docs/
@@ -620,8 +628,7 @@ rustbgpd/
 ## Roadmap Beyond v1
 
 - FlowSpec speaker mode (prefixd lineage)
-- BMP exporter
-- RPKI validation integration (RTR client)
+- MRT dump export (RFC 6396)
 - Plugin-based policy engine (WASM or embedded DSL) — only after core stability
 - Config persistence (gRPC changes written back to TOML)
 
@@ -653,11 +660,11 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | MP-BGP (IPv6 unicast) | 4760 | v0.2.0 | FRR | `MP_REACH_NLRI` / `MP_UNREACH_NLRI`, `Prefix` enum, AFI/SAFI negotiation |
 | Communities (standard) | 1997 | M4 | FRR | Typed decode/encode, gRPC exposure |
 | Extended communities | 4360 | v0.3.0+ | FRR | RT, RO, 4-byte AS (ADR-0025/0026) |
-| FlowSpec | 8955 | Post-v1 | — | Roadmap (prefixd lineage) |
+| FlowSpec | 8955 | post-v0.3.0 | — | IPv4/IPv6 unicast FlowSpec implemented; speaker-mode hardening continues |
 | Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
 | TCP-AO | 5925 | Post-v1 | — | Roadmap |
-| BMP exporter | 7854 | Post-v1 | — | Roadmap |
-| RPKI / RTR client | 8210 | Post-v1 | — | Roadmap |
+| BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); replay/stats cadence deferred |
+| RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); runtime gRPC management deferred |
 
 This matrix is updated with every milestone. "Interop Tested" means validated in the containerlab CI suite, not "someone tried it once."
 
@@ -724,7 +731,7 @@ These are invariants. They are not negotiable, not deferrable, and not subject t
 
 2. **The wire crate remains independently usable.** It has zero internal dependencies. Anyone should be able to `cargo add rustbgpd-wire` and use it as a standalone BGP codec library without pulling in the rest of the daemon.
 
-3. **No unbounded channels anywhere.** Every channel in the system has an explicit capacity. Backpressure is a feature, not a bug.
+3. **No accidental unbounded channels.** Channels are bounded by default. The only intentional unbounded channel is session notifications used for collision handling to avoid bounded `send().await` deadlock with synchronous peer-state queries.
 
 4. **No silent attribute drops.** If an attribute is ignored, filtered, or rejected, a structured event is emitted. Operators must be able to explain every routing decision from logs alone.
 

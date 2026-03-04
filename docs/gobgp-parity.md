@@ -99,7 +99,7 @@ Last updated: 2026-03-04
 | VRF management | Yes | No | |
 | Policy CRUD via API | Yes | No | Config-file only |
 | RPKI management | Yes | Partial | VRP/cache status via metrics; no gRPC RPKI CRUD |
-| BMP management | Yes | No | |
+| BMP management | Yes | Partial | Config-file only; no runtime gRPC add/remove |
 | MRT control | Yes | No | |
 | Zebra/FRR integration | Yes | No | |
 | Runtime log level | Yes | No | |
@@ -113,7 +113,7 @@ Last updated: 2026-03-04
 |---------|:-----:|:--------:|-------|
 | Prometheus metrics | Yes | Yes | rustbgpd has more granular RIB metrics |
 | Structured logging | No | Yes | JSON via tracing-subscriber |
-| BMP exporter (RFC 7854) | Yes | No | On roadmap |
+| BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination |
 | MRT dump (RFC 6396) | Yes | No | On roadmap |
 | WatchEvent streaming | Yes | Yes | WatchRoutes |
 | Sentry integration | Yes | No | |
@@ -169,7 +169,7 @@ Last updated: 2026-03-04
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 13 | ~72% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
-| Monitoring | 5 | 3 | 60% |
+| Monitoring | 5 | 4 | 80% |
 | Security | 4 | 3 | 75% |
 | Best-path steps | 11 | 10.5 | ~95% |
 
@@ -185,6 +185,7 @@ The primary target deployment. Weighted toward what matters:
 - **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
+- **BMP exporter:** RFC 7854 streaming to collectors now implemented; collector reconnect replay deferred
 
 ### General-Purpose BGP Speaker (~55% parity)
 
@@ -206,11 +207,11 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Top 5 Gaps for Maximum Parity Gain
 
-1. **BMP exporter (RFC 7854)** — standard route monitoring export for visibility and external collectors
-2. **Long-Lived GR (RFC 9494)** — per-AFI stale timers; important for large-scale iBGP
-3. **Confederation (RFC 5065)** — required for service provider deployments
-4. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
-5. **Config persistence** — write gRPC mutations back to TOML so they survive restarts
+1. **Long-Lived GR (RFC 9494)** — per-AFI stale timers; important for large-scale iBGP
+2. **Confederation (RFC 5065)** — required for service provider deployments
+3. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
+4. **Config persistence** — write gRPC mutations back to TOML so they survive restarts
+5. **MRT dump export (RFC 6396)** — TABLE_DUMP_V2 for offline analysis and archival
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 
@@ -218,8 +219,8 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 
 | Priority | Item | Impact |
 |----------|------|--------|
-| HIGH | manager.rs at ~7,700 lines | Hardest file to review; split into distribution.rs, flowspec.rs, revalidation.rs, graceful_restart.rs |
-| HIGH | Policy engine has 0 unit tests | 57 tests exist but all indirect through engine.rs; needs dedicated test module |
+| HIGH | manager.rs at ~7,713 lines | Hardest file to review; split into distribution.rs, flowspec.rs, revalidation.rs, graceful_restart.rs |
+| MEDIUM | Policy engine tests concentrated in one file | 70 tests exist in `engine.rs`; split into focused modules/files for maintainability |
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | ~~MEDIUM~~ | ~~RTR expire_interval not enforced~~ | Done — stale VRPs now expire and are withdrawn if no fresh EndOfData arrives before the effective expiry timer |
 | MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |

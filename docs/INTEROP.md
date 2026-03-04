@@ -228,10 +228,10 @@ auto-reconnect injected `ManualStart` synchronously. Fixed by adding a
 
 ## Cease Subcode Compatibility
 
-Per RFC_NOTES.md, rustbgpd sends Cease subcode 4 (Out of Resources)
+Per RFC_NOTES.md, rustbgpd sends Cease subcode 8 (Out of Resources)
 for global route limit violations. Track peer behavior here:
 
-| Peer | Accepts Subcode 4 | Fallback Needed | Notes |
+| Peer | Accepts Subcode 8 | Fallback Needed | Notes |
 |------|--------------------|-----------------|-------|
 | FRR | TBD | TBD | — |
 | BIRD | TBD | TBD | — |

@@ -15,6 +15,7 @@ rustbgpd-fsm.workspace = true
 rustbgpd-rib.workspace = true
 rustbgpd-policy.workspace = true
 rustbgpd-telemetry.workspace = true
+rustbgpd-bmp.workspace = true
 bytes.workspace = true
 tokio.workspace = true
 tracing.workspace = true

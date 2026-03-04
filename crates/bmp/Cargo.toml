@@ -1,0 +1,19 @@
+[package]
+name = "rustbgpd-bmp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "BMP exporter — RFC 7854 BGP Monitoring Protocol"
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

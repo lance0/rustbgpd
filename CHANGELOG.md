@@ -63,6 +63,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **FlowSpec fuzz target.** New `decode_flowspec` fuzz target exercises
   FlowSpec NLRI decoding directly with both IPv4 and IPv6 AFIs, complementing
   the existing `decode_message` and `decode_update` targets.
+- **BMP exporter (RFC 7854).** New `crates/bmp/` crate implementing the BGP
+  Monitoring Protocol. Unidirectional streaming of BGP state to external
+  collectors (OpenBMP, pmacct). Encodes Initiation, Peer Up, Peer Down, Route
+  Monitoring, Stats Report, and Termination messages. Per-collector async TCP
+  client with reconnect/backoff. Fan-out manager distributes encoded BMP
+  messages to all configured collectors. Raw BGP PDU capture in transport layer
+  (`ReadBuffer::try_decode()` returns `(Message, Bytes)`) enables byte-perfect
+  Route Monitoring and Peer Up messages. TOML config: `[bmp]` section with
+  `[[bmp.collectors]]`. Near-zero overhead when BMP is not configured (raw
+  frame capture uses `Bytes` refcount clones, not data copies). (ADR-0041)
 - **CLI tool (`rustbgpctl`).** New `crates/cli/` crate providing a command-line
   interface wrapping the gRPC API. Client-only proto codegen — no dependency on
   internal crates. Commands: `global`, `neighbor` (list/show/add/delete/enable/

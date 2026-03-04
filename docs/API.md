@@ -2,7 +2,8 @@
 
 rustbgpd exposes five gRPC services on a configurable address (default
 `127.0.0.1:50051`). All examples use
-[grpcurl](https://github.com/fullstorydev/grpcurl) with proto file reflection.
+[grpcurl](https://github.com/fullstorydev/grpcurl) with the checked-in
+`proto/rustbgpd.proto`.
 
 The proto definition lives at `proto/rustbgpd.proto`.
 
@@ -38,6 +39,7 @@ added at runtime.
 | `GetNeighborState` | Get detailed state for a single peer |
 | `EnableNeighbor` | Re-enable a previously disabled peer |
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
+| `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
 
 ### Add a neighbor
 
@@ -86,6 +88,20 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.NeighborService/DeleteNeighbor
 ```
 
+### Trigger SoftResetIn
+
+```bash
+# Refresh all configured families (empty families list)
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2"}' \
+  localhost:50051 rustbgpd.v1.NeighborService/SoftResetIn
+
+# Refresh only IPv4 unicast
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2", "families": ["ipv4_unicast"]}' \
+  localhost:50051 rustbgpd.v1.NeighborService/SoftResetIn
+```
+
 ---
 
 ## RibService
@@ -97,6 +113,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListReceivedRoutes` | Adj-RIB-In: all routes received from peers |
 | `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
 | `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
+| `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
 ### List received routes (Adj-RIB-In)
@@ -166,6 +183,19 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 `ROUTE_EVENT_TYPE_BEST_CHANGED`.
 
+### List FlowSpec routes
+
+```bash
+# List all FlowSpec routes
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
+
+# List only IPv6 FlowSpec routes
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"afi_safi": "ADDRESS_FAMILY_IPV6_FLOWSPEC"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
+```
+
 ---
 
 ## InjectionService
@@ -178,6 +208,8 @@ export policy).
 |-----|-------------|
 | `AddPath` | Inject a route with specified attributes |
 | `DeletePath` | Withdraw a previously injected route |
+| `AddFlowSpec` | Inject a FlowSpec rule with actions |
+| `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
 
 ### Inject an IPv4 route
 
@@ -211,6 +243,7 @@ Optional fields: `as_path`, `origin`, `local_pref`, `med`, `communities`.
 
 The `prefix` and `next_hop` fields accept both IPv4 and IPv6 addresses. Prefix
 length is validated against the address family (max 32 for IPv4, 128 for IPv6).
+`path_id` defaults to `0` (default path) when omitted.
 
 ### Withdraw a route
 
@@ -224,6 +257,37 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"prefix": "2001:db8:ff::", "prefix_length": 48}' \
   localhost:50051 rustbgpd.v1.InjectionService/DeletePath
+```
+
+### Inject a FlowSpec rule
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "afi_safi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+    "components": [
+      { "type": 1, "prefix": "203.0.113.0/24" },
+      { "type": 4, "value": "=80" }
+    ],
+    "actions": [
+      { "traffic_rate": { "rate": 0.0 } }
+    ]
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddFlowSpec
+```
+
+### Withdraw a FlowSpec rule
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "afi_safi": "ADDRESS_FAMILY_IPV4_FLOWSPEC",
+    "components": [
+      { "type": 1, "prefix": "203.0.113.0/24" },
+      { "type": 4, "value": "=80" }
+    ]
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/DeleteFlowSpec
 ```
 
 ---

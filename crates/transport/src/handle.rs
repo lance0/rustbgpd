@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use bytes::Bytes;
+use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
@@ -94,6 +95,7 @@ impl PeerHandle {
         import_policy: Option<PolicyChain>,
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
@@ -105,6 +107,7 @@ impl PeerHandle {
                 import_policy,
                 export_policy,
                 session_notify_tx,
+                bmp_tx,
             );
             session.run().await
         });
@@ -116,6 +119,7 @@ impl PeerHandle {
     /// The session starts with a connected stream and receives
     /// `TcpConnectionConfirmed` to begin the handshake.
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn spawn_inbound(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -124,6 +128,7 @@ impl PeerHandle {
         export_policy: Option<PolicyChain>,
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let task = tokio::spawn(async move {
@@ -136,6 +141,7 @@ impl PeerHandle {
                 export_policy,
                 stream,
                 session_notify_tx,
+                bmp_tx,
             );
             session.run().await
         });

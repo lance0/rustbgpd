@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use rustbgpd_api::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
+use rustbgpd_bmp::BmpEvent;
 use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
@@ -47,11 +48,14 @@ pub struct PeerManager {
     local_gr_restart_until: Option<Instant>,
     metrics: BgpMetrics,
     rib_tx: mpsc::Sender<RibUpdate>,
+    /// Optional BMP event sender (None when BMP not configured).
+    bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
     session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
 }
 
 impl PeerManager {
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         rx: mpsc::Receiver<PeerManagerCommand>,
         local_asn: u32,
@@ -60,6 +64,7 @@ impl PeerManager {
         local_gr_restart_until: Option<Instant>,
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
         let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
         Self {
@@ -71,6 +76,7 @@ impl PeerManager {
             local_gr_restart_until,
             metrics,
             rib_tx,
+            bmp_tx,
             session_notify_tx,
             session_notify_rx,
         }
@@ -131,6 +137,7 @@ impl PeerManager {
             config.import_policy.clone(),
             config.export_policy.clone(),
             Some(self.session_notify_tx.clone()),
+            self.bmp_tx.clone(),
         );
 
         if let Err(e) = handle.start().await {
@@ -439,6 +446,7 @@ impl PeerManager {
                 managed.export_policy.clone(),
                 stream,
                 Some(self.session_notify_tx.clone()),
+                self.bmp_tx.clone(),
             ),
         );
 
@@ -560,6 +568,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -600,6 +609,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -640,6 +650,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -687,6 +698,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -717,6 +729,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -759,6 +772,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -788,6 +802,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -820,6 +835,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
 
         let nh: std::net::Ipv6Addr = "2001:db8::1".parse().unwrap();
@@ -843,6 +859,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
 
         let mut config = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
@@ -885,6 +902,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -930,6 +948,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -988,6 +1007,7 @@ mod tests {
             None,
             metrics,
             rib_tx,
+            None,
         );
         let handle = tokio::spawn(mgr.run());
 
@@ -1019,6 +1039,7 @@ mod tests {
             Some(Instant::now() + Duration::from_secs(30)),
             BgpMetrics::new(),
             rib_tx,
+            None,
         );
         let mut cfg = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
         cfg.gr_restart_eligible = true;
@@ -1039,6 +1060,7 @@ mod tests {
             Some(Instant::now() + Duration::from_secs(30)),
             BgpMetrics::new(),
             rib_tx,
+            None,
         );
         let cfg = make_config(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 65002);
 

@@ -720,6 +720,63 @@ set_med = 50
 
 ---
 
+## `[bmp]`
+
+Optional. Configures BMP (BGP Monitoring Protocol, RFC 7854) export to external
+collectors. rustbgpd acts as a BMP client, initiating TCP connections to each
+configured collector and streaming BGP state changes (peer up/down, route
+monitoring) as BMP messages.
+
+```toml
+[bmp]
+sys_name = "rustbgpd"          # optional, default "rustbgpd"
+sys_descr = "my bgp speaker"   # optional, default "rustbgpd <version>"
+
+[[bmp.collectors]]
+address = "10.0.0.100:11019"
+reconnect_interval = 30        # seconds, default 30
+
+[[bmp.collectors]]
+address = "10.0.0.101:11019"
+```
+
+### BMP section fields
+
+| Field       | Type   | Required | Default      | Description                          |
+|-------------|--------|----------|--------------|--------------------------------------|
+| `sys_name`  | string | no       | `"rustbgpd"` | System name in BMP Initiation message |
+| `sys_descr` | string | no       | version string | System description in BMP Initiation message |
+| `collectors`| array  | no       | `[]`         | List of BMP collector endpoints       |
+
+### Collector fields
+
+| Field                | Type   | Required | Default | Description                          |
+|----------------------|--------|----------|---------|--------------------------------------|
+| `address`            | string | yes      | --      | Collector `host:port` socket address  |
+| `reconnect_interval` | u64   | no       | 30      | Seconds between reconnect attempts    |
+
+### What is streamed
+
+BMP messages sent to collectors:
+
+| Message | When |
+|---------|------|
+| **Initiation** (Type 4) | On TCP connect to collector |
+| **Peer Up** (Type 3) | BGP session reaches Established (includes raw OPEN PDUs) |
+| **Peer Down** (Type 2) | BGP session leaves Established |
+| **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU) |
+| **Stats Report** (Type 1) | Encoding supported; periodic sending deferred |
+| **Termination** (Type 5) | On client shutdown |
+
+Route Monitoring messages carry the original raw BGP UPDATE PDU bytes
+(including the 19-byte BGP header), enabling collectors to decode the full
+UPDATE without loss.
+
+When BMP is not configured, overhead remains minimal: raw frame capture uses
+`Bytes` refcount clones (no message-data copy).
+
+---
+
 ## Validation rules
 
 The following checks run at startup. Any failure prevents the daemon from
@@ -747,6 +804,8 @@ starting:
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
+| BMP collector `address` must be a valid `ip:port` | `invalid BMP collector address` |
+| BMP collector `reconnect_interval` must be > 0 | `reconnect_interval must be > 0` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
 ### Defaults applied at runtime

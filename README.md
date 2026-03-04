@@ -46,7 +46,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Transparent route server mode** -- config-driven eBGP unicast transparency preserves original next hop and skips automatic local-AS prepend for IX route-server clients
 - **RPKI origin validation** -- RFC 6811: persistent RTR client (RFC 8210) keeps sessions open, honors `SerialNotify`, enforces expiry, stamps routes Valid/Invalid/NotFound, and integrates into best-path and policy
 - **CLI tool** -- `rustbgpctl` wraps the gRPC API with human-readable tables and `--json` structured output
-- **877 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **897 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -133,7 +133,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
                +-----+       +-----------+
 ```
 
-Nine crates with strict dependency rules:
+Ten crates with strict dependency rules:
 
 | Crate | Description |
 |-------|-------------|
@@ -143,6 +143,7 @@ Nine crates with strict dependency rules:
 | `rustbgpd-rib` | Adj-RIB-In, Loc-RIB best-path, Adj-RIB-Out. Single-task ownership, no locks. |
 | `rustbgpd-policy` | Policy engine: prefix/community/AS_PATH matching, route modifications. |
 | `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
+| `rustbgpd-bmp` | BMP exporter: RFC 7854 codec, collector clients, manager fan-out. |
 | `rustbgpd-api` | gRPC server (tonic). Five services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 | `rustbgpctl` | CLI tool. Client-only gRPC stubs, no internal crate deps. |
@@ -164,9 +165,9 @@ Five services cover the full operational surface:
 | Service | RPCs | Purpose |
 |---------|------|---------|
 | `GlobalService` | `GetGlobal`, `SetGlobal` | Daemon identity and configuration |
-| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor` | Peer lifecycle |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `WatchRoutes` | RIB queries and streaming |
-| `InjectionService` | `AddPath`, `DeletePath` | Programmatic route injection |
+| `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn` | Peer lifecycle + inbound soft reset |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListFlowSpecRoutes`, `WatchRoutes` | RIB queries and streaming |
+| `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec` | Programmatic route and FlowSpec injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown` | Health, metrics, lifecycle |
 
 ```bash
@@ -270,7 +271,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 877 tests pass. P0+P1+P2 complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 897 tests pass. P0+P1+P2 complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), BMP export (RFC 7854), and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -282,12 +283,12 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | Operations | v0.1.0 | Coordinated shutdown, gRPC supervision, Prometheus metrics |
 | MP-BGP (IPv6) | v0.2.0 | RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation |
 | Graceful Restart | v0.3.0 | RFC 4724: helper mode, stale route demotion, End-of-RIB, timer sweep, minimal restarting-speaker `R=1` after coordinated restart |
-| **Policy actions** | **post-v0.3.0** | **Match + modify + filter: set LOCAL_PREF/MED/communities/AS_PATH, next-hop self** |
-| **AS_PATH regex** | **post-v0.3.0** | **Cisco/Quagga-style `_` boundary patterns in policy match conditions** |
-| **Large communities** | **post-v0.3.0** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |
-| **Route Reflector** | **post-v0.3.0** | **RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST** |
+| **Policy actions** | **unreleased** | **Match + modify + filter: set LOCAL_PREF/MED/communities/AS_PATH, next-hop self** |
+| **AS_PATH regex** | **unreleased** | **Cisco/Quagga-style `_` boundary patterns in policy match conditions** |
+| **Large communities** | **unreleased** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |
+| **Route Reflector** | **unreleased** | **RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST** |
 
-Next: config persistence, BMP exporter, MRT dump. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: config persistence, MRT dump, and benchmark hardening. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

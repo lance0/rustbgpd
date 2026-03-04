@@ -63,7 +63,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Add-Path (RFC 7911) — dual-stack receive + multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
 - [x] Extended nexthop (RFC 8950) — capability code 5; automatic dual-stack capability advertisement, IPv4 unicast NLRI over IPv6 next hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
-- [x] 877 tests — unit, integration, property, fuzz
+- [x] 897 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -90,12 +90,15 @@ Items identified during review that are not correctness bugs but improve strictn
 
 - [ ] **Unknown FlowSpec component forward compatibility** — component types >13 currently cause hard decode errors; should skip unknown types to allow future RFC extensions without breaking interop
 - [x] **FlowSpec fuzz target** — `decode_flowspec` fuzz target added for direct FlowSpec NLRI decoding coverage
-- [ ] **Policy engine unit tests** — 57 tests exist but all indirect via engine.rs integration tests; needs dedicated test module with isolated unit tests per match/action type
+- [ ] **Policy engine test modularization** — 70 tests now exist in `engine.rs`; split into focused test modules/files by match/action family to improve maintainability and reviewability
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
 - [x] **RTR persistent session + Serial Notify** — RTR client now keeps the TCP session open after EndOfData, honors Serial Notify for immediate updates, and uses refresh_interval as a fallback serial-poll timer (RFC 8210 §8)
 - [x] **RTR expire_interval enforcement** — config and server-advertised expire timers are now enforced; VRPs are cleared if no fresh EndOfData arrives before the expiry window
 - [ ] **ERR metrics** — no gauge for active enhanced route refresh windows or pending refresh-stale route count; would improve operational visibility during soft resets
 - [ ] **Inbound BoRR/EoRR retry on channel-full** — inbound BoRR/EoRR markers are silently dropped (with warning) when the RIB channel is full; unlike outbound responses which have `pending_refresh` retry, inbound markers have no recovery path
+- [ ] **BMP collector reconnect replay** — on reconnect, collectors should receive Peer Up for all currently Established peers; currently only new events after reconnect are sent
+- [ ] **BMP periodic Stats Report** — Stats Report encoding is implemented in codec but periodic sending from transport metrics is not wired
+- [ ] **BMP Termination on daemon shutdown** — client sends Termination on its own shutdown, but coordinated daemon shutdown doesn't explicitly trigger BMP Termination before TCP close
 
 ### P1 — Core Protocol Gaps
 
@@ -124,7 +127,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 Features that improve day-to-day operations.
 
 - [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
-- [ ] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); standard for visibility into BGP state
+- [x] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); per-collector TCP client with reconnect, fan-out manager, raw PDU capture (ADR-0041)
 - [ ] **MRT dump export** (RFC 6396) — TABLE_DUMP_V2 for offline analysis and archival
 
 ### P3 — Scale & Hardening
@@ -172,7 +175,7 @@ Quality gates before tagging 1.0.0:
 - [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
 - [ ] Comprehensive rustdoc for public API
 - [ ] Security audit of gRPC surface
-- [ ] **manager.rs split** — currently ~7,700 lines; split into distribution.rs, revalidation.rs, graceful_restart.rs submodules for reviewability
+- [ ] **manager.rs split** — currently ~7,713 lines; split into distribution.rs, revalidation.rs, graceful_restart.rs submodules for reviewability
 - [x] **RTR expire_interval enforcement** — VRPs are now cleared if no fresh EndOfData arrives before the expiry window
 
 ---

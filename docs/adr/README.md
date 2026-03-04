@@ -48,6 +48,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0038](0038-enhanced-route-refresh.md) | Enhanced Route Refresh (RFC 7313) | Accepted | 2026-03-04 |
 | [0039](0039-transparent-route-server.md) | Transparent Route Server Mode | Accepted | 2026-03-04 |
 | [0040](0040-gr-restarting-speaker.md) | Graceful Restart — Minimal Restarting Speaker Mode | Accepted | 2026-03-04 |
+| [0041](0041-bmp-exporter.md) | BMP Exporter (RFC 7854) | Accepted | 2026-03-04 |
 
 ## Template
 
