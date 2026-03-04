@@ -40,7 +40,7 @@ Last updated: 2026-03-04
 | Confederation (RFC 5065) | Yes | No | |
 | Extended Messages (RFC 8654) | No | Yes | rustbgpd supports it; GoBGP does not |
 | Extended Nexthop (RFC 8950) | Yes | No | IPv6 NH for IPv4 NLRI |
-| Admin Shutdown Comm (RFC 8203) | Yes | No | Reason text in NOTIFICATION |
+| Admin Shutdown Comm (RFC 8203) | Yes | Yes | Reason text in NOTIFICATION |
 
 ## Path Attributes
 
@@ -208,7 +208,7 @@ Competing head-to-head with GoBGP for all use cases:
 2. **Policy chaining + named policies** — policy 61% → 72%, table stakes for production
 3. **Extended nexthop (RFC 8950)** — IPv6 NH for IPv4 NLRI, increasingly common in modern networks
 4. **CLI tool** — practical usability; grpcurl is a poor substitute for `gobgp` CLI
-5. **Admin shutdown communication (RFC 8203)** — low-effort, high-visibility operational feature
+5. ~~**Admin shutdown communication (RFC 8203)**~~ — done
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 
@@ -218,7 +218,7 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 |----------|------|--------|
 | HIGH | manager.rs at ~7,100 lines | Hardest file to review; split into distribution.rs, flowspec.rs, revalidation.rs, graceful_restart.rs |
 | HIGH | Policy engine has 0 unit tests | 57 tests exist but all indirect through engine.rs; needs dedicated test module |
-| MEDIUM | No FlowSpec fuzz target | Wire-level FlowSpec parsing should have its own fuzz target for coverage |
+| ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | MEDIUM | RTR expire_interval not enforced | Stale VRPs persist indefinitely if cache goes silent without disconnecting |
 | MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |
 | LOW | RTR client polling-only | No Serial Notify; deferred by design |

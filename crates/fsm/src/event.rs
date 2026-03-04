@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use rustbgpd_wire::{Afi, DecodeError, NotificationMessage, OpenMessage, Safi};
 
 /// Input events that drive FSM transitions.
@@ -7,7 +8,8 @@ pub enum Event {
     /// Operator requests the session be started.
     ManualStart,
     /// Operator requests the session be torn down.
-    ManualStop,
+    /// Optional reason is included in the Cease NOTIFICATION data (RFC 8203).
+    ManualStop { reason: Option<Bytes> },
 
     // ── Timer ─────────────────────────────────────────
     /// The connect-retry timer has expired.
@@ -48,7 +50,7 @@ impl Event {
     pub fn name(&self) -> &'static str {
         match self {
             Self::ManualStart => "ManualStart",
-            Self::ManualStop => "ManualStop",
+            Self::ManualStop { .. } => "ManualStop",
             Self::ConnectRetryTimerExpires => "ConnectRetryTimerExpires",
             Self::HoldTimerExpires => "HoldTimerExpires",
             Self::KeepaliveTimerExpires => "KeepaliveTimerExpires",

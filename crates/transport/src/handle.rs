@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr};
 
+use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::Policy;
 use rustbgpd_rib::RibUpdate;
@@ -32,7 +33,8 @@ pub enum PeerCommand {
     /// Start the BGP session (`ManualStart`).
     Start,
     /// Gracefully tear down the session (`ManualStop`).
-    Stop,
+    /// Optional reason is included in the Cease NOTIFICATION (RFC 8203).
+    Stop { reason: Option<Bytes> },
     /// Shut down the task entirely.
     Shutdown,
     /// Query the current session state.
@@ -151,11 +153,16 @@ impl PeerHandle {
 
     /// Send a Stop command for graceful teardown.
     ///
+    /// The optional `reason` is included in the Cease NOTIFICATION (RFC 8203).
+    ///
     /// # Errors
     ///
     /// Returns an error if the session task has already exited.
-    pub async fn stop(&self) -> Result<(), mpsc::error::SendError<PeerCommand>> {
-        self.commands.send(PeerCommand::Stop).await
+    pub async fn stop(
+        &self,
+        reason: Option<Bytes>,
+    ) -> Result<(), mpsc::error::SendError<PeerCommand>> {
+        self.commands.send(PeerCommand::Stop { reason }).await
     }
 
     /// Send a Shutdown command and wait for the task to finish.

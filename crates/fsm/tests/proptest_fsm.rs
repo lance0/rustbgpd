@@ -30,7 +30,7 @@ fn test_config() -> PeerConfig {
 fn arb_event() -> impl Strategy<Value = Event> {
     prop_oneof![
         Just(Event::ManualStart),
-        Just(Event::ManualStop),
+        Just(Event::ManualStop { reason: None }),
         Just(Event::ConnectRetryTimerExpires),
         Just(Event::HoldTimerExpires),
         Just(Event::KeepaliveTimerExpires),

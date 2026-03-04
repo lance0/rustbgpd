@@ -62,7 +62,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Extended Messages (RFC 8654) — raise 4096-byte BGP message limit to 65535 bytes; capability code 6, unconditional advertisement, dynamic buffer sizing (ADR-0032)
 - [x] Add-Path (RFC 7911) — dual-stack receive + multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
-- [x] 779 tests — unit, integration, property, fuzz
+- [x] 786 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -88,7 +88,7 @@ All P0 features shipped. See Completed section above.
 Items identified during review that are not correctness bugs but improve strictness.
 
 - [ ] **Unknown FlowSpec component forward compatibility** — component types >13 currently cause hard decode errors; should skip unknown types to allow future RFC extensions without breaking interop
-- [ ] **FlowSpec fuzz target** — existing fuzz targets cover `decode_message` and `decode_update` but FlowSpec MP_REACH paths may not get deep coverage; add dedicated `fuzz_target_flowspec` for FlowSpec NLRI decoding
+- [x] **FlowSpec fuzz target** — `decode_flowspec` fuzz target added for direct FlowSpec NLRI decoding coverage
 - [ ] **Policy engine unit tests** — 57 tests exist but all indirect via engine.rs integration tests; needs dedicated test module with isolated unit tests per match/action type
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
 - [ ] **RTR persistent session + Serial Notify** — RTR client currently disconnects after each EndOfData and reconnects after refresh_interval; keeping the TCP session open would allow receiving Serial Notify for faster cache-change propagation (RFC 8210 §8)
@@ -112,7 +112,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [ ] **Policy chaining + named policies** — first-match-wins today, no multi-policy sequencing; table stakes for production policy (policy 61% → 72%)
 - [ ] **Extended nexthop** (RFC 8950) — IPv6 next-hop for IPv4 NLRI; increasingly common in modern dual-stack networks
 - [ ] **CLI tool** — `rustbgpctl` wrapping gRPC; grpcurl is a poor substitute for `gobgp` CLI; TUI mode as a follow-on
-- [ ] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; low-effort, high-visibility
+- [x] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; threaded from gRPC DisableNeighbor through transport
 
 ### P2.5 — Operational Polish
 

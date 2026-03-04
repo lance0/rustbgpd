@@ -42,7 +42,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Extended Messages** -- RFC 8654 raises the 4096-byte message limit to 65535 bytes
 - **Add-Path** -- RFC 7911 dual-stack receive + multi-path send (route server mode) for IPv4 and IPv6 unicast
 - **RPKI origin validation** -- RFC 6811: poll-based RTR client (RFC 8210) connects to RPKI validators, stamps routes Valid/Invalid/NotFound, integrates into best-path and policy
-- **779 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **786 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -255,7 +255,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 779 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 786 tests pass. P0 production blockers complete. Extended Messages (RFC 8654), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, poll-based RTR), and dual-stack FlowSpec (RFC 8955/8956) shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|

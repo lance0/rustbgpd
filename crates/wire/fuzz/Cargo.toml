@@ -26,4 +26,10 @@ path = "fuzz_targets/decode_update.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "decode_flowspec"
+path = "fuzz_targets/decode_flowspec.rs"
+test = false
+doc = false
+
 [workspace]

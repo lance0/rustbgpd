@@ -11,6 +11,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Admin shutdown communication (RFC 8203).** DisableNeighbor gRPC reason
+  field is now propagated through to the Cease/2 (Administrative Shutdown)
+  NOTIFICATION data as a 1-byte length + UTF-8 string (max 128 bytes).
+  Inbound Cease/2 and Cease/4 NOTIFICATIONs with shutdown communication
+  are decoded and logged. Wire helpers: `encode_shutdown_communication()`
+  and `decode_shutdown_communication()` in the notification module.
+- **FlowSpec fuzz target.** New `decode_flowspec` fuzz target exercises
+  FlowSpec NLRI decoding directly with both IPv4 and IPv6 AFIs, complementing
+  the existing `decode_message` and `decode_update` targets.
+
+### Fixed
+
+- **Cease subcode constants.** `ADMINISTRATIVE_RESET` (4) added,
+  `OUT_OF_RESOURCES` corrected from 4 to 8 per RFC 4486. Description
+  table updated for subcode 4 ("Administrative Reset") and 8.
+
 - **FlowSpec (RFC 8955/8956).** IPv4 and IPv6 unicast FlowSpec (SAFI 133)
   with all 13 component types: destination/source prefix, IP protocol,
   port, destination/source port, ICMP type/code, TCP flags, packet length,

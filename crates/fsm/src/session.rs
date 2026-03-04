@@ -1,7 +1,7 @@
 use bytes::Bytes;
 
 use rustbgpd_wire::OpenMessage;
-use rustbgpd_wire::notification::NotificationCode;
+use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 
 use crate::action::{Action, NegotiatedSession, TimerType};
 use crate::config::PeerConfig;
@@ -95,7 +95,7 @@ impl Session {
     #[expect(clippy::needless_pass_by_value)]
     fn handle_connect(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop => self.enter_idle_silent(),
+            Event::ManualStop { .. } => self.enter_idle_silent(),
 
             Event::ConnectRetryTimerExpires => {
                 let mut actions = vec![
@@ -140,7 +140,7 @@ impl Session {
     #[expect(clippy::needless_pass_by_value)]
     fn handle_active(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop => self.enter_idle_silent(),
+            Event::ManualStop { .. } => self.enter_idle_silent(),
 
             Event::ConnectRetryTimerExpires => {
                 let mut actions = vec![
@@ -182,9 +182,11 @@ impl Session {
 
     fn handle_open_sent(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop => {
-                self.enter_idle_with_notification(NotificationCode::Cease, 0, Bytes::new())
-            }
+            Event::ManualStop { reason } => self.enter_idle_with_notification(
+                NotificationCode::Cease,
+                cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+                reason.unwrap_or_default(),
+            ),
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
                 NotificationCode::HoldTimerExpired,
@@ -250,12 +252,13 @@ impl Session {
         }
     }
 
-    #[expect(clippy::needless_pass_by_value)]
     fn handle_open_confirm(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop => {
-                self.enter_idle_with_notification(NotificationCode::Cease, 0, Bytes::new())
-            }
+            Event::ManualStop { reason } => self.enter_idle_with_notification(
+                NotificationCode::Cease,
+                cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+                reason.unwrap_or_default(),
+            ),
 
             Event::HoldTimerExpires => self.enter_idle_with_notification(
                 NotificationCode::HoldTimerExpired,
@@ -326,12 +329,12 @@ impl Session {
 
     fn handle_established(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop => {
+            Event::ManualStop { reason } => {
                 let mut actions = vec![Action::SessionDown];
                 actions.extend(self.enter_idle_with_notification(
                     NotificationCode::Cease,
-                    0,
-                    Bytes::new(),
+                    cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+                    reason.unwrap_or_default(),
                 ));
                 actions
             }
@@ -589,7 +592,7 @@ mod tests {
         // Now in Active with counter > 0
         assert!(s.connect_retry_counter() > 0);
         // Go to idle
-        s.handle_event(Event::ManualStop);
+        s.handle_event(Event::ManualStop { reason: None });
         // ManualStart should reset
         s.handle_event(Event::ManualStart);
         assert_eq!(s.connect_retry_counter(), 0);
@@ -601,7 +604,7 @@ mod tests {
     fn connect_manual_stop_goes_idle() {
         let mut s = Session::new(test_config());
         s.handle_event(Event::ManualStart);
-        let actions = s.handle_event(Event::ManualStop);
+        let actions = s.handle_event(Event::ManualStop { reason: None });
 
         assert_eq!(s.state(), SessionState::Idle);
         assert!(has_action(&actions, |a| matches!(
@@ -681,7 +684,7 @@ mod tests {
         let mut s = Session::new(test_config());
         s.handle_event(Event::ManualStart);
         s.handle_event(Event::TcpConnectionFails); // → Active
-        let actions = s.handle_event(Event::ManualStop);
+        let actions = s.handle_event(Event::ManualStop { reason: None });
 
         assert_eq!(s.state(), SessionState::Idle);
         assert!(has_action(&actions, |a| matches!(
@@ -733,7 +736,7 @@ mod tests {
         let mut s = Session::new(test_config());
         s.handle_event(Event::ManualStart);
         s.handle_event(Event::TcpConnectionConfirmed);
-        let actions = s.handle_event(Event::ManualStop);
+        let actions = s.handle_event(Event::ManualStop { reason: None });
 
         assert_eq!(s.state(), SessionState::Idle);
         assert!(has_action(&actions, |a| matches!(
@@ -852,7 +855,7 @@ mod tests {
         s.handle_event(Event::ManualStart);
         s.handle_event(Event::TcpConnectionConfirmed);
         s.handle_event(Event::OpenReceived(peer_open()));
-        let actions = s.handle_event(Event::ManualStop);
+        let actions = s.handle_event(Event::ManualStop { reason: None });
 
         assert_eq!(s.state(), SessionState::Idle);
         assert!(has_action(&actions, |a| matches!(
@@ -924,7 +927,7 @@ mod tests {
     #[test]
     fn established_manual_stop_emits_session_down() {
         let mut s = reach_established();
-        let actions = s.handle_event(Event::ManualStop);
+        let actions = s.handle_event(Event::ManualStop { reason: None });
 
         assert_eq!(s.state(), SessionState::Idle);
         assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));
@@ -1028,6 +1031,23 @@ mod tests {
         assert!(has_action(&actions, |a| matches!(
             a,
             Action::SendNotification(n) if n.code == NotificationCode::FsmError
+        )));
+    }
+
+    #[test]
+    fn established_manual_stop_with_reason_includes_data() {
+        let mut s = reach_established();
+        let reason_data = rustbgpd_wire::notification::encode_shutdown_communication("maintenance");
+        let actions = s.handle_event(Event::ManualStop {
+            reason: Some(reason_data.clone()),
+        });
+
+        assert_eq!(s.state(), SessionState::Idle);
+        assert!(has_action(&actions, |a| matches!(
+            a,
+            Action::SendNotification(n) if n.code == NotificationCode::Cease
+                && n.subcode == 2
+                && n.data == reason_data
         )));
     }
 

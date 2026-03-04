@@ -347,10 +347,19 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
 
+        let reason = if req.reason.is_empty() {
+            None
+        } else {
+            Some(rustbgpd_wire::notification::encode_shutdown_communication(
+                &req.reason,
+            ))
+        };
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::DisablePeer {
                 address,
+                reason,
                 reply: reply_tx,
             })
             .await

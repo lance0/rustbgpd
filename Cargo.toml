@@ -74,6 +74,7 @@ serde.workspace = true
 toml.workspace = true
 prometheus.workspace = true
 thiserror.workspace = true
+bytes.workspace = true
 
 [profile.release]
 lto = true

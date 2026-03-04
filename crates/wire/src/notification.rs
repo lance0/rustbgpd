@@ -96,11 +96,52 @@ pub mod cease_subcode {
     pub const MAX_PREFIXES: u8 = 1;
     pub const ADMINISTRATIVE_SHUTDOWN: u8 = 2;
     pub const PEER_DECONFIGURED: u8 = 3;
-    pub const OUT_OF_RESOURCES: u8 = 4;
+    /// RFC 8203
+    pub const ADMINISTRATIVE_RESET: u8 = 4;
+    pub const OUT_OF_RESOURCES: u8 = 8;
     /// RFC 4271 §6.8
     pub const CONNECTION_COLLISION_RESOLUTION: u8 = 7;
     /// RFC 8538
     pub const HARD_RESET: u8 = 9;
+}
+
+/// Encode a shutdown communication reason string (RFC 8203).
+///
+/// The format is: 1-byte length prefix + UTF-8 string, max 128 bytes.
+/// If the reason exceeds 128 bytes, it is truncated at a char boundary.
+/// An empty reason encodes as a zero-length field (`[0]`).
+#[must_use]
+pub fn encode_shutdown_communication(reason: &str) -> bytes::Bytes {
+    // Truncate to at most 128 bytes at a char boundary
+    let mut end = reason.len().min(128);
+    while end > 0 && !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = &reason[..end];
+    // Safe: end ≤ 128, which always fits in u8.
+    #[expect(clippy::cast_possible_truncation)]
+    let len = truncated.len() as u8;
+    let mut buf = Vec::with_capacity(1 + truncated.len());
+    buf.push(len);
+    buf.extend_from_slice(truncated.as_bytes());
+    bytes::Bytes::from(buf)
+}
+
+/// Decode a shutdown communication reason string from NOTIFICATION data (RFC 8203).
+///
+/// Returns `None` if the data is empty or the length prefix is inconsistent.
+/// Invalid UTF-8 is replaced with the Unicode replacement character.
+#[must_use]
+pub fn decode_shutdown_communication(data: &[u8]) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    let len = data[0] as usize;
+    if data.len() != 1 + len {
+        return None;
+    }
+    let raw = &data[1..];
+    Some(String::from_utf8_lossy(raw).into_owned())
 }
 
 /// Human-readable description for a NOTIFICATION code/subcode pair.
@@ -137,7 +178,8 @@ pub fn description(code: NotificationCode, subcode: u8) -> &'static str {
         (NotificationCode::Cease, 1) => "Maximum Number of Prefixes Reached",
         (NotificationCode::Cease, 2) => "Administrative Shutdown",
         (NotificationCode::Cease, 3) => "Peer De-configured",
-        (NotificationCode::Cease, 4) => "Out of Resources",
+        (NotificationCode::Cease, 4) => "Administrative Reset",
+        (NotificationCode::Cease, 8) => "Out of Resources",
         (NotificationCode::Cease, 7) => "Connection Collision Resolution",
         (NotificationCode::Cease, 9) => "Hard Reset",
         // Unknown code
@@ -193,5 +235,58 @@ mod tests {
             );
             assert_ne!(desc, "Unknown", "got Unknown for ({code}, {subcode})");
         }
+    }
+
+    #[test]
+    fn shutdown_communication_roundtrip() {
+        let reason = "maintenance window";
+        let encoded = encode_shutdown_communication(reason);
+        assert_eq!(encoded[0] as usize, reason.len());
+        let decoded = decode_shutdown_communication(&encoded).unwrap();
+        assert_eq!(decoded, reason);
+    }
+
+    #[test]
+    fn shutdown_communication_empty() {
+        let encoded = encode_shutdown_communication("");
+        assert_eq!(encoded.as_ref(), &[0]);
+        assert_eq!(decode_shutdown_communication(&encoded).as_deref(), Some(""));
+        assert_eq!(decode_shutdown_communication(&[]), None);
+    }
+
+    #[test]
+    fn shutdown_communication_truncates_at_128() {
+        let long = "a".repeat(200);
+        let encoded = encode_shutdown_communication(&long);
+        assert_eq!(encoded[0], 128);
+        assert_eq!(encoded.len(), 129);
+        let decoded = decode_shutdown_communication(&encoded).unwrap();
+        assert_eq!(decoded.len(), 128);
+    }
+
+    #[test]
+    fn shutdown_communication_truncates_at_char_boundary() {
+        // 'é' is 2 bytes in UTF-8. Fill 127 bytes + 'é' = 129 bytes total → truncate
+        let reason = format!("{}é", "x".repeat(127));
+        assert_eq!(reason.len(), 129);
+        let encoded = encode_shutdown_communication(&reason);
+        // Should truncate to 127 bytes (before the multi-byte char)
+        assert_eq!(encoded[0], 127);
+        let decoded = decode_shutdown_communication(&encoded).unwrap();
+        assert_eq!(decoded, "x".repeat(127));
+    }
+
+    #[test]
+    fn shutdown_communication_invalid_utf8() {
+        // Length 3 + 3 bytes of invalid UTF-8
+        let data = [3, 0xff, 0xfe, 0xfd];
+        let decoded = decode_shutdown_communication(&data).unwrap();
+        assert!(decoded.contains('\u{FFFD}')); // replacement char
+    }
+
+    #[test]
+    fn shutdown_communication_rejects_trailing_bytes() {
+        let data = [3, b'f', b'o', b'o', b'x'];
+        assert_eq!(decode_shutdown_communication(&data), None);
     }
 }

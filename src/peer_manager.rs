@@ -237,7 +237,11 @@ impl PeerManager {
         Ok(())
     }
 
-    async fn disable_peer(&mut self, address: IpAddr) -> Result<(), String> {
+    async fn disable_peer(
+        &mut self,
+        address: IpAddr,
+        reason: Option<bytes::Bytes>,
+    ) -> Result<(), String> {
         let managed = self
             .peers
             .get_mut(&address)
@@ -246,7 +250,7 @@ impl PeerManager {
         managed.pending_inbound = None;
         managed
             .handle
-            .stop()
+            .stop(reason)
             .await
             .map_err(|e| format!("failed to stop peer: {e}"))?;
         info!(%address, "peer disabled");
@@ -466,8 +470,8 @@ impl PeerManager {
                             let result = self.enable_peer(address).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::DisablePeer { address, reply } => {
-                            let result = self.disable_peer(address).await;
+                        PeerManagerCommand::DisablePeer { address, reason, reply } => {
+                            let result = self.disable_peer(address, reason).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::SoftResetIn { address, families, reply } => {
@@ -828,6 +832,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::DisablePeer {
             address: addr,
+            reason: None,
             reply: reply_tx,
         })
         .await

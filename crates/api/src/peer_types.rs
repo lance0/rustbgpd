@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv6Addr};
 
+use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::Policy;
 use rustbgpd_wire::{Afi, Safi};
@@ -29,6 +30,8 @@ pub enum PeerManagerCommand {
     },
     DisablePeer {
         address: IpAddr,
+        /// RFC 8203 shutdown communication reason (pre-encoded).
+        reason: Option<Bytes>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     SoftResetIn {

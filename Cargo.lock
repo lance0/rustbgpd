@@ -805,6 +805,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 name = "rustbgpd"
 version = "0.3.0"
 dependencies = [
+ "bytes",
  "prometheus",
  "rustbgpd-api",
  "rustbgpd-fsm",
@@ -826,6 +827,7 @@ dependencies = [
 name = "rustbgpd-api"
 version = "0.3.0"
 dependencies = [
+ "bytes",
  "prometheus",
  "prost",
  "rustbgpd-fsm",

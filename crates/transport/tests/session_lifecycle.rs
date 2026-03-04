@@ -311,7 +311,7 @@ async fn stop_command_sends_cease() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Send Stop command — should trigger Cease NOTIFICATION
-    handle.stop().await.unwrap();
+    handle.stop(None).await.unwrap();
 
     // Read the NOTIFICATION from rustbgpd
     let msg = tokio::time::timeout(

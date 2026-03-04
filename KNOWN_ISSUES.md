@@ -33,9 +33,6 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
-- **DisableNeighbor reason not propagated.** The `reason` field in
-  `DisableNeighborRequest` is accepted but not included in the Cease
-  NOTIFICATION sent to the peer.
 - **IPv6 link-local next-hop discarded.** When `MP_REACH_NLRI` carries a
   32-byte next-hop (global + link-local), only the first 16 bytes (global
   address) are used. Link-local next-hops are not tracked or advertised.

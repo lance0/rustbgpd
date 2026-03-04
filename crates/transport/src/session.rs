@@ -717,6 +717,21 @@ impl PeerSession {
                             );
                             self.metrics
                                 .record_message_received(&self.peer_label, "notification");
+                            // Log shutdown communication reason (RFC 8203)
+                            if notif.code == NotificationCode::Cease
+                                && (notif.subcode == cease_subcode::ADMINISTRATIVE_SHUTDOWN
+                                    || notif.subcode == cease_subcode::ADMINISTRATIVE_RESET)
+                                && let Some(reason) =
+                                    rustbgpd_wire::notification::decode_shutdown_communication(
+                                        &notif.data,
+                                    )
+                            {
+                                info!(
+                                    peer = %self.peer_label,
+                                    reason = %reason,
+                                    "peer sent shutdown communication"
+                                );
+                            }
                             Event::NotificationReceived(notif)
                         }
                         Message::Update(update) => {
@@ -1347,10 +1362,10 @@ impl PeerSession {
                 self.drive_fsm(Event::ManualStart).await;
                 ControlFlow::Continue(())
             }
-            PeerCommand::Stop => {
+            PeerCommand::Stop { reason } => {
                 self.stop_requested = true;
                 self.reconnect_timer = None;
-                self.drive_fsm(Event::ManualStop).await;
+                self.drive_fsm(Event::ManualStop { reason }).await;
                 ControlFlow::Continue(())
             }
             PeerCommand::Shutdown => {
@@ -1358,7 +1373,7 @@ impl PeerSession {
                 self.reconnect_timer = None;
                 info!(peer = %self.peer_label, "shutdown requested");
                 if self.fsm.state() == SessionState::Established {
-                    self.drive_fsm(Event::ManualStop).await;
+                    self.drive_fsm(Event::ManualStop { reason: None }).await;
                 }
                 self.close_tcp();
                 self.timers.stop_all();

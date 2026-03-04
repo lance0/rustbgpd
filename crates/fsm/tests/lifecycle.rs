@@ -113,7 +113,7 @@ fn full_lifecycle_idle_to_established_to_idle() {
     )));
 
     // ── Established → Idle: ManualStop ─────────────────────────────
-    let actions = s.handle_event(Event::ManualStop);
+    let actions = s.handle_event(Event::ManualStop { reason: None });
     assert_eq!(s.state(), SessionState::Idle);
     assert!(has_action(&actions, |a| matches!(a, Action::SessionDown)));
     assert!(has_action(&actions, |a| matches!(
