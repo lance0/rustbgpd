@@ -379,8 +379,10 @@ impl proto::rib_service_server::RibService for RibService {
             })
             .collect();
 
-        let routes: Vec<proto::FlowSpecRouteEntry> =
-            filtered.iter().map(|r| flowspec_route_to_proto(r)).collect();
+        let routes: Vec<proto::FlowSpecRouteEntry> = filtered
+            .iter()
+            .map(|r| flowspec_route_to_proto(r))
+            .collect();
 
         Ok(Response::new(proto::ListFlowSpecResponse { routes }))
     }
@@ -421,74 +423,79 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
                     r#type: 1,
                     prefix: format_flowspec_prefix(p),
                     value: String::new(),
+                    offset: flowspec_prefix_offset(p),
                 },
                 FC::SourcePrefix(p) => proto::FlowSpecComponent {
                     r#type: 2,
                     prefix: format_flowspec_prefix(p),
                     value: String::new(),
+                    offset: flowspec_prefix_offset(p),
                 },
                 FC::IpProtocol(ops) => proto::FlowSpecComponent {
                     r#type: 3,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::Port(ops) => proto::FlowSpecComponent {
                     r#type: 4,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::DestinationPort(ops) => proto::FlowSpecComponent {
                     r#type: 5,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::SourcePort(ops) => proto::FlowSpecComponent {
                     r#type: 6,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::IcmpType(ops) => proto::FlowSpecComponent {
                     r#type: 7,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::IcmpCode(ops) => proto::FlowSpecComponent {
                     r#type: 8,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::TcpFlags(ops) => proto::FlowSpecComponent {
                     r#type: 9,
                     prefix: String::new(),
-                    value: ops
-                        .iter()
-                        .map(|o| format!("0x{:04x}", o.value))
-                        .collect::<Vec<_>>()
-                        .join(","),
+                    value: format_bitmask_ops(ops),
+                    offset: 0,
                 },
                 FC::PacketLength(ops) => proto::FlowSpecComponent {
                     r#type: 10,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::Dscp(ops) => proto::FlowSpecComponent {
                     r#type: 11,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
                 FC::Fragment(ops) => proto::FlowSpecComponent {
                     r#type: 12,
                     prefix: String::new(),
-                    value: ops
-                        .iter()
-                        .map(|o| format!("0x{:04x}", o.value))
-                        .collect::<Vec<_>>()
-                        .join(","),
+                    value: format_bitmask_ops(ops),
+                    offset: 0,
                 },
                 FC::FlowLabel(ops) => proto::FlowSpecComponent {
                     r#type: 13,
                     prefix: String::new(),
                     value: format_numeric_ops(ops),
+                    offset: 0,
                 },
             }
         })
@@ -513,16 +520,15 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
                     })
                 }
                 FA::TrafficAction { sample, terminal } => {
-                    proto::flow_spec_action::Action::TrafficAction(
-                        proto::FlowSpecTrafficAction { sample, terminal },
-                    )
+                    proto::flow_spec_action::Action::TrafficAction(proto::FlowSpecTrafficAction {
+                        sample,
+                        terminal,
+                    })
                 }
                 FA::TrafficMarking { dscp } => {
-                    proto::flow_spec_action::Action::TrafficMarking(
-                        proto::FlowSpecTrafficMarking {
-                            dscp: u32::from(dscp),
-                        },
-                    )
+                    proto::flow_spec_action::Action::TrafficMarking(proto::FlowSpecTrafficMarking {
+                        dscp: u32::from(dscp),
+                    })
                 }
                 FA::Redirect2Octet { asn, value } => {
                     proto::flow_spec_action::Action::Redirect(proto::FlowSpecRedirect {
@@ -562,24 +568,59 @@ fn format_flowspec_prefix(p: &rustbgpd_wire::FlowSpecPrefix) -> String {
     }
 }
 
+fn flowspec_prefix_offset(p: &rustbgpd_wire::FlowSpecPrefix) -> u32 {
+    match p {
+        rustbgpd_wire::FlowSpecPrefix::V4(_) => 0,
+        rustbgpd_wire::FlowSpecPrefix::V6(v6) => u32::from(v6.offset),
+    }
+}
+
 fn format_numeric_ops(ops: &[rustbgpd_wire::NumericMatch]) -> String {
-    ops.iter()
-        .map(|o| {
-            let mut s = String::new();
-            if o.eq {
-                s.push('=');
+    let mut rendered = String::new();
+    for (idx, o) in ops.iter().enumerate() {
+        if idx > 0 {
+            if o.and_bit {
+                rendered.push_str(" & ");
+            } else {
+                rendered.push_str(", ");
             }
-            if o.lt {
-                s.push('<');
+        }
+        let term = {
+            let cmp = match (o.lt, o.gt, o.eq) {
+                (false, false, true) => "==",
+                (true, false, false) => "<",
+                (false, true, false) => ">",
+                (true, false, true) => "<=",
+                (false, true, true) => ">=",
+                (true, true, false) => "!=",
+                _ => "?",
+            };
+            format!("{cmp}{}", o.value)
+        };
+        rendered.push_str(&term);
+    }
+    rendered
+}
+
+fn format_bitmask_ops(ops: &[rustbgpd_wire::BitmaskMatch]) -> String {
+    let mut rendered = String::new();
+    for (idx, o) in ops.iter().enumerate() {
+        if idx > 0 {
+            if o.and_bit {
+                rendered.push_str(" & ");
+            } else {
+                rendered.push_str(", ");
             }
-            if o.gt {
-                s.push('>');
-            }
-            s.push_str(&o.value.to_string());
-            s
-        })
-        .collect::<Vec<_>>()
-        .join(",")
+        }
+        if o.not_bit {
+            rendered.push('!');
+        }
+        rendered.push_str(&format!("0x{:04x}", o.value));
+        if o.match_bit {
+            rendered.push_str("/match");
+        }
+    }
+    rendered
 }
 
 #[cfg(test)]
@@ -652,5 +693,49 @@ mod tests {
         });
         let err = svc.list_received_routes(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn format_numeric_ops_preserves_and_bit() {
+        let rendered = format_numeric_ops(&[
+            rustbgpd_wire::NumericMatch {
+                end_of_list: false,
+                and_bit: false,
+                lt: false,
+                gt: true,
+                eq: true,
+                value: 1024,
+            },
+            rustbgpd_wire::NumericMatch {
+                end_of_list: true,
+                and_bit: true,
+                lt: true,
+                gt: false,
+                eq: true,
+                value: 65535,
+            },
+        ]);
+        assert_eq!(rendered, ">=1024 & <=65535");
+    }
+
+    #[test]
+    fn format_bitmask_ops_preserves_and_bit_and_not() {
+        let rendered = format_bitmask_ops(&[
+            rustbgpd_wire::BitmaskMatch {
+                end_of_list: false,
+                and_bit: false,
+                not_bit: false,
+                match_bit: true,
+                value: 0x0002,
+            },
+            rustbgpd_wire::BitmaskMatch {
+                end_of_list: true,
+                and_bit: true,
+                not_bit: true,
+                match_bit: true,
+                value: 0x0004,
+            },
+        ]);
+        assert_eq!(rendered, "0x0002/match & !0x0004/match");
     }
 }

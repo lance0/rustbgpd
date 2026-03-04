@@ -12,12 +12,13 @@ Add-Path; rustbgpd did not.
 
 ## Decision
 
-### Scope: Receive + Single-Best Send
+### Scope: Receive + Family-Aware Multi-Path Send
 
-This landing implements Add-Path receive (accept multiple paths per prefix
-from peers) and single-best outbound (advertise only the best path, with
-path_id encoding when the peer negotiated Add-Path). Multi-path send
-(route server mode) is deferred — see Consequences.
+This implementation supports Add-Path receive (accept multiple paths per
+prefix from peers) and family-aware multi-path outbound send (route server
+mode). Peers can negotiate Add-Path send independently per family, so one
+session can advertise multiple paths for IPv4 unicast while keeping IPv6
+unicast single-best, or vice versa.
 
 ### NlriEntry struct
 

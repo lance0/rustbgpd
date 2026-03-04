@@ -39,9 +39,10 @@ resolved.
 - **IPv6 link-local next-hop discarded.** When `MP_REACH_NLRI` carries a
   32-byte next-hop (global + link-local), only the first 16 bytes (global
   address) are used. Link-local next-hops are not tracked or advertised.
-- **Only IPv4 and IPv6 unicast.** MP-BGP supports AFI/SAFI negotiation
-  but only IPv4 unicast (AFI 1, SAFI 1) and IPv6 unicast (AFI 2, SAFI 1)
-  are implemented. Other families (VPNv4, FlowSpec, etc.) are rejected.
+- **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
+  but rustbgpd currently implements only IPv4/IPv6 unicast (AFI 1/2,
+  SAFI 1) and IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133). Other families
+  such as VPNv4/VPNv6 and VPN FlowSpec are not implemented.
 - **Implicit IPv4 prevents IPv6-only peers.** Per RFC 4760 §8, IPv4
   unicast is implicitly added when not explicitly negotiated via
   MultiProtocol capability. A `disable_ipv4_unicast` config option

@@ -133,7 +133,9 @@ impl AdjRibIn {
     }
 
     pub fn withdraw_flowspec(&mut self, rule: &FlowSpecRule, path_id: u32) -> bool {
-        self.flowspec_routes.remove(&(rule.clone(), path_id)).is_some()
+        self.flowspec_routes
+            .remove(&(rule.clone(), path_id))
+            .is_some()
     }
 
     pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {

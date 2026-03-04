@@ -1204,9 +1204,10 @@ impl PeerSession {
                             let dest_prefix = rule.destination_prefix();
                             let result = rustbgpd_policy::evaluate_policy(
                                 self.import_policy.as_ref(),
-                                dest_prefix.unwrap_or(Prefix::V4(
-                                    rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
-                                )),
+                                dest_prefix.unwrap_or(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                                    Ipv4Addr::UNSPECIFIED,
+                                    0,
+                                ))),
                                 update_ecs,
                                 update_communities,
                                 update_large_communities,
@@ -1672,7 +1673,10 @@ impl PeerSession {
             let mut v6_fs_withdraw: Vec<FlowSpecRule> = Vec::new();
             for rule in &update.flowspec_withdraw {
                 // Determine AFI from the rule's destination prefix component
-                let afi = if rule.destination_prefix().is_some_and(|p| matches!(p, Prefix::V6(_))) {
+                let afi = if rule
+                    .destination_prefix()
+                    .is_some_and(|p| matches!(p, Prefix::V6(_)))
+                {
                     Afi::Ipv6
                 } else {
                     Afi::Ipv4

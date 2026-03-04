@@ -284,8 +284,10 @@ message FlowSpecComponent {
   // For type 1/2: IP prefix string (e.g. "10.0.0.0/24" or "2001:db8::/32").
   string prefix = 2;
   // For numeric/bitmask types: human-readable operator expression
-  // (e.g. "=80", ">=1024 & <=65535", "=tcp").
+  // (e.g. "=80", ">=1024 & <=65535").
   string value = 3;
+  // For type 1/2 with IPv6: prefix bit offset (RFC 8956 §3.1). Default 0.
+  uint32 offset = 4;
 }
 
 // FlowSpec traffic action (RFC 8955 extended communities).

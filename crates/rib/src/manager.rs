@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rustbgpd_policy::{Policy, PolicyAction, evaluate_policy};
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, Prefix, RpkiValidation, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RpkiValidation, Safi};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -493,6 +493,92 @@ impl RibManager {
         }
     }
 
+    /// Stage `FlowSpec` announces and withdrawals for a set of rules.
+    ///
+    /// Uses `loc_rib` as the current best-route source and diffs against the
+    /// provided outbound view. Passing an empty `AdjRibOut` view causes a full
+    /// re-advertisement of the current `FlowSpec` export set, which is useful
+    /// for initial table dump and ROUTE-REFRESH responses.
+    #[expect(clippy::too_many_arguments)]
+    fn stage_flowspec_rules(
+        loc_rib: &LocRib,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        rules: &HashSet<FlowSpecRule>,
+        target_is_ebgp: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&Policy>,
+        fs_announce: &mut Vec<crate::route::FlowSpecRoute>,
+        fs_withdraw: &mut Vec<FlowSpecRule>,
+    ) {
+        for rule in rules {
+            if let Some(best) = loc_rib.get_flowspec(rule) {
+                let fs_family = (best.afi, Safi::FlowSpec);
+                if !sendable.is_some_and(|f| f.contains(&fs_family)) {
+                    if rib_out.get_flowspec(rule).is_some() {
+                        fs_withdraw.push(rule.clone());
+                    }
+                    continue;
+                }
+
+                // Reuse the existing iBGP split-horizon / RR check. Only
+                // origin_type/peer/peer_router_id are relevant here.
+                if should_suppress_ibgp_inner(
+                    &crate::route::Route {
+                        prefix: Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+                            Ipv4Addr::UNSPECIFIED,
+                            0,
+                        )),
+                        next_hop: best.peer,
+                        peer: best.peer,
+                        attributes: vec![],
+                        received_at: best.received_at,
+                        origin_type: best.origin_type,
+                        peer_router_id: best.peer_router_id,
+                        is_stale: false,
+                        path_id: 0,
+                        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                    },
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    peer_is_rr_client,
+                ) {
+                    if rib_out.get_flowspec(rule).is_some() {
+                        fs_withdraw.push(rule.clone());
+                    }
+                    continue;
+                }
+
+                let dest_prefix = best.rule.destination_prefix();
+                let prefix_for_policy = dest_prefix.unwrap_or(Prefix::V4(
+                    rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+                ));
+                let aspath_str = best
+                    .as_path()
+                    .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+                let result = rustbgpd_policy::evaluate_policy(
+                    export_pol,
+                    prefix_for_policy,
+                    best.extended_communities(),
+                    best.communities(),
+                    best.large_communities(),
+                    &aspath_str,
+                    rustbgpd_wire::RpkiValidation::NotFound,
+                );
+                if result.action == rustbgpd_policy::PolicyAction::Permit {
+                    fs_announce.push(best.clone());
+                } else if rib_out.get_flowspec(rule).is_some() {
+                    fs_withdraw.push(rule.clone());
+                }
+            } else if rib_out.get_flowspec(rule).is_some() {
+                fs_withdraw.push(rule.clone());
+            }
+        }
+    }
+
     /// Distribute Loc-RIB changes to all registered outbound peers.
     ///
     /// For clean peers, only `changed_prefixes` are evaluated. Dirty peers
@@ -541,14 +627,29 @@ impl RibManager {
                 }
                 prefixes
             };
+            let effective_flowspec_rules: HashSet<FlowSpecRule> = if is_dirty {
+                let mut all: HashSet<FlowSpecRule> = self
+                    .loc_rib
+                    .iter_flowspec()
+                    .map(|route| route.rule.clone())
+                    .collect();
+                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                    all.extend(rib_out.iter_flowspec().map(|route| route.rule.clone()));
+                }
+                all
+            } else {
+                HashSet::new()
+            };
 
-            if effective_prefixes.is_empty() {
+            if effective_prefixes.is_empty() && effective_flowspec_rules.is_empty() {
                 continue;
             }
 
             let mut announce = Vec::new();
             let mut withdraw = Vec::new();
             let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
+            let mut fs_announce = Vec::new();
+            let mut fs_withdraw = Vec::new();
 
             // Resolve export policy, sendable families, and RR state before
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
@@ -617,7 +718,26 @@ impl RibManager {
                 }
             }
 
-            if (!announce.is_empty() || !withdraw.is_empty())
+            if is_dirty && !effective_flowspec_rules.is_empty() {
+                Self::stage_flowspec_rules(
+                    loc_rib,
+                    rib_out,
+                    &self.peer_is_rr_client,
+                    &effective_flowspec_rules,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    &mut fs_announce,
+                    &mut fs_withdraw,
+                );
+            }
+
+            if (!announce.is_empty()
+                || !withdraw.is_empty()
+                || !fs_announce.is_empty()
+                || !fs_withdraw.is_empty())
                 && let Some(tx) = self.outbound_peers.get(&peer)
             {
                 // If a prior initial dump / route-refresh EoR was deferred,
@@ -636,8 +756,8 @@ impl RibManager {
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
                     end_of_rib: pending_eor.clone(),
-                    flowspec_announce: vec![],
-                    flowspec_withdraw: vec![],
+                    flowspec_announce: fs_announce.clone(),
+                    flowspec_withdraw: fs_withdraw.clone(),
                 };
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full or closed — marking dirty for resync");
@@ -655,10 +775,21 @@ impl RibManager {
                     for &(ref prefix, path_id) in &withdraw {
                         rib_out.withdraw(prefix, path_id);
                     }
+                    for route in &fs_announce {
+                        rib_out.insert_flowspec(route.clone());
+                    }
+                    for rule in &fs_withdraw {
+                        rib_out.remove_flowspec(rule);
+                    }
                     self.metrics.set_adj_rib_out_prefixes(
                         &peer.to_string(),
                         "all",
                         gauge_val(rib_out.len()),
+                    );
+                    self.metrics.set_adj_rib_out_prefixes(
+                        &peer.to_string(),
+                        "flowspec",
+                        gauge_val(rib_out.flowspec_len()),
                     );
                     if is_dirty {
                         self.dirty_peers.remove(&peer);
@@ -669,7 +800,12 @@ impl RibManager {
                         }
                     }
                 }
-            } else if is_dirty && announce.is_empty() && withdraw.is_empty() {
+            } else if is_dirty
+                && announce.is_empty()
+                && withdraw.is_empty()
+                && fs_announce.is_empty()
+                && fs_withdraw.is_empty()
+            {
                 // Dirty peer with no diff — already in sync
                 self.dirty_peers.remove(&peer);
                 self.flush_pending_eor(peer);
@@ -679,7 +815,6 @@ impl RibManager {
 
     /// Recompute `FlowSpec` Loc-RIB best routes for affected rules and
     /// distribute changes to all outbound peers.
-    #[expect(clippy::too_many_lines)]
     fn recompute_and_distribute_flowspec(
         &mut self,
         affected: &HashSet<rustbgpd_wire::FlowSpecRule>,
@@ -694,7 +829,9 @@ impl RibManager {
                 .values()
                 .flat_map(|rib| rib.iter_flowspec_rule(rule))
                 .collect();
-            let did_change = self.loc_rib.recompute_flowspec(rule.clone(), candidates.into_iter());
+            let did_change = self
+                .loc_rib
+                .recompute_flowspec(rule.clone(), candidates.into_iter());
             if did_change {
                 changed_rules.insert(rule.clone());
             }
@@ -704,10 +841,8 @@ impl RibManager {
             return;
         }
 
-        self.metrics.set_loc_rib_prefixes(
-            "flowspec",
-            gauge_val(self.loc_rib.flowspec_len()),
-        );
+        self.metrics
+            .set_loc_rib_prefixes("flowspec", gauge_val(self.loc_rib.flowspec_len()));
 
         // Distribute FlowSpec changes to outbound peers
         let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
@@ -732,79 +867,19 @@ impl RibManager {
 
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();
-
-            for rule in &changed_rules {
-                if let Some(best) = self.loc_rib.get_flowspec(rule) {
-                    // Check sendable family
-                    let fs_family = (best.afi, rustbgpd_wire::Safi::FlowSpec);
-                    if !sendable.as_ref().is_some_and(|f| f.contains(&fs_family)) {
-                        if rib_out.get_flowspec(rule).is_some() {
-                            fs_withdraw.push(rule.clone());
-                        }
-                        continue;
-                    }
-
-                    // iBGP split-horizon / RR check
-                    if best.peer != peer
-                        && !should_suppress_ibgp_inner(
-                            // Use a dummy Route for the suppression check — only origin_type/peer matter
-                            &crate::route::Route {
-                                prefix: rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                                    std::net::Ipv4Addr::UNSPECIFIED,
-                                    0,
-                                )),
-                                next_hop: best.peer,
-                                peer: best.peer,
-                                attributes: vec![],
-                                received_at: best.received_at,
-                                origin_type: best.origin_type,
-                                peer_router_id: best.peer_router_id,
-                                is_stale: false,
-                                path_id: 0,
-                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                            },
-                            target_is_ebgp,
-                            target_is_rr_client,
-                            self.cluster_id,
-                            &self.peer_is_rr_client,
-                        )
-                    {
-                        // Export policy
-                        let dest_prefix = best.rule.destination_prefix();
-                        let prefix_for_policy = dest_prefix.unwrap_or(
-                            rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                                std::net::Ipv4Addr::UNSPECIFIED,
-                                0,
-                            )),
-                        );
-                        let aspath_str = best
-                            .as_path()
-                            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
-                        let result = rustbgpd_policy::evaluate_policy(
-                            export_pol.as_ref(),
-                            prefix_for_policy,
-                            best.extended_communities(),
-                            best.communities(),
-                            best.large_communities(),
-                            &aspath_str,
-                            rustbgpd_wire::RpkiValidation::NotFound,
-                        );
-                        if result.action == rustbgpd_policy::PolicyAction::Permit {
-                            fs_announce.push(best.clone());
-                        } else if rib_out.get_flowspec(rule).is_some() {
-                            fs_withdraw.push(rule.clone());
-                        }
-                    } else if rib_out.get_flowspec(rule).is_some() {
-                        // Suppressed — withdraw if previously advertised
-                        fs_withdraw.push(rule.clone());
-                    }
-                } else {
-                    // No best route — withdraw
-                    if rib_out.get_flowspec(rule).is_some() {
-                        fs_withdraw.push(rule.clone());
-                    }
-                }
-            }
+            Self::stage_flowspec_rules(
+                &self.loc_rib,
+                rib_out,
+                &self.peer_is_rr_client,
+                &changed_rules,
+                target_is_ebgp,
+                target_is_rr_client,
+                self.cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &mut fs_announce,
+                &mut fs_withdraw,
+            );
 
             if (!fs_announce.is_empty() || !fs_withdraw.is_empty())
                 && let Some(tx) = self.outbound_peers.get(&peer)
@@ -852,6 +927,8 @@ impl RibManager {
         let mut announce = Vec::new();
         let mut withdraw = Vec::new();
         let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
+        let mut fs_announce = Vec::new();
+        let mut fs_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -918,6 +995,27 @@ impl RibManager {
             }
         }
 
+        let all_flowspec_rules: HashSet<FlowSpecRule> = self
+            .loc_rib
+            .iter_flowspec()
+            .map(|route| route.rule.clone())
+            .collect();
+        if !all_flowspec_rules.is_empty() {
+            Self::stage_flowspec_rules(
+                loc_rib,
+                &initial_view,
+                &self.peer_is_rr_client,
+                &all_flowspec_rules,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &mut fs_announce,
+                &mut fs_withdraw,
+            );
+        }
+
         // Determine EoR families from this peer's sendable families
         let eor_families = self
             .peer_sendable_families
@@ -926,14 +1024,18 @@ impl RibManager {
             .unwrap_or_default();
 
         if let Some(tx) = self.outbound_peers.get(&peer) {
-            if !announce.is_empty() || !withdraw.is_empty() {
+            if !announce.is_empty()
+                || !withdraw.is_empty()
+                || !fs_announce.is_empty()
+                || !fs_withdraw.is_empty()
+            {
                 let update = OutboundRouteUpdate {
                     next_hop_override: nh_override_flags.clone(),
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
                     end_of_rib: vec![],
-                    flowspec_announce: vec![],
-                    flowspec_withdraw: vec![],
+                    flowspec_announce: fs_announce.clone(),
+                    flowspec_withdraw: fs_withdraw.clone(),
                 };
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
@@ -955,10 +1057,21 @@ impl RibManager {
                 for (prefix, path_id) in &withdraw {
                     rib_out.withdraw(prefix, *path_id);
                 }
+                for route in &fs_announce {
+                    rib_out.insert_flowspec(route.clone());
+                }
+                for rule in &fs_withdraw {
+                    rib_out.remove_flowspec(rule);
+                }
                 self.metrics.set_adj_rib_out_prefixes(
                     &peer.to_string(),
                     "all",
                     gauge_val(rib_out.len()),
+                );
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer.to_string(),
+                    "flowspec",
+                    gauge_val(rib_out.flowspec_len()),
                 );
             }
 
@@ -991,6 +1104,8 @@ impl RibManager {
         let mut announce = Vec::new();
         let mut withdraw = Vec::new();
         let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
+        let mut fs_announce = Vec::new();
+        let mut fs_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -1023,59 +1138,87 @@ impl RibManager {
         // diffing against what was already sent.
         let refresh_view = AdjRibOut::new(peer);
 
-        for prefix in &all_prefixes {
-            let prefix_send_max = if peer_add_path_send_max > 0
-                && peer_add_path_send_families.contains(&prefix_family(prefix))
-            {
-                peer_add_path_send_max
-            } else {
-                0
-            };
-            if prefix_send_max > 0 {
-                Self::distribute_multipath_prefix(
-                    &self.ribs,
-                    &refresh_view,
-                    &self.peer_is_rr_client,
-                    prefix,
-                    peer,
-                    prefix_send_max,
-                    target_is_ebgp,
-                    target_is_rr_client,
-                    cluster_id,
-                    sendable.as_ref(),
-                    export_pol.as_ref(),
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_override_flags,
-                );
-            } else {
-                Self::distribute_single_best_prefix(
+        if safi == Safi::FlowSpec {
+            let flow_rules: HashSet<FlowSpecRule> = self
+                .loc_rib
+                .iter_flowspec()
+                .filter(|route| route.afi == afi)
+                .map(|route| route.rule.clone())
+                .collect();
+            if !flow_rules.is_empty() {
+                Self::stage_flowspec_rules(
                     loc_rib,
                     &refresh_view,
                     &self.peer_is_rr_client,
-                    prefix,
-                    peer,
+                    &flow_rules,
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
                     sendable.as_ref(),
                     export_pol.as_ref(),
-                    &mut announce,
-                    &mut withdraw,
-                    &mut nh_override_flags,
+                    &mut fs_announce,
+                    &mut fs_withdraw,
                 );
+            }
+        } else {
+            for prefix in &all_prefixes {
+                let prefix_send_max = if peer_add_path_send_max > 0
+                    && peer_add_path_send_families.contains(&prefix_family(prefix))
+                {
+                    peer_add_path_send_max
+                } else {
+                    0
+                };
+                if prefix_send_max > 0 {
+                    Self::distribute_multipath_prefix(
+                        &self.ribs,
+                        &refresh_view,
+                        &self.peer_is_rr_client,
+                        prefix,
+                        peer,
+                        prefix_send_max,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        export_pol.as_ref(),
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_override_flags,
+                    );
+                } else {
+                    Self::distribute_single_best_prefix(
+                        loc_rib,
+                        &refresh_view,
+                        &self.peer_is_rr_client,
+                        prefix,
+                        peer,
+                        target_is_ebgp,
+                        target_is_rr_client,
+                        cluster_id,
+                        sendable.as_ref(),
+                        export_pol.as_ref(),
+                        &mut announce,
+                        &mut withdraw,
+                        &mut nh_override_flags,
+                    );
+                }
             }
         }
 
         if let Some(tx) = self.outbound_peers.get(&peer) {
-            if !announce.is_empty() || !withdraw.is_empty() {
+            if !announce.is_empty()
+                || !withdraw.is_empty()
+                || !fs_announce.is_empty()
+                || !fs_withdraw.is_empty()
+            {
                 let update = OutboundRouteUpdate {
                     next_hop_override: nh_override_flags.clone(),
                     announce: announce.clone(),
                     withdraw: withdraw.clone(),
                     end_of_rib: vec![],
-                    flowspec_announce: vec![],
-                    flowspec_withdraw: vec![],
+                    flowspec_announce: fs_announce.clone(),
+                    flowspec_withdraw: fs_withdraw.clone(),
                 };
                 if tx.try_send(update).is_err() {
                     warn!(%peer, "outbound channel full during route refresh response");
@@ -1095,10 +1238,21 @@ impl RibManager {
                 for (prefix, path_id) in &withdraw {
                     rib_out.withdraw(prefix, *path_id);
                 }
+                for route in &fs_announce {
+                    rib_out.insert_flowspec(route.clone());
+                }
+                for rule in &fs_withdraw {
+                    rib_out.remove_flowspec(rule);
+                }
                 self.metrics.set_adj_rib_out_prefixes(
                     &peer.to_string(),
                     "all",
                     gauge_val(rib_out.len()),
+                );
+                self.metrics.set_adj_rib_out_prefixes(
+                    &peer.to_string(),
+                    "flowspec",
+                    gauge_val(rib_out.flowspec_len()),
                 );
             }
 
@@ -1108,9 +1262,9 @@ impl RibManager {
                 announce: vec![],
                 withdraw: vec![],
                 end_of_rib: vec![family],
-                    flowspec_announce: vec![],
-                    flowspec_withdraw: vec![],
-                };
+                flowspec_announce: vec![],
+                flowspec_withdraw: vec![],
+            };
             if tx.try_send(eor).is_err() {
                 warn!(%peer, ?family, "outbound channel full — route refresh `EoR` deferred");
                 self.pending_eor.entry(peer).or_default().insert(family);
@@ -1138,9 +1292,9 @@ impl RibManager {
             announce: vec![],
             withdraw: vec![],
             end_of_rib: families.iter().copied().collect(),
-                    flowspec_announce: vec![],
-                    flowspec_withdraw: vec![],
-                };
+            flowspec_announce: vec![],
+            flowspec_withdraw: vec![],
+        };
         if tx.try_send(eor).is_err() {
             warn!(%peer, "outbound channel full — `EoR` still deferred");
             self.pending_eor.insert(peer, families);
@@ -1712,12 +1866,13 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use rustbgpd_wire::{
-        Afi, AsPath, AsPathSegment, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix, Safi,
+        Afi, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
+        Ipv6Prefix, Origin, PathAttribute, Prefix, Safi,
     };
     use tokio::sync::oneshot;
 
     use super::*;
-    use crate::route::Route;
+    use crate::route::{FlowSpecRoute, Route};
 
     /// Default sendable families for IPv4-only test peers.
     fn ipv4_sendable() -> Vec<(Afi, Safi)> {
@@ -1727,6 +1882,11 @@ mod tests {
     /// Sendable families for dual-stack test peers.
     fn dual_stack_sendable() -> Vec<(Afi, Safi)> {
         vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+    }
+
+    /// Sendable families for IPv4 `FlowSpec` test peers.
+    fn ipv4_flowspec_sendable() -> Vec<(Afi, Safi)> {
+        vec![(Afi::Ipv4, Safi::FlowSpec)]
     }
 
     /// Drain the initial End-of-RIB marker sent at `PeerUp` time.
@@ -1773,6 +1933,25 @@ mod tests {
         }
     }
 
+    fn make_flowspec_route(peer: Ipv4Addr) -> FlowSpecRoute {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        FlowSpecRoute {
+            rule: FlowSpecRule {
+                components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+                    prefix,
+                ))],
+            },
+            afi: Afi::Ipv4,
+            peer: IpAddr::V4(peer),
+            attributes: vec![],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            path_id: 0,
+        }
+    }
+
     #[tokio::test]
     async fn routes_received_and_queried() {
         let (tx, rx) = mpsc::channel(64);
@@ -1787,9 +1966,9 @@ mod tests {
             peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -1823,9 +2002,9 @@ mod tests {
             peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -1863,9 +2042,9 @@ mod tests {
                 make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1)),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -1873,9 +2052,9 @@ mod tests {
             peer,
             announced: vec![],
             withdrawn: vec![(Prefix::V4(prefix1), 0)],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -1911,9 +2090,9 @@ mod tests {
                 Ipv4Addr::new(10, 0, 0, 1),
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -1924,9 +2103,9 @@ mod tests {
                 Ipv4Addr::new(10, 0, 0, 2),
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -1962,9 +2141,9 @@ mod tests {
             peer: peer1,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -1973,9 +2152,9 @@ mod tests {
             peer: peer2,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2006,9 +2185,9 @@ mod tests {
             peer: peer1,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2016,9 +2195,9 @@ mod tests {
             peer: peer2,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2052,9 +2231,9 @@ mod tests {
             peer: peer1,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2062,9 +2241,9 @@ mod tests {
             peer: peer2,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2073,9 +2252,9 @@ mod tests {
             peer: peer2,
             announced: vec![],
             withdrawn: vec![(Prefix::V4(prefix), 0)],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2111,9 +2290,9 @@ mod tests {
                 make_route_with_lp(prefix_b, Ipv4Addr::new(1, 0, 0, 1), 100),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2124,9 +2303,9 @@ mod tests {
                 make_route_with_lp(prefix_b, Ipv4Addr::new(1, 0, 0, 2), 200),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2170,9 +2349,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2229,9 +2408,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2273,9 +2452,9 @@ mod tests {
             peer: route.peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2316,9 +2495,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2365,9 +2544,9 @@ mod tests {
             peer: source,
             announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2408,9 +2587,9 @@ mod tests {
             peer: source,
             announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2455,9 +2634,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2521,9 +2700,9 @@ mod tests {
             peer: ebgp_source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let update = out_rx.recv().await.unwrap();
@@ -2544,9 +2723,9 @@ mod tests {
             peer: ibgp_source,
             announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 3))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2893,9 +3072,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -2940,9 +3119,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3031,9 +3210,9 @@ mod tests {
                 make_route(allowed_prefix, Ipv4Addr::new(10, 0, 0, 1)),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3139,9 +3318,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3165,9 +3344,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3177,9 +3356,9 @@ mod tests {
             peer: source,
             announced: vec![],
             withdrawn: vec![(Prefix::V4(prefix1), 0)],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3279,9 +3458,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix1, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let _ = out_rx.recv().await.unwrap(); // drain
@@ -3291,9 +3470,9 @@ mod tests {
             peer: source,
             announced: vec![],
             withdrawn: vec![(Prefix::V4(prefix1), 0)],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3303,9 +3482,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3316,9 +3495,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix3, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3376,9 +3555,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3434,9 +3613,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3450,9 +3629,9 @@ mod tests {
                 announce: vec![],
                 withdraw: vec![],
                 end_of_rib: vec![],
-                    flowspec_announce: vec![],
-                    flowspec_withdraw: vec![],
-                })
+                flowspec_announce: vec![],
+                flowspec_withdraw: vec![],
+            })
             .await
             .unwrap();
 
@@ -3545,9 +3724,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3572,9 +3751,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3586,9 +3765,9 @@ mod tests {
             peer,
             announced: vec![],
             withdrawn: vec![(Prefix::V4(prefix), 0)],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3616,9 +3795,9 @@ mod tests {
             peer: peer1,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3630,9 +3809,9 @@ mod tests {
             peer: peer2,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3660,9 +3839,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3690,9 +3869,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3702,9 +3881,9 @@ mod tests {
             peer,
             announced: vec![],
             withdrawn: vec![(Prefix::V4(prefix), 0)],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3731,9 +3910,9 @@ mod tests {
             peer: peer1,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 1), 100)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3743,9 +3922,9 @@ mod tests {
             peer: peer2,
             announced: vec![make_route_with_lp(prefix, Ipv4Addr::new(1, 0, 0, 2), 200)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3772,9 +3951,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3805,9 +3984,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3837,9 +4016,9 @@ mod tests {
             peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3868,9 +4047,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3923,9 +4102,9 @@ mod tests {
             peer,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -3977,9 +4156,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4019,9 +4198,9 @@ mod tests {
                 make_route(prefix2, Ipv4Addr::new(10, 0, 0, 1)),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4064,9 +4243,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4153,9 +4332,9 @@ mod tests {
             peer: source,
             announced: vec![v4_route, v6_route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4212,9 +4391,9 @@ mod tests {
             peer: source,
             announced: vec![v4_route, v6_route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4288,9 +4467,9 @@ mod tests {
             peer: source,
             announced: vec![v4_route, v6_route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4313,6 +4492,171 @@ mod tests {
         // Should receive both routes in initial dump
         let update = out_rx.recv().await.unwrap();
         assert_eq!(update.announce.len(), 2);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn send_initial_table_includes_flowspec_routes() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let fs_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+        let fs_rule = fs_route.rule.clone();
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![fs_route],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_flowspec_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+        })
+        .await
+        .unwrap();
+
+        let update = out_rx.recv().await.unwrap();
+        assert!(update.announce.is_empty());
+        assert!(update.withdraw.is_empty());
+        assert_eq!(update.flowspec_announce.len(), 1);
+        assert_eq!(update.flowspec_announce[0].rule, fs_rule);
+        assert!(update.flowspec_withdraw.is_empty());
+
+        let eor = out_rx.recv().await.unwrap();
+        assert_eq!(eor.end_of_rib, ipv4_flowspec_sendable());
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn route_refresh_flowspec_re_advertises_routes() {
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let fs_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+        let fs_rule = fs_route.rule.clone();
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![fs_route],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_flowspec_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+        })
+        .await
+        .unwrap();
+
+        // Drain the initial dump and its EoR before triggering route refresh.
+        let _ = out_rx.recv().await.unwrap();
+        let _ = out_rx.recv().await.unwrap();
+
+        tx.send(RibUpdate::RouteRefreshRequest {
+            peer: target,
+            afi: Afi::Ipv4,
+            safi: Safi::FlowSpec,
+        })
+        .await
+        .unwrap();
+
+        let update = out_rx.recv().await.unwrap();
+        assert!(update.announce.is_empty());
+        assert!(update.withdraw.is_empty());
+        assert_eq!(update.flowspec_announce.len(), 1);
+        assert_eq!(update.flowspec_announce[0].rule, fs_rule);
+        assert!(update.flowspec_withdraw.is_empty());
+
+        let eor = out_rx.recv().await.unwrap();
+        assert_eq!(eor.end_of_rib, vec![(Afi::Ipv4, Safi::FlowSpec)]);
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dirty_resync_retries_flowspec_updates() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        tx.send(RibUpdate::PeerUp {
+            peer: target,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_flowspec_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+        })
+        .await
+        .unwrap();
+
+        // The initial EoR occupies the single slot, so the next FlowSpec
+        // update will fail to enqueue and mark the peer dirty.
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let fs_route = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+        let fs_rule = fs_route.rule.clone();
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![],
+            withdrawn: vec![],
+            flowspec_announced: vec![fs_route],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Drain the initial EoR to make room for the timer-driven resync.
+        let initial = out_rx.recv().await.unwrap();
+        assert_eq!(initial.end_of_rib, ipv4_flowspec_sendable());
+
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        let resync = out_rx.recv().await.unwrap();
+        assert!(resync.announce.is_empty());
+        assert!(resync.withdraw.is_empty());
+        assert_eq!(resync.flowspec_announce.len(), 1);
+        assert_eq!(resync.flowspec_announce[0].rule, fs_rule);
+        assert!(resync.flowspec_withdraw.is_empty());
 
         drop(tx);
         handle.await.unwrap();
@@ -4350,9 +4694,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let update = out_rx.recv().await.unwrap();
@@ -4395,9 +4739,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4460,9 +4804,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4516,9 +4860,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4604,9 +4948,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4678,9 +5022,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4738,9 +5082,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(v4_prefix, Ipv4Addr::new(10, 0, 0, 1)), v6_route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4847,9 +5191,9 @@ mod tests {
             peer: source,
             announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 4))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4935,9 +5279,9 @@ mod tests {
             peer: source,
             announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -4991,9 +5335,9 @@ mod tests {
             peer: source,
             announced: vec![make_ibgp_route(prefix, Ipv4Addr::new(10, 0, 0, 2))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5042,9 +5386,9 @@ mod tests {
             peer: source,
             announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 5))],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5280,9 +5624,9 @@ mod tests {
             peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5321,9 +5665,9 @@ mod tests {
             peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5381,18 +5725,18 @@ mod tests {
             peer: peer1,
             announced: vec![route1],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             peer: peer2,
             announced: vec![route2],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5450,18 +5794,18 @@ mod tests {
             peer: peer1,
             announced: vec![route1],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             peer: peer2,
             announced: vec![route2],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5503,9 +5847,9 @@ mod tests {
             peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5557,9 +5901,9 @@ mod tests {
             peer,
             announced: vec![route],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5670,9 +6014,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -5684,9 +6028,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5803,9 +6147,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -5817,9 +6161,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -5890,9 +6234,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let update = out_rx.recv().await.unwrap();
@@ -5907,9 +6251,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let update = out_rx.recv().await.unwrap();
@@ -5921,9 +6265,9 @@ mod tests {
             peer: peer2,
             announced: vec![],
             withdrawn: vec![(Prefix::V4(prefix), 0)],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let update = out_rx.recv().await.unwrap();
@@ -5958,9 +6302,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -5972,9 +6316,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6052,9 +6396,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6117,9 +6461,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let update = out_rx.recv().await.unwrap();
@@ -6136,9 +6480,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         let update = out_rx.recv().await.unwrap();
@@ -6179,9 +6523,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -6193,9 +6537,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6276,18 +6620,18 @@ mod tests {
             peer: peer1,
             announced: vec![mk(Ipv4Addr::new(10, 0, 0, 1), 65001, 200)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
             peer: peer2,
             announced: vec![mk(Ipv4Addr::new(10, 0, 0, 2), 65002, 100)],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6344,9 +6688,9 @@ mod tests {
                 ),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -6362,9 +6706,9 @@ mod tests {
                 ),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6430,9 +6774,9 @@ mod tests {
                 ),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -6448,9 +6792,9 @@ mod tests {
                 ),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6516,9 +6860,9 @@ mod tests {
                 ),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -6534,9 +6878,9 @@ mod tests {
                 ),
             ],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6619,9 +6963,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -6633,9 +6977,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 
@@ -6724,9 +7068,9 @@ mod tests {
                 200,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
         tx.send(RibUpdate::RoutesReceived {
@@ -6738,9 +7082,9 @@ mod tests {
                 100,
             )],
             withdrawn: vec![],
-                flowspec_announced: vec![],
-                flowspec_withdrawn: vec![],
-            })
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
         .await
         .unwrap();
 

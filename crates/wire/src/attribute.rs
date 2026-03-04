@@ -718,9 +718,7 @@ fn decode_mp_reach_nlri(
                 if nh_len != 4 {
                     return Err(DecodeError::MalformedField {
                         message_type: "UPDATE",
-                        detail: format!(
-                            "MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4)"
-                        ),
+                        detail: format!("MP_REACH_NLRI IPv4 next-hop length {nh_len} (expected 4)"),
                     });
                 }
                 IpAddr::V4(Ipv4Addr::new(

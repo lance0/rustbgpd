@@ -250,7 +250,9 @@ impl crate::attribute::ExtendedCommunity {
                 Some(FlowSpecAction::Redirect2Octet { asn, value })
             }
             // Traffic-marking: 0x80, 0x09
-            (0x80, 0x09) => Some(FlowSpecAction::TrafficMarking { dscp: bytes[7] & 0x3F }),
+            (0x80, 0x09) => Some(FlowSpecAction::TrafficMarking {
+                dscp: bytes[7] & 0x3F,
+            }),
             // Traffic-rate packets: 0x80, 0x0c
             (0x80, 0x0c) => {
                 let asn = u16::from_be_bytes([bytes[2], bytes[3]]);
@@ -343,10 +345,7 @@ impl crate::attribute::ExtendedCommunity {
 ///
 /// Returns `DecodeError` if the wire data is truncated, malformed, or
 /// contains components in invalid order.
-pub fn decode_flowspec_nlri(
-    mut buf: &[u8],
-    afi: Afi,
-) -> Result<Vec<FlowSpecRule>, DecodeError> {
+pub fn decode_flowspec_nlri(mut buf: &[u8], afi: Afi) -> Result<Vec<FlowSpecRule>, DecodeError> {
     let mut rules = Vec::new();
     while !buf.is_empty() {
         // Length prefix
@@ -418,10 +417,7 @@ fn encode_flowspec_length(len: usize, buf: &mut Vec<u8>) {
 }
 
 /// Decode a single `FlowSpec` rule from its component bytes (after length prefix).
-fn decode_flowspec_rule(
-    mut buf: &[u8],
-    afi: Afi,
-) -> Result<FlowSpecRule, DecodeError> {
+fn decode_flowspec_rule(mut buf: &[u8], afi: Afi) -> Result<FlowSpecRule, DecodeError> {
     let mut components = Vec::new();
     while !buf.is_empty() {
         let (component, consumed) = decode_component(buf, afi)?;
@@ -433,10 +429,7 @@ fn decode_flowspec_rule(
 
 /// Decode a single `FlowSpec` component from the start of `buf`.
 /// Returns the component and the number of bytes consumed.
-fn decode_component(
-    buf: &[u8],
-    afi: Afi,
-) -> Result<(FlowSpecComponent, usize), DecodeError> {
+fn decode_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecComponent, usize), DecodeError> {
     if buf.is_empty() {
         return Err(DecodeError::MalformedField {
             message_type: "UPDATE",
@@ -510,10 +503,7 @@ fn decode_component(
 }
 
 /// Decode a prefix component (types 1 and 2).
-fn decode_prefix_component(
-    buf: &[u8],
-    afi: Afi,
-) -> Result<(FlowSpecPrefix, usize), DecodeError> {
+fn decode_prefix_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecPrefix, usize), DecodeError> {
     match afi {
         Afi::Ipv4 => {
             // IPv4: prefix-length (1 byte) + prefix bytes (ceil(len/8))
@@ -971,10 +961,7 @@ mod tests {
     #[test]
     fn ipv6_prefix_component_roundtrip() {
         let prefix = FlowSpecPrefix::V6(Ipv6PrefixOffset {
-            prefix: Ipv6Prefix::new(
-                std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
-                32,
-            ),
+            prefix: Ipv6Prefix::new(std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0), 32),
             offset: 0,
         });
         let mut buf = Vec::new();
@@ -1074,9 +1061,7 @@ mod tests {
 
     #[test]
     fn empty_rule_rejected() {
-        let rule = FlowSpecRule {
-            components: vec![],
-        };
+        let rule = FlowSpecRule { components: vec![] };
         assert!(rule.validate().is_err());
     }
 
@@ -1212,7 +1197,10 @@ mod tests {
         let action = FlowSpecAction::TrafficMarking { dscp: 46 };
         let ec = crate::attribute::ExtendedCommunity::from_flowspec_action(&action);
         let decoded = ec.as_flowspec_action().unwrap();
-        assert!(matches!(decoded, FlowSpecAction::TrafficMarking { dscp: 46 }));
+        assert!(matches!(
+            decoded,
+            FlowSpecAction::TrafficMarking { dscp: 46 }
+        ));
     }
 
     #[test]

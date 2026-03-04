@@ -68,9 +68,11 @@ impl PeerConfig {
     /// Build Add-Path capability entries for our outgoing OPEN message.
     ///
     /// Advertises the appropriate mode (Receive, Send, or Both) for all
-    /// configured families. The RIB applies the configured `send_max`
-    /// numerically per peer, but only to families that actually negotiate
-    /// Add-Path Send/Both.
+    /// configured unicast families. Add-Path is not currently implemented
+    /// for non-unicast SAFIs such as `FlowSpec`, so those families are
+    /// omitted from the advertised capability even when configured on the
+    /// session. The RIB applies the configured `send_max` numerically per
+    /// peer, but only to families that actually negotiate Add-Path Send/Both.
     #[must_use]
     pub fn add_path_capabilities(&self) -> Vec<AddPathFamily> {
         if !self.add_path_receive && !self.add_path_send {
@@ -84,6 +86,7 @@ impl PeerConfig {
         };
         self.families
             .iter()
+            .filter(|(_, safi)| *safi == Safi::Unicast)
             .map(|&(afi, safi)| AddPathFamily {
                 afi,
                 safi,
@@ -263,5 +266,22 @@ mod tests {
         assert_eq!(caps.len(), 2);
         assert_eq!(caps[0].afi, Afi::Ipv4);
         assert_eq!(caps[1].afi, Afi::Ipv6);
+    }
+
+    #[test]
+    fn add_path_capabilities_omit_flowspec_families() {
+        let mut cfg = test_config();
+        cfg.add_path_receive = true;
+        cfg.families = vec![
+            (Afi::Ipv4, Safi::Unicast),
+            (Afi::Ipv4, Safi::FlowSpec),
+            (Afi::Ipv6, Safi::FlowSpec),
+        ];
+
+        let caps = cfg.add_path_capabilities();
+        assert_eq!(caps.len(), 1, "only unicast families should be advertised");
+        assert_eq!(caps[0].afi, Afi::Ipv4);
+        assert_eq!(caps[0].safi, Safi::Unicast);
+        assert_eq!(caps[0].send_receive, AddPathMode::Receive);
     }
 }

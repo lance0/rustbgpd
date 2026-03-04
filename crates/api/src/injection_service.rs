@@ -6,9 +6,9 @@ use tonic::{Request, Response, Status};
 use crate::proto;
 use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix,
-    FlowSpecRule, Ipv4Prefix, Ipv6Prefix, LargeCommunity, NumericMatch, Origin, PathAttribute,
-    Prefix,
+    Afi, AsPath, AsPathSegment, BitmaskMatch, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix,
+    FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LargeCommunity, NumericMatch, Origin,
+    PathAttribute, Prefix,
 };
 
 pub struct InjectionService {
@@ -343,29 +343,41 @@ fn parse_flowspec_components(
     }
     let mut result = Vec::with_capacity(components.len());
     for c in components {
+        if c.r#type != 1 && c.r#type != 2 && c.offset != 0 {
+            return Err(Status::invalid_argument(format!(
+                "offset is only valid for destination/source prefix components (type 1/2), got type {}",
+                c.r#type
+            )));
+        }
         let comp = match c.r#type {
             1 => {
                 // Destination prefix
-                let prefix = parse_flowspec_prefix(&c.prefix, afi, "destination prefix")?;
+                let prefix = parse_flowspec_prefix(&c.prefix, afi, "destination prefix", c.offset)?;
                 FlowSpecComponent::DestinationPrefix(prefix)
             }
             2 => {
                 // Source prefix
-                let prefix = parse_flowspec_prefix(&c.prefix, afi, "source prefix")?;
+                let prefix = parse_flowspec_prefix(&c.prefix, afi, "source prefix", c.offset)?;
                 FlowSpecComponent::SourcePrefix(prefix)
             }
             3 => FlowSpecComponent::IpProtocol(parse_numeric_value(&c.value, "ip_protocol")?),
             4 => FlowSpecComponent::Port(parse_numeric_value(&c.value, "port")?),
-            5 => {
-                FlowSpecComponent::DestinationPort(parse_numeric_value(&c.value, "dst_port")?)
-            }
+            5 => FlowSpecComponent::DestinationPort(parse_numeric_value(&c.value, "dst_port")?),
             6 => FlowSpecComponent::SourcePort(parse_numeric_value(&c.value, "src_port")?),
             7 => FlowSpecComponent::IcmpType(parse_numeric_value(&c.value, "icmp_type")?),
             8 => FlowSpecComponent::IcmpCode(parse_numeric_value(&c.value, "icmp_code")?),
-            10 => {
-                FlowSpecComponent::PacketLength(parse_numeric_value(&c.value, "packet_length")?)
-            }
+            9 => FlowSpecComponent::TcpFlags(parse_bitmask_value(&c.value, "tcp_flags")?),
+            10 => FlowSpecComponent::PacketLength(parse_numeric_value(&c.value, "packet_length")?),
             11 => FlowSpecComponent::Dscp(parse_numeric_value(&c.value, "dscp")?),
+            12 => FlowSpecComponent::Fragment(parse_bitmask_value(&c.value, "fragment")?),
+            13 => {
+                if afi != Afi::Ipv6 {
+                    return Err(Status::invalid_argument(
+                        "FlowLabel (type 13) is only valid for IPv6 FlowSpec",
+                    ));
+                }
+                FlowSpecComponent::FlowLabel(parse_numeric_value(&c.value, "flow_label")?)
+            }
             other => {
                 return Err(Status::invalid_argument(format!(
                     "unsupported FlowSpec component type {other}"
@@ -379,7 +391,12 @@ fn parse_flowspec_components(
 
 /// Parse a prefix string (e.g., "10.0.0.0/24") into a `FlowSpecPrefix`.
 #[expect(clippy::result_large_err)]
-fn parse_flowspec_prefix(s: &str, afi: Afi, label: &str) -> Result<FlowSpecPrefix, Status> {
+fn parse_flowspec_prefix(
+    s: &str,
+    afi: Afi,
+    label: &str,
+    offset: u32,
+) -> Result<FlowSpecPrefix, Status> {
     let parts: Vec<&str> = s.splitn(2, '/').collect();
     if parts.len() != 2 {
         return Err(Status::invalid_argument(format!(
@@ -394,34 +411,143 @@ fn parse_flowspec_prefix(s: &str, afi: Afi, label: &str) -> Result<FlowSpecPrefi
         .map_err(|e| Status::invalid_argument(format!("{label}: invalid prefix length: {e}")))?;
 
     match (afi, addr) {
-        (Afi::Ipv4, IpAddr::V4(v4)) => Ok(FlowSpecPrefix::V4(Ipv4Prefix::new(v4, len))),
-        (Afi::Ipv6, IpAddr::V6(v6)) => Ok(FlowSpecPrefix::V6(
-            rustbgpd_wire::Ipv6PrefixOffset {
+        (Afi::Ipv4, IpAddr::V4(v4)) => {
+            if offset != 0 {
+                return Err(Status::invalid_argument(format!(
+                    "{label}: offset is only valid for IPv6 FlowSpec"
+                )));
+            }
+            Ok(FlowSpecPrefix::V4(Ipv4Prefix::new(v4, len)))
+        }
+        (Afi::Ipv6, IpAddr::V6(v6)) => {
+            let offset_u8 = u8::try_from(offset).map_err(|_| {
+                Status::invalid_argument(format!("{label}: offset must be 0..=255"))
+            })?;
+            Ok(FlowSpecPrefix::V6(Ipv6PrefixOffset {
                 prefix: Ipv6Prefix::new(v6, len),
-                offset: 0,
-            },
-        )),
+                offset: offset_u8,
+            }))
+        }
         _ => Err(Status::invalid_argument(format!(
             "{label}: address family mismatch"
         ))),
     }
 }
 
-/// Parse a simple numeric value string (e.g., "80" or "6") into a single `NumericMatch`.
+#[expect(clippy::result_large_err)]
+fn split_match_terms(s: &str, label: &str) -> Result<Vec<(String, bool)>, Status> {
+    let mut terms = Vec::new();
+    let mut current = String::new();
+    let mut and_bit_for_current = false;
+
+    for ch in s.chars() {
+        match ch {
+            ',' | '&' => {
+                let token = current.trim();
+                if token.is_empty() {
+                    return Err(Status::invalid_argument(format!(
+                        "{label}: empty term in {s:?}"
+                    )));
+                }
+                terms.push((token.to_string(), and_bit_for_current));
+                current.clear();
+                and_bit_for_current = ch == '&';
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    let token = current.trim();
+    if token.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{label}: empty term in {s:?}"
+        )));
+    }
+    terms.push((token.to_string(), and_bit_for_current));
+    Ok(terms)
+}
+
+/// Parse a numeric operator expression into one or more `NumericMatch` terms.
+///
+/// Supports comma-separated OR terms and `&`-separated AND terms. Each term may
+/// start with any combination of `=`, `<`, `>` (e.g. `=80`, `>=1024`, `<4096`).
+/// A bare integer is treated as an exact match for backwards compatibility.
 #[expect(clippy::result_large_err)]
 fn parse_numeric_value(s: &str, label: &str) -> Result<Vec<NumericMatch>, Status> {
-    let value: u64 = s
-        .trim_start_matches('=')
-        .parse()
-        .map_err(|e| Status::invalid_argument(format!("{label}: invalid value {s:?}: {e}")))?;
-    Ok(vec![NumericMatch {
-        end_of_list: true,
-        and_bit: false,
-        lt: false,
-        gt: false,
-        eq: true,
-        value,
-    }])
+    let terms = split_match_terms(s, label)?;
+    let len = terms.len();
+    let mut result = Vec::with_capacity(len);
+
+    for (idx, (token, and_bit)) in terms.into_iter().enumerate() {
+        let op_len = token
+            .chars()
+            .take_while(|c| matches!(c, '=' | '<' | '>'))
+            .count();
+        let (ops, value_part) = token.split_at(op_len);
+        let eq = ops.contains('=');
+        let lt = ops.contains('<');
+        let gt = ops.contains('>');
+        let value_str = value_part.trim();
+        let value: u64 = value_str.parse().map_err(|e| {
+            Status::invalid_argument(format!("{label}: invalid value {token:?}: {e}"))
+        })?;
+        result.push(NumericMatch {
+            end_of_list: idx + 1 == len,
+            and_bit,
+            lt,
+            gt,
+            eq: if ops.is_empty() { true } else { eq },
+            value,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Parse a bitmask operator expression into one or more `BitmaskMatch` terms.
+///
+/// Supports comma-separated OR terms and `&`-separated AND terms. Each term is
+/// parsed as a decimal or hex (with `0x` prefix) integer. The parser accepts the
+/// subset emitted by `format_bitmask_ops()` and preserves AND chaining.
+#[expect(clippy::result_large_err)]
+fn parse_bitmask_value(s: &str, label: &str) -> Result<Vec<BitmaskMatch>, Status> {
+    let terms = split_match_terms(s, label)?;
+    let len = terms.len();
+    let mut result = Vec::with_capacity(len);
+
+    for (idx, (token, and_bit)) in terms.into_iter().enumerate() {
+        let mut trimmed = token.trim_start_matches('=').trim();
+        let not_bit = if let Some(rest) = trimmed.strip_prefix('!') {
+            trimmed = rest.trim_start();
+            true
+        } else {
+            false
+        };
+        if let Some(rest) = trimmed.strip_suffix("/match") {
+            trimmed = rest.trim_end();
+        }
+        let value: u16 = if let Some(hex) = trimmed
+            .strip_prefix("0x")
+            .or_else(|| trimmed.strip_prefix("0X"))
+        {
+            u16::from_str_radix(hex, 16).map_err(|e| {
+                Status::invalid_argument(format!("{label}: invalid hex value {token:?}: {e}"))
+            })?
+        } else {
+            trimmed.parse().map_err(|e| {
+                Status::invalid_argument(format!("{label}: invalid value {token:?}: {e}"))
+            })?
+        };
+        result.push(BitmaskMatch {
+            end_of_list: idx + 1 == len,
+            and_bit,
+            not_bit,
+            match_bit: true,
+            value,
+        });
+    }
+
+    Ok(result)
 }
 
 /// Convert a proto `FlowSpecAction` into a wire `ExtendedCommunity`.
@@ -462,9 +588,7 @@ fn flowspec_action_to_ec(
             FlowSpecAction::Redirect2Octet { asn, value }
         }
     };
-    Ok(Some(ExtendedCommunity::from_flowspec_action(
-        &wire_action,
-    )))
+    Ok(Some(ExtendedCommunity::from_flowspec_action(&wire_action)))
 }
 
 #[cfg(test)]
@@ -517,5 +641,64 @@ mod tests {
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("multicast"));
+    }
+
+    #[test]
+    fn parse_numeric_value_supports_multiple_terms() {
+        let ops = parse_numeric_value(">=1024 & <=65535", "port").unwrap();
+        assert_eq!(ops.len(), 2);
+        assert!(!ops[0].and_bit);
+        assert!(ops[0].gt);
+        assert!(ops[0].eq);
+        assert_eq!(ops[0].value, 1024);
+        assert!(ops[1].and_bit);
+        assert!(ops[1].lt);
+        assert!(ops[1].eq);
+        assert_eq!(ops[1].value, 65535);
+        assert!(ops[1].end_of_list);
+    }
+
+    #[test]
+    fn parse_bitmask_value_supports_multiple_terms() {
+        let ops = parse_bitmask_value("0x02 & 0x04", "tcp_flags").unwrap();
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].value, 0x0002);
+        assert!(!ops[0].and_bit);
+        assert_eq!(ops[1].value, 0x0004);
+        assert!(ops[1].and_bit);
+        assert!(ops[1].end_of_list);
+    }
+
+    #[test]
+    fn parse_bitmask_value_supports_not_and_match_suffix() {
+        let ops = parse_bitmask_value("!0x02/match", "fragment").unwrap();
+        assert_eq!(ops.len(), 1);
+        assert!(ops[0].not_bit);
+        assert!(ops[0].match_bit);
+        assert_eq!(ops[0].value, 0x0002);
+    }
+
+    #[test]
+    fn parse_flowspec_components_rejects_offset_on_non_prefix() {
+        let err = parse_flowspec_components(
+            &[proto::FlowSpecComponent {
+                r#type: 3,
+                prefix: String::new(),
+                value: "6".into(),
+                offset: 12,
+            }],
+            Afi::Ipv4,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("offset is only valid"));
+    }
+
+    #[test]
+    fn parse_flowspec_prefix_rejects_ipv4_offset() {
+        let err =
+            parse_flowspec_prefix("192.0.2.0/24", Afi::Ipv4, "destination prefix", 4).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("IPv6 FlowSpec"));
     }
 }
