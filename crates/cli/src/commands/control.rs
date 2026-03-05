@@ -3,7 +3,7 @@ use tonic::transport::Channel;
 use crate::error::CliError;
 use crate::output::{self, JsonHealth};
 use crate::proto::control_service_client::ControlServiceClient;
-use crate::proto::{HealthRequest, MetricsRequest, ShutdownRequest};
+use crate::proto::{HealthRequest, MetricsRequest, ShutdownRequest, TriggerMrtDumpRequest};
 
 pub async fn health(channel: Channel, json: bool) -> Result<(), CliError> {
     let mut client = ControlServiceClient::new(channel);
@@ -48,5 +48,20 @@ pub async fn shutdown(
         })
         .await?;
     output::print_result(json, "shutdown", "", "Shutdown requested");
+    Ok(())
+}
+
+pub async fn mrt_dump(channel: Channel, json: bool) -> Result<(), CliError> {
+    let mut client = ControlServiceClient::new(channel);
+    let resp = client
+        .trigger_mrt_dump(TriggerMrtDumpRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        println!("{}", serde_json::json!({ "file_path": resp.file_path }));
+    } else {
+        println!("MRT dump written: {}", resp.file_path);
+    }
     Ok(())
 }

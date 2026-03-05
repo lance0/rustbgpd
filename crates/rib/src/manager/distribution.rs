@@ -5,8 +5,8 @@ use rustbgpd_policy::{PolicyAction, PolicyChain, evaluate_chain};
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tracing::{debug, warn};
 
-use super::helpers::{gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner};
 use super::RibManager;
+use super::helpers::{gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner};
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};

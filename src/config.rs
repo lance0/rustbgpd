@@ -28,6 +28,8 @@ pub struct Config {
     pub rpki: Option<RpkiConfig>,
     #[serde(default)]
     pub bmp: Option<BmpConfig>,
+    #[serde(default)]
+    pub mrt: Option<MrtConfig>,
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
@@ -69,6 +71,26 @@ pub struct BmpCollector {
     pub address: String,
     #[serde(default = "default_bmp_reconnect")]
     pub reconnect_interval: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MrtConfig {
+    pub output_dir: String,
+    #[serde(default = "default_mrt_dump_interval")]
+    pub dump_interval: u64,
+    #[serde(default)]
+    pub compress: bool,
+    #[serde(default = "default_mrt_file_prefix")]
+    pub file_prefix: String,
+}
+
+fn default_mrt_dump_interval() -> u64 {
+    7200
+}
+
+fn default_mrt_file_prefix() -> String {
+    "rib".to_string()
 }
 
 fn default_bmp_sys_name() -> String {
@@ -296,6 +318,8 @@ pub enum ConfigError {
     UndefinedPolicy { name: String },
     #[error("invalid BMP collector config: {reason}")]
     InvalidBmpCollector { reason: String },
+    #[error("invalid MRT config: {reason}")]
+    InvalidMrtConfig { reason: String },
 }
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
@@ -730,6 +754,20 @@ impl Config {
                 value: self.global.telemetry.grpc_addr.clone(),
                 reason: e.to_string(),
             })?;
+
+        // Validate MRT config if present
+        if let Some(ref mrt) = self.mrt {
+            if mrt.output_dir.trim().is_empty() {
+                return Err(ConfigError::InvalidMrtConfig {
+                    reason: "output_dir must not be empty".to_string(),
+                });
+            }
+            if mrt.dump_interval == 0 {
+                return Err(ConfigError::InvalidMrtConfig {
+                    reason: "dump_interval must be > 0".to_string(),
+                });
+            }
+        }
 
         // Eagerly validate all policies at load time
         parse_policy(&self.policy.import)?;

@@ -4,7 +4,7 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::transport::Server;
 use tracing::{error, info};
 
-use crate::control_service::ControlService;
+use crate::control_service::{ControlService, MrtTriggerTx};
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
@@ -25,6 +25,7 @@ pub struct ServeConfig {
     pub listen_port: u32,
     pub metrics: BgpMetrics,
     pub start_time: tokio::time::Instant,
+    pub mrt_trigger_tx: Option<MrtTriggerTx>,
 }
 
 /// Start the gRPC server. Runs until the shutdown signal fires.
@@ -50,6 +51,7 @@ pub async fn serve(
         peer_mgr_tx,
         rib_tx,
         shutdown_tx,
+        config.mrt_trigger_tx,
     );
 
     info!(%addr, "starting gRPC server");

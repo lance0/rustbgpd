@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
@@ -48,6 +48,10 @@ pub enum RibUpdate {
     /// Peer session established — register for outbound updates.
     PeerUp {
         peer: IpAddr,
+        /// Peer's remote ASN (for MRT `PEER_INDEX_TABLE`).
+        peer_asn: u32,
+        /// Peer's BGP router ID.
+        peer_router_id: Ipv4Addr,
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
         export_policy: Option<PolicyChain>,
         /// Address families that the transport can actually serialize for this
@@ -139,4 +143,23 @@ pub enum RibUpdate {
     QueryFlowSpecRoutes {
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
     },
+    /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
+    QueryMrtSnapshot {
+        reply: oneshot::Sender<MrtSnapshotData>,
+    },
+}
+
+/// Peer metadata for MRT `PEER_INDEX_TABLE`.
+#[derive(Debug, Clone)]
+pub struct MrtPeerEntry {
+    pub peer_addr: IpAddr,
+    pub peer_bgp_id: Ipv4Addr,
+    pub peer_asn: u32,
+}
+
+/// Complete RIB snapshot for MRT dump.
+#[derive(Debug)]
+pub struct MrtSnapshotData {
+    pub peers: Vec<MrtPeerEntry>,
+    pub routes: Vec<Route>,
 }

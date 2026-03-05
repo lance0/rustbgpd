@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use prometheus::{Encoder, TextEncoder};
@@ -10,6 +11,9 @@ use crate::proto;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
+/// MRT trigger channel type.
+pub type MrtTriggerTx = mpsc::Sender<oneshot::Sender<Result<PathBuf, String>>>;
+
 /// Daemon lifecycle and observability service.
 ///
 /// `GetHealth` returns uptime, peer count, and route count.
@@ -21,6 +25,7 @@ pub struct ControlService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    mrt_trigger_tx: Option<MrtTriggerTx>,
 }
 
 impl ControlService {
@@ -34,6 +39,7 @@ impl ControlService {
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
         shutdown_tx: oneshot::Sender<()>,
+        mrt_trigger_tx: Option<MrtTriggerTx>,
     ) -> Self {
         Self {
             start_time,
@@ -41,6 +47,7 @@ impl ControlService {
             peer_mgr_tx,
             rib_tx,
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
+            mrt_trigger_tx,
         }
     }
 }
@@ -130,6 +137,33 @@ impl proto::control_service_server::ControlService for ControlService {
 
         Ok(Response::new(proto::ShutdownResponse {}))
     }
+
+    async fn trigger_mrt_dump(
+        &self,
+        _request: Request<proto::TriggerMrtDumpRequest>,
+    ) -> Result<Response<proto::TriggerMrtDumpResponse>, Status> {
+        let trigger_tx = self
+            .mrt_trigger_tx
+            .as_ref()
+            .ok_or_else(|| Status::failed_precondition("MRT export is not configured"))?;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        trigger_tx
+            .send(reply_tx)
+            .await
+            .map_err(|_| Status::internal("MRT manager unavailable"))?;
+
+        let result = reply_rx
+            .await
+            .map_err(|_| Status::internal("MRT manager dropped reply"))?;
+
+        match result {
+            Ok(path) => Ok(Response::new(proto::TriggerMrtDumpResponse {
+                file_path: path.to_string_lossy().to_string(),
+            })),
+            Err(e) => Err(Status::internal(format!("MRT dump failed: {e}"))),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +182,7 @@ mod tests {
             peer_tx,
             rib_tx,
             shutdown_tx,
+            None,
         )
     }
 
@@ -175,6 +210,7 @@ mod tests {
             peer_tx,
             rib_tx,
             shutdown_tx,
+            None,
         );
 
         let resp = svc
@@ -204,6 +240,7 @@ mod tests {
             peer_tx,
             rib_tx,
             shutdown_tx,
+            None,
         );
 
         // Spawn responders

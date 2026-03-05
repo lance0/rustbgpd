@@ -330,6 +330,29 @@ async fn run(mut config: Config) {
         None
     };
 
+    // Spawn MRT manager (periodic TABLE_DUMP_V2 snapshots)
+    let mrt_trigger_tx: Option<mpsc::Sender<oneshot::Sender<Result<std::path::PathBuf, String>>>> =
+        if let Some(ref mrt_config) = config.mrt {
+            let writer_config = rustbgpd_mrt::MrtWriterConfig {
+                output_dir: std::path::PathBuf::from(&mrt_config.output_dir),
+                dump_interval: mrt_config.dump_interval,
+                compress: mrt_config.compress,
+                file_prefix: mrt_config.file_prefix.clone(),
+            };
+            let (trigger_tx, trigger_rx) = mpsc::channel(16);
+            let mgr =
+                rustbgpd_mrt::MrtManager::new(writer_config, rib_tx.clone(), trigger_rx, router_id);
+            info!(
+                output_dir = %mrt_config.output_dir,
+                interval = mrt_config.dump_interval,
+                "spawning MRT dump manager"
+            );
+            tokio::spawn(mgr.run());
+            Some(trigger_tx)
+        } else {
+            None
+        };
+
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
     let peer_mgr = PeerManager::new(
@@ -453,6 +476,7 @@ async fn run(mut config: Config) {
         listen_port: u32::from(config.global.listen_port),
         metrics: metrics.clone(),
         start_time,
+        mrt_trigger_tx,
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(
@@ -716,6 +740,9 @@ async fn reload_config(
     if new_config.bmp != current.bmp {
         warn!("[bmp] changed — requires full restart to take effect");
     }
+    if new_config.mrt != current.mrt {
+        warn!("[mrt] changed — requires full restart to take effect");
+    }
 
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
     if diff.added.is_empty() && diff.removed.is_empty() && diff.changed.is_empty() {
@@ -921,6 +948,7 @@ mod tests {
             policy: crate::config::PolicyConfig::default(),
             rpki: None,
             bmp: None,
+            mrt: None,
             file_path: None,
         };
 

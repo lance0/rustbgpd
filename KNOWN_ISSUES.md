@@ -40,6 +40,11 @@ resolved.
   per-peer failures and keeps the prior in-memory config snapshot when
   reconciliation is incomplete, but runtime peer changes applied before a
   later failure are not rolled back automatically.
+- **MRT snapshot encoding is allocation-heavy at large scale.** The
+  `TABLE_DUMP_V2` encoder groups routes by prefix and synthesizes
+  per-entry attributes, which is correct but can create extra allocation
+  pressure for very large snapshots. Track as a performance optimization,
+  not a correctness issue.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.

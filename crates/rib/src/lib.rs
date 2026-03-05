@@ -22,4 +22,4 @@ pub use event::{RouteEvent, RouteEventType};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::{FlowSpecRoute, Route, RouteOrigin};
-pub use update::{OutboundRouteUpdate, RibUpdate};
+pub use update::{MrtPeerEntry, MrtSnapshotData, OutboundRouteUpdate, RibUpdate};

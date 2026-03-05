@@ -90,6 +90,9 @@ enum Command {
         #[arg(long)]
         reason: Option<String>,
     },
+
+    /// Trigger an on-demand MRT dump
+    MrtDump,
 }
 
 #[derive(Subcommand)]
@@ -404,6 +407,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Health => commands::control::health(channel, json).await,
         Command::Metrics => commands::control::metrics(channel).await,
         Command::Shutdown { reason } => commands::control::shutdown(channel, reason, json).await,
+        Command::MrtDump => commands::control::mrt_dump(channel, json).await,
     }
 }
 

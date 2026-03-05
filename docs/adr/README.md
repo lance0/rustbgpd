@@ -51,6 +51,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0041](0041-bmp-exporter.md) | BMP Exporter (RFC 7854) | Accepted | 2026-03-04 |
 | [0042](0042-llgr.md) | Long-Lived Graceful Restart (RFC 9494) | Accepted | 2026-03-05 |
 | [0043](0043-config-persistence.md) | Config Persistence and SIGHUP Reload | Accepted | 2026-03-05 |
+| [0044](0044-mrt-dump-export.md) | MRT Dump Export (RFC 6396) | Accepted | 2026-03-05 |
 
 ## Template
 

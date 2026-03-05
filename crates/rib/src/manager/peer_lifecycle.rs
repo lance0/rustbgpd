@@ -4,8 +4,8 @@ use std::net::IpAddr;
 use rustbgpd_wire::{FlowSpecRule, Prefix};
 use tracing::warn;
 
-use super::helpers::{gauge_val, prefix_family};
 use super::RibManager;
+use super::helpers::{gauge_val, prefix_family};
 use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 

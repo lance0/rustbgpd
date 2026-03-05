@@ -19,7 +19,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 | **Runtime** | C | Go (GC) | Rust (no GC) |
 | **Scope** | Full routing suite | BGP-only | BGP-only |
 | **Dynamic peers** | Config reload | gRPC | gRPC |
-| **Real-time events** | Log parsing | BMP/MRT | gRPC streaming + BMP |
+| **Real-time events** | Log parsing | BMP/MRT | gRPC streaming + BMP + MRT |
 | **Observability** | SNMP, CLI | Prometheus | Prometheus + structured logs |
 | **Wire codec reuse** | No | No | `rustbgpd-wire` standalone crate |
 
@@ -53,7 +53,8 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **CLI tool** -- `rustbgpctl` wraps the gRPC API with human-readable tables and `--json` structured output
 - **Long-Lived Graceful Restart** -- RFC 9494 two-phase timer: GR-stale routes promote to LLGR-stale with `LLGR_STALE` community instead of purging, with configurable per-peer `llgr_stale_time`
 - **Config persistence** -- gRPC neighbor mutations (add/delete) persist to TOML; `SIGHUP` triggers config reload with structured per-peer reconciliation
-- **931 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **MRT dump export** -- RFC 6396 `TABLE_DUMP_V2` periodic and on-demand RIB snapshots with optional gzip; `TriggerMrtDump` gRPC RPC and `rustbgpctl mrt-dump` CLI
+- **946+ tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -141,7 +142,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
               +-----+       +-----------+
 ```
 
-Ten crates with strict dependency rules:
+Eleven crates with strict dependency rules:
 
 | Crate | Description |
 |-------|-------------|
@@ -152,6 +153,7 @@ Ten crates with strict dependency rules:
 | `rustbgpd-policy` | Policy engine: prefix/community/AS_PATH matching, route modifications. |
 | `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
 | `rustbgpd-bmp` | BMP exporter: RFC 7854 codec, collector clients, manager fan-out. |
+| `rustbgpd-mrt` | MRT dump: RFC 6396 TABLE_DUMP_V2 codec, atomic writer, periodic manager. |
 | `rustbgpd-api` | gRPC server (tonic). Five services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 | `rustbgpctl` | CLI tool. Client-only gRPC stubs, no internal crate deps. |
@@ -279,7 +281,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 931 tests pass. P0+P1+P2 complete, P2.5 in progress. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, Long-Lived Graceful Restart (RFC 9494), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), BMP export (RFC 7854), config persistence + SIGHUP reload, and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 946+ tests pass. P0+P1+P2 complete, P2.5 in progress. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, Long-Lived Graceful Restart (RFC 9494), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), BMP export (RFC 7854), MRT dump export (RFC 6396), config persistence + SIGHUP reload, and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -307,9 +309,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | CLI tool | post-v0.3.0 | `rustbgpctl`: human-readable tables and `--json` output |
 | LLGR | post-v0.3.0 | RFC 9494: two-phase GR timer with LLGR-stale promotion and configurable stale time |
 | Config persistence | post-v0.3.0 | gRPC mutations persist to TOML; SIGHUP reload with neighbor reconciliation |
+| MRT dump export | post-v0.3.0 | RFC 6396 TABLE_DUMP_V2 periodic + on-demand snapshots, optional gzip (ADR-0044) |
 | RibManager split | post-v0.3.0 | 8,318-line manager.rs split into 7 submodules for reviewability |
 
-Next: MRT dump and benchmark hardening. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: benchmark hardening. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 

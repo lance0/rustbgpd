@@ -4,8 +4,8 @@ use std::net::IpAddr;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, warn};
 
-use super::helpers::{gauge_val, prefix_family, ERR_REFRESH_TIMEOUT};
 use super::RibManager;
+use super::helpers::{ERR_REFRESH_TIMEOUT, gauge_val, prefix_family};
 use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 

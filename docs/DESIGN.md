@@ -2,9 +2,9 @@
 
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
-**Author:** Lance  
+**Author:** Lance
 **Status:** pre-1.0 hardening — P0/P1/P2 complete, P2.5 in progress
-**Last updated:** 2026-03-04
+**Last updated:** 2026-03-05
 
 ---
 
@@ -89,6 +89,8 @@ struct RawAttribute {
 
 **bmp** — BMP exporter (RFC 7854): message codec, per-collector TCP client with reconnect/backoff, fan-out manager with Peer Up replay cache. No internal crate dependencies.
 
+**mrt** — MRT dump export (RFC 6396): TABLE_DUMP_V2 codec, atomic file writer with optional gzip, periodic/on-demand dump manager. Depends on `wire` and `rib`.
+
 **cli** (`rustbgpctl`) — gRPC CLI tool. Client-only proto stubs, no internal crate dependencies. Human-readable tables and `--json` output.
 
 ### Dependency Graph
@@ -99,6 +101,7 @@ fsm            ──► wire
 policy         ──► wire
 rpki           ──► wire
 bmp            (no internal deps)
+mrt            ──► wire, rib
 telemetry      (no internal deps)
 rib            ──► wire, policy, telemetry, rpki
 transport      ──► wire, fsm, rib, policy, telemetry, bmp
@@ -616,6 +619,7 @@ rustbgpd/
     telemetry/          # metrics + structured logging
     transport/          # tokio TCP, read/write loops, session runtime
     bmp/                # BMP exporter (RFC 7854) — codec, client, manager
+    mrt/                # MRT dump export (RFC 6396) — codec, writer, manager
     rpki/               # RTR client + VRP table + aggregation (RFC 8210/6811)
     cli/                # rustbgpctl gRPC CLI
   proto/
@@ -636,7 +640,6 @@ rustbgpd/
 
 ## Roadmap Beyond v1
 
-- MRT dump export (RFC 6396)
 - Plugin-based policy engine (WASM or embedded DSL) — only after core stability
 
 ---
@@ -669,11 +672,11 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | Extended communities | 4360 | v0.3.0+ | FRR | RT, RO, 4-byte AS (ADR-0025/0026) |
 | FlowSpec | 8955 | post-v0.3.0 | — | IPv4/IPv6 unicast FlowSpec implemented; speaker-mode hardening continues |
 | Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
+| LLGR (two-phase GR timer) | 9494 | post-v0.3.0 | FRR | Implemented; GR-stale → LLGR-stale promotion, configurable stale time |
 | TCP-AO | 5925 | Post-v1 | — | Roadmap |
 | BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); reconnect replay + periodic stats + coordinated-shutdown termination |
+| MRT dump export | 6396 | post-v0.3.0 | — | Implemented (ADR-0044); TABLE_DUMP_V2 periodic + on-demand, gzip optional |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); runtime gRPC management deferred |
-| Long-Lived Graceful Restart | 9494 | post-v0.3.0 | FRR | Two-phase timer, LLGR-stale demotion, configurable stale time |
-| Config persistence + SIGHUP reload | rustbgpd | post-v0.3.0 | — | gRPC mutations auto-persist, SIGHUP reconciles |
 
 This matrix is updated with every milestone. "Interop Tested" means validated in the containerlab CI suite, not "someone tried it once."
 

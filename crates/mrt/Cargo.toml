@@ -1,0 +1,24 @@
+[package]
+name = "rustbgpd-mrt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "MRT dump export — RFC 6396 TABLE_DUMP_V2"
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rustbgpd-wire = { workspace = true }
+rustbgpd-rib = { workspace = true }
+flate2 = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

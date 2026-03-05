@@ -87,7 +87,7 @@ Last updated: 2026-03-05
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | ~20 | |
+| Total RPCs | ~55 | ~21 | |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | No | |
 | Dynamic neighbors (prefix-based) | Yes | No | |
@@ -100,7 +100,7 @@ Last updated: 2026-03-05
 | Policy CRUD via API | Yes | No | Config-file only |
 | RPKI management | Yes | Partial | VRP/cache status via metrics; no gRPC RPKI CRUD |
 | BMP management | Yes | Partial | Config-file only; no runtime gRPC add/remove |
-| MRT control | Yes | No | |
+| MRT control | Yes | Yes | `TriggerMrtDump` RPC |
 | Zebra/FRR integration | Yes | No | |
 | Runtime log level | Yes | No | |
 | Global config get/set | Partial | Partial | Get only on both |
@@ -114,7 +114,7 @@ Last updated: 2026-03-05
 | Prometheus metrics | Yes | Yes | rustbgpd has more granular RIB metrics |
 | Structured logging | No | Yes | JSON via tracing-subscriber |
 | BMP exporter (RFC 7854) | Yes | Yes | Per-collector TCP client, Initiation/PeerUp/PeerDown/RouteMonitoring/StatsReport/Termination |
-| MRT dump (RFC 6396) | Yes | No | On roadmap |
+| MRT dump (RFC 6396) | Yes | Yes | `TABLE_DUMP_V2` periodic + on-demand; gzip optional (ADR-0044) |
 | WatchEvent streaming | Yes | Yes | WatchRoutes |
 | Sentry integration | Yes | No | |
 
@@ -168,14 +168,14 @@ Last updated: 2026-03-05
 | Core protocol | 14 | 12.5 | ~89% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 13 | ~72% |
-| gRPC RPCs | ~55 | ~20 | ~36% |
-| Monitoring | 5 | 4 | 80% |
+| gRPC RPCs | ~55 | ~21 | ~38% |
+| Monitoring | 5 | 5 | 100% |
 | Security | 4 | 3 | 75% |
 | Best-path steps | 11 | 10.5 | ~95% |
 
 ## Weighted Parity Estimates
 
-### IX Route Server Use Case (~85% parity)
+### IX Route Server Use Case (~87% parity)
 
 The primary target deployment. Weighted toward what matters:
 
@@ -186,6 +186,7 @@ The primary target deployment. Weighted toward what matters:
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
 - **BMP exporter:** RFC 7854 streaming to collectors implemented, including collector reconnect replay and periodic Stats Report export
+- **MRT dump:** RFC 6396 TABLE_DUMP_V2 periodic + on-demand snapshots with gzip; completes the monitoring/archival story
 - **LLGR (RFC 9494):** two-phase timer, three-tier best-path demotion, per-AFI family scoping — critical for large IXes
 - **Config persistence + SIGHUP reload:** gRPC mutations survive restart; live neighbor reconciliation
 
@@ -196,7 +197,7 @@ Competing head-to-head with GoBGP for all use cases:
 - Missing address families hurt badly (EVPN, VPN)
 - No confederation support limits SP deployments
 - `rustbgpctl` ships but has fewer subcommands than `gobgp`
-- gRPC API covers ~36% of GoBGP's RPC surface
+- gRPC API covers ~38% of GoBGP's RPC surface
 - Config persistence narrows the operational gap
 
 ## Advantages Over GoBGP
@@ -213,9 +214,9 @@ Competing head-to-head with GoBGP for all use cases:
 
 1. **Confederation (RFC 5065)** — required for service provider deployments
 2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
-3. **MRT dump export (RFC 6396)** — TABLE_DUMP_V2 for offline analysis and archival
-4. **Notification GR (RFC 8538)** — Hard Reset avoidance; completes the GR story
-5. **Private AS removal** — common operational requirement for IX and transit
+3. **Notification GR (RFC 8538)** — Hard Reset avoidance; completes the GR story
+4. **Private AS removal** — common operational requirement for IX and transit
+5. **Policy CRUD via gRPC** — runtime policy management without config file edits
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 

@@ -103,6 +103,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applies per-peer add/delete operations. Global config changes are logged
   as warnings but require restart. Structured per-peer failure reporting
   on reconciliation.
+- **MRT dump export (RFC 6396).** New `crates/mrt/` crate implementing
+  `TABLE_DUMP_V2` (type 13) periodic and on-demand RIB snapshots.
+  `MrtManager` runs a configurable interval timer and accepts on-demand
+  triggers via the new `TriggerMrtDump` gRPC RPC on `ControlService`.
+  Snapshots query Adj-RIB-In routes from `RibManager` via
+  `QueryMrtSnapshot` (no Loc-RIB overlay to avoid duplication). Peer
+  metadata (`peer_asn`, `peer_bgp_id`) is tracked in `RibManager` and
+  retained during GR/LLGR transitions. Codec synthesizes next-hop
+  attributes stripped by the MP-BGP architecture: `NEXT_HOP` for IPv4,
+  `MP_REACH_NLRI` for IPv6, and `MP_REACH_NLRI` with `Afi::Ipv4` for
+  RFC 8950 IPv4-with-IPv6-NH routes. Add-Path subtypes 8/9 per RFC 8050.
+  `EncodeError` enum for explicit length-overflow handling (no truncation).
+  Atomic file writes with optional gzip compression (flate2).
+  Collision-resistant filenames (seconds + nanoseconds). TOML config:
+  `[mrt]` section with `output_dir`, `dump_interval`, `compress`, and
+  `file_prefix`. CLI: `mrt-dump` subcommand. (ADR-0044)
 
 ### Changed
 

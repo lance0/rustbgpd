@@ -810,6 +810,67 @@ When BMP is not configured, overhead remains minimal: raw frame capture uses
 
 ---
 
+## `[mrt]`
+
+Optional. Configures periodic MRT TABLE_DUMP_V2 (RFC 6396) RIB snapshots for
+offline analysis and archival. Dumps can also be triggered on demand via the
+gRPC `TriggerMrtDump` RPC or the `rustbgpctl mrt-dump` CLI command.
+
+```toml
+[mrt]
+output_dir = "/var/lib/rustbgpd/mrt"
+dump_interval = 7200        # seconds between periodic dumps (default 7200)
+compress = true             # gzip output files (default false)
+file_prefix = "rib"         # filename prefix (default "rib")
+```
+
+### MRT section fields
+
+| Field           | Type    | Required | Default  | Description                              |
+|-----------------|---------|----------|----------|------------------------------------------|
+| `output_dir`    | string  | yes      | --       | Directory for MRT dump files (must exist and be writable) |
+| `dump_interval` | u64     | no       | 7200     | Seconds between periodic dumps (must be > 0) |
+| `compress`      | bool    | no       | false    | Compress output files with gzip           |
+| `file_prefix`   | string  | no       | `"rib"`  | Filename prefix for dump files            |
+
+### Output files
+
+Dump files are written atomically (temp file + rename) with collision-resistant
+names:
+
+```
+{file_prefix}.{YYYYMMDD.HHMMSS}.{nanoseconds}.mrt[.gz]
+```
+
+For example: `rib.20260305.143022.123456789.mrt.gz`
+
+### What is dumped
+
+Each dump contains a complete `TABLE_DUMP_V2` snapshot:
+
+| Record | Contents |
+|--------|----------|
+| `PEER_INDEX_TABLE` (subtype 1) | All known peers with ASN and BGP ID |
+| `RIB_IPV4_UNICAST` (subtype 2) | IPv4 routes from Adj-RIB-In per peer |
+| `RIB_IPV6_UNICAST` (subtype 4) | IPv6 routes from Adj-RIB-In per peer |
+| `RIB_IPV4_UNICAST_ADDPATH` (subtype 8) | IPv4 routes with path IDs (RFC 8050) |
+| `RIB_IPV6_UNICAST_ADDPATH` (subtype 9) | IPv6 routes with path IDs (RFC 8050) |
+
+Routes are sourced from Adj-RIB-In (not Loc-RIB) to avoid duplicate entries
+for the best-path winner. Next-hop attributes are synthesized per the MP-BGP
+architecture (IPv4 `NEXT_HOP`, IPv6 `MP_REACH_NLRI`, RFC 8950
+IPv4-with-IPv6-NH `MP_REACH_NLRI`).
+
+Peer metadata is retained during Graceful Restart and LLGR transitions, so
+dumps taken during a peer restart window still include correct peer entries.
+
+When MRT is not configured, no timer or manager task is spawned — zero
+overhead.
+
+See [ADR-0044](docs/adr/0044-mrt-dump-export.md) for design details.
+
+---
+
 ## Config Persistence
 
 Neighbor mutations made through the gRPC API (`AddNeighbor`, `DeleteNeighbor`)
@@ -858,6 +919,8 @@ starting:
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
+| MRT `output_dir` must not be empty | `output_dir must not be empty` |
+| MRT `dump_interval` must be > 0 | `dump_interval must be > 0` |
 | BMP collector `address` must be a valid `ip:port` | `invalid BMP collector address` |
 | BMP collector `reconnect_interval` must be > 0 | `reconnect_interval must be > 0` |
 | `cluster_id` must be a valid IPv4 address | `invalid cluster_id` |

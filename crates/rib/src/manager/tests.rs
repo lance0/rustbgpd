@@ -53,6 +53,14 @@ async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Ve
     reply_rx.await.unwrap()
 }
 
+async fn query_mrt_snapshot(tx: &mpsc::Sender<RibUpdate>) -> crate::update::MrtSnapshotData {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryMrtSnapshot { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
 fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
@@ -534,6 +542,8 @@ async fn peer_up_triggers_initial_table_dump() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -565,6 +575,8 @@ async fn route_change_distributes_to_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -607,6 +619,8 @@ async fn single_best_send_normalizes_path_id_to_zero() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -652,6 +666,8 @@ async fn split_horizon_prevents_echo() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -731,6 +747,8 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -774,6 +792,8 @@ async fn ibgp_route_sent_to_ebgp_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -821,6 +841,8 @@ async fn ebgp_route_sent_to_ibgp_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -859,6 +881,8 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: ibgp_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -930,6 +954,8 @@ async fn local_route_sent_to_ibgp_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1010,6 +1036,8 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1043,6 +1071,8 @@ async fn peer_down_cleans_up_outbound() {
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1082,6 +1112,8 @@ async fn inject_route_enters_loc_rib_and_distributes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1148,6 +1180,8 @@ async fn withdraw_injected_removes_and_distributes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1209,9 +1243,7 @@ async fn withdraw_injected_removes_and_distributes() {
 
 #[tokio::test]
 async fn export_policy_blocks_denied() {
-    use rustbgpd_policy::{
-        Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
-    };
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
     let export_policy = PolicyChain::new(vec![Policy {
@@ -1236,6 +1268,8 @@ async fn export_policy_blocks_denied() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1284,6 +1318,8 @@ async fn query_advertised_routes() {
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1326,9 +1362,7 @@ async fn query_advertised_routes() {
 
 #[tokio::test]
 async fn per_peer_export_policy() {
-    use rustbgpd_policy::{
-        Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
-    };
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
     let allowed_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
@@ -1358,6 +1392,8 @@ async fn per_peer_export_policy() {
     let (send_filtered, mut recv_filtered) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: peer1,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: send_filtered,
         export_policy: peer1_export,
         sendable_families: ipv4_sendable(),
@@ -1373,6 +1409,8 @@ async fn per_peer_export_policy() {
     let (send_unfiltered, mut recv_unfiltered) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: peer2,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: send_unfiltered,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1415,9 +1453,7 @@ async fn per_peer_export_policy() {
 
 #[tokio::test]
 async fn peer_down_cleans_up_export_policy() {
-    use rustbgpd_policy::{
-        Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
-    };
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, None, None, BgpMetrics::new());
@@ -1441,6 +1477,8 @@ async fn peer_down_cleans_up_export_policy() {
 
     tx.send(RibUpdate::PeerUp {
         peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: policy,
         sendable_families: ipv4_sendable(),
@@ -1487,6 +1525,8 @@ async fn channel_full_marks_dirty_and_resyncs() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1628,6 +1668,8 @@ async fn dirty_resync_not_starved_by_query_traffic() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1753,6 +1795,8 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
 
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -1824,6 +1868,8 @@ async fn initial_dump_failure_resyncs_via_timer() {
 
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -2328,6 +2374,8 @@ async fn adj_rib_out_gauge_tracks_advertised() {
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -2415,6 +2463,8 @@ async fn query_advertised_count() {
     let (out_tx, mut _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -2484,6 +2534,8 @@ async fn distribute_changes_filters_unsendable_families() {
     // Register peer with IPv4-only sendable families
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -2592,6 +2644,8 @@ async fn send_initial_table_filters_unsendable_families() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -2668,6 +2722,8 @@ async fn dual_stack_peer_receives_both_families() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: dual_stack_sendable(),
@@ -2711,6 +2767,8 @@ async fn send_initial_table_includes_flowspec_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_flowspec_sendable(),
@@ -2760,6 +2818,8 @@ async fn route_refresh_flowspec_re_advertises_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_flowspec_sendable(),
@@ -3130,6 +3190,8 @@ async fn dirty_resync_retries_flowspec_updates() {
     let (out_tx, mut out_rx) = mpsc::channel(1);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_flowspec_sendable(),
@@ -3188,6 +3250,8 @@ async fn gr_marks_stale_and_demotes_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -3411,6 +3475,8 @@ async fn gr_peer_up_defers_stale_to_eor() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -3498,6 +3564,8 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -3833,6 +3901,8 @@ async fn llgr_eor_clears_llgr_stale() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -3999,6 +4069,8 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     let (out_tx_src, _) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx_src,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4014,6 +4086,8 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     let (client_tx, mut client_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: client_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: client_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4030,6 +4104,8 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: nonclient_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: nonclient_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4087,6 +4163,8 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     let (out_tx_src, _) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx_src,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4102,6 +4180,8 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     let (client_tx, mut client_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: client_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: client_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4118,6 +4198,8 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
     let (nonclient_tx, mut nonclient_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: nonclient_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: nonclient_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4174,6 +4256,8 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4224,6 +4308,8 @@ async fn rr_ebgp_route_to_all_ibgp() {
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4273,6 +4359,8 @@ async fn rr_local_route_to_all_ibgp() {
     let (out_tx, mut out_rx) = mpsc::channel(16);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4739,6 +4827,8 @@ async fn rpki_cache_update_no_change_no_redistribution() {
 
     tx.send(RibUpdate::PeerUp {
         peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4900,6 +4990,8 @@ async fn multipath_send_advertises_multiple_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -4963,6 +5055,8 @@ async fn multipath_send_respects_send_max() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5033,6 +5127,8 @@ async fn multipath_send_split_horizon() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5074,6 +5170,8 @@ async fn multipath_withdrawal_on_candidate_removal() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5188,6 +5286,8 @@ async fn single_best_peer_unaffected_by_multipath_config() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5231,6 +5331,8 @@ async fn multipath_peer_down_cleans_up_state() {
     let (out_tx, _out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5267,6 +5369,8 @@ async fn multipath_peer_down_cleans_up_state() {
     let (reconnect_tx, mut reconnect_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: reconnect_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5301,6 +5405,8 @@ async fn multipath_send_incremental_route_addition() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5409,6 +5515,8 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     let (multi_tx, mut multi_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: multi_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: multi_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5424,6 +5532,8 @@ async fn multipath_send_mixed_peers_single_and_multi() {
     let (single_tx, mut single_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: single_target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: single_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5501,6 +5611,8 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: vec![(Afi::Ipv6, Safi::Unicast)],
@@ -5578,6 +5690,8 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: dual_stack_sendable(),
@@ -5664,6 +5778,8 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: dual_stack_sendable(),
@@ -5750,6 +5866,8 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: dual_stack_sendable(),
@@ -5847,6 +5965,8 @@ async fn multipath_send_max_one_uses_path_id_one() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5876,9 +5996,7 @@ async fn multipath_send_max_one_uses_path_id_one() {
 
 #[tokio::test]
 async fn multipath_all_candidates_denied_by_export_policy() {
-    use rustbgpd_policy::{
-        Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications,
-    };
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
     // Deny all prefixes in 192.168.0.0/16
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 0, 0), 16);
@@ -5909,6 +6027,8 @@ async fn multipath_all_candidates_denied_by_export_policy() {
     let (out_tx, mut out_rx) = mpsc::channel(64);
     tx.send(RibUpdate::PeerUp {
         peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
         outbound_tx: out_tx,
         export_policy: None,
         sendable_families: ipv4_sendable(),
@@ -5963,6 +6083,96 @@ async fn multipath_all_candidates_denied_by_export_policy() {
         out_rx.try_recv().is_err(),
         "all candidates denied by export policy — nothing sent"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let snapshot = query_mrt_snapshot(&tx).await;
+    assert_eq!(
+        snapshot.routes.len(),
+        1,
+        "MRT snapshot should include only Adj-RIB-In routes (no Loc-RIB duplication)"
+    );
+    assert_eq!(snapshot.routes[0].prefix, Prefix::V4(prefix));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn mrt_peer_metadata_retained_during_gr() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer,
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let snapshot = query_mrt_snapshot(&tx).await;
+    let meta = snapshot
+        .peers
+        .iter()
+        .find(|entry| entry.peer_addr == peer)
+        .expect("peer metadata should remain available during GR");
+    assert_eq!(meta.peer_asn, 65001);
+    assert_eq!(meta.peer_bgp_id, Ipv4Addr::new(10, 0, 0, 1));
 
     drop(tx);
     handle.await.unwrap();

@@ -4,8 +4,8 @@ use std::net::IpAddr;
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tracing::info;
 
-use super::helpers::gauge_val;
 use super::RibManager;
+use super::helpers::gauge_val;
 
 impl RibManager {
     /// Sweep stale routes for a peer whose GR timer has expired.

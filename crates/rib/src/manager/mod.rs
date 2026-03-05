@@ -25,8 +25,8 @@ use crate::loc_rib::LocRib;
 use crate::update::{OutboundRouteUpdate, RibUpdate};
 
 use helpers::{
-    gauge_val, prefix_family, validate_route_rpki, LlgrPeerConfig, DIRTY_RESYNC_INTERVAL,
-    ERR_REFRESH_TIMEOUT, LOCAL_PEER,
+    DIRTY_RESYNC_INTERVAL, ERR_REFRESH_TIMEOUT, LOCAL_PEER, LlgrPeerConfig, gauge_val,
+    prefix_family, validate_route_rpki,
 };
 
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
@@ -79,6 +79,10 @@ pub struct RibManager {
     llgr_peer_config: HashMap<IpAddr, LlgrPeerConfig>,
     /// Maximum Add-Path paths per prefix per peer (0 = single-best only).
     peer_add_path_send_max: HashMap<IpAddr, u32>,
+    /// Peer ASN, tracked for MRT `PEER_INDEX_TABLE`.
+    peer_asn: HashMap<IpAddr, u32>,
+    /// Peer BGP router ID, tracked for MRT `PEER_INDEX_TABLE`.
+    peer_bgp_id: HashMap<IpAddr, Ipv4Addr>,
     /// Families for which Add-Path Send/Both was negotiated per peer.
     peer_add_path_send_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
@@ -123,6 +127,8 @@ impl RibManager {
             llgr_peer_config: HashMap::new(),
             peer_add_path_send_max: HashMap::new(),
             peer_add_path_send_families: HashMap::new(),
+            peer_asn: HashMap::new(),
+            peer_bgp_id: HashMap::new(),
             vrp_table: None,
             route_events_tx,
             metrics,
@@ -313,6 +319,8 @@ impl RibManager {
                 self.peer_is_rr_client.remove(&peer);
                 self.peer_add_path_send_max.remove(&peer);
                 self.peer_add_path_send_families.remove(&peer);
+                self.peer_asn.remove(&peer);
+                self.peer_bgp_id.remove(&peer);
                 self.dirty_peers.remove(&peer);
                 self.pending_eor.remove(&peer);
                 self.clear_peer_refresh_state(peer);
@@ -320,6 +328,8 @@ impl RibManager {
 
             RibUpdate::PeerUp {
                 peer,
+                peer_asn,
+                peer_router_id,
                 outbound_tx,
                 export_policy,
                 sendable_families,
@@ -328,6 +338,8 @@ impl RibManager {
                 add_path_send_families,
                 add_path_send_max,
             } => {
+                self.peer_asn.insert(peer, peer_asn);
+                self.peer_bgp_id.insert(peer, peer_router_id);
                 // If the peer re-establishes during graceful restart, keep
                 // routes stale and wait for End-of-RIB per family (RFC 4724
                 // §4.2).  Reset the timer from restart_time (session window)
@@ -752,6 +764,37 @@ impl RibManager {
                 let routes: Vec<_> = self.loc_rib.iter_flowspec().cloned().collect();
                 if reply.send(routes).is_err() {
                     warn!("FlowSpec query caller dropped before receiving response");
+                }
+            }
+
+            RibUpdate::QueryMrtSnapshot { reply } => {
+                use crate::update::{MrtPeerEntry, MrtSnapshotData};
+
+                let peers: Vec<MrtPeerEntry> = self
+                    .peer_asn
+                    .iter()
+                    .map(|(&addr, &asn)| MrtPeerEntry {
+                        peer_addr: addr,
+                        peer_bgp_id: self
+                            .peer_bgp_id
+                            .get(&addr)
+                            .copied()
+                            .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                        peer_asn: asn,
+                    })
+                    .collect();
+
+                // TABLE_DUMP_V2 is built from Adj-RIB-In routes per peer.
+                // Avoid mixing Loc-RIB winners to prevent duplicate entries.
+                let routes: Vec<_> = self
+                    .ribs
+                    .values()
+                    .flat_map(|rib| rib.iter().cloned())
+                    .collect();
+
+                let snapshot = MrtSnapshotData { peers, routes };
+                if reply.send(snapshot).is_err() {
+                    warn!("MRT snapshot query caller dropped before receiving response");
                 }
             }
         }

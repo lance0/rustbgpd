@@ -363,6 +363,7 @@ service ControlService {
   rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
   rpc GetHealth(HealthRequest) returns (HealthResponse);
   rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+  rpc TriggerMrtDump(TriggerMrtDumpRequest) returns (TriggerMrtDumpResponse);
 }
 
 message ShutdownRequest {
@@ -384,4 +385,10 @@ message MetricsRequest {}
 
 message MetricsResponse {
   string prometheus_text = 1;
+}
+
+message TriggerMrtDumpRequest {}
+
+message TriggerMrtDumpResponse {
+  string file_path = 1;
 }
