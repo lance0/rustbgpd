@@ -1077,7 +1077,7 @@ mod tests {
         assert_eq!(
             cm,
             CommunityMatch::Standard {
-                value: (65001 << 16) | 100
+                value: (65001 << 16) | 0x0064
             }
         );
     }
@@ -1193,7 +1193,7 @@ mod tests {
 
     #[test]
     fn standard_community_match_hit() {
-        let val = (65001u32 << 16) | 100;
+        let val = (65001u32 << 16) | 0x0064;
         let pl = Policy {
             entries: vec![stmt(
                 None,
@@ -1224,7 +1224,7 @@ mod tests {
                 PolicyAction::Deny,
                 vec![
                     CommunityMatch::Standard {
-                        value: (65001 << 16) | 100,
+                        value: (65001 << 16) | 0x0064,
                     },
                     CommunityMatch::RouteTarget {
                         global: 65002,
@@ -1234,7 +1234,7 @@ mod tests {
             )],
             default_action: PolicyAction::Permit,
         };
-        let std_community = (65001u32 << 16) | 100;
+        let std_community = (65001u32 << 16) | 0x0064;
         assert_eq!(
             pl.evaluate(
                 v4_prefix([10, 0, 0, 0], 8),
@@ -1450,7 +1450,7 @@ mod tests {
             local_data2: 200,
         };
         assert!(!cm.matches_ec(&make_rt(65001, 100)));
-        assert!(!cm.matches_standard((65001 << 16) | 100));
+        assert!(!cm.matches_standard((65001 << 16) | 0x0064));
     }
 
     #[test]
@@ -1461,7 +1461,7 @@ mod tests {
                 PolicyAction::Deny,
                 vec![
                     CommunityMatch::Standard {
-                        value: (65001 << 16) | 100,
+                        value: (65001 << 16) | 0x0064,
                     },
                     CommunityMatch::RouteTarget {
                         global: 65002,
@@ -1505,7 +1505,7 @@ mod tests {
             PolicyAction::Deny
         );
         // Standard match
-        let std_c = (65001u32 << 16) | 100;
+        let std_c = (65001u32 << 16) | 0x0064;
         assert_eq!(
             pl.evaluate(
                 v4_prefix([10, 0, 0, 0], 8),
@@ -1740,7 +1740,7 @@ mod tests {
                 le: None,
                 action: PolicyAction::Deny,
                 match_community: vec![CommunityMatch::Standard {
-                    value: (65001 << 16) | 100,
+                    value: (65001 << 16) | 0x0064,
                 }],
                 match_as_path: Some(AsPathRegex::new("_65200_").unwrap()),
                 match_rpki_validation: None,
@@ -1748,7 +1748,7 @@ mod tests {
             }],
             default_action: PolicyAction::Permit,
         };
-        let std_c = (65001u32 << 16) | 100;
+        let std_c = (65001u32 << 16) | 0x0064;
         // Both match → deny
         assert_eq!(
             pl.evaluate(
@@ -1832,8 +1832,8 @@ mod tests {
 
     #[test]
     fn apply_community_add_remove() {
-        let c1 = (65001u32 << 16) | 100;
-        let c2 = (65001u32 << 16) | 200;
+        let c1 = (65001u32 << 16) | 0x0064;
+        let c2 = (65001u32 << 16) | 0x00C8;
         let mut attrs = vec![PathAttribute::Communities(vec![c1])];
         let mods = RouteModifications {
             communities_add: vec![c2],
