@@ -748,7 +748,13 @@ impl Config {
         {
             let mut seen = std::collections::HashSet::new();
             for neighbor in &self.neighbors {
-                if !seen.insert(&neighbor.address) {
+                let addr = neighbor.address.parse::<IpAddr>().map_err(|e| {
+                    ConfigError::InvalidNeighborAddress {
+                        value: neighbor.address.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
+                if !seen.insert(addr) {
                     return Err(ConfigError::InvalidNeighborAddress {
                         value: neighbor.address.clone(),
                         reason: "duplicate neighbor address".to_string(),
@@ -758,13 +764,6 @@ impl Config {
         }
 
         for neighbor in &self.neighbors {
-            neighbor.address.parse::<IpAddr>().map_err(|e| {
-                ConfigError::InvalidNeighborAddress {
-                    value: neighbor.address.clone(),
-                    reason: e.to_string(),
-                }
-            })?;
-
             let hold_time = neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
             if hold_time != 0 && hold_time < 3 {
                 return Err(ConfigError::InvalidHoldTime { value: hold_time });
@@ -1201,6 +1200,27 @@ address = "10.0.0.2"
 remote_asn = 65099
 "#,
             valid_toml()
+        );
+        let err = parse(&toml_str).unwrap_err();
+        match err {
+            ConfigError::InvalidNeighborAddress { reason, .. } => {
+                assert!(reason.contains("duplicate"));
+            }
+            other => panic!("expected InvalidNeighborAddress, got {other}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_neighbor_address_canonical_form_rejected() {
+        let base = valid_toml().replace("10.0.0.2", "::1");
+        let toml_str = format!(
+            r#"
+{base}
+
+[[neighbors]]
+address = "0:0:0:0:0:0:0:1"
+remote_asn = 65099
+"#
         );
         let err = parse(&toml_str).unwrap_err();
         match err {

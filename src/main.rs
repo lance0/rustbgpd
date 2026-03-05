@@ -573,10 +573,16 @@ async fn run(mut config: Config) {
                 if let Some(new_config) = reload_config(&path, &config, &peer_mgr_tx).await {
                     // Sync persister's snapshot so future gRPC mutations apply
                     // to the reloaded config, not the stale startup config.
-                    if let Some(ref mtx) = config_mutation_tx {
-                        let _ = mtx.send(ConfigMutation::ReplaceConfig(
-                            Box::new(new_config.clone()),
-                        )).await;
+                    if let Some(ref mtx) = config_mutation_tx
+                        && let Err(e) = mtx
+                            .send(ConfigMutation::ReplaceConfig(Box::new(new_config.clone())))
+                            .await
+                    {
+                        error!(
+                            error = %e,
+                            "failed to sync config persister after reload — keeping previous in-memory config"
+                        );
+                        continue;
                     }
                     config = new_config;
                 }
@@ -762,7 +768,32 @@ async fn reload_config(
         error!(error = %e, "failed to send reconcile command to peer manager");
         return None;
     }
-    let _ = reply_rx.await;
+    let reconcile = match reply_rx.await {
+        Ok(result) => result,
+        Err(e) => {
+            error!(
+                error = %e,
+                "peer manager dropped reconcile reply — keeping current config"
+            );
+            return None;
+        }
+    };
+
+    if !reconcile.is_success() {
+        for failure in &reconcile.failures {
+            warn!(
+                kind = ?failure.kind,
+                address = %failure.address,
+                error = %failure.error,
+                "config reload reconciliation operation failed"
+            );
+        }
+        error!(
+            failures = reconcile.failures.len(),
+            "config reload reconciliation incomplete — keeping current config"
+        );
+        return None;
+    }
 
     info!("config reload complete");
     Some(new_config)

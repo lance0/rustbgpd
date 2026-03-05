@@ -1,4 +1,5 @@
 use std::net::IpAddr;
+use std::time::Duration;
 
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{mpsc, oneshot};
@@ -7,6 +8,8 @@ use tonic::{Request, Response, Status};
 use crate::peer_types::{ConfigEvent, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
 use crate::proto;
 use rustbgpd_rib::RibUpdate;
+
+const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Parse a list of family strings from the gRPC proto into `(Afi, Safi)` pairs.
 #[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
@@ -51,6 +54,23 @@ impl NeighborService {
             config_tx,
         }
     }
+}
+
+async fn reserve_config_event_slot(
+    config_tx: Option<mpsc::Sender<ConfigEvent>>,
+) -> Result<Option<mpsc::OwnedPermit<ConfigEvent>>, Status> {
+    let Some(tx) = config_tx else {
+        return Ok(None);
+    };
+
+    let permit = tokio::time::timeout(CONFIG_PERSIST_RESERVE_TIMEOUT, tx.reserve_owned())
+        .await
+        .map_err(|_| {
+            Status::internal("config persistence queue busy — refusing mutation to avoid drift")
+        })?
+        .map_err(|_| Status::internal("config persistence unavailable"))?;
+
+    Ok(Some(permit))
 }
 
 async fn query_advertised_count(
@@ -178,8 +198,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             export_policy: None,
         };
 
-        // Clone before sending if we need to persist
-        let config_clone = self.config_tx.as_ref().map(|_| peer_config.clone());
+        // Reserve config persistence capacity before mutating runtime state.
+        // This makes AddNeighbor fail-fast when persistence is unavailable.
+        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
+        let persisted_config = persist_permit.as_ref().map(|_| peer_config.clone());
 
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -195,13 +217,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
             .map_err(Status::already_exists)?;
 
-        // Notify config persister of the successful add
-        if let (Some(tx), Some(cfg)) = (&self.config_tx, config_clone)
-            && tx.try_send(ConfigEvent::NeighborAdded(cfg)).is_err()
-        {
-            tracing::warn!(
-                "config persistence queue full or closed — neighbor add may not be persisted to disk"
-            );
+        // Persist only after successful runtime mutation.
+        if let (Some(permit), Some(cfg)) = (persist_permit, persisted_config) {
+            permit.send(ConfigEvent::NeighborAdded(cfg));
         }
 
         Ok(Response::new(proto::AddNeighborResponse {}))
@@ -217,6 +235,10 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .parse()
             .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
 
+        // Reserve config persistence capacity before mutating runtime state.
+        // This makes DeleteNeighbor fail-fast when persistence is unavailable.
+        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::DeletePeer {
@@ -231,13 +253,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(|_| Status::internal("peer manager dropped reply"))?
             .map_err(Status::not_found)?;
 
-        // Notify config persister of the successful delete
-        if let Some(ref tx) = self.config_tx
-            && tx.try_send(ConfigEvent::NeighborDeleted(address)).is_err()
-        {
-            tracing::warn!(
-                "config persistence queue full or closed — neighbor delete may not be persisted to disk"
-            );
+        if let Some(permit) = persist_permit {
+            permit.send(ConfigEvent::NeighborDeleted(address));
         }
 
         Ok(Response::new(proto::DeleteNeighborResponse {}))
@@ -406,6 +423,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 mod tests {
     use super::*;
     use proto::neighbor_service_server::NeighborService as _;
+    use tokio::sync::mpsc::error::TryRecvError;
 
     fn make_service() -> NeighborService {
         let (tx, _rx) = mpsc::channel(16);
@@ -570,5 +588,44 @@ mod tests {
         let state = peer_info_to_proto(&info);
         let config = state.config.unwrap();
         assert_eq!(config.families, vec!["ipv4_unicast", "ipv6_unicast"]);
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_fails_when_config_persistence_unavailable() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, config_rx) = mpsc::channel(1);
+        drop(config_rx);
+        let svc = NeighborService::new(peer_tx, rib_tx, Some(config_tx));
+
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn delete_neighbor_fails_when_config_persistence_unavailable() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (config_tx, config_rx) = mpsc::channel(1);
+        drop(config_rx);
+        let svc = NeighborService::new(peer_tx, rib_tx, Some(config_tx));
+
+        let req = Request::new(proto::DeleteNeighborRequest {
+            address: "10.0.0.2".into(),
+        });
+        let err = svc.delete_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

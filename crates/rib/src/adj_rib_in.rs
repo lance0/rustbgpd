@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
@@ -13,6 +13,8 @@ use crate::route::{FlowSpecRoute, Route};
 pub struct AdjRibIn {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
+    /// Route keys where `LLGR_STALE` was injected locally by this daemon.
+    llgr_stale_local_tags: HashSet<(Prefix, u32)>,
     /// `FlowSpec` routes keyed by `(rule, path_id)`.
     flowspec_routes: HashMap<(FlowSpecRule, u32), FlowSpecRoute>,
 }
@@ -23,6 +25,7 @@ impl AdjRibIn {
         Self {
             peer,
             routes: HashMap::new(),
+            llgr_stale_local_tags: HashSet::new(),
             flowspec_routes: HashMap::new(),
         }
     }
@@ -33,15 +36,20 @@ impl AdjRibIn {
     }
 
     pub fn insert(&mut self, route: Route) {
-        self.routes.insert((route.prefix, route.path_id), route);
+        let key = (route.prefix, route.path_id);
+        self.llgr_stale_local_tags.remove(&key);
+        self.routes.insert(key, route);
     }
 
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
-        self.routes.remove(&(*prefix, path_id)).is_some()
+        let key = (*prefix, path_id);
+        self.llgr_stale_local_tags.remove(&key);
+        self.routes.remove(&key).is_some()
     }
 
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.llgr_stale_local_tags.clear();
     }
 
     #[must_use]
@@ -84,13 +92,17 @@ impl AdjRibIn {
 
     /// Clear the stale flag on routes matching the given address family.
     pub fn clear_stale(&mut self, family: (Afi, Safi)) {
-        for route in self.routes.values_mut() {
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.routes {
             if route_matches_family(route, family) {
                 route.is_stale = false;
                 route.is_llgr_stale = false;
-                remove_llgr_stale_community(route);
+                if self.llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(*key);
+                }
             }
         }
+        self.clear_local_llgr_stale_community(&clear_local_llgr);
     }
 
     /// Remove all routes whose family is NOT in `keep`, returning their
@@ -106,6 +118,7 @@ impl AdjRibIn {
         let mut prefixes = Vec::new();
         for key in &to_remove {
             prefixes.push(key.0);
+            self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
         }
         prefixes
@@ -122,6 +135,7 @@ impl AdjRibIn {
         let mut prefixes = Vec::new();
         for key in &stale {
             prefixes.push(key.0);
+            self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
         }
         prefixes
@@ -139,6 +153,7 @@ impl AdjRibIn {
         let mut prefixes = Vec::new();
         for key in &stale {
             prefixes.push(key.0);
+            self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
         }
         prefixes
@@ -167,6 +182,7 @@ impl AdjRibIn {
             .collect();
         let mut affected: Vec<Prefix> = no_llgr_keys.iter().map(|(p, _)| *p).collect();
         for key in &no_llgr_keys {
+            self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
         }
 
@@ -183,11 +199,15 @@ impl AdjRibIn {
                 {
                     if !comms.contains(&COMMUNITY_LLGR_STALE) {
                         comms.push(COMMUNITY_LLGR_STALE);
+                        self.llgr_stale_local_tags
+                            .insert((route.prefix, route.path_id));
                     }
                 } else {
                     route
                         .attributes
                         .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    self.llgr_stale_local_tags
+                        .insert((route.prefix, route.path_id));
                 }
                 affected.push(route.prefix);
             }
@@ -207,6 +227,7 @@ impl AdjRibIn {
         let mut prefixes = Vec::new();
         for key in &stale {
             prefixes.push(key.0);
+            self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
         }
         prefixes
@@ -215,12 +236,16 @@ impl AdjRibIn {
     /// Clear the LLGR-stale flag on routes matching the given family.
     /// Called when `EoR` is received during LLGR phase.
     pub fn clear_llgr_stale(&mut self, family: (Afi, Safi)) {
-        for route in self.routes.values_mut() {
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.routes {
             if route_matches_family(route, family) {
                 route.is_llgr_stale = false;
-                remove_llgr_stale_community(route);
+                if self.llgr_stale_local_tags.contains(key) {
+                    clear_local_llgr.push(*key);
+                }
             }
         }
+        self.clear_local_llgr_stale_community(&clear_local_llgr);
     }
 
     // --- FlowSpec methods ---
@@ -297,6 +322,15 @@ impl AdjRibIn {
             }
         }
     }
+
+    fn clear_local_llgr_stale_community(&mut self, keys: &[(Prefix, u32)]) {
+        for key in keys {
+            if let Some(route) = self.routes.get_mut(key) {
+                remove_llgr_stale_community(route);
+            }
+            self.llgr_stale_local_tags.remove(key);
+        }
+    }
 }
 
 /// Remove the `LLGR_STALE` community from a route's attributes, if present.
@@ -323,7 +357,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::time::Instant;
 
-    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
+    use rustbgpd_wire::{COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, PathAttribute};
 
     use super::*;
 
@@ -574,5 +608,48 @@ mod tests {
 
         let routes: Vec<_> = rib.iter_prefix(&Prefix::V4(prefix)).collect();
         assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn clear_llgr_stale_preserves_peer_originated_llgr_stale_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+
+        let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        route.is_llgr_stale = true;
+        route
+            .attributes
+            .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+        rib.insert(route);
+
+        rib.clear_llgr_stale((Afi::Ipv4, Safi::Unicast));
+        let route = rib.get(&Prefix::V4(prefix), 0).unwrap();
+        assert!(!route.is_llgr_stale);
+        assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn clear_llgr_stale_removes_locally_added_llgr_stale_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+        let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
+        route.is_stale = true;
+        rib.insert(route);
+
+        rib.promote_to_llgr_stale((Afi::Ipv4, Safi::Unicast));
+        assert!(
+            rib.get(&Prefix::V4(prefix), 0)
+                .unwrap()
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+
+        rib.clear_llgr_stale((Afi::Ipv4, Safi::Unicast));
+        let route = rib.get(&Prefix::V4(prefix), 0).unwrap();
+        assert!(!route.is_llgr_stale);
+        assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
     }
 }

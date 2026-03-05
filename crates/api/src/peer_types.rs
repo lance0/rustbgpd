@@ -7,6 +7,36 @@ use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 
+/// Kind of reconciliation failure returned to config reload callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconcileFailureKind {
+    Add,
+    Remove,
+    ChangeRemove,
+    ChangeAdd,
+}
+
+/// One failed peer reconciliation operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcileFailure {
+    pub kind: ReconcileFailureKind,
+    pub address: IpAddr,
+    pub error: String,
+}
+
+/// Result of a peer reconciliation run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReconcileResult {
+    pub failures: Vec<ReconcileFailure>,
+}
+
+impl ReconcileResult {
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        self.failures.is_empty()
+    }
+}
+
 /// Commands sent to the `PeerManager` task.
 pub enum PeerManagerCommand {
     AddPeer {
@@ -47,7 +77,7 @@ pub enum PeerManagerCommand {
         added: Vec<PeerManagerNeighborConfig>,
         removed: Vec<IpAddr>,
         changed: Vec<PeerManagerNeighborConfig>,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<ReconcileResult>,
     },
     Shutdown,
 }

@@ -105,6 +105,7 @@ Items identified during review that are not correctness bugs but improve strictn
 - [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
 - [ ] **Duplicate BMP collector address detection** — two collectors with the same address are accepted without warning, resulting in duplicate data streams
 - [ ] **CLI gRPC integration tests** — `rustbgpctl` has parser/format tests but no mock-server integration tests for command-to-RPC behavior
+- [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
 
 ### P1 — Core Protocol Gaps
 
@@ -132,7 +133,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 
 Features that improve day-to-day operations.
 
-- [ ] **Config persistence** — write gRPC mutations (AddNeighbor, etc.) back to TOML so they survive restarts
+- [x] **Config persistence** — gRPC neighbor add/delete mutations persist to TOML and SIGHUP reload reconciles neighbor deltas
 - [x] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); per-collector TCP client with reconnect, fan-out manager, raw PDU capture (ADR-0041)
 - [ ] **MRT dump export** (RFC 6396) — TABLE_DUMP_V2 for offline analysis and archival
 

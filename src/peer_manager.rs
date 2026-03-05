@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
-use rustbgpd_api::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
+use rustbgpd_api::peer_types::{
+    PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig, ReconcileFailure,
+    ReconcileFailureKind, ReconcileResult,
+};
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::PolicyChain;
@@ -469,11 +472,21 @@ impl PeerManager {
         added: Vec<PeerManagerNeighborConfig>,
         removed: Vec<IpAddr>,
         changed: Vec<PeerManagerNeighborConfig>,
-    ) {
+    ) -> ReconcileResult {
+        let mut result = ReconcileResult::default();
+        let added_count = added.len();
+        let removed_count = removed.len();
+        let changed_count = changed.len();
+
         // Remove peers
         for addr in &removed {
             if let Err(e) = self.delete_peer(*addr).await {
                 warn!(%addr, error = %e, "reconcile: failed to remove peer");
+                result.failures.push(ReconcileFailure {
+                    kind: ReconcileFailureKind::Remove,
+                    address: *addr,
+                    error: e,
+                });
             }
         }
         // Changed peers: delete then re-add
@@ -481,9 +494,19 @@ impl PeerManager {
             let addr = cfg.address;
             if let Err(e) = self.delete_peer(addr).await {
                 warn!(%addr, error = %e, "reconcile: failed to remove changed peer");
+                result.failures.push(ReconcileFailure {
+                    kind: ReconcileFailureKind::ChangeRemove,
+                    address: addr,
+                    error: e,
+                });
             }
             if let Err(e) = self.add_peer(cfg.clone()).await {
                 warn!(%addr, error = %e, "reconcile: failed to re-add changed peer");
+                result.failures.push(ReconcileFailure {
+                    kind: ReconcileFailureKind::ChangeAdd,
+                    address: addr,
+                    error: e,
+                });
             }
         }
         // Add new peers
@@ -491,12 +514,21 @@ impl PeerManager {
             let addr = cfg.address;
             if let Err(e) = self.add_peer(cfg).await {
                 warn!(%addr, error = %e, "reconcile: failed to add new peer");
+                result.failures.push(ReconcileFailure {
+                    kind: ReconcileFailureKind::Add,
+                    address: addr,
+                    error: e,
+                });
             }
         }
         info!(
-            added = changed.len() + removed.len(),
+            added = added_count,
+            removed = removed_count,
+            changed = changed_count,
+            failures = result.failures.len(),
             "peer reconciliation complete"
         );
+        result
     }
 
     fn bmp_peer_info(
@@ -605,8 +637,8 @@ impl PeerManager {
                             self.handle_inbound(stream, peer_addr).await;
                         }
                         PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {
-                            self.reconcile_peers(added, removed, changed).await;
-                            let _ = reply.send(());
+                            let result = self.reconcile_peers(added, removed, changed).await;
+                            let _ = reply.send(result);
                         }
                         PeerManagerCommand::Shutdown => {
                             info!("peer manager shutting down {} peers", self.peers.len());

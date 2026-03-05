@@ -36,6 +36,10 @@ resolved.
 - **CLI lacks gRPC integration tests.** `rustbgpctl` has parser/formatter
   coverage but does not yet run mock-server integration tests for command ↔ RPC
   behavior.
+- **SIGHUP reconcile is not transactional.** Reload now logs structured
+  per-peer failures and keeps the prior in-memory config snapshot when
+  reconciliation is incomplete, but runtime peer changes applied before a
+  later failure are not rolled back automatically.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.

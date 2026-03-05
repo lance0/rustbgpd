@@ -86,6 +86,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Neighbor gRPC mutations are now fail-fast when persistence is unavailable.**
+  `AddNeighbor` and `DeleteNeighbor` reserve config-persistence queue capacity
+  before mutating runtime state. If the persistence channel is busy/closed, the
+  RPC fails with `INTERNAL` instead of applying an unpersisted runtime change.
+- **SIGHUP reload no longer silently accepts partial reconcile failures.**
+  `ReconcilePeers` now returns structured per-peer failures; reload logs each
+  failed operation and keeps the previous in-memory config snapshot when
+  reconciliation is incomplete.
+- **LLGR_STALE community provenance preserved.** Adj-RIB-In now tracks which
+  `LLGR_STALE` communities were injected locally during LLGR promotion and
+  only removes those on stale clear/EoR. Peer-originated `LLGR_STALE`
+  communities are preserved.
+- **Neighbor duplicate detection uses canonical IP identity.** Config
+  validation now detects duplicates by parsed `IpAddr` (e.g., `::1` and
+  `0:0:0:0:0:0:0:1` are treated as the same neighbor address).
 - **BMP Termination on coordinated shutdown.** Main runtime now sends an
   explicit BMP shutdown control event, then drains BMP manager/client tasks
   with bounded waits so connected collectors receive BMP Termination (type 5,
