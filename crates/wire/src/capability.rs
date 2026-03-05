@@ -93,6 +93,17 @@ pub struct ExtendedNextHopFamily {
     pub next_hop_afi: Afi,
 }
 
+/// Per-AFI/SAFI entry in the Long-Lived Graceful Restart capability (RFC 9494).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LlgrFamily {
+    pub afi: Afi,
+    pub safi: Safi,
+    /// Whether the peer preserved forwarding state for this family during LLGR.
+    pub forwarding_preserved: bool,
+    /// Long-lived stale time in seconds (24-bit, max `16_777_215` ≈ 194 days).
+    pub stale_time: u32,
+}
+
 /// BGP capability as negotiated in OPEN optional parameters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
@@ -116,6 +127,8 @@ pub enum Capability {
     EnhancedRouteRefresh,
     /// RFC 8654: Extended Messages (raise max message length to 65535).
     ExtendedMessage,
+    /// RFC 9494: Long-Lived Graceful Restart.
+    LongLivedGracefulRestart(Vec<LlgrFamily>),
     /// RFC 7911: Add-Path — advertise/receive multiple paths per prefix.
     AddPath(Vec<AddPathFamily>),
     /// RFC 6793: 4-Byte AS Number.
@@ -272,6 +285,47 @@ impl Capability {
                     families,
                 })
             }
+            capability_code::LONG_LIVED_GRACEFUL_RESTART => {
+                // RFC 9494: repeated entries of AFI(2) + SAFI(1) + flags(1) + stale_time(3) = 7 bytes each
+                if !usize::from(length).is_multiple_of(7) {
+                    let data = buf.copy_to_bytes(usize::from(length));
+                    return Ok(Capability::Unknown { code, data });
+                }
+                let entry_count = usize::from(length) / 7;
+                let raw_data = buf.copy_to_bytes(usize::from(length));
+                let mut cursor = raw_data.clone();
+                let mut families = Vec::with_capacity(entry_count);
+                let mut all_valid = true;
+                for _ in 0..entry_count {
+                    let afi_raw = cursor.get_u16();
+                    let safi_raw = cursor.get_u8();
+                    let flags = cursor.get_u8();
+                    // stale_time is 24-bit (3 bytes, big-endian)
+                    let st_hi = cursor.get_u8();
+                    let st_lo = cursor.get_u16();
+                    let stale_time = (u32::from(st_hi) << 16) | u32::from(st_lo);
+                    if let (Some(afi), Some(safi)) =
+                        (Afi::from_u16(afi_raw), Safi::from_u8(safi_raw))
+                    {
+                        families.push(LlgrFamily {
+                            afi,
+                            safi,
+                            forwarding_preserved: (flags & 0x80) != 0,
+                            stale_time,
+                        });
+                    } else {
+                        all_valid = false;
+                    }
+                }
+                if all_valid {
+                    Ok(Capability::LongLivedGracefulRestart(families))
+                } else {
+                    Ok(Capability::Unknown {
+                        code,
+                        data: raw_data,
+                    })
+                }
+            }
             capability_code::ADD_PATH => {
                 // RFC 7911 §4: value is N entries of (AFI:2 + SAFI:1 + mode:1) = 4 bytes each
                 if length == 0 || !usize::from(length).is_multiple_of(4) {
@@ -409,6 +463,27 @@ impl Capability {
                     buf.put_u8(if fam.forwarding_preserved { 0x80 } else { 0 });
                 }
             }
+            Capability::LongLivedGracefulRestart(families) => {
+                let value_len = families.len() * 7;
+                if value_len > 255 {
+                    return Err(EncodeError::ValueOutOfRange {
+                        field: "llgr_capability_length",
+                        value: value_len.to_string(),
+                    });
+                }
+                buf.put_u8(capability_code::LONG_LIVED_GRACEFUL_RESTART);
+                #[expect(clippy::cast_possible_truncation)]
+                buf.put_u8(value_len as u8);
+                for fam in families {
+                    buf.put_u16(fam.afi as u16);
+                    buf.put_u8(fam.safi as u8);
+                    buf.put_u8(if fam.forwarding_preserved { 0x80 } else { 0 });
+                    // stale_time is 24-bit (3 bytes, big-endian)
+                    #[expect(clippy::cast_possible_truncation)]
+                    buf.put_u8((fam.stale_time >> 16) as u8);
+                    buf.put_u16((fam.stale_time & 0xFFFF) as u16);
+                }
+            }
             Capability::AddPath(families) => {
                 let value_len = families.len() * 4;
                 if value_len > 255 {
@@ -456,6 +531,7 @@ impl Capability {
             Self::EnhancedRouteRefresh => capability_code::ENHANCED_ROUTE_REFRESH,
             Self::ExtendedNextHop(_) => capability_code::EXTENDED_NEXT_HOP,
             Self::ExtendedMessage => capability_code::EXTENDED_MESSAGE,
+            Self::LongLivedGracefulRestart(_) => capability_code::LONG_LIVED_GRACEFUL_RESTART,
             Self::AddPath(_) => capability_code::ADD_PATH,
             Self::GracefulRestart { .. } => capability_code::GRACEFUL_RESTART,
             Self::FourOctetAs { .. } => capability_code::FOUR_OCTET_AS,
@@ -470,6 +546,7 @@ impl Capability {
             Self::MultiProtocol { .. } | Self::FourOctetAs { .. } => 4,
             Self::RouteRefresh | Self::EnhancedRouteRefresh | Self::ExtendedMessage => 0,
             Self::ExtendedNextHop(families) => families.len() * 6,
+            Self::LongLivedGracefulRestart(families) => families.len() * 7,
             Self::AddPath(families) => families.len() * 4,
             Self::GracefulRestart { families, .. } => 2 + families.len() * 4,
             Self::Unknown { data, .. } => data.len(),
@@ -1150,5 +1227,79 @@ mod tests {
         let cap = Capability::decode(&mut buf).unwrap();
         // One invalid entry → entire capability preserved as Unknown
         assert!(matches!(cap, Capability::Unknown { code: 69, .. }));
+    }
+
+    #[test]
+    fn llgr_capability_roundtrip() {
+        let families = vec![
+            LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: true,
+                stale_time: 86400,
+            },
+            LlgrFamily {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+                stale_time: 3600,
+            },
+        ];
+        let cap = Capability::LongLivedGracefulRestart(families);
+
+        let mut buf = bytes::BytesMut::new();
+        cap.encode(&mut buf).unwrap();
+        let mut frozen = buf.freeze();
+        let decoded = Capability::decode(&mut frozen).unwrap();
+
+        match decoded {
+            Capability::LongLivedGracefulRestart(fams) => {
+                assert_eq!(fams.len(), 2);
+                assert_eq!(fams[0].afi, Afi::Ipv4);
+                assert_eq!(fams[0].safi, Safi::Unicast);
+                assert!(fams[0].forwarding_preserved);
+                assert_eq!(fams[0].stale_time, 86400);
+                assert_eq!(fams[1].afi, Afi::Ipv6);
+                assert_eq!(fams[1].safi, Safi::Unicast);
+                assert!(!fams[1].forwarding_preserved);
+                assert_eq!(fams[1].stale_time, 3600);
+            }
+            other => panic!("expected LongLivedGracefulRestart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llgr_capability_max_stale_time() {
+        let cap = Capability::LongLivedGracefulRestart(vec![LlgrFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+            stale_time: 0x00FF_FFFF, // 24-bit max
+        }]);
+
+        let mut buf = bytes::BytesMut::new();
+        cap.encode(&mut buf).unwrap();
+        let mut frozen = buf.freeze();
+        let decoded = Capability::decode(&mut frozen).unwrap();
+
+        match decoded {
+            Capability::LongLivedGracefulRestart(fams) => {
+                assert_eq!(fams[0].stale_time, 0x00FF_FFFF);
+            }
+            other => panic!("expected LongLivedGracefulRestart, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llgr_capability_empty() {
+        let cap = Capability::LongLivedGracefulRestart(vec![]);
+        let mut buf = bytes::BytesMut::new();
+        cap.encode(&mut buf).unwrap();
+        let mut frozen = buf.freeze();
+        let decoded = Capability::decode(&mut frozen).unwrap();
+        assert!(matches!(
+            decoded,
+            Capability::LongLivedGracefulRestart(fams) if fams.is_empty()
+        ));
     }
 }

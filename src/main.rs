@@ -386,6 +386,11 @@ async fn run(mut config: Config) {
                             graceful_restart: Some(cfg.graceful_restart),
                             gr_restart_time: Some(cfg.gr_restart_time),
                             gr_stale_routes_time: Some(cfg.gr_stale_routes_time),
+                            llgr_stale_time: if cfg.llgr_stale_time > 0 {
+                                Some(cfg.llgr_stale_time)
+                            } else {
+                                None
+                            },
                             local_ipv6_nexthop: cfg.local_ipv6_nexthop.map(|a| a.to_string()),
                             route_reflector_client: cfg.route_reflector_client,
                             route_server_client: cfg.route_server_client,
@@ -517,6 +522,7 @@ async fn run(mut config: Config) {
                     graceful_restart: transport_config.peer.graceful_restart,
                     gr_restart_time: transport_config.peer.gr_restart_time,
                     gr_stale_routes_time: transport_config.gr_stale_routes_time,
+                    llgr_stale_time: transport_config.llgr_stale_time,
                     gr_restart_eligible: true,
                     local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
                     route_reflector_client: transport_config.route_reflector_client,
@@ -656,6 +662,7 @@ fn build_peer_mgr_config(
         graceful_restart: tc.peer.graceful_restart,
         gr_restart_time: tc.peer.gr_restart_time,
         gr_stale_routes_time: tc.gr_stale_routes_time,
+        llgr_stale_time: tc.llgr_stale_time,
         gr_restart_eligible: false,
         local_ipv6_nexthop: tc.local_ipv6_nexthop,
         route_reflector_client: tc.route_reflector_client,
@@ -817,6 +824,7 @@ mod tests {
                     graceful_restart: Some(true),
                     gr_restart_time: Some(90),
                     gr_stale_routes_time: None,
+                    llgr_stale_time: None,
                     local_ipv6_nexthop: None,
                     route_reflector_client: false,
                     route_server_client: false,
@@ -838,6 +846,7 @@ mod tests {
                     graceful_restart: Some(true),
                     gr_restart_time: Some(180),
                     gr_stale_routes_time: None,
+                    llgr_stale_time: None,
                     local_ipv6_nexthop: None,
                     route_reflector_client: false,
                     route_server_client: false,
@@ -859,6 +868,7 @@ mod tests {
                     graceful_restart: Some(false),
                     gr_restart_time: Some(300),
                     gr_stale_routes_time: None,
+                    llgr_stale_time: None,
                     local_ipv6_nexthop: None,
                     route_reflector_client: false,
                     route_server_client: false,

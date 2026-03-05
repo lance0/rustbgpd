@@ -87,6 +87,8 @@ impl AdjRibIn {
         for route in self.routes.values_mut() {
             if route_matches_family(route, family) {
                 route.is_stale = false;
+                route.is_llgr_stale = false;
+                remove_llgr_stale_community(route);
             }
         }
     }
@@ -123,6 +125,85 @@ impl AdjRibIn {
             self.routes.remove(key);
         }
         prefixes
+    }
+
+    /// Promote GR-stale routes to LLGR-stale for the given family (RFC 9494).
+    ///
+    /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
+    /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
+    ///   `LLGR_STALE` community added.
+    ///
+    /// Returns prefixes affected (for best-path recalc).
+    pub fn promote_to_llgr_stale(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
+        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR, PathAttribute};
+
+        // First pass: remove routes with NO_LLGR community
+        let no_llgr_keys: Vec<(Prefix, u32)> = self
+            .routes
+            .iter()
+            .filter(|(_, r)| {
+                r.is_stale
+                    && route_matches_family(r, family)
+                    && r.communities().contains(&COMMUNITY_NO_LLGR)
+            })
+            .map(|(k, _)| *k)
+            .collect();
+        let mut affected: Vec<Prefix> = no_llgr_keys.iter().map(|(p, _)| *p).collect();
+        for key in &no_llgr_keys {
+            self.routes.remove(key);
+        }
+
+        // Second pass: promote remaining stale routes to LLGR-stale
+        for route in self.routes.values_mut() {
+            if route.is_stale && route_matches_family(route, family) {
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                // Add LLGR_STALE community
+                if let Some(PathAttribute::Communities(comms)) = route
+                    .attributes
+                    .iter_mut()
+                    .find(|a| matches!(a, PathAttribute::Communities(_)))
+                {
+                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
+                        comms.push(COMMUNITY_LLGR_STALE);
+                    }
+                } else {
+                    route
+                        .attributes
+                        .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                }
+                affected.push(route.prefix);
+            }
+        }
+
+        affected
+    }
+
+    /// Remove all LLGR-stale routes, returning their prefixes.
+    pub fn sweep_llgr_stale(&mut self) -> Vec<Prefix> {
+        let stale: Vec<(Prefix, u32)> = self
+            .routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale)
+            .map(|(k, _)| *k)
+            .collect();
+        let mut prefixes = Vec::new();
+        for key in &stale {
+            prefixes.push(key.0);
+            self.routes.remove(key);
+        }
+        prefixes
+    }
+
+    /// Clear the LLGR-stale flag on routes matching the given family.
+    /// Called when `EoR` is received during LLGR phase.
+    pub fn clear_llgr_stale(&mut self, family: (Afi, Safi)) {
+        for route in self.routes.values_mut() {
+            if route_matches_family(route, family) {
+                route.is_llgr_stale = false;
+                remove_llgr_stale_community(route);
+            }
+        }
     }
 
     // --- FlowSpec methods ---
@@ -201,6 +282,16 @@ impl AdjRibIn {
     }
 }
 
+/// Remove the `LLGR_STALE` community from a route's attributes, if present.
+fn remove_llgr_stale_community(route: &mut Route) {
+    use rustbgpd_wire::{COMMUNITY_LLGR_STALE, PathAttribute};
+    for attr in &mut route.attributes {
+        if let PathAttribute::Communities(comms) = attr {
+            comms.retain(|&c| c != COMMUNITY_LLGR_STALE);
+        }
+    }
+}
+
 /// Check whether a route's prefix matches an AFI/SAFI family.
 fn route_matches_family(route: &Route, family: (Afi, Safi)) -> bool {
     family.1 == Safi::Unicast
@@ -229,6 +320,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -244,6 +336,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }

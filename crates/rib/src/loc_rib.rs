@@ -228,6 +228,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -335,6 +336,7 @@ mod tests {
             origin_type,
             peer_router_id: Ipv4Addr::new(1, 1, 1, router_id_oct),
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
         }
     }

@@ -65,6 +65,8 @@ pub struct PeerManagerNeighborConfig {
     pub graceful_restart: bool,
     pub gr_restart_time: u16,
     pub gr_stale_routes_time: u64,
+    /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.
+    pub llgr_stale_time: u32,
     /// Whether this peer should participate in the current local
     /// restarting-speaker GR window (static startup peers only).
     pub gr_restart_eligible: bool,

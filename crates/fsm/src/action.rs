@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use rustbgpd_wire::{
-    AddPathMode, Afi, Capability, GracefulRestartFamily, NotificationMessage, OpenMessage, Safi,
+    AddPathMode, Afi, Capability, GracefulRestartFamily, LlgrFamily, NotificationMessage,
+    OpenMessage, Safi,
 };
 
 use crate::state::SessionState;
@@ -52,6 +53,10 @@ pub struct NegotiatedSession {
     /// AFI for that family. For this implementation the meaningful negotiated
     /// mapping is IPv4 unicast -> IPv6.
     pub extended_nexthop_families: HashMap<(Afi, Safi), Afi>,
+    /// Whether the peer advertised Long-Lived Graceful Restart (RFC 9494).
+    pub peer_llgr_capable: bool,
+    /// Per-family LLGR stale times from the peer's capability.
+    pub peer_llgr_families: Vec<LlgrFamily>,
     /// Per-AFI/SAFI Add-Path negotiated mode (RFC 7911).
     ///
     /// Only families where both sides agree are included. The mode

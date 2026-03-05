@@ -31,6 +31,8 @@ pub struct Route {
     pub peer_router_id: Ipv4Addr,
     /// Whether this route is stale due to a peer graceful restart.
     pub is_stale: bool,
+    /// Whether this route is in long-lived graceful restart stale phase (RFC 9494).
+    pub is_llgr_stale: bool,
     /// Add-Path path identifier (RFC 7911). 0 = no Add-Path / default path.
     pub path_id: u32,
     /// RPKI origin validation state (RFC 6811). Default: `NotFound`.
@@ -162,6 +164,7 @@ pub struct FlowSpecRoute {
     pub origin_type: RouteOrigin,
     pub peer_router_id: Ipv4Addr,
     pub is_stale: bool,
+    pub is_llgr_stale: bool,
     pub path_id: u32,
 }
 

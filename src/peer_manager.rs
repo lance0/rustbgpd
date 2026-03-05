@@ -98,6 +98,7 @@ impl PeerManager {
             families,
             graceful_restart: config.graceful_restart,
             gr_restart_time: config.gr_restart_time,
+            llgr_stale_time: config.llgr_stale_time,
             add_path_receive: config.add_path_receive,
             add_path_send: config.add_path_send,
             add_path_send_max: config.add_path_send_max,
@@ -107,6 +108,7 @@ impl PeerManager {
         transport.max_prefixes = config.max_prefixes;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport.gr_stale_routes_time = config.gr_stale_routes_time;
+        transport.llgr_stale_time = config.llgr_stale_time;
         transport.gr_restart_until = if config.gr_restart_eligible && config.graceful_restart {
             self.local_gr_restart_until
                 .filter(|deadline| *deadline > Instant::now())
@@ -656,6 +658,7 @@ mod tests {
             graceful_restart: true,
             gr_restart_time: 120,
             gr_stale_routes_time: 360,
+            llgr_stale_time: 0,
             gr_restart_eligible: false,
             local_ipv6_nexthop: None,
             route_reflector_client: false,

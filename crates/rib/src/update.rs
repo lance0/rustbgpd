@@ -103,6 +103,12 @@ pub enum RibUpdate {
         stale_routes_time: u64,
         /// All families from the peer's Graceful Restart capability.
         gr_families: Vec<(Afi, Safi)>,
+        /// Whether the peer supports Long-Lived Graceful Restart (RFC 9494).
+        peer_llgr_capable: bool,
+        /// Per-family LLGR stale times from the peer's capability.
+        peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
+        /// Our configured LLGR stale time (seconds). 0 = disabled.
+        llgr_stale_time: u32,
     },
     /// Query: return the number of prefixes in the Loc-RIB.
     QueryLocRibCount { reply: oneshot::Sender<usize> },

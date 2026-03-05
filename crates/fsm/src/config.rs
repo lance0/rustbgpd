@@ -2,7 +2,8 @@ use std::net::Ipv4Addr;
 
 use rustbgpd_wire::constants::AS_TRANS;
 use rustbgpd_wire::{
-    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily, Safi,
+    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily,
+    LlgrFamily, Safi,
 };
 
 /// Configuration for a single BGP peer session.
@@ -24,6 +25,8 @@ pub struct PeerConfig {
     pub graceful_restart: bool,
     /// Restart time advertised in GR capability (seconds, max 4095).
     pub gr_restart_time: u16,
+    /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.
+    pub llgr_stale_time: u32,
     /// Accept multiple paths per prefix from this peer (RFC 7911).
     pub add_path_receive: bool,
     /// Advertise multiple paths per prefix to this peer (RFC 7911).
@@ -54,6 +57,20 @@ impl PeerConfig {
                     })
                     .collect(),
             });
+        }
+        // LLGR requires GR — only advertise when both are enabled (RFC 9494 §3).
+        if self.graceful_restart && self.llgr_stale_time > 0 {
+            caps.push(Capability::LongLivedGracefulRestart(
+                self.families
+                    .iter()
+                    .map(|&(afi, safi)| LlgrFamily {
+                        afi,
+                        safi,
+                        forwarding_preserved: false,
+                        stale_time: self.llgr_stale_time,
+                    })
+                    .collect(),
+            ));
         }
         let add_path_caps = self.add_path_capabilities();
         if !add_path_caps.is_empty() {
@@ -151,6 +168,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            llgr_stale_time: 0,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,

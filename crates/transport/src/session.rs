@@ -656,6 +656,9 @@ impl PeerSession {
                                 restart_time: neg.peer_restart_time,
                                 stale_routes_time: self.config.gr_stale_routes_time,
                                 gr_families,
+                                peer_llgr_capable: neg.peer_llgr_capable,
+                                peer_llgr_families: neg.peer_llgr_families.clone(),
+                                llgr_stale_time: self.config.llgr_stale_time,
                             })
                         } else {
                             None
@@ -1402,6 +1405,7 @@ impl PeerSession {
                         .as_ref()
                         .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                     is_stale: false,
+                    is_llgr_stale: false,
                     path_id: entry.path_id,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 })
@@ -1485,6 +1489,7 @@ impl PeerSession {
                                         .as_ref()
                                         .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                     is_stale: false,
+                                    is_llgr_stale: false,
                                     path_id: 0,
                                 });
                             }
@@ -1527,6 +1532,7 @@ impl PeerSession {
                                     .as_ref()
                                     .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
                                 is_stale: false,
+                                is_llgr_stale: false,
                                 path_id: entry.path_id,
                                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                             });
@@ -2553,6 +2559,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            llgr_stale_time: 0,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
@@ -2578,6 +2585,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            llgr_stale_time: 0,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
@@ -2610,6 +2618,8 @@ mod tests {
             peer_restart_state: false,
             peer_restart_time: 0,
             peer_gr_families: vec![],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
             peer_route_refresh: false,
             peer_enhanced_route_refresh: false,
             peer_extended_message: false,
@@ -2635,6 +2645,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -2722,6 +2733,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -2870,6 +2882,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -2897,6 +2910,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -2944,6 +2958,7 @@ mod tests {
             origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
             peer_router_id: source_id,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -3065,6 +3080,7 @@ mod tests {
                 origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,
                 is_stale: false,
+                is_llgr_stale: false,
                 path_id: 0,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             }],
@@ -3126,6 +3142,7 @@ mod tests {
                 origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,
                 is_stale: false,
+                is_llgr_stale: false,
                 path_id: 0,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             }],
@@ -3171,6 +3188,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            llgr_stale_time: 0,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
@@ -3295,6 +3313,7 @@ mod tests {
                     origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
                     peer_router_id: Ipv4Addr::UNSPECIFIED,
                     is_stale: false,
+                    is_llgr_stale: false,
                     path_id: 0,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                 }],
@@ -3325,6 +3344,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            llgr_stale_time: 0,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,

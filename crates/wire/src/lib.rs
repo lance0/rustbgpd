@@ -45,7 +45,8 @@ pub mod validate;
 
 // Re-export primary public API
 pub use capability::{
-    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily, Safi,
+    AddPathFamily, AddPathMode, Afi, Capability, ExtendedNextHopFamily, GracefulRestartFamily,
+    LlgrFamily, Safi,
 };
 pub use constants::{EXTENDED_MAX_MESSAGE_LEN, MAX_MESSAGE_LEN};
 pub use error::{DecodeError, EncodeError};
@@ -108,6 +109,12 @@ pub use flowspec::{
     BitmaskMatch, FlowSpecAction, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv6PrefixOffset, NumericMatch,
 };
+
+// Well-known communities (RFC 1997 + RFC 9494)
+/// `LLGR_STALE` community (RFC 9494 §4.6): marks a route as long-lived stale.
+pub const COMMUNITY_LLGR_STALE: u32 = 0xFFFF_0006;
+/// `NO_LLGR` community (RFC 9494 §4.7): this route must not enter LLGR stale phase.
+pub const COMMUNITY_NO_LLGR: u32 = 0xFFFF_0007;
 
 // Re-export RPKI types
 // (RpkiValidation is defined above in this file)

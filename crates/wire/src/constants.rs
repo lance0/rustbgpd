@@ -67,6 +67,8 @@ pub mod capability_code {
     pub const ADD_PATH: u8 = 69;
     /// RFC 7313: Enhanced Route Refresh.
     pub const ENHANCED_ROUTE_REFRESH: u8 = 70;
+    /// RFC 9494: Long-Lived Graceful Restart.
+    pub const LONG_LIVED_GRACEFUL_RESTART: u8 = 71;
     /// RFC 6793: 4-Byte AS Number.
     pub const FOUR_OCTET_AS: u8 = 65;
 }

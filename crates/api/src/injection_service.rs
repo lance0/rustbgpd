@@ -157,6 +157,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             origin_type: RouteOrigin::Local,
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: req.path_id,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -268,6 +269,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             origin_type: RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
         };
 

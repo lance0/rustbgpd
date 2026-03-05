@@ -99,6 +99,20 @@ pub fn validate_open(
         })
         .unwrap_or_default();
 
+    // Extract Long-Lived Graceful Restart capability (RFC 9494).
+    // LLGR requires GR — if the peer didn't advertise GR, LLGR is ignored.
+    let (peer_llgr_capable, peer_llgr_families) = if peer_gr_capable {
+        open.capabilities
+            .iter()
+            .find_map(|c| match c {
+                Capability::LongLivedGracefulRestart(families) => Some((true, families.clone())),
+                _ => None,
+            })
+            .unwrap_or((false, Vec::new()))
+    } else {
+        (false, Vec::new())
+    };
+
     let peer_route_refresh = open
         .capabilities
         .iter()
@@ -154,6 +168,8 @@ pub fn validate_open(
         peer_restart_state,
         peer_restart_time,
         peer_gr_families,
+        peer_llgr_capable,
+        peer_llgr_families,
         peer_route_refresh,
         peer_enhanced_route_refresh,
         peer_extended_message,
@@ -312,6 +328,7 @@ mod tests {
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: false,
             gr_restart_time: 120,
+            llgr_stale_time: 0,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,

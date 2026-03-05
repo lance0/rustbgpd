@@ -20,6 +20,7 @@ fn test_config() -> PeerConfig {
         families: vec![(Afi::Ipv4, Safi::Unicast)],
         graceful_restart: false,
         gr_restart_time: 120,
+        llgr_stale_time: 0,
         add_path_receive: false,
         add_path_send: false,
         add_path_send_max: 0,

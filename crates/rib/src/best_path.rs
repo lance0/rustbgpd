@@ -17,10 +17,20 @@ fn rpki_preference(v: RpkiValidation) -> u8 {
     }
 }
 
+/// Three-tier stale ranking: fresh (0) > GR-stale (1) > LLGR-stale (2).
+/// Lower value = more preferred.
+fn stale_rank(route: &Route) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
 /// Compare two routes for best-path selection.
 ///
 /// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
-/// 0. Non-stale preferred over stale (RFC 4724 demotion)
+/// 0. Non-stale preferred over stale (RFC 4724 / RFC 9494 three-tier)
 /// 0.5. RPKI validation: Valid > `NotFound` > Invalid (RFC 6811)
 /// 1. Highest `LOCAL_PREF` (default 100)
 /// 2. Shortest `AS_PATH` length (default 0)
@@ -32,8 +42,8 @@ fn rpki_preference(v: RpkiValidation) -> u8 {
 /// 6. Lowest peer address (tiebreaker)
 #[must_use]
 pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
-    // 0. Non-stale preferred over stale (RFC 4724)
-    let cmp = a.is_stale.cmp(&b.is_stale);
+    // 0. Three-tier stale demotion: fresh > GR-stale > LLGR-stale (RFC 4724 + RFC 9494)
+    let cmp = stale_rank(a).cmp(&stale_rank(b));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -122,6 +132,7 @@ mod tests {
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -481,6 +492,7 @@ mod proptests {
                         origin_type,
                         peer_router_id: Ipv4Addr::UNSPECIFIED,
                         is_stale: false,
+                        is_llgr_stale: false,
                         path_id: 0,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                     }

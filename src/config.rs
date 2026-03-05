@@ -143,6 +143,11 @@ pub struct Neighbor {
     pub gr_restart_time: Option<u16>,
     /// Time to retain stale routes after peer restart (seconds). Default: 360.
     pub gr_stale_routes_time: Option<u64>,
+    /// Long-lived stale routes time (RFC 9494, seconds). Default: 0 (disabled).
+    /// When > 0, LLGR capability is advertised and routes enter a long-lived
+    /// stale phase instead of being purged when the GR timer expires.
+    /// Max: `16_777_215` (24-bit, ≈ 194 days).
+    pub llgr_stale_time: Option<u32>,
     /// Explicit IPv6 next-hop for eBGP advertisements when the TCP session
     /// is IPv4. If not set, the local IPv6 socket address is used (if
     /// available); otherwise IPv6 routes are suppressed for this peer.
@@ -807,6 +812,13 @@ impl Config {
                     reason: format!("gr_stale_routes_time {t} exceeds 3600 (1 hour max)"),
                 });
             }
+            if let Some(t) = neighbor.llgr_stale_time
+                && t > 16_777_215
+            {
+                return Err(ConfigError::InvalidGrConfig {
+                    reason: format!("llgr_stale_time {t} exceeds 16777215 (24-bit max)"),
+                });
+            }
 
             // Validate local_ipv6_nexthop if configured
             if let Some(ref nh) = neighbor.local_ipv6_nexthop {
@@ -1023,6 +1035,7 @@ impl Config {
                 families,
                 graceful_restart: neighbor.graceful_restart.unwrap_or(true),
                 gr_restart_time: neighbor.gr_restart_time.unwrap_or(120),
+                llgr_stale_time: neighbor.llgr_stale_time.unwrap_or(0),
                 add_path_receive: neighbor.add_path.as_ref().is_some_and(|c| c.receive),
                 add_path_send: neighbor.add_path.as_ref().is_some_and(|c| c.send),
                 add_path_send_max: neighbor
@@ -1042,6 +1055,7 @@ impl Config {
                 .as_ref()
                 .map(|s| s.parse::<Ipv6Addr>().expect("validated in Config::load"));
             transport.gr_stale_routes_time = neighbor.gr_stale_routes_time.unwrap_or(360);
+            transport.llgr_stale_time = neighbor.llgr_stale_time.unwrap_or(0);
             transport.route_server_client = neighbor.route_server_client;
 
             let label = neighbor
@@ -2767,6 +2781,7 @@ remote_asn = 65003
             graceful_restart: None,
             gr_restart_time: None,
             gr_stale_routes_time: None,
+            llgr_stale_time: None,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
             route_server_client: false,

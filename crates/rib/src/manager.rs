@@ -5,7 +5,9 @@ use std::sync::Arc;
 use rustbgpd_policy::{PolicyAction, PolicyChain, evaluate_chain};
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, RpkiValidation, Safi};
+use rustbgpd_wire::{
+    Afi, FlowSpecRule, LlgrFamily, Prefix, RouteRefreshSubtype, RpkiValidation, Safi,
+};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -25,6 +27,13 @@ const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// How long to wait for an inbound enhanced route refresh window to complete
 /// before sweeping unreplaced state.
 const ERR_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Per-peer LLGR configuration stored when `PeerGracefulRestart` is received.
+struct LlgrPeerConfig {
+    peer_llgr_capable: bool,
+    peer_llgr_families: Vec<LlgrFamily>,
+    local_llgr_stale_time: u32,
+}
 
 /// Safe cast from usize to i64 for gauge metrics.
 #[expect(clippy::cast_possible_wrap)]
@@ -73,6 +82,13 @@ pub struct RibManager {
     /// Configured stale-routes-time per GR peer (seconds), used to reset
     /// the timer on `PeerUp` during graceful restart.
     gr_stale_routes_time: HashMap<IpAddr, u64>,
+    /// Peers currently in LLGR stale phase (RFC 9494), keyed by peer address.
+    /// Value is the set of (AFI, SAFI) families in LLGR.
+    llgr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Deadlines for sweeping LLGR-stale routes per peer.
+    llgr_stale_deadlines: HashMap<IpAddr, tokio::time::Instant>,
+    /// Configured per-peer LLGR parameters, stored on `PeerGracefulRestart`.
+    llgr_peer_config: HashMap<IpAddr, LlgrPeerConfig>,
     /// Maximum Add-Path paths per prefix per peer (0 = single-best only).
     peer_add_path_send_max: HashMap<IpAddr, u32>,
     /// Families for which Add-Path Send/Both was negotiated per peer.
@@ -184,6 +200,9 @@ impl RibManager {
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
             gr_stale_routes_time: HashMap::new(),
+            llgr_peers: HashMap::new(),
+            llgr_stale_deadlines: HashMap::new(),
+            llgr_peer_config: HashMap::new(),
             peer_add_path_send_max: HashMap::new(),
             peer_add_path_send_families: HashMap::new(),
             vrp_table: None,
@@ -567,6 +586,7 @@ impl RibManager {
                         origin_type: best.origin_type,
                         peer_router_id: best.peer_router_id,
                         is_stale: false,
+                        is_llgr_stale: false,
                         path_id: 0,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
                     },
@@ -1541,7 +1561,17 @@ impl RibManager {
                 if self.gr_peers.remove(&peer).is_some() {
                     self.gr_stale_deadlines.remove(&peer);
                     self.gr_stale_routes_time.remove(&peer);
+                    self.llgr_peer_config.remove(&peer);
                     info!(%peer, "peer down during graceful restart — aborting GR");
+                    let peer_label = peer.to_string();
+                    self.metrics.set_gr_active(&peer_label, false);
+                    self.metrics.set_gr_stale_routes(&peer_label, 0);
+                }
+
+                // If LLGR was active for this peer, abort it
+                if self.llgr_peers.remove(&peer).is_some() {
+                    self.llgr_stale_deadlines.remove(&peer);
+                    info!(%peer, "peer down during LLGR — aborting LLGR");
                     let peer_label = peer.to_string();
                     self.metrics.set_gr_active(&peer_label, false);
                     self.metrics.set_gr_stale_routes(&peer_label, 0);
@@ -1600,6 +1630,18 @@ impl RibManager {
                         self.gr_stale_deadlines.insert(peer, deadline);
                     }
                     info!(%peer, "peer re-established during GR — waiting for End-of-RIB");
+                } else if self.llgr_peers.contains_key(&peer) {
+                    // Peer re-established during LLGR — promote LLGR families
+                    // back to GR-awaiting-EoR so EndOfRib clears the stale flag.
+                    if let Some(llgr_families) = self.llgr_peers.remove(&peer) {
+                        self.llgr_stale_deadlines.remove(&peer);
+                        self.gr_peers.insert(peer, llgr_families);
+                        // Use a generous deadline for EoR during LLGR re-establishment
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(360);
+                        self.gr_stale_deadlines.insert(peer, deadline);
+                        info!(%peer, "peer re-established during LLGR — waiting for End-of-RIB");
+                    }
                 }
 
                 debug!(%peer, "peer up — registering for outbound updates");
@@ -1717,8 +1759,9 @@ impl RibManager {
             RibUpdate::EndOfRib { peer, afi, safi } => {
                 info!(%peer, ?afi, ?safi, "received End-of-RIB");
                 let is_gr_peer = self.gr_peers.contains_key(&peer);
-                if !is_gr_peer {
-                    debug!(%peer, ?afi, ?safi, "End-of-RIB received without active GR state, ignoring");
+                let is_llgr_peer = self.llgr_peers.contains_key(&peer);
+                if !is_gr_peer && !is_llgr_peer {
+                    debug!(%peer, ?afi, ?safi, "End-of-RIB received without active GR/LLGR state, ignoring");
                 }
                 if is_gr_peer {
                     // Remove family from awaiting set
@@ -1756,6 +1799,44 @@ impl RibManager {
                         self.gr_peers.remove(&peer);
                         self.gr_stale_deadlines.remove(&peer);
                         self.gr_stale_routes_time.remove(&peer);
+                        self.llgr_peer_config.remove(&peer);
+                        self.metrics.set_gr_active(&peer_label, false);
+                        self.metrics.set_gr_stale_routes(&peer_label, 0);
+                    }
+                } else if is_llgr_peer {
+                    // EoR during LLGR phase — clear LLGR-stale flag for this family
+                    if let Some(awaiting) = self.llgr_peers.get_mut(&peer) {
+                        awaiting.remove(&(afi, safi));
+                    }
+
+                    // Clear LLGR-stale flag on this family's routes
+                    if let Some(rib) = self.ribs.get_mut(&peer) {
+                        rib.clear_llgr_stale((afi, safi));
+                    }
+
+                    // Recompute best paths — routes are no longer demoted
+                    let affected: HashSet<Prefix> = self
+                        .ribs
+                        .get(&peer)
+                        .map(|rib| rib.iter().map(|r| r.prefix).collect())
+                        .unwrap_or_default();
+                    let changed = self.recompute_best(&affected);
+                    self.distribute_changes(&changed, &affected);
+
+                    let peer_label = peer.to_string();
+                    let llgr_stale_count = self
+                        .ribs
+                        .get(&peer)
+                        .map_or(0, |rib| rib.iter().filter(|r| r.is_llgr_stale).count());
+                    self.metrics
+                        .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_count));
+
+                    // If all LLGR families received EoR, LLGR is complete
+                    let all_done = self.llgr_peers.get(&peer).is_some_and(HashSet::is_empty);
+                    if all_done {
+                        info!(%peer, "LLGR complete — all End-of-RIB received");
+                        self.llgr_peers.remove(&peer);
+                        self.llgr_stale_deadlines.remove(&peer);
                         self.metrics.set_gr_active(&peer_label, false);
                         self.metrics.set_gr_stale_routes(&peer_label, 0);
                     }
@@ -1806,8 +1887,11 @@ impl RibManager {
                 restart_time,
                 stale_routes_time,
                 gr_families,
+                peer_llgr_capable,
+                peer_llgr_families,
+                llgr_stale_time,
             } => {
-                info!(%peer, restart_time, stale_routes_time, "peer entered graceful restart");
+                info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
 
                 let mut affected = HashSet::new();
 
@@ -1862,6 +1946,18 @@ impl RibManager {
                 // Record awaiting families
                 self.gr_peers
                     .insert(peer, gr_families.into_iter().collect());
+
+                // Store LLGR config for two-phase timer
+                if peer_llgr_capable && llgr_stale_time > 0 {
+                    self.llgr_peer_config.insert(
+                        peer,
+                        LlgrPeerConfig {
+                            peer_llgr_capable,
+                            peer_llgr_families,
+                            local_llgr_stale_time: llgr_stale_time,
+                        },
+                    );
+                }
 
                 // Metrics
                 let peer_label = peer.to_string();
@@ -1947,13 +2043,69 @@ impl RibManager {
     }
 
     /// Sweep stale routes for a peer whose GR timer has expired.
+    ///
+    /// Two-phase timer (RFC 9494): if LLGR is configured for this peer,
+    /// promote GR-stale routes to LLGR-stale instead of purging.
     fn sweep_gr_stale(&mut self, peer: IpAddr) {
-        info!(%peer, "graceful restart timer expired — sweeping stale routes");
-        self.gr_peers.remove(&peer);
+        let gr_families: Vec<(Afi, Safi)> = self
+            .gr_peers
+            .remove(&peer)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         self.gr_stale_deadlines.remove(&peer);
         self.gr_stale_routes_time.remove(&peer);
         let peer_label = peer.to_string();
         self.metrics.record_gr_timer_expired(&peer_label);
+
+        // Check if LLGR applies
+        if let Some(llgr_config) = self.llgr_peer_config.remove(&peer)
+            && llgr_config.peer_llgr_capable
+            && llgr_config.local_llgr_stale_time > 0
+        {
+            info!(%peer, "GR timer expired — promoting to LLGR stale phase");
+
+            // Compute effective stale time: min(local, peer per-family)
+            let peer_min_stale = llgr_config
+                .peer_llgr_families
+                .iter()
+                .filter(|f| gr_families.contains(&(f.afi, f.safi)))
+                .map(|f| f.stale_time)
+                .min()
+                .unwrap_or(llgr_config.local_llgr_stale_time);
+            let effective_stale_time = peer_min_stale.min(llgr_config.local_llgr_stale_time);
+
+            let mut affected = HashSet::new();
+            let mut rib_len = 0;
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                for &family in &gr_families {
+                    let promoted = rib.promote_to_llgr_stale(family);
+                    for p in promoted {
+                        affected.insert(p);
+                    }
+                }
+                rib_len = rib.len();
+            }
+            if !affected.is_empty() {
+                info!(%peer, count = affected.len(), "promoted routes to LLGR stale");
+                let changed = self.recompute_best(&affected);
+                self.distribute_changes(&changed, &affected);
+            }
+            self.metrics
+                .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+
+            // Set LLGR timer
+            let deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(u64::from(effective_stale_time));
+            self.llgr_stale_deadlines.insert(peer, deadline);
+            self.llgr_peers
+                .insert(peer, gr_families.into_iter().collect());
+            // GR remains "active" for metrics until LLGR completes
+            return;
+        }
+
+        // No LLGR — purge stale routes
+        info!(%peer, "graceful restart timer expired — sweeping stale routes");
         self.metrics.set_gr_active(&peer_label, false);
         self.metrics.set_gr_stale_routes(&peer_label, 0);
 
@@ -1963,7 +2115,29 @@ impl RibManager {
                 info!(%peer, count = swept.len(), "swept stale routes");
                 let affected: HashSet<Prefix> = swept.into_iter().collect();
                 self.metrics
-                    .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+                    .set_rib_prefixes(&peer_label, "all", gauge_val(rib.len()));
+                let changed = self.recompute_best(&affected);
+                self.distribute_changes(&changed, &affected);
+            }
+        }
+    }
+
+    /// Sweep LLGR-stale routes for a peer whose LLGR timer has expired.
+    fn sweep_llgr_stale(&mut self, peer: IpAddr) {
+        info!(%peer, "LLGR timer expired — sweeping LLGR-stale routes");
+        self.llgr_peers.remove(&peer);
+        self.llgr_stale_deadlines.remove(&peer);
+        let peer_label = peer.to_string();
+        self.metrics.set_gr_active(&peer_label, false);
+        self.metrics.set_gr_stale_routes(&peer_label, 0);
+
+        if let Some(rib) = self.ribs.get_mut(&peer) {
+            let swept = rib.sweep_llgr_stale();
+            if !swept.is_empty() {
+                info!(%peer, count = swept.len(), "swept LLGR-stale routes");
+                let affected: HashSet<Prefix> = swept.into_iter().collect();
+                self.metrics
+                    .set_rib_prefixes(&peer_label, "all", gauge_val(rib.len()));
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed, &affected);
             }
@@ -1973,6 +2147,11 @@ impl RibManager {
     /// Find the nearest GR stale deadline, if any.
     fn next_gr_deadline(&self) -> Option<tokio::time::Instant> {
         self.gr_stale_deadlines.values().copied().min()
+    }
+
+    /// Find the nearest LLGR stale deadline, if any.
+    fn next_llgr_deadline(&self) -> Option<tokio::time::Instant> {
+        self.llgr_stale_deadlines.values().copied().min()
     }
 
     /// Find the nearest enhanced route refresh deadline, if any.
@@ -2014,6 +2193,10 @@ impl RibManager {
         let gr_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
         tokio::pin!(gr_sleep);
 
+        // LLGR stale sweep timer — reset each iteration to the nearest deadline.
+        let llgr_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        tokio::pin!(llgr_sleep);
+
         // Enhanced route refresh timer — reset each iteration to the nearest
         // active refresh deadline.
         let refresh_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
@@ -2036,6 +2219,14 @@ impl RibManager {
                 false
             };
 
+            // Arm the LLGR timer to the nearest stale deadline.
+            let has_llgr_timers = if let Some(deadline) = self.next_llgr_deadline() {
+                llgr_sleep.as_mut().reset(deadline);
+                true
+            } else {
+                false
+            };
+
             let has_refresh_timers = if let Some(deadline) = self.next_refresh_deadline() {
                 refresh_sleep.as_mut().reset(deadline);
                 true
@@ -2043,7 +2234,8 @@ impl RibManager {
                 false
             };
 
-            let needs_timers = resync_armed || has_gr_timers || has_refresh_timers;
+            let needs_timers =
+                resync_armed || has_gr_timers || has_llgr_timers || has_refresh_timers;
 
             if needs_timers {
                 tokio::select! {
@@ -2080,6 +2272,19 @@ impl RibManager {
                             .collect();
                         for peer in expired {
                             self.sweep_gr_stale(peer);
+                        }
+                    }
+                    () = llgr_sleep.as_mut(), if has_llgr_timers => {
+                        // Find all peers whose LLGR deadline has expired
+                        let now = tokio::time::Instant::now();
+                        let expired: Vec<IpAddr> = self
+                            .llgr_stale_deadlines
+                            .iter()
+                            .filter(|&(_, &deadline)| deadline <= now)
+                            .map(|(&peer, _)| peer)
+                            .collect();
+                        for peer in expired {
+                            self.sweep_llgr_stale(peer);
                         }
                     }
                     () = refresh_sleep.as_mut(), if has_refresh_timers => {
@@ -2170,6 +2375,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -2185,6 +2391,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -2206,6 +2413,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -2226,6 +2434,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
         }
     }
@@ -2804,6 +3013,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ibgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -3055,6 +3265,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -3093,6 +3304,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -3207,6 +3419,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -3269,6 +3482,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -4608,6 +4822,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -4667,6 +4882,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -4743,6 +4959,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -5314,6 +5531,9 @@ mod tests {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
         })
         .await
         .unwrap();
@@ -5357,6 +5577,9 @@ mod tests {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
         })
         .await
         .unwrap();
@@ -5422,6 +5645,9 @@ mod tests {
             restart_time: 5,
             stale_routes_time: 10,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
         })
         .await
         .unwrap();
@@ -5478,6 +5704,9 @@ mod tests {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
         })
         .await
         .unwrap();
@@ -5566,6 +5795,9 @@ mod tests {
             restart_time: 5,
             stale_routes_time: 10,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
         })
         .await
         .unwrap();
@@ -5640,6 +5872,9 @@ mod tests {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
         })
         .await
         .unwrap();
@@ -5681,6 +5916,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -5708,6 +5944,9 @@ mod tests {
             restart_time: 120,
             stale_routes_time: 360,
             gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 0,
         })
         .await
         .unwrap();
@@ -5724,6 +5963,330 @@ mod tests {
             "remaining route should be IPv4"
         );
         assert!(best[0].is_stale, "IPv4 route should be stale");
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    // --- LLGR (RFC 9494) tests ---
+
+    #[tokio::test]
+    async fn llgr_gr_timer_promotes_to_llgr_stale() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        // Source sends a route
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // Source enters GR with LLGR enabled
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer: source,
+            restart_time: 5,
+            stale_routes_time: 10,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: true,
+            peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+                stale_time: 3600,
+            }],
+            llgr_stale_time: 7200,
+        })
+        .await
+        .unwrap();
+
+        // Route should be GR-stale
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert!(best[0].is_stale);
+        assert!(!best[0].is_llgr_stale);
+
+        // Advance past GR timer — should promote to LLGR-stale
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1, "route should still be present during LLGR");
+        assert!(!best[0].is_stale, "GR-stale flag should be cleared");
+        assert!(best[0].is_llgr_stale, "route should be LLGR-stale");
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn llgr_timer_sweeps_llgr_stale_routes() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // GR with LLGR, short timers for testing
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer: source,
+            restart_time: 2,
+            stale_routes_time: 5,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: true,
+            peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+                stale_time: 10,
+            }],
+            llgr_stale_time: 10,
+        })
+        .await
+        .unwrap();
+
+        // Ensure manager processes PeerGracefulRestart before advancing time
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert!(best[0].is_stale);
+
+        // Advance past GR timer → promotes to LLGR
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert!(best[0].is_llgr_stale);
+
+        // Advance past LLGR timer → sweeps routes
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert!(best.is_empty(), "LLGR-stale routes should be swept");
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn llgr_eor_clears_llgr_stale() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer: source,
+            restart_time: 2,
+            stale_routes_time: 5,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: true,
+            peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+                stale_time: 3600,
+            }],
+            llgr_stale_time: 3600,
+        })
+        .await
+        .unwrap();
+
+        // Ensure manager processes PeerGracefulRestart
+        let best = query_best_routes(&tx).await;
+        assert!(best[0].is_stale);
+
+        // Advance past GR timer → LLGR phase
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert!(best[0].is_llgr_stale);
+
+        // Peer re-establishes during LLGR
+        let (out_tx, mut out_rx) = mpsc::channel(64);
+        tx.send(RibUpdate::PeerUp {
+            peer: source,
+            outbound_tx: out_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+        })
+        .await
+        .unwrap();
+        drain_eor(&mut out_rx).await;
+
+        // EoR should clear LLGR-stale
+        tx.send(RibUpdate::EndOfRib {
+            peer: source,
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+        })
+        .await
+        .unwrap();
+
+        let best = query_best_routes(&tx).await;
+        assert_eq!(best.len(), 1);
+        assert!(
+            !best[0].is_llgr_stale,
+            "LLGR-stale should be cleared by EoR"
+        );
+        assert!(!best[0].is_stale, "GR-stale should also be cleared");
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn llgr_peer_down_aborts_llgr() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer: source,
+            restart_time: 2,
+            stale_routes_time: 5,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: true,
+            peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: false,
+                stale_time: 3600,
+            }],
+            llgr_stale_time: 3600,
+        })
+        .await
+        .unwrap();
+
+        // Ensure manager processes PeerGracefulRestart
+        let best = query_best_routes(&tx).await;
+        assert!(best[0].is_stale);
+
+        // Advance past GR timer → LLGR phase
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert!(best[0].is_llgr_stale);
+
+        // PeerDown during LLGR — should clear everything
+        tx.send(RibUpdate::PeerDown { peer: source }).await.unwrap();
+
+        let best = query_best_routes(&tx).await;
+        assert!(
+            best.is_empty(),
+            "routes should be cleared on PeerDown during LLGR"
+        );
+
+        drop(tx);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn llgr_without_peer_capability_falls_through_to_sweep() {
+        tokio::time::pause();
+
+        let (tx, rx) = mpsc::channel(64);
+        let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+        let handle = tokio::spawn(manager.run());
+
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+        tx.send(RibUpdate::RoutesReceived {
+            peer: source,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+
+        // GR without LLGR capability — timer expiry should purge
+        tx.send(RibUpdate::PeerGracefulRestart {
+            peer: source,
+            restart_time: 2,
+            stale_routes_time: 5,
+            gr_families: vec![(Afi::Ipv4, Safi::Unicast)],
+            peer_llgr_capable: false,
+            peer_llgr_families: vec![],
+            llgr_stale_time: 3600, // local config, but peer doesn't support
+        })
+        .await
+        .unwrap();
+
+        // Ensure manager processes PeerGracefulRestart
+        let best = query_best_routes(&tx).await;
+        assert!(best[0].is_stale);
+
+        // Advance past GR timer — should purge (no LLGR promotion)
+        tokio::time::advance(Duration::from_secs(3)).await;
+        tokio::task::yield_now().await;
+
+        let best = query_best_routes(&tx).await;
+        assert!(
+            best.is_empty(),
+            "routes should be purged when peer lacks LLGR"
+        );
 
         drop(tx);
         handle.await.unwrap();
@@ -6045,6 +6608,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Local,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
@@ -6084,6 +6648,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -6194,6 +6759,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: RpkiValidation::NotFound,
         };
@@ -6565,6 +7131,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -6594,6 +7161,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         }
@@ -7218,6 +7786,7 @@ mod tests {
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
             is_stale: false,
+            is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
         };
