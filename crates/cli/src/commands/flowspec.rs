@@ -172,6 +172,9 @@ fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
     }
     if let Some(val) = s.strip_prefix("mark-dscp=") {
         let dscp: u32 = val.parse().map_err(|_| format!("invalid DSCP: {val}"))?;
+        if dscp > 63 {
+            return Err(format!("invalid DSCP: {dscp} (expected 0-63)"));
+        }
         return Ok(FlowSpecAction {
             action: Some(crate::proto::flow_spec_action::Action::TrafficMarking(
                 FlowSpecTrafficMarking { dscp },
@@ -244,4 +247,19 @@ pub async fn delete(
         .await?;
     output::print_result(json, "delete_flowspec", "", "FlowSpec rule deleted");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_action;
+
+    #[test]
+    fn parse_action_rejects_out_of_range_dscp() {
+        assert!(parse_action("mark-dscp=64").is_err());
+    }
+
+    #[test]
+    fn parse_action_accepts_max_dscp() {
+        assert!(parse_action("mark-dscp=63").is_ok());
+    }
 }

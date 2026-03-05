@@ -49,6 +49,11 @@ pub enum BmpControlEvent {
         collector_id: usize,
         collector_addr: SocketAddr,
     },
+    /// Coordinated daemon shutdown request.
+    ///
+    /// The BMP manager stops fan-out and drops collector channels so
+    /// per-collector clients can send BMP Termination and exit.
+    Shutdown,
 }
 
 /// Information about a monitored peer, used to build the BMP per-peer header.

@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use std::net::IpAddr;
+
 use crate::proto;
 
 /// Format seconds as HH:MM:SS or "never" if 0.
@@ -230,21 +232,27 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
         let length: u32 = len
             .parse()
             .map_err(|_| format!("invalid prefix length: {len}"))?;
-        // Basic validation
-        if addr.contains(':') {
-            if length > 128 {
+        let ip: IpAddr = addr
+            .parse()
+            .map_err(|_| format!("invalid IP address in prefix: {addr}"))?;
+        match ip {
+            IpAddr::V4(_) if length > 32 => {
+                return Err(format!("prefix length {length} exceeds 32 for IPv4"));
+            }
+            IpAddr::V6(_) if length > 128 => {
                 return Err(format!("prefix length {length} exceeds 128 for IPv6"));
             }
-        } else if length > 32 {
-            return Err(format!("prefix length {length} exceeds 32 for IPv4"));
+            _ => {}
         }
         Ok((addr.to_string(), length))
     } else {
         // Host route
-        if s.contains(':') {
-            Ok((s.to_string(), 128))
-        } else {
-            Ok((s.to_string(), 32))
+        let ip: IpAddr = s
+            .parse()
+            .map_err(|_| format!("invalid IP address in prefix: {s}"))?;
+        match ip {
+            IpAddr::V4(_) => Ok((s.to_string(), 32)),
+            IpAddr::V6(_) => Ok((s.to_string(), 128)),
         }
     }
 }
@@ -306,5 +314,7 @@ mod tests {
         assert!(parse_prefix("10.0.0.0/33").is_err());
         assert!(parse_prefix("::1/129").is_err());
         assert!(parse_prefix("10.0.0.0/abc").is_err());
+        assert!(parse_prefix("999.999.999.999/24").is_err());
+        assert!(parse_prefix("not-an-ip").is_err());
     }
 }

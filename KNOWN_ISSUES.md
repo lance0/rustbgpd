@@ -30,6 +30,12 @@ resolved.
   eBGP) is not yet fully distinguished. Will be enforced post-v1.
 - **No gRPC TLS.** Server listens in plaintext. TLS and mTLS are
   post-v1 scope. Default bind is localhost only.
+- **BMP drop/replay counters are not exported yet.** BMP channel-full
+  conditions are logged, but no dedicated Prometheus counter currently tracks
+  dropped/replayed BMP events for operational alerting.
+- **CLI lacks gRPC integration tests.** `rustbgpctl` has parser/formatter
+  coverage but does not yet run mock-server integration tests for command ↔ RPC
+  behavior.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.

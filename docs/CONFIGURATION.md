@@ -766,7 +766,7 @@ BMP messages sent to collectors:
 | **Peer Down** (Type 2) | BGP session leaves Established |
 | **Route Monitoring** (Type 0) | Inbound UPDATE received (pre-policy, raw PDU) |
 | **Stats Report** (Type 1) | Periodic per-peer export every 60s (Adj-RIB-In route count, type 7) |
-| **Termination** (Type 5) | On client shutdown |
+| **Termination** (Type 5) | On coordinated daemon shutdown (and on client channel shutdown) |
 
 Route Monitoring messages carry the original raw BGP UPDATE PDU bytes
 (including the 19-byte BGP header), enabling collectors to decode the full

@@ -463,7 +463,6 @@ impl PeerManager {
     }
 
     fn bmp_peer_info(
-        &self,
         peer_addr: IpAddr,
         remote_asn: u32,
         remote_router_id: Option<Ipv4Addr>,
@@ -496,7 +495,7 @@ impl PeerManager {
 
             let prefix_count = u64::try_from(state.prefix_count).unwrap_or(u64::MAX);
             let event = BmpEvent::StatsReport {
-                peer_info: self.bmp_peer_info(
+                peer_info: Self::bmp_peer_info(
                     peer_addr,
                     managed.remote_asn,
                     state.remote_router_id,

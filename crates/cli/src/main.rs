@@ -7,6 +7,7 @@ pub mod proto {
 }
 
 use clap::{Parser, Subcommand};
+use std::time::Duration;
 use tonic::transport::{Channel, Endpoint};
 
 use crate::error::CliError;
@@ -219,6 +220,7 @@ async fn connect(addr: &str) -> Result<Channel, CliError> {
     };
     let channel = Endpoint::from_shared(uri)
         .map_err(|e| CliError::Argument(format!("invalid address: {e}")))?
+        .connect_timeout(Duration::from_secs(5))
         .connect()
         .await?;
     Ok(channel)

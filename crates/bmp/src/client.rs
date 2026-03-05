@@ -15,6 +15,9 @@ use tracing::{debug, info, warn};
 use crate::codec;
 use crate::types::{BmpClientConfig, BmpControlEvent};
 
+/// Write timeout for BMP collector TCP writes.
+const BMP_WRITE_TIMEOUT_SECS: u64 = 5;
+
 /// Per-collector BMP client.
 ///
 /// Connects to a single collector, sends an Initiation message, then
@@ -29,6 +32,33 @@ pub struct BmpClient {
 }
 
 impl BmpClient {
+    async fn write_all_with_timeout(stream: &mut TcpStream, msg: &[u8]) -> std::io::Result<()> {
+        match tokio::time::timeout(
+            Duration::from_secs(BMP_WRITE_TIMEOUT_SECS),
+            stream.write_all(msg),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "BMP collector write timed out",
+            )),
+        }
+    }
+
+    async fn flush_with_timeout(stream: &mut TcpStream) -> std::io::Result<()> {
+        match tokio::time::timeout(Duration::from_secs(BMP_WRITE_TIMEOUT_SECS), stream.flush())
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "BMP collector flush timed out",
+            )),
+        }
+    }
+
     #[must_use]
     pub fn new(
         config: BmpClientConfig,
@@ -73,18 +103,17 @@ impl BmpClient {
 
             // Send Initiation message
             let init_msg = codec::encode_initiation(&self.sys_name, &self.sys_descr);
-            if let Err(e) = stream.write_all(&init_msg).await {
+            if let Err(e) = Self::write_all_with_timeout(&mut stream, &init_msg).await {
                 warn!(collector = %addr, error = %e, "failed to send BMP Initiation");
                 continue; // reconnect
             }
 
             // Collector is now ready to receive BMP messages.
             if let Some(ref control_tx) = self.control_tx {
-                let _ = control_tx
-                    .try_send(BmpControlEvent::CollectorConnected {
-                        collector_id: id,
-                        collector_addr: addr,
-                    });
+                let _ = control_tx.try_send(BmpControlEvent::CollectorConnected {
+                    collector_id: id,
+                    collector_addr: addr,
+                });
             }
 
             // Stream messages until error or channel close
@@ -92,20 +121,19 @@ impl BmpClient {
                 let Some(msg) = self.rx.recv().await else {
                     // Channel closed — send Termination and exit
                     let term = codec::encode_termination(0, "daemon shutting down");
-                    let _ = stream.write_all(&term).await;
-                    let _ = stream.flush().await;
+                    let _ = Self::write_all_with_timeout(&mut stream, &term).await;
+                    let _ = Self::flush_with_timeout(&mut stream).await;
                     info!(collector = %addr, "BMP client shutting down");
                     return;
                 };
 
-                if let Err(e) = stream.write_all(&msg).await {
+                if let Err(e) = Self::write_all_with_timeout(&mut stream, &msg).await {
                     warn!(collector = %addr, error = %e, "BMP write failed, reconnecting");
                     if let Some(ref control_tx) = self.control_tx {
-                        let _ = control_tx
-                            .try_send(BmpControlEvent::CollectorDisconnected {
-                                collector_id: id,
-                                collector_addr: addr,
-                            });
+                        let _ = control_tx.try_send(BmpControlEvent::CollectorDisconnected {
+                            collector_id: id,
+                            collector_addr: addr,
+                        });
                     }
                     break; // reconnect
                 }

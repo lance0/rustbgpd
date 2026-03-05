@@ -663,7 +663,7 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | FlowSpec | 8955 | post-v0.3.0 | — | IPv4/IPv6 unicast FlowSpec implemented; speaker-mode hardening continues |
 | Graceful restart (receiving speaker) | 4724 | v0.3.0 | FRR | Stale demotion, per-family EoR, two-phase timer (ADR-0024) |
 | TCP-AO | 5925 | Post-v1 | — | Roadmap |
-| BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); replay/stats cadence deferred |
+| BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); reconnect replay + periodic stats + coordinated-shutdown termination |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); runtime gRPC management deferred |
 
 This matrix is updated with every milestone. "Interop Tested" means validated in the containerlab CI suite, not "someone tried it once."

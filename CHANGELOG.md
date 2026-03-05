@@ -86,6 +86,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **BMP Termination on coordinated shutdown.** Main runtime now sends an
+  explicit BMP shutdown control event, then drains BMP manager/client tasks
+  with bounded waits so connected collectors receive BMP Termination (type 5,
+  reason 0) before daemon exit.
+- **BMP client write timeout.** Per-collector TCP writes now use a 5-second
+  timeout to avoid indefinite stalls on slow or wedged collectors.
+- **CLI gRPC connect timeout.** `rustbgpctl` now sets a 5-second
+  `Endpoint::connect_timeout(...)` to avoid hanging indefinitely when the
+  daemon endpoint is unreachable.
+- **CLI FlowSpec DSCP validation.** `mark-dscp=` is now bounds-checked in the
+  CLI (0..=63) and fails fast on invalid values before RPC submission.
+- **CLI prefix IP validation.** Prefix parsing now validates address syntax
+  (`IpAddr`) instead of only slash-length bounds.
 - **`sendable_families` excluded IPv6 for route-server clients.** eBGP peers
   without a local IPv6 next-hop had IPv6 unicast filtered from
   `sendable_families`, silently preventing IPv6 route advertisement to

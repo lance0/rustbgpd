@@ -92,6 +92,8 @@ reconnect_interval = 30
 - Collector reconnect replay for currently Established peers (targeted to the
   collector that reconnected)
 - Periodic per-peer Stats Report export (type 7, Adj-RIB-In route count)
+- Coordinated daemon shutdown now explicitly signals BMP shutdown and allows
+  connected collectors to receive BMP Termination before process exit
 
 ### Negative
 

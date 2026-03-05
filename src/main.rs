@@ -20,6 +20,7 @@ use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::BgpListener;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
@@ -34,6 +35,12 @@ const GR_RESTART_MARKER_VERSION: u8 = 1;
 struct GrRestartMarker {
     version: u8,
     expires_at_unix: u64,
+}
+
+struct BmpRuntime {
+    control_tx: mpsc::Sender<rustbgpd_bmp::BmpControlEvent>,
+    manager_handle: JoinHandle<()>,
+    client_handles: Vec<JoinHandle<()>>,
 }
 
 fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
@@ -262,6 +269,7 @@ async fn run(config: Config) {
     }
 
     // Spawn BMP subsystem (manager + per-collector clients)
+    let mut bmp_runtime: Option<BmpRuntime> = None;
     let bmp_tx = if let Some(ref bmp_config) = config.bmp
         && !bmp_config.collectors.is_empty()
     {
@@ -275,6 +283,7 @@ async fn run(config: Config) {
         };
 
         let mut collector_txs = Vec::new();
+        let mut client_handles = Vec::new();
         for (collector_id, collector) in bmp_config.collectors.iter().enumerate() {
             let addr: std::net::SocketAddr = match collector.address.parse() {
                 Ok(a) => a,
@@ -301,11 +310,16 @@ async fn run(config: Config) {
                 Some(bmp_control_tx.clone()),
             );
             info!(collector = %addr, "spawning BMP client");
-            tokio::spawn(client.run());
+            client_handles.push(tokio::spawn(client.run()));
         }
 
         let mgr = rustbgpd_bmp::BmpManager::new(bmp_event_rx, bmp_control_rx, collector_txs);
-        tokio::spawn(mgr.run());
+        let manager_handle = tokio::spawn(mgr.run());
+        bmp_runtime = Some(BmpRuntime {
+            control_tx: bmp_control_tx,
+            manager_handle,
+            client_handles,
+        });
 
         Some(bmp_event_tx)
     } else {
@@ -489,7 +503,38 @@ async fn run(config: Config) {
         error!(error = %e, "peer manager task panicked");
     }
 
-    // 3. Stop the gRPC server
+    // 3. Shut down BMP subsystem (send explicit shutdown and await bounded drain)
+    if let Some(mut bmp_runtime) = bmp_runtime {
+        if let Err(e) = bmp_runtime
+            .control_tx
+            .send(rustbgpd_bmp::BmpControlEvent::Shutdown)
+            .await
+        {
+            warn!(error = %e, "failed to send BMP shutdown control event");
+        }
+
+        match tokio::time::timeout(Duration::from_secs(2), &mut bmp_runtime.manager_handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!(error = %e, "BMP manager task panicked during shutdown"),
+            Err(_) => {
+                warn!("BMP manager did not exit within 2s; aborting task");
+                bmp_runtime.manager_handle.abort();
+            }
+        }
+
+        for mut handle in bmp_runtime.client_handles {
+            match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!(error = %e, "BMP client task panicked during shutdown"),
+                Err(_) => {
+                    warn!("BMP client did not exit within 2s; aborting task");
+                    handle.abort();
+                }
+            }
+        }
+    }
+
+    // 4. Stop the gRPC server
     let _ = grpc_shutdown_tx.send(());
 
     info!("rustbgpd exiting");

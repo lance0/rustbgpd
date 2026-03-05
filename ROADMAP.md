@@ -98,7 +98,10 @@ Items identified during review that are not correctness bugs but improve strictn
 - [ ] **Inbound BoRR/EoRR retry on channel-full** — inbound BoRR/EoRR markers are silently dropped (with warning) when the RIB channel is full; unlike outbound responses which have `pending_refresh` retry, inbound markers have no recovery path
 - [x] **BMP collector reconnect replay** — `BmpManager` caches live Peer Up state and replays it only to the collector that just reconnected
 - [x] **BMP periodic Stats Report** — `PeerManager` now emits per-peer periodic BMP Stats Report messages (type 7: Adj-RIB-In routes) every 60 seconds
-- [ ] **BMP Termination on daemon shutdown** — client sends Termination on its own shutdown, but coordinated daemon shutdown doesn't explicitly trigger BMP Termination before TCP close
+- [x] **BMP Termination on daemon shutdown** — coordinated shutdown now signals `BmpManager` explicitly, then drains manager/client tasks with bounded waits so connected collectors receive Termination before process exit
+- [ ] **BMP event-drop counters** — BMP send paths currently log dropped events on channel-full but do not expose a Prometheus counter for replay/stats/route-monitoring drop rates
+- [ ] **BMP transport integration tests** — codec and manager are covered, but session-to-BMP emission paths (PeerUp/PeerDown/RouteMonitoring) still lack end-to-end tests
+- [ ] **CLI gRPC integration tests** — `rustbgpctl` has parser/format tests but no mock-server integration tests for command-to-RPC behavior
 
 ### P1 — Core Protocol Gaps
 

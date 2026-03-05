@@ -15,7 +15,7 @@ pub struct BmpManager {
     event_rx: mpsc::Receiver<BmpEvent>,
     control_rx: mpsc::Receiver<BmpControlEvent>,
     collectors: Vec<mpsc::Sender<Bytes>>,
-    /// Latest encoded PeerUp message per peer address.
+    /// Latest encoded `PeerUp` message per peer address.
     peer_up_cache: std::collections::HashMap<std::net::IpAddr, Bytes>,
 }
 
@@ -35,7 +35,8 @@ impl BmpManager {
     }
 
     /// Run the manager loop. Receives events, encodes, and fans out.
-    /// Returns when both event and control channels are closed.
+    /// Returns when both channels are closed or an explicit shutdown is
+    /// requested.
     pub async fn run(mut self) {
         let mut events_open = true;
         let mut control_open = true;
@@ -43,21 +44,21 @@ impl BmpManager {
         while events_open || control_open {
             tokio::select! {
                 maybe_event = self.event_rx.recv(), if events_open => {
-                    match maybe_event {
-                        Some(event) => self.handle_event(event),
-                        None => {
-                            events_open = false;
-                            debug!("BMP event channel closed");
-                        }
+                    if let Some(event) = maybe_event {
+                        self.handle_event(&event);
+                    } else {
+                        events_open = false;
+                        debug!("BMP event channel closed");
                     }
                 }
                 maybe_control = self.control_rx.recv(), if control_open => {
-                    match maybe_control {
-                        Some(control) => self.handle_control(control),
-                        None => {
-                            control_open = false;
-                            debug!("BMP control channel closed");
+                    if let Some(control) = maybe_control {
+                        if self.handle_control(control) {
+                            break;
                         }
+                    } else {
+                        control_open = false;
+                        debug!("BMP control channel closed");
                     }
                 }
             }
@@ -101,26 +102,28 @@ impl BmpManager {
         }
     }
 
-    fn handle_event(&mut self, event: BmpEvent) {
-        match &event {
+    fn handle_event(&mut self, event: &BmpEvent) {
+        match event {
             BmpEvent::PeerUp { peer_info, .. } => {
-                let encoded = Self::encode_event(&event);
-                self.peer_up_cache.insert(peer_info.peer_addr, encoded.clone());
+                let encoded = Self::encode_event(event);
+                self.peer_up_cache
+                    .insert(peer_info.peer_addr, encoded.clone());
                 self.fan_out(&encoded);
             }
             BmpEvent::PeerDown { peer_info, .. } => {
                 self.peer_up_cache.remove(&peer_info.peer_addr);
-                let encoded = Self::encode_event(&event);
+                let encoded = Self::encode_event(event);
                 self.fan_out(&encoded);
             }
             BmpEvent::RouteMonitoring { .. } | BmpEvent::StatsReport { .. } => {
-                let encoded = Self::encode_event(&event);
+                let encoded = Self::encode_event(event);
                 self.fan_out(&encoded);
             }
         }
     }
 
-    fn handle_control(&self, control: BmpControlEvent) {
+    /// Returns true when manager should exit.
+    fn handle_control(&mut self, control: BmpControlEvent) -> bool {
         match control {
             BmpControlEvent::CollectorConnected {
                 collector_id,
@@ -133,6 +136,7 @@ impl BmpManager {
                     "BMP collector connected, replaying current PeerUp state"
                 );
                 self.replay_peer_up_to_collector(collector_id);
+                false
             }
             BmpControlEvent::CollectorDisconnected {
                 collector_id,
@@ -143,6 +147,11 @@ impl BmpManager {
                     collector = %collector_addr,
                     "BMP collector disconnected"
                 );
+                false
+            }
+            BmpControlEvent::Shutdown => {
+                info!("BMP manager received shutdown request");
+                true
             }
         }
     }
@@ -379,5 +388,26 @@ mod tests {
         drop(event_tx);
         drop(control_tx);
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn manager_exits_on_explicit_shutdown() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, _c_rx) = mpsc::channel(16);
+
+        let mgr = BmpManager::new(event_rx, control_rx, vec![c_tx]);
+        let mut handle = tokio::spawn(mgr.run());
+
+        control_tx.send(BmpControlEvent::Shutdown).await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut handle)
+            .await
+            .expect("BMP manager did not exit after explicit shutdown")
+            .unwrap();
+
+        // Keep sender alive until after manager exits to prove explicit
+        // shutdown does not depend on event channel closure.
+        drop(event_tx);
     }
 }
