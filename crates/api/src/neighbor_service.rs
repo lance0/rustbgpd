@@ -196,8 +196,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(Status::already_exists)?;
 
         // Notify config persister of the successful add
-        if let (Some(tx), Some(cfg)) = (&self.config_tx, config_clone) {
-            let _ = tx.try_send(ConfigEvent::NeighborAdded(cfg));
+        if let (Some(tx), Some(cfg)) = (&self.config_tx, config_clone)
+            && tx.try_send(ConfigEvent::NeighborAdded(cfg)).is_err()
+        {
+            tracing::warn!(
+                "config persistence queue full or closed — neighbor add may not be persisted to disk"
+            );
         }
 
         Ok(Response::new(proto::AddNeighborResponse {}))
@@ -228,8 +232,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .map_err(Status::not_found)?;
 
         // Notify config persister of the successful delete
-        if let Some(ref tx) = self.config_tx {
-            let _ = tx.try_send(ConfigEvent::NeighborDeleted(address));
+        if let Some(ref tx) = self.config_tx
+            && tx.try_send(ConfigEvent::NeighborDeleted(address)).is_err()
+        {
+            tracing::warn!(
+                "config persistence queue full or closed — neighbor delete may not be persisted to disk"
+            );
         }
 
         Ok(Response::new(proto::DeleteNeighborResponse {}))

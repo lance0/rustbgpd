@@ -18,6 +18,8 @@ use crate::config::{Config, Neighbor};
 pub enum ConfigMutation {
     AddNeighbor(Box<Neighbor>),
     DeleteNeighbor(IpAddr),
+    /// Replace the entire config snapshot (e.g. after SIGHUP reload).
+    ReplaceConfig(Box<Config>),
 }
 
 /// Listens for config mutations and persists them atomically.
@@ -74,6 +76,10 @@ impl ConfigPersister {
                 if self.current.neighbors.len() < before {
                     info!(%address, "persisting deleted neighbor");
                 }
+            }
+            ConfigMutation::ReplaceConfig(new_config) => {
+                info!("replacing persister config snapshot (e.g. after SIGHUP reload)");
+                self.current = *new_config;
             }
         }
     }

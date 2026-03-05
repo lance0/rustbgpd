@@ -127,6 +127,23 @@ impl AdjRibIn {
         prefixes
     }
 
+    /// Remove stale routes for a specific family, returning their prefixes.
+    /// Used when a family was in GR but not in the peer's LLGR capability.
+    pub fn sweep_stale_family(&mut self, family: (Afi, Safi)) -> Vec<Prefix> {
+        let stale: Vec<(Prefix, u32)> = self
+            .routes
+            .iter()
+            .filter(|(_, r)| r.is_stale && route_matches_family(r, family))
+            .map(|(k, _)| *k)
+            .collect();
+        let mut prefixes = Vec::new();
+        for key in &stale {
+            prefixes.push(key.0);
+            self.routes.remove(key);
+        }
+        prefixes
+    }
+
     /// Promote GR-stale routes to LLGR-stale for the given family (RFC 9494).
     ///
     /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).

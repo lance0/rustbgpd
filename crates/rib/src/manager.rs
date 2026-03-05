@@ -33,6 +33,8 @@ struct LlgrPeerConfig {
     peer_llgr_capable: bool,
     peer_llgr_families: Vec<LlgrFamily>,
     local_llgr_stale_time: u32,
+    /// Configured stale-routes-time for use if peer re-establishes during LLGR.
+    stale_routes_time: u64,
 }
 
 /// Safe cast from usize to i64 for gauge metrics.
@@ -1635,12 +1637,17 @@ impl RibManager {
                     // back to GR-awaiting-EoR so EndOfRib clears the stale flag.
                     if let Some(llgr_families) = self.llgr_peers.remove(&peer) {
                         self.llgr_stale_deadlines.remove(&peer);
+                        // Recover configured stale_routes_time from LLGR config
+                        let srt = self
+                            .llgr_peer_config
+                            .get(&peer)
+                            .map_or(360, |c| c.stale_routes_time);
+                        self.gr_stale_routes_time.insert(peer, srt);
                         self.gr_peers.insert(peer, llgr_families);
-                        // Use a generous deadline for EoR during LLGR re-establishment
                         let deadline =
-                            tokio::time::Instant::now() + std::time::Duration::from_secs(360);
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
                         self.gr_stale_deadlines.insert(peer, deadline);
-                        info!(%peer, "peer re-established during LLGR — waiting for End-of-RIB");
+                        info!(%peer, stale_routes_time = srt, "peer re-established during LLGR — waiting for End-of-RIB");
                     }
                 }
 
@@ -1955,6 +1962,7 @@ impl RibManager {
                             peer_llgr_capable,
                             peer_llgr_families,
                             local_llgr_stale_time: llgr_stale_time,
+                            stale_routes_time,
                         },
                     );
                 }
@@ -2065,11 +2073,28 @@ impl RibManager {
         {
             info!(%peer, "GR timer expired — promoting to LLGR stale phase");
 
-            // Compute effective stale time: min(local, peer per-family)
+            // Only promote families that are in BOTH the GR and LLGR capability sets.
+            let llgr_family_set: HashSet<(Afi, Safi)> = llgr_config
+                .peer_llgr_families
+                .iter()
+                .map(|f| (f.afi, f.safi))
+                .collect();
+            let llgr_families: Vec<(Afi, Safi)> = gr_families
+                .iter()
+                .copied()
+                .filter(|f| llgr_family_set.contains(f))
+                .collect();
+            let non_llgr_families: Vec<(Afi, Safi)> = gr_families
+                .iter()
+                .copied()
+                .filter(|f| !llgr_family_set.contains(f))
+                .collect();
+
+            // Compute effective stale time: min(local, peer per-family minimum)
             let peer_min_stale = llgr_config
                 .peer_llgr_families
                 .iter()
-                .filter(|f| gr_families.contains(&(f.afi, f.safi)))
+                .filter(|f| llgr_families.contains(&(f.afi, f.safi)))
                 .map(|f| f.stale_time)
                 .min()
                 .unwrap_or(llgr_config.local_llgr_stale_time);
@@ -2078,13 +2103,24 @@ impl RibManager {
             let mut affected = HashSet::new();
             let mut rib_len = 0;
             if let Some(rib) = self.ribs.get_mut(&peer) {
-                for &family in &gr_families {
+                // Promote LLGR-negotiated families to LLGR-stale
+                for &family in &llgr_families {
                     let promoted = rib.promote_to_llgr_stale(family);
                     for p in promoted {
                         affected.insert(p);
                     }
                 }
+                // Sweep families NOT in LLGR — these cannot be preserved
+                for &family in &non_llgr_families {
+                    let swept = rib.sweep_stale_family(family);
+                    for p in swept {
+                        affected.insert(p);
+                    }
+                }
                 rib_len = rib.len();
+            }
+            if !non_llgr_families.is_empty() {
+                info!(%peer, families = ?non_llgr_families, "swept stale routes for non-LLGR families");
             }
             if !affected.is_empty() {
                 info!(%peer, count = affected.len(), "promoted routes to LLGR stale");
@@ -2099,7 +2135,7 @@ impl RibManager {
                 + std::time::Duration::from_secs(u64::from(effective_stale_time));
             self.llgr_stale_deadlines.insert(peer, deadline);
             self.llgr_peers
-                .insert(peer, gr_families.into_iter().collect());
+                .insert(peer, llgr_families.into_iter().collect());
             // GR remains "active" for metrics until LLGR completes
             return;
         }

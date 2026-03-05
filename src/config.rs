@@ -744,6 +744,19 @@ impl Config {
         resolve_chain(&self.policy.import_chain, &self.policy.definitions)?;
         resolve_chain(&self.policy.export_chain, &self.policy.definitions)?;
 
+        // Validate neighbor address uniqueness
+        {
+            let mut seen = std::collections::HashSet::new();
+            for neighbor in &self.neighbors {
+                if !seen.insert(&neighbor.address) {
+                    return Err(ConfigError::InvalidNeighborAddress {
+                        value: neighbor.address.clone(),
+                        reason: "duplicate neighbor address".to_string(),
+                    });
+                }
+            }
+        }
+
         for neighbor in &self.neighbors {
             neighbor.address.parse::<IpAddr>().map_err(|e| {
                 ConfigError::InvalidNeighborAddress {
@@ -1175,6 +1188,27 @@ hold_time = 90
         let toml_str = valid_toml().replace("10.0.0.2", "bad-addr");
         let err = parse(&toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidNeighborAddress { .. }));
+    }
+
+    #[test]
+    fn duplicate_neighbor_address_rejected() {
+        let toml_str = format!(
+            r#"
+{}
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65099
+"#,
+            valid_toml()
+        );
+        let err = parse(&toml_str).unwrap_err();
+        match err {
+            ConfigError::InvalidNeighborAddress { reason, .. } => {
+                assert!(reason.contains("duplicate"));
+            }
+            other => panic!("expected InvalidNeighborAddress, got {other}"),
+        }
     }
 
     #[test]
@@ -2556,8 +2590,8 @@ prefix = "10.0.0.0/8"
 set_local_pref = 200
 
 [[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
+address = "10.0.0.3"
+remote_asn = 65003
 "#,
             GLOBAL_HEADER = valid_toml()
         )
@@ -2590,8 +2624,8 @@ remote_asn = 65002
 default_action = "deny"
 
 [[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
+address = "10.0.0.3"
+remote_asn = 65003
 "#,
             GLOBAL_HEADER = valid_toml()
         );
@@ -2612,8 +2646,8 @@ remote_asn = 65002
 import_chain = ["nonexistent"]
 
 [[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
+address = "10.0.0.3"
+remote_asn = 65003
 "#,
             GLOBAL_HEADER = valid_toml()
         );
@@ -2637,8 +2671,8 @@ set_local_pref = 200
 import_chain = ["set-lp"]
 
 [[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
+address = "10.0.0.3"
+remote_asn = 65003
 "#,
             GLOBAL_HEADER = valid_toml()
         );
@@ -2669,8 +2703,8 @@ set_local_pref = 300
 import_chain = ["global-pol"]
 
 [[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
+address = "10.0.0.3"
+remote_asn = 65003
 import_policy_chain = ["peer-pol"]
 "#,
             GLOBAL_HEADER = valid_toml()

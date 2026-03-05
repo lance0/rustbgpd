@@ -345,11 +345,12 @@ async fn run(mut config: Config) {
     let peer_mgr_handle = tokio::spawn(peer_mgr.run());
 
     // Spawn config persister (converts gRPC config events → disk writes)
-    let config_event_tx = if let Some(ref path) = config.file_path {
+    let (config_event_tx, config_mutation_tx) = if let Some(ref path) = config.file_path {
         let (event_tx, mut event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(64);
         let persister = ConfigPersister::new(mutation_rx, path.clone(), config.clone());
         tokio::spawn(persister.run());
+        let reload_mutation_tx = mutation_tx.clone();
 
         // Bridge: convert ConfigEvent → ConfigMutation
         tokio::spawn(async move {
@@ -422,9 +423,9 @@ async fn run(mut config: Config) {
                 }
             }
         });
-        Some(event_tx)
+        (Some(event_tx), Some(reload_mutation_tx))
     } else {
-        None
+        (None, None)
     };
 
     // Shutdown channels:
@@ -570,6 +571,13 @@ async fn run(mut config: Config) {
                 info!("SIGHUP received, reloading configuration");
                 let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
                 if let Some(new_config) = reload_config(&path, &config, &peer_mgr_tx).await {
+                    // Sync persister's snapshot so future gRPC mutations apply
+                    // to the reloaded config, not the stale startup config.
+                    if let Some(ref mtx) = config_mutation_tx {
+                        let _ = mtx.send(ConfigMutation::ReplaceConfig(
+                            Box::new(new_config.clone()),
+                        )).await;
+                    }
                     config = new_config;
                 }
             }
