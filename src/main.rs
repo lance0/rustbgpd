@@ -418,6 +418,16 @@ async fn run(mut config: Config) {
                             local_ipv6_nexthop: cfg.local_ipv6_nexthop.map(|a| a.to_string()),
                             route_reflector_client: cfg.route_reflector_client,
                             route_server_client: cfg.route_server_client,
+                            remove_private_as: match cfg.remove_private_as {
+                                rustbgpd_transport::RemovePrivateAs::Disabled => None,
+                                rustbgpd_transport::RemovePrivateAs::Remove => {
+                                    Some("remove".to_string())
+                                }
+                                rustbgpd_transport::RemovePrivateAs::All => Some("all".to_string()),
+                                rustbgpd_transport::RemovePrivateAs::Replace => {
+                                    Some("replace".to_string())
+                                }
+                            },
                             add_path: if cfg.add_path_receive || cfg.add_path_send {
                                 Some(config::AddPathConfig {
                                     receive: cfg.add_path_receive,
@@ -552,6 +562,7 @@ async fn run(mut config: Config) {
                     local_ipv6_nexthop: transport_config.local_ipv6_nexthop,
                     route_reflector_client: transport_config.route_reflector_client,
                     route_server_client: transport_config.route_server_client,
+                    remove_private_as: transport_config.remove_private_as,
                     add_path_receive: transport_config.peer.add_path_receive,
                     add_path_send: transport_config.peer.add_path_send,
                     add_path_send_max: transport_config.peer.add_path_send_max,
@@ -705,6 +716,7 @@ fn build_peer_mgr_config(
         local_ipv6_nexthop: tc.local_ipv6_nexthop,
         route_reflector_client: tc.route_reflector_client,
         route_server_client: tc.route_server_client,
+        remove_private_as: tc.remove_private_as,
         add_path_receive: tc.peer.add_path_receive,
         add_path_send: tc.peer.add_path_send,
         add_path_send_max: tc.peer.add_path_send_max,
@@ -894,6 +906,7 @@ mod tests {
                     local_ipv6_nexthop: None,
                     route_reflector_client: false,
                     route_server_client: false,
+                    remove_private_as: None,
                     add_path: None,
                     import_policy: Vec::new(),
                     export_policy: Vec::new(),
@@ -916,6 +929,7 @@ mod tests {
                     local_ipv6_nexthop: None,
                     route_reflector_client: false,
                     route_server_client: false,
+                    remove_private_as: None,
                     add_path: None,
                     import_policy: Vec::new(),
                     export_policy: Vec::new(),
@@ -938,6 +952,7 @@ mod tests {
                     local_ipv6_nexthop: None,
                     route_reflector_client: false,
                     route_server_client: false,
+                    remove_private_as: None,
                     add_path: None,
                     import_policy: Vec::new(),
                     export_policy: Vec::new(),

@@ -15,6 +15,7 @@ use rustbgpd_wire::{
     AddPathMode, Afi, AsPath, AsPathSegment, Capability, FlowSpecRule, Ipv4NlriEntry,
     Ipv4UnicastMode, Message, MpReachNlri, MpUnreachNlri, NlriEntry, NotificationMessage,
     PathAttribute, Prefix, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage,
+    is_private_asn,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -22,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio::time::Sleep;
 use tracing::{debug, error, info, warn};
 
-use crate::config::TransportConfig;
+use crate::config::{RemovePrivateAs, TransportConfig};
 use crate::error::TransportError;
 use crate::framing::ReadBuffer;
 use crate::handle::{PeerCommand, PeerSessionState, SessionNotification};
@@ -2283,10 +2284,16 @@ impl PeerSession {
             match attr {
                 PathAttribute::AsPath(as_path) => {
                     if is_ebgp && !route_server_client {
+                        // Apply private AS removal before prepending our ASN
+                        let cleaned = remove_private_asns(
+                            as_path,
+                            self.config.remove_private_as,
+                            self.config.peer.local_asn,
+                        );
                         // Prepend our ASN
                         let mut new_segments =
                             vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                        for seg in &as_path.segments {
+                        for seg in &cleaned.segments {
                             match seg {
                                 AsPathSegment::AsSequence(asns) => {
                                     // Merge into first sequence if possible
@@ -2442,9 +2449,15 @@ impl PeerSession {
             match attr {
                 PathAttribute::AsPath(as_path) => {
                     if is_ebgp {
+                        // Apply private AS removal before prepending our ASN
+                        let cleaned = remove_private_asns(
+                            as_path,
+                            self.config.remove_private_as,
+                            self.config.peer.local_asn,
+                        );
                         let mut new_segments =
                             vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                        for seg in &as_path.segments {
+                        for seg in &cleaned.segments {
                             match seg {
                                 AsPathSegment::AsSequence(asns) => {
                                     if let Some(AsPathSegment::AsSequence(first)) =
@@ -2533,6 +2546,90 @@ async fn read_tcp(
     use tokio::io::AsyncReadExt;
     let stream = stream.as_mut().expect("read_tcp called without stream");
     stream.read_buf(buf).await
+}
+
+/// Remove private ASNs from an `AS_PATH` according to the given mode.
+///
+/// - `Remove` — strip all ASNs only if every ASN in the path is private.
+/// - `All` — unconditionally remove all private ASNs; drop empty segments.
+/// - `Replace` — replace each private ASN with `local_asn`.
+/// - `Disabled` — return the path unchanged.
+fn remove_private_asns(as_path: &AsPath, mode: RemovePrivateAs, local_asn: u32) -> AsPath {
+    match mode {
+        RemovePrivateAs::Disabled => as_path.clone(),
+        RemovePrivateAs::Remove => {
+            if as_path.all_private() {
+                // Strip all private ASNs (produces empty path)
+                let segments: Vec<_> = as_path
+                    .segments
+                    .iter()
+                    .filter_map(|seg| {
+                        let filtered: Vec<u32> = match seg {
+                            AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns
+                                .iter()
+                                .copied()
+                                .filter(|a| !is_private_asn(*a))
+                                .collect(),
+                        };
+                        if filtered.is_empty() {
+                            None
+                        } else {
+                            Some(match seg {
+                                AsPathSegment::AsSequence(_) => AsPathSegment::AsSequence(filtered),
+                                AsPathSegment::AsSet(_) => AsPathSegment::AsSet(filtered),
+                            })
+                        }
+                    })
+                    .collect();
+                AsPath { segments }
+            } else {
+                as_path.clone()
+            }
+        }
+        RemovePrivateAs::All => {
+            let segments: Vec<_> = as_path
+                .segments
+                .iter()
+                .filter_map(|seg| {
+                    let filtered: Vec<u32> = match seg {
+                        AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => asns
+                            .iter()
+                            .copied()
+                            .filter(|a| !is_private_asn(*a))
+                            .collect(),
+                    };
+                    if filtered.is_empty() {
+                        None
+                    } else {
+                        Some(match seg {
+                            AsPathSegment::AsSequence(_) => AsPathSegment::AsSequence(filtered),
+                            AsPathSegment::AsSet(_) => AsPathSegment::AsSet(filtered),
+                        })
+                    }
+                })
+                .collect();
+            AsPath { segments }
+        }
+        RemovePrivateAs::Replace => {
+            let segments = as_path
+                .segments
+                .iter()
+                .map(|seg| match seg {
+                    AsPathSegment::AsSequence(asns) => AsPathSegment::AsSequence(
+                        asns.iter()
+                            .map(|a| if is_private_asn(*a) { local_asn } else { *a })
+                            .collect(),
+                    ),
+                    AsPathSegment::AsSet(asns) => AsPathSegment::AsSet(
+                        asns.iter()
+                            .map(|a| if is_private_asn(*a) { local_asn } else { *a })
+                            .collect(),
+                    ),
+                })
+                .collect();
+            AsPath { segments }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3493,5 +3590,181 @@ mod tests {
             IpAddr::V6("2001:db8::1".parse().unwrap())
         );
         assert_eq!(announced[0].path_id, 42);
+    }
+
+    // --- Private AS removal tests ---
+
+    #[test]
+    fn all_private_path_mode_remove() {
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![64512, 65000])],
+        };
+        let result = remove_private_asns(&path, RemovePrivateAs::Remove, 100);
+        assert!(result.segments.is_empty());
+    }
+
+    #[test]
+    fn mixed_path_mode_remove_unchanged() {
+        // 100 is public, 64512 is private — not all private, so unchanged
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![100, 64512, 200])],
+        };
+        let result = remove_private_asns(&path, RemovePrivateAs::Remove, 300);
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn mixed_path_mode_all() {
+        // 100 and 200 are public, 64512 is private
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![100, 64512, 200])],
+        };
+        let result = remove_private_asns(&path, RemovePrivateAs::All, 300);
+        assert_eq!(
+            result.segments,
+            vec![AsPathSegment::AsSequence(vec![100, 200])]
+        );
+    }
+
+    #[test]
+    fn replace_mode() {
+        // 100 is public, 64512 is private
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![100, 64512])],
+        };
+        let result = remove_private_asns(&path, RemovePrivateAs::Replace, 300);
+        assert_eq!(
+            result.segments,
+            vec![AsPathSegment::AsSequence(vec![100, 300])]
+        );
+    }
+
+    #[test]
+    fn four_byte_private_range() {
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![4_200_000_001])],
+        };
+        assert!(path.all_private());
+        let result = remove_private_asns(&path, RemovePrivateAs::All, 100);
+        assert!(result.segments.is_empty());
+    }
+
+    #[test]
+    fn as_set_filtering() {
+        // 64512 is private, 100 is public
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSet(vec![64512, 100])],
+        };
+        let result = remove_private_asns(&path, RemovePrivateAs::All, 300);
+        assert_eq!(result.segments, vec![AsPathSegment::AsSet(vec![100])]);
+    }
+
+    #[test]
+    fn empty_segment_dropped() {
+        // First segment all-private → dropped; second segment has public ASN 100
+        let path = AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![64512]),
+                AsPathSegment::AsSequence(vec![100]),
+            ],
+        };
+        let result = remove_private_asns(&path, RemovePrivateAs::All, 300);
+        assert_eq!(result.segments, vec![AsPathSegment::AsSequence(vec![100])]);
+    }
+
+    #[test]
+    fn disabled_noop() {
+        let path = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![64512, 65000])],
+        };
+        let result = remove_private_asns(&path, RemovePrivateAs::Disabled, 100);
+        assert_eq!(result, path);
+    }
+
+    #[test]
+    fn ibgp_unaffected() {
+        let mut session = make_test_session(65001, 65001);
+        session.config.remove_private_as = RemovePrivateAs::All;
+        let mut route = make_route(100);
+        route.attributes = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![64512])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::LocalPref(100),
+        ];
+        let attrs =
+            session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
+        let as_path = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::AsPath(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+        // iBGP: no removal, no prepend — path unchanged
+        assert_eq!(
+            as_path.segments,
+            vec![AsPathSegment::AsSequence(vec![64512])]
+        );
+    }
+
+    #[test]
+    fn route_server_skipped() {
+        let mut session = make_test_session(65001, 65002);
+        session.config.route_server_client = true;
+        session.config.remove_private_as = RemovePrivateAs::All;
+        let mut route = make_route(100);
+        route.attributes = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![64512])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+        let as_path = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::AsPath(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+        // Route server client: no removal, no prepend — path unchanged
+        assert_eq!(
+            as_path.segments,
+            vec![AsPathSegment::AsSequence(vec![64512])]
+        );
+    }
+
+    #[test]
+    fn ebgp_remove_private_as_all_prepends_after_removal() {
+        let mut session = make_test_session(100, 200);
+        session.config.remove_private_as = RemovePrivateAs::All;
+        let mut route = make_route(100);
+        route.attributes = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![64512, 65535])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ];
+        let attrs =
+            session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+        let as_path = attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::AsPath(p) => Some(p),
+                _ => None,
+            })
+            .unwrap();
+        // 64512 removed (private), 65535 kept (not private: 65535 > 65534)
+        // Then our ASN 100 prepended
+        assert_eq!(
+            as_path.segments,
+            vec![AsPathSegment::AsSequence(vec![100, 65535])]
+        );
     }
 }

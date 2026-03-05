@@ -96,6 +96,27 @@ impl AsPath {
         })
     }
 
+    /// Returns `true` if every ASN in the path is a private ASN.
+    ///
+    /// Returns `false` for empty paths (no ASNs to check).
+    #[must_use]
+    pub fn all_private(&self) -> bool {
+        let mut count = 0;
+        for seg in &self.segments {
+            match seg {
+                AsPathSegment::AsSequence(asns) | AsPathSegment::AsSet(asns) => {
+                    for asn in asns {
+                        count += 1;
+                        if !is_private_asn(*asn) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        count > 0
+    }
+
     /// Convert to a string representation for regex matching.
     ///
     /// `AS_SEQUENCE` segments produce space-separated ASNs.
@@ -121,6 +142,16 @@ impl AsPath {
         }
         parts.join(" ")
     }
+}
+
+/// Returns `true` if the given ASN falls in a private-use range.
+///
+/// Private ranges (RFC 5398 + RFC 6996):
+/// - 16-bit: 64512–65534
+/// - 32-bit: 4200000000–4294967294
+#[must_use]
+pub fn is_private_asn(asn: u32) -> bool {
+    (64512..=65534).contains(&asn) || (4_200_000_000..=4_294_967_294).contains(&asn)
 }
 
 /// RFC 4760 `MP_REACH_NLRI` attribute (type code 14).
@@ -1265,6 +1296,46 @@ mod tests {
     fn contains_asn_empty_path() {
         let path = AsPath { segments: vec![] };
         assert!(!path.contains_asn(65001));
+    }
+
+    #[test]
+    fn is_private_asn_boundaries() {
+        // 16-bit private range boundaries
+        assert!(!is_private_asn(64_511));
+        assert!(is_private_asn(64_512));
+        assert!(is_private_asn(65_534));
+        assert!(!is_private_asn(65_535));
+
+        // 32-bit private range boundaries
+        assert!(!is_private_asn(4_199_999_999));
+        assert!(is_private_asn(4_200_000_000));
+        assert!(is_private_asn(4_294_967_294));
+        assert!(!is_private_asn(4_294_967_295));
+    }
+
+    #[test]
+    fn all_private_empty_path_is_false() {
+        let path = AsPath { segments: vec![] };
+        assert!(!path.all_private());
+    }
+
+    #[test]
+    fn all_private_mixed_segments() {
+        let path = AsPath {
+            segments: vec![
+                AsPathSegment::AsSet(vec![64_512, 65_000]),
+                AsPathSegment::AsSequence(vec![4_200_000_000, 65_534]),
+            ],
+        };
+        assert!(path.all_private());
+
+        let non_private = AsPath {
+            segments: vec![
+                AsPathSegment::AsSet(vec![64_512, 65_000]),
+                AsPathSegment::AsSequence(vec![65_535]),
+            ],
+        };
+        assert!(!non_private.all_private());
     }
 
     #[test]

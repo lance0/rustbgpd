@@ -44,6 +44,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Enhanced Route Refresh** -- RFC 7313 `BoRR` / `EoRR` markers with inbound family replacement semantics for `SoftResetIn`
 - **Add-Path** -- RFC 7911 dual-stack receive + multi-path send (route server mode) for IPv4 and IPv6 unicast
 - **Transparent route server mode** -- config-driven eBGP unicast transparency preserves original next hop and skips automatic local-AS prepend for IX route-server clients
+- **Private AS removal** -- strip private ASNs (RFC 5398/6996) from AS_PATH before eBGP export; three modes: `remove`, `all`, `replace`
 - **RPKI origin validation** -- RFC 6811: persistent RTR client (RFC 8210) keeps sessions open, honors `SerialNotify`, enforces expiry, stamps routes Valid/Invalid/NotFound, and integrates into best-path and policy
 - **FlowSpec** -- RFC 8955/8956: IPv4 and IPv6 traffic filtering rules distributed via BGP; 13 match component types, rate-limit/redirect/mark actions via extended communities
 - **BMP export** -- RFC 7854: stream peer state and route monitoring to collectors (OpenBMP, pmacct); per-collector TCP with reconnect, Peer Up replay, periodic Stats Report

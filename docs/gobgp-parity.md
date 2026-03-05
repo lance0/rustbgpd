@@ -126,7 +126,7 @@ Last updated: 2026-03-05
 | TCP-AO (RFC 5925) | No | No | Neither; on rustbgpd roadmap |
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
-| Private AS removal | Yes | No | |
+| Private AS removal | Yes | Yes | Three modes: `remove`, `all`, `replace` (ADR-0045) |
 
 ## Operations
 
@@ -170,7 +170,7 @@ Last updated: 2026-03-05
 | Policy engine | 18 | 13 | ~72% |
 | gRPC RPCs | ~55 | ~21 | ~38% |
 | Monitoring | 5 | 5 | 100% |
-| Security | 4 | 3 | 75% |
+| Security | 4 | 4 | 100% |
 | Best-path steps | 11 | 10.5 | ~95% |
 
 ## Weighted Parity Estimates
@@ -215,8 +215,8 @@ Competing head-to-head with GoBGP for all use cases:
 1. **Confederation (RFC 5065)** — required for service provider deployments
 2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
 3. **Notification GR (RFC 8538)** — Hard Reset avoidance; completes the GR story
-4. **Private AS removal** — common operational requirement for IX and transit
-5. **Policy CRUD via gRPC** — runtime policy management without config file edits
+4. **Policy CRUD via gRPC** — runtime policy management without config file edits
+5. **Peer groups** — template-based neighbor config reduces boilerplate for large deployments
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 

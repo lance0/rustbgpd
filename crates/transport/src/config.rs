@@ -3,6 +3,20 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
 
+/// Private AS removal mode for eBGP outbound `AS_PATH` manipulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RemovePrivateAs {
+    /// No removal (default).
+    #[default]
+    Disabled,
+    /// Remove all private ASNs only if the entire path is private.
+    Remove,
+    /// Unconditionally remove all private ASNs from every segment.
+    All,
+    /// Replace each private ASN with the local ASN.
+    Replace,
+}
+
 /// Transport-layer configuration for a single BGP peer.
 #[derive(Clone)]
 pub struct TransportConfig {
@@ -34,6 +48,8 @@ pub struct TransportConfig {
     pub route_reflector_client: bool,
     /// Whether this eBGP neighbor is a transparent route-server client.
     pub route_server_client: bool,
+    /// Private AS removal mode for eBGP outbound `AS_PATH`.
+    pub remove_private_as: RemovePrivateAs,
     /// Local cluster ID for route reflection. `Some` means this speaker is a
     /// route reflector; used for `CLUSTER_LIST` prepend and loop detection.
     pub cluster_id: Option<Ipv4Addr>,
@@ -59,6 +75,7 @@ impl TransportConfig {
             gr_restart_until: None,
             route_reflector_client: false,
             route_server_client: false,
+            remove_private_as: RemovePrivateAs::Disabled,
             cluster_id: None,
         }
     }

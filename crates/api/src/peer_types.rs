@@ -3,6 +3,7 @@ use std::net::{IpAddr, Ipv6Addr};
 use bytes::Bytes;
 use rustbgpd_fsm::SessionState;
 use rustbgpd_policy::PolicyChain;
+use rustbgpd_transport::RemovePrivateAs;
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -103,6 +104,7 @@ pub struct PeerManagerNeighborConfig {
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
     pub route_reflector_client: bool,
     pub route_server_client: bool,
+    pub remove_private_as: RemovePrivateAs,
     pub add_path_receive: bool,
     pub add_path_send: bool,
     pub add_path_send_max: u32,
@@ -131,6 +133,7 @@ pub struct PeerInfo {
     pub hold_time: Option<u16>,
     pub max_prefixes: Option<u32>,
     pub families: Vec<(Afi, Safi)>,
+    pub remove_private_as: RemovePrivateAs,
     pub updates_received: u64,
     pub updates_sent: u64,
     pub notifications_received: u64,

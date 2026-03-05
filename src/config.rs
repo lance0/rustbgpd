@@ -8,7 +8,7 @@ use rustbgpd_policy::{
     CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
     RouteModifications, parse_community_match,
 };
-use rustbgpd_transport::TransportConfig;
+use rustbgpd_transport::{RemovePrivateAs, TransportConfig};
 use rustbgpd_wire::{Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix, Safi};
 use serde::{Deserialize, Serialize};
 
@@ -185,6 +185,14 @@ pub struct Neighbor {
     /// policy next-hop rewrites still apply.
     #[serde(default)]
     pub route_server_client: bool,
+    /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
+    ///
+    /// - `"remove"` — only if the entire path consists of private ASNs
+    /// - `"all"` — unconditionally remove all private ASNs
+    /// - `"replace"` — replace each private ASN with the local ASN
+    ///
+    /// Only valid for eBGP neighbors.
+    pub remove_private_as: Option<String>,
     /// Add-Path (RFC 7911) configuration for this neighbor.
     pub add_path: Option<AddPathConfig>,
     #[serde(default)]
@@ -320,6 +328,8 @@ pub enum ConfigError {
     InvalidBmpCollector { reason: String },
     #[error("invalid MRT config: {reason}")]
     InvalidMrtConfig { reason: String },
+    #[error("invalid remove_private_as config: {reason}")]
+    InvalidRemovePrivateAs { reason: String },
 }
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
@@ -826,6 +836,27 @@ impl Config {
                 });
             }
 
+            if let Some(ref mode) = neighbor.remove_private_as {
+                match mode.as_str() {
+                    "remove" | "all" | "replace" => {}
+                    other => {
+                        return Err(ConfigError::InvalidRemovePrivateAs {
+                            reason: format!(
+                                "unknown mode {other:?}, expected \"remove\", \"all\", or \"replace\""
+                            ),
+                        });
+                    }
+                }
+                if neighbor.remote_asn == self.global.asn {
+                    return Err(ConfigError::InvalidRemovePrivateAs {
+                        reason: format!(
+                            "remove_private_as requires eBGP (remote_asn {} == local asn {})",
+                            neighbor.remote_asn, self.global.asn
+                        ),
+                    });
+                }
+            }
+
             // Validate families if explicitly configured
             if !neighbor.families.is_empty() {
                 parse_families(&neighbor.families)?;
@@ -1107,6 +1138,12 @@ impl Config {
             transport.gr_stale_routes_time = neighbor.gr_stale_routes_time.unwrap_or(360);
             transport.llgr_stale_time = neighbor.llgr_stale_time.unwrap_or(0);
             transport.route_server_client = neighbor.route_server_client;
+            transport.remove_private_as = match neighbor.remove_private_as.as_deref() {
+                Some("remove") => RemovePrivateAs::Remove,
+                Some("all") => RemovePrivateAs::All,
+                Some("replace") => RemovePrivateAs::Replace,
+                _ => RemovePrivateAs::Disabled,
+            };
 
             let label = neighbor
                 .description
@@ -2071,6 +2108,101 @@ route_server_client = true
     }
 
     #[test]
+    fn remove_private_as_on_ibgp_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+remove_private_as = "all"
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRemovePrivateAs { .. }));
+    }
+
+    #[test]
+    fn remove_private_as_invalid_mode_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+remove_private_as = "bogus"
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidRemovePrivateAs { .. }));
+    }
+
+    #[test]
+    fn remove_private_as_valid_modes_accepted() {
+        for mode in &["remove", "all", "replace"] {
+            let toml_str = format!(
+                r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+remove_private_as = "{mode}"
+"#,
+            );
+            let config = parse(&toml_str).unwrap();
+            assert_eq!(
+                config.neighbors[0].remove_private_as.as_deref(),
+                Some(*mode)
+            );
+        }
+    }
+
+    #[test]
+    fn to_peer_configs_maps_remove_private_as() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+remove_private_as = "all"
+"#;
+        let config = parse(toml_str).unwrap();
+        let peers = config.to_peer_configs().unwrap();
+        assert_eq!(
+            peers[0].0.remove_private_as,
+            rustbgpd_transport::RemovePrivateAs::All
+        );
+    }
+
+    #[test]
     fn cluster_id_invalid_rejected() {
         let toml_str = r#"
 [global]
@@ -2877,6 +3009,7 @@ remote_asn = 65003
             local_ipv6_nexthop: None,
             route_reflector_client: false,
             route_server_client: false,
+            remove_private_as: None,
             add_path: None,
             import_policy: Vec::new(),
             export_policy: Vec::new(),

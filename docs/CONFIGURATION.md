@@ -83,6 +83,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP unicast peers (see below) |
+| `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
 | `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
@@ -264,6 +265,30 @@ rejects it on iBGP peers.
 **Current scope:** transparent route-server behavior is implemented for
 unicast only. FlowSpec still uses the standard eBGP automatic AS_PATH prepend
 behavior and does not yet have a transparent mode.
+
+### Private AS Removal
+
+Strip private ASNs (64512–65534, 4200000000–4294967294) from AS_PATH
+before eBGP advertisement:
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+remove_private_as = "all"
+```
+
+Three modes are available:
+
+- **`"remove"`** — remove private ASNs only if *every* ASN in the path is private (safe default)
+- **`"all"`** — unconditionally remove all private ASNs from every segment; drop empty segments
+- **`"replace"`** — replace each private ASN with the local ASN
+
+`remove_private_as` is only valid for eBGP neighbors. Config validation
+rejects it on iBGP peers. Route server client peers skip private AS
+removal (they already skip AS_PATH manipulation).
+
+See [ADR-0045](docs/adr/0045-private-as-removal.md).
 
 ### FlowSpec (RFC 8955)
 
@@ -919,6 +944,7 @@ starting:
 | Named policy referenced in chain must exist in `[policy.definitions]` | `undefined policy` |
 | Inline policy and policy chain cannot both be set for the same neighbor/direction | `mutually exclusive` |
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
+| `remove_private_as` must be `"remove"`, `"all"`, or `"replace"` (eBGP only) | `invalid remove_private_as` |
 | MRT `output_dir` must not be empty | `output_dir must not be empty` |
 | MRT `dump_interval` must be > 0 | `dump_interval must be > 0` |
 | BMP collector `address` must be a valid `ip:port` | `invalid BMP collector address` |
@@ -948,4 +974,5 @@ starting:
 | `llgr_stale_time` | 0 (disabled) |
 | `description` | peer address used as label |
 | `route_server_client` | `false` |
+| `remove_private_as` | disabled (absent) |
 | Policy default action | permit (when no entry matches) |

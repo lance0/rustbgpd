@@ -47,6 +47,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Inbound Cease/2 and Cease/4 NOTIFICATIONs with shutdown communication
   are decoded and logged. Wire helpers: `encode_shutdown_communication()`
   and `decode_shutdown_communication()` in the notification module.
+- **Private AS removal.** New per-neighbor `remove_private_as` config strips
+  private ASNs (64512–65534, 4200000000–4294967294) from AS_PATH before
+  eBGP advertisement. Three modes: `"remove"` (entire path must be private),
+  `"all"` (unconditional), `"replace"` (substitute local ASN). Applied before
+  local ASN prepend in both unicast and FlowSpec outbound paths. eBGP only;
+  route-server clients skip. (ADR-0045)
 - **Transparent route server mode.** Static neighbor config now supports
   `route_server_client = true` for eBGP peers. Outbound unicast
   advertisements to route-server clients preserve the original next hop and
@@ -132,6 +138,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Neighbor gRPC `remove_private_as` parity.** `AddNeighbor` now validates
+  and applies `remove_private_as` (`"", remove, all, replace`) instead of
+  silently forcing disabled mode for dynamic peers. `ListNeighbors` and
+  `GetNeighborState` now return the active `remove_private_as` mode from
+  runtime peer state.
 - **Neighbor gRPC mutations are now fail-fast when persistence is unavailable.**
   `AddNeighbor` and `DeleteNeighbor` reserve config-persistence queue capacity
   before mutating runtime state. If the persistence channel is busy/closed, the

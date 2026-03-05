@@ -106,6 +106,9 @@ message NeighborConfig {
   // Address families (e.g., "ipv4_unicast", "ipv6_unicast").
   // If empty, defaults to ["ipv4_unicast"].
   repeated string families = 6;
+  // Private AS removal mode: "", "remove", "all", or "replace".
+  // Empty string means disabled (default).
+  string remove_private_as = 7;
 }
 
 message NeighborState {

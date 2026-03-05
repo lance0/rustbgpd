@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use rustbgpd_transport::RemovePrivateAs;
 use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
@@ -37,6 +38,7 @@ fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status>
 
 #[allow(clippy::struct_field_names)]
 pub struct NeighborService {
+    local_asn: u32,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -44,11 +46,13 @@ pub struct NeighborService {
 
 impl NeighborService {
     pub fn new(
+        local_asn: u32,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
         Self {
+            local_asn,
             peer_mgr_tx,
             rib_tx,
             config_tx,
@@ -99,6 +103,28 @@ fn family_to_string(afi: Afi, safi: Safi) -> String {
     }
 }
 
+#[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
+fn parse_remove_private_as_proto(mode: &str) -> Result<RemovePrivateAs, Status> {
+    match mode {
+        "" => Ok(RemovePrivateAs::Disabled),
+        "remove" => Ok(RemovePrivateAs::Remove),
+        "all" => Ok(RemovePrivateAs::All),
+        "replace" => Ok(RemovePrivateAs::Replace),
+        other => Err(Status::invalid_argument(format!(
+            "unknown remove_private_as mode {other:?}, expected \"remove\", \"all\", \"replace\", or empty string"
+        ))),
+    }
+}
+
+fn remove_private_as_to_string(mode: RemovePrivateAs) -> String {
+    match mode {
+        RemovePrivateAs::Disabled => String::new(),
+        RemovePrivateAs::Remove => "remove".to_string(),
+        RemovePrivateAs::All => "all".to_string(),
+        RemovePrivateAs::Replace => "replace".to_string(),
+    }
+}
+
 fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
     let families = info
         .families
@@ -113,6 +139,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         hold_time: info.hold_time.map_or(0, u32::from),
         max_prefixes: info.max_prefixes.unwrap_or(0),
         families,
+        remove_private_as: remove_private_as_to_string(info.remove_private_as),
     };
 
     let state = match info.state {
@@ -164,6 +191,13 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         }
 
         let families = parse_families_proto(&config.families)?;
+        let remove_private_as = parse_remove_private_as_proto(&config.remove_private_as)?;
+        if remove_private_as != RemovePrivateAs::Disabled && config.remote_asn == self.local_asn {
+            return Err(Status::invalid_argument(format!(
+                "remove_private_as requires eBGP (remote_asn {} == local asn {})",
+                config.remote_asn, self.local_asn
+            )));
+        }
 
         let peer_config = PeerManagerNeighborConfig {
             address,
@@ -191,6 +225,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             local_ipv6_nexthop: None,
             route_reflector_client: false,
             route_server_client: false,
+            remove_private_as,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,
@@ -428,7 +463,7 @@ mod tests {
     fn make_service() -> NeighborService {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        NeighborService::new(tx, rib_tx, None)
+        NeighborService::new(65001, tx, rib_tx, None)
     }
 
     #[tokio::test]
@@ -442,6 +477,7 @@ mod tests {
                 hold_time: 90,
                 max_prefixes: 0,
                 families: Vec::new(),
+                remove_private_as: String::new(),
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -460,6 +496,7 @@ mod tests {
                 hold_time: 2,
                 max_prefixes: 0,
                 families: Vec::new(),
+                remove_private_as: String::new(),
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -486,7 +523,7 @@ mod tests {
     async fn soft_reset_in_deduplicates_requested_families() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, peer_tx, rib_tx, None);
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::SoftResetIn {
@@ -520,7 +557,7 @@ mod tests {
 
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, peer_tx, rib_tx, None);
 
         let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
 
@@ -537,6 +574,7 @@ mod tests {
                     hold_time: None,
                     max_prefixes: None,
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
+                    remove_private_as: RemovePrivateAs::Disabled,
                     updates_received: 0,
                     updates_sent: 0,
                     notifications_received: 0,
@@ -577,6 +615,7 @@ mod tests {
             hold_time: None,
             max_prefixes: None,
             families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
+            remove_private_as: RemovePrivateAs::All,
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -588,6 +627,7 @@ mod tests {
         let state = peer_info_to_proto(&info);
         let config = state.config.unwrap();
         assert_eq!(config.families, vec!["ipv4_unicast", "ipv6_unicast"]);
+        assert_eq!(config.remove_private_as, "all");
     }
 
     #[tokio::test]
@@ -596,7 +636,7 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, config_rx) = mpsc::channel(1);
         drop(config_rx);
-        let svc = NeighborService::new(peer_tx, rib_tx, Some(config_tx));
+        let svc = NeighborService::new(65001, peer_tx, rib_tx, Some(config_tx));
 
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
@@ -606,6 +646,7 @@ mod tests {
                 hold_time: 90,
                 max_prefixes: 0,
                 families: Vec::new(),
+                remove_private_as: String::new(),
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -619,7 +660,7 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, config_rx) = mpsc::channel(1);
         drop(config_rx);
-        let svc = NeighborService::new(peer_tx, rib_tx, Some(config_tx));
+        let svc = NeighborService::new(65001, peer_tx, rib_tx, Some(config_tx));
 
         let req = Request::new(proto::DeleteNeighborRequest {
             address: "10.0.0.2".into(),
@@ -627,5 +668,43 @@ mod tests {
         let err = svc.delete_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::Internal);
         assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_invalid_remove_private_as() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                remove_private_as: "bogus".into(),
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("remove_private_as"));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_remove_private_as_on_ibgp() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 65001,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                remove_private_as: "all".into(),
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("requires eBGP"));
     }
 }

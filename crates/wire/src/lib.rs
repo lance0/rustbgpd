@@ -98,7 +98,7 @@ impl std::str::FromStr for RpkiValidation {
 // Re-export attribute types
 pub use attribute::{
     AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MpReachNlri, MpUnreachNlri, Origin,
-    PathAttribute, RawAttribute,
+    PathAttribute, RawAttribute, is_private_asn,
 };
 pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
 pub use update::ParsedUpdate;

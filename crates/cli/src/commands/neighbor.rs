@@ -137,6 +137,7 @@ pub async fn add(
                 hold_time: opts.hold_time.unwrap_or(0),
                 max_prefixes: opts.max_prefixes.unwrap_or(0),
                 families: opts.families,
+                remove_private_as: String::new(),
             }),
         })
         .await?;

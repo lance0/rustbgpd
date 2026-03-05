@@ -120,6 +120,7 @@ impl PeerManager {
         };
         transport.route_reflector_client = config.route_reflector_client;
         transport.route_server_client = config.route_server_client;
+        transport.remove_private_as = config.remove_private_as;
         transport.cluster_id = self.cluster_id;
         transport
     }
@@ -202,6 +203,7 @@ impl PeerManager {
             hold_time: managed.hold_time,
             max_prefixes: managed.max_prefixes,
             families: managed.transport_config.peer.families.clone(),
+            remove_private_as: managed.transport_config.remove_private_as,
             updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
             updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
             notifications_received: session_state
@@ -232,6 +234,7 @@ impl PeerManager {
                 hold_time: managed.hold_time,
                 max_prefixes: managed.max_prefixes,
                 families: managed.transport_config.peer.families.clone(),
+                remove_private_as: managed.transport_config.remove_private_as,
                 updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
                 updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
                 notifications_received: session_state
@@ -695,6 +698,7 @@ mod tests {
             local_ipv6_nexthop: None,
             route_reflector_client: false,
             route_server_client: false,
+            remove_private_as: rustbgpd_transport::RemovePrivateAs::Disabled,
             add_path_receive: false,
             add_path_send: false,
             add_path_send_max: 0,

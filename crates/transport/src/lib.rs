@@ -17,7 +17,7 @@ pub(crate) mod session;
 mod socket_opts;
 pub mod timer;
 
-pub use config::TransportConfig;
+pub use config::{RemovePrivateAs, TransportConfig};
 pub use error::TransportError;
 pub use handle::{PeerCommand, PeerHandle, PeerSessionState, SessionNotification};
 pub use listener::{AcceptedConnection, BgpListener};
