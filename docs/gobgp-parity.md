@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-03-04
+Last updated: 2026-03-05
 
 ## Address Families
 
@@ -31,7 +31,7 @@ Last updated: 2026-03-04
 | Capability negotiation (RFC 5492) | Yes | Yes | |
 | TCP collision detection (RFC 4271 §6.8) | Yes | Yes | |
 | Graceful Restart (RFC 4724) | Yes | Partial | Helper mode + minimal restarting-speaker `R=1`; no forwarding-preserved support yet |
-| Long-Lived GR (RFC 9494) | Yes | No | Per-AFI timers |
+| Long-Lived GR (RFC 9494) | Yes | Yes | Two-phase timer, three-tier best-path demotion, `LLGR_STALE`/`NO_LLGR` communities, per-AFI family scoping |
 | Notification GR (RFC 8538) | Yes | No | |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
@@ -133,8 +133,8 @@ Last updated: 2026-03-04
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
 | Config formats | TOML/YAML/JSON/HCL | TOML | |
-| Config reload (SIGHUP) | Yes | No | |
-| Config persistence | No | No | On rustbgpd roadmap |
+| Config reload (SIGHUP) | Yes | Yes | Neighbor diff + reconcile; global changes require restart |
+| Config persistence | No | Yes | gRPC mutations atomically persisted to TOML |
 | Prefix limits | Yes | Yes | Cease/1 enforcement |
 | Embeddable library | Yes (Go) | No | Wire crate is standalone |
 | CLI tool | Yes (gobgp) | Yes | `rustbgpctl` wraps gRPC API |
@@ -165,7 +165,7 @@ Last updated: 2026-03-04
 | Category | GoBGP | rustbgpd | Parity |
 |----------|:-----:|:--------:|:------:|
 | Address families | 15 | 4 | ~27% |
-| Core protocol | 14 | 11.5 | ~82% |
+| Core protocol | 14 | 12.5 | ~89% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 13 | ~72% |
 | gRPC RPCs | ~55 | ~20 | ~36% |
@@ -175,19 +175,21 @@ Last updated: 2026-03-04
 
 ## Weighted Parity Estimates
 
-### IX Route Server Use Case (~80% parity)
+### IX Route Server Use Case (~85% parity)
 
 The primary target deployment. Weighted toward what matters:
 
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
-- **Core protocol:** 82% — GR helper + restarting speaker, Enhanced RR, Add-Path, Extended Nexthop all landed
+- **Core protocol:** 89% — GR helper + restarting speaker, LLGR, Enhanced RR, Add-Path, Extended Nexthop all landed
 - **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
 - **BMP exporter:** RFC 7854 streaming to collectors implemented, including collector reconnect replay and periodic Stats Report export
+- **LLGR (RFC 9494):** two-phase timer, three-tier best-path demotion, per-AFI family scoping — critical for large IXes
+- **Config persistence + SIGHUP reload:** gRPC mutations survive restart; live neighbor reconciliation
 
-### General-Purpose BGP Speaker (~55% parity)
+### General-Purpose BGP Speaker (~57% parity)
 
 Competing head-to-head with GoBGP for all use cases:
 
@@ -195,6 +197,7 @@ Competing head-to-head with GoBGP for all use cases:
 - No confederation support limits SP deployments
 - `rustbgpctl` ships but has fewer subcommands than `gobgp`
 - gRPC API covers ~36% of GoBGP's RPC surface
+- Config persistence narrows the operational gap
 
 ## Advantages Over GoBGP
 
@@ -204,14 +207,15 @@ Competing head-to-head with GoBGP for all use cases:
 - **Interop test suite** — Containerlab + FRR/BIRD shipped; GoBGP doesn't ship one
 - **Structured logging** — tracing-subscriber JSON vs GoBGP's unstructured logs
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
+- **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 
 ## Top 5 Gaps for Maximum Parity Gain
 
-1. **Long-Lived GR (RFC 9494)** — per-AFI stale timers; important for large-scale iBGP
-2. **Confederation (RFC 5065)** — required for service provider deployments
-3. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
-4. **Config persistence** — write gRPC mutations back to TOML so they survive restarts
-5. **MRT dump export (RFC 6396)** — TABLE_DUMP_V2 for offline analysis and archival
+1. **Confederation (RFC 5065)** — required for service provider deployments
+2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
+3. **MRT dump export (RFC 6396)** — TABLE_DUMP_V2 for offline analysis and archival
+4. **Notification GR (RFC 8538)** — Hard Reset avoidance; completes the GR story
+5. **Private AS removal** — common operational requirement for IX and transit
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 
