@@ -19,7 +19,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 | **Runtime** | C | Go (GC) | Rust (no GC) |
 | **Scope** | Full routing suite | BGP-only | BGP-only |
 | **Dynamic peers** | Config reload | gRPC | gRPC |
-| **Real-time events** | Log parsing | BMP/MRT | gRPC streaming |
+| **Real-time events** | Log parsing | BMP/MRT | gRPC streaming + BMP |
 | **Observability** | SNMP, CLI | Prometheus | Prometheus + structured logs |
 | **Wire codec reuse** | No | No | `rustbgpd-wire` standalone crate |
 
@@ -45,8 +45,13 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Add-Path** -- RFC 7911 dual-stack receive + multi-path send (route server mode) for IPv4 and IPv6 unicast
 - **Transparent route server mode** -- config-driven eBGP unicast transparency preserves original next hop and skips automatic local-AS prepend for IX route-server clients
 - **RPKI origin validation** -- RFC 6811: persistent RTR client (RFC 8210) keeps sessions open, honors `SerialNotify`, enforces expiry, stamps routes Valid/Invalid/NotFound, and integrates into best-path and policy
+- **FlowSpec** -- RFC 8955/8956: IPv4 and IPv6 traffic filtering rules distributed via BGP; 13 match component types, rate-limit/redirect/mark actions via extended communities
+- **BMP export** -- RFC 7854: stream peer state and route monitoring to collectors (OpenBMP, pmacct); per-collector TCP with reconnect, Peer Up replay, periodic Stats Report
+- **Extended Communities** -- RFC 4360: route target, route origin, 4-byte AS subtypes; policy matching with logical RT/RO equivalence
+- **Route Refresh** -- RFC 2918: inbound re-advertisement on demand via gRPC `SoftResetIn`
+- **Admin Shutdown** -- RFC 8203: human-readable reason text in Cease NOTIFICATION; threaded from gRPC `DisableNeighbor`
 - **CLI tool** -- `rustbgpctl` wraps the gRPC API with human-readable tables and `--json` structured output
-- **897 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **909 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -118,19 +123,20 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ## Architecture
 
 ```
-               +-----------+
-               | transport |----> fsm ----> wire
-               +-----------+
-                   |
-                   v
-    policy ----> +-----+
-                 | rib |
-                 +-----+
-                   |
-                   v
-               +-----+       +-----------+
-               | api |-----> | telemetry |
-               +-----+       +-----------+
+              +-----------+
+              | transport |──► fsm ──► wire
+              +-----------+        ◄── policy
+                  │   │
+                  │   └──► bmp
+                  ▼
+  rpki ──►    +-----+
+              | rib | ◄── policy
+              +-----+
+                  │
+                  ▼
+              +-----+       +-----------+
+              | api |──────►| telemetry |
+              +-----+       +-----------+
 ```
 
 Ten crates with strict dependency rules:
@@ -261,7 +267,7 @@ Interop tests run via [containerlab](https://containerlab.dev/) against FRR 10.3
 
 ```bash
 # Deploy the 10-peer M4 topology
-sudo containerlab deploy -t tests/interop/m4-frr.clab.yml
+containerlab deploy -t tests/interop/m4-frr.clab.yml
 
 # Run the automated test suite (17 tests)
 bash tests/interop/scripts/test-m4-frr.sh
@@ -271,7 +277,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 897 tests pass. P0+P1+P2 complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), BMP export (RFC 7854), and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 909 tests pass. P0+P1+P2 complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), BMP export (RFC 7854), and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -283,10 +289,20 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | Operations | v0.1.0 | Coordinated shutdown, gRPC supervision, Prometheus metrics |
 | MP-BGP (IPv6) | v0.2.0 | RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation |
 | Graceful Restart | v0.3.0 | RFC 4724: helper mode, stale route demotion, End-of-RIB, timer sweep, minimal restarting-speaker `R=1` after coordinated restart |
-| **Policy actions** | **unreleased** | **Match + modify + filter: set LOCAL_PREF/MED/communities/AS_PATH, next-hop self** |
-| **AS_PATH regex** | **unreleased** | **Cisco/Quagga-style `_` boundary patterns in policy match conditions** |
-| **Large communities** | **unreleased** | **RFC 8092: wire codec, RIB, gRPC API, policy matching and set/delete** |
-| **Route Reflector** | **unreleased** | **RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST** |
+| Extended Communities | unreleased | RFC 4360: route target, route origin, policy matching (ADR-0025/0026) |
+| Route Refresh | unreleased | RFC 2918 + RFC 7313: inbound re-advertisement, BoRR/EoRR (ADR-0027/0038) |
+| Policy engine | unreleased | Named policies, chaining, match + modify + filter, AS_PATH regex (ADR-0030/0036) |
+| Large communities | unreleased | RFC 8092: wire codec, RIB, gRPC API, policy matching (ADR-0031) |
+| Route Reflector | unreleased | RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST (ADR-0029) |
+| Extended Messages | unreleased | RFC 8654: raise 4096-byte limit to 65535 bytes (ADR-0032) |
+| Add-Path | unreleased | RFC 7911: dual-stack receive + multi-path send (ADR-0033) |
+| Extended Next Hop | unreleased | RFC 8950: IPv4 unicast over IPv6 next hop (ADR-0037) |
+| RPKI validation | unreleased | RFC 6811 + RFC 8210: RTR client, VRP table, best-path integration (ADR-0034) |
+| FlowSpec | unreleased | RFC 8955/8956: IPv4 and IPv6 traffic filtering rules (ADR-0035) |
+| Transparent route server | unreleased | Config-driven eBGP unicast transparency for IX (ADR-0039) |
+| Admin Shutdown | unreleased | RFC 8203: human-readable reason text in Cease NOTIFICATION |
+| BMP export | unreleased | RFC 7854: peer state and route monitoring to collectors (ADR-0041) |
+| CLI tool | unreleased | `rustbgpctl`: human-readable tables and `--json` output |
 
 Next: config persistence, MRT dump, and benchmark hardening. See [ROADMAP.md](ROADMAP.md) for the full plan.
 

@@ -3,6 +3,7 @@
 ## Development Setup
 
 - Rust 1.88+ (edition 2024)
+- `protobuf-compiler` (`apt-get install protobuf-compiler` on Debian/Ubuntu)
 - Linux x86_64 or aarch64 (primary targets)
 - macOS works for development but is not CI-tested
 - Docker + [containerlab](https://containerlab.dev/) for interop tests
@@ -67,26 +68,34 @@ src/main.rs              # Binary entry point — config, wiring, shutdown
 src/config.rs            # TOML config types, loading, validation
 src/metrics_server.rs    # Prometheus /metrics HTTP endpoint
 crates/
-  wire/                  # BGP codec — zero internal deps
+  wire/                  # BGP codec — zero internal deps, independently publishable
   fsm/                   # RFC 4271 state machine — pure, no I/O
-  transport/             # Tokio TCP glue — the only async crate
-  rib/                   # RIB data structures and best-path
-  policy/                # Prefix filters, max-prefix enforcement
-  api/                   # gRPC server (tonic)
+  transport/             # Tokio TCP glue — session runtime, BMP event emission
+  rib/                   # RIB data structures, best-path selection, route distribution
+  policy/                # Match + modify + filter engine: prefix, community, AS_PATH regex, RPKI
+  rpki/                  # RPKI origin validation: RTR client (RFC 8210), VRP table
+  bmp/                   # BMP exporter (RFC 7854): codec, per-collector client, manager
+  api/                   # gRPC server (tonic) — 5 services
   telemetry/             # Prometheus metrics + structured tracing
+  cli/                   # rustbgpctl — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
 tests/interop/           # Containerlab topologies and configs
-docs/                    # Design doc, RFC notes, interop results
+docs/                    # Design doc, RFC notes, interop results, ADRs
 ```
 
 ### Dependency Rules
 
 These are not guidelines — they are enforced invariants:
 
-- `wire` depends on nothing internal
+- `wire` depends on nothing internal — it is a pure codec library
 - `fsm` depends only on `wire` types
 - `fsm` never imports tokio, never touches I/O
-- `transport` is the only crate that does async I/O
+- `policy` depends only on `wire`
+- `rpki` depends only on `wire`
+- `bmp` and `telemetry` have no internal dependencies
+- `rib` depends on `wire`, `policy`, `telemetry`, and `rpki`
+- `transport` is the only crate that does async I/O — it depends on `wire`, `fsm`, `rib`, `policy`, `telemetry`, and `bmp`
+- `cli` has no internal crate dependencies (client-only proto stubs)
 
 ## Pull Request Process
 

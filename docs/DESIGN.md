@@ -20,7 +20,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 ## Non-Goals (v1)
 
-This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, full VRF support, EVPN, or a complete policy language in v1. It will not attempt every BGP extension at once (Add-Path, GR, LLGR, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
+This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, full VRF support, EVPN, or a complete policy language in v1. It will not attempt every BGP extension at once (LLGR, Confederation, EVPN, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
 
 ## Target v1 Use Cases
 
@@ -28,7 +28,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **Programmable edge speaker.** Inject and withdraw prefixes programmatically. Minimal, reliable session handling.
 
-**Later:** FlowSpec speaker mode (ties into prefixd lineage).
+**Later:** VPNv4/VPNv6, EVPN (post-v1 address families).
 
 ---
 
@@ -75,7 +75,7 @@ struct RawAttribute {
 
 **fsm** (session state machine) — RFC 4271 FSM: Idle, Connect, Active, OpenSent, OpenConfirm, Established. Timers modeled as inputs (not spawned internally). Negotiation result struct: negotiated caps, AFI/SAFI set, peer ASN, peer ID. Depends on `wire` types only.
 
-**transport** — TCP connection management via tokio. Read loop → decode → FSM input. FSM output → encode → write loop. Most paths use bounded queues; the session-notification channel used for collision handling is intentionally unbounded to avoid query/notification deadlock. This is the only crate that touches async I/O. Depends on `wire` and `fsm`.
+**transport** — TCP connection management via tokio. Read loop → decode → FSM input. FSM output → encode → write loop. Most paths use bounded queues; the session-notification channel used for collision handling is intentionally unbounded to avoid query/notification deadlock. This is the only crate that touches async I/O. Depends on `wire`, `fsm`, `rib`, `policy`, `telemetry`, and `bmp`.
 
 **rib** — AdjRibIn per neighbor, LocRib best-path selection, AdjRibOut computed per neighbor. Route objects keyed by `Prefix` (IPv4 and IPv6 coexist in the same HashMap). See ADR-0023.
 
@@ -85,16 +85,25 @@ struct RawAttribute {
 
 **telemetry** — Prometheus metrics endpoint, structured tracing logs.
 
+**rpki** — RPKI origin validation: RTR client (RFC 8210), VRP table with binary-search prefix containment, multi-cache aggregation. `Arc<VrpTable>` snapshot pattern (exception to no-Arc rule). Depends on `wire`.
+
+**bmp** — BMP exporter (RFC 7854): message codec, per-collector TCP client with reconnect/backoff, fan-out manager with Peer Up replay cache. No internal crate dependencies.
+
+**cli** (`rustbgpctl`) — gRPC CLI tool. Client-only proto stubs, no internal crate dependencies. Human-readable tables and `--json` output.
+
 ### Dependency Graph
 
 ```
-transport ──► fsm ──► wire
-    │    │
-    ▼    └──► bmp
-   rib ◄── policy
-    │
-    ▼
-   api ──► telemetry
+wire           (no internal deps)
+fsm            ──► wire
+policy         ──► wire
+rpki           ──► wire
+bmp            (no internal deps)
+telemetry      (no internal deps)
+rib            ──► wire, policy, telemetry, rpki
+transport      ──► wire, fsm, rib, policy, telemetry, bmp
+api            ──► wire, fsm, rib, policy, transport, telemetry
+cli            (no internal deps — uses tonic codegen directly)
 ```
 
 Hard rules:
@@ -103,7 +112,7 @@ Hard rules:
 - `fsm` never imports `tokio`, never touches a socket, never spawns a task.
 - `transport` is the adapter that owns TCP streams, runs async read/write loops, and feeds the FSM.
 - `rib` and `policy` are independent of transport and fsm — they consume route update events.
-- `api` is the orchestration layer that wires everything together.
+- `api` provides the gRPC server; the binary crate (`src/main.rs`) wires everything together.
 
 ### Runtime Model
 
@@ -627,7 +636,6 @@ rustbgpd/
 
 ## Roadmap Beyond v1
 
-- FlowSpec speaker mode (prefixd lineage)
 - MRT dump export (RFC 6396)
 - Plugin-based policy engine (WASM or embedded DSL) — only after core stability
 - Config persistence (gRPC changes written back to TOML)

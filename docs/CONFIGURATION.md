@@ -23,6 +23,7 @@ Required. Defines the local BGP speaker identity.
 | `router_id`         | string | yes      | --                   | BGP router ID (must be valid IPv4) |
 | `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179) |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker today) |
+| `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 
 ```toml
 [global]
@@ -80,6 +81,10 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
 | `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP unicast peers (see below) |
+| `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
+| `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
+| `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
+| `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 
 ### Address families
@@ -806,6 +811,13 @@ starting:
 | `route_server_client` is only valid on eBGP neighbors | `invalid route_server_client` |
 | BMP collector `address` must be a valid `ip:port` | `invalid BMP collector address` |
 | BMP collector `reconnect_interval` must be > 0 | `reconnect_interval must be > 0` |
+| `cluster_id` must be a valid IPv4 address | `invalid cluster_id` |
+| `runtime_state_dir` must not be empty | `runtime_state_dir must not be empty` |
+| `route_reflector_client` requires iBGP (local ASN == remote ASN) | `route_reflector_client requires iBGP` |
+| `local_ipv6_nexthop` must be a valid non-link-local, non-loopback, non-multicast IPv6 address | `invalid local_ipv6_nexthop` |
+| `ge` must be >= prefix length and <= AFI max (32 for IPv4, 128 for IPv6) | `invalid ge` |
+| `le` must be <= AFI max | `invalid le` |
+| `ge` must be <= `le` when both are set | `ge must be <= le` |
 | Config file must be valid TOML | `failed to parse TOML` |
 
 ### Defaults applied at runtime

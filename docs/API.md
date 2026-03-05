@@ -147,13 +147,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ### Address family filtering
 
 All `List*` RPCs accept an `afi_safi` field to filter by address family.
-Supported values: `IPV4_UNICAST` (1), `IPV6_UNICAST` (2), or unspecified (0,
-returns all families). `WatchRoutes` events include the address family of each
-route change.
+Supported values: `IPV4_UNICAST` (1), `IPV6_UNICAST` (2), `IPV4_FLOWSPEC` (3),
+`IPV6_FLOWSPEC` (4), or unspecified (0, returns all families). `WatchRoutes`
+events include the address family of each route change.
 
 ### Pagination
 
-All `List*` RPCs support pagination via `page_size` and `page_token`:
+All unicast `List*` RPCs support pagination via `page_size` and `page_token` (`ListFlowSpecRoutes` does not support pagination):
 
 ```bash
 # First page (2 routes)
@@ -179,6 +179,9 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.RibService/WatchRoutes
 ```
+
+The `WatchRoutesRequest` also accepts an `afi_safi` field to filter the stream
+by address family.
 
 Event types: `ROUTE_EVENT_TYPE_ADDED`, `ROUTE_EVENT_TYPE_WITHDRAWN`,
 `ROUTE_EVENT_TYPE_BEST_CHANGED`.
@@ -239,7 +242,7 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.InjectionService/AddPath
 ```
 
-Optional fields: `as_path`, `origin`, `local_pref`, `med`, `communities`.
+Optional fields: `as_path`, `origin`, `local_pref`, `med`, `communities`, `extended_communities`, `large_communities`, `path_id`.
 
 The `prefix` and `next_hop` fields accept both IPv4 and IPv6 addresses. Prefix
 length is validated against the address family (max 32 for IPv4, 128 for IPv6).

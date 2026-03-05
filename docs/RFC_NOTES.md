@@ -193,14 +193,14 @@ RFC 4271 recommends a minimum of 3 seconds; we enforce it.
 ### §5.1.4 — MULTI_EXIT_DISC (MED) Attribute
 
 - 4 bytes decoded as u32.
-- Optional non-transitive. Decoded and stored but not yet used in
-  best-path comparison (M2 scope).
+- Optional non-transitive. Used in best-path step 4 (deterministic
+  always-compare mode).
 
 ### §5.1.5 — LOCAL_PREF Attribute
 
 - 4 bytes decoded as u32.
-- Well-known mandatory (iBGP scope). Decoded and stored but not yet
-  used in best-path comparison (M2 scope).
+- Well-known mandatory (iBGP scope). Used in best-path step 1 (highest
+  wins, default 100).
 
 ### §6.3 — UPDATE Message Error Handling
 
@@ -216,7 +216,7 @@ RFC 4271 recommends a minimum of 3 seconds; we enforce it.
 
 ### §9.1 — Adj-RIB-In
 
-- Per-peer `AdjRibIn` stores routes keyed by `Ipv4Prefix`.
+- Per-peer `AdjRibIn` stores routes keyed by `(Prefix, u32)` (prefix + path_id for Add-Path support).
 - Insert replaces existing route for the same prefix.
 - Withdraw removes by prefix, returns whether the route existed.
 - PeerDown clears all routes for that peer.
@@ -333,8 +333,11 @@ them.
 
 ### §4.1 — Procedures for the Restarting Speaker
 
-Not implemented. rustbgpd does not advertise R=1 or preserve its own
-forwarding state on restart. This requires FIB integration and is deferred.
+Minimal restarting-speaker mode implemented (ADR-0040). After a coordinated
+shutdown, a marker file is written to `runtime_state_dir`. On startup, if the
+marker is present and not expired, static peers from config are offered R=1 in
+OPEN. `forwarding_preserved` remains false because rustbgpd does not own or
+verify the FIB. Dynamic gRPC-added peers always get R=0.
 
 ### §4.2 — Procedures for the Receiving Speaker
 
@@ -417,5 +420,127 @@ should not keep stale routes for days.
 
 ### Receiving Speaker Only
 
-Restarting speaker mode (advertising R=1, preserving forwarding state)
-requires FIB integration that does not exist. Deferred per ADR-0024.
+Full restarting speaker mode with forwarding-state preservation requires
+FIB integration. Minimal honest mode (R=1 without forwarding claims) is
+implemented per ADR-0040.
+
+---
+
+## RFC 2918 — Route Refresh Capability
+
+- Capability code 2, unconditionally advertised.
+- Inbound: on receiving ROUTE-REFRESH, re-advertise the requested family
+  from Adj-RIB-Out.
+- Outbound: `SoftResetIn` gRPC RPC sends ROUTE-REFRESH to the peer.
+- See ADR-0027.
+
+---
+
+## RFC 7313 — Enhanced Route Refresh
+
+- Capability code 70, unconditionally advertised.
+- BoRR/EoRR markers demarcate the refresh window.
+- Inbound BoRR marks existing routes as refresh-stale; EoRR sweeps
+  unreplaced routes. 5-minute timeout on the refresh window.
+- Outbound: Enhanced peers get BoRR → routes → EoRR; legacy peers get
+  routes → EoR.
+- See ADR-0038.
+
+---
+
+## RFC 4360 — Extended Communities
+
+- Type code 16. Two-octet AS (subtypes 0x02 RT, 0x03 RO) and four-octet
+  AS (subtypes 0x02 RT, 0x03 RO) encodings.
+- Policy matching uses logical RT/RO equivalence across encodings.
+- See ADR-0025, ADR-0026.
+
+---
+
+## RFC 8092 — Large Communities
+
+- Type code 32. 12 bytes: Global Administrator (4) + Local Data Part 1 (4) +
+  Local Data Part 2 (4).
+- Zero-length Large Communities attribute rejected at wire decode.
+- Policy: `LC:G:L1:L2` format in `match_community`, `set_community_add`,
+  `set_community_remove`.
+- See ADR-0031.
+
+---
+
+## RFC 8654 — Extended Message Support
+
+- Capability code 6, unconditionally advertised.
+- When both peers advertise, max message length is raised from 4096 to
+  65535 bytes for that session. Resets to 4096 on session-down.
+- `ReadBuffer.set_max_message_len()` dynamically resizes on negotiation.
+- See ADR-0032.
+
+---
+
+## RFC 7911 — Add-Path
+
+- Capability code 69. Per-family Send/Receive/Both modes.
+- Adj-RIB-In/Out keyed by `(Prefix, u32)` for multi-path storage.
+- Multi-path send: rank-based path IDs (best=1, second=2, ...).
+- `send_max` caps paths per prefix per peer.
+- Both IPv4 body NLRI and IPv6 MP_REACH/MP_UNREACH supported.
+- See ADR-0033.
+
+---
+
+## RFC 8950 — Extended Next Hop
+
+- Capability code 5. Advertised automatically when both `ipv4_unicast` and
+  `ipv6_unicast` are configured.
+- Negotiation: exact 6-byte tuple matching (NLRI AFI, NLRI SAFI, NH AFI).
+- When negotiated, IPv4 unicast uses `MP_REACH_NLRI` / `MP_UNREACH_NLRI`
+  with IPv6 next hop instead of body NLRI.
+- See ADR-0037.
+
+---
+
+## RFC 6811 — RPKI Origin Validation + RFC 8210 — RTR
+
+- VRP table with sorted-Vec binary search for prefix containment.
+- `Arc<VrpTable>` snapshot pattern for lock-free reads.
+- RTR codec: RFC 8210 v1 only. Serial/Reset queries, Serial Notify,
+  expire enforcement.
+- Best-path step 0.5: Valid > NotFound > Invalid (between stale demotion
+  and LOCAL_PREF).
+- `match_rpki_validation` in policy.
+- See ADR-0034.
+
+---
+
+## RFC 8955/8956 — FlowSpec
+
+- SAFI 133. IPv4 and IPv6 unicast FlowSpec.
+- 13 match component types (destination/source prefix, protocol, ports,
+  ICMP, TCP flags, packet length, DSCP, fragment, flow label).
+- Actions via extended communities: traffic-rate, traffic-action,
+  traffic-marking, redirect.
+- NH length = 0 in MP_REACH_NLRI for FlowSpec.
+- See ADR-0035.
+
+---
+
+## RFC 7854 — BMP
+
+- BMP exporter (router-initiated). All 6 message types encoded.
+- Per-collector TCP client with reconnect/backoff.
+- Peer Up replay on collector reconnect.
+- Periodic Stats Report (type 7: Adj-RIB-In route count, 60s interval).
+- Coordinated Termination on daemon shutdown.
+- Raw UPDATE PDU capture via `Bytes` refcount clone (zero overhead when
+  unconfigured).
+- See ADR-0041.
+
+---
+
+## RFC 8203 — Admin Shutdown Communication
+
+- Cease NOTIFICATION subcode 2 (Administrative Shutdown) carries a
+  UTF-8 reason string.
+- Reason threaded from gRPC `DisableNeighbor` through transport to the
+  NOTIFICATION data field.
