@@ -63,7 +63,9 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Add-Path (RFC 7911) — dual-stack receive + multi-path send (route server mode); capability code 69, NlriEntry composite keying, RIB re-keying with (Prefix, path_id), multi-candidate best-path selection, rank-based path ID assignment, per-candidate export policy, gRPC path_id fields (ADR-0033)
 - [x] Extended nexthop (RFC 8950) — capability code 5; automatic dual-stack capability advertisement, IPv4 unicast NLRI over IPv6 next hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
-- [x] 897 tests — unit, integration, property, fuzz
+- [x] Config persistence + SIGHUP reload — gRPC neighbor add/delete mutations persist to TOML via atomic write; SIGHUP triggers config reload with structured per-peer reconciliation
+- [x] LLGR (RFC 9494) — two-phase GR timer: GR-stale routes promote to LLGR-stale with LLGR_STALE community, configurable llgr_stale_time per peer, NO_LLGR routes purged at transition, effective stale time = min(local, peer)
+- [x] 931 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -135,6 +137,7 @@ Features that improve day-to-day operations.
 
 - [x] **Config persistence** — gRPC neighbor add/delete mutations persist to TOML and SIGHUP reload reconciles neighbor deltas
 - [x] **BMP exporter** (RFC 7854) — stream route monitoring data to collectors (OpenBMP, pmacct); per-collector TCP client with reconnect, fan-out manager, raw PDU capture (ADR-0041)
+- [x] **LLGR** (RFC 9494) — two-phase GR timer with LLGR-stale promotion and configurable stale time per peer
 - [ ] **MRT dump export** (RFC 6396) — TABLE_DUMP_V2 for offline analysis and archival
 
 ### P3 — Scale & Hardening
@@ -182,7 +185,7 @@ Quality gates before tagging 1.0.0:
 - [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
 - [ ] Comprehensive rustdoc for public API
 - [ ] Security audit of gRPC surface
-- [ ] **manager.rs split** — currently ~7,713 lines; split into distribution.rs, revalidation.rs, graceful_restart.rs submodules for reviewability
+- [x] **RibManager submodule split** — 8,318-line manager.rs split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs)
 - [x] **RTR expire_interval enforcement** — VRPs are now cleared if no fresh EndOfData arrives before the expiry window
 
 ---
@@ -195,7 +198,7 @@ Quality gates before tagging 1.0.0:
 | **Runtime** | C | Go (GC) | Rust (no GC) |
 | **Scope** | Full routing suite | BGP-only | BGP-only |
 | **Dynamic peers** | Config reload | gRPC | gRPC |
-| **Real-time events** | Log parsing | BMP/MRT | gRPC streaming |
+| **Real-time events** | Log parsing | BMP/MRT | gRPC streaming + BMP |
 | **Observability** | SNMP, CLI | Prometheus | Prometheus + structured logs |
 | **Wire codec reuse** | No | No | `rustbgpd-wire` standalone crate |
 

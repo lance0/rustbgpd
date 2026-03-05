@@ -8,7 +8,9 @@ rustbgpd /etc/rustbgpd/config.toml
 
 The config file defines the initial boot state. At runtime, the gRPC API is the
 source of truth -- peers can be added, removed, enabled, and disabled dynamically
-without restarting the daemon. Starting with zero `[[neighbors]]` is valid when
+without restarting the daemon. Neighbor add/delete mutations made via gRPC are
+persisted back to the config file. Sending `SIGHUP` to the daemon triggers a
+config reload with per-peer reconciliation. Starting with zero `[[neighbors]]` is valid when
 all peers are managed via gRPC.
 
 ---
@@ -85,6 +87,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
 | `import_policy_chain`  | [string] | no       | --      | Named policy chain for import (mutually exclusive with inline import_policy) |
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
+| `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
 
 ### Address families
@@ -169,6 +172,31 @@ honest. The daemon may advertise `R=1` after a planned restart, but it does
 not claim forwarding-state preservation (`forwarding_preserved = false`) and
 does not persist route state across restarts.
 See [ADR-0024](docs/adr/0024-graceful-restart.md).
+
+### Long-Lived Graceful Restart (RFC 9494)
+
+LLGR extends Graceful Restart with a second stale-timer phase. When the GR
+timer expires, routes for LLGR-negotiated families are promoted to LLGR-stale
+(with the `LLGR_STALE` well-known community added) instead of being purged.
+Routes carrying `NO_LLGR` are purged at the GR-to-LLGR transition.
+
+The effective LLGR stale time is `min(local llgr_stale_time, peer's per-family minimum)`.
+
+```toml
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+graceful_restart = true
+llgr_stale_time = 3600    # seconds (0 = disabled, max 16777215)
+```
+
+To disable LLGR for a specific peer, set `llgr_stale_time = 0` (the default).
+
+Best-path selection uses three-tier stale ranking: fresh > GR-stale > LLGR-stale,
+applied at step 0 (before LOCAL_PREF). LLGR-stale routes are least preferred but
+still participate in best-path selection until the LLGR timer expires.
+
+See [ADR-0024](docs/adr/0024-graceful-restart.md) for the two-phase timer design.
 
 ### Add-Path (RFC 7911)
 
@@ -782,6 +810,27 @@ When BMP is not configured, overhead remains minimal: raw frame capture uses
 
 ---
 
+## Config Persistence
+
+Neighbor mutations made through the gRPC API (`AddNeighbor`, `DeleteNeighbor`)
+are automatically persisted back to the config file via atomic write (temp file
++ rename). This ensures the on-disk config stays in sync with the running state.
+
+### SIGHUP Reload
+
+Sending `SIGHUP` to the rustbgpd process triggers a config reload:
+
+1. The daemon re-reads the TOML config file
+2. `diff_neighbors()` computes the delta between running and file state
+3. `ReconcilePeers` applies per-peer add/delete operations
+4. Global config changes (ASN, router_id, etc.) are logged as warnings but
+   require a restart to take effect
+
+Reload failures are reported per-peer with structured logging. The previous
+in-memory config snapshot is preserved when reconciliation is incomplete.
+
+---
+
 ## Validation rules
 
 The following checks run at startup. Any failure prevents the daemon from
@@ -813,6 +862,7 @@ starting:
 | BMP collector `reconnect_interval` must be > 0 | `reconnect_interval must be > 0` |
 | `cluster_id` must be a valid IPv4 address | `invalid cluster_id` |
 | `runtime_state_dir` must not be empty | `runtime_state_dir must not be empty` |
+| `llgr_stale_time` must be <= 16777215 (24-bit) | `llgr_stale_time exceeds maximum` |
 | `route_reflector_client` requires iBGP (local ASN == remote ASN) | `route_reflector_client requires iBGP` |
 | `local_ipv6_nexthop` must be a valid non-link-local, non-loopback, non-multicast IPv6 address | `invalid local_ipv6_nexthop` |
 | `ge` must be >= prefix length and <= AFI max (32 for IPv4, 128 for IPv6) | `invalid ge` |
@@ -832,6 +882,7 @@ starting:
 | `graceful_restart` | `true` |
 | `gr_restart_time` | 120 seconds |
 | `gr_stale_routes_time` | 360 seconds |
+| `llgr_stale_time` | 0 (disabled) |
 | `description` | peer address used as label |
 | `route_server_client` | `false` |
 | Policy default action | permit (when no entry matches) |

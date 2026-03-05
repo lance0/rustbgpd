@@ -83,6 +83,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (streaming), `flowspec` (list/add/delete), `health`, `metrics`, `shutdown`.
   Global `--json` flag for structured output on all commands. Global `--addr`
   flag with `RUSTBGPD_ADDR` env var support.
+- **Long-Lived Graceful Restart (RFC 9494).** Two-phase GR timer: when
+  the GR restart timer expires, routes for LLGR-negotiated families are
+  promoted to LLGR-stale (with `LLGR_STALE` community, well-known
+  0xFFFF0006) instead of being purged. Routes carrying `NO_LLGR`
+  (0xFFFF0007) are purged at the GR-to-LLGR transition. Effective stale
+  time is `min(local llgr_stale_time, peer per-family minimum)`.
+  Three-tier best-path ranking: fresh > GR-stale > LLGR-stale at step 0
+  (before LOCAL_PREF). New capability code 71 with per-family 24-bit
+  stale time. Config: `llgr_stale_time` per neighbor (0 = disabled,
+  default). EoR during LLGR clears `is_llgr_stale` and removes locally-
+  injected `LLGR_STALE` communities. PeerUp during LLGR moves families
+  back to GR phase.
+- **Config persistence + SIGHUP reload.** Neighbor add/delete mutations
+  via gRPC are now persisted back to the TOML config file via atomic
+  write (temp file + rename). `ConfigPersister` task accepts mutations
+  through a bounded channel. Sending `SIGHUP` to the daemon triggers a
+  config reload: `diff_neighbors()` computes the delta, `ReconcilePeers`
+  applies per-peer add/delete operations. Global config changes are logged
+  as warnings but require restart. Structured per-peer failure reporting
+  on reconciliation.
+
+### Changed
+
+- **RibManager submodule split.** The 8,318-line `manager.rs` has been
+  split into 7 files under `crates/rib/src/manager/`: `mod.rs` (893
+  lines, struct + event loop), `distribution.rs` (729 lines),
+  `peer_lifecycle.rs` (193 lines), `route_refresh.rs` (333 lines),
+  `graceful_restart.rs` (170 lines), `helpers.rs` (100 lines), and
+  `tests.rs` (5,969 lines). Zero behavior change — pure refactor for
+  reviewability.
 
 ### Fixed
 

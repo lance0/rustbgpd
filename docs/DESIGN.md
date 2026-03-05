@@ -20,7 +20,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 ## Non-Goals (v1)
 
-This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, full VRF support, EVPN, or a complete policy language in v1. It will not attempt every BGP extension at once (LLGR, Confederation, EVPN, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
+This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, full VRF support, EVPN, or a complete policy language in v1. It will not attempt every BGP extension at once (Confederation, EVPN, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
 
 ## Target v1 Use Cases
 
@@ -274,8 +274,8 @@ The boot config file (TOML) provides initial state. At startup, the daemon loads
 
 **The contract:**
 - Peers can be added, removed, enabled, and disabled at runtime via gRPC. Zero restarts required.
-- Changes made via gRPC live until the daemon restarts, at which point the file is reloaded.
-- Config persistence (writing gRPC changes back to the file) is a v2 feature.
+- Neighbor add/delete mutations made via gRPC are persisted back to the config file via atomic write (temp file + rename).
+- `SIGHUP` triggers a config reload: `diff_neighbors()` computes the delta and `ReconcilePeers` applies structured per-peer add/delete operations.
 - If the file changes on disk, a restart picks up the new file state.
 
 ### Minimal Config Example
@@ -638,7 +638,6 @@ rustbgpd/
 
 - MRT dump export (RFC 6396)
 - Plugin-based policy engine (WASM or embedded DSL) — only after core stability
-- Config persistence (gRPC changes written back to TOML)
 
 ---
 
@@ -673,6 +672,8 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | TCP-AO | 5925 | Post-v1 | — | Roadmap |
 | BMP exporter | 7854 | post-v0.3.0 | — | Implemented (ADR-0041); reconnect replay + periodic stats + coordinated-shutdown termination |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); runtime gRPC management deferred |
+| Long-Lived Graceful Restart | 9494 | post-v0.3.0 | FRR | Two-phase timer, LLGR-stale demotion, configurable stale time |
+| Config persistence + SIGHUP reload | rustbgpd | post-v0.3.0 | — | gRPC mutations auto-persist, SIGHUP reconciles |
 
 This matrix is updated with every milestone. "Interop Tested" means validated in the containerlab CI suite, not "someone tried it once."
 

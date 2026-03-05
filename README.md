@@ -51,7 +51,9 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Route Refresh** -- RFC 2918: inbound re-advertisement on demand via gRPC `SoftResetIn`
 - **Admin Shutdown** -- RFC 8203: human-readable reason text in Cease NOTIFICATION; threaded from gRPC `DisableNeighbor`
 - **CLI tool** -- `rustbgpctl` wraps the gRPC API with human-readable tables and `--json` structured output
-- **909 tests** -- unit, integration, property tests, and fuzzed wire decoder
+- **Long-Lived Graceful Restart** -- RFC 9494 two-phase timer: GR-stale routes promote to LLGR-stale with `LLGR_STALE` community instead of purging, with configurable per-peer `llgr_stale_time`
+- **Config persistence** -- gRPC neighbor mutations (add/delete) persist to TOML; `SIGHUP` triggers config reload with structured per-peer reconciliation
+- **931 tests** -- unit, integration, property tests, and fuzzed wire decoder
 
 ## Quick Start
 
@@ -190,7 +192,7 @@ Full API reference with examples for every RPC: [docs/API.md](docs/API.md)
 
 ## Configuration Reference
 
-The config file is TOML. All runtime changes go through gRPC -- the file is only read at startup.
+The config file is TOML. gRPC owns runtime state, but neighbor add/delete mutations are persisted back to the config file. `SIGHUP` triggers a config reload with per-peer reconciliation.
 
 **`[global]`** -- ASN, router ID, listen port.
 
@@ -277,7 +279,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 
 ## Project Status
 
-**Pre-release.** 909 tests pass. P0+P1+P2 complete. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), BMP export (RFC 7854), and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
+**Pre-release.** 931 tests pass. P0+P1+P2 complete, P2.5 in progress. Extended Messages (RFC 8654), Extended Next Hop (RFC 8950), Enhanced Route Refresh (RFC 7313), minimal restarting-speaker Graceful Restart, Long-Lived Graceful Restart (RFC 9494), dual-stack Add-Path receive + family-aware multi-path send (RFC 7911), RPKI origin validation (RFC 6811, persistent RTR with `SerialNotify` + expiry), dual-stack FlowSpec (RFC 8955/8956), BMP export (RFC 7854), config persistence + SIGHUP reload, and `rustbgpctl` CLI shipped. Interop validated against FRR 10.3.1 and BIRD 2.0.12.
 
 | Feature | Version | Scope |
 |---------|---------|-------|
@@ -289,22 +291,25 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full test procedures, results, and tr
 | Operations | v0.1.0 | Coordinated shutdown, gRPC supervision, Prometheus metrics |
 | MP-BGP (IPv6) | v0.2.0 | RFC 4760: MP_REACH/UNREACH, dual-stack, AFI/SAFI negotiation |
 | Graceful Restart | v0.3.0 | RFC 4724: helper mode, stale route demotion, End-of-RIB, timer sweep, minimal restarting-speaker `R=1` after coordinated restart |
-| Extended Communities | unreleased | RFC 4360: route target, route origin, policy matching (ADR-0025/0026) |
-| Route Refresh | unreleased | RFC 2918 + RFC 7313: inbound re-advertisement, BoRR/EoRR (ADR-0027/0038) |
-| Policy engine | unreleased | Named policies, chaining, match + modify + filter, AS_PATH regex (ADR-0030/0036) |
-| Large communities | unreleased | RFC 8092: wire codec, RIB, gRPC API, policy matching (ADR-0031) |
-| Route Reflector | unreleased | RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST (ADR-0029) |
-| Extended Messages | unreleased | RFC 8654: raise 4096-byte limit to 65535 bytes (ADR-0032) |
-| Add-Path | unreleased | RFC 7911: dual-stack receive + multi-path send (ADR-0033) |
-| Extended Next Hop | unreleased | RFC 8950: IPv4 unicast over IPv6 next hop (ADR-0037) |
-| RPKI validation | unreleased | RFC 6811 + RFC 8210: RTR client, VRP table, best-path integration (ADR-0034) |
-| FlowSpec | unreleased | RFC 8955/8956: IPv4 and IPv6 traffic filtering rules (ADR-0035) |
-| Transparent route server | unreleased | Config-driven eBGP unicast transparency for IX (ADR-0039) |
-| Admin Shutdown | unreleased | RFC 8203: human-readable reason text in Cease NOTIFICATION |
-| BMP export | unreleased | RFC 7854: peer state and route monitoring to collectors (ADR-0041) |
-| CLI tool | unreleased | `rustbgpctl`: human-readable tables and `--json` output |
+| Extended Communities | post-v0.3.0 | RFC 4360: route target, route origin, policy matching (ADR-0025/0026) |
+| Route Refresh | post-v0.3.0 | RFC 2918 + RFC 7313: inbound re-advertisement, BoRR/EoRR (ADR-0027/0038) |
+| Policy engine | post-v0.3.0 | Named policies, chaining, match + modify + filter, AS_PATH regex (ADR-0030/0036) |
+| Large communities | post-v0.3.0 | RFC 8092: wire codec, RIB, gRPC API, policy matching (ADR-0031) |
+| Route Reflector | post-v0.3.0 | RFC 4456: client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST (ADR-0029) |
+| Extended Messages | post-v0.3.0 | RFC 8654: raise 4096-byte limit to 65535 bytes (ADR-0032) |
+| Add-Path | post-v0.3.0 | RFC 7911: dual-stack receive + multi-path send (ADR-0033) |
+| Extended Next Hop | post-v0.3.0 | RFC 8950: IPv4 unicast over IPv6 next hop (ADR-0037) |
+| RPKI validation | post-v0.3.0 | RFC 6811 + RFC 8210: RTR client, VRP table, best-path integration (ADR-0034) |
+| FlowSpec | post-v0.3.0 | RFC 8955/8956: IPv4 and IPv6 traffic filtering rules (ADR-0035) |
+| Transparent route server | post-v0.3.0 | Config-driven eBGP unicast transparency for IX (ADR-0039) |
+| Admin Shutdown | post-v0.3.0 | RFC 8203: human-readable reason text in Cease NOTIFICATION |
+| BMP export | post-v0.3.0 | RFC 7854: peer state and route monitoring to collectors (ADR-0041) |
+| CLI tool | post-v0.3.0 | `rustbgpctl`: human-readable tables and `--json` output |
+| LLGR | post-v0.3.0 | RFC 9494: two-phase GR timer with LLGR-stale promotion and configurable stale time |
+| Config persistence | post-v0.3.0 | gRPC mutations persist to TOML; SIGHUP reload with neighbor reconciliation |
+| RibManager split | post-v0.3.0 | 8,318-line manager.rs split into 7 submodules for reviewability |
 
-Next: config persistence, MRT dump, and benchmark hardening. See [ROADMAP.md](ROADMAP.md) for the full plan.
+Next: MRT dump and benchmark hardening. See [ROADMAP.md](ROADMAP.md) for the full plan.
 
 ## Documentation
 
