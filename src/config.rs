@@ -2412,8 +2412,7 @@ address = "127.0.0.1:11019"
 
     #[test]
     fn bmp_invalid_collector_address_rejected() {
-        let err = parse(&bmp_toml("").replace("127.0.0.1:11019", "not-a-socket-addr"))
-            .unwrap_err();
+        let err = parse(&bmp_toml("").replace("127.0.0.1:11019", "not-a-socket-addr")).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));
     }
 
