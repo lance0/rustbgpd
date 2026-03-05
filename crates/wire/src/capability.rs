@@ -116,6 +116,9 @@ pub enum Capability {
         /// R-bit: the sender has restarted and its forwarding state
         /// may have been preserved.
         restart_state: bool,
+        /// N-bit (RFC 8538): the sender supports Notification GR — NOTIFICATIONs
+        /// trigger GR unless Cease/Hard Reset (subcode 9) is used.
+        notification: bool,
         /// Time in seconds the sender will retain stale routes (12-bit, max 4095).
         restart_time: u16,
         /// Per-AFI/SAFI forwarding state flags.
@@ -261,6 +264,7 @@ impl Capability {
                 }
                 let flags_and_time = buf.get_u16();
                 let restart_state = (flags_and_time & 0x8000) != 0;
+                let notification = (flags_and_time & 0x4000) != 0;
                 let restart_time = flags_and_time & 0x0FFF;
                 let family_count = (length - 2) / 4;
                 let mut families = Vec::with_capacity(usize::from(family_count));
@@ -281,6 +285,7 @@ impl Capability {
                 }
                 Ok(Capability::GracefulRestart {
                     restart_state,
+                    notification,
                     restart_time,
                     families,
                 })
@@ -433,6 +438,7 @@ impl Capability {
             }
             Capability::GracefulRestart {
                 restart_state,
+                notification,
                 restart_time,
                 families,
             } => {
@@ -455,6 +461,9 @@ impl Capability {
                 let mut flags_and_time = *restart_time;
                 if *restart_state {
                     flags_and_time |= 0x8000;
+                }
+                if *notification {
+                    flags_and_time |= 0x4000;
                 }
                 buf.put_u16(flags_and_time);
                 for fam in families {
@@ -802,6 +811,7 @@ mod tests {
             cap,
             Capability::GracefulRestart {
                 restart_state: true,
+                notification: false,
                 restart_time: 120,
                 families: vec![
                     GracefulRestartFamily {
@@ -835,6 +845,7 @@ mod tests {
             cap,
             Capability::GracefulRestart {
                 restart_state: false,
+                notification: false,
                 restart_time: 90,
                 families: vec![GracefulRestartFamily {
                     afi: Afi::Ipv4,
@@ -858,6 +869,7 @@ mod tests {
             cap,
             Capability::GracefulRestart {
                 restart_state: false,
+                notification: false,
                 restart_time: 60,
                 families: vec![],
             }
@@ -868,6 +880,7 @@ mod tests {
     fn roundtrip_graceful_restart() {
         let original = Capability::GracefulRestart {
             restart_state: true,
+            notification: false,
             restart_time: 120,
             families: vec![
                 GracefulRestartFamily {
@@ -893,6 +906,7 @@ mod tests {
     fn graceful_restart_encoded_len() {
         let cap = Capability::GracefulRestart {
             restart_state: false,
+            notification: false,
             restart_time: 120,
             families: vec![GracefulRestartFamily {
                 afi: Afi::Ipv4,
@@ -908,6 +922,7 @@ mod tests {
     fn graceful_restart_code() {
         let cap = Capability::GracefulRestart {
             restart_state: false,
+            notification: false,
             restart_time: 0,
             families: vec![],
         };
@@ -935,6 +950,7 @@ mod tests {
             .collect();
         let cap = Capability::GracefulRestart {
             restart_state: false,
+            notification: false,
             restart_time: 120,
             families,
         };
@@ -970,6 +986,7 @@ mod tests {
     fn encode_rejects_restart_time_over_4095() {
         let cap = Capability::GracefulRestart {
             restart_state: false,
+            notification: false,
             restart_time: 4096,
             families: vec![],
         };
@@ -981,11 +998,58 @@ mod tests {
     fn encode_accepts_restart_time_at_4095() {
         let cap = Capability::GracefulRestart {
             restart_state: false,
+            notification: false,
             restart_time: 4095,
             families: vec![],
         };
         let mut buf = bytes::BytesMut::new();
         assert!(cap.encode(&mut buf).is_ok());
+    }
+
+    #[test]
+    fn decode_graceful_restart_n_bit() {
+        let mut data = bytes::BytesMut::new();
+        data.put_u8(64);
+        data.put_u8(6); // 2 + 1*4
+        data.put_u16(0xC078); // R-bit + N-bit set, restart_time=120
+        data.put_u16(1); // AFI IPv4
+        data.put_u8(1); // SAFI Unicast
+        data.put_u8(0x80); // forwarding preserved
+
+        let mut buf = data.freeze();
+        let cap = Capability::decode(&mut buf).unwrap();
+        assert_eq!(
+            cap,
+            Capability::GracefulRestart {
+                restart_state: true,
+                notification: true,
+                restart_time: 120,
+                families: vec![GracefulRestartFamily {
+                    afi: Afi::Ipv4,
+                    safi: Safi::Unicast,
+                    forwarding_preserved: true,
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn roundtrip_graceful_restart_with_n_bit() {
+        let original = Capability::GracefulRestart {
+            restart_state: true,
+            notification: true,
+            restart_time: 120,
+            families: vec![GracefulRestartFamily {
+                afi: Afi::Ipv4,
+                safi: Safi::Unicast,
+                forwarding_preserved: true,
+            }],
+        };
+        let mut encoded = bytes::BytesMut::with_capacity(12);
+        original.encode(&mut encoded).unwrap();
+        let mut buf = encoded.freeze();
+        let decoded = Capability::decode(&mut buf).unwrap();
+        assert_eq!(original, decoded);
     }
 
     #[test]

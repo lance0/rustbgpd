@@ -86,15 +86,28 @@ pub fn validate_open(
     let negotiated_families = intersect_families(config, &open.capabilities);
 
     // Extract Graceful Restart capability from peer
-    let (peer_gr_capable, peer_restart_state, peer_restart_time, peer_gr_families) = open
+    let (
+        peer_gr_capable,
+        peer_restart_state,
+        peer_notification,
+        peer_restart_time,
+        peer_gr_families,
+    ) = open
         .capabilities
         .iter()
         .find_map(|c| match c {
             Capability::GracefulRestart {
                 restart_state,
+                notification,
                 restart_time,
                 families,
-            } => Some((true, *restart_state, *restart_time, families.clone())),
+            } => Some((
+                true,
+                *restart_state,
+                *notification,
+                *restart_time,
+                families.clone(),
+            )),
             _ => None,
         })
         .unwrap_or_default();
@@ -168,6 +181,7 @@ pub fn validate_open(
         peer_restart_state,
         peer_restart_time,
         peer_gr_families,
+        peer_notification_gr: peer_gr_capable && peer_notification && config.graceful_restart,
         peer_llgr_capable,
         peer_llgr_families,
         peer_route_refresh,
@@ -514,10 +528,12 @@ mod tests {
     fn graceful_restart_extracted_from_peer_open() {
         use rustbgpd_wire::GracefulRestartFamily;
 
-        let cfg = test_config();
+        let mut cfg = test_config();
+        cfg.graceful_restart = true;
         let mut open = peer_open();
         open.capabilities.push(Capability::GracefulRestart {
             restart_state: true,
+            notification: true,
             restart_time: 120,
             families: vec![GracefulRestartFamily {
                 afi: Afi::Ipv4,
@@ -528,6 +544,7 @@ mod tests {
         let neg = validate_open(&open, &cfg).unwrap();
         assert!(neg.peer_gr_capable);
         assert!(neg.peer_restart_state);
+        assert!(neg.peer_notification_gr);
         assert_eq!(neg.peer_restart_time, 120);
         assert_eq!(neg.peer_gr_families.len(), 1);
         assert!(neg.peer_gr_families[0].forwarding_preserved);

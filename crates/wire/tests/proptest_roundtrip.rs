@@ -56,12 +56,14 @@ fn arb_capability() -> impl Strategy<Value = Capability> {
             .prop_map(Capability::ExtendedNextHop),
         (
             any::<bool>(),
+            any::<bool>(),
             (0..=4095u16),
             proptest::collection::vec(arb_gr_family(), 0..=4),
         )
-            .prop_map(|(restart_state, restart_time, families)| {
+            .prop_map(|(restart_state, notification, restart_time, families)| {
                 Capability::GracefulRestart {
                     restart_state,
+                    notification,
                     restart_time,
                     families,
                 }

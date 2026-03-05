@@ -53,6 +53,8 @@ pub struct NegotiatedSession {
     /// AFI for that family. For this implementation the meaningful negotiated
     /// mapping is IPv4 unicast -> IPv6.
     pub extended_nexthop_families: HashMap<(Afi, Safi), Afi>,
+    /// Whether both sides support Notification GR (RFC 8538 N-bit).
+    pub peer_notification_gr: bool,
     /// Whether the peer advertised Long-Lived Graceful Restart (RFC 9494).
     pub peer_llgr_capable: bool,
     /// Per-family LLGR stale times from the peer's capability.

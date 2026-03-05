@@ -47,6 +47,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Inbound Cease/2 and Cease/4 NOTIFICATIONs with shutdown communication
   are decoded and logged. Wire helpers: `encode_shutdown_communication()`
   and `decode_shutdown_communication()` in the notification module.
+- **Notification GR (RFC 8538).** GR capability now advertises the N-bit
+  (notification support). NOTIFICATION-triggered teardown now preserves routes
+  only when both sides negotiated N-bit support. Cease/Hard Reset (subcode 9)
+  sent or received bypasses Graceful Restart, forcing immediate route purge
+  instead of stale preservation. Completes the GR story alongside ADR-0024 (helper),
+  ADR-0040 (restarting speaker), and ADR-0042 (LLGR). (ADR-0046)
 - **Private AS removal.** New per-neighbor `remove_private_as` config strips
   private ASNs (64512–65534, 4200000000–4294967294) from AS_PATH before
   eBGP advertisement. Three modes: `"remove"` (entire path must be private),

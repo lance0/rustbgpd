@@ -32,7 +32,7 @@ Last updated: 2026-03-05
 | TCP collision detection (RFC 4271 §6.8) | Yes | Yes | |
 | Graceful Restart (RFC 4724) | Yes | Partial | Helper mode + minimal restarting-speaker `R=1`; no forwarding-preserved support yet |
 | Long-Lived GR (RFC 9494) | Yes | Yes | Two-phase timer, three-tier best-path demotion, `LLGR_STALE`/`NO_LLGR` communities, per-AFI family scoping |
-| Notification GR (RFC 8538) | Yes | No | |
+| Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |
 | Enhanced Route Refresh (RFC 7313) | Yes | Yes | `BoRR` / `EoRR` demarcation; inbound replacement semantics on `SoftResetIn` |
 | Add-Path (RFC 7911) | Yes | Yes | Dual-stack receive + multi-path send (route server mode) |
@@ -165,7 +165,7 @@ Last updated: 2026-03-05
 | Category | GoBGP | rustbgpd | Parity |
 |----------|:-----:|:--------:|:------:|
 | Address families | 15 | 4 | ~27% |
-| Core protocol | 14 | 12.5 | ~89% |
+| Core protocol | 14 | 13.5 | ~96% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 13 | ~72% |
 | gRPC RPCs | ~55 | ~21 | ~38% |
@@ -175,13 +175,13 @@ Last updated: 2026-03-05
 
 ## Weighted Parity Estimates
 
-### IX Route Server Use Case (~87% parity)
+### IX Route Server Use Case (~88% parity)
 
 The primary target deployment. Weighted toward what matters:
 
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
-- **Core protocol:** 89% — GR helper + restarting speaker, LLGR, Enhanced RR, Add-Path, Extended Nexthop all landed
+- **Core protocol:** 96% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
 - **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
@@ -214,9 +214,9 @@ Competing head-to-head with GoBGP for all use cases:
 
 1. **Confederation (RFC 5065)** — required for service provider deployments
 2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
-3. **Notification GR (RFC 8538)** — Hard Reset avoidance; completes the GR story
-4. **Policy CRUD via gRPC** — runtime policy management without config file edits
-5. **Peer groups** — template-based neighbor config reduces boilerplate for large deployments
+3. **Policy CRUD via gRPC** — runtime policy management without config file edits
+4. **Peer groups** — template-based neighbor config reduces boilerplate for large deployments
+5. **AS_PATH length match** — trivial policy engine addition, common in real-world filters
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 

@@ -52,6 +52,7 @@ If you're automating BGP -- injecting routes, managing peers, reacting to events
 - **Route Refresh** -- RFC 2918: inbound re-advertisement on demand via gRPC `SoftResetIn`
 - **Admin Shutdown** -- RFC 8203: human-readable reason text in Cease NOTIFICATION; threaded from gRPC `DisableNeighbor`
 - **CLI tool** -- `rustbgpctl` wraps the gRPC API with human-readable tables and `--json` structured output
+- **Notification GR** -- RFC 8538: N-bit capability and Cease/Hard Reset bypass; completes the GR story with ADR-0024 (helper), ADR-0040 (restarting speaker), and ADR-0042 (LLGR)
 - **Long-Lived Graceful Restart** -- RFC 9494 two-phase timer: GR-stale routes promote to LLGR-stale with `LLGR_STALE` community instead of purging, with configurable per-peer `llgr_stale_time`
 - **Config persistence** -- gRPC neighbor mutations (add/delete) persist to TOML; `SIGHUP` triggers config reload with structured per-peer reconciliation
 - **MRT dump export** -- RFC 6396 `TABLE_DUMP_V2` periodic and on-demand RIB snapshots with optional gzip; `TriggerMrtDump` gRPC RPC and `rustbgpctl mrt-dump` CLI

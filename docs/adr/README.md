@@ -53,6 +53,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0043](0043-config-persistence.md) | Config Persistence and SIGHUP Reload | Accepted | 2026-03-05 |
 | [0044](0044-mrt-dump-export.md) | MRT Dump Export (RFC 6396) | Accepted | 2026-03-05 |
 | [0045](0045-private-as-removal.md) | Private AS Removal | Accepted | 2026-03-05 |
+| [0046](0046-notification-gr.md) | Notification GR (RFC 8538) | Accepted | 2026-03-05 |
 
 ## Template
 

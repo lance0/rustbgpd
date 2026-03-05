@@ -46,6 +46,7 @@ impl PeerConfig {
         if self.graceful_restart {
             caps.push(Capability::GracefulRestart {
                 restart_state: false,
+                notification: true,
                 restart_time: self.gr_restart_time,
                 families: self
                     .families
@@ -245,6 +246,7 @@ mod tests {
             &caps[1],
             Capability::GracefulRestart {
                 restart_state: false,
+                notification: true,
                 restart_time: 120,
                 families,
             } if families.len() == 1

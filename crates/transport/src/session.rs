@@ -34,6 +34,7 @@ use crate::timer::{Timers, poll_timer};
 /// Owns the FSM, TCP stream, timers, and read buffer. Runs as a single
 /// tokio task driven by `select!` over TCP reads, timer expirations,
 /// and external commands.
+#[expect(clippy::struct_excessive_bools)] // Per-session protocol flags are intentionally explicit.
 pub(crate) struct PeerSession {
     config: TransportConfig,
     fsm: Session,
@@ -91,6 +92,13 @@ pub(crate) struct PeerSession {
     flap_count: u64,
     established_at: Option<Instant>,
     last_error: String,
+    /// Teardown was triggered by NOTIFICATION semantics (inbound or outbound).
+    /// RFC 8538: only preserves routes when Notification GR was negotiated.
+    notification_teardown: bool,
+    /// RFC 8538: peer sent Cease/Hard Reset — skip GR on this teardown.
+    received_hard_reset: bool,
+    /// RFC 8538: we sent Cease/Hard Reset — skip GR on this teardown.
+    sent_hard_reset: bool,
 }
 
 /// Outbound channel buffer size.
@@ -194,6 +202,9 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            notification_teardown: false,
+            received_hard_reset: false,
+            sent_hard_reset: false,
         }
     }
 
@@ -246,6 +257,9 @@ impl PeerSession {
             flap_count: 0,
             established_at: None,
             last_error: String::new(),
+            notification_teardown: false,
+            received_hard_reset: false,
+            sent_hard_reset: false,
         }
     }
 
@@ -366,7 +380,13 @@ impl PeerSession {
                 event = event.name(),
                 "FSM event"
             );
-            let actions = self.fsm.handle_event(event);
+            let actions = self.fsm.handle_event(event.clone());
+            if notification_teardown_event(&event, &actions) {
+                self.notification_teardown = true;
+            }
+            if hard_reset_notification_in_actions(&actions) {
+                self.sent_hard_reset = true;
+            }
             let follow_up = self.execute_actions(actions).await;
             pending.extend(follow_up);
         }
@@ -411,6 +431,10 @@ impl PeerSession {
                 Action::SendNotification(notif) => {
                     let code = notif.code;
                     let subcode = notif.subcode;
+                    // RFC 8538: track outbound Hard Reset to bypass GR
+                    if code == NotificationCode::Cease && subcode == cease_subcode::HARD_RESET {
+                        self.sent_hard_reset = true;
+                    }
                     let msg = Message::Notification(notif);
                     // Cache raw NOTIFICATION PDU for BMP Peer Down (reason 1: local sent NOTIFICATION)
                     if self.bmp_tx.is_some()
@@ -650,8 +674,14 @@ impl PeerSession {
                     // indicates restart state in the NEW OPEN, not the dying
                     // session.  All families from the peer's GR capability
                     // are retained (not just forwarding-preserved ones).
+                    // RFC 8538: Cease/Hard Reset bypasses GR unconditionally.
                     let gr_update = self.negotiated.as_ref().and_then(|neg| {
-                        if neg.peer_gr_capable && self.config.peer.graceful_restart {
+                        if neg.peer_gr_capable
+                            && self.config.peer.graceful_restart
+                            && (!self.notification_teardown || neg.peer_notification_gr)
+                            && !self.received_hard_reset
+                            && !self.sent_hard_reset
+                        {
                             let gr_families: Vec<(Afi, Safi)> = neg
                                 .peer_gr_families
                                 .iter()
@@ -677,6 +707,9 @@ impl PeerSession {
                     self.local_open_pdu = None;
                     self.remote_open_pdu = None;
                     self.last_down_reason = None;
+                    self.notification_teardown = false;
+                    self.received_hard_reset = false;
+                    self.sent_hard_reset = false;
                     // Reset framing limit for the next session (RFC 8654 §2:
                     // extended messages are per-session, not persistent).
                     self.read_buf
@@ -864,6 +897,16 @@ impl PeerSession {
                             );
                             self.metrics
                                 .record_message_received(&self.peer_label, "notification");
+                            // RFC 8538: detect Cease/Hard Reset to bypass GR
+                            if notif.code == NotificationCode::Cease
+                                && notif.subcode == cease_subcode::HARD_RESET
+                            {
+                                info!(
+                                    peer = %self.peer_label,
+                                    "peer sent Cease/Hard Reset, GR will be skipped"
+                                );
+                                self.received_hard_reset = true;
+                            }
                             // Log shutdown communication reason (RFC 8203)
                             if notif.code == NotificationCode::Cease
                                 && (notif.subcode == cease_subcode::ADMINISTRATIVE_SHUTDOWN
@@ -2548,6 +2591,37 @@ async fn read_tcp(
     stream.read_buf(buf).await
 }
 
+/// Return true when this event/action batch represents a
+/// NOTIFICATION-triggered teardown path.
+///
+/// RFC 8538: when teardown is triggered by NOTIFICATION semantics, route
+/// preservation requires negotiated Notification GR (N-bit).
+fn notification_teardown_event(event: &Event, actions: &[Action]) -> bool {
+    let has_session_down = actions.iter().any(|a| matches!(a, Action::SessionDown));
+    if !has_session_down {
+        return false;
+    }
+    matches!(event, Event::NotificationReceived(_))
+        || actions
+            .iter()
+            .any(|a| matches!(a, Action::SendNotification(_)))
+}
+
+/// Return true when this action batch contains Cease/Hard Reset (subcode 9).
+///
+/// Some FSM paths emit `SessionDown` before `SendNotification`, so this is
+/// checked before action execution.
+fn hard_reset_notification_in_actions(actions: &[Action]) -> bool {
+    actions.iter().any(|a| {
+        matches!(
+            a,
+            Action::SendNotification(notif)
+                if notif.code == NotificationCode::Cease
+                    && notif.subcode == cease_subcode::HARD_RESET
+        )
+    })
+}
+
 /// Remove private ASNs from an `AS_PATH` according to the given mode.
 ///
 /// - `Remove` — strip all ASNs only if every ASN in the path is private.
@@ -2720,6 +2794,7 @@ mod tests {
             peer_restart_state: false,
             peer_restart_time: 0,
             peer_gr_families: vec![],
+            peer_notification_gr: false,
             peer_llgr_capable: false,
             peer_llgr_families: vec![],
             peer_route_refresh: false,
@@ -3590,6 +3665,114 @@ mod tests {
             IpAddr::V6("2001:db8::1".parse().unwrap())
         );
         assert_eq!(announced[0].path_id, 42);
+    }
+
+    #[test]
+    fn notification_teardown_detects_inbound_notification() {
+        let event = Event::NotificationReceived(NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+            Bytes::new(),
+        ));
+        let actions = vec![Action::SessionDown];
+        assert!(notification_teardown_event(&event, &actions));
+    }
+
+    #[test]
+    fn notification_teardown_detects_local_notification_path() {
+        let event = Event::ManualStop { reason: None };
+        let actions = vec![
+            Action::SessionDown,
+            Action::SendNotification(NotificationMessage::new(
+                NotificationCode::Cease,
+                cease_subcode::ADMINISTRATIVE_SHUTDOWN,
+                Bytes::new(),
+            )),
+        ];
+        assert!(notification_teardown_event(&event, &actions));
+    }
+
+    #[test]
+    fn hard_reset_detected_in_actions() {
+        let actions = vec![Action::SendNotification(NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::HARD_RESET,
+            Bytes::new(),
+        ))];
+        assert!(hard_reset_notification_in_actions(&actions));
+    }
+
+    #[tokio::test]
+    async fn notification_teardown_without_n_bit_uses_peer_down() {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut neg = negotiated_session(65002, false);
+        neg.peer_gr_capable = true;
+        neg.peer_restart_time = 120;
+        neg.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+        }];
+        neg.peer_notification_gr = false;
+        session.config.peer.graceful_restart = true;
+        session.negotiated = Some(neg);
+        session.notification_teardown = true;
+
+        session.execute_actions(vec![Action::SessionDown]).await;
+
+        match rib_rx.try_recv().unwrap() {
+            RibUpdate::PeerDown { peer } => assert_eq!(peer, session.peer_ip),
+            _ => panic!("expected PeerDown"),
+        }
+    }
+
+    #[tokio::test]
+    async fn notification_teardown_with_n_bit_uses_peer_graceful_restart() {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut neg = negotiated_session(65002, false);
+        neg.peer_gr_capable = true;
+        neg.peer_restart_time = 120;
+        neg.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+        }];
+        neg.peer_notification_gr = true;
+        session.config.peer.graceful_restart = true;
+        session.negotiated = Some(neg);
+        session.notification_teardown = true;
+
+        session.execute_actions(vec![Action::SessionDown]).await;
+
+        match rib_rx.try_recv().unwrap() {
+            RibUpdate::PeerGracefulRestart { peer, .. } => assert_eq!(peer, session.peer_ip),
+            _ => panic!("expected PeerGracefulRestart"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hard_reset_always_bypasses_gr_even_with_n_bit() {
+        let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+        let mut neg = negotiated_session(65002, false);
+        neg.peer_gr_capable = true;
+        neg.peer_restart_time = 120;
+        neg.peer_gr_families = vec![rustbgpd_wire::GracefulRestartFamily {
+            afi: Afi::Ipv4,
+            safi: Safi::Unicast,
+            forwarding_preserved: false,
+        }];
+        neg.peer_notification_gr = true;
+        session.config.peer.graceful_restart = true;
+        session.negotiated = Some(neg);
+        session.notification_teardown = true;
+        session.received_hard_reset = true;
+
+        session.execute_actions(vec![Action::SessionDown]).await;
+
+        match rib_rx.try_recv().unwrap() {
+            RibUpdate::PeerDown { peer } => assert_eq!(peer, session.peer_ip),
+            _ => panic!("expected PeerDown"),
+        }
     }
 
     // --- Private AS removal tests ---

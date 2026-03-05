@@ -1562,7 +1562,7 @@ mod tests {
     fn decode_communities_single() {
         // flags=0xC0 (optional+transitive), type=8, len=4, community=65001:100
         // 65001 = 0xFDE9, 100 = 0x0064 → u32 = 0xFDE90064
-        let community: u32 = (65001 << 16) | 100;
+        let community: u32 = (65001 << 16) | 0x0064;
         let bytes = community.to_be_bytes();
         let buf = [0xC0, 0x08, 0x04, bytes[0], bytes[1], bytes[2], bytes[3]];
         let attrs = decode_path_attributes(&buf, true, &[]).unwrap();
@@ -1572,8 +1572,8 @@ mod tests {
 
     #[test]
     fn decode_communities_multiple() {
-        let c1: u32 = (65001 << 16) | 100;
-        let c2: u32 = (65002 << 16) | 200;
+        let c1: u32 = (65001 << 16) | 0x0064;
+        let c2: u32 = (65002 << 16) | 0x00C8;
         let b1 = c1.to_be_bytes();
         let b2 = c2.to_be_bytes();
         let buf = [
@@ -1600,8 +1600,8 @@ mod tests {
 
     #[test]
     fn communities_roundtrip() {
-        let c1: u32 = (65001 << 16) | 100;
-        let c2: u32 = (65002 << 16) | 200;
+        let c1: u32 = (65001 << 16) | 0x0064;
+        let c2: u32 = (65002 << 16) | 0x00C8;
         let attrs = vec![PathAttribute::Communities(vec![c1, c2])];
 
         let mut buf = Vec::new();
