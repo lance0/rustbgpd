@@ -284,7 +284,7 @@ async fn run(config: Config) {
 
         let mut collector_txs = Vec::new();
         let mut client_handles = Vec::new();
-        for (collector_id, collector) in bmp_config.collectors.iter().enumerate() {
+        for collector in &bmp_config.collectors {
             let addr: std::net::SocketAddr = match collector.address.parse() {
                 Ok(a) => a,
                 Err(e) => {
@@ -297,6 +297,7 @@ async fn run(config: Config) {
                 }
             };
             let (msg_tx, msg_rx) = mpsc::channel(4096);
+            let collector_id = collector_txs.len();
             collector_txs.push(msg_tx);
             let client = rustbgpd_bmp::BmpClient::new(
                 rustbgpd_bmp::BmpClientConfig {

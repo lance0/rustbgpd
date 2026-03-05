@@ -101,6 +101,9 @@ Items identified during review that are not correctness bugs but improve strictn
 - [x] **BMP Termination on daemon shutdown** — coordinated shutdown now signals `BmpManager` explicitly, then drains manager/client tasks with bounded waits so connected collectors receive Termination before process exit
 - [ ] **BMP event-drop counters** — BMP send paths currently log dropped events on channel-full but do not expose a Prometheus counter for replay/stats/route-monitoring drop rates
 - [ ] **BMP transport integration tests** — codec and manager are covered, but session-to-BMP emission paths (PeerUp/PeerDown/RouteMonitoring) still lack end-to-end tests
+- [ ] **BMP periodic stats scalability** — `emit_periodic_bmp_stats` serializes `query_state().await` per peer; at hundreds of peers this could stall the PeerManager select! loop; consider concurrent queries or cached counts
+- [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
+- [ ] **Duplicate BMP collector address detection** — two collectors with the same address are accepted without warning, resulting in duplicate data streams
 - [ ] **CLI gRPC integration tests** — `rustbgpctl` has parser/format tests but no mock-server integration tests for command-to-RPC behavior
 
 ### P1 — Core Protocol Gaps

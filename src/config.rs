@@ -2378,6 +2378,102 @@ address = "127.0.0.1:3323"
     }
 
     // -----------------------------------------------------------------------
+    // BMP config validation
+    // -----------------------------------------------------------------------
+
+    fn bmp_toml(collector_fields: &str) -> String {
+        format!(
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[bmp]
+[[bmp.collectors]]
+address = "127.0.0.1:11019"
+{collector_fields}
+"#
+        )
+    }
+
+    #[test]
+    fn bmp_valid_config_accepted() {
+        let config = parse(&bmp_toml("")).unwrap();
+        let bmp = config.bmp.as_ref().unwrap();
+        assert_eq!(bmp.sys_name, "rustbgpd");
+        assert_eq!(bmp.collectors.len(), 1);
+        assert_eq!(bmp.collectors[0].reconnect_interval, 30);
+    }
+
+    #[test]
+    fn bmp_invalid_collector_address_rejected() {
+        let err = parse(&bmp_toml("").replace("127.0.0.1:11019", "not-a-socket-addr"))
+            .unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));
+    }
+
+    #[test]
+    fn bmp_zero_reconnect_interval_rejected() {
+        let err = parse(&bmp_toml("reconnect_interval = 0")).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));
+    }
+
+    #[test]
+    fn bmp_custom_reconnect_interval_accepted() {
+        let config = parse(&bmp_toml("reconnect_interval = 60")).unwrap();
+        let bmp = config.bmp.as_ref().unwrap();
+        assert_eq!(bmp.collectors[0].reconnect_interval, 60);
+    }
+
+    #[test]
+    fn bmp_empty_collectors_accepted() {
+        let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[bmp]
+"#;
+        let config = parse(toml).unwrap();
+        let bmp = config.bmp.as_ref().unwrap();
+        assert!(bmp.collectors.is_empty());
+    }
+
+    #[test]
+    fn bmp_custom_sys_name_accepted() {
+        let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[bmp]
+sys_name = "my-router"
+sys_descr = "production edge"
+[[bmp.collectors]]
+address = "127.0.0.1:11019"
+"#;
+        let config = parse(toml).unwrap();
+        let bmp = config.bmp.as_ref().unwrap();
+        assert_eq!(bmp.sys_name, "my-router");
+        assert_eq!(bmp.sys_descr, "production edge");
+    }
+
+    // -----------------------------------------------------------------------
     // Named policies + policy chaining
     // -----------------------------------------------------------------------
 
