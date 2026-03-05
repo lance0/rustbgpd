@@ -7,6 +7,7 @@
 #![warn(clippy::pedantic)]
 
 mod config;
+mod config_persister;
 mod metrics_server;
 mod peer_manager;
 
@@ -25,8 +26,10 @@ use tracing::{error, info, warn};
 
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
 use rustbgpd_api::server::ServeConfig;
+use rustbgpd_policy::PolicyChain;
 
 use crate::config::Config;
+use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 
 const GR_RESTART_MARKER_VERSION: u8 = 1;
@@ -125,7 +128,7 @@ fn main() {
 }
 
 #[expect(clippy::too_many_lines)]
-async fn run(config: Config) {
+async fn run(mut config: Config) {
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
     let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
@@ -341,6 +344,84 @@ async fn run(config: Config) {
     );
     let peer_mgr_handle = tokio::spawn(peer_mgr.run());
 
+    // Spawn config persister (converts gRPC config events → disk writes)
+    let config_event_tx = if let Some(ref path) = config.file_path {
+        let (event_tx, mut event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
+        let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(64);
+        let persister = ConfigPersister::new(mutation_rx, path.clone(), config.clone());
+        tokio::spawn(persister.run());
+
+        // Bridge: convert ConfigEvent → ConfigMutation
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                let mutation = match event {
+                    rustbgpd_api::peer_types::ConfigEvent::NeighborAdded(cfg) => {
+                        ConfigMutation::AddNeighbor(Box::new(config::Neighbor {
+                            address: cfg.address.to_string(),
+                            remote_asn: cfg.remote_asn,
+                            description: Some(cfg.description),
+                            hold_time: cfg.hold_time,
+                            max_prefixes: cfg.max_prefixes,
+                            md5_password: None,
+                            ttl_security: false,
+                            families: cfg
+                                .families
+                                .iter()
+                                .map(|(afi, safi)| match (afi, safi) {
+                                    (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => {
+                                        "ipv4_unicast".to_string()
+                                    }
+                                    (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast) => {
+                                        "ipv6_unicast".to_string()
+                                    }
+                                    (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::FlowSpec) => {
+                                        "ipv4_flowspec".to_string()
+                                    }
+                                    (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::FlowSpec) => {
+                                        "ipv6_flowspec".to_string()
+                                    }
+                                    _ => format!("{afi:?}_{safi:?}"),
+                                })
+                                .collect(),
+                            graceful_restart: Some(cfg.graceful_restart),
+                            gr_restart_time: Some(cfg.gr_restart_time),
+                            gr_stale_routes_time: Some(cfg.gr_stale_routes_time),
+                            local_ipv6_nexthop: cfg.local_ipv6_nexthop.map(|a| a.to_string()),
+                            route_reflector_client: cfg.route_reflector_client,
+                            route_server_client: cfg.route_server_client,
+                            add_path: if cfg.add_path_receive || cfg.add_path_send {
+                                Some(config::AddPathConfig {
+                                    receive: cfg.add_path_receive,
+                                    send: cfg.add_path_send,
+                                    send_max: if cfg.add_path_send_max > 0 {
+                                        Some(cfg.add_path_send_max)
+                                    } else {
+                                        None
+                                    },
+                                })
+                            } else {
+                                None
+                            },
+                            import_policy: Vec::new(),
+                            export_policy: Vec::new(),
+                            import_policy_chain: Vec::new(),
+                            export_policy_chain: Vec::new(),
+                        }))
+                    }
+                    rustbgpd_api::peer_types::ConfigEvent::NeighborDeleted(addr) => {
+                        ConfigMutation::DeleteNeighbor(addr)
+                    }
+                };
+                if mutation_tx.send(mutation).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Some(event_tx)
+    } else {
+        None
+    };
+
     // Shutdown channels:
     // - grpc_shutdown: signals the tonic server to stop
     // - rpc_shutdown: given to ControlService so Shutdown RPC can trigger exit
@@ -375,6 +456,7 @@ async fn run(config: Config) {
             serve_config,
             grpc_shutdown_rx,
             rpc_shutdown_tx,
+            config_event_tx,
         )
         .await;
     });
@@ -455,20 +537,36 @@ async fn run(config: Config) {
         }
     }
 
-    // Wait for shutdown signal: ctrl_c, Shutdown RPC, or unexpected gRPC exit
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => {
-            match result {
-                Ok(()) => info!("received shutdown signal"),
-                Err(e) => error!(error = %e, "failed to listen for shutdown signal"),
+    // SIGHUP handler for config reload (unix-only, which is our target)
+    let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("failed to register SIGHUP handler");
+
+    // Wait for shutdown signal: ctrl_c, Shutdown RPC, unexpected gRPC exit, or SIGHUP
+    loop {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                match result {
+                    Ok(()) => info!("received shutdown signal"),
+                    Err(e) => error!(error = %e, "failed to listen for shutdown signal"),
+                }
+                break;
             }
-        }
-        _ = &mut rpc_shutdown_rx => {
-            info!("shutdown initiated via gRPC");
-        }
-        result = &mut grpc_handle => {
-            error!(?result, "gRPC server exited unexpectedly");
-            info!("initiating shutdown due to gRPC server failure");
+            _ = &mut rpc_shutdown_rx => {
+                info!("shutdown initiated via gRPC");
+                break;
+            }
+            result = &mut grpc_handle => {
+                error!(?result, "gRPC server exited unexpectedly");
+                info!("initiating shutdown due to gRPC server failure");
+                break;
+            }
+            _ = sighup.recv() => {
+                info!("SIGHUP received, reloading configuration");
+                let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+                if let Some(new_config) = reload_config(&path, &config, &peer_mgr_tx).await {
+                    config = new_config;
+                }
+            }
         }
     }
 
@@ -539,6 +637,120 @@ async fn run(config: Config) {
     let _ = grpc_shutdown_tx.send(());
 
     info!("rustbgpd exiting");
+}
+
+/// Build a `PeerManagerNeighborConfig` from transport config components.
+fn build_peer_mgr_config(
+    tc: &rustbgpd_transport::TransportConfig,
+    label: &str,
+    import: Option<&PolicyChain>,
+    export: Option<&PolicyChain>,
+) -> PeerManagerNeighborConfig {
+    PeerManagerNeighborConfig {
+        address: tc.remote_addr.ip(),
+        remote_asn: tc.peer.remote_asn,
+        description: label.to_string(),
+        hold_time: Some(tc.peer.hold_time),
+        max_prefixes: tc.max_prefixes,
+        families: tc.peer.families.clone(),
+        graceful_restart: tc.peer.graceful_restart,
+        gr_restart_time: tc.peer.gr_restart_time,
+        gr_stale_routes_time: tc.gr_stale_routes_time,
+        gr_restart_eligible: false,
+        local_ipv6_nexthop: tc.local_ipv6_nexthop,
+        route_reflector_client: tc.route_reflector_client,
+        route_server_client: tc.route_server_client,
+        add_path_receive: tc.peer.add_path_receive,
+        add_path_send: tc.peer.add_path_send,
+        add_path_send_max: tc.peer.add_path_send_max,
+        import_policy: import.cloned(),
+        export_policy: export.cloned(),
+    }
+}
+
+/// Reload configuration from disk and reconcile peers.
+///
+/// Only neighbor changes take effect — global/RPKI/BMP/metrics changes
+/// are logged as warnings and require a full restart.
+async fn reload_config(
+    config_path: &str,
+    current: &Config,
+    peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
+) -> Option<Config> {
+    let new_config = match Config::load(config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "config reload failed — keeping current config");
+            return None;
+        }
+    };
+
+    // Warn about sections that require restart
+    if new_config.global != current.global {
+        warn!("[global] changed — requires full restart to take effect");
+    }
+    if new_config.rpki != current.rpki {
+        warn!("[rpki] changed — requires full restart to take effect");
+    }
+    if new_config.bmp != current.bmp {
+        warn!("[bmp] changed — requires full restart to take effect");
+    }
+
+    let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
+    if diff.added.is_empty() && diff.removed.is_empty() && diff.changed.is_empty() {
+        info!("config reloaded — no neighbor changes detected");
+        return Some(new_config);
+    }
+
+    info!(
+        added = diff.added.len(),
+        removed = diff.removed.len(),
+        changed = diff.changed.len(),
+        "reconciling neighbors after config reload"
+    );
+
+    let peer_configs = match new_config.to_peer_configs() {
+        Ok(p) => p,
+        Err(e) => {
+            error!(error = %e, "config reload failed — invalid policy in new config");
+            return None;
+        }
+    };
+
+    // Lookup by address
+    let peer_map: std::collections::HashMap<String, _> = peer_configs
+        .into_iter()
+        .map(|(tc, label, imp, exp)| (tc.remote_addr.ip().to_string(), (tc, label, imp, exp)))
+        .collect();
+
+    let resolve = |neighbors: &[config::Neighbor]| -> Vec<PeerManagerNeighborConfig> {
+        neighbors
+            .iter()
+            .filter_map(|n| {
+                peer_map.get(&n.address).map(|(tc, label, imp, exp)| {
+                    build_peer_mgr_config(tc, label, imp.as_ref(), exp.as_ref())
+                })
+            })
+            .collect()
+    };
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if let Err(e) = peer_mgr_tx
+        .send(PeerManagerCommand::ReconcilePeers {
+            added: resolve(&diff.added),
+            removed: diff.removed,
+            changed: resolve(&diff.changed),
+            reply: reply_tx,
+        })
+        .await
+    {
+        error!(error = %e, "failed to send reconcile command to peer manager");
+        return None;
+    }
+    let _ = reply_rx.await;
+
+    info!("config reload complete");
+    Some(new_config)
 }
 
 #[cfg(test)]
@@ -660,6 +872,7 @@ mod tests {
             policy: crate::config::PolicyConfig::default(),
             rpki: None,
             bmp: None,
+            file_path: None,
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));

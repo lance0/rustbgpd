@@ -43,10 +43,17 @@ pub enum PeerManagerCommand {
         stream: TcpStream,
         peer_addr: IpAddr,
     },
+    ReconcilePeers {
+        added: Vec<PeerManagerNeighborConfig>,
+        removed: Vec<IpAddr>,
+        changed: Vec<PeerManagerNeighborConfig>,
+        reply: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
 /// Configuration for adding a peer dynamically.
+#[derive(Clone)]
 #[expect(clippy::struct_excessive_bools)]
 pub struct PeerManagerNeighborConfig {
     pub address: IpAddr,
@@ -69,6 +76,15 @@ pub struct PeerManagerNeighborConfig {
     pub add_path_send_max: u32,
     pub import_policy: Option<PolicyChain>,
     pub export_policy: Option<PolicyChain>,
+}
+
+/// A config persistence event sent after successful peer add/delete.
+///
+/// The binary crate converts these into config file mutations.
+/// Kept simple — only the data the neighbor service already has.
+pub enum ConfigEvent {
+    NeighborAdded(PeerManagerNeighborConfig),
+    NeighborDeleted(IpAddr),
 }
 
 /// Snapshot of a peer's state for queries.

@@ -4,7 +4,7 @@ use rustbgpd_wire::{Afi, Safi};
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
-use crate::peer_types::{PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
+use crate::peer_types::{ConfigEvent, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
 use crate::proto;
 use rustbgpd_rib::RibUpdate;
 
@@ -32,19 +32,23 @@ fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status>
     Ok(result)
 }
 
+#[allow(clippy::struct_field_names)]
 pub struct NeighborService {
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    config_tx: Option<mpsc::Sender<ConfigEvent>>,
 }
 
 impl NeighborService {
     pub fn new(
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
+        config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
         Self {
             peer_mgr_tx,
             rib_tx,
+            config_tx,
         }
     }
 }
@@ -173,6 +177,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             export_policy: None,
         };
 
+        // Clone before sending if we need to persist
+        let config_clone = self.config_tx.as_ref().map(|_| peer_config.clone());
+
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
             .send(PeerManagerCommand::AddPeer {
@@ -186,6 +193,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
             .map_err(Status::already_exists)?;
+
+        // Notify config persister of the successful add
+        if let (Some(tx), Some(cfg)) = (&self.config_tx, config_clone) {
+            let _ = tx.try_send(ConfigEvent::NeighborAdded(cfg));
+        }
 
         Ok(Response::new(proto::AddNeighborResponse {}))
     }
@@ -213,6 +225,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
             .map_err(Status::not_found)?;
+
+        // Notify config persister of the successful delete
+        if let Some(ref tx) = self.config_tx {
+            let _ = tx.try_send(ConfigEvent::NeighborDeleted(address));
+        }
 
         Ok(Response::new(proto::DeleteNeighborResponse {}))
     }
@@ -384,7 +401,7 @@ mod tests {
     fn make_service() -> NeighborService {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        NeighborService::new(tx, rib_tx)
+        NeighborService::new(tx, rib_tx, None)
     }
 
     #[tokio::test]
@@ -442,7 +459,7 @@ mod tests {
     async fn soft_reset_in_deduplicates_requested_families() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(peer_tx, rib_tx);
+        let svc = NeighborService::new(peer_tx, rib_tx, None);
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::SoftResetIn {
@@ -476,7 +493,7 @@ mod tests {
 
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(peer_tx, rib_tx);
+        let svc = NeighborService::new(peer_tx, rib_tx, None);
 
         let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
 

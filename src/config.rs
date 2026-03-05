@@ -10,13 +10,13 @@ use rustbgpd_policy::{
 };
 use rustbgpd_transport::TransportConfig;
 use rustbgpd_wire::{Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix, Safi};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_HOLD_TIME: u16 = 90;
 const DEFAULT_CONNECT_RETRY_SECS: u32 = 30;
 const BGP_PORT: u16 = 179;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub global: Global,
@@ -28,16 +28,19 @@ pub struct Config {
     pub rpki: Option<RpkiConfig>,
     #[serde(default)]
     pub bmp: Option<BmpConfig>,
+    /// Path of the config file (populated by `Config::load`, not serialized).
+    #[serde(skip)]
+    pub file_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RpkiConfig {
     #[serde(default)]
     pub cache_servers: Vec<CacheServer>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheServer {
     pub address: String,
@@ -49,7 +52,7 @@ pub struct CacheServer {
     pub expire_interval: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BmpConfig {
     #[serde(default = "default_bmp_sys_name")]
@@ -60,7 +63,7 @@ pub struct BmpConfig {
     pub collectors: Vec<BmpCollector>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BmpCollector {
     pub address: String,
@@ -86,7 +89,7 @@ fn default_rpki_expire() -> u64 {
     7200
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Global {
     pub asn: u32,
@@ -105,11 +108,10 @@ fn default_runtime_state_dir() -> String {
     "/var/lib/rustbgpd".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     pub prometheus_addr: String,
-    #[expect(dead_code)] // parsed from config, only "json" in M0
     pub log_format: String,
     #[serde(default = "default_grpc_addr")]
     pub grpc_addr: String,
@@ -119,7 +121,7 @@ fn default_grpc_addr() -> String {
     "127.0.0.1:50051".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Neighbor {
     pub address: String,
@@ -170,7 +172,7 @@ pub struct Neighbor {
     pub export_policy_chain: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddPathConfig {
     /// Accept multiple paths per prefix from this peer (RFC 7911).
@@ -183,7 +185,7 @@ pub struct AddPathConfig {
     pub send_max: Option<u32>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     #[serde(default)]
@@ -202,7 +204,7 @@ pub struct PolicyConfig {
 }
 
 /// A named policy definition with configurable default action.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NamedPolicyConfig {
     /// Default action when no statement matches: `"permit"` (default) or `"deny"`.
@@ -216,7 +218,7 @@ fn default_policy_action_str() -> String {
     "permit".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyStatementConfig {
     pub action: String,
@@ -248,7 +250,7 @@ pub struct PolicyStatementConfig {
     pub set_as_path_prepend: Option<AsPathPrependConfig>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AsPathPrependConfig {
     pub asn: u32,
@@ -672,7 +674,8 @@ fn parse_families(families: &[String]) -> Result<Vec<(Afi, Safi)>, ConfigError> 
 impl Config {
     pub fn load(path: &str) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        config.file_path = Some(PathBuf::from(path));
         config.validate()?;
         Ok(config)
     }
@@ -1063,6 +1066,49 @@ impl Config {
             configs.push((transport, label, import, export));
         }
         Ok(configs)
+    }
+}
+
+/// Differences between two neighbor lists, keyed by address.
+pub struct NeighborDiff {
+    pub added: Vec<Neighbor>,
+    pub removed: Vec<IpAddr>,
+    pub changed: Vec<Neighbor>,
+}
+
+/// Compare two neighbor lists and return the differences.
+///
+/// Two neighbors with the same address but different configuration
+/// (any field difference) are reported in `changed`.
+pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
+    let old_map: std::collections::HashMap<&str, &Neighbor> =
+        old.iter().map(|n| (n.address.as_str(), n)).collect();
+    let new_map: std::collections::HashMap<&str, &Neighbor> =
+        new.iter().map(|n| (n.address.as_str(), n)).collect();
+
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    for (addr, new_n) in &new_map {
+        match old_map.get(addr) {
+            None => added.push((*new_n).clone()),
+            Some(old_n) => {
+                if *old_n != *new_n {
+                    changed.push((*new_n).clone());
+                }
+            }
+        }
+    }
+
+    let removed: Vec<IpAddr> = old_map
+        .keys()
+        .filter(|addr| !new_map.contains_key(*addr))
+        .filter_map(|addr| addr.parse::<IpAddr>().ok())
+        .collect();
+
+    NeighborDiff {
+        added,
+        removed,
+        changed,
     }
 }
 
@@ -2706,5 +2752,88 @@ remote_asn = 65003
             chain.policies[0].entries[0].modifications.set_local_pref,
             Some(150)
         );
+    }
+
+    fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
+        Neighbor {
+            address: addr.to_string(),
+            remote_asn: asn,
+            description: None,
+            hold_time: None,
+            max_prefixes: None,
+            md5_password: None,
+            ttl_security: false,
+            families: Vec::new(),
+            graceful_restart: None,
+            gr_restart_time: None,
+            gr_stale_routes_time: None,
+            local_ipv6_nexthop: None,
+            route_reflector_client: false,
+            route_server_client: false,
+            add_path: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
+            import_policy_chain: Vec::new(),
+            export_policy_chain: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn diff_neighbors_detects_added() {
+        let old = vec![test_neighbor("10.0.0.1", 65001)];
+        let new = vec![
+            test_neighbor("10.0.0.1", 65001),
+            test_neighbor("10.0.0.2", 65002),
+        ];
+        let diff = super::diff_neighbors(&old, &new);
+        assert!(diff.removed.is_empty());
+        assert!(diff.changed.is_empty());
+        assert_eq!(diff.added.len(), 1);
+        assert_eq!(diff.added[0].address, "10.0.0.2");
+    }
+
+    #[test]
+    fn diff_neighbors_detects_removed() {
+        let old = vec![
+            test_neighbor("10.0.0.1", 65001),
+            test_neighbor("10.0.0.2", 65002),
+        ];
+        let new = vec![test_neighbor("10.0.0.1", 65001)];
+        let diff = super::diff_neighbors(&old, &new);
+        assert!(diff.added.is_empty());
+        assert!(diff.changed.is_empty());
+        assert_eq!(diff.removed.len(), 1);
+        assert_eq!(diff.removed[0], "10.0.0.2".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn diff_neighbors_detects_changed() {
+        let old = vec![test_neighbor("10.0.0.1", 65001)];
+        let new = vec![test_neighbor("10.0.0.1", 65099)];
+        let diff = super::diff_neighbors(&old, &new);
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(diff.changed[0].remote_asn, 65099);
+    }
+
+    #[test]
+    fn diff_neighbors_no_changes() {
+        let peers = vec![
+            test_neighbor("10.0.0.1", 65001),
+            test_neighbor("10.0.0.2", 65002),
+        ];
+        let diff = super::diff_neighbors(&peers, &peers);
+        assert!(diff.added.is_empty());
+        assert!(diff.removed.is_empty());
+        assert!(diff.changed.is_empty());
+    }
+
+    #[test]
+    fn config_round_trips_through_toml() {
+        let config = parse(valid_toml()).unwrap();
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let reloaded: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(config, reloaded);
     }
 }

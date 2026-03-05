@@ -462,6 +462,41 @@ impl PeerManager {
         }
     }
 
+    async fn reconcile_peers(
+        &mut self,
+        added: Vec<PeerManagerNeighborConfig>,
+        removed: Vec<IpAddr>,
+        changed: Vec<PeerManagerNeighborConfig>,
+    ) {
+        // Remove peers
+        for addr in &removed {
+            if let Err(e) = self.delete_peer(*addr).await {
+                warn!(%addr, error = %e, "reconcile: failed to remove peer");
+            }
+        }
+        // Changed peers: delete then re-add
+        for cfg in &changed {
+            let addr = cfg.address;
+            if let Err(e) = self.delete_peer(addr).await {
+                warn!(%addr, error = %e, "reconcile: failed to remove changed peer");
+            }
+            if let Err(e) = self.add_peer(cfg.clone()).await {
+                warn!(%addr, error = %e, "reconcile: failed to re-add changed peer");
+            }
+        }
+        // Add new peers
+        for cfg in added {
+            let addr = cfg.address;
+            if let Err(e) = self.add_peer(cfg).await {
+                warn!(%addr, error = %e, "reconcile: failed to add new peer");
+            }
+        }
+        info!(
+            added = changed.len() + removed.len(),
+            "peer reconciliation complete"
+        );
+    }
+
     fn bmp_peer_info(
         peer_addr: IpAddr,
         remote_asn: u32,
@@ -566,6 +601,10 @@ impl PeerManager {
                         }
                         PeerManagerCommand::AcceptInbound { stream, peer_addr } => {
                             self.handle_inbound(stream, peer_addr).await;
+                        }
+                        PeerManagerCommand::ReconcilePeers { added, removed, changed, reply } => {
+                            self.reconcile_peers(added, removed, changed).await;
+                            let _ = reply.send(());
                         }
                         PeerManagerCommand::Shutdown => {
                             info!("peer manager shutting down {} peers", self.peers.len());

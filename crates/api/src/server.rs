@@ -8,7 +8,7 @@ use crate::control_service::ControlService;
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
-use crate::peer_types::PeerManagerCommand;
+use crate::peer_types::{ConfigEvent, PeerManagerCommand};
 use crate::proto::control_service_server::ControlServiceServer;
 use crate::proto::global_service_server::GlobalServiceServer;
 use crate::proto::injection_service_server::InjectionServiceServer;
@@ -38,10 +38,11 @@ pub async fn serve(
     config: ServeConfig,
     shutdown_rx: oneshot::Receiver<()>,
     shutdown_tx: oneshot::Sender<()>,
+    config_tx: Option<mpsc::Sender<ConfigEvent>>,
 ) {
     let rib_svc = RibService::new(rib_tx.clone());
     let injection_svc = InjectionService::new(rib_tx.clone());
-    let neighbor_svc = NeighborService::new(peer_mgr_tx.clone(), rib_tx.clone());
+    let neighbor_svc = NeighborService::new(peer_mgr_tx.clone(), rib_tx.clone(), config_tx);
     let global_svc = GlobalService::new(config.asn, config.router_id, config.listen_port);
     let control_svc = ControlService::new(
         config.start_time,
