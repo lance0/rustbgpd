@@ -69,7 +69,7 @@ Last updated: 2026-03-05
 | Extended community matching | Yes | Yes | RT/RO encoding-agnostic |
 | Large community matching | Yes | Yes | LC:global:local1:local2 |
 | AS_PATH regex | Yes | Yes | Cisco/Quagga `_` convention |
-| AS_PATH length match | Yes | No | |
+| AS_PATH length match | Yes | Yes | `match_as_path_length_ge` / `match_as_path_length_le` |
 | Neighbor set matching | Yes | No | |
 | RPKI validation result match | Yes | Yes | `match_rpki_validation` in policy |
 | Route type match (int/ext/local) | Yes | No | |
@@ -216,7 +216,7 @@ Competing head-to-head with GoBGP for all use cases:
 2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
 3. **Policy CRUD via gRPC** — runtime policy management without config file edits
 4. **Peer groups** — template-based neighbor config reduces boilerplate for large deployments
-5. **AS_PATH length match** — trivial policy engine addition, common in real-world filters
+5. ~~**AS_PATH length match**~~ — done: `match_as_path_length_ge` / `match_as_path_length_le`
 
 Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
 

@@ -53,6 +53,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sent or received bypasses Graceful Restart, forcing immediate route purge
   instead of stale preservation. Completes the GR story alongside ADR-0024 (helper),
   ADR-0040 (restarting speaker), and ADR-0042 (LLGR). (ADR-0046)
+- **AS_PATH length matching in policy.** New `match_as_path_length_ge` and
+  `match_as_path_length_le` fields on policy statements for inclusive
+  range-based AS_PATH length filtering. Fields can be used independently or
+  together (AND logic), and work standalone or combined with existing match
+  criteria (prefix, community, regex, RPKI). `AS_SET` counts as 1 per
+  RFC 4271.
 - **Private AS removal.** New per-neighbor `remove_private_as` config strips
   private ASNs (64512–65534, 4200000000–4294967294) from AS_PATH before
   eBGP advertisement. Three modes: `"remove"` (entire path must be private),
