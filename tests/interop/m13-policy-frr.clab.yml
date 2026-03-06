@@ -1,0 +1,57 @@
+# Containerlab topology: rustbgpd ↔ 2× FRR (M13 — Policy Engine)
+#
+# Validates: import/export policy actions (set_local_pref, set_med,
+# set_community_add, set_as_path_prepend, AS_PATH regex match),
+# prefix-based deny rules, and end-to-end route modification.
+#
+# FRR-A (AS 65002) advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16
+# FRR-B (AS 65003) receives: filtered/modified routes from rustbgpd
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m13-policy-frr.clab.yml
+#   containerlab destroy -t tests/interop/m13-policy-frr.clab.yml
+
+name: m13-policy-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      binds:
+        - ./configs/rustbgpd-m13-policy.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m13-policy-a.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m13-policy-b.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-b:eth1"]
+
+# Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ FRR-A (10.0.0.2, AS 65002)
+# Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ FRR-B (10.0.1.2, AS 65003)

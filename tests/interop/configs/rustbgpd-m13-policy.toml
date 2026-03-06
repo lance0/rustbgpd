@@ -1,0 +1,67 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# --- Import policy ---
+# 1. Routes matching AS_PATH containing 65002 get LOCAL_PREF 200
+# 2. Routes for 10.0.0.0/8 le 16 get standard community 65001:100 added
+# 3. Deny any prefix longer than /24
+
+[[policy.import]]
+match_as_path = "_65002_"
+action = "permit"
+set_local_pref = 200
+
+[[policy.import]]
+prefix = "10.0.0.0/8"
+le = 16
+action = "permit"
+set_community_add = ["65001:100"]
+
+[[policy.import]]
+prefix = "0.0.0.0/0"
+ge = 25
+le = 32
+action = "deny"
+
+[[policy.import]]
+prefix = "0.0.0.0/0"
+le = 24
+action = "permit"
+
+# --- Export policy ---
+# 1. Deny 10.10.0.0/16 (don't re-export to FRR-B)
+# 2. Permit everything else with MED 50 and AS_PATH prepend
+
+[[policy.export]]
+prefix = "10.10.0.0/16"
+action = "deny"
+
+[[policy.export]]
+prefix = "0.0.0.0/0"
+le = 24
+action = "permit"
+set_med = 50
+set_as_path_prepend = { asn = 65001, count = 2 }
+
+# --- Neighbors ---
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-a-upstream"
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65003
+description = "frr-b-downstream"
+hold_time = 90

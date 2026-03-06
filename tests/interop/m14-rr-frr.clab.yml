@@ -1,0 +1,57 @@
+# Containerlab topology: rustbgpd RR ↔ 2× FRR iBGP clients (M14 — Route Reflector)
+#
+# Validates: iBGP route reflection (RFC 4456) — client-to-client
+# reflection, ORIGINATOR_ID and CLUSTER_LIST attribute handling.
+#
+# rustbgpd (AS 65001, RR with cluster_id 10.0.0.1) reflects between:
+#   FRR-client1 (AS 65001): advertises 192.168.10.0/24, 192.168.11.0/24
+#   FRR-client2 (AS 65001): advertises 192.168.20.0/24
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m14-rr-frr.clab.yml
+#   containerlab destroy -t tests/interop/m14-rr-frr.clab.yml
+
+name: m14-rr-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      binds:
+        - ./configs/rustbgpd-m14-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    frr-client1:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m14-rr-client1.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-client2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m14-rr-client2.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-client1:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-client2:eth1"]
+
+# Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ FRR-client1 (10.0.0.2)
+# Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ FRR-client2 (10.0.1.2)

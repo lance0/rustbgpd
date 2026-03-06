@@ -9,7 +9,9 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-grpc_addr = "0.0.0.0:50051"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
 
 # FRR-01 (AS 65010) — has per-peer export policy
 [[neighbors]]

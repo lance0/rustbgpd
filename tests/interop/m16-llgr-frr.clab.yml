@@ -1,0 +1,40 @@
+# Containerlab topology: rustbgpd ↔ FRR (M16 — LLGR RFC 9494)
+#
+# Validates: Long-Lived Graceful Restart — GR timer expiry promotes routes
+# to LLGR-stale instead of purging; reconnect clears LLGR-stale.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m16-llgr-frr.clab.yml
+#   containerlab destroy -t tests/interop/m16-llgr-frr.clab.yml
+
+name: m16-llgr-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      binds:
+        - ./configs/rustbgpd-m16-llgr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m16-llgr.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# rustbgpd: 10.0.0.1, AS 65001 (GR + LLGR helper)
+# FRR:      10.0.0.2, AS 65002 (GR + LLGR enabled, stale-time 30s)

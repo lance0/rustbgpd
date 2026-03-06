@@ -2,6 +2,7 @@
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
+cluster_id = "10.0.0.1"
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -12,7 +13,14 @@ address = "0.0.0.0:50051"
 
 [[neighbors]]
 address = "10.0.0.2"
-remote_asn = 65002
-description = "frr-m10-ipv6"
+remote_asn = 65001
+description = "rr-client1"
 hold_time = 90
-families = ["ipv4_unicast", "ipv6_unicast"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65001
+description = "rr-client2"
+hold_time = 90
+route_reflector_client = true

@@ -13,6 +13,9 @@ address = "0.0.0.0:50051"
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
-description = "frr-m10-ipv6"
-hold_time = 90
-families = ["ipv4_unicast", "ipv6_unicast"]
+description = "frr-m16-llgr"
+hold_time = 30
+graceful_restart = true
+gr_restart_time = 15
+gr_stale_routes_time = 20
+llgr_stale_time = 60
