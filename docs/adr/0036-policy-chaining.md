@@ -93,11 +93,17 @@ import_policy_chain = ["reject-bogons", "set-lp-customer"]
 - Resolution order: per-neighbor chain > per-neighbor inline > global chain >
   global inline > permit-all
 
-### Config-only scope
+### Runtime CRUD extension
 
-Named policies are defined in TOML only. No gRPC CRUD for policy definitions
-in this iteration. This keeps the implementation focused and avoids the
-complexity of runtime policy mutation.
+Named policies and chain attachments are also exposed through the gRPC
+`PolicyService`. The runtime model is intentionally narrow:
+
+- named policy definitions are full-replace (`SetPolicy`)
+- global and per-neighbor chain assignments are full-replace
+- deleting a referenced named policy is rejected
+- import-chain changes apply to future inbound UPDATE processing; operators use
+  `SoftResetIn` when they want existing Adj-RIB-In state re-evaluated
+- export-chain changes trigger outbound recomputation immediately
 
 ## Consequences
 
@@ -109,5 +115,5 @@ complexity of runtime policy mutation.
   becomes `Option<PolicyChain>` in transport, RIB, API, and peer manager
 - **19 new tests** — 10 in policy crate (merge_from + chain evaluation),
   9 in config (named policies, chain resolution, mutual exclusion)
-- **Future gRPC policy CRUD** can build on the named policy infrastructure
-  without changing the evaluation model
+- **gRPC CRUD reuses the same named-policy infrastructure** without changing
+  chain evaluation semantics or the persisted TOML shape

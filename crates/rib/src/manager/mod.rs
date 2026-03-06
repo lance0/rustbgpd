@@ -166,10 +166,10 @@ impl RibManager {
 
     /// Resolve the export policy for a peer: per-peer if set, else global.
     fn export_policy_for(&self, peer: IpAddr) -> Option<&PolicyChain> {
-        self.peer_export_policies
-            .get(&peer)
-            .and_then(|p| p.as_ref())
-            .or(self.export_policy.as_ref())
+        match self.peer_export_policies.get(&peer) {
+            Some(policy) => policy.as_ref(),
+            None => self.export_policy.as_ref(),
+        }
     }
 
     /// Clear all enhanced route refresh state for a peer.
@@ -242,6 +242,11 @@ impl RibManager {
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
                 self.handle_query_advertised_count(peer, reply);
             }
+            RibUpdate::ReplacePeerExportPolicy {
+                peer,
+                export_policy,
+                reply,
+            } => self.handle_replace_peer_export_policy(peer, export_policy, reply),
             RibUpdate::EndOfRib { peer, afi, safi } => self.handle_end_of_rib(peer, afi, safi),
             RibUpdate::RouteRefreshRequest { peer, afi, safi } => {
                 self.handle_route_refresh_request(peer, afi, safi);

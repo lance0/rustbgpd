@@ -24,7 +24,7 @@ FRR 10.3.1 and BIRD 2.0.12.
 
 ## Why rustbgpd
 
-- **API-first control plane** -- full gRPC control surface across 5 services plus a thin CLI (`rustbgpctl`). Dynamic peer management, route injection, policy, streaming events, and daemon control without restarts.
+- **API-first control plane** -- full gRPC control surface across 6 services plus a thin CLI (`rustbgpctl`). Dynamic peer management, route injection, policy CRUD, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, FlowSpec, Route Reflector, large and extended communities.
 - **Operational visibility** -- Prometheus metrics, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, structured JSON logging, per-peer counters.
@@ -123,12 +123,13 @@ mTLS proxy — see [`examples/envoy-mtls/`](examples/envoy-mtls/) and
 
 ## gRPC API
 
-Five services cover the full operational surface:
+Six services cover the full operational surface:
 
 | Service | RPCs | Purpose |
 |---------|------|---------|
 | `GlobalService` | `GetGlobal`, `SetGlobal` | Daemon identity and configuration |
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn` | Peer lifecycle + inbound soft reset |
+| `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `Get*Chain`, `Set*Chain`, `Clear*Chain` | Named policy CRUD + global/per-neighbor chain attachment |
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListFlowSpecRoutes`, `WatchRoutes` | RIB queries and streaming |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec` | Programmatic route and FlowSpec injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |

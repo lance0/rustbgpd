@@ -19,6 +19,25 @@ use crate::loc_rib::LocRib;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
+    pub(super) fn handle_replace_peer_export_policy(
+        &mut self,
+        peer: IpAddr,
+        export_policy: Option<PolicyChain>,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        if !self.outbound_peers.contains_key(&peer) {
+            let _ = reply.send(Err(format!(
+                "peer {peer} not registered for outbound updates"
+            )));
+            return;
+        }
+
+        self.peer_export_policies.insert(peer, export_policy);
+        self.dirty_peers.insert(peer);
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        let _ = reply.send(Ok(()));
+    }
+
     pub(super) fn handle_routes_received(
         &mut self,
         peer: IpAddr,

@@ -155,6 +155,15 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<usize>,
     },
+    /// Replace the effective export policy for a peer and resync outbound state.
+    ReplacePeerExportPolicy {
+        /// The target peer.
+        peer: IpAddr,
+        /// New effective export policy (`None` = permit-all/global fallback resolved already).
+        export_policy: Option<PolicyChain>,
+        /// Response channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
     RouteRefreshRequest {
         /// The requesting peer.

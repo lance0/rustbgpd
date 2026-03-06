@@ -5,8 +5,9 @@
 
 ## Context
 
-The proto file defines five gRPC services — `GlobalService`, `NeighborService`,
-`RibService`, `InjectionService`, and `ControlService`. Three of these were
+At the time of this ADR, the proto file defined five gRPC services —
+`GlobalService`, `NeighborService`, `RibService`, `InjectionService`, and
+`ControlService`. Three of these were
 implemented (M1–M4), but `GlobalService` and `ControlService` had no server-side
 implementation. Clients generated from the proto would get UNIMPLEMENTED for 5 RPCs.
 

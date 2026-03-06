@@ -9,6 +9,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Policy CRUD via gRPC.** New `PolicyService` adds named policy definition
+  CRUD plus global/per-neighbor chain assignment at runtime. Successful
+  mutations hot-apply to the running daemon, persist back to TOML, and reuse
+  the existing named-policy / chain model from ADR-0036. Import-chain changes
+  affect future inbound UPDATE processing; operators use `SoftResetIn` when
+  they want existing Adj-RIB-In state re-evaluated. Export-chain changes
+  trigger immediate outbound recomputation.
+
 ---
 
 ## [0.4.2] — 2026-03-06

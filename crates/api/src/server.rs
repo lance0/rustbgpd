@@ -19,10 +19,12 @@ use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
 use crate::peer_types::{ConfigEvent, PeerManagerCommand};
+use crate::policy_service::PolicyService;
 use crate::proto::control_service_server::ControlServiceServer;
 use crate::proto::global_service_server::GlobalServiceServer;
 use crate::proto::injection_service_server::InjectionServiceServer;
 use crate::proto::neighbor_service_server::NeighborServiceServer;
+use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
 use rustbgpd_rib::RibUpdate;
@@ -252,7 +254,11 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(NeighborServiceServer::with_interceptor(
-            NeighborService::new(asn, peer_mgr_tx.clone(), rib_tx.clone(), config_tx),
+            NeighborService::new(asn, peer_mgr_tx.clone(), rib_tx.clone(), config_tx.clone()),
+            interceptor.clone(),
+        ))
+        .add_service(PolicyServiceServer::with_interceptor(
+            PolicyService::new(peer_mgr_tx.clone(), config_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(GlobalServiceServer::with_interceptor(
@@ -310,7 +316,11 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(NeighborServiceServer::with_interceptor(
-            NeighborService::new(asn, peer_mgr_tx.clone(), rib_tx.clone(), config_tx),
+            NeighborService::new(asn, peer_mgr_tx.clone(), rib_tx.clone(), config_tx.clone()),
+            interceptor.clone(),
+        ))
+        .add_service(PolicyServiceServer::with_interceptor(
+            PolicyService::new(peer_mgr_tx.clone(), config_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(GlobalServiceServer::with_interceptor(

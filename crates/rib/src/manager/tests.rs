@@ -1456,6 +1456,82 @@ async fn per_peer_export_policy() {
 }
 
 #[tokio::test]
+async fn replace_peer_export_policy_resyncs_outbound_state() {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+
+    let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8);
+    let deny_chain = Some(PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: Some(Prefix::V4(denied_prefix)),
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]));
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![make_route(denied_prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let initial = out_rx.recv().await.unwrap();
+    assert_eq!(initial.announce.len(), 1);
+    assert!(initial.withdraw.is_empty());
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ReplacePeerExportPolicy {
+        peer: target,
+        export_policy: deny_chain,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    assert_eq!(reply_rx.await.unwrap(), Ok(()));
+
+    let update = out_rx.recv().await.unwrap();
+    assert!(update.announce.is_empty());
+    assert_eq!(update.withdraw, vec![(Prefix::V4(denied_prefix), 0)]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn peer_down_cleans_up_export_policy() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 

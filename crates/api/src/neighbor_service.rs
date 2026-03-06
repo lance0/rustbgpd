@@ -246,6 +246,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         self.peer_mgr_tx
             .send(PeerManagerCommand::AddPeer {
                 config: peer_config,
+                sync_config_snapshot: true,
                 reply: reply_tx,
             })
             .await
@@ -282,6 +283,7 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         self.peer_mgr_tx
             .send(PeerManagerCommand::DeletePeer {
                 address,
+                sync_config_snapshot: true,
                 reply: reply_tx,
             })
             .await

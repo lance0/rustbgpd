@@ -5,6 +5,10 @@ use super::{
 
 impl PeerSession {
     /// Map external commands to FSM events.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "command dispatch centralizes all external peer-session control paths"
+    )]
     pub(super) async fn handle_command(&mut self, cmd: PeerCommand) -> ControlFlow<()> {
         match cmd {
             PeerCommand::Start => {
@@ -82,6 +86,16 @@ impl PeerSession {
                         .record_message_sent(&self.peer_label, "route_refresh");
                     let _ = reply.send(Ok(()));
                 }
+                ControlFlow::Continue(())
+            }
+            PeerCommand::UpdateImportPolicy { policy, reply } => {
+                self.import_policy = policy;
+                let _ = reply.send(Ok(()));
+                ControlFlow::Continue(())
+            }
+            PeerCommand::UpdateExportPolicy { policy, reply } => {
+                self.export_policy = policy;
+                let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
             }
             PeerCommand::CollisionDump => {

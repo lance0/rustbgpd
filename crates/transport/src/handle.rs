@@ -62,6 +62,20 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Replace the import policy chain for future inbound UPDATE processing.
+    UpdateImportPolicy {
+        /// New effective import policy chain (`None` = permit-all).
+        policy: Option<PolicyChain>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Replace the export policy chain used on future `PeerUp` registration.
+    UpdateExportPolicy {
+        /// New effective export policy chain (`None` = permit-all).
+        policy: Option<PolicyChain>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
 }
@@ -253,6 +267,48 @@ impl PeerHandle {
             .await
             .ok()?;
         reply_rx.await.ok()
+    }
+
+    /// Replace the effective import policy chain for this session.
+    ///
+    /// The new chain applies to future inbound UPDATE processing only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has already exited.
+    pub async fn update_import_policy(&self, policy: Option<PolicyChain>) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(PeerCommand::UpdateImportPolicy {
+                policy,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "session task exited".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "session task dropped reply".to_string())?
+    }
+
+    /// Replace the effective export policy chain for future `PeerUp` messages.
+    ///
+    /// The new chain is used when the session next registers with the RIB.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task has already exited.
+    pub async fn update_export_policy(&self, policy: Option<PolicyChain>) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(PeerCommand::UpdateExportPolicy {
+                policy,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "session task exited".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "session task dropped reply".to_string())?
     }
 
     /// Check if the session task has finished.

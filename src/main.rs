@@ -10,6 +10,7 @@ mod config;
 mod config_persister;
 mod metrics_server;
 mod peer_manager;
+mod policy_admin;
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -30,7 +31,8 @@ use rustbgpd_policy::PolicyChain;
 
 use crate::config::{Config, GrpcListener};
 use crate::config_persister::{ConfigMutation, ConfigPersister};
-use crate::peer_manager::PeerManager;
+use crate::peer_manager::{InternalCommand, PeerManager};
+use crate::policy_admin::apply_config_event;
 
 const GR_RESTART_MARKER_VERSION: u8 = 1;
 
@@ -392,8 +394,10 @@ async fn run(mut config: Config) {
 
     // Spawn PeerManager (keep JoinHandle for coordinated shutdown)
     let (peer_mgr_tx, peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(64);
-    let peer_mgr = PeerManager::new(
+    let (peer_mgr_internal_tx, peer_mgr_internal_rx) = mpsc::unbounded_channel();
+    let peer_mgr = PeerManager::new_with_config(
         peer_mgr_rx,
+        peer_mgr_internal_rx,
         config.global.asn,
         router_id,
         cluster_id,
@@ -401,6 +405,7 @@ async fn run(mut config: Config) {
         metrics.clone(),
         rib_tx.clone(),
         bmp_tx,
+        config.clone(),
     );
     let peer_mgr_handle = tokio::spawn(peer_mgr.run());
 
@@ -411,84 +416,22 @@ async fn run(mut config: Config) {
         let persister = ConfigPersister::new(mutation_rx, path.clone(), config.clone());
         tokio::spawn(persister.run());
         let reload_mutation_tx = mutation_tx.clone();
+        let mut current_config = config.clone();
 
         // Bridge: convert ConfigEvent → ConfigMutation
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let mutation = match event {
-                    rustbgpd_api::peer_types::ConfigEvent::NeighborAdded(cfg) => {
-                        ConfigMutation::AddNeighbor(Box::new(config::Neighbor {
-                            address: cfg.address.to_string(),
-                            remote_asn: cfg.remote_asn,
-                            description: Some(cfg.description),
-                            hold_time: cfg.hold_time,
-                            max_prefixes: cfg.max_prefixes,
-                            md5_password: None,
-                            ttl_security: false,
-                            families: cfg
-                                .families
-                                .iter()
-                                .map(|(afi, safi)| match (afi, safi) {
-                                    (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::Unicast) => {
-                                        "ipv4_unicast".to_string()
-                                    }
-                                    (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::Unicast) => {
-                                        "ipv6_unicast".to_string()
-                                    }
-                                    (rustbgpd_wire::Afi::Ipv4, rustbgpd_wire::Safi::FlowSpec) => {
-                                        "ipv4_flowspec".to_string()
-                                    }
-                                    (rustbgpd_wire::Afi::Ipv6, rustbgpd_wire::Safi::FlowSpec) => {
-                                        "ipv6_flowspec".to_string()
-                                    }
-                                    _ => format!("{afi:?}_{safi:?}"),
-                                })
-                                .collect(),
-                            graceful_restart: Some(cfg.graceful_restart),
-                            gr_restart_time: Some(cfg.gr_restart_time),
-                            gr_stale_routes_time: Some(cfg.gr_stale_routes_time),
-                            llgr_stale_time: if cfg.llgr_stale_time > 0 {
-                                Some(cfg.llgr_stale_time)
-                            } else {
-                                None
-                            },
-                            local_ipv6_nexthop: cfg.local_ipv6_nexthop.map(|a| a.to_string()),
-                            route_reflector_client: cfg.route_reflector_client,
-                            route_server_client: cfg.route_server_client,
-                            remove_private_as: match cfg.remove_private_as {
-                                rustbgpd_transport::RemovePrivateAs::Disabled => None,
-                                rustbgpd_transport::RemovePrivateAs::Remove => {
-                                    Some("remove".to_string())
-                                }
-                                rustbgpd_transport::RemovePrivateAs::All => Some("all".to_string()),
-                                rustbgpd_transport::RemovePrivateAs::Replace => {
-                                    Some("replace".to_string())
-                                }
-                            },
-                            add_path: if cfg.add_path_receive || cfg.add_path_send {
-                                Some(config::AddPathConfig {
-                                    receive: cfg.add_path_receive,
-                                    send: cfg.add_path_send,
-                                    send_max: if cfg.add_path_send_max > 0 {
-                                        Some(cfg.add_path_send_max)
-                                    } else {
-                                        None
-                                    },
-                                })
-                            } else {
-                                None
-                            },
-                            import_policy: Vec::new(),
-                            export_policy: Vec::new(),
-                            import_policy_chain: Vec::new(),
-                            export_policy_chain: Vec::new(),
-                        }))
-                    }
-                    rustbgpd_api::peer_types::ConfigEvent::NeighborDeleted(addr) => {
-                        ConfigMutation::DeleteNeighbor(addr)
-                    }
-                };
-                if mutation_tx.send(mutation).await.is_err() {
+                if let Err(error) = apply_config_event(&mut current_config, &event) {
+                    error!(error = %error, "failed to apply config event before persistence");
+                    continue;
+                }
+                if mutation_tx
+                    .send(ConfigMutation::ReplaceConfig(Box::new(
+                        current_config.clone(),
+                    )))
+                    .await
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -627,6 +570,7 @@ async fn run(mut config: Config) {
                     import_policy,
                     export_policy,
                 },
+                sync_config_snapshot: false,
                 reply: reply_tx,
             })
             .await;
@@ -677,6 +621,15 @@ async fn run(mut config: Config) {
                         error!(
                             error = %e,
                             "failed to sync config persister after reload — keeping previous in-memory config"
+                        );
+                        continue;
+                    }
+                    if let Err(e) = peer_mgr_internal_tx
+                        .send(InternalCommand::ReplaceConfigSnapshot(Box::new(new_config.clone())))
+                    {
+                        error!(
+                            error = %e,
+                            "failed to sync peer manager config snapshot after reload"
                         );
                         continue;
                     }

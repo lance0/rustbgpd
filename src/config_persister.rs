@@ -15,6 +15,7 @@ use tracing::{error, info, warn};
 use crate::config::{Config, Neighbor};
 
 /// A mutation to apply to the persisted config.
+#[allow(dead_code)]
 pub enum ConfigMutation {
     AddNeighbor(Box<Neighbor>),
     DeleteNeighbor(IpAddr),

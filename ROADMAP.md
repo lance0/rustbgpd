@@ -42,7 +42,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Tokio transport — single task per peer, inbound listener, TCP MD5/GTSM, session counters, NLRI batching, TCP collision detection (RFC 4271 §6.8)
 - [x] RIB — Adj-RIB-In, Loc-RIB best-path (RFC 4271 §9.1.2 with eBGP preference), Adj-RIB-Out with split horizon, dirty peer resync, route injection, WatchRoutes streaming
 - [x] Policy — prefix lists with ge/le matching (IPv4 + IPv6), per-peer import/export, global fallback
-- [x] gRPC API — 5 services: Global, Neighbor, RIB, Injection, Control (all IPv6-capable)
+- [x] gRPC API — 6 services: Global, Neighbor, Policy, RIB, Injection, Control (all IPv6-capable)
 - [x] Dynamic peer management — add, delete, enable, disable neighbors at runtime (IPv4 + IPv6)
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening

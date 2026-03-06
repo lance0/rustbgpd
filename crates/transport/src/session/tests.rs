@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Instant;
 
 use rustbgpd_fsm::PeerConfig;
-use rustbgpd_policy::{Policy, PolicyAction, PolicyStatement, RouteModifications};
+use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Message, Origin, PathAttribute,
 };
@@ -862,6 +862,83 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
     assert_eq!(route.prefix, Prefix::V4(prefix));
     assert_eq!(route.local_pref(), 200);
     assert_eq!(route.communities(), &[0xFDE9_0064]);
+}
+
+#[tokio::test]
+async fn update_import_policy_applies_to_future_updates() {
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+
+    let mut session = PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None, None);
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update.clone()).await;
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected first RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+
+    let deny_chain = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: Some(Prefix::V4(prefix)),
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    let flow = session
+        .handle_command(PeerCommand::UpdateImportPolicy {
+            policy: Some(deny_chain),
+            reply: reply_tx,
+        })
+        .await;
+    assert_eq!(flow, ControlFlow::Continue(()));
+    assert_eq!(reply_rx.await.unwrap(), Ok(()));
+
+    session.process_update(update).await;
+    assert!(rib_rx.try_recv().is_err());
 }
 
 /// End-to-end ERR + import policy interaction:

@@ -6,18 +6,21 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 
 ## Services
 
-| Service | RPCs |
-|---------|------|
-| **Global** | `GetGlobal` — ASN, router ID, listen port |
-| **Neighbor** | `ListNeighbors`, `GetNeighbor`, `AddNeighbor`, `DeleteNeighbor`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn` |
-| **RIB** | `GetRoutes` (received/best/advertised), `GetRouteCount` |
-| **Injection** | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `ListFlowSpecRoutes` |
-| **Control** | `Health`, `Shutdown`, `WatchRoutes` (server-streaming), `TriggerMrtDump` |
+| Service | Scope |
+|---------|-------|
+| **GlobalService** | Read daemon identity and bootstrap config |
+| **NeighborService** | Dynamic peer CRUD, enable/disable, soft reset |
+| **PolicyService** | Named policy CRUD and global/per-neighbor chain assignment |
+| **RibService** | Received/best/advertised route queries and watch stream |
+| **InjectionService** | Inject/withdraw unicast and FlowSpec routes |
+| **ControlService** | Health, metrics, shutdown, MRT trigger |
+
+See [docs/API.md](../../docs/API.md) for the full RPC reference and examples.
 
 ## Proto
 
-Protocol buffer definitions are in `proto/bgp.proto`. Code generation
-runs via `tonic-build` in `build.rs`.
+Protocol buffer definitions are in [proto/rustbgpd.proto](../../proto/rustbgpd.proto).
+Code generation runs via `tonic-build` in `build.rs`.
 
 ## License
 

@@ -1,6 +1,6 @@
 # gRPC API Reference
 
-rustbgpd exposes five gRPC services over one or more configured listeners. The
+rustbgpd exposes six gRPC services over one or more configured listeners. The
 default listener is a local Unix domain socket at
 `/var/lib/rustbgpd/grpc.sock`. The examples below use
 [grpcurl](https://github.com/fullstorydev/grpcurl) against an explicit local
@@ -106,6 +106,73 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"address": "10.0.0.2", "families": ["ipv4_unicast"]}' \
   localhost:50051 rustbgpd.v1.NeighborService/SoftResetIn
+```
+
+---
+
+## PolicyService
+
+Named policy definition CRUD plus global and per-neighbor chain assignment.
+Chain changes apply immediately for future route processing. Import-policy
+changes do not retroactively re-evaluate existing Adj-RIB-In state; use
+`SoftResetIn` if you need a full inbound refresh.
+
+| RPC | Description |
+|-----|-------------|
+| `ListPolicies` | List all named policy definitions |
+| `GetPolicy` | Return one named policy definition |
+| `SetPolicy` | Create or replace a named policy definition |
+| `DeletePolicy` | Delete a named policy definition (rejected while referenced) |
+| `GetGlobalPolicyChains` | Return global import/export chain assignments |
+| `SetGlobalImportChain` / `SetGlobalExportChain` | Replace global chain assignment |
+| `ClearGlobalImportChain` / `ClearGlobalExportChain` | Remove the global chain assignment |
+| `GetNeighborPolicyChains` | Return one neighbor's import/export chain assignments |
+| `SetNeighborImportChain` / `SetNeighborExportChain` | Replace one neighbor's chain assignment |
+| `ClearNeighborImportChain` / `ClearNeighborExportChain` | Remove one neighbor's chain assignment |
+
+### Create or replace a named policy
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "name": "tag-internal",
+    "definition": {
+      "default_action": "permit",
+      "statements": [
+        {
+          "action": "permit",
+          "prefix": "10.0.0.0/8",
+          "le": 16,
+          "set_community_add": ["65001:100"]
+        }
+      ]
+    }
+  }' \
+  localhost:50051 rustbgpd.v1.PolicyService/SetPolicy
+```
+
+### Attach a global import chain
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"policy_names": ["reject-bogons", "tag-internal"]}' \
+  localhost:50051 rustbgpd.v1.PolicyService/SetGlobalImportChain
+```
+
+### Attach a per-neighbor export chain
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2", "policy_names": ["tag-ixp"]}' \
+  localhost:50051 rustbgpd.v1.PolicyService/SetNeighborExportChain
+```
+
+### Delete a named policy
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"name": "tag-internal"}' \
+  localhost:50051 rustbgpd.v1.PolicyService/DeletePolicy
 ```
 
 ---

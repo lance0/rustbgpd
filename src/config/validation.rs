@@ -6,7 +6,7 @@ use super::{Config, ConfigError, DEFAULT_HOLD_TIME};
 
 impl Config {
     #[expect(clippy::too_many_lines)]
-    pub(super) fn validate(&self) -> Result<(), ConfigError> {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         // Validate router_id is a valid IPv4
         self.global
             .router_id

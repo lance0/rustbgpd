@@ -544,7 +544,9 @@ action = "deny"
 
 Named policies are reusable policy blocks defined under `[policy.definitions]`.
 Each has a name, optional `default_action` (default: `"permit"`), and a list of
-statements.
+statements. The same named definitions and chain attachments can also be
+managed at runtime through the gRPC `PolicyService`; successful mutations are
+persisted back to TOML.
 
 ```toml
 [policy.definitions.reject-bogons]

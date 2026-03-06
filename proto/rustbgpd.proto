@@ -170,6 +170,151 @@ message SoftResetInRequest {
 message SoftResetInResponse {}
 
 // ---------------------------------------------------------------------------
+// PolicyService — Named policy definitions and chain assignment
+// ---------------------------------------------------------------------------
+
+service PolicyService {
+  rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse);
+  rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
+  rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse);
+  rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+  rpc GetGlobalPolicyChains(GetGlobalPolicyChainsRequest) returns (GlobalPolicyChains);
+  rpc SetGlobalImportChain(SetGlobalImportChainRequest) returns (SetGlobalImportChainResponse);
+  rpc SetGlobalExportChain(SetGlobalExportChainRequest) returns (SetGlobalExportChainResponse);
+  rpc ClearGlobalImportChain(ClearGlobalImportChainRequest) returns (ClearGlobalImportChainResponse);
+  rpc ClearGlobalExportChain(ClearGlobalExportChainRequest) returns (ClearGlobalExportChainResponse);
+  rpc GetNeighborPolicyChains(GetNeighborPolicyChainsRequest) returns (NeighborPolicyChains);
+  rpc SetNeighborImportChain(SetNeighborImportChainRequest) returns (SetNeighborImportChainResponse);
+  rpc SetNeighborExportChain(SetNeighborExportChainRequest) returns (SetNeighborExportChainResponse);
+  rpc ClearNeighborImportChain(ClearNeighborImportChainRequest) returns (ClearNeighborImportChainResponse);
+  rpc ClearNeighborExportChain(ClearNeighborExportChainRequest) returns (ClearNeighborExportChainResponse);
+}
+
+message PolicyDefinition {
+  string default_action = 1;
+  repeated PolicyStatement statements = 2;
+}
+
+message NamedPolicy {
+  string name = 1;
+  PolicyDefinition definition = 2;
+}
+
+message PolicyStatement {
+  string action = 1;
+  optional string prefix = 2;
+  optional uint32 ge = 3;
+  optional uint32 le = 4;
+  repeated string match_community = 5;
+  optional string match_as_path = 6;
+  optional uint32 match_as_path_length_ge = 7;
+  optional uint32 match_as_path_length_le = 8;
+  optional string match_rpki_validation = 9;
+  optional uint32 set_local_pref = 10;
+  optional uint32 set_med = 11;
+  optional string set_next_hop = 12;
+  repeated string set_community_add = 13;
+  repeated string set_community_remove = 14;
+  AsPathPrepend set_as_path_prepend = 15;
+}
+
+message AsPathPrepend {
+  uint32 asn = 1;
+  uint32 count = 2;
+}
+
+message ListPoliciesRequest {}
+
+message ListPoliciesResponse {
+  repeated NamedPolicy policies = 1;
+}
+
+message GetPolicyRequest {
+  string name = 1;
+}
+
+message GetPolicyResponse {
+  string name = 1;
+  PolicyDefinition definition = 2;
+}
+
+message SetPolicyRequest {
+  string name = 1;
+  PolicyDefinition definition = 2;
+}
+
+message SetPolicyResponse {}
+
+message DeletePolicyRequest {
+  string name = 1;
+}
+
+message DeletePolicyResponse {}
+
+message GlobalPolicyChains {
+  repeated string import_policy_names = 1;
+  repeated string export_policy_names = 2;
+}
+
+message GetGlobalPolicyChainsRequest {}
+
+message SetGlobalImportChainRequest {
+  repeated string policy_names = 1;
+}
+
+message SetGlobalImportChainResponse {}
+
+message SetGlobalExportChainRequest {
+  repeated string policy_names = 1;
+}
+
+message SetGlobalExportChainResponse {}
+
+message ClearGlobalImportChainRequest {}
+
+message ClearGlobalImportChainResponse {}
+
+message ClearGlobalExportChainRequest {}
+
+message ClearGlobalExportChainResponse {}
+
+message NeighborPolicyChains {
+  string address = 1;
+  repeated string import_policy_names = 2;
+  repeated string export_policy_names = 3;
+}
+
+message GetNeighborPolicyChainsRequest {
+  string address = 1;
+}
+
+message SetNeighborImportChainRequest {
+  string address = 1;
+  repeated string policy_names = 2;
+}
+
+message SetNeighborImportChainResponse {}
+
+message SetNeighborExportChainRequest {
+  string address = 1;
+  repeated string policy_names = 2;
+}
+
+message SetNeighborExportChainResponse {}
+
+message ClearNeighborImportChainRequest {
+  string address = 1;
+}
+
+message ClearNeighborImportChainResponse {}
+
+message ClearNeighborExportChainRequest {
+  string address = 1;
+}
+
+message ClearNeighborExportChainResponse {}
+
+// ---------------------------------------------------------------------------
 // RibService — RIB queries (paginated + streaming)
 // ---------------------------------------------------------------------------
 

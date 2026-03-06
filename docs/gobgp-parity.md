@@ -87,7 +87,7 @@ Last updated: 2026-03-06
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | ~21 | |
+| Total RPCs | ~55 | ~35 | |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | No | |
 | Dynamic neighbors (prefix-based) | Yes | No | |
@@ -97,7 +97,7 @@ Last updated: 2026-03-06
 | Watch events (streaming) | Yes | Yes | WatchRoutes |
 | Table statistics | Yes | Partial | Health endpoint |
 | VRF management | Yes | No | |
-| Policy CRUD via API | Yes | No | Config-file only |
+| Policy CRUD via API | Yes | Yes | Named policy definition CRUD plus global/per-neighbor chain assignment |
 | RPKI management | Yes | Partial | VRP/cache status via metrics; no gRPC RPKI CRUD |
 | BMP management | Yes | Partial | Config-file only; no runtime gRPC add/remove |
 | MRT control | Yes | Yes | `TriggerMrtDump` RPC |
@@ -168,7 +168,7 @@ Last updated: 2026-03-06
 | Core protocol | 14 | 13.5 | ~96% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 13 | ~72% |
-| gRPC RPCs | ~55 | ~21 | ~38% |
+| gRPC RPCs | ~55 | ~35 | ~64% |
 | Monitoring | 5 | 5 | 100% |
 | Security | 4 | 4 | 100% |
 | Best-path steps | 11 | 10.5 | ~95% |
@@ -182,7 +182,7 @@ The primary target deployment. Weighted toward what matters:
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
 - **Core protocol:** 96% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
-- **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self). Missing: neighbor set match, route type match, MED/LP comparison, gRPC policy CRUD
+- **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self). Missing: neighbor set match, route type match, MED/LP comparison
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
 - **BMP exporter:** RFC 7854 streaming to collectors, reconnect replay, periodic Stats Report
@@ -191,7 +191,7 @@ The primary target deployment. Weighted toward what matters:
 - **Config persistence + SIGHUP reload:** gRPC mutations survive restart; live neighbor reconciliation
 - **Operator packaging (v0.4.2):** systemd unit, example configs, operations guide, release checklist, container image CI
 
-**Remaining gaps for IX RS parity:** Policy CRUD via gRPC (~5%), peer groups (~3%), neighbor set matching (~1%), route type match (~1%). Closing policy CRUD alone would bring IX parity to ~93%.
+**Remaining gaps for IX RS parity:** peer groups (~3%), neighbor set matching (~1%), route type match (~1%), MED/LOCAL_PREF comparison (~1%). Policy CRUD via gRPC is now complete, bringing IX route-server parity to roughly ~93%.
 
 ### General-Purpose BGP Speaker (~57% parity)
 
@@ -220,19 +220,16 @@ Competing head-to-head with GoBGP for all use cases:
 
 These are the gaps that matter most for the stated alpha audience:
 
-1. **Policy CRUD via gRPC** — runtime policy management without config file
-   edits. Most impactful missing API feature for IX operators who want to
-   adjust filtering at runtime. Moves gRPC parity from ~38% toward ~45%.
-2. **Peer groups** — template-based neighbor config. At 100+ members,
+1. **Peer groups** — template-based neighbor config. At 100+ members,
    per-peer config becomes unwieldy. GoBGP solves this with peer groups and
    apply-groups. Medium effort (config + API + transport threading).
-3. **Neighbor set matching** — match policy by peer address/ASN group. Small
+2. **Neighbor set matching** — match policy by peer address/ASN group. Small
    effort, useful in combination with policy chains (e.g., "apply this chain
    to all peers in AS-SET X").
-4. **Route type match (int/ext/local)** — match on route origin in policy.
+3. **Route type match (int/ext/local)** — match on route origin in policy.
    Small effort, enables cleaner import/export separation without AS_PATH
    regex workarounds.
-5. **MED / LOCAL_PREF comparison in policy** — match routes where MED or
+4. **MED / LOCAL_PREF comparison in policy** — match routes where MED or
    LOCAL_PREF is above/below a threshold. Small effort, useful for
    traffic engineering policies.
 

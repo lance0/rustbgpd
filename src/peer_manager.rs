@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
-    PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig, ReconcileFailure,
+    ConfigEvent, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig, ReconcileFailure,
     ReconcileFailureKind, ReconcileResult,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
@@ -14,13 +14,23 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{PeerHandle, SessionNotification, TransportConfig};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
+
+use crate::config::Config;
+use crate::policy_admin::{
+    apply_config_event, global_policy_chains_from_config, named_policies_from_config,
+    named_policy_from_config, neighbor_policy_chains_from_config, policy_references,
+};
 
 const DEFAULT_HOLD_TIME: u16 = 90;
 const DEFAULT_CONNECT_RETRY_SECS: u32 = 30;
 const BGP_PORT: u16 = 179;
 const BMP_STATS_INTERVAL_SECS: u64 = 60;
+
+pub(crate) enum InternalCommand {
+    ReplaceConfigSnapshot(Box<Config>),
+}
 
 struct ManagedPeer {
     handle: PeerHandle,
@@ -43,6 +53,7 @@ struct ManagedPeer {
 pub struct PeerManager {
     peers: HashMap<IpAddr, ManagedPeer>,
     rx: mpsc::Receiver<PeerManagerCommand>,
+    internal_rx: mpsc::UnboundedReceiver<InternalCommand>,
     local_asn: u32,
     router_id: Ipv4Addr,
     /// Local cluster ID for route reflection (RFC 4456). `None` when not an RR.
@@ -56,9 +67,11 @@ pub struct PeerManager {
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
     session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
+    current_config: Config,
 }
 
 impl PeerManager {
+    #[cfg(test)]
     #[expect(clippy::too_many_arguments)]
     pub fn new(
         rx: mpsc::Receiver<PeerManagerCommand>,
@@ -70,10 +83,59 @@ impl PeerManager {
         rib_tx: mpsc::Sender<RibUpdate>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
+        let (_internal_tx, internal_rx) = mpsc::unbounded_channel();
+        Self::new_with_config(
+            rx,
+            internal_rx,
+            local_asn,
+            router_id,
+            cluster_id,
+            local_gr_restart_until,
+            metrics,
+            rib_tx,
+            bmp_tx,
+            Config {
+                global: crate::config::Global {
+                    asn: local_asn,
+                    router_id: router_id.to_string(),
+                    listen_port: BGP_PORT,
+                    cluster_id: cluster_id.map(|id| id.to_string()),
+                    runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
+                    telemetry: crate::config::TelemetryConfig {
+                        prometheus_addr: "127.0.0.1:9179".to_string(),
+                        log_format: "json".to_string(),
+                        grpc_tcp: None,
+                        grpc_uds: None,
+                    },
+                },
+                neighbors: Vec::new(),
+                policy: crate::config::PolicyConfig::default(),
+                rpki: None,
+                bmp: None,
+                mrt: None,
+                file_path: None,
+            },
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub fn new_with_config(
+        rx: mpsc::Receiver<PeerManagerCommand>,
+        internal_rx: mpsc::UnboundedReceiver<InternalCommand>,
+        local_asn: u32,
+        router_id: Ipv4Addr,
+        cluster_id: Option<Ipv4Addr>,
+        local_gr_restart_until: Option<Instant>,
+        metrics: BgpMetrics,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        current_config: Config,
+    ) -> Self {
         let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
         Self {
             peers: HashMap::new(),
             rx,
+            internal_rx,
             local_asn,
             router_id,
             cluster_id,
@@ -83,6 +145,7 @@ impl PeerManager {
             bmp_tx,
             session_notify_tx,
             session_notify_rx,
+            current_config,
         }
     }
 
@@ -125,10 +188,95 @@ impl PeerManager {
         transport
     }
 
-    async fn add_peer(&mut self, config: PeerManagerNeighborConfig) -> Result<(), String> {
+    async fn update_runtime_policies(
+        &mut self,
+        address: IpAddr,
+        import_policy: Option<PolicyChain>,
+        export_policy: Option<PolicyChain>,
+    ) -> Result<(), String> {
+        let Some(managed) = self.peers.get_mut(&address) else {
+            return Ok(());
+        };
+
+        managed.import_policy.clone_from(&import_policy);
+        managed.export_policy.clone_from(&export_policy);
+
+        if let Err(error) = managed.handle.update_import_policy(import_policy).await {
+            warn!(
+                %address,
+                error = %error,
+                "failed to hot-apply import policy to peer session; new policy will apply on next session start"
+            );
+        }
+        if let Err(error) = managed
+            .handle
+            .update_export_policy(export_policy.clone())
+            .await
+        {
+            warn!(
+                %address,
+                error = %error,
+                "failed to hot-apply export policy to peer session; new policy will apply on next session start"
+            );
+        }
+
+        if let Some(state) = managed.handle.query_state().await
+            && state.fsm_state == SessionState::Established
+        {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            self.rib_tx
+                .send(RibUpdate::ReplacePeerExportPolicy {
+                    peer: address,
+                    export_policy,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| "RIB manager unavailable".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "RIB manager dropped reply".to_string())?
+                .map_err(|e| format!("failed to update export policy: {e}"))?;
+        }
+
+        Ok(())
+    }
+    async fn add_peer(
+        &mut self,
+        config: PeerManagerNeighborConfig,
+        sync_config_snapshot: bool,
+    ) -> Result<(), String> {
         if self.peers.contains_key(&config.address) {
             return Err(format!("peer {} already exists", config.address));
         }
+
+        let (import_policy, export_policy, next_config) = if sync_config_snapshot {
+            let mut next_config = self.current_config.clone();
+            apply_config_event(
+                &mut next_config,
+                &ConfigEvent::NeighborAdded(config.clone()),
+            )
+            .map_err(|e| e.to_string())?;
+            let neighbor = next_config
+                .neighbors
+                .iter()
+                .find(|neighbor| neighbor.address == config.address.to_string())
+                .ok_or_else(|| {
+                    format!(
+                        "neighbor {} missing after config snapshot update",
+                        config.address
+                    )
+                })?;
+            let (import_policy, export_policy) = next_config
+                .effective_policy_chains_for_neighbor(neighbor)
+                .map_err(|e| e.to_string())?;
+            (import_policy, export_policy, Some(next_config))
+        } else {
+            (
+                config.import_policy.clone(),
+                config.export_policy.clone(),
+                None,
+            )
+        };
 
         let transport = self.build_transport_config(&config);
         let address = config.address;
@@ -141,8 +289,8 @@ impl PeerManager {
             transport.clone(),
             self.metrics.clone(),
             self.rib_tx.clone(),
-            config.import_policy.clone(),
-            config.export_policy.clone(),
+            import_policy.clone(),
+            export_policy.clone(),
             Some(self.session_notify_tx.clone()),
             self.bmp_tx.clone(),
         );
@@ -163,16 +311,24 @@ impl PeerManager {
                 hold_time,
                 max_prefixes,
                 transport_config: transport,
-                import_policy: config.import_policy,
-                export_policy: config.export_policy,
+                import_policy,
+                export_policy,
                 pending_inbound: None,
             },
         );
 
+        if let Some(next_config) = next_config {
+            self.current_config = next_config;
+        }
+
         Ok(())
     }
 
-    async fn delete_peer(&mut self, address: IpAddr) -> Result<(), String> {
+    async fn delete_peer(
+        &mut self,
+        address: IpAddr,
+        sync_config_snapshot: bool,
+    ) -> Result<(), String> {
         let managed = self
             .peers
             .remove(&address)
@@ -182,6 +338,14 @@ impl PeerManager {
             Ok(Ok(())) => info!(%address, "peer deleted"),
             Ok(Err(e)) => warn!(%address, error = %e, "peer shutdown error during delete"),
             Err(e) => error!(%address, error = %e, "peer task join error during delete"),
+        }
+
+        if sync_config_snapshot {
+            apply_config_event(
+                &mut self.current_config,
+                &ConfigEvent::NeighborDeleted(address),
+            )
+            .map_err(|e| e.to_string())?;
         }
 
         Ok(())
@@ -312,6 +476,48 @@ impl PeerManager {
         }
 
         info!(%address, families = ?target_families, "soft reset in requested");
+        Ok(())
+    }
+
+    async fn apply_policy_change(
+        &mut self,
+        event: ConfigEvent,
+        affected_peers: Option<Vec<IpAddr>>,
+    ) -> Result<(), String> {
+        if let ConfigEvent::DeletePolicy { name } = &event {
+            let refs = policy_references(&self.current_config, name);
+            if !refs.is_empty() {
+                return Err(format!(
+                    "policy {name} is still referenced by {}",
+                    refs.join(", ")
+                ));
+            }
+        }
+
+        let mut next_config = self.current_config.clone();
+        apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
+
+        let peers: Vec<IpAddr> =
+            affected_peers.unwrap_or_else(|| self.peers.keys().copied().collect());
+        for address in peers {
+            if !self.peers.contains_key(&address) {
+                continue;
+            }
+            let Some(neighbor) = next_config
+                .neighbors
+                .iter()
+                .find(|neighbor| neighbor.address == address.to_string())
+            else {
+                continue;
+            };
+            let (import_policy, export_policy) = next_config
+                .effective_policy_chains_for_neighbor(neighbor)
+                .map_err(|e| e.to_string())?;
+            self.update_runtime_policies(address, import_policy, export_policy)
+                .await?;
+        }
+
+        self.current_config = next_config;
         Ok(())
     }
 
@@ -483,7 +689,7 @@ impl PeerManager {
 
         // Remove peers
         for addr in &removed {
-            if let Err(e) = self.delete_peer(*addr).await {
+            if let Err(e) = self.delete_peer(*addr, false).await {
                 warn!(%addr, error = %e, "reconcile: failed to remove peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Remove,
@@ -495,7 +701,7 @@ impl PeerManager {
         // Changed peers: delete then re-add
         for cfg in &changed {
             let addr = cfg.address;
-            if let Err(e) = self.delete_peer(addr).await {
+            if let Err(e) = self.delete_peer(addr, false).await {
                 warn!(%addr, error = %e, "reconcile: failed to remove changed peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeRemove,
@@ -503,7 +709,7 @@ impl PeerManager {
                     error: e,
                 });
             }
-            if let Err(e) = self.add_peer(cfg.clone()).await {
+            if let Err(e) = self.add_peer(cfg.clone(), false).await {
                 warn!(%addr, error = %e, "reconcile: failed to re-add changed peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::ChangeAdd,
@@ -515,7 +721,7 @@ impl PeerManager {
         // Add new peers
         for cfg in added {
             let addr = cfg.address;
-            if let Err(e) = self.add_peer(cfg).await {
+            if let Err(e) = self.add_peer(cfg, false).await {
                 warn!(%addr, error = %e, "reconcile: failed to add new peer");
                 result.failures.push(ReconcileFailure {
                     kind: ReconcileFailureKind::Add,
@@ -587,6 +793,10 @@ impl PeerManager {
     }
 
     /// Run the `PeerManager` event loop until shutdown or channel close.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "peer manager run loop centralizes command, notification, and reload orchestration"
+    )]
     pub async fn run(mut self) {
         let mut bmp_stats_interval = self.bmp_tx.as_ref().map(|_| {
             let mut interval =
@@ -608,12 +818,12 @@ impl PeerManager {
                         return;
                     };
                     match cmd {
-                        PeerManagerCommand::AddPeer { config, reply } => {
-                            let result = self.add_peer(config).await;
+                        PeerManagerCommand::AddPeer { config, sync_config_snapshot, reply } => {
+                            let result = self.add_peer(config, sync_config_snapshot).await;
                             let _ = reply.send(result);
                         }
-                        PeerManagerCommand::DeletePeer { address, reply } => {
-                            let result = self.delete_peer(address).await;
+                        PeerManagerCommand::DeletePeer { address, sync_config_snapshot, reply } => {
+                            let result = self.delete_peer(address, sync_config_snapshot).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::ListPeers { reply } => {
@@ -643,6 +853,88 @@ impl PeerManager {
                             let result = self.reconcile_peers(added, removed, changed).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ListPolicies { reply } => {
+                            let _ = reply.send(named_policies_from_config(&self.current_config));
+                        }
+                        PeerManagerCommand::GetPolicy { name, reply } => {
+                            let _ = reply.send(named_policy_from_config(&self.current_config, &name));
+                        }
+                        PeerManagerCommand::SetPolicy { name, definition, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::SetPolicy { name, definition },
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::DeletePolicy { name, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::DeletePolicy { name },
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::GetGlobalPolicyChains { reply } => {
+                            let _ = reply.send(global_policy_chains_from_config(&self.current_config));
+                        }
+                        PeerManagerCommand::SetGlobalImportChain { policy_names, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::SetGlobalImportChain { policy_names },
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::SetGlobalExportChain { policy_names, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::SetGlobalExportChain { policy_names },
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ClearGlobalImportChain { reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::ClearGlobalImportChain,
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ClearGlobalExportChain { reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::ClearGlobalExportChain,
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
+                            let _ = reply.send(neighbor_policy_chains_from_config(&self.current_config, address));
+                        }
+                        PeerManagerCommand::SetNeighborImportChain { address, policy_names, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::SetNeighborImportChain { address, policy_names },
+                                Some(vec![address]),
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::SetNeighborExportChain { address, policy_names, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::SetNeighborExportChain { address, policy_names },
+                                Some(vec![address]),
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ClearNeighborImportChain { address, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::ClearNeighborImportChain { address },
+                                Some(vec![address]),
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ClearNeighborExportChain { address, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::ClearNeighborExportChain { address },
+                                Some(vec![address]),
+                            ).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::Shutdown => {
                             info!("peer manager shutting down {} peers", self.peers.len());
                             for (addr, managed) in self.peers.drain() {
@@ -655,6 +947,11 @@ impl PeerManager {
                             }
                             return;
                         }
+                    }
+                }
+                internal = self.internal_rx.recv() => {
+                    if let Some(InternalCommand::ReplaceConfigSnapshot(config)) = internal {
+                        self.current_config = *config;
                     }
                 }
                 notification = self.session_notify_rx.recv() => {
@@ -729,6 +1026,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -770,6 +1068,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -779,6 +1078,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -811,6 +1111,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -820,6 +1121,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::DeletePeer {
             address: addr,
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -858,6 +1160,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::DeletePeer {
             address: addr,
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -890,6 +1193,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -963,6 +1267,7 @@ mod tests {
             let (reply_tx, reply_rx) = oneshot::channel();
             tx.send(PeerManagerCommand::AddPeer {
                 config: make_config(addr, 65000 + u32::from(i)),
+                sync_config_snapshot: false,
                 reply: reply_tx,
             })
             .await
@@ -1064,6 +1369,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -1110,6 +1416,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await
@@ -1169,6 +1476,7 @@ mod tests {
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
+            sync_config_snapshot: false,
             reply: reply_tx,
         })
         .await

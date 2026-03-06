@@ -147,6 +147,33 @@ impl Config {
         }
     }
 
+    /// Resolve the effective import/export policy chains for one neighbor.
+    ///
+    /// Per-neighbor named chain overrides per-neighbor inline policy, which
+    /// overrides the corresponding global named chain or global inline policy.
+    pub fn effective_policy_chains_for_neighbor(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<(Option<PolicyChain>, Option<PolicyChain>), ConfigError> {
+        let global_import = self.import_chain()?;
+        let global_export = self.export_chain()?;
+
+        let import = if neighbor.import_policy_chain.is_empty() {
+            parse_policy(&neighbor.import_policy)?.map(|p| PolicyChain::new(vec![p]))
+        } else {
+            resolve_chain(&neighbor.import_policy_chain, &self.policy.definitions)?
+        }
+        .or_else(|| global_import.clone());
+        let export = if neighbor.export_policy_chain.is_empty() {
+            parse_policy(&neighbor.export_policy)?.map(|p| PolicyChain::new(vec![p]))
+        } else {
+            resolve_chain(&neighbor.export_policy_chain, &self.policy.definitions)?
+        }
+        .or_else(|| global_export.clone());
+
+        Ok((import, export))
+    }
+
     /// Returns `(TransportConfig, label, import_chain, export_chain)` per neighbor.
     ///
     /// Per-neighbor policy overrides global; if neighbor has no policy entries,
@@ -168,9 +195,6 @@ impl Config {
             .router_id
             .parse()
             .expect("validated in Config::load");
-
-        let global_import = self.import_chain()?;
-        let global_export = self.export_chain()?;
 
         let mut configs = Vec::with_capacity(self.neighbors.len());
         for neighbor in &self.neighbors {
@@ -231,19 +255,7 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| neighbor.address.clone());
 
-            // Per-neighbor policy: chain > inline > global fallback
-            let import = if neighbor.import_policy_chain.is_empty() {
-                parse_policy(&neighbor.import_policy)?.map(|p| PolicyChain::new(vec![p]))
-            } else {
-                resolve_chain(&neighbor.import_policy_chain, &self.policy.definitions)?
-            }
-            .or_else(|| global_import.clone());
-            let export = if neighbor.export_policy_chain.is_empty() {
-                parse_policy(&neighbor.export_policy)?.map(|p| PolicyChain::new(vec![p]))
-            } else {
-                resolve_chain(&neighbor.export_policy_chain, &self.policy.definitions)?
-            }
-            .or_else(|| global_export.clone());
+            let (import, export) = self.effective_policy_chains_for_neighbor(neighbor)?;
 
             configs.push((transport, label, import, export));
         }

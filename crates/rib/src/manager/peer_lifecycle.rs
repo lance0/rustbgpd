@@ -107,7 +107,8 @@ impl RibManager {
         self.metrics.set_rib_prefixes(&peer_label, "all", 0);
         self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
         self.outbound_peers.insert(peer, outbound_tx);
-        self.peer_export_policies.insert(peer, export_policy);
+        self.peer_export_policies
+            .insert(peer, export_policy.or_else(|| self.export_policy.clone()));
         self.peer_sendable_families.insert(peer, sendable_families);
         self.peer_is_ebgp.insert(peer, is_ebgp);
         self.peer_is_rr_client.insert(peer, route_reflector_client);

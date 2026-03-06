@@ -55,6 +55,8 @@ pub enum PeerManagerCommand {
     AddPeer {
         /// Neighbor configuration.
         config: PeerManagerNeighborConfig,
+        /// Whether to update the live config snapshot.
+        sync_config_snapshot: bool,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -62,6 +64,8 @@ pub enum PeerManagerCommand {
     DeletePeer {
         /// Peer IP address to remove.
         address: IpAddr,
+        /// Whether to update the live config snapshot.
+        sync_config_snapshot: bool,
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -120,8 +124,175 @@ pub enum PeerManagerCommand {
         /// Reply channel with reconciliation results.
         reply: oneshot::Sender<ReconcileResult>,
     },
+    /// List all named policy definitions.
+    ListPolicies {
+        /// Reply channel returning all named policies.
+        reply: oneshot::Sender<Vec<NamedPolicySnapshot>>,
+    },
+    /// Query a single named policy definition.
+    GetPolicy {
+        /// Policy definition name.
+        name: String,
+        /// Reply channel returning the definition if found.
+        reply: oneshot::Sender<Option<NamedPolicyDefinition>>,
+    },
+    /// Create or replace a named policy definition.
+    SetPolicy {
+        /// Policy definition name.
+        name: String,
+        /// Full replacement definition.
+        definition: NamedPolicyDefinition,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a named policy definition.
+    DeletePolicy {
+        /// Policy definition name.
+        name: String,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query global named import/export chains.
+    GetGlobalPolicyChains {
+        /// Reply channel returning configured chain names.
+        reply: oneshot::Sender<PolicyChainAssignment>,
+    },
+    /// Replace the global import policy chain.
+    SetGlobalImportChain {
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Replace the global export policy chain.
+    SetGlobalExportChain {
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Clear the global import policy chain.
+    ClearGlobalImportChain {
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Clear the global export policy chain.
+    ClearGlobalExportChain {
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Query per-neighbor named import/export chains.
+    GetNeighborPolicyChains {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Reply channel returning configured chain names if the neighbor exists.
+        reply: oneshot::Sender<Option<PolicyChainAssignment>>,
+    },
+    /// Replace the per-neighbor import policy chain.
+    SetNeighborImportChain {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Replace the per-neighbor export policy chain.
+    SetNeighborExportChain {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Clear the per-neighbor import policy chain.
+    ClearNeighborImportChain {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Clear the per-neighbor export policy chain.
+    ClearNeighborExportChain {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Shut down all peers and exit the peer manager task.
     Shutdown,
+}
+
+/// `AS_PATH` prepend configuration for policy modifications.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyAsPathPrependConfig {
+    /// ASN to prepend.
+    pub asn: u32,
+    /// Number of times to prepend.
+    pub count: u8,
+}
+
+/// One policy statement in config-shaped form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyStatementDefinition {
+    /// `"permit"` or `"deny"`.
+    pub action: String,
+    /// Optional prefix match in CIDR form.
+    pub prefix: Option<String>,
+    /// Optional minimum prefix length.
+    pub ge: Option<u8>,
+    /// Optional maximum prefix length.
+    pub le: Option<u8>,
+    /// Community match clauses.
+    pub match_community: Vec<String>,
+    /// Optional Cisco/Quagga style `AS_PATH` regex.
+    pub match_as_path: Option<String>,
+    /// Optional minimum `AS_PATH` length.
+    pub match_as_path_length_ge: Option<u32>,
+    /// Optional maximum `AS_PATH` length.
+    pub match_as_path_length_le: Option<u32>,
+    /// Optional RPKI validation state match.
+    pub match_rpki_validation: Option<String>,
+    /// Optional `LOCAL_PREF` rewrite.
+    pub set_local_pref: Option<u32>,
+    /// Optional `MED` rewrite.
+    pub set_med: Option<u32>,
+    /// Optional next-hop rewrite (`"self"` or IP string).
+    pub set_next_hop: Option<String>,
+    /// Communities to add.
+    pub set_community_add: Vec<String>,
+    /// Communities to remove.
+    pub set_community_remove: Vec<String>,
+    /// Optional `AS_PATH` prepend rewrite.
+    pub set_as_path_prepend: Option<PolicyAsPathPrependConfig>,
+}
+
+/// Full replacement definition for one named policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedPolicyDefinition {
+    /// `"permit"` or `"deny"` when no statement matches.
+    pub default_action: String,
+    /// Ordered policy statements.
+    pub statements: Vec<PolicyStatementDefinition>,
+}
+
+/// Named policy definition with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedPolicySnapshot {
+    /// Policy definition name.
+    pub name: String,
+    /// Full definition payload.
+    pub definition: NamedPolicyDefinition,
+}
+
+/// Ordered import/export chain assignment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PolicyChainAssignment {
+    /// Global or per-neighbor import chain names.
+    pub import_policy_names: Vec<String>,
+    /// Global or per-neighbor export chain names.
+    pub export_policy_names: Vec<String>,
 }
 
 /// Configuration for adding a peer dynamically.
@@ -180,6 +351,56 @@ pub enum ConfigEvent {
     NeighborAdded(PeerManagerNeighborConfig),
     /// A neighbor was successfully deleted at runtime.
     NeighborDeleted(IpAddr),
+    /// Create or replace a named policy definition.
+    SetPolicy {
+        /// Policy definition name.
+        name: String,
+        /// Full replacement definition.
+        definition: NamedPolicyDefinition,
+    },
+    /// Delete a named policy definition.
+    DeletePolicy {
+        /// Policy definition name.
+        name: String,
+    },
+    /// Replace the global import policy chain.
+    SetGlobalImportChain {
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+    },
+    /// Replace the global export policy chain.
+    SetGlobalExportChain {
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+    },
+    /// Clear the global import policy chain.
+    ClearGlobalImportChain,
+    /// Clear the global export policy chain.
+    ClearGlobalExportChain,
+    /// Replace the per-neighbor import policy chain.
+    SetNeighborImportChain {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+    },
+    /// Replace the per-neighbor export policy chain.
+    SetNeighborExportChain {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Ordered policy names.
+        policy_names: Vec<String>,
+    },
+    /// Clear the per-neighbor import policy chain.
+    ClearNeighborImportChain {
+        /// Neighbor address.
+        address: IpAddr,
+    },
+    /// Clear the per-neighbor export policy chain.
+    ClearNeighborExportChain {
+        /// Neighbor address.
+        address: IpAddr,
+    },
 }
 
 /// Snapshot of a peer's state for queries.
