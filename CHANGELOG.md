@@ -9,6 +9,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+---
+
+## [0.4.1] — 2026-03-06
+
 ### Added
 
 - **Secure-by-default gRPC listeners.** The daemon now defaults to a local Unix
