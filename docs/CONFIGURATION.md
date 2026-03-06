@@ -81,6 +81,13 @@ container/network exposure.
 If either listener subtable is present, at least one gRPC listener must remain
 enabled after applying `enabled = false`.
 
+**Token file lifecycle:** When `token_file` is configured, the file must exist
+and contain a non-empty token at daemon startup. The token is read once during
+config validation and kept in memory for the daemon's lifetime. Token rotation
+requires a daemon restart. In orchestrated environments where secrets are
+mounted after config files, ensure the token file is available before starting
+the daemon.
+
 ```toml
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
@@ -733,8 +740,12 @@ listen_port = 179
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
 
-[global.telemetry.grpc_tcp]
-address = "0.0.0.0:50051"
+# gRPC defaults to a UDS at <runtime_state_dir>/grpc.sock when no listener
+# is configured. Uncomment below to add a TCP listener (UDS stays active
+# unless explicitly disabled with [global.telemetry.grpc_uds] enabled = false).
+# [global.telemetry.grpc_tcp]
+# address = "127.0.0.1:50051"
+# token_file = "/etc/rustbgpd/grpc.token"
 
 # Global import policy: deny default route and RFC 1918, permit up to /24
 [[policy.import]]

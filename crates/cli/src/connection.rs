@@ -1,3 +1,9 @@
+//! gRPC connection handling for `rustbgpctl`.
+//!
+//! Supports both Unix domain socket (`unix:///path`) and TCP (`host:port` or
+//! `http://host:port`) endpoints, with optional bearer-token authentication
+//! loaded from a file.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
