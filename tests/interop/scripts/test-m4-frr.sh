@@ -259,7 +259,7 @@ start_rustbgpd() {
     log "Starting rustbgpd daemon..."
     docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
     sleep 3
-    if docker exec "$RUSTBGPD" cat /proc/*/comm 2>/dev/null | grep -q rustbgpd; then
+    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
         log "rustbgpd is running"
     else
         echo "ERROR: rustbgpd failed to start" >&2

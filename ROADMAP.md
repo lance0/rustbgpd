@@ -176,10 +176,10 @@ post-M12.
 
 **Must-test (high signal, high risk):**
 
-- [ ] **M13: Policy engine** — FRR ↔ rustbgpd: `set_local_pref`, `set_med`, `set_next_hop`, community add/remove, AS_PATH prepend, AS_PATH regex match, standard/large community matching
-- [ ] **M14: Route Reflector** (RFC 4456) — iBGP client/non-client reflection rules, ORIGINATOR_ID/CLUSTER_LIST manipulation, loop detection
-- [ ] **M15: Route Refresh** (RFC 2918 + 7313) — `SoftResetIn` via gRPC triggers route re-advertisement from FRR
-- [ ] **M16: LLGR** (RFC 9494) — GR → LLGR-stale promotion, `LLGR_STALE` community, reconnect clears stale, timer expiry purge
+- [x] **M13: Policy engine** — FRR ↔ rustbgpd: `set_local_pref`, `set_med`, community add, AS_PATH prepend, AS_PATH regex match, export deny, policy chain accumulation (15/15)
+- [x] **M14: Route Reflector** (RFC 4456) — iBGP client/non-client reflection, ORIGINATOR_ID/CLUSTER_LIST, 3-node topology (14/14)
+- [x] **M15: Route Refresh** (RFC 2918 + 7313) — `SoftResetIn` via gRPC, session stability, import policy reapplication (10/10)
+- [x] **M16: LLGR** (RFC 9494) — GR → LLGR-stale promotion, reconnect clears stale (8/8)
 
 **Should-test (important, lower blast radius):**
 

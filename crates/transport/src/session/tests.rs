@@ -745,6 +745,128 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
     assert_eq!(all_announced[0].prefix, Prefix::V4(permitted_prefix));
 }
 
+/// Import policy chains accumulate modifications across matching permit
+/// policies before the route reaches the RIB.
+#[expect(clippy::too_many_lines)]
+#[tokio::test]
+async fn import_policy_chain_accumulates_community_and_local_pref() {
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+
+    let chain = PolicyChain::new(vec![
+        Policy {
+            entries: vec![PolicyStatement {
+                prefix: Some(Prefix::V4(Ipv4Prefix::new(
+                    Ipv4Addr::UNSPECIFIED,
+                    0,
+                ))),
+                ge: Some(25),
+                le: Some(32),
+                action: PolicyAction::Deny,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                modifications: RouteModifications::default(),
+            }],
+            default_action: PolicyAction::Permit,
+        },
+        Policy {
+            entries: vec![PolicyStatement {
+                prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8))),
+                ge: None,
+                le: Some(16),
+                action: PolicyAction::Permit,
+                match_community: vec![],
+                match_as_path: None,
+                match_rpki_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                modifications: RouteModifications {
+                    communities_add: vec![0xFDE9_0064],
+                    ..Default::default()
+                },
+            }],
+            default_action: PolicyAction::Permit,
+        },
+        Policy {
+            entries: vec![PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Permit,
+                match_community: vec![],
+                match_as_path: Some(rustbgpd_policy::AsPathRegex::new("_65002_").unwrap()),
+                match_rpki_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                modifications: RouteModifications {
+                    set_local_pref: Some(200),
+                    ..Default::default()
+                },
+            }],
+            default_action: PolicyAction::Permit,
+        },
+    ]);
+
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(chain),
+        None,
+        None,
+        None,
+    );
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 10, 0, 0), 16);
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[Ipv4NlriEntry { path_id: 0, prefix }],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+
+    session.process_update(update).await;
+
+    let RibUpdate::RoutesReceived { announced, .. } = rib_rx.try_recv().unwrap() else {
+        panic!("expected RoutesReceived");
+    };
+    assert_eq!(announced.len(), 1);
+    let route = &announced[0];
+    assert_eq!(route.prefix, Prefix::V4(prefix));
+    assert_eq!(route.local_pref(), 200);
+    assert_eq!(route.communities(), &[0xFDE9_0064]);
+}
+
 /// End-to-end ERR + import policy interaction:
 /// a stale route that is "replaced" by an inbound UPDATE denied by import
 /// policy is not reinstalled, so the stale entry is swept at `EoRR`.

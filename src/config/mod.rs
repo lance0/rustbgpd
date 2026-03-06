@@ -218,6 +218,7 @@ impl Config {
             transport.gr_stale_routes_time = neighbor.gr_stale_routes_time.unwrap_or(360);
             transport.llgr_stale_time = neighbor.llgr_stale_time.unwrap_or(0);
             transport.route_server_client = neighbor.route_server_client;
+            transport.route_reflector_client = neighbor.route_reflector_client;
             transport.remove_private_as = match neighbor.remove_private_as.as_deref() {
                 Some("remove") => RemovePrivateAs::Remove,
                 Some("all") => RemovePrivateAs::All,

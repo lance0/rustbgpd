@@ -18,6 +18,10 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m10-frr-ipv6.clab.yml` | Tested (M10) | Dual-stack MP-BGP | IPv4 session, IPv6 via MP_REACH_NLRI | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m11-gr-frr.clab.yml` | Tested (M11) | Graceful Restart (RFC 4724) | Short timers (30s restart, 30s stale) | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m12-ec-frr.clab.yml` | Tested (M12) | Extended Communities (RFC 4360) | RT:65002:100 via route-map | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m13-policy-frr.clab.yml` | Tested (M13) | Policy Engine (chains, actions) | 3-node: import chain + export deny/MED/prepend | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m14-rr-frr.clab.yml` | Tested (M14) | Route Reflector (RFC 4456) | 3-node iBGP: RR + 2 clients | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m15-rr-frr.clab.yml` | Tested (M15) | Route Refresh (RFC 2918) | SoftResetIn via gRPC | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m16-llgr-frr.clab.yml` | Tested (M16) | LLGR (RFC 9494) | GR→LLGR transition, stale clearing | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -875,6 +879,275 @@ Automated test: `bash tests/interop/scripts/test-m12-ec-frr.sh` — **14 passed,
 | RT:65002:100 in best routes | PASS | EC preserved through best-path selection |
 | DeletePath removes injected route | PASS | 10.99.0.0/24 removed |
 | FRR routes survive deletion | PASS | 192.168.1.0/24 still present |
+
+---
+
+## M13 Test Procedures (Policy Engine)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m13-policy-frr.clab.yml`
+
+### Network Layout
+
+```
+M13 Policy (3-node):
+
+  FRR-A (AS 65002)          rustbgpd (AS 65001)          FRR-B (AS 65003)
+  eth1: 10.0.0.2/24  ────  eth1: 10.0.0.1/24
+                            eth2: 10.0.1.1/24  ────  eth1: 10.0.1.2/24
+```
+
+FRR-A advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16.
+FRR-B receives only (no route advertisements).
+
+rustbgpd import chain (named policies, GoBGP-style accumulation):
+1. `deny-long-prefixes` — deny /25 and longer
+2. `tag-internal` — add community 65001:100 to 10.0.0.0/8 le 16
+3. `set-lp-upstream` — set LOCAL_PREF 200 for AS_PATH matching `_65002_`
+
+rustbgpd export policy (inline first-match):
+1. Deny 10.10.0.0/16
+2. Permit all with MED 50 + AS_PATH prepend 65001 ×2
+
+### Test 1: Import LOCAL_PREF
+
+Verify 192.168.1.0/24 has LOCAL_PREF 200 (AS_PATH regex match).
+
+### Test 2: Import Community Add
+
+Verify 10.10.0.0/16 has standard community 65001:100 (prefix match via chain accumulation).
+
+### Test 3: Export Deny
+
+Verify 10.10.0.0/16 is NOT present on FRR-B. Other prefixes must be present.
+
+### Test 4: Export MED
+
+Verify 192.168.1.0/24 has MED 50 on FRR-B.
+
+### Test 5: Export AS_PATH Prepend
+
+Verify AS_PATH on FRR-B has 3× 65001 (1 natural eBGP + 2 prepended) followed by 65002.
+
+### Test 6: Import LOCAL_PREF All Routes
+
+Verify all 3 routes from AS 65002 have LOCAL_PREF 200.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m13-policy-frr.sh
+```
+
+---
+
+## M13 Policy FRR Test Results (2026-03-06, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m13-policy-frr.sh` — **15 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment (FRR-A) | PASS | Established on first attempt |
+| Session establishment (FRR-B) | PASS | Established on first attempt |
+| Routes received (3/3) | PASS | All 3 prefixes in RIB |
+| FRR-B routes (2/2) | PASS | 10.10.0.0/16 correctly denied |
+| Import LOCAL_PREF 200 | PASS | 192.168.1.0/24 has LOCAL_PREF 200 |
+| Import community 65001:100 | PASS | 10.10.0.0/16 has community via chain accumulation |
+| LOCAL_PREF all routes | PASS | All 3 routes from AS 65002 have LOCAL_PREF 200 |
+| Export deny 10.10.0.0/16 | PASS | Not present on FRR-B |
+| Export permit 192.168.x.0 | PASS | Both /24 prefixes on FRR-B |
+| Export MED 50 | PASS | 192.168.1.0/24 MED=50 on FRR-B |
+| Export AS_PATH prepend | PASS | 3× 65001 (1 natural + 2 prepended) |
+| AS_PATH origin AS | PASS | 65002 present in AS_PATH |
+
+---
+
+## M14 Test Procedures (Route Reflector — RFC 4456)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m14-rr-frr.clab.yml`
+
+### Network Layout
+
+```
+M14 Route Reflector (3-node iBGP):
+
+  FRR-Client1 (AS 65001)          rustbgpd RR (AS 65001)          FRR-Client2 (AS 65001)
+  eth1: 10.0.0.2/24  ────────  eth1: 10.0.0.1/24
+  router-id: 10.0.0.2            cluster_id: 10.0.0.1
+                                  eth2: 10.0.1.1/24  ────────  eth1: 10.0.1.2/24
+                                                                 router-id: 10.0.1.2
+```
+
+rustbgpd is the route reflector with `cluster_id = "10.0.0.1"` and both neighbors
+marked `route_reflector_client = true`.
+
+Client1 advertises: 192.168.10.0/24, 192.168.11.0/24.
+Client2 advertises: 192.168.20.0/24.
+
+### Test 1: Client1 Routes Reflected to Client2
+
+Verify FRR-Client2 receives 192.168.10.0/24 and 192.168.11.0/24.
+
+### Test 2: Client2 Routes Reflected to Client1
+
+Verify FRR-Client1 receives 192.168.20.0/24.
+
+### Test 3: ORIGINATOR_ID Set Correctly
+
+Verify reflected routes carry ORIGINATOR_ID matching the originator's router-id.
+
+### Test 4: CLUSTER_LIST Contains RR Cluster ID
+
+Verify reflected routes carry CLUSTER_LIST containing 10.0.0.1.
+
+### Test 5: RR RIB Has All Routes
+
+Verify rustbgpd's Loc-RIB has all 3 routes.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m14-rr-frr.sh
+```
+
+---
+
+## M14 RR FRR Test Results (2026-03-06, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m14-rr-frr.sh` — **14 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment (Client1) | PASS | Established on first attempt |
+| Session establishment (Client2) | PASS | Established on first attempt |
+| Routes received (3/3) | PASS | All 3 prefixes in RIB |
+| Client2 has Client1 routes | PASS | 192.168.10.0/24, 192.168.11.0/24 reflected |
+| Client1 has Client2 routes | PASS | 192.168.20.0/24 reflected |
+| RR RIB complete | PASS | All 3 routes in Loc-RIB |
+| Client1→Client2 reflection | PASS | Both /24 prefixes reflected |
+| Client2→Client1 reflection | PASS | 192.168.20.0/24 reflected |
+| ORIGINATOR_ID (Client1) | PASS | 10.0.0.2 (Client1's router-id) |
+| ORIGINATOR_ID (Client2) | PASS | 10.0.1.2 (Client2's router-id) |
+| CLUSTER_LIST | PASS | 10.0.0.1 present in route attributes |
+
+---
+
+## M15 Test Procedures (Route Refresh — RFC 2918 + RFC 7313)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m15-rr-frr.clab.yml`
+
+### Network Layout
+
+```
+M15 Route Refresh:
+  rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR (10.0.0.2/24, AS 65002)
+```
+
+rustbgpd has an import policy setting LOCAL_PREF 150. FRR advertises 192.168.1.0/24
+and 192.168.2.0/24. A third route (10.99.0.0/24) is added dynamically by FRR during
+the test.
+
+### Test 1: Initial Routes with Import Policy
+
+Verify routes arrive with LOCAL_PREF 150 from the import policy.
+
+### Test 2: SoftResetIn Triggers Re-advertisement
+
+Trigger `SoftResetIn` via gRPC. Verify the session remains Established (no flap)
+and all routes are still present.
+
+### Test 3: Import Policy After SoftResetIn
+
+Verify LOCAL_PREF 150 is still applied after the soft reset.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m15-rr-frr.sh
+```
+
+---
+
+## M15 Route Refresh FRR Test Results (2026-03-06, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m15-rr-frr.sh` — **10 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment | PASS | Established on first attempt |
+| Routes received (2/2) | PASS | Both prefixes in RIB |
+| 192.168.1.0/24 present | PASS | In received routes |
+| 192.168.2.0/24 present | PASS | In received routes |
+| LOCAL_PREF = 150 on import | PASS | Import policy applied |
+| New route received | PASS | 10.99.0.0/24 via normal UPDATE |
+| SoftResetIn RPC completed | PASS | gRPC call succeeded |
+| Session stable after SoftResetIn | PASS | Established, no flap |
+| All routes after SoftResetIn | PASS | 3 routes still present |
+| LOCAL_PREF after SoftResetIn | PASS | 150 still applied |
+
+---
+
+## M16 Test Procedures (LLGR — RFC 9494)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m16-llgr-frr.clab.yml`
+
+### Network Layout
+
+```
+M16 LLGR:
+  rustbgpd (10.0.0.1/24, AS 65001) ── eth1 ─── eth1 ── FRR (10.0.0.2/24, AS 65002)
+```
+
+rustbgpd has `graceful_restart = true`, `gr_restart_time = 15`, `llgr_stale_time = 60`.
+FRR has `bgp graceful-restart` and `bgp long-lived-graceful-restart stale-time 60`.
+
+### Test 1: Initial Routes Received
+
+Verify routes arrive normally.
+
+### Test 2: GR → LLGR Transition
+
+Kill FRR's bgpd. Wait for GR timer (15s) to expire. Routes should still be present
+(LLGR preserves them beyond the GR timer).
+
+### Test 3: Reconnect Clears LLGR-Stale
+
+watchfrr restarts bgpd. After session re-establishment and EoR, LLGR-stale state
+should be cleared and routes remain valid.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m16-llgr-frr.sh
+```
+
+---
+
+## M16 LLGR FRR Test Results (2026-03-06, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m16-llgr-frr.sh` — **8 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment | PASS | Established on first attempt |
+| Routes received (2/2) | PASS | Both prefixes in RIB |
+| 192.168.1.0/24 present | PASS | In received routes |
+| 192.168.2.0/24 present | PASS | In received routes |
+| Routes preserved after GR timer | PASS | 2 routes still present (LLGR active) |
+| Session re-established | PASS | watchfrr restarted bgpd |
+| Routes present after reconnect | PASS | 2 routes still present |
+| LLGR-stale cleared | PASS | No stale routes after EoR |
 
 ---
 

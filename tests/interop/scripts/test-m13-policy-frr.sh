@@ -147,8 +147,8 @@ test_import_community_add() {
     best=$(grpc_list_best)
 
     # 10.10.0.0/16 matches prefix 10.0.0.0/8 le 16, should get community 65001:100
-    # Standard community 65001:100 = (65001 << 16) | 100 = 4259840100
-    local comm_value="4259840100"
+    # Standard community encoding is (ASN << 16) | value.
+    local comm_value=$(((65001 << 16) | 100))
 
     if echo "$best" | python3 -c "
 import json, sys
@@ -223,8 +223,22 @@ test_export_as_path_prepend() {
 
     # AS_PATH should be: 65001 65001 65001 65002
     # (1 natural eBGP prepend + 2 from policy = 3× 65001, then 65002)
+    # FRR JSON nests aspath as {"string": "...", "segments": [...]}
     local as_path
-    as_path=$(echo "$route_json" | grep -o '"aspath":"[^"]*"' | head -1 | cut -d'"' -f4 || true)
+    as_path=$(echo "$route_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for prefix_data in data.get('paths', data.get('routes', {}).values() if isinstance(data.get('routes'), dict) else []):
+    paths = prefix_data if isinstance(prefix_data, list) else [prefix_data]
+    for p in paths:
+        asp = p.get('aspath', {})
+        if isinstance(asp, dict):
+            print(asp.get('string', ''))
+        elif isinstance(asp, str):
+            print(asp)
+        break
+    break
+" 2>/dev/null || true)
 
     local count_65001
     count_65001=$(echo "$as_path" | grep -o "65001" | wc -l || true)

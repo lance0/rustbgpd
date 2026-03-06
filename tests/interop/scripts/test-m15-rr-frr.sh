@@ -52,7 +52,7 @@ grpc_list_best() {
 
 grpc_soft_reset_in() {
     grpcurl -plaintext -import-path . -proto "$PROTO" \
-        -d "{\"neighbor_address\": \"$1\"}" \
+        -d "{\"address\": \"$1\"}" \
         "$GRPC_ADDR" rustbgpd.v1.NeighborService/SoftResetIn 2>/dev/null
 }
 

@@ -10,36 +10,37 @@ log_format = "json"
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
 
-# --- Import policy ---
-# 1. Routes matching AS_PATH containing 65002 get LOCAL_PREF 200
-# 2. Routes for 10.0.0.0/8 le 16 get standard community 65001:100 added
-# 3. Deny any prefix longer than /24
+# --- Named policy definitions ---
 
-[[policy.import]]
-match_as_path = "_65002_"
-action = "permit"
-set_local_pref = 200
-
-[[policy.import]]
-prefix = "10.0.0.0/8"
-le = 16
-action = "permit"
-set_community_add = ["65001:100"]
-
-[[policy.import]]
+# Deny prefixes longer than /24
+[policy.definitions.deny-long-prefixes]
+default_action = "permit"
+[[policy.definitions.deny-long-prefixes.statements]]
 prefix = "0.0.0.0/0"
 ge = 25
 le = 32
 action = "deny"
 
-[[policy.import]]
-prefix = "0.0.0.0/0"
-le = 24
+# Tag 10.0.0.0/8 le 16 with community 65001:100
+[policy.definitions.tag-internal]
+[[policy.definitions.tag-internal.statements]]
+prefix = "10.0.0.0/8"
+le = 16
 action = "permit"
+set_community_add = ["65001:100"]
 
-# --- Export policy ---
-# 1. Deny 10.10.0.0/16 (don't re-export to FRR-B)
-# 2. Permit everything else with MED 50 and AS_PATH prepend
+# Set LOCAL_PREF 200 for routes from AS 65002
+[policy.definitions.set-lp-upstream]
+[[policy.definitions.set-lp-upstream.statements]]
+match_as_path = "_65002_"
+action = "permit"
+set_local_pref = 200
+
+# --- Import chain: all three fire in sequence (chain accumulates) ---
+[policy]
+import_chain = ["deny-long-prefixes", "tag-internal", "set-lp-upstream"]
+
+# --- Export policy (inline, first-match is fine here) ---
 
 [[policy.export]]
 prefix = "10.10.0.0/16"

@@ -20,6 +20,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `--token-file` / `RUSTBGPD_TOKEN_FILE`. Security docs and the Envoy mTLS
   example were updated to reflect the new operator posture.
 
+- **Interop tests M13–M16.** Four new containerlab test suites: policy engine
+  with chain accumulation (M13, 15 assertions), route reflector with
+  ORIGINATOR_ID/CLUSTER_LIST validation (M14, 14 assertions), route refresh via
+  SoftResetIn (M15, 10 assertions), and LLGR GR→stale transition (M16, 8
+  assertions). All 10 interop suites now pass (130 total assertions).
+
+### Fixed
+
+- **Route reflector config wiring.** `route_reflector_client` was not copied
+  from the neighbor config to `TransportConfig`, so route reflection was
+  non-functional when configured via TOML (gRPC dynamic peers were unaffected).
+
+- **M10 IPv6 interop test.** FRR static IPv6 routes via `fd00::2` were
+  unreachable in the container, preventing IPv6 prefix advertisement. Changed
+  to `Null0` blackhole routes.
+
 ---
 
 ## [0.4.0] — 2026-03-06

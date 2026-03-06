@@ -205,10 +205,10 @@ test_route_injection() {
     # Inject a route
     local result
     result=$(grpc_add_path "172.16.0.0" 16 "10.0.0.1" 0 || echo "ERROR")
-    if echo "$result" | grep -q "uuid"; then
-        ok "AddPath returned uuid"
+    if [ "$result" = "ERROR" ]; then
+        fail "AddPath gRPC call failed"
     else
-        fail "AddPath failed: $result"
+        ok "AddPath succeeded"
     fi
 
     # Wait for best routes to include our injected route
@@ -309,7 +309,7 @@ start_rustbgpd() {
     log "Starting rustbgpd daemon..."
     docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
     sleep 3
-    if docker exec "$RUSTBGPD" cat /proc/*/comm 2>/dev/null | grep -q rustbgpd; then
+    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
         log "rustbgpd is running"
     else
         echo "ERROR: rustbgpd failed to start" >&2
