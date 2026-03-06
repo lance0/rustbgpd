@@ -251,6 +251,6 @@ the current alpha:
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | ~~MEDIUM~~ | ~~RTR expire_interval not enforced~~ | Done — stale VRPs now expire and are withdrawn if no fresh EndOfData arrives before the effective expiry timer |
 | MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |
-| LOW | `timer.rs:118` production `panic!()` | Only non-test panic in codebase; replace with `unreachable!()` and descriptive message |
-| LOW | CLI `.unwrap()` on JSON serialization (7 sites) | Infallible but should use `.expect()` for clarity |
+| ~~LOW~~ | ~~`timer.rs:118` production `panic!()`~~ | Done — removed |
+| ~~LOW~~ | ~~CLI `.unwrap()` on JSON serialization~~ | Done — only test code uses `.unwrap()` now |
 | ~~LOW~~ | ~~RTR client polling-only~~ | Done — RTR sessions stay connected and honor Serial Notify |
