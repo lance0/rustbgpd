@@ -579,17 +579,19 @@ the same schema.
 Each entry must have at least one match condition. Multiple conditions on the
 same entry are ANDed.
 
-| Field             | Type     | Required | Description                                           |
-|-------------------|----------|----------|-------------------------------------------------------|
-| `prefix`          | string   | no*      | Network prefix in CIDR notation (IPv4 or IPv6)        |
-| `ge`              | u8       | no       | Minimum prefix length to match (inclusive)             |
-| `le`              | u8       | no       | Maximum prefix length to match (inclusive)             |
-| `match_community` | [string] | no*      | Community match criteria (see below). OR within list.  |
-| `match_as_path`   | string   | no*      | AS_PATH regex (Cisco/Quagga style, `_` = boundary)    |
-| `match_rpki_validation` | string | no* | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` |
-| `action`          | string   | yes      | `"permit"` or `"deny"`                                |
+| Field                    | Type     | Required | Description                                           |
+|--------------------------|----------|----------|-------------------------------------------------------|
+| `prefix`                 | string   | no*      | Network prefix in CIDR notation (IPv4 or IPv6)        |
+| `ge`                     | u8       | no       | Minimum prefix length to match (inclusive)            |
+| `le`                     | u8       | no       | Maximum prefix length to match (inclusive)            |
+| `match_community`        | [string] | no*      | Community match criteria (see below). OR within list. |
+| `match_as_path`          | string   | no*      | AS_PATH regex (Cisco/Quagga style, `_` = boundary)    |
+| `match_as_path_length_ge`| u32      | no*      | Minimum AS_PATH length to match (inclusive)           |
+| `match_as_path_length_le`| u32      | no*      | Maximum AS_PATH length to match (inclusive)           |
+| `match_rpki_validation`  | string   | no*      | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` |
+| `action`                 | string   | yes      | `"permit"` or `"deny"`                                |
 
-*At least one of `prefix`, `match_community`, `match_as_path`, or `match_rpki_validation` is required.
+*At least one of `prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, or `match_rpki_validation` is required.
 
 ### Route modifications (set actions)
 
@@ -633,6 +635,19 @@ the start of the string, a space between ASNs, the end of the string, or
 
 Entries are evaluated in order. The first matching entry wins. If no entry
 matches, the default action is **permit**.
+
+### AS_PATH length matching
+
+Use `match_as_path_length_ge` / `match_as_path_length_le` to match routes by
+inclusive AS_PATH length. Either field may be used independently or together
+as a range. `AS_SET` counts as 1 per RFC 4271.
+
+```toml
+[[policy.import]]
+match_as_path_length_ge = 3
+match_as_path_length_le = 8
+action = "deny"
+```
 
 ### Prefix length matching
 
@@ -934,7 +949,8 @@ starting:
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
-| Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, or `match_rpki_validation`) | `must have at least one match condition` |
+| Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, or `match_rpki_validation`) | `must have at least one match condition` |
+| `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |
 | `match_as_path` must be a valid regex | `invalid regex` |
