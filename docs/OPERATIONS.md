@@ -120,8 +120,9 @@ daemon does not crash on MRT failures.
 
 When a peer sends more prefixes than `max_prefixes`, the daemon sends a
 NOTIFICATION (Cease / Maximum Number of Prefixes Reached) and tears down the
-session. The peer is not automatically re-enabled — use `rustbgpctl enable`
-or the gRPC `EnableNeighbor` RPC to restart it.
+session. The peer is not automatically re-enabled — use
+`rustbgpctl neighbor <addr> enable` or the gRPC `EnableNeighbor` RPC to
+restart it.
 
 ---
 
