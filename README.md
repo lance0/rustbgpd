@@ -10,11 +10,17 @@ routing, and policy operations. The config file bootstraps initial state; after
 startup, gRPC owns the truth. No restarts to add peers, change policy, or
 inject routes.
 
-**Status:** feature-complete for the initial route-server and control-plane
-target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR, FlowSpec, BMP,
-MRT, and full gRPC/CLI management are implemented. Kernel FIB integration and
-broader router features remain future work. Validated with workspace tests,
-fuzz targets, and automated interop suites against FRR 10.3.1 and BIRD 2.0.12.
+**Status: public alpha.** Feature-complete for the initial route-server and
+control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
+FlowSpec, BMP, MRT, and full gRPC/CLI management are implemented. Kernel FIB
+integration and broader router features remain future work. Validated with
+950+ workspace tests, fuzz targets, and 10 automated interop suites against
+FRR 10.3.1 and BIRD 2.0.12.
+
+> **Alpha expectations:** The config format and gRPC API are not yet frozen.
+> Breaking changes are possible between minor versions. The daemon runs on
+> Linux (the primary target); other platforms are not tested. See
+> [Project Status](#project-status) for details.
 
 ## Why rustbgpd
 
@@ -38,77 +44,79 @@ fuzz targets, and automated interop suites against FRR 10.3.1 and BIRD 2.0.12.
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
 
-## Quick start
+## Quick start (5 minutes)
 
-### Prerequisites
-
-- **Rust 1.88+** (edition 2024)
-- **protobuf-compiler** (`apt-get install protobuf-compiler` on Debian/Ubuntu)
-- **grpcurl** (optional, for direct gRPC verification)
-
-### Build and test
+### 1. Build
 
 ```bash
+# Prerequisites: Rust 1.88+, protobuf-compiler
+sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 cargo build --release
-cargo test --workspace
 ```
 
-### Configure
-
-Create a TOML config file. A minimal two-peer setup:
-
-```toml
-[global]
-asn = 65001
-router_id = "10.0.0.1"
-listen_port = 179
-
-[global.telemetry]
-prometheus_addr = "0.0.0.0:9179"
-log_format = "json"
-
-[[neighbors]]
-address = "10.0.0.2"
-remote_asn = 65002
-description = "upstream-1"
-hold_time = 90
-families = ["ipv4_unicast", "ipv6_unicast"]
-
-[[neighbors]]
-address = "10.0.1.2"
-remote_asn = 65003
-description = "upstream-2"
-hold_time = 90
-```
-
-Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md). Working examples: `tests/interop/configs/`.
-
-By default, gRPC listens on a local Unix domain socket at
-`/var/lib/rustbgpd/grpc.sock`. Preferred operator posture is that UDS for
-same-host administration and an mTLS proxy for remote access. If you need TCP,
-configure `[global.telemetry.grpc_tcp]` explicitly. See
-[docs/SECURITY.md](docs/SECURITY.md) and
-[`examples/envoy-mtls/`](examples/envoy-mtls/).
-
-### Run
+### 2. Configure
 
 ```bash
+# Copy and edit the minimal example
+cp examples/minimal/config.toml config.toml
+$EDITOR config.toml   # set your ASN, router ID, and peer address
+```
+
+For a route-server deployment, start from `examples/route-server/config.toml`
+instead. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+### 3. Run
+
+```bash
+# Ensure the state directory exists (for gRPC socket, GR markers)
+sudo mkdir -p /var/lib/rustbgpd
+
 ./target/release/rustbgpd config.toml
 ```
 
-### Verify
+Or with Docker:
 
 ```bash
-# Using rustbgpctl (recommended)
+docker build -t rustbgpd .
+docker run -d --name rustbgpd \
+  -v $(pwd)/config.toml:/etc/rustbgpd/config.toml:ro \
+  -v rustbgpd-state:/var/lib/rustbgpd \
+  -p 179:179 -p 9179:9179 \
+  rustbgpd
+```
+
+Or with systemd (see `examples/systemd/rustbgpd.service`).
+
+### 4. Verify
+
+```bash
+# CLI (talks to gRPC UDS by default)
 rustbgpctl health
 rustbgpctl neighbor
 rustbgpctl rib
 
-# Or using grpcurl directly against the default UDS
+# Or grpcurl against the default UDS
 grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
   -import-path . -proto proto/rustbgpd.proto \
   rustbgpd.v1.NeighborService/ListNeighbors
 ```
+
+### 5. Operate
+
+```bash
+# Add a peer at runtime (persisted to config file automatically)
+rustbgpctl neighbor add --address 10.0.0.5 --remote-asn 65005
+
+# Reload config after editing the file
+kill -HUP $(pidof rustbgpd)
+
+# Graceful shutdown (writes GR marker, notifies peers)
+rustbgpctl shutdown
+```
+
+gRPC defaults to a local Unix domain socket. For remote access, prefer an
+mTLS proxy — see [`examples/envoy-mtls/`](examples/envoy-mtls/) and
+[docs/SECURITY.md](docs/SECURITY.md).
 
 ## gRPC API
 
@@ -143,38 +151,20 @@ rustbgpd is intentionally built around:
 Designed around an API-first operating model similar to GoBGP, with a smaller
 and more explicit internal architecture.
 
-## Docker
+## Deployment examples
 
-```bash
-docker build -t rustbgpd:dev .
-docker run -d --name rustbgpd \
-  -v $(pwd)/config.toml:/etc/rustbgpd/config.toml \
-  -v rustbgpd-state:/var/lib/rustbgpd \
-  -p 179:179 -p 50051:50051 -p 9179:9179 \
-  rustbgpd:dev /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml
-```
-
-Add an explicit TCP listener if gRPC needs to be reachable from outside the
-container:
-
-```toml
-[global.telemetry.grpc_tcp]
-address = "0.0.0.0:50051"
-```
-
-That exposes the privileged gRPC API on all interfaces. For production, prefer
-leaving the backend on the default UDS and fronting remote access with an mTLS
-proxy. See [docs/SECURITY.md](docs/SECURITY.md).
+| Example | Description |
+|---------|-------------|
+| [`examples/minimal/`](examples/minimal/) | Smallest working config — single eBGP peer |
+| [`examples/route-server/`](examples/route-server/) | IXP route server with RPKI, Add-Path, policy chains |
+| [`examples/envoy-mtls/`](examples/envoy-mtls/) | Remote gRPC access via Envoy mTLS proxy |
+| [`examples/systemd/`](examples/systemd/) | systemd unit file with security hardening |
 
 ## Security posture
 
-- Same-host administration: prefer a Unix domain socket when your deployment
-  exposes one; that is the default listener.
-- Remote administration: prefer an mTLS proxy or sidecar in front of rustbgpd,
-  with the backend still bound to loopback or a local socket.
-- Network controls still matter: put gRPC on a management VLAN/interface and
-  firewall it to known management hosts.
-- Example Envoy deployment: [`examples/envoy-mtls/`](examples/envoy-mtls/)
+- **Default listener:** Unix domain socket at `/var/lib/rustbgpd/grpc.sock` — local-only, no TCP exposure
+- **Remote access:** prefer an mTLS proxy (Envoy example provided) over direct TCP
+- **Network controls:** put gRPC on a management VLAN/interface and firewall it to known hosts
 
 ## Testing and correctness
 
@@ -202,16 +192,34 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 - No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported
 - Performance benchmarks not yet published (P3 roadmap)
 
+## Project status
+
+**Alpha — suitable for lab, IX route-server pilots, and programmable
+control-plane deployments where you are comfortable with an evolving API.**
+
+| Dimension | Current state |
+|-----------|---------------|
+| **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
+| **Maturity** | Public alpha (v0.4.x) |
+| **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
+| **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
+| **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
+| **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
+| **Not yet supported** | Kernel FIB integration, EVPN, VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
+| **Tests** | 950+ workspace tests, fuzz targets, 10 automated interop suites (130 assertions) |
+
 ## Documentation
 
 | Document | Content |
 |----------|---------|
-| [ARCHITECTURE.md](ARCHITECTURE.md) | How the daemon is structured: crate graph, runtime model, ownership, data flow |
-| [docs/DESIGN.md](docs/DESIGN.md) | Why it was built this way: tradeoffs, protocol scope, rationale |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Crate graph, runtime model, ownership, data flow |
+| [docs/DESIGN.md](docs/DESIGN.md) | Tradeoffs, protocol scope, rationale |
 | [docs/API.md](docs/API.md) | gRPC API reference with examples for every RPC |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config reference and examples |
-| [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and notes |
-| [docs/adr/](docs/adr/) | Architecture decision records |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | Running in production: reload, upgrade, failure modes, debugging |
+| [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
+| [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
+| [docs/adr/](docs/adr/) | Architecture decision records (46 ADRs) |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, code style, PR process |

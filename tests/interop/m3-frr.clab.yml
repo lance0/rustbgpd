@@ -17,6 +17,7 @@ topology:
     rustbgpd:
       kind: linux
       image: rustbgpd:dev
+      cmd: sleep infinity
       binds:
         - ./configs/rustbgpd-m3-frr.toml:/etc/rustbgpd/config.toml:ro
         - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro

@@ -1,0 +1,32 @@
+[Unit]
+Description=rustbgpd BGP daemon
+Documentation=https://github.com/lance0/rustbgpd
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rustbgpd /etc/rustbgpd/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+
+# State directory for GR restart markers, gRPC UDS, config persistence
+StateDirectory=rustbgpd
+RuntimeDirectory=rustbgpd
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/rustbgpd
+PrivateTmp=yes
+
+# BGP needs CAP_NET_BIND_SERVICE for port 179
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+
+# Restart on failure, but not on clean shutdown (exit 0) or SIGTERM
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

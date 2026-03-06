@@ -1,0 +1,20 @@
+# Minimal rustbgpd configuration
+#
+# This is the smallest working config for a single eBGP peer.
+# gRPC defaults to a Unix domain socket at /var/lib/rustbgpd/grpc.sock.
+
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "upstream"
+hold_time = 90
+families = ["ipv4_unicast"]

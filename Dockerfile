@@ -15,6 +15,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/rustbgpd /usr/local/bin/rustbgpd
+COPY --from=builder /build/target/release/rustbgpctl /usr/local/bin/rustbgpctl
 COPY tests/interop/scripts/start-rustbgpd.sh /usr/local/bin/start-rustbgpd.sh
 
-CMD ["sleep", "infinity"]
+RUN mkdir -p /var/lib/rustbgpd
+
+EXPOSE 179 9179
+
+# Default: run daemon with config at /etc/rustbgpd/config.toml
+# Interop tests override with: docker run ... sleep infinity
+CMD ["rustbgpd", "/etc/rustbgpd/config.toml"]
