@@ -1,12 +1,17 @@
 # Minimal rustbgpd configuration
 #
 # This is the smallest working config for a single eBGP peer.
-# gRPC defaults to a Unix domain socket at /var/lib/rustbgpd/grpc.sock.
+# gRPC defaults to a Unix domain socket at <runtime_state_dir>/grpc.sock.
+#
+# For local development, runtime_state_dir points to /tmp/rustbgpd so no
+# root access is needed. For production, use /var/lib/rustbgpd with the
+# systemd unit (examples/systemd/) which creates and owns that directory.
 
 [global]
 asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
+runtime_state_dir = "/tmp/rustbgpd"
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"

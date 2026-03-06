@@ -62,15 +62,13 @@ cp examples/minimal/config.toml config.toml
 $EDITOR config.toml   # set your ASN, router ID, and peer address
 ```
 
-For a route-server deployment, start from `examples/route-server/config.toml`
+The minimal example sets `runtime_state_dir` to a user-writable path. For a
+route-server deployment, start from `examples/route-server/config.toml`
 instead. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ### 3. Run
 
 ```bash
-# Ensure the state directory exists (for gRPC socket, GR markers)
-sudo mkdir -p /var/lib/rustbgpd
-
 ./target/release/rustbgpd config.toml
 ```
 
@@ -90,22 +88,27 @@ Or with systemd (see `examples/systemd/rustbgpd.service`).
 ### 4. Verify
 
 ```bash
-# CLI (talks to gRPC UDS by default)
+# The minimal example uses /tmp/rustbgpd as state dir, so point the CLI there:
+export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
+
 rustbgpctl health
 rustbgpctl neighbor
 rustbgpctl rib
 
-# Or grpcurl against the default UDS
-grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
+# Or grpcurl directly
+grpcurl -plaintext -unix /tmp/rustbgpd/grpc.sock \
   -import-path . -proto proto/rustbgpd.proto \
   rustbgpd.v1.NeighborService/ListNeighbors
 ```
+
+In production with the systemd unit, the default UDS path
+(`/var/lib/rustbgpd/grpc.sock`) matches the CLI default — no env var needed.
 
 ### 5. Operate
 
 ```bash
 # Add a peer at runtime (persisted to config file automatically)
-rustbgpctl neighbor add --address 10.0.0.5 --remote-asn 65005
+rustbgpctl neighbor 10.0.0.5 add --asn 65005
 
 # Reload config after editing the file
 kill -HUP $(pidof rustbgpd)

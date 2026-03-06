@@ -91,8 +91,8 @@ cleanly later. See [ADR-0022](adr/0022-grpc-server-supervision.md).
 
 ### RPKI cache unreachable
 
-Each RTR client reconnects independently with exponential backoff (default
-`retry_interval` = 600s). If no fresh `EndOfData` arrives before
+Each RTR client reconnects independently after a fixed `retry_interval`
+(default 600s). If no fresh `EndOfData` arrives before
 `expire_interval` (default 7200s), cached VRPs for that server are discarded.
 Routes are re-validated against the remaining VRP table.
 
@@ -223,7 +223,7 @@ rustbgpd uses structured JSON logging. Key messages to watch for:
 ### Add a peer at runtime
 
 ```bash
-rustbgpctl neighbor add --address 10.0.0.5 --remote-asn 65005 --description "new-peer"
+rustbgpctl neighbor 10.0.0.5 add --asn 65005 --description "new-peer"
 ```
 
 The peer is persisted to the config file automatically.
@@ -231,7 +231,7 @@ The peer is persisted to the config file automatically.
 ### Remove a peer
 
 ```bash
-rustbgpctl neighbor delete --address 10.0.0.5
+rustbgpctl neighbor 10.0.0.5 delete
 ```
 
 Sends NOTIFICATION, tears down the session, removes from config.
@@ -239,11 +239,18 @@ Sends NOTIFICATION, tears down the session, removes from config.
 ### Soft reset (re-evaluate import policy)
 
 ```bash
-rustbgpctl soft-reset-in --address 10.0.0.2
+rustbgpctl neighbor 10.0.0.2 softreset
 ```
 
 Re-applies import policy to all routes from this peer without tearing down
 the session.
+
+### Enable / disable a peer
+
+```bash
+rustbgpctl neighbor 10.0.0.2 enable
+rustbgpctl neighbor 10.0.0.2 disable --reason "maintenance"
+```
 
 ### Trigger an MRT dump
 
@@ -257,10 +264,16 @@ rustbgpctl mrt-dump
 rustbgpctl health
 ```
 
-### View received routes
+### View received routes from a peer
 
 ```bash
-rustbgpctl rib received
+rustbgpctl rib received 10.0.0.2
+```
+
+### View best routes (Loc-RIB)
+
+```bash
+rustbgpctl rib
 ```
 
 ### Graceful shutdown

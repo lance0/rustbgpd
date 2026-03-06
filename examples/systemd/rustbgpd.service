@@ -17,7 +17,7 @@ RuntimeDirectory=rustbgpd
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/rustbgpd
+ReadWritePaths=/var/lib/rustbgpd /etc/rustbgpd
 PrivateTmp=yes
 
 # BGP needs CAP_NET_BIND_SERVICE for port 179
