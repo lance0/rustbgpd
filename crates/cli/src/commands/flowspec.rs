@@ -1,5 +1,4 @@
-use tonic::transport::Channel;
-
+use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
 use crate::proto::injection_service_client::InjectionServiceClient;
@@ -62,8 +61,9 @@ fn format_action(a: &FlowSpecAction) -> String {
     }
 }
 
-pub async fn list(channel: Channel, family: Option<i32>, json: bool) -> Result<(), CliError> {
-    let mut client = RibServiceClient::new(channel);
+pub async fn list(connection: Connection, family: Option<i32>, json: bool) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
         .list_flow_spec_routes(ListFlowSpecRequest {
             afi_safi: family.unwrap_or(0),
@@ -199,7 +199,7 @@ fn parse_action(s: &str) -> Result<FlowSpecAction, String> {
 }
 
 pub async fn add(
-    channel: Channel,
+    connection: Connection,
     family: i32,
     components: &[String],
     actions: &[String],
@@ -216,7 +216,8 @@ pub async fn add(
         .collect::<Result<_, _>>()
         .map_err(CliError::Argument)?;
 
-    let mut client = InjectionServiceClient::new(channel);
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .add_flow_spec(AddFlowSpecRequest {
             afi_safi: family,
@@ -231,7 +232,7 @@ pub async fn add(
 }
 
 pub async fn delete(
-    channel: Channel,
+    connection: Connection,
     family: i32,
     components: &[String],
     json: bool,
@@ -242,7 +243,8 @@ pub async fn delete(
         .collect::<Result<_, _>>()
         .map_err(CliError::Argument)?;
 
-    let mut client = InjectionServiceClient::new(channel);
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .delete_flow_spec(DeleteFlowSpecRequest {
             afi_safi: family,

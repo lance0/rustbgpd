@@ -46,12 +46,48 @@ impl Config {
         )
     }
 
-    pub fn grpc_addr(&self) -> SocketAddr {
-        self.global
-            .telemetry
-            .grpc_addr
-            .parse()
-            .expect("validated in Config::load")
+    /// Resolve the configured gRPC listeners.
+    ///
+    /// If neither TCP nor UDS is configured explicitly, a secure local-only UDS
+    /// listener is enabled at `<runtime_state_dir>/grpc.sock`.
+    pub fn grpc_listeners(&self) -> Vec<GrpcListener> {
+        let telemetry = &self.global.telemetry;
+        let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
+        let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);
+
+        if tcp.is_none() && uds.is_none() {
+            return vec![GrpcListener::Uds {
+                path: self.default_grpc_uds_path(),
+                mode: 0o600,
+                token_file: None,
+            }];
+        }
+
+        let mut listeners = Vec::new();
+        if let Some(cfg) = tcp {
+            let addr = cfg
+                .address
+                .as_ref()
+                .expect("validated in Config::load")
+                .parse()
+                .expect("validated in Config::load");
+            listeners.push(GrpcListener::Tcp {
+                addr,
+                token_file: cfg.token_file.as_ref().map(PathBuf::from),
+            });
+        }
+        if let Some(cfg) = uds {
+            let path = cfg
+                .path
+                .as_ref()
+                .map_or_else(|| self.default_grpc_uds_path(), PathBuf::from);
+            listeners.push(GrpcListener::Uds {
+                path,
+                mode: cfg.mode,
+                token_file: cfg.token_file.as_ref().map(PathBuf::from),
+            });
+        }
+        listeners
     }
 
     /// Directory for daemon-owned runtime state files.
@@ -64,6 +100,11 @@ impl Config {
     #[must_use]
     pub fn gr_restart_marker_path(&self) -> PathBuf {
         self.runtime_state_dir().join("gr-restart.toml")
+    }
+
+    #[must_use]
+    pub fn default_grpc_uds_path(&self) -> PathBuf {
+        self.runtime_state_dir().join("grpc.sock")
     }
 
     /// Resolve the effective cluster ID.
@@ -207,6 +248,19 @@ impl Config {
         }
         Ok(configs)
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GrpcListener {
+    Tcp {
+        addr: SocketAddr,
+        token_file: Option<PathBuf>,
+    },
+    Uds {
+        path: PathBuf,
+        mode: u32,
+        token_file: Option<PathBuf>,
+    },
 }
 
 /// Differences between two neighbor lists, keyed by address.

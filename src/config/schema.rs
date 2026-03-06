@@ -126,12 +126,38 @@ fn default_runtime_state_dir() -> String {
 pub struct TelemetryConfig {
     pub prometheus_addr: String,
     pub log_format: String,
-    #[serde(default = "default_grpc_addr")]
-    pub grpc_addr: String,
+    #[serde(default)]
+    pub grpc_tcp: Option<GrpcTcpListenerConfig>,
+    #[serde(default)]
+    pub grpc_uds: Option<GrpcUdsListenerConfig>,
 }
 
-fn default_grpc_addr() -> String {
-    "127.0.0.1:50051".to_string()
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcTcpListenerConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub address: Option<String>,
+    pub token_file: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcUdsListenerConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+    pub path: Option<String>,
+    #[serde(default = "default_grpc_uds_mode")]
+    pub mode: u32,
+    pub token_file: Option<String>,
+}
+
+fn default_enabled() -> bool {
+    true
+}
+
+fn default_grpc_uds_mode() -> u32 {
+    0o600
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -299,8 +325,8 @@ pub enum ConfigError {
     InvalidNeighborAddress { value: String, reason: String },
     #[error("invalid prometheus_addr {value:?}: {reason}")]
     InvalidPrometheusAddr { value: String, reason: String },
-    #[error("invalid grpc_addr {value:?}: {reason}")]
-    InvalidGrpcAddr { value: String, reason: String },
+    #[error("invalid gRPC config: {reason}")]
+    InvalidGrpcConfig { reason: String },
     #[error("invalid hold_time {value}: must be 0 or >= 3")]
     InvalidHoldTime { value: u16 },
     #[error("invalid policy entry: {reason}")]

@@ -1,5 +1,4 @@
-use tonic::transport::Channel;
-
+use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{self, JsonRoute};
 use crate::proto::injection_service_client::InjectionServiceClient;
@@ -53,8 +52,9 @@ fn print_routes(routes: &[crate::proto::Route], json: bool) {
     }
 }
 
-pub async fn best(channel: Channel, family: Option<i32>, json: bool) -> Result<(), CliError> {
-    let mut client = RibServiceClient::new(channel);
+pub async fn best(connection: Connection, family: Option<i32>, json: bool) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
         .list_best_routes(make_route_request(None, family))
         .await?
@@ -64,12 +64,13 @@ pub async fn best(channel: Channel, family: Option<i32>, json: bool) -> Result<(
 }
 
 pub async fn received(
-    channel: Channel,
+    connection: Connection,
     address: &str,
     family: Option<i32>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client = RibServiceClient::new(channel);
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
         .list_received_routes(make_route_request(Some(address), family))
         .await?
@@ -79,12 +80,13 @@ pub async fn received(
 }
 
 pub async fn advertised(
-    channel: Channel,
+    connection: Connection,
     address: &str,
     family: Option<i32>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client = RibServiceClient::new(channel);
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
         .list_advertised_routes(make_route_request(Some(address), family))
         .await?
@@ -105,13 +107,14 @@ pub struct AddRouteOpts {
 }
 
 pub async fn add_route(
-    channel: Channel,
+    connection: Connection,
     prefix: &str,
     opts: AddRouteOpts,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
-    let mut client = InjectionServiceClient::new(channel);
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .add_path(AddPathRequest {
             prefix: addr,
@@ -132,13 +135,14 @@ pub async fn add_route(
 }
 
 pub async fn delete_route(
-    channel: Channel,
+    connection: Connection,
     prefix: &str,
     path_id: Option<u32>,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
-    let mut client = InjectionServiceClient::new(channel);
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .delete_path(DeletePathRequest {
             prefix: addr,

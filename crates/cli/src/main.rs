@@ -1,4 +1,5 @@
 mod commands;
+mod connection;
 mod error;
 mod output;
 
@@ -6,25 +7,27 @@ pub mod proto {
     tonic::include_proto!("rustbgpd.v1");
 }
 
-use clap::{Parser, Subcommand};
-use std::time::Duration;
-use tonic::transport::{Channel, Endpoint};
-
+use crate::connection::connect;
 use crate::error::CliError;
 use crate::output::parse_family;
+use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "rustbgpctl", about = "CLI for rustbgpd", version)]
 struct Cli {
-    /// gRPC server address
+    /// gRPC server address or unix:///path/to/socket
     #[arg(
         long,
         short = 's',
-        default_value = "127.0.0.1:50051",
+        default_value = "unix:///var/lib/rustbgpd/grpc.sock",
         env = "RUSTBGPD_ADDR",
         global = true
     )]
     addr: String,
+
+    /// Bearer token file for authenticated gRPC endpoints
+    #[arg(long, env = "RUSTBGPD_TOKEN_FILE", global = true)]
+    token_file: Option<String>,
 
     /// Output in JSON format
     #[arg(long, short = 'j', global = true)]
@@ -215,20 +218,6 @@ enum FlowspecAction {
     },
 }
 
-async fn connect(addr: &str) -> Result<Channel, CliError> {
-    let uri = if addr.starts_with("http") {
-        addr.to_string()
-    } else {
-        format!("http://{addr}")
-    };
-    let channel = Endpoint::from_shared(uri)
-        .map_err(|e| CliError::Argument(format!("invalid address: {e}")))?
-        .connect_timeout(Duration::from_secs(5))
-        .connect()
-        .await?;
-    Ok(channel)
-}
-
 fn resolve_family(family: &Option<String>) -> Result<Option<i32>, CliError> {
     match family {
         Some(f) => parse_family(f)
@@ -266,15 +255,15 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
-    let channel = connect(&cli.addr).await?;
+    let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
     match cli.command {
-        Command::Global => commands::global::run(channel, json).await,
+        Command::Global => commands::global::run(connection, json).await,
 
         Command::Neighbor { address, action } => match (address, action) {
-            (None, None) => commands::neighbor::list(channel, json).await,
-            (Some(addr), None) => commands::neighbor::show(channel, &addr, json).await,
+            (None, None) => commands::neighbor::list(connection, json).await,
+            (Some(addr), None) => commands::neighbor::show(connection, &addr, json).await,
             (
                 Some(addr),
                 Some(NeighborAction::Add {
@@ -286,7 +275,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 }),
             ) => {
                 commands::neighbor::add(
-                    channel,
+                    connection,
                     &addr,
                     commands::neighbor::AddNeighborOpts {
                         asn,
@@ -300,16 +289,16 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 .await
             }
             (Some(addr), Some(NeighborAction::Delete)) => {
-                commands::neighbor::delete(channel, &addr, json).await
+                commands::neighbor::delete(connection, &addr, json).await
             }
             (Some(addr), Some(NeighborAction::Enable)) => {
-                commands::neighbor::enable(channel, &addr, json).await
+                commands::neighbor::enable(connection, &addr, json).await
             }
             (Some(addr), Some(NeighborAction::Disable { reason })) => {
-                commands::neighbor::disable(channel, &addr, reason, json).await
+                commands::neighbor::disable(connection, &addr, reason, json).await
             }
             (Some(addr), Some(NeighborAction::Softreset { family })) => {
-                commands::neighbor::softreset(channel, &addr, family, json).await
+                commands::neighbor::softreset(connection, &addr, family, json).await
             }
             (None, Some(_)) => Err(CliError::Argument(
                 "neighbor address required for this action".into(),
@@ -319,20 +308,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Rib { action, family } => {
             let family_val = resolve_family(&family)?;
             match action {
-                None => commands::rib::best(channel, family_val, json).await,
+                None => commands::rib::best(connection, family_val, json).await,
                 Some(RibAction::Received {
                     address,
                     family: fam,
                 }) => {
                     let f = resolve_family(&fam.or(family))?;
-                    commands::rib::received(channel, &address, f, json).await
+                    commands::rib::received(connection, &address, f, json).await
                 }
                 Some(RibAction::Advertised {
                     address,
                     family: fam,
                 }) => {
                     let f = resolve_family(&fam.or(family))?;
-                    commands::rib::advertised(channel, &address, f, json).await
+                    commands::rib::advertised(connection, &address, f, json).await
                 }
                 Some(RibAction::Add {
                     prefix,
@@ -351,7 +340,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         .collect::<Result<_, _>>()
                         .map_err(CliError::Argument)?;
                     commands::rib::add_route(
-                        channel,
+                        connection,
                         &prefix,
                         commands::rib::AddRouteOpts {
                             next_hop: nexthop,
@@ -368,20 +357,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     .await
                 }
                 Some(RibAction::Delete { prefix, path_id }) => {
-                    commands::rib::delete_route(channel, &prefix, path_id, json).await
+                    commands::rib::delete_route(connection, &prefix, path_id, json).await
                 }
             }
         }
 
         Command::Watch { address, family } => {
             let family_val = resolve_family(&family)?;
-            commands::watch::run(channel, address, family_val, json).await
+            commands::watch::run(connection, address, family_val, json).await
         }
 
         Command::Flowspec { action, family } => {
             let family_val = resolve_family(&family)?;
             match action {
-                None => commands::flowspec::list(channel, family_val, json).await,
+                None => commands::flowspec::list(connection, family_val, json).await,
                 Some(FlowspecAction::Add {
                     family: fam,
                     components,
@@ -390,7 +379,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     let f = parse_family(&fam).ok_or_else(|| {
                         CliError::Argument(format!("unknown address family: {fam}"))
                     })?;
-                    commands::flowspec::add(channel, f, &components, &actions, json).await
+                    commands::flowspec::add(connection, f, &components, &actions, json).await
                 }
                 Some(FlowspecAction::Delete {
                     family: fam,
@@ -399,15 +388,15 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     let f = parse_family(&fam).ok_or_else(|| {
                         CliError::Argument(format!("unknown address family: {fam}"))
                     })?;
-                    commands::flowspec::delete(channel, f, &components, json).await
+                    commands::flowspec::delete(connection, f, &components, json).await
                 }
             }
         }
 
-        Command::Health => commands::control::health(channel, json).await,
-        Command::Metrics => commands::control::metrics(channel).await,
-        Command::Shutdown { reason } => commands::control::shutdown(channel, reason, json).await,
-        Command::MrtDump => commands::control::mrt_dump(channel, json).await,
+        Command::Health => commands::control::health(connection, json).await,
+        Command::Metrics => commands::control::metrics(connection).await,
+        Command::Shutdown { reason } => commands::control::shutdown(connection, reason, json).await,
+        Command::MrtDump => commands::control::mrt_dump(connection, json).await,
     }
 }
 
@@ -547,6 +536,30 @@ mod tests {
         let cli =
             Cli::try_parse_from(["rustbgpctl", "--addr", "10.0.0.1:50051", "health"]).unwrap();
         assert_eq!(cli.addr, "10.0.0.1:50051");
+    }
+
+    #[test]
+    fn test_parse_unix_addr_flag() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "--addr",
+            "unix:///run/rustbgpd/grpc.sock",
+            "health",
+        ])
+        .unwrap();
+        assert_eq!(cli.addr, "unix:///run/rustbgpd/grpc.sock");
+    }
+
+    #[test]
+    fn test_parse_token_file_flag() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "--token-file",
+            "/run/rustbgpd/token",
+            "health",
+        ])
+        .unwrap();
+        assert_eq!(cli.token_file.as_deref(), Some("/run/rustbgpd/token"));
     }
 
     #[test]

@@ -1,9 +1,15 @@
 # gRPC API Reference
 
-rustbgpd exposes five gRPC services on a configurable address (default
-`127.0.0.1:50051`). All examples use
-[grpcurl](https://github.com/fullstorydev/grpcurl) with the checked-in
-`proto/rustbgpd.proto`.
+rustbgpd exposes five gRPC services over one or more configured listeners. The
+default listener is a local Unix domain socket at
+`/var/lib/rustbgpd/grpc.sock`. The examples below use
+[grpcurl](https://github.com/fullstorydev/grpcurl) against an explicit local
+TCP listener for readability:
+
+```toml
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+```
 
 The proto definition lives at `proto/rustbgpd.proto`.
 
@@ -304,6 +310,7 @@ Daemon lifecycle, health checks, and metrics.
 | `GetHealth` | Returns health status, uptime, active peers, total routes |
 | `GetMetrics` | Returns Prometheus metrics as text |
 | `Shutdown` | Initiates graceful shutdown |
+| `TriggerMrtDump` | Triggers an on-demand MRT TABLE_DUMP_V2 dump |
 
 ### Health check
 
@@ -325,6 +332,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"reason": "maintenance window"}' \
   localhost:50051 rustbgpd.v1.ControlService/Shutdown
+```
+
+### Trigger MRT dump
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.ControlService/TriggerMrtDump
 ```
 
 ---

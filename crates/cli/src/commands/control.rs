@@ -1,12 +1,12 @@
-use tonic::transport::Channel;
-
+use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{self, JsonHealth};
 use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::{HealthRequest, MetricsRequest, ShutdownRequest, TriggerMrtDumpRequest};
 
-pub async fn health(channel: Channel, json: bool) -> Result<(), CliError> {
-    let mut client = ControlServiceClient::new(channel);
+pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client.get_health(HealthRequest {}).await?.into_inner();
 
     if json {
@@ -32,19 +32,21 @@ pub async fn health(channel: Channel, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-pub async fn metrics(channel: Channel) -> Result<(), CliError> {
-    let mut client = ControlServiceClient::new(channel);
+pub async fn metrics(connection: Connection) -> Result<(), CliError> {
+    let mut client =
+        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client.get_metrics(MetricsRequest {}).await?.into_inner();
     print!("{}", resp.prometheus_text);
     Ok(())
 }
 
 pub async fn shutdown(
-    channel: Channel,
+    connection: Connection,
     reason: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client = ControlServiceClient::new(channel);
+    let mut client =
+        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .shutdown(ShutdownRequest {
             reason: reason.unwrap_or_default(),
@@ -54,8 +56,9 @@ pub async fn shutdown(
     Ok(())
 }
 
-pub async fn mrt_dump(channel: Channel, json: bool) -> Result<(), CliError> {
-    let mut client = ControlServiceClient::new(channel);
+pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
         .trigger_mrt_dump(TriggerMrtDumpRequest {})
         .await?

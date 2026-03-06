@@ -1,8 +1,7 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use prometheus::{Encoder, TextEncoder};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tonic::{Request, Response, Status};
 use tracing::info;
 
@@ -18,27 +17,27 @@ pub type MrtTriggerTx = mpsc::Sender<oneshot::Sender<Result<PathBuf, String>>>;
 ///
 /// `GetHealth` returns uptime, peer count, and route count.
 /// `GetMetrics` returns Prometheus text exposition.
-/// `Shutdown` triggers coordinated daemon shutdown via a oneshot channel.
+/// `Shutdown` triggers coordinated daemon shutdown via a watch channel.
 pub struct ControlService {
     start_time: tokio::time::Instant,
     metrics: BgpMetrics,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
-    shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    shutdown_tx: watch::Sender<bool>,
     mrt_trigger_tx: Option<MrtTriggerTx>,
 }
 
 impl ControlService {
     /// Create a new `ControlService`.
     ///
-    /// `shutdown_tx` is consumed by the first `Shutdown` RPC call to trigger
-    /// coordinated daemon exit.
+    /// `shutdown_tx` is set to `true` by the first `Shutdown` RPC call to
+    /// trigger coordinated daemon exit.
     pub fn new(
         start_time: tokio::time::Instant,
         metrics: BgpMetrics,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
-        shutdown_tx: oneshot::Sender<()>,
+        shutdown_tx: watch::Sender<bool>,
         mrt_trigger_tx: Option<MrtTriggerTx>,
     ) -> Self {
         Self {
@@ -46,7 +45,7 @@ impl ControlService {
             metrics,
             peer_mgr_tx,
             rib_tx,
-            shutdown_tx: Mutex::new(Some(shutdown_tx)),
+            shutdown_tx,
             mrt_trigger_tx,
         }
     }
@@ -121,18 +120,12 @@ impl proto::control_service_server::ControlService for ControlService {
         info!(reason = %reason, "shutdown requested via gRPC");
 
         let peer_mgr_tx = self.peer_mgr_tx.clone();
-        let shutdown_tx = self
-            .shutdown_tx
-            .lock()
-            .expect("shutdown_tx mutex poisoned")
-            .take();
+        let shutdown_tx = self.shutdown_tx.clone();
 
         // Spawn the shutdown sequence so the RPC can return before we stop
         tokio::spawn(async move {
             let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
-            if let Some(tx) = shutdown_tx {
-                let _ = tx.send(());
-            }
+            let _ = shutdown_tx.send(true);
         });
 
         Ok(Response::new(proto::ShutdownResponse {}))
@@ -174,7 +167,7 @@ mod tests {
     fn make_service() -> ControlService {
         let (peer_tx, _peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         ControlService::new(
             tokio::time::Instant::now(),
@@ -202,7 +195,7 @@ mod tests {
     async fn shutdown_takes_sender() {
         let (peer_tx, _peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         let svc = ControlService::new(
             tokio::time::Instant::now(),
@@ -222,8 +215,8 @@ mod tests {
 
         // Give the spawned task a moment to fire
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // shutdown_rx should have been signaled (or sender dropped)
-        assert!(shutdown_rx.await.is_ok());
+        shutdown_rx.changed().await.unwrap();
+        assert!(*shutdown_rx.borrow());
     }
 
     #[tokio::test]
@@ -232,7 +225,7 @@ mod tests {
 
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         let metrics = BgpMetrics::new();
         let svc = ControlService::new(
             tokio::time::Instant::now(),

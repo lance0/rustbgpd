@@ -1,5 +1,4 @@
-use tonic::transport::Channel;
-
+use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{self, JsonRouteEvent};
 use crate::proto::WatchRoutesRequest;
@@ -15,12 +14,13 @@ fn format_event_type(t: i32) -> &'static str {
 }
 
 pub async fn run(
-    channel: Channel,
+    connection: Connection,
     neighbor: Option<String>,
     family: Option<i32>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client = RibServiceClient::new(channel);
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let mut stream = client
         .watch_routes(WatchRoutesRequest {
             neighbor_address: neighbor.unwrap_or_default(),

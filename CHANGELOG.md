@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Secure-by-default gRPC listeners.** The daemon now defaults to a local Unix
+  domain socket at `/var/lib/rustbgpd/grpc.sock` instead of loopback TCP. TCP
+  gRPC listeners are now explicit config via `[global.telemetry.grpc_tcp]`,
+  local UDS can be configured via `[global.telemetry.grpc_uds]`, and both may
+  run concurrently. Optional per-listener bearer-token authentication is
+  available via `token_file`. `rustbgpctl` now supports `unix:///...` endpoints
+  and `--token-file` / `RUSTBGPD_TOKEN_FILE`. Security docs and the Envoy mTLS
+  example were updated to reflect the new operator posture.
+
 ---
 
 ## [0.4.0] — 2026-03-06

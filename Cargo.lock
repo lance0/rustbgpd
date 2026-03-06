@@ -1031,12 +1031,15 @@ name = "rustbgpctl"
 version = "0.4.0"
 dependencies = [
  "clap",
+ "hyper-util",
  "prost",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tonic",
  "tonic-build",
+ "tower",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@ use std::fmt;
 
 pub enum CliError {
     Connect(#[expect(dead_code)] tonic::transport::Error),
+    ConnectTimeout,
     Rpc(String),
     Argument(String),
     Io(std::io::Error),
@@ -11,6 +12,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CliError::Connect(_) => write!(f, "daemon is not running or unreachable"),
+            CliError::ConnectTimeout => write!(f, "daemon is not running or unreachable"),
             CliError::Rpc(msg) => write!(f, "{msg}"),
             CliError::Argument(msg) => write!(f, "{msg}"),
             CliError::Io(e) => write!(f, "{e}"),

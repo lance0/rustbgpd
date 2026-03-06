@@ -45,21 +45,54 @@ example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
 
 Required. Configures observability and management endpoints.
 
-| Field             | Type   | Required | Default             | Description                          |
-|-------------------|--------|----------|---------------------|--------------------------------------|
-| `prometheus_addr` | string | yes      | --                  | `host:port` for Prometheus metrics   |
-| `log_format`      | string | yes      | --                  | Log output format (`"json"`)         |
-| `grpc_addr`       | string | no       | `"127.0.0.1:50051"` | `host:port` for the gRPC API server |
+| Field             | Type   | Required | Default | Description                        |
+|-------------------|--------|----------|---------|------------------------------------|
+| `prometheus_addr` | string | yes      | --      | `host:port` for Prometheus metrics |
+| `log_format`      | string | yes      | --      | Log output format (`"json"`)       |
 
-Both `prometheus_addr` and `grpc_addr` must be valid `ip:port` socket addresses.
-Use `0.0.0.0` as the host to bind on all interfaces (necessary when gRPC or
-metrics must be reachable from outside the host, e.g. in containers).
+`prometheus_addr` must be a valid `ip:port` socket address.
+
+gRPC listeners are configured with optional subtables:
+
+### `[global.telemetry.grpc_uds]`
+
+Preferred local-only gRPC transport. If neither `grpc_uds` nor `grpc_tcp` is
+configured, rustbgpd enables this listener by default at
+`<runtime_state_dir>/grpc.sock`.
+
+| Field        | Type   | Required | Default | Description |
+|--------------|--------|----------|---------|-------------|
+| `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
+| `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path |
+| `mode`       | u32    | no       | `0o600` | Filesystem mode applied to the socket after bind |
+| `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+
+### `[global.telemetry.grpc_tcp]`
+
+Optional TCP gRPC listener. Use this only when you need remote access or
+container/network exposure.
+
+| Field        | Type   | Required | Default | Description |
+|--------------|--------|----------|---------|-------------|
+| `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
+| `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
+| `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+
+If either listener subtable is present, at least one gRPC listener must remain
+enabled after applying `enabled = false`.
 
 ```toml
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-grpc_addr = "0.0.0.0:50051"
+
+[global.telemetry.grpc_uds]
+path = "/var/lib/rustbgpd/grpc.sock"
+mode = 0o660
+
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+# token_file = "/etc/rustbgpd/grpc.token"
 ```
 
 ---
@@ -699,7 +732,9 @@ listen_port = 179
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"
 log_format = "json"
-grpc_addr = "0.0.0.0:50051"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
 
 # Global import policy: deny default route and RFC 1918, permit up to /24
 [[policy.import]]
@@ -942,7 +977,11 @@ starting:
 | `router_id` must be a valid IPv4 address | `invalid router_id` |
 | Each `address` in `[[neighbors]]` must be a valid IP address (IPv4 or IPv6) | `invalid neighbor address` |
 | `prometheus_addr` must be a valid `ip:port` | `invalid prometheus_addr` |
-| `grpc_addr` must be a valid `ip:port` | `invalid grpc_addr` |
+| `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
+| `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |
+| `grpc_uds.mode` must be <= `0o777` | `invalid gRPC config` |
+| `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
+| If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |
 | `families` entries must be `"ipv4_unicast"`, `"ipv6_unicast"`, `"ipv4_flowspec"`, or `"ipv6_flowspec"` | `unsupported address family` |
 | `gr_restart_time` must be <= 4095 | `gr_restart_time exceeds 4095` |
@@ -981,7 +1020,7 @@ starting:
 |-------|---------------|
 | `hold_time` | 90 seconds |
 | `connect_retry_secs` | 30 seconds (not configurable) |
-| `grpc_addr` | `127.0.0.1:50051` |
+| gRPC listener | UDS at `<runtime_state_dir>/grpc.sock` with mode `0o600` |
 | `ttl_security` | `false` |
 | `families` | `["ipv4_unicast"]` for IPv4 peers; `["ipv4_unicast", "ipv6_unicast"]` for IPv6 peers |
 | `graceful_restart` | `true` |

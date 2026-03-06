@@ -1,0 +1,72 @@
+static_resources:
+  listeners:
+    - name: rustbgpd_grpc_mtls
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 50052
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain:
+                      filename: /etc/envoy/certs/server.crt
+                    private_key:
+                      filename: /etc/envoy/certs/server.key
+                validation_context:
+                  trusted_ca:
+                    filename: /etc/envoy/certs/ca.crt
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: rustbgpd_grpc
+                codec_type: AUTO
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: rustbgpd
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/"
+                          route:
+                            cluster: rustbgpd_grpc
+                            timeout: 0s
+                            max_stream_duration:
+                              grpc_timeout_header_max: 0s
+                http2_protocol_options: {}
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: rustbgpd_grpc
+      type: STATIC
+      connect_timeout: 1s
+      lb_policy: ROUND_ROBIN
+      http2_protocol_options: {}
+      load_assignment:
+        cluster_name: rustbgpd_grpc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    pipe:
+                      path: /var/lib/rustbgpd/grpc.sock
+      # Alternate loopback TCP backend:
+      # address:
+      #   socket_address:
+      #     address: 127.0.0.1
+      #     port_value: 50051
+
+admin:
+  address:
+    socket_address:
+      address: 127.0.0.1
+      port_value: 9901

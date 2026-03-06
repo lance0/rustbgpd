@@ -1,5 +1,4 @@
-use tonic::transport::Channel;
-
+use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::{self, JsonNeighbor, JsonNeighborDetail};
 use crate::proto::neighbor_service_client::NeighborServiceClient;
@@ -8,8 +7,9 @@ use crate::proto::{
     GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, SoftResetInRequest,
 };
 
-pub async fn list(channel: Channel, json: bool) -> Result<(), CliError> {
-    let mut client = NeighborServiceClient::new(channel);
+pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
         .list_neighbors(ListNeighborsRequest {})
         .await?
@@ -47,8 +47,9 @@ pub async fn list(channel: Channel, json: bool) -> Result<(), CliError> {
     Ok(())
 }
 
-pub async fn show(channel: Channel, address: &str, json: bool) -> Result<(), CliError> {
-    let mut client = NeighborServiceClient::new(channel);
+pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let n = client
         .get_neighbor_state(GetNeighborStateRequest {
             address: address.to_string(),
@@ -129,12 +130,13 @@ pub struct AddNeighborOpts {
 }
 
 pub async fn add(
-    channel: Channel,
+    connection: Connection,
     address: &str,
     opts: AddNeighborOpts,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client = NeighborServiceClient::new(channel);
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .add_neighbor(AddNeighborRequest {
             config: Some(NeighborConfig {
@@ -157,8 +159,9 @@ pub async fn add(
     Ok(())
 }
 
-pub async fn delete(channel: Channel, address: &str, json: bool) -> Result<(), CliError> {
-    let mut client = NeighborServiceClient::new(channel);
+pub async fn delete(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .delete_neighbor(DeleteNeighborRequest {
             address: address.to_string(),
@@ -173,8 +176,9 @@ pub async fn delete(channel: Channel, address: &str, json: bool) -> Result<(), C
     Ok(())
 }
 
-pub async fn enable(channel: Channel, address: &str, json: bool) -> Result<(), CliError> {
-    let mut client = NeighborServiceClient::new(channel);
+pub async fn enable(connection: Connection, address: &str, json: bool) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .enable_neighbor(EnableNeighborRequest {
             address: address.to_string(),
@@ -190,12 +194,13 @@ pub async fn enable(channel: Channel, address: &str, json: bool) -> Result<(), C
 }
 
 pub async fn disable(
-    channel: Channel,
+    connection: Connection,
     address: &str,
     reason: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client = NeighborServiceClient::new(channel);
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .disable_neighbor(DisableNeighborRequest {
             address: address.to_string(),
@@ -212,12 +217,13 @@ pub async fn disable(
 }
 
 pub async fn softreset(
-    channel: Channel,
+    connection: Connection,
     address: &str,
     family: Option<String>,
     json: bool,
 ) -> Result<(), CliError> {
-    let mut client = NeighborServiceClient::new(channel);
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     client
         .soft_reset_in(SoftResetInRequest {
             address: address.to_string(),

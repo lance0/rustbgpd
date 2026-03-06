@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::path::Path;
 
 use super::parse::{parse_families, parse_named_policy, parse_policy, resolve_chain};
 use super::{Config, ConfigError, DEFAULT_HOLD_TIME};
@@ -40,15 +41,48 @@ impl Config {
                 reason: e.to_string(),
             })?;
 
-        // Validate grpc_addr is a valid SocketAddr
-        self.global
-            .telemetry
-            .grpc_addr
-            .parse::<SocketAddr>()
-            .map_err(|e| ConfigError::InvalidGrpcAddr {
-                value: self.global.telemetry.grpc_addr.clone(),
-                reason: e.to_string(),
-            })?;
+        let telemetry = &self.global.telemetry;
+        let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);
+        let uds = telemetry.grpc_uds.as_ref().filter(|cfg| cfg.enabled);
+
+        if let Some(cfg) = tcp {
+            let addr = cfg
+                .address
+                .as_ref()
+                .ok_or_else(|| ConfigError::InvalidGrpcConfig {
+                    reason: "grpc_tcp.address is required when grpc_tcp is enabled".to_string(),
+                })?;
+            addr.parse::<SocketAddr>()
+                .map_err(|e| ConfigError::InvalidGrpcConfig {
+                    reason: format!("invalid grpc_tcp.address {addr:?}: {e}"),
+                })?;
+            validate_grpc_token_file(cfg.token_file.as_deref(), "grpc_tcp.token_file")?;
+        }
+
+        if let Some(cfg) = uds {
+            if let Some(path) = cfg.path.as_deref().map(Path::new)
+                && !path.is_absolute()
+            {
+                return Err(ConfigError::InvalidGrpcConfig {
+                    reason: format!("grpc_uds.path {:?} must be absolute", path.display()),
+                });
+            }
+            if cfg.mode > 0o777 {
+                return Err(ConfigError::InvalidGrpcConfig {
+                    reason: format!("grpc_uds.mode {:o} exceeds 0o777", cfg.mode),
+                });
+            }
+            validate_grpc_token_file(cfg.token_file.as_deref(), "grpc_uds.token_file")?;
+        }
+
+        if (telemetry.grpc_tcp.is_some() || telemetry.grpc_uds.is_some())
+            && tcp.is_none()
+            && uds.is_none()
+        {
+            return Err(ConfigError::InvalidGrpcConfig {
+                reason: "at least one gRPC listener must be enabled".to_string(),
+            });
+        }
 
         // Validate MRT config if present
         if let Some(ref mrt) = self.mrt {
@@ -276,4 +310,24 @@ impl Config {
 
         Ok(())
     }
+}
+
+fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), ConfigError> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    if path.trim().is_empty() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!("{field_name} must not be empty"),
+        });
+    }
+    let token = std::fs::read_to_string(path).map_err(|e| ConfigError::InvalidGrpcConfig {
+        reason: format!("failed to read {field_name} {path:?}: {e}"),
+    })?;
+    if token.trim_end().is_empty() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!("{field_name} {path:?} must contain a non-empty token"),
+        });
+    }
+    Ok(())
 }

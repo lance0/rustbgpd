@@ -1,59 +1,120 @@
 # Security Posture
 
-## gRPC API
+rustbgpd exposes a privileged gRPC management API for peer lifecycle, route
+injection, soft reset, MRT triggers, and daemon shutdown. Treat that surface as
+part of your management plane, not as a general-purpose service endpoint.
 
-rustbgpd exposes a gRPC API for daemon control and route management.
-**There is no built-in authentication, authorization, or TLS.**
+Today the daemon defaults to a Unix domain socket at
+`/var/lib/rustbgpd/grpc.sock`. That local-only default is the safe baseline.
+If you enable TCP gRPC access, you are responsible for putting network and
+transport controls in front of it.
 
-### Default configuration
+## Recommended deployment tiers
 
-The default bind address is `127.0.0.1:50051` (loopback only). In this
-configuration, only processes on the local machine can reach the API.
-This is safe for single-host deployments.
+### Same-host administration
 
-### Non-loopback deployments
+Preferred posture:
 
-When `grpc_addr` is set to a non-loopback address (e.g., `0.0.0.0:50051`),
-**all RPCs are accessible without authentication**, including privileged
-control-plane operations:
+- Use the default Unix domain socket (UDS) for local-only access.
+  Filesystem permissions give the OS a concrete user/group boundary that
+  loopback TCP does not.
+- If you need TCP for local tooling or container networking, configure
+  `[global.telemetry.grpc_tcp]` on `127.0.0.1:50051` and access it locally via
+  `rustbgpctl`, `grpcurl`, or SSH.
+- Optional bearer-token auth can be enabled per listener with `token_file`, but
+  same-host UDS access is still the preferred local posture.
+- For occasional remote administration, tunnel to the local listener or socket
+  rather than exposing raw management TCP on a routed interface.
 
-- `Shutdown` — stops the daemon
-- `AddNeighbor` / `DeleteNeighbor` — modifies the peer table
-- `EnableNeighbor` / `DisableNeighbor` — controls session state
-- `AddPath` / `DeletePath` — injects or withdraws routes
+### Remote administration
 
-The daemon logs a warning at startup when bound to a non-loopback address.
+Preferred posture:
 
-**Recommendations for non-loopback deployments:**
+- Keep rustbgpd itself bound to loopback or a local UDS.
+- Put an mTLS proxy or sidecar in front of it for remote access. Envoy is the
+  recommended reference path; see [`examples/envoy-mtls/`](../examples/envoy-mtls/).
+- Restrict the exposed listener to a management VLAN/interface or a small set
+  of management hosts.
+- Even behind a proxy, treat the API as privileged. Read-only RPCs still reveal
+  peer topology, route state, and policy results.
 
-- Use an mTLS termination proxy (e.g., Envoy, nginx) in front of the
-  gRPC port
-- Restrict access at the network level (firewall rules, security groups)
-- Bind to a management-only interface rather than `0.0.0.0`
+### Direct TCP on a non-loopback address
 
-### Read-only endpoints
+This is the least-preferred posture.
 
-`GetGlobal`, `ListNeighbors`, `GetNeighborState`, `ListReceivedRoutes`,
-`ListBestRoutes`, `ListAdvertisedRoutes`, `WatchRoutes`, `GetHealth`,
-and `GetMetrics` are read-only but also unauthenticated.
+When `[global.telemetry.grpc_tcp]` is configured on a non-loopback address (for
+example `0.0.0.0:50051`), the entire gRPC surface becomes reachable on that
+interface.
+That includes privileged RPCs such as:
+
+- `Shutdown`
+- `AddNeighbor` / `DeleteNeighbor`
+- `EnableNeighbor` / `DisableNeighbor`
+- `SoftResetIn`
+- `AddPath` / `DeletePath`
+- `AddFlowSpec` / `DeleteFlowSpec`
+- `TriggerMrtDump`
+
+The daemon logs a warning at startup when a gRPC TCP listener is bound to a
+non-loopback address. It logs a stronger warning when that listener is also
+unauthenticated. Use that posture only on a deliberately isolated management
+network, and prefer an mTLS proxy in front of it.
+
+## Firewall guidance
+
+If you do expose the management API on TCP, firewall it to known management
+hosts. Examples below assume the daemon or proxy is listening on `:50051`.
+Adjust the port if your proxy terminates on a different frontend port.
+
+### `iptables`
+
+```bash
+# Allow only the management subnet to reach gRPC.
+iptables -A INPUT -p tcp -s 198.51.100.0/24 --dport 50051 -j ACCEPT
+iptables -A INPUT -p tcp --dport 50051 -j DROP
+```
+
+### `nftables`
+
+```nft
+table inet filter {
+  chain input {
+    type filter hook input priority 0;
+
+    tcp dport 50051 ip saddr 198.51.100.0/24 accept
+    tcp dport 50051 drop
+  }
+}
+```
+
+These examples are intentionally minimal. Fold them into your existing
+stateful-policy baseline rather than pasting them in isolation.
 
 ## Metrics endpoint
 
-The Prometheus `/metrics` HTTP endpoint (configured via `prometheus_addr`;
-commonly `0.0.0.0:9179`) is
-read-only and unauthenticated. It exposes operational counters and gauges
-but no secrets. The same loopback-vs-non-loopback considerations apply.
+The Prometheus `/metrics` HTTP endpoint is read-only and unauthenticated. It
+does not expose secrets, but it does expose operational detail. Apply the same
+loopback-vs-management-network discipline to `prometheus_addr` that you apply
+to gRPC.
 
 ## TCP MD5 and GTSM
 
 Per-neighbor TCP MD5 authentication (RFC 2385) and GTSM / TTL security
-(RFC 5082) are supported on Linux via `md5_password` and `ttl_security`
-configuration fields. These are applied at the socket level before the
-TCP handshake.
+(RFC 5082) are supported on Linux via `md5_password` and `ttl_security`.
+These protect BGP transport sessions, not the gRPC management surface.
 
-## Intentional gaps
+## Deferred hardening
 
-- **No built-in TLS for gRPC** — use a proxy or sidecar for TLS termination
-- **No TCP-AO** (RFC 5925) — deferred to post-v1
-- **No config persistence** — gRPC mutations are not written back to TOML
-- **No RPKI validation** — deferred to post-v1
+The following security improvements are intentionally deferred and tracked in
+the roadmap:
+
+- Read-only vs read-write gRPC listener split
+- Native gRPC mTLS inside the daemon
+- Finer-grained gRPC authorization beyond "listener allowed / denied"
+
+## Current gaps
+
+- No native TLS termination in the daemon today; use a proxy or sidecar for
+  remote encrypted access
+- No built-in authorization tiers between read-only and mutating RPCs
+- No TCP-AO (RFC 5925); TCP MD5 and GTSM are the supported session protections

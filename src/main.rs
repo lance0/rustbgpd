@@ -20,15 +20,15 @@ use rustbgpd_rib::{RibManager, RibUpdate};
 use rustbgpd_telemetry::{BgpMetrics, init_logging};
 use rustbgpd_transport::BgpListener;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
-use rustbgpd_api::server::ServeConfig;
+use rustbgpd_api::server::{ListenerConfig as GrpcListenerConfig, ListenerEndpoint, ServeConfig};
 use rustbgpd_policy::PolicyChain;
 
-use crate::config::Config;
+use crate::config::{Config, GrpcListener};
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::PeerManager;
 
@@ -95,6 +95,40 @@ fn write_gr_restart_marker(path: &Path, expires_at: SystemTime) -> std::io::Resu
     std::fs::create_dir_all(parent)?;
     let encoded = toml::to_string(&marker).map_err(|e| std::io::Error::other(e.to_string()))?;
     std::fs::write(path, encoded)
+}
+
+fn load_grpc_token(path: &Path) -> Result<String, String> {
+    let token = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read gRPC token file {}: {e}", path.display()))?;
+    let token = token.trim_end().to_string();
+    if token.is_empty() {
+        return Err(format!(
+            "gRPC token file {} must contain a non-empty token",
+            path.display()
+        ));
+    }
+    Ok(token)
+}
+
+fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, String> {
+    config
+        .grpc_listeners()
+        .into_iter()
+        .map(|listener| match listener {
+            GrpcListener::Tcp { addr, token_file } => Ok(GrpcListenerConfig {
+                endpoint: ListenerEndpoint::Tcp(addr),
+                auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+            }),
+            GrpcListener::Uds {
+                path,
+                mode,
+                token_file,
+            } => Ok(GrpcListenerConfig {
+                endpoint: ListenerEndpoint::Uds { path, mode },
+                auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+            }),
+        })
+        .collect()
 }
 
 fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
@@ -199,7 +233,10 @@ async fn run(mut config: Config) {
 
     let metrics = BgpMetrics::new();
     let prometheus_addr = config.prometheus_addr();
-    let grpc_addr = config.grpc_addr();
+    let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {
+        error!(error = %e, "invalid gRPC listener configuration");
+        process::exit(1);
+    });
     let router_id: Ipv4Addr = config
         .global
         .router_id
@@ -462,19 +499,40 @@ async fn run(mut config: Config) {
     };
 
     // Shutdown channels:
-    // - grpc_shutdown: signals the tonic server to stop
+    // - grpc_shutdown: signals all tonic listeners to stop
     // - rpc_shutdown: given to ControlService so Shutdown RPC can trigger exit
     let (grpc_shutdown_tx, grpc_shutdown_rx) = oneshot::channel::<()>();
-    let (rpc_shutdown_tx, mut rpc_shutdown_rx) = oneshot::channel::<()>();
+    let (rpc_shutdown_tx, mut rpc_shutdown_rx) = watch::channel(false);
 
-    // Warn if gRPC is bound to a non-loopback address
-    if !grpc_addr.ip().is_loopback() {
-        warn!(
-            %grpc_addr,
-            "gRPC server bound to non-loopback address — all RPCs are \
-             unauthenticated. Use an auth proxy or mTLS for production \
-             non-loopback deployments."
-        );
+    for listener in &grpc_listeners {
+        match &listener.endpoint {
+            ListenerEndpoint::Tcp(addr) => {
+                info!(
+                    %addr,
+                    auth_enabled = listener.auth_token.is_some(),
+                    "configured gRPC TCP listener"
+                );
+                if !addr.ip().is_loopback() && listener.auth_token.is_none() {
+                    warn!(
+                        %addr,
+                        "gRPC TCP listener bound to a non-loopback address without authentication; prefer UDS for local administration or a proxy with mTLS for remote access"
+                    );
+                } else if !addr.ip().is_loopback() {
+                    warn!(
+                        %addr,
+                        "gRPC TCP listener bound to a non-loopback address with bearer authentication but no transport encryption; prefer a proxy with mTLS for remote access"
+                    );
+                }
+            }
+            ListenerEndpoint::Uds { path, mode } => {
+                info!(
+                    path = %path.display(),
+                    mode = format_args!("{mode:o}"),
+                    auth_enabled = listener.auth_token.is_some(),
+                    "configured gRPC UDS listener"
+                );
+            }
+        }
     }
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
@@ -490,7 +548,7 @@ async fn run(mut config: Config) {
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(
-            grpc_addr,
+            grpc_listeners,
             grpc_rib_tx,
             grpc_peer_mgr_tx,
             serve_config,
@@ -593,7 +651,10 @@ async fn run(mut config: Config) {
                 }
                 break;
             }
-            _ = &mut rpc_shutdown_rx => {
+            changed = rpc_shutdown_rx.changed() => {
+                if changed.is_err() || !*rpc_shutdown_rx.borrow() {
+                    continue;
+                }
                 info!("shutdown initiated via gRPC");
                 break;
             }
@@ -886,7 +947,8 @@ mod tests {
                 telemetry: crate::config::TelemetryConfig {
                     prometheus_addr: "127.0.0.1:9179".to_string(),
                     log_format: "json".to_string(),
-                    grpc_addr: "127.0.0.1:50051".to_string(),
+                    grpc_tcp: None,
+                    grpc_uds: None,
                 },
             },
             neighbors: vec![

@@ -1,4 +1,5 @@
 use super::*;
+use tempfile::NamedTempFile;
 
 fn valid_toml() -> &'static str {
     r#"
@@ -195,6 +196,57 @@ fn runtime_state_dir_override_is_used() {
         config.gr_restart_marker_path(),
         PathBuf::from("/tmp/rustbgpd-test/gr-restart.toml")
     );
+}
+
+#[test]
+fn grpc_listeners_default_to_uds() {
+    let config = parse(valid_toml()).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Uds {
+            path: PathBuf::from("/var/lib/rustbgpd/grpc.sock"),
+            mode: 0o600,
+            token_file: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_tcp_listener_parses_when_enabled() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Tcp {
+            addr: "127.0.0.1:50051".parse().unwrap(),
+            token_file: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_uds_relative_path_rejected() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_uds]\npath = \"grpc.sock\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
+}
+
+#[test]
+fn grpc_token_file_must_be_non_empty() {
+    let token_file = NamedTempFile::new().unwrap();
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntoken_file = {:?}\n",
+        valid_toml(),
+        token_file.path()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
 }
 
 #[test]

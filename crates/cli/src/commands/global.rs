@@ -1,12 +1,12 @@
-use tonic::transport::Channel;
-
+use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output::JsonGlobal;
 use crate::proto::GetGlobalRequest;
 use crate::proto::global_service_client::GlobalServiceClient;
 
-pub async fn run(channel: Channel, json: bool) -> Result<(), CliError> {
-    let mut client = GlobalServiceClient::new(channel);
+pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        GlobalServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client.get_global(GetGlobalRequest {}).await?.into_inner();
 
     if json {
