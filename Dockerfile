@@ -6,7 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY . .
-RUN cargo build --release
+RUN cargo build --workspace --release
 
 FROM debian:bookworm-slim
 

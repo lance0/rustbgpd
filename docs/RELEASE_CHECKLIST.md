@@ -112,8 +112,13 @@ containerlab destroy -t tests/interop/m11-gr-frr.clab.yml
 
 ```bash
 docker build -t rustbgpd:dev .
-docker run --rm rustbgpd:dev rustbgpd --version
-docker run --rm rustbgpd:dev rustbgpctl --version
+
+# Verify both binaries are present
+docker run --rm --entrypoint sh rustbgpd:dev -c \
+  "ls /usr/local/bin/rustbgpd /usr/local/bin/rustbgpctl"
+
+# Verify rustbgpctl parses subcommands
+docker run --rm --entrypoint rustbgpctl rustbgpd:dev --help
 ```
 
 ## Release steps
