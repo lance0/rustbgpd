@@ -193,13 +193,13 @@ The primary target deployment. Weighted toward what matters:
 
 **Remaining gaps for IX RS parity:** no major control-plane gaps remain for the target unicast route-server deployment. The notable remaining limitation is FlowSpec transparency in route-server client mode, plus broader operator polish like CLI integration tests and listener authorization split.
 
-### General-Purpose BGP Speaker (~57% parity)
+### General-Purpose BGP Speaker (~73% parity)
 
 Competing head-to-head with GoBGP for all use cases:
 
 - Missing address families hurt badly (EVPN, VPN, labeled unicast)
 - No confederation support limits SP deployments
-- gRPC API covers ~38% of GoBGP's RPC surface (no policy/VRF/peer-group CRUD)
+- gRPC API covers ~84% of GoBGP's RPC surface (no VRF/dynamic-neighbor CRUD)
 - No Zebra/FIB integration — cannot install routes into the kernel
 
 ## Advantages Over GoBGP
