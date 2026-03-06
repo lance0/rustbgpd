@@ -225,8 +225,14 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 | Priority | Item | Impact |
 |----------|------|--------|
 | ~~HIGH~~ | ~~manager.rs at ~8,318 lines~~ | Done — split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs) |
+| HIGH | `config.rs` at 3,118 lines | Single file for all config types, parsing, and validation; split into submodules (types, parsing, validation) |
+| HIGH | `transport/session.rs` at 3,967 lines | 6 functions with `#[expect(clippy::too_many_lines)]`; extract outbound/inbound attribute prep into submodules |
+| MEDIUM | Refactor policy `evaluate()` to take a `RouteContext` struct | 5 functions carry 8+ params with `#[expect(clippy::too_many_arguments)]`; a context struct prevents API churn as match criteria grow |
+| MEDIUM | `RibManager::handle_update()` at 615 lines | Giant match dispatch; extract per-variant handler methods |
 | MEDIUM | Policy engine tests concentrated in one file | 70 tests exist in `engine.rs`; split into focused modules/files for maintainability |
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | ~~MEDIUM~~ | ~~RTR expire_interval not enforced~~ | Done — stale VRPs now expire and are withdrawn if no fresh EndOfData arrives before the effective expiry timer |
 | MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |
+| LOW | `timer.rs:118` production `panic!()` | Only non-test panic in codebase; replace with `unreachable!()` and descriptive message |
+| LOW | CLI `.unwrap()` on JSON serialization (7 sites) | Infallible but should use `.expect()` for clarity |
 | ~~LOW~~ | ~~RTR client polling-only~~ | Done — RTR sessions stay connected and honor Serial Notify |
