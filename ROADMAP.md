@@ -167,9 +167,32 @@ Valuable but not blocking production use or 1.0.
 - [ ] **TUI mode** for `rustbgpctl` — interactive terminal UI for monitoring and management; follow-on to CLI
 - [ ] **YANG model / NETCONF** — alternative management interface for traditional NOC tooling
 
-### Interop Test Hardening
+### Interop Test Coverage
 
-Ongoing improvements to the test infrastructure.
+Existing tests (M1, M3, M4, M10, M11, M12) cover IPv4/IPv6 unicast, route
+injection, dynamic peers, GR helper mode, and extended communities. The
+following tests close the remaining coverage gaps for features shipped
+post-M12.
+
+**Must-test (high signal, high risk):**
+
+- [ ] **M13: Policy engine** — FRR ↔ rustbgpd: `set_local_pref`, `set_med`, `set_next_hop`, community add/remove, AS_PATH prepend, AS_PATH regex match, standard/large community matching
+- [ ] **M14: Route Reflector** (RFC 4456) — iBGP client/non-client reflection rules, ORIGINATOR_ID/CLUSTER_LIST manipulation, loop detection
+- [ ] **M15: Route Refresh** (RFC 2918 + 7313) — `SoftResetIn` via gRPC triggers route re-advertisement from FRR
+- [ ] **M16: LLGR** (RFC 9494) — GR → LLGR-stale promotion, `LLGR_STALE` community, reconnect clears stale, timer expiry purge
+
+**Should-test (important, lower blast radius):**
+
+- [ ] **M17: Add-Path multi-path send** (RFC 7911) — rank-based path IDs, multiple candidates advertised to FRR
+- [ ] **M18: Extended next-hop** (RFC 8950) — IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI`
+- [ ] **M19: Transparent route server** — skip ASN prepend, preserve original NEXT_HOP on eBGP re-advertisement
+- [ ] **M20: Private AS removal** — all three modes (`remove`, `all`, `replace`) validated against FRR
+
+**Deferred (hard to interop-test or low wire-level risk):**
+
+- RPKI (needs running validator), FlowSpec (limited FRR support), BMP (needs collector), MRT (offline format), config persistence/SIGHUP (daemon-internal), Notification GR, Admin Shutdown, Extended Messages (capability negotiation only), gRPC security (not wire protocol)
+
+### Interop Test Infrastructure
 
 - [ ] **`trap cleanup EXIT`** — auto-destroy topology on failure; guard with a `--deploy` flag so manual workflows aren't disrupted
 - [ ] **EoR detection by polling** — replace `sleep 10` in M11 test 3 with a `wait_eor()` loop that polls `bgp_gr_stale_routes` until 0
