@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "RIB data structures — Adj-RIB-In, Loc-RIB best-path selection, Adj-RIB-Out"
+readme = "README.md"
 
 [dependencies]
 rustbgpd-wire.workspace = true

@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "gRPC API server — tonic bindings for all five rustbgpd services"
+readme = "README.md"
 
 [dependencies]
 rustbgpd-wire.workspace = true

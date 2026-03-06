@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "BMP exporter — RFC 7854 BGP Monitoring Protocol"
+readme = "README.md"
 
 [dependencies]
 bytes.workspace = true

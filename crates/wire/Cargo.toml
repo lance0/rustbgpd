@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "BGP message codec — encode/decode OPEN, KEEPALIVE, UPDATE, NOTIFICATION, ROUTE-REFRESH"
+readme = "README.md"
 
 [dependencies]
 bytes.workspace = true

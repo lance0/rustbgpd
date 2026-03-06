@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "CLI tool for rustbgpd — thin gRPC wrapper for daemon management"
+readme = "README.md"
 
 [[bin]]
 name = "rustbgpctl"

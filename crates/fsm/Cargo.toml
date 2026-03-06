@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "RFC 4271 BGP finite state machine — pure, no I/O, no async runtime"
+readme = "README.md"
 
 [dependencies]
 rustbgpd-wire.workspace = true

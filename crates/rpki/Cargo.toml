@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "RPKI origin validation — VRP table, RTR protocol client, cache management"
+readme = "README.md"
 
 [dependencies]
 rustbgpd-wire.workspace = true

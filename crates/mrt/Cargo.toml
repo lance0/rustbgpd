@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "MRT dump export — RFC 6396 TABLE_DUMP_V2"
+readme = "README.md"
 
 [dependencies]
 bytes.workspace = true

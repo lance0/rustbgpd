@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "TCP connection management — tokio read/write loops, session runtime, bounded channels"
+readme = "README.md"
 
 [dependencies]
 rustbgpd-wire.workspace = true

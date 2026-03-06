@@ -8,6 +8,7 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Minimal policy engine — prefix allow/deny, max-prefix enforcement, attribute filters"
+readme = "README.md"
 
 [dependencies]
 regex = "1"
