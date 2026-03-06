@@ -1,6 +1,6 @@
 # gRPC API Reference
 
-rustbgpd exposes six gRPC services over one or more configured listeners. The
+rustbgpd exposes seven gRPC services over one or more configured listeners. The
 default listener is a local Unix domain socket at
 `/var/lib/rustbgpd/grpc.sock`. The examples below use
 [grpcurl](https://github.com/fullstorydev/grpcurl) against an explicit local
@@ -222,7 +222,6 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{
     "name": "rs-clients",
     "definition": {
-      "description": "IX route-server clients",
       "families": ["ipv4_unicast", "ipv6_unicast"],
       "hold_time": 90,
       "route_server_client": true,
