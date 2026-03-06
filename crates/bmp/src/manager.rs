@@ -20,6 +20,7 @@ pub struct BmpManager {
 }
 
 impl BmpManager {
+    /// Create a new BMP manager with the given event/control channels and collector senders.
     #[must_use]
     pub fn new(
         event_rx: mpsc::Receiver<BmpEvent>,

@@ -1,3 +1,5 @@
+//! Output actions and negotiated session parameters produced by the FSM.
+
 use std::collections::HashMap;
 
 use rustbgpd_wire::{
@@ -10,8 +12,11 @@ use crate::state::SessionState;
 /// Which timer to start or stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimerType {
+    /// TCP connect-retry timer (exponential backoff).
     ConnectRetry,
+    /// Hold timer — peer must send KEEPALIVE/UPDATE before expiry.
     Hold,
+    /// Keepalive timer — send KEEPALIVE at this interval.
     Keepalive,
 }
 
@@ -86,7 +91,9 @@ pub enum Action {
     CloseTcpConnection,
     /// The FSM transitioned to a new state (for telemetry).
     StateChanged {
+        /// Previous FSM state.
         old: SessionState,
+        /// New FSM state.
         new: SessionState,
     },
     /// The session is fully established — negotiated parameters enclosed.

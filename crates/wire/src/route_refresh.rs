@@ -13,13 +13,21 @@ const TOTAL_LEN: usize = HEADER_LEN + BODY_LEN;
 /// ROUTE-REFRESH demarcation subtype (RFC 7313).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RouteRefreshSubtype {
+    /// Normal route refresh request (subtype 0).
     Normal,
+    /// Beginning of Route Refresh (subtype 1, RFC 7313).
     BoRR,
+    /// End of Route Refresh (subtype 2, RFC 7313).
     EoRR,
-    Unknown(u8),
+    /// Unrecognized subtype value.
+    Unknown(
+        /// The raw subtype byte.
+        u8,
+    ),
 }
 
 impl RouteRefreshSubtype {
+    /// Create from a raw subtype byte.
     #[must_use]
     pub fn from_u8(value: u8) -> Self {
         match value {
@@ -30,6 +38,7 @@ impl RouteRefreshSubtype {
         }
     }
 
+    /// Return the raw byte value for this subtype.
     #[must_use]
     pub fn as_u8(self) -> u8 {
         match self {
@@ -50,8 +59,11 @@ impl RouteRefreshSubtype {
 /// whether to act on or ignore them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteRefreshMessage {
+    /// Raw AFI value from the wire.
     pub afi_raw: u16,
+    /// Raw demarcation subtype byte from the wire.
     pub subtype_raw: u8,
+    /// Raw SAFI value from the wire.
     pub safi_raw: u8,
 }
 

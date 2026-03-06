@@ -1,3 +1,5 @@
+//! OPEN message validation and capability negotiation (RFC 4271 section 6.2).
+
 use std::collections::HashMap;
 
 use bytes::Bytes;

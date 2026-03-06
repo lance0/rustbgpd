@@ -10,7 +10,9 @@ use crate::notification::update_subcode;
 /// Contains the NOTIFICATION subcode and data bytes per RFC 4271 §6.3.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateError {
+    /// NOTIFICATION subcode for this validation error.
     pub subcode: u8,
+    /// Raw bytes for the NOTIFICATION data field.
     pub data: Vec<u8>,
 }
 

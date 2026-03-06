@@ -37,8 +37,11 @@ pub struct UpdateMessage {
 /// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedUpdate {
+    /// Withdrawn IPv4 NLRI entries.
     pub withdrawn: Vec<Ipv4NlriEntry>,
+    /// Decoded path attributes.
     pub attributes: Vec<PathAttribute>,
+    /// Announced IPv4 NLRI entries.
     pub announced: Vec<Ipv4NlriEntry>,
 }
 

@@ -6,55 +6,111 @@ use crate::notification::NotificationCode;
 /// Errors encountered while decoding a BGP message from bytes.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum DecodeError {
+    /// Not enough bytes are available to decode the message.
     #[error("incomplete message: need {needed} bytes, have {available}")]
-    Incomplete { needed: usize, available: usize },
+    Incomplete {
+        /// Minimum bytes required.
+        needed: usize,
+        /// Bytes currently available.
+        available: usize,
+    },
 
+    /// The 16-byte header marker is not all `0xFF`.
     #[error("invalid header marker")]
     InvalidMarker,
 
+    /// Message length field is outside the valid range.
     #[error("invalid message length {length} (must be 19..=4096)")]
-    InvalidLength { length: u16 },
+    InvalidLength {
+        /// The invalid length value from the wire.
+        length: u16,
+    },
 
+    /// Message type byte is not a known BGP message type.
     #[error("unknown message type {0}")]
-    UnknownMessageType(u8),
+    UnknownMessageType(
+        /// The unrecognized type byte.
+        u8,
+    ),
 
+    /// BGP version in OPEN is not 4.
     #[error("unsupported BGP version {version} (expected 4)")]
-    UnsupportedVersion { version: u8 },
+    UnsupportedVersion {
+        /// The version number received.
+        version: u8,
+    },
 
+    /// KEEPALIVE message has an invalid length (must be exactly 19).
     #[error("invalid keepalive length {length} (expected 19)")]
-    InvalidKeepaliveLength { length: u16 },
+    InvalidKeepaliveLength {
+        /// The invalid length value.
+        length: u16,
+    },
 
+    /// A field within the message body is structurally invalid.
     #[error("{message_type}: {detail}")]
     MalformedField {
+        /// Which message type contained the error.
         message_type: &'static str,
+        /// Human-readable description of the malformation.
         detail: String,
     },
 
+    /// An optional parameter in OPEN is malformed.
     #[error("malformed optional parameter at offset {offset}: {detail}")]
-    MalformedOptionalParameter { offset: usize, detail: String },
+    MalformedOptionalParameter {
+        /// Byte offset within the optional parameters.
+        offset: usize,
+        /// Human-readable description of the error.
+        detail: String,
+    },
 
+    /// UPDATE withdrawn/attribute/NLRI length fields are inconsistent.
     #[error("UPDATE length mismatch: {detail}")]
-    UpdateLengthMismatch { detail: String },
+    UpdateLengthMismatch {
+        /// Human-readable description of the mismatch.
+        detail: String,
+    },
 
+    /// UPDATE attribute fails RFC 4271 §6.3 validation.
     #[error("UPDATE attribute error (subcode {subcode}): {detail}")]
     UpdateAttributeError {
+        /// NOTIFICATION subcode for this error.
         subcode: u8,
+        /// Raw attribute bytes for the NOTIFICATION data field.
         data: Vec<u8>,
+        /// Human-readable description of the error.
         detail: String,
     },
 
+    /// NLRI prefix encoding is invalid (RFC 4271 §4.3).
     #[error("UPDATE invalid network field: {detail}")]
-    InvalidNetworkField { detail: String, data: Vec<u8> },
+    InvalidNetworkField {
+        /// Human-readable description of the error.
+        detail: String,
+        /// Raw NLRI bytes for the NOTIFICATION data field.
+        data: Vec<u8>,
+    },
 }
 
 /// Errors encountered while encoding a BGP message to bytes.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum EncodeError {
+    /// Encoded message exceeds the maximum BGP message size.
     #[error("message exceeds maximum size: {size} bytes (max 4096)")]
-    MessageTooLong { size: usize },
+    MessageTooLong {
+        /// Total encoded size in bytes.
+        size: usize,
+    },
 
+    /// A field value is outside its valid range for encoding.
     #[error("{field}: value {value} out of range")]
-    ValueOutOfRange { field: &'static str, value: String },
+    ValueOutOfRange {
+        /// Name of the field that is out of range.
+        field: &'static str,
+        /// String representation of the invalid value.
+        value: String,
+    },
 }
 
 impl DecodeError {

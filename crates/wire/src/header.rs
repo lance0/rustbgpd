@@ -7,14 +7,20 @@ use crate::error::DecodeError;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MessageType {
+    /// OPEN message.
     Open = 1,
+    /// UPDATE message.
     Update = 2,
+    /// NOTIFICATION message.
     Notification = 3,
+    /// KEEPALIVE message.
     Keepalive = 4,
+    /// ROUTE-REFRESH message (RFC 2918).
     RouteRefresh = 5,
 }
 
 impl MessageType {
+    /// Create from a raw type byte, returning `None` for unknown types.
     #[must_use]
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -27,6 +33,7 @@ impl MessageType {
         }
     }
 
+    /// Return the raw byte value for this message type.
     #[must_use]
     pub fn as_u8(self) -> u8 {
         self as u8
@@ -48,7 +55,9 @@ impl std::fmt::Display for MessageType {
 /// Decoded BGP message header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BgpHeader {
+    /// Total message length in bytes (including the 19-byte header).
     pub length: u16,
+    /// The type of this BGP message.
     pub message_type: MessageType,
 }
 

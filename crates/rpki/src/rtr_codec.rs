@@ -12,43 +12,74 @@ pub const RTR_VERSION: u8 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RtrPdu {
     /// Server → Client: cache has new data (type 0).
-    SerialNotify { session_id: u16, serial: u32 },
+    SerialNotify {
+        /// RTR session identifier.
+        session_id: u16,
+        /// Current serial number.
+        serial: u32,
+    },
     /// Client → Server: request incremental update (type 1).
-    SerialQuery { session_id: u16, serial: u32 },
+    SerialQuery {
+        /// RTR session identifier.
+        session_id: u16,
+        /// Last known serial number.
+        serial: u32,
+    },
     /// Client → Server: request full table (type 2).
     ResetQuery,
     /// Server → Client: start of data payload (type 3).
-    CacheResponse { session_id: u16 },
+    CacheResponse {
+        /// RTR session identifier.
+        session_id: u16,
+    },
     /// Server → Client: IPv4 VRP entry (type 4).
     Ipv4Prefix {
+        /// 1 = announce, 0 = withdraw.
         flags: u8,
+        /// Prefix length in bits.
         prefix_len: u8,
+        /// Maximum prefix length for this ROA.
         max_len: u8,
+        /// IPv4 prefix address.
         prefix: Ipv4Addr,
+        /// Authorized origin ASN.
         asn: u32,
     },
     /// Server → Client: IPv6 VRP entry (type 6).
     Ipv6Prefix {
+        /// 1 = announce, 0 = withdraw.
         flags: u8,
+        /// Prefix length in bits.
         prefix_len: u8,
+        /// Maximum prefix length for this ROA.
         max_len: u8,
+        /// IPv6 prefix address.
         prefix: Ipv6Addr,
+        /// Authorized origin ASN.
         asn: u32,
     },
     /// Server → Client: end of payload with serial + timers (type 7).
     EndOfData {
+        /// RTR session identifier.
         session_id: u16,
+        /// Serial number after this data set.
         serial: u32,
+        /// Recommended refresh interval (seconds).
         refresh: u32,
+        /// Recommended retry interval (seconds).
         retry: u32,
+        /// Cache expiration interval (seconds).
         expire: u32,
     },
     /// Server → Client: cache unavailable, do full reset (type 8).
     CacheReset,
     /// Both directions: error report (type 10).
     ErrorReport {
+        /// RTR error code.
         code: u16,
+        /// Encapsulated erroneous PDU (may be empty).
         pdu: Vec<u8>,
+        /// Human-readable error text.
         text: String,
     },
 }
@@ -56,16 +87,22 @@ pub enum RtrPdu {
 /// RTR decode errors.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RtrDecodeError {
+    /// Need more bytes to complete the PDU.
     #[error("incomplete: need more bytes")]
     Incomplete,
+    /// Unsupported RTR protocol version.
     #[error("invalid RTR version {0}")]
     InvalidVersion(u8),
+    /// Unrecognized PDU type code.
     #[error("unknown RTR PDU type {0}")]
     InvalidType(u8),
+    /// PDU length field does not match the expected size.
     #[error("invalid PDU length")]
     InvalidLength,
+    /// Prefix length or max-length out of range.
     #[error("invalid prefix")]
     InvalidPrefix,
+    /// Error report text is not valid UTF-8.
     #[error("invalid UTF-8 in error text")]
     Utf8Error,
 }

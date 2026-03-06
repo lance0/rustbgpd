@@ -93,6 +93,7 @@ pub struct RibManager {
 }
 
 impl RibManager {
+    /// Create a new RIB manager with the given update channel and optional export policy.
     #[must_use]
     pub fn new(
         rx: mpsc::Receiver<RibUpdate>,

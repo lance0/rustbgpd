@@ -22,6 +22,7 @@ pub struct MrtManager {
 }
 
 impl MrtManager {
+    /// Create a new MRT manager with the given configuration.
     #[must_use]
     pub fn new(
         config: MrtWriterConfig,

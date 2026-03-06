@@ -16,7 +16,7 @@ mod rib_service;
 pub mod server;
 
 /// Generated protobuf/gRPC types.
-#[allow(clippy::all, clippy::pedantic)]
+#[allow(clippy::all, clippy::pedantic, missing_docs)]
 pub mod proto {
     tonic::include_proto!("rustbgpd.v1");
 }

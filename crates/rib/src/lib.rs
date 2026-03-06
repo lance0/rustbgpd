@@ -8,13 +8,21 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+/// Per-peer inbound RIB storage.
 pub mod adj_rib_in;
+/// Per-peer outbound RIB storage.
 pub mod adj_rib_out;
+/// Best-path selection algorithm (RFC 4271 §9.1.2).
 pub mod best_path;
+/// Route change event types for broadcast subscribers.
 pub mod event;
+/// Loc-RIB: best route per prefix.
 pub mod loc_rib;
+/// RIB manager task and submodules.
 pub mod manager;
+/// Route and `FlowSpec` route data types.
 pub mod route;
+/// RIB update messages and outbound route structures.
 pub mod update;
 
 pub use best_path::best_path_cmp;

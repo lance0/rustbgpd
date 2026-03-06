@@ -21,17 +21,27 @@ const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
 
 /// An individual RIB entry within a RIB_* record.
 pub struct RibEntry {
+    /// Index into the `PEER_INDEX_TABLE`.
     pub peer_index: u16,
+    /// Unix timestamp when this route was originated.
     pub originated_time: u32,
+    /// Add-Path path identifier (RFC 8050). 0 = no Add-Path.
     pub path_id: u32,
+    /// BGP path attributes for this RIB entry.
     pub attributes: Vec<PathAttribute>,
 }
 
 /// MRT encoding errors.
 #[derive(Debug, Error)]
 pub enum EncodeError {
+    /// A field value exceeds the maximum representable MRT wire size.
     #[error("{field} too large for MRT encoding: {value}")]
-    FieldTooLarge { field: &'static str, value: usize },
+    FieldTooLarge {
+        /// Name of the field that overflowed.
+        field: &'static str,
+        /// The actual value that was too large.
+        value: usize,
+    },
 }
 
 /// Encode the 12-byte MRT common header.

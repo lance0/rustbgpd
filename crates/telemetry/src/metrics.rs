@@ -1,3 +1,5 @@
+//! Prometheus metrics for session, RIB, policy, GR, and RPKI counters/gauges.
+
 use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry};
 
 /// Prometheus metrics for the BGP daemon.

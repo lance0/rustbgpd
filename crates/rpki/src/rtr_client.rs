@@ -29,25 +29,37 @@ enum QueryKind {
 pub enum VrpUpdate {
     /// Full table replacement from a Reset Query response.
     FullTable {
+        /// The cache server that sent this table.
         server: SocketAddr,
+        /// All VRP entries from the full reset.
         entries: Vec<VrpEntry>,
     },
     /// Incremental delta from a Serial Query response.
     IncrementalUpdate {
+        /// The cache server that sent this delta.
         server: SocketAddr,
+        /// Newly announced VRP entries.
         announced: Vec<VrpEntry>,
+        /// Withdrawn VRP entries.
         withdrawn: Vec<VrpEntry>,
     },
     /// Server connection lost — its entries should be expired.
-    ServerDown { server: SocketAddr },
+    ServerDown {
+        /// The cache server that went down.
+        server: SocketAddr,
+    },
 }
 
 /// Configuration for a single RTR cache server connection.
 #[derive(Debug, Clone)]
 pub struct RtrClientConfig {
+    /// TCP address of the RTR cache server.
     pub server_addr: SocketAddr,
+    /// Seconds between Serial Query polls.
     pub refresh_interval: u64,
+    /// Seconds before retrying after a failed connection.
     pub retry_interval: u64,
+    /// Seconds after which cached VRPs are considered stale.
     pub expire_interval: u64,
 }
 
@@ -477,18 +489,29 @@ impl RtrClient {
 /// Errors from the RTR client.
 #[derive(Debug, thiserror::Error)]
 pub enum RtrError {
+    /// TCP or socket I/O failure.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// RTR PDU decoding failure.
     #[error("RTR decode error: {0}")]
     Decode(#[from] RtrDecodeError),
+    /// The remote end closed the connection.
     #[error("connection closed")]
     ConnectionClosed,
+    /// Inbound data exceeded the read buffer limit.
     #[error("read buffer overflow")]
     BufferOverflow,
+    /// Cache data expired without a fresh `EndOfData`.
     #[error("cache data expired")]
     Expired,
+    /// Cache server sent an Error Report PDU.
     #[error("server error (code {code}): {text}")]
-    ServerError { code: u16, text: String },
+    ServerError {
+        /// Error code from the cache server.
+        code: u16,
+        /// Human-readable error text.
+        text: String,
+    },
 }
 
 #[cfg(test)]

@@ -20,6 +20,7 @@ pub struct AdjRibIn {
 }
 
 impl AdjRibIn {
+    /// Create a new empty Adj-RIB-In for the given peer.
     #[must_use]
     pub fn new(peer: IpAddr) -> Self {
         Self {
@@ -30,46 +31,55 @@ impl AdjRibIn {
         }
     }
 
+    /// Return the peer address this RIB belongs to.
     #[must_use]
     pub fn peer(&self) -> IpAddr {
         self.peer
     }
 
+    /// Insert or replace a route. Clears any stale tag on the key.
     pub fn insert(&mut self, route: Route) {
         let key = (route.prefix, route.path_id);
         self.llgr_stale_local_tags.remove(&key);
         self.routes.insert(key, route);
     }
 
+    /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
         let key = (*prefix, path_id);
         self.llgr_stale_local_tags.remove(&key);
         self.routes.remove(&key).is_some()
     }
 
+    /// Remove all routes and stale tags.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.llgr_stale_local_tags.clear();
     }
 
+    /// Return the number of unicast routes stored.
     #[must_use]
     pub fn len(&self) -> usize {
         self.routes.len()
     }
 
+    /// Return `true` if no unicast routes are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty()
     }
 
+    /// Iterate over all stored routes.
     pub fn iter(&self) -> impl Iterator<Item = &Route> {
         self.routes.values()
     }
 
+    /// Iterate mutably over all stored routes.
     pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Route> {
         self.routes.values_mut()
     }
 
+    /// Look up a route by prefix and path ID.
     #[must_use]
     pub fn get(&self, prefix: &Prefix, path_id: u32) -> Option<&Route> {
         self.routes.get(&(*prefix, path_id))
@@ -250,17 +260,20 @@ impl AdjRibIn {
 
     // --- FlowSpec methods ---
 
+    /// Insert or replace a `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
         self.flowspec_routes
             .insert((route.rule.clone(), route.path_id), route);
     }
 
+    /// Withdraw a `FlowSpec` route by rule and path ID. Returns `true` if it existed.
     pub fn withdraw_flowspec(&mut self, rule: &FlowSpecRule, path_id: u32) -> bool {
         self.flowspec_routes
             .remove(&(rule.clone(), path_id))
             .is_some()
     }
 
+    /// Iterate over all `FlowSpec` routes.
     pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {
         self.flowspec_routes.values()
     }
@@ -273,6 +286,7 @@ impl AdjRibIn {
             .filter(move |r| r.rule == target)
     }
 
+    /// Return the number of `FlowSpec` routes stored.
     #[must_use]
     pub fn flowspec_len(&self) -> usize {
         self.flowspec_routes.len()

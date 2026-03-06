@@ -1,3 +1,5 @@
+//! gRPC injection service — `AddPath` / `DeletePath` / `AddFlowSpec` / `DeleteFlowSpec`.
+
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tokio::sync::{mpsc, oneshot};
@@ -11,11 +13,13 @@ use rustbgpd_wire::{
     PathAttribute, Prefix,
 };
 
+/// gRPC service for injecting and withdrawing locally-originated routes.
 pub struct InjectionService {
     rib_tx: mpsc::Sender<RibUpdate>,
 }
 
 impl InjectionService {
+    /// Create a new injection service backed by the given RIB channel.
     pub fn new(rib_tx: mpsc::Sender<RibUpdate>) -> Self {
         Self { rib_tx }
     }

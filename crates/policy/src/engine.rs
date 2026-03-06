@@ -10,18 +10,23 @@ use rustbgpd_wire::{
 /// Action taken when a prefix matches a policy entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyAction {
+    /// Allow the route to pass.
     Permit,
+    /// Reject the route.
     Deny,
 }
 
 /// The result of evaluating a policy: an action plus any route modifications.
 #[derive(Debug, Clone)]
 pub struct PolicyResult {
+    /// Whether the route is permitted or denied.
     pub action: PolicyAction,
+    /// Attribute modifications to apply (empty when denied).
     pub modifications: RouteModifications,
 }
 
 impl PolicyResult {
+    /// Create a `Permit` result with no modifications.
     #[must_use]
     pub fn permit() -> Self {
         Self {
@@ -30,6 +35,7 @@ impl PolicyResult {
         }
     }
 
+    /// Create a `Deny` result with no modifications.
     #[must_use]
     pub fn deny() -> Self {
         Self {
@@ -42,12 +48,19 @@ impl PolicyResult {
 /// Borrowed route data used for policy evaluation.
 #[derive(Debug, Clone, Copy)]
 pub struct RouteContext<'a> {
+    /// The route's NLRI prefix.
     pub prefix: Prefix,
+    /// Extended communities attached to the route.
     pub extended_communities: &'a [ExtendedCommunity],
+    /// Standard communities (RFC 1997) as raw u32 values.
     pub communities: &'a [u32],
+    /// Large communities (RFC 8092) attached to the route.
     pub large_communities: &'a [LargeCommunity],
+    /// String representation of the `AS_PATH` for regex matching.
     pub as_path_str: &'a str,
+    /// Number of ASNs in the `AS_PATH` (RFC 4271 length rules).
     pub as_path_len: usize,
+    /// RPKI origin validation state (RFC 6811).
     pub validation_state: RpkiValidation,
 }
 
@@ -63,14 +76,23 @@ pub enum NextHopAction {
 /// Route attribute modifications to apply after a policy match.
 #[derive(Debug, Clone, Default)]
 pub struct RouteModifications {
+    /// Override `LOCAL_PREF` to this value.
     pub set_local_pref: Option<u32>,
+    /// Override `MED` to this value.
     pub set_med: Option<u32>,
+    /// Override the `NEXT_HOP` attribute.
     pub set_next_hop: Option<NextHopAction>,
+    /// Standard communities (RFC 1997) to add.
     pub communities_add: Vec<u32>,
+    /// Standard communities (RFC 1997) to remove.
     pub communities_remove: Vec<u32>,
+    /// Extended communities to add.
     pub extended_communities_add: Vec<ExtendedCommunity>,
+    /// Extended communities to remove.
     pub extended_communities_remove: Vec<ExtendedCommunity>,
+    /// Large communities (RFC 8092) to add.
     pub large_communities_add: Vec<LargeCommunity>,
+    /// Large communities (RFC 8092) to remove.
     pub large_communities_remove: Vec<LargeCommunity>,
     /// `(ASN, count)` — prepend `count` copies of `ASN` to the `AS_PATH`.
     pub as_path_prepend: Option<(u32, u8)>,
@@ -162,15 +184,31 @@ fn merge_equivalent_list<T: Copy>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommunityMatch {
     /// Match Route Target (sub-type 0x02) — extended community.
-    RouteTarget { global: u32, local: u32 },
+    RouteTarget {
+        /// Global administrator (ASN).
+        global: u32,
+        /// Local administrator (assigned number).
+        local: u32,
+    },
     /// Match Route Origin (sub-type 0x03) — extended community.
-    RouteOrigin { global: u32, local: u32 },
+    RouteOrigin {
+        /// Global administrator (ASN).
+        global: u32,
+        /// Local administrator (assigned number).
+        local: u32,
+    },
     /// Match a standard community (RFC 1997) — raw u32 value.
-    Standard { value: u32 },
+    Standard {
+        /// Community value (high 16 bits = ASN, low 16 bits = local).
+        value: u32,
+    },
     /// Match a large community (RFC 8092).
     LargeCommunity {
+        /// Global administrator (4-byte ASN).
         global_admin: u32,
+        /// First local data part.
         local_data1: u32,
+        /// Second local data part.
         local_data2: u32,
     },
 }
@@ -381,6 +419,7 @@ pub struct PolicyStatement {
     pub ge: Option<u8>,
     /// Maximum prefix length (inclusive).
     pub le: Option<u8>,
+    /// Action to take when all conditions match.
     pub action: PolicyAction,
     /// Community match criteria (OR within the list).
     pub match_community: Vec<CommunityMatch>,
@@ -487,7 +526,9 @@ impl PolicyStatement {
 /// An ordered list of policy statements with a default action.
 #[derive(Debug, Clone)]
 pub struct Policy {
+    /// Ordered list of statements; first match wins.
     pub entries: Vec<PolicyStatement>,
+    /// Action when no statement matches.
     pub default_action: PolicyAction,
 }
 
@@ -528,10 +569,12 @@ pub fn evaluate_policy(policy: Option<&Policy>, ctx: &RouteContext<'_>) -> Polic
 /// with the accumulated modifications.
 #[derive(Debug, Clone, Default)]
 pub struct PolicyChain {
+    /// Policies evaluated in order; modifications accumulate across permits.
     pub policies: Vec<Policy>,
 }
 
 impl PolicyChain {
+    /// Create a chain from an ordered list of policies.
     #[must_use]
     pub fn new(policies: Vec<Policy>) -> Self {
         Self { policies }

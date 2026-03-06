@@ -1,13 +1,21 @@
+//! BGP session states (RFC 4271 section 8).
+
 use std::fmt;
 
 /// RFC 4271 §8 — BGP session states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SessionState {
+    /// No resources allocated; waiting for `ManualStart`.
     Idle,
+    /// Outbound TCP connection in progress.
     Connect,
+    /// Listening for an inbound TCP connection.
     Active,
+    /// OPEN sent, waiting for peer's OPEN.
     OpenSent,
+    /// OPEN exchange done, waiting for KEEPALIVE to confirm.
     OpenConfirm,
+    /// Session fully operational; UPDATE exchange in progress.
     Established,
 }
 

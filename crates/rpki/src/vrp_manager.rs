@@ -17,6 +17,7 @@ use crate::vrp::{VrpEntry, VrpTable};
 /// Message sent from VRP manager to RIB manager when the VRP table changes.
 #[derive(Debug, Clone)]
 pub struct RpkiTableUpdate {
+    /// The new merged VRP table snapshot.
     pub table: Arc<VrpTable>,
 }
 

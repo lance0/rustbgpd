@@ -1,3 +1,5 @@
+//! Peer session configuration used by the FSM.
+
 use std::net::Ipv4Addr;
 
 use rustbgpd_wire::constants::AS_TRANS;

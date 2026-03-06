@@ -8,8 +8,11 @@ use crate::notification::NotificationCode;
 /// A decoded BGP NOTIFICATION message (RFC 4271 §4.5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationMessage {
+    /// Error code identifying the type of error.
     pub code: NotificationCode,
+    /// Error subcode providing more specific information.
     pub subcode: u8,
+    /// Diagnostic data (contents depend on code/subcode).
     pub data: Bytes,
 }
 

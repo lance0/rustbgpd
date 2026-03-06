@@ -1,3 +1,5 @@
+//! Transport-layer configuration types.
+
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Duration, Instant};
 

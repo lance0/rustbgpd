@@ -11,6 +11,7 @@ use crate::route::{FlowSpecRoute, Route};
 
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
+    /// Routes to announce to this peer.
     pub announce: Vec<Route>,
     /// Withdrawn routes with their path IDs. For non-Add-Path peers,
     /// `path_id` is always 0.
@@ -33,7 +34,9 @@ pub struct OutboundRouteUpdate {
 pub enum RibUpdate {
     /// Peer session sent us routes.
     RoutesReceived {
+        /// Source peer address.
         peer: IpAddr,
+        /// Newly announced routes.
         announced: Vec<Route>,
         /// Withdrawn prefixes with Add-Path path identifiers.
         /// `(prefix, path_id)` — `path_id = 0` for non-Add-Path peers.
@@ -44,15 +47,21 @@ pub enum RibUpdate {
         flowspec_withdrawn: Vec<FlowSpecRule>,
     },
     /// Peer session went down — clear all routes from this peer.
-    PeerDown { peer: IpAddr },
+    PeerDown {
+        /// The peer whose session went down.
+        peer: IpAddr,
+    },
     /// Peer session established — register for outbound updates.
     PeerUp {
+        /// The peer whose session came up.
         peer: IpAddr,
         /// Peer's remote ASN (for MRT `PEER_INDEX_TABLE`).
         peer_asn: u32,
         /// Peer's BGP router ID.
         peer_router_id: Ipv4Addr,
+        /// Channel to send outbound route updates to this peer's transport.
         outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+        /// Export policy chain applied before sending routes to this peer.
         export_policy: Option<PolicyChain>,
         /// Address families that the transport can actually serialize for this
         /// peer. Routes whose AFI is not in this list are filtered out of
@@ -70,36 +79,56 @@ pub enum RibUpdate {
     },
     /// Inject a locally-originated route.
     InjectRoute {
+        /// The route to inject.
         route: Route,
+        /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Withdraw a locally-injected route.
     WithdrawInjected {
+        /// Prefix to withdraw.
         prefix: Prefix,
         /// Add-Path path identifier (0 = default path).
         path_id: u32,
+        /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query: return all received routes, optionally filtered by peer.
     QueryReceivedRoutes {
+        /// Optional peer filter; `None` returns all peers.
         peer: Option<IpAddr>,
+        /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
     },
     /// Query: return best routes from the Loc-RIB.
-    QueryBestRoutes { reply: oneshot::Sender<Vec<Route>> },
+    QueryBestRoutes {
+        /// Response channel.
+        reply: oneshot::Sender<Vec<Route>>,
+    },
     /// Query: return routes advertised to a specific peer.
     QueryAdvertisedRoutes {
+        /// The target peer.
         peer: IpAddr,
+        /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
     },
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {
+        /// Response channel carrying the broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
     },
     /// End-of-RIB marker received from a peer for a given address family.
-    EndOfRib { peer: IpAddr, afi: Afi, safi: Safi },
+    EndOfRib {
+        /// The peer that sent the `EoR`.
+        peer: IpAddr,
+        /// Address family identifier.
+        afi: Afi,
+        /// Subsequent address family identifier.
+        safi: Safi,
+    },
     /// Peer entered graceful restart — preserve routes but mark stale.
     PeerGracefulRestart {
+        /// The restarting peer.
         peer: IpAddr,
         /// Peer's advertised restart time (seconds).
         restart_time: u16,
@@ -115,36 +144,71 @@ pub enum RibUpdate {
         llgr_stale_time: u32,
     },
     /// Query: return the number of prefixes in the Loc-RIB.
-    QueryLocRibCount { reply: oneshot::Sender<usize> },
+    QueryLocRibCount {
+        /// Response channel.
+        reply: oneshot::Sender<usize>,
+    },
     /// Query: return the number of prefixes advertised to a specific peer.
     QueryAdvertisedCount {
+        /// The target peer.
         peer: IpAddr,
+        /// Response channel.
         reply: oneshot::Sender<usize>,
     },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
-    RouteRefreshRequest { peer: IpAddr, afi: Afi, safi: Safi },
+    RouteRefreshRequest {
+        /// The requesting peer.
+        peer: IpAddr,
+        /// Address family identifier.
+        afi: Afi,
+        /// Subsequent address family identifier.
+        safi: Safi,
+    },
     /// Peer sent Beginning-of-RIB-Refresh (RFC 7313) for this family.
-    BeginRouteRefresh { peer: IpAddr, afi: Afi, safi: Safi },
+    BeginRouteRefresh {
+        /// The peer that sent `BoRR`.
+        peer: IpAddr,
+        /// Address family identifier.
+        afi: Afi,
+        /// Subsequent address family identifier.
+        safi: Safi,
+    },
     /// Peer sent End-of-RIB-Refresh (RFC 7313) for this family.
-    EndRouteRefresh { peer: IpAddr, afi: Afi, safi: Safi },
+    EndRouteRefresh {
+        /// The peer that sent `EoRR`.
+        peer: IpAddr,
+        /// Address family identifier.
+        afi: Afi,
+        /// Subsequent address family identifier.
+        safi: Safi,
+    },
     /// RPKI cache update — new VRP table for origin validation.
-    RpkiCacheUpdate { table: Arc<VrpTable> },
+    RpkiCacheUpdate {
+        /// The new VRP table snapshot.
+        table: Arc<VrpTable>,
+    },
     /// Inject a locally-originated `FlowSpec` route.
     InjectFlowSpec {
+        /// The `FlowSpec` route to inject.
         route: FlowSpecRoute,
+        /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Withdraw a locally-injected `FlowSpec` route.
     WithdrawFlowSpec {
+        /// The `FlowSpec` rule to withdraw.
         rule: FlowSpecRule,
+        /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Query `FlowSpec` routes from the Loc-RIB.
     QueryFlowSpecRoutes {
+        /// Response channel.
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
     },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {
+        /// Response channel.
         reply: oneshot::Sender<MrtSnapshotData>,
     },
 }
@@ -152,14 +216,19 @@ pub enum RibUpdate {
 /// Peer metadata for MRT `PEER_INDEX_TABLE`.
 #[derive(Debug, Clone)]
 pub struct MrtPeerEntry {
+    /// Peer's transport address.
     pub peer_addr: IpAddr,
+    /// Peer's BGP router ID.
     pub peer_bgp_id: Ipv4Addr,
+    /// Peer's autonomous system number.
     pub peer_asn: u32,
 }
 
 /// Complete RIB snapshot for MRT dump.
 #[derive(Debug)]
 pub struct MrtSnapshotData {
+    /// All known peers for the `PEER_INDEX_TABLE`.
     pub peers: Vec<MrtPeerEntry>,
+    /// All Adj-RIB-In routes across all peers.
     pub routes: Vec<Route>,
 }

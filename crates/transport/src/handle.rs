@@ -1,3 +1,5 @@
+//! Peer session handle and command types.
+
 use std::net::{IpAddr, Ipv4Addr};
 
 use bytes::Bytes;
@@ -21,11 +23,16 @@ use crate::session::PeerSession;
 pub enum SessionNotification {
     /// Session received a valid OPEN and transitioned to `OpenConfirm`.
     OpenReceived {
+        /// IP address of the remote peer.
         peer_addr: IpAddr,
+        /// Router ID from the peer's OPEN message.
         remote_router_id: Ipv4Addr,
     },
     /// Session fell back to Idle.
-    BackToIdle { peer_addr: IpAddr },
+    BackToIdle {
+        /// IP address of the remote peer.
+        peer_addr: IpAddr,
+    },
 }
 
 /// Commands sent to a running peer session.
@@ -35,17 +42,24 @@ pub enum PeerCommand {
     Start,
     /// Gracefully tear down the session (`ManualStop`).
     /// Optional reason is included in the Cease NOTIFICATION (RFC 8203).
-    Stop { reason: Option<Bytes> },
+    Stop {
+        /// Shutdown communication reason (pre-encoded), or None.
+        reason: Option<Bytes>,
+    },
     /// Shut down the task entirely.
     Shutdown,
     /// Query the current session state.
     QueryState {
+        /// Oneshot channel to receive the session state snapshot.
         reply: oneshot::Sender<PeerSessionState>,
     },
     /// Send a ROUTE-REFRESH message to the peer (RFC 2918).
     SendRouteRefresh {
+        /// Address Family Identifier.
         afi: Afi,
+        /// Subsequent Address Family Identifier.
         safi: Safi,
+        /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
@@ -55,18 +69,31 @@ pub enum PeerCommand {
 /// Snapshot of a peer session's runtime state.
 #[derive(Debug, Clone)]
 pub struct PeerSessionState {
+    /// Current FSM state.
     pub fsm_state: SessionState,
+    /// Remote peer IP address.
     pub peer_ip: IpAddr,
+    /// Number of accepted prefixes from this peer.
     pub prefix_count: usize,
+    /// Negotiated hold time (seconds), if session reached `OpenConfirm`.
     pub negotiated_hold_time: Option<u16>,
+    /// Whether 4-octet AS was negotiated, if session reached `OpenConfirm`.
     pub four_octet_as: Option<bool>,
+    /// Remote BGP router ID, if session reached `OpenConfirm`.
     pub remote_router_id: Option<Ipv4Addr>,
+    /// Total UPDATE messages received.
     pub updates_received: u64,
+    /// Total UPDATE messages sent.
     pub updates_sent: u64,
+    /// Total NOTIFICATION messages received.
     pub notifications_received: u64,
+    /// Total NOTIFICATION messages sent.
     pub notifications_sent: u64,
+    /// Number of times the session went from Established to non-Established.
     pub flap_count: u64,
+    /// Seconds since last transition to Established (0 if never established).
     pub uptime_secs: u64,
+    /// Human-readable description of the last error (empty if none).
     pub last_error: String,
 }
 

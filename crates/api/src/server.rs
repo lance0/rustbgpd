@@ -1,3 +1,5 @@
+//! gRPC server startup and wiring.
+
 use std::net::SocketAddr;
 
 use tokio::sync::{mpsc, oneshot};
@@ -20,11 +22,17 @@ use rustbgpd_telemetry::BgpMetrics;
 
 /// Configuration for the gRPC server beyond basic connectivity.
 pub struct ServeConfig {
+    /// Local autonomous system number.
     pub asn: u32,
+    /// Local BGP router ID (dotted-quad string).
     pub router_id: String,
+    /// BGP listen port (typically 179).
     pub listen_port: u32,
+    /// Shared metrics registry for Prometheus exposition.
     pub metrics: BgpMetrics,
+    /// Daemon start time for uptime calculation.
     pub start_time: tokio::time::Instant,
+    /// Optional MRT dump trigger channel (None if MRT not configured).
     pub mrt_trigger_tx: Option<MrtTriggerTx>,
 }
 

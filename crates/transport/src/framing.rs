@@ -1,3 +1,5 @@
+//! Length-delimited BGP message framing over TCP byte streams.
+
 use bytes::{Bytes, BytesMut};
 use rustbgpd_wire::constants::MAX_MESSAGE_LEN;
 use rustbgpd_wire::{DecodeError, Message, decode_message, peek_message_length};

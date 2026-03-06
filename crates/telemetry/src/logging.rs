@@ -1,3 +1,5 @@
+//! Structured JSON logging via `tracing`.
+
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 
@@ -27,6 +29,7 @@ pub fn init_logging() -> Result<(), LoggingError> {
 /// Errors from logging initialization.
 #[derive(Debug, thiserror::Error)]
 pub enum LoggingError {
+    /// The global tracing subscriber was already set.
     #[error("logging subscriber already initialized: {0}")]
     AlreadyInitialized(String),
 }

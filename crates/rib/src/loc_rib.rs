@@ -19,6 +19,7 @@ pub struct LocRib {
 }
 
 impl LocRib {
+    /// Create an empty Loc-RIB.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -57,16 +58,19 @@ impl LocRib {
         self.routes.values()
     }
 
+    /// Return the number of best routes.
     #[must_use]
     pub fn len(&self) -> usize {
         self.routes.len()
     }
 
+    /// Return `true` if no best routes are stored.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.routes.is_empty()
     }
 
+    /// Look up the best route for a prefix.
     #[must_use]
     pub fn get(&self, prefix: &Prefix) -> Option<&Route> {
         self.routes.get(prefix)
@@ -99,20 +103,24 @@ impl LocRib {
         }
     }
 
+    /// Look up the best `FlowSpec` route for a rule.
     #[must_use]
     pub fn get_flowspec(&self, rule: &FlowSpecRule) -> Option<&FlowSpecRoute> {
         self.flowspec_routes.get(rule)
     }
 
+    /// Iterate over all best `FlowSpec` routes.
     pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {
         self.flowspec_routes.values()
     }
 
+    /// Return the number of best `FlowSpec` routes.
     #[must_use]
     pub fn flowspec_len(&self) -> usize {
         self.flowspec_routes.len()
     }
 
+    /// Remove the best `FlowSpec` route for a rule. Returns `true` if it existed.
     pub fn remove_flowspec(&mut self, rule: &FlowSpecRule) -> bool {
         self.flowspec_routes.remove(rule).is_some()
     }

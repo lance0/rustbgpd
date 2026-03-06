@@ -8,7 +8,9 @@ use crate::error::DecodeError;
 /// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ipv4NlriEntry {
+    /// Add-Path path identifier (0 when Add-Path is not in use).
     pub path_id: u32,
+    /// The IPv4 prefix.
     pub prefix: Ipv4Prefix,
 }
 
@@ -17,7 +19,9 @@ pub struct Ipv4NlriEntry {
 /// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NlriEntry {
+    /// Add-Path path identifier (0 when Add-Path is not in use).
     pub path_id: u32,
+    /// The prefix (IPv4 or IPv6).
     pub prefix: Prefix,
 }
 
@@ -26,7 +30,9 @@ pub struct NlriEntry {
 /// Stored in canonical form: host bits are always zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ipv4Prefix {
+    /// Network address (host bits zeroed).
     pub addr: Ipv4Addr,
+    /// Prefix length in bits (0–32).
     pub len: u8,
 }
 
@@ -125,7 +131,9 @@ pub fn encode_nlri(prefixes: &[Ipv4Prefix], buf: &mut Vec<u8>) {
 /// Stored in canonical form: host bits are always zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ipv6Prefix {
+    /// Network address (host bits zeroed).
     pub addr: Ipv6Addr,
+    /// Prefix length in bits (0–128).
     pub len: u8,
 }
 
@@ -162,7 +170,9 @@ impl fmt::Display for Ipv6Prefix {
 /// A prefix that can be either IPv4 or IPv6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Prefix {
+    /// IPv4 prefix.
     V4(Ipv4Prefix),
+    /// IPv6 prefix.
     V6(Ipv6Prefix),
 }
 

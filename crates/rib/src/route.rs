@@ -20,10 +20,15 @@ pub enum RouteOrigin {
 /// A single route stored in the Adj-RIB-In.
 #[derive(Debug, Clone)]
 pub struct Route {
+    /// The destination prefix.
     pub prefix: Prefix,
+    /// The next-hop address (IPv4 or IPv6).
     pub next_hop: IpAddr,
+    /// The peer that advertised this route.
     pub peer: IpAddr,
+    /// BGP path attributes (ORIGIN, `AS_PATH`, communities, etc.).
     pub attributes: Vec<PathAttribute>,
+    /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or locally originated).
     pub origin_type: RouteOrigin,
@@ -156,15 +161,25 @@ impl Route {
 /// and use separate storage in the RIB.
 #[derive(Debug, Clone)]
 pub struct FlowSpecRoute {
+    /// The `FlowSpec` match rule (RFC 8955).
     pub rule: FlowSpecRule,
+    /// Address family (IPv4 or IPv6).
     pub afi: Afi,
+    /// The peer that advertised this route.
     pub peer: IpAddr,
+    /// BGP path attributes.
     pub attributes: Vec<PathAttribute>,
+    /// When this route was received (monotonic clock).
     pub received_at: Instant,
+    /// How this route was learned (eBGP, iBGP, or local).
     pub origin_type: RouteOrigin,
+    /// BGP router-id of the advertising peer.
     pub peer_router_id: Ipv4Addr,
+    /// Whether this route is stale due to graceful restart.
     pub is_stale: bool,
+    /// Whether this route is in LLGR stale phase (RFC 9494).
     pub is_llgr_stale: bool,
+    /// Add-Path path identifier (RFC 7911). 0 = no Add-Path.
     pub path_id: u32,
 }
 

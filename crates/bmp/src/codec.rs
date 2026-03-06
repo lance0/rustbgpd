@@ -49,7 +49,9 @@ const PEER_FLAG_A: u8 = 0x20; // 2-byte AS in per-peer header (legacy)
 /// AFI/SAFI-qualified stat types 9-10 must use [`AfiStatCounter`].
 #[derive(Debug, Clone)]
 pub struct StatCounter {
+    /// RFC 7854 stat type code (0-8, 11-13).
     pub stat_type: u16,
+    /// Counter or gauge value.
     pub value: u64,
 }
 
@@ -57,9 +59,13 @@ pub struct StatCounter {
 /// Payload: AFI(2) + SAFI(1) + count(8).
 #[derive(Debug, Clone)]
 pub struct AfiStatCounter {
+    /// RFC 7854 stat type code (9 or 10).
     pub stat_type: u16,
+    /// Address Family Identifier.
     pub afi: u16,
+    /// Subsequent Address Family Identifier.
     pub safi: u8,
+    /// Counter value.
     pub value: u64,
 }
 

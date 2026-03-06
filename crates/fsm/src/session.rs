@@ -1,3 +1,5 @@
+//! Core FSM session — `(State, Event) -> (State, Vec<Action>)`.
+
 use bytes::Bytes;
 
 use rustbgpd_wire::OpenMessage;

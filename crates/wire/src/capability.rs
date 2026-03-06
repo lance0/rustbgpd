@@ -7,11 +7,14 @@ use crate::error::{DecodeError, EncodeError};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u16)]
 pub enum Afi {
+    /// IPv4 (AFI 1).
     Ipv4 = 1,
+    /// IPv6 (AFI 2).
     Ipv6 = 2,
 }
 
 impl Afi {
+    /// Create from a raw 16-bit AFI value.
     #[must_use]
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
@@ -26,13 +29,16 @@ impl Afi {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Safi {
+    /// Unicast forwarding (SAFI 1).
     Unicast = 1,
+    /// Multicast forwarding (SAFI 2).
     Multicast = 2,
     /// RFC 8955 `FlowSpec`.
     FlowSpec = 133,
 }
 
 impl Safi {
+    /// Create from a raw 8-bit SAFI value.
     #[must_use]
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -47,7 +53,9 @@ impl Safi {
 /// Per-AFI/SAFI entry in the Graceful Restart capability (RFC 4724 §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GracefulRestartFamily {
+    /// Address family.
     pub afi: Afi,
+    /// Sub-address family.
     pub safi: Safi,
     /// Whether the peer preserved forwarding state for this family.
     pub forwarding_preserved: bool,
@@ -57,12 +65,16 @@ pub struct GracefulRestartFamily {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum AddPathMode {
+    /// Peer can receive multiple paths.
     Receive = 1,
+    /// Peer can send multiple paths.
     Send = 2,
+    /// Peer can both send and receive multiple paths.
     Both = 3,
 }
 
 impl AddPathMode {
+    /// Create from a raw 8-bit mode value.
     #[must_use]
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -77,8 +89,11 @@ impl AddPathMode {
 /// Per-AFI/SAFI entry in the Add-Path capability (RFC 7911 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AddPathFamily {
+    /// Address family.
     pub afi: Afi,
+    /// Sub-address family.
     pub safi: Safi,
+    /// Send/receive mode for this family.
     pub send_receive: AddPathMode,
 }
 
@@ -88,15 +103,20 @@ pub struct AddPathFamily {
 /// specified `next_hop_afi` in `MP_REACH_NLRI`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExtendedNextHopFamily {
+    /// AFI of the NLRI.
     pub nlri_afi: Afi,
+    /// SAFI of the NLRI.
     pub nlri_safi: Safi,
+    /// AFI of the next-hop encoding.
     pub next_hop_afi: Afi,
 }
 
 /// Per-AFI/SAFI entry in the Long-Lived Graceful Restart capability (RFC 9494).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LlgrFamily {
+    /// Address family.
     pub afi: Afi,
+    /// Sub-address family.
     pub safi: Safi,
     /// Whether the peer preserved forwarding state for this family during LLGR.
     pub forwarding_preserved: bool,
@@ -108,7 +128,12 @@ pub struct LlgrFamily {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Capability {
     /// RFC 4760: Multi-Protocol Extensions.
-    MultiProtocol { afi: Afi, safi: Safi },
+    MultiProtocol {
+        /// Address family.
+        afi: Afi,
+        /// Sub-address family.
+        safi: Safi,
+    },
     /// RFC 8950: Extended Next Hop Encoding.
     ExtendedNextHop(Vec<ExtendedNextHopFamily>),
     /// RFC 4724: Graceful Restart.
@@ -135,9 +160,17 @@ pub enum Capability {
     /// RFC 7911: Add-Path — advertise/receive multiple paths per prefix.
     AddPath(Vec<AddPathFamily>),
     /// RFC 6793: 4-Byte AS Number.
-    FourOctetAs { asn: u32 },
+    FourOctetAs {
+        /// The 4-byte autonomous system number.
+        asn: u32,
+    },
     /// Unknown or unrecognized capability, preserved for re-emission.
-    Unknown { code: u8, data: Bytes },
+    Unknown {
+        /// Capability code.
+        code: u8,
+        /// Raw capability value bytes.
+        data: Bytes,
+    },
 }
 
 impl Capability {

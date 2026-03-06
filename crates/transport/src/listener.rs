@@ -1,3 +1,5 @@
+//! BGP inbound TCP listener.
+
 use std::net::{IpAddr, SocketAddr};
 
 use tokio::net::{TcpListener, TcpStream};
@@ -6,7 +8,9 @@ use tracing::{debug, error, info, warn};
 
 /// An accepted inbound TCP connection.
 pub struct AcceptedConnection {
+    /// The raw TCP stream for the accepted connection.
     pub stream: TcpStream,
+    /// IP address of the remote peer.
     pub peer_addr: IpAddr,
 }
 

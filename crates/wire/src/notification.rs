@@ -4,11 +4,17 @@
 /// preserved via `Unknown(u8)` so the original byte is never lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NotificationCode {
+    /// Error in the message header (code 1).
     MessageHeader,
+    /// Error in the OPEN message (code 2).
     OpenMessage,
+    /// Error in the UPDATE message (code 3).
     UpdateMessage,
+    /// Hold timer expired without receiving a KEEPALIVE or UPDATE (code 4).
     HoldTimerExpired,
+    /// Finite state machine error (code 5).
     FsmError,
+    /// Administrative or resource-related session termination (code 6).
     Cease,
     /// A code value not defined in RFC 4271. The raw byte is preserved
     /// for logging and re-encoding.
@@ -16,6 +22,7 @@ pub enum NotificationCode {
 }
 
 impl NotificationCode {
+    /// Create from a raw code byte, mapping known values to named variants.
     #[must_use]
     pub fn from_u8(value: u8) -> Self {
         match value {
@@ -29,6 +36,7 @@ impl NotificationCode {
         }
     }
 
+    /// Return the raw byte value for this error code.
     #[must_use]
     pub fn as_u8(self) -> u8 {
         match self {
@@ -59,45 +67,67 @@ impl std::fmt::Display for NotificationCode {
 
 /// Message Header Error subcodes (code 1).
 pub mod header_subcode {
+    /// Subcode 1: Connection Not Synchronized.
     pub const CONNECTION_NOT_SYNCHRONIZED: u8 = 1;
+    /// Subcode 2: Bad Message Length.
     pub const BAD_MESSAGE_LENGTH: u8 = 2;
+    /// Subcode 3: Bad Message Type.
     pub const BAD_MESSAGE_TYPE: u8 = 3;
 }
 
 /// OPEN Message Error subcodes (code 2).
 pub mod open_subcode {
+    /// Subcode 1: Unsupported Version Number.
     pub const UNSUPPORTED_VERSION: u8 = 1;
+    /// Subcode 2: Bad Peer AS.
     pub const BAD_PEER_AS: u8 = 2;
+    /// Subcode 3: Bad BGP Identifier.
     pub const BAD_BGP_IDENTIFIER: u8 = 3;
+    /// Subcode 4: Unsupported Optional Parameter.
     pub const UNSUPPORTED_OPTIONAL_PARAMETER: u8 = 4;
     // subcode 5 deprecated (Authentication Failure)
+    /// Subcode 6: Unacceptable Hold Time.
     pub const UNACCEPTABLE_HOLD_TIME: u8 = 6;
-    /// RFC 5492
+    /// Subcode 7: Unsupported Capability (RFC 5492).
     pub const UNSUPPORTED_CAPABILITY: u8 = 7;
 }
 
 /// UPDATE Message Error subcodes (code 3).
 pub mod update_subcode {
+    /// Subcode 1: Malformed Attribute List.
     pub const MALFORMED_ATTRIBUTE_LIST: u8 = 1;
+    /// Subcode 2: Unrecognized Well-known Attribute.
     pub const UNRECOGNIZED_WELLKNOWN: u8 = 2;
+    /// Subcode 3: Missing Well-known Attribute.
     pub const MISSING_WELLKNOWN: u8 = 3;
+    /// Subcode 4: Attribute Flags Error.
     pub const ATTRIBUTE_FLAGS_ERROR: u8 = 4;
+    /// Subcode 5: Attribute Length Error.
     pub const ATTRIBUTE_LENGTH_ERROR: u8 = 5;
+    /// Subcode 6: Invalid `ORIGIN` Attribute.
     pub const INVALID_ORIGIN: u8 = 6;
     // subcode 7 deprecated (AS Routing Loop)
+    /// Subcode 8: Invalid `NEXT_HOP` Attribute.
     pub const INVALID_NEXT_HOP: u8 = 8;
+    /// Subcode 9: Optional Attribute Error.
     pub const OPTIONAL_ATTRIBUTE_ERROR: u8 = 9;
+    /// Subcode 10: Invalid Network Field.
     pub const INVALID_NETWORK_FIELD: u8 = 10;
+    /// Subcode 11: Malformed `AS_PATH`.
     pub const MALFORMED_AS_PATH: u8 = 11;
 }
 
 /// Cease subcodes (code 6, RFC 4486).
 pub mod cease_subcode {
+    /// Subcode 1: Maximum Number of Prefixes Reached.
     pub const MAX_PREFIXES: u8 = 1;
+    /// Subcode 2: Administrative Shutdown (RFC 8203).
     pub const ADMINISTRATIVE_SHUTDOWN: u8 = 2;
+    /// Subcode 3: Peer De-configured.
     pub const PEER_DECONFIGURED: u8 = 3;
-    /// RFC 8203
+    /// Subcode 4: Administrative Reset (RFC 8203).
     pub const ADMINISTRATIVE_RESET: u8 = 4;
+    /// Subcode 8: Out of Resources.
     pub const OUT_OF_RESOURCES: u8 = 8;
     /// RFC 4271 §6.8
     pub const CONNECTION_COLLISION_RESOLUTION: u8 = 7;

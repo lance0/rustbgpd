@@ -1,3 +1,5 @@
+//! Shared types for peer management across the API and `PeerManager`.
+
 use std::net::{IpAddr, Ipv6Addr};
 
 use bytes::Bytes;
@@ -11,27 +13,36 @@ use tokio::sync::oneshot;
 /// Kind of reconciliation failure returned to config reload callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReconcileFailureKind {
+    /// Failed to add a new peer.
     Add,
+    /// Failed to remove an existing peer.
     Remove,
+    /// Failed to remove the old config during a peer change.
     ChangeRemove,
+    /// Failed to add the new config during a peer change.
     ChangeAdd,
 }
 
 /// One failed peer reconciliation operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileFailure {
+    /// Which reconciliation step failed.
     pub kind: ReconcileFailureKind,
+    /// Peer address that failed.
     pub address: IpAddr,
+    /// Human-readable error description.
     pub error: String,
 }
 
 /// Result of a peer reconciliation run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReconcileResult {
+    /// List of individual failures (empty means success).
     pub failures: Vec<ReconcileFailure>,
 }
 
 impl ReconcileResult {
+    /// Returns `true` if all reconciliation operations succeeded.
     #[must_use]
     pub fn is_success(&self) -> bool {
         self.failures.is_empty()
@@ -40,46 +51,76 @@ impl ReconcileResult {
 
 /// Commands sent to the `PeerManager` task.
 pub enum PeerManagerCommand {
+    /// Add a new peer with the given configuration.
     AddPeer {
+        /// Neighbor configuration.
         config: PeerManagerNeighborConfig,
+        /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Remove an existing peer by address.
     DeletePeer {
+        /// Peer IP address to remove.
         address: IpAddr,
+        /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// List all configured peers and their state.
     ListPeers {
+        /// Reply channel returning all peer snapshots.
         reply: oneshot::Sender<Vec<PeerInfo>>,
     },
+    /// Query a single peer's state by address.
     GetPeerState {
+        /// Peer IP address to query.
         address: IpAddr,
+        /// Reply channel returning the peer snapshot (None if not found).
         reply: oneshot::Sender<Option<PeerInfo>>,
     },
+    /// Start (enable) a previously disabled peer.
     EnablePeer {
+        /// Peer IP address to enable.
         address: IpAddr,
+        /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Disable (stop) a peer, optionally with a shutdown reason.
     DisablePeer {
+        /// Peer IP address to disable.
         address: IpAddr,
         /// RFC 8203 shutdown communication reason (pre-encoded).
         reason: Option<Bytes>,
+        /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Trigger a soft inbound reset (route refresh) for the given families.
     SoftResetIn {
+        /// Peer IP address.
         address: IpAddr,
+        /// Families to refresh (empty = all configured).
         families: Vec<(Afi, Safi)>,
+        /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Accept an inbound TCP connection for a known peer.
     AcceptInbound {
+        /// Already-accepted TCP stream.
         stream: TcpStream,
+        /// Remote peer IP address.
         peer_addr: IpAddr,
     },
+    /// Reconcile peers after config reload (add/remove/change).
     ReconcilePeers {
+        /// Neighbors to add.
         added: Vec<PeerManagerNeighborConfig>,
+        /// Neighbor addresses to remove.
         removed: Vec<IpAddr>,
+        /// Neighbors whose config changed (remove + re-add).
         changed: Vec<PeerManagerNeighborConfig>,
+        /// Reply channel with reconciliation results.
         reply: oneshot::Sender<ReconcileResult>,
     },
+    /// Shut down all peers and exit the peer manager task.
     Shutdown,
 }
 
@@ -87,28 +128,46 @@ pub enum PeerManagerCommand {
 #[derive(Clone)]
 #[expect(clippy::struct_excessive_bools)]
 pub struct PeerManagerNeighborConfig {
+    /// Remote peer IP address (used as peer identifier).
     pub address: IpAddr,
+    /// Remote autonomous system number.
     pub remote_asn: u32,
+    /// Human-readable peer description.
     pub description: String,
+    /// Override hold time (None = use default).
     pub hold_time: Option<u16>,
+    /// Maximum prefixes accepted before Cease/1 (None = unlimited).
     pub max_prefixes: Option<u32>,
+    /// Negotiated address families for this peer.
     pub families: Vec<(Afi, Safi)>,
+    /// Whether to advertise Graceful Restart capability.
     pub graceful_restart: bool,
+    /// GR restart time value advertised in OPEN (seconds).
     pub gr_restart_time: u16,
+    /// Time to retain stale routes after peer restart (seconds).
     pub gr_stale_routes_time: u64,
     /// Long-lived stale routes time (RFC 9494, seconds). 0 = disabled.
     pub llgr_stale_time: u32,
     /// Whether this peer should participate in the current local
     /// restarting-speaker GR window (static startup peers only).
     pub gr_restart_eligible: bool,
+    /// Explicit IPv6 next-hop for eBGP (None = derive from socket).
     pub local_ipv6_nexthop: Option<Ipv6Addr>,
+    /// Whether this peer is a route reflector client (RFC 4456).
     pub route_reflector_client: bool,
+    /// Whether this eBGP peer is a transparent route-server client.
     pub route_server_client: bool,
+    /// Private AS removal mode for eBGP outbound `AS_PATH`.
     pub remove_private_as: RemovePrivateAs,
+    /// Enable Add-Path receive capability.
     pub add_path_receive: bool,
+    /// Enable Add-Path send capability.
     pub add_path_send: bool,
+    /// Maximum number of paths to advertise per prefix (Add-Path).
     pub add_path_send_max: u32,
+    /// Import policy chain applied to inbound routes.
     pub import_policy: Option<PolicyChain>,
+    /// Export policy chain applied to outbound routes.
     pub export_policy: Option<PolicyChain>,
 }
 
@@ -117,28 +176,47 @@ pub struct PeerManagerNeighborConfig {
 /// The binary crate converts these into config file mutations.
 /// Kept simple — only the data the neighbor service already has.
 pub enum ConfigEvent {
+    /// A neighbor was successfully added at runtime.
     NeighborAdded(PeerManagerNeighborConfig),
+    /// A neighbor was successfully deleted at runtime.
     NeighborDeleted(IpAddr),
 }
 
 /// Snapshot of a peer's state for queries.
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
+    /// Remote peer IP address.
     pub address: IpAddr,
+    /// Remote autonomous system number.
     pub remote_asn: u32,
+    /// Human-readable peer description.
     pub description: String,
+    /// Current FSM state.
     pub state: SessionState,
+    /// Whether the peer is administratively enabled.
     pub enabled: bool,
+    /// Number of accepted prefixes from this peer.
     pub prefix_count: usize,
+    /// Configured hold time override (None = default).
     pub hold_time: Option<u16>,
+    /// Maximum prefix limit (None = unlimited).
     pub max_prefixes: Option<u32>,
+    /// Configured address families.
     pub families: Vec<(Afi, Safi)>,
+    /// Private AS removal mode.
     pub remove_private_as: RemovePrivateAs,
+    /// Total UPDATE messages received.
     pub updates_received: u64,
+    /// Total UPDATE messages sent.
     pub updates_sent: u64,
+    /// Total NOTIFICATION messages received.
     pub notifications_received: u64,
+    /// Total NOTIFICATION messages sent.
     pub notifications_sent: u64,
+    /// Number of Established→non-Established transitions.
     pub flap_count: u64,
+    /// Seconds since last Established transition (0 if never).
     pub uptime_secs: u64,
+    /// Human-readable last error description.
     pub last_error: String,
 }

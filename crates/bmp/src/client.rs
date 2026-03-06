@@ -59,6 +59,7 @@ impl BmpClient {
         }
     }
 
+    /// Create a new BMP client for the given collector.
     #[must_use]
     pub fn new(
         config: BmpClientConfig,

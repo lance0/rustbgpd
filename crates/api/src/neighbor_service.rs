@@ -1,3 +1,5 @@
+//! gRPC neighbor service — add, remove, enable, disable, and list BGP peers.
+
 use std::net::IpAddr;
 use std::time::Duration;
 
@@ -36,6 +38,7 @@ fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status>
     Ok(result)
 }
 
+/// gRPC service for adding, removing, enabling, and disabling BGP neighbors.
 #[allow(clippy::struct_field_names)]
 pub struct NeighborService {
     local_asn: u32,
@@ -45,6 +48,7 @@ pub struct NeighborService {
 }
 
 impl NeighborService {
+    /// Create a new neighbor service with the given channels.
     pub fn new(
         local_asn: u32,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,

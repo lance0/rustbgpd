@@ -1,3 +1,5 @@
+//! BGP session timers (connect-retry, hold, keepalive).
+
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -12,8 +14,11 @@ use tokio::time::Sleep;
 /// stopped, `Some` means it is running.
 #[derive(Debug, Default)]
 pub struct Timers {
+    /// Connect-retry timer (RFC 4271 §8.2.2).
     pub connect_retry: Option<Pin<Box<Sleep>>>,
+    /// Hold timer — session tears down if no KEEPALIVE/UPDATE within this window.
     pub hold: Option<Pin<Box<Sleep>>>,
+    /// Keepalive timer — fires periodically to send KEEPALIVE messages.
     pub keepalive: Option<Pin<Box<Sleep>>>,
 }
 

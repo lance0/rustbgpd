@@ -25,11 +25,17 @@ use crate::nlri::{Ipv4Prefix, Ipv6Prefix};
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NumericMatch {
+    /// Last term in this operator list.
     pub end_of_list: bool,
+    /// If true, AND with the previous term; otherwise OR.
     pub and_bit: bool,
+    /// Less-than comparison flag.
     pub lt: bool,
+    /// Greater-than comparison flag.
     pub gt: bool,
+    /// Equal comparison flag.
     pub eq: bool,
+    /// Numeric value to compare against.
     pub value: u64,
 }
 
@@ -37,10 +43,15 @@ pub struct NumericMatch {
 #[expect(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BitmaskMatch {
+    /// Last term in this operator list.
     pub end_of_list: bool,
+    /// If true, AND with the previous term; otherwise OR.
     pub and_bit: bool,
+    /// Negate the match result.
     pub not_bit: bool,
+    /// If true, all specified bits must match; otherwise any bit suffices.
     pub match_bit: bool,
+    /// Bitmask value to compare against.
     pub value: u16,
 }
 
@@ -51,7 +62,9 @@ pub struct BitmaskMatch {
 /// IPv6 prefix with an additional bit offset for `FlowSpec` source/destination.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Ipv6PrefixOffset {
+    /// The IPv6 prefix.
     pub prefix: Ipv6Prefix,
+    /// Bit offset within the prefix (RFC 8956 §3.1).
     pub offset: u8,
 }
 
@@ -96,7 +109,9 @@ pub enum FlowSpecComponent {
 /// Prefix value for `FlowSpec` destination/source components.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FlowSpecPrefix {
+    /// IPv4 prefix.
     V4(Ipv4Prefix),
+    /// IPv6 prefix with bit offset.
     V6(Ipv6PrefixOffset),
 }
 
@@ -132,6 +147,7 @@ impl FlowSpecComponent {
 /// most one component of each type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FlowSpecRule {
+    /// Ordered match components (ascending type code).
     pub components: Vec<FlowSpecComponent>,
 }
 
@@ -203,19 +219,52 @@ impl fmt::Display for FlowSpecRule {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlowSpecAction {
     /// Traffic-rate (type 0x8006): rate=0.0 means drop.
-    TrafficRateBytes { asn: u16, rate: f32 },
+    TrafficRateBytes {
+        /// Informational ASN.
+        asn: u16,
+        /// Rate limit in bytes per second.
+        rate: f32,
+    },
     /// Traffic-rate-packets (type 0x800c, RFC 8955 Appendix A).
-    TrafficRatePackets { asn: u16, rate: f32 },
+    TrafficRatePackets {
+        /// Informational ASN.
+        asn: u16,
+        /// Rate limit in packets per second.
+        rate: f32,
+    },
     /// Traffic-action (type 0x8007): sample and/or terminal bits.
-    TrafficAction { sample: bool, terminal: bool },
+    TrafficAction {
+        /// Sample matching traffic.
+        sample: bool,
+        /// Terminal action — do not evaluate further `FlowSpec` rules.
+        terminal: bool,
+    },
     /// Traffic-marking (type 0x8009): set DSCP value.
-    TrafficMarking { dscp: u8 },
+    TrafficMarking {
+        /// DSCP value to mark on matching packets.
+        dscp: u8,
+    },
     /// Redirect 2-octet AS (type 0x8008).
-    Redirect2Octet { asn: u16, value: u32 },
+    Redirect2Octet {
+        /// Target 2-octet ASN.
+        asn: u16,
+        /// Local administrator value.
+        value: u32,
+    },
     /// Redirect IPv4 (type 0x8108, RFC 7674).
-    RedirectIpv4 { addr: Ipv4Addr, value: u16 },
+    RedirectIpv4 {
+        /// Target IPv4 address.
+        addr: Ipv4Addr,
+        /// Local administrator value.
+        value: u16,
+    },
     /// Redirect 4-octet AS (type 0x8208, RFC 7674).
-    Redirect4Octet { asn: u32, value: u16 },
+    Redirect4Octet {
+        /// Target 4-octet ASN.
+        asn: u32,
+        /// Local administrator value.
+        value: u16,
+    },
 }
 
 impl crate::attribute::ExtendedCommunity {

@@ -7,6 +7,7 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+/// Policy engine core — match, modify, and filter routes.
 pub mod engine;
 
 pub use engine::{

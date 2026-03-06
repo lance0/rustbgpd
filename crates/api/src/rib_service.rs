@@ -1,3 +1,5 @@
+//! gRPC RIB service — route listing, filtering, and streaming.
+
 use std::net::IpAddr;
 use std::pin::Pin;
 
@@ -10,11 +12,13 @@ use crate::proto;
 use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteEventType};
 use rustbgpd_wire::{Afi, AsPathSegment, PathAttribute, Prefix};
 
+/// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
 }
 
 impl RibService {
+    /// Create a new RIB service backed by the given RIB channel.
     pub fn new(rib_tx: mpsc::Sender<RibUpdate>) -> Self {
         Self { rib_tx }
     }

@@ -13,12 +13,16 @@ use crate::notification::update_subcode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Origin {
+    /// Learned via IGP.
     Igp = 0,
+    /// Learned via EGP.
     Egp = 1,
+    /// Origin undetermined.
     Incomplete = 2,
 }
 
 impl Origin {
+    /// Create from a raw byte value.
     #[must_use]
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -52,6 +56,7 @@ pub enum AsPathSegment {
 /// `AS_PATH` attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsPath {
+    /// Ordered list of path segments.
     pub segments: Vec<AsPathSegment>,
 }
 
@@ -69,6 +74,7 @@ impl AsPath {
             .sum()
     }
 
+    /// Returns `true` if the path has no segments.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.segments.is_empty()
@@ -160,7 +166,9 @@ pub fn is_private_asn(asn: u32) -> bool {
 /// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MpReachNlri {
+    /// Address family.
     pub afi: Afi,
+    /// Sub-address family.
     pub safi: Safi,
     /// Next-hop address for the announced prefixes.
     ///
@@ -176,6 +184,7 @@ pub struct MpReachNlri {
     /// For `FlowSpec` (SAFI 133), next-hop length is 0 and this field is
     /// unused (defaults to `0.0.0.0`).
     pub next_hop: IpAddr,
+    /// Announced NLRI entries.
     pub announced: Vec<NlriEntry>,
     /// `FlowSpec` NLRI rules (RFC 8955). Populated only when `safi == FlowSpec`.
     pub flowspec_announced: Vec<crate::flowspec::FlowSpecRule>,
@@ -187,8 +196,11 @@ pub struct MpReachNlri {
 /// For non-Add-Path peers, `path_id` is always 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MpUnreachNlri {
+    /// Address family.
     pub afi: Afi,
+    /// Sub-address family.
     pub safi: Safi,
+    /// Withdrawn NLRI entries.
     pub withdrawn: Vec<NlriEntry>,
     /// `FlowSpec` NLRI rules withdrawn (RFC 8955). Populated only when `safi == FlowSpec`.
     pub flowspec_withdrawn: Vec<crate::flowspec::FlowSpecRule>,
@@ -323,12 +335,16 @@ impl fmt::Display for ExtendedCommunity {
 /// Each field is a 32-bit unsigned integer. Display format: `"65001:100:200"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LargeCommunity {
+    /// Global administrator (typically ASN).
     pub global_admin: u32,
+    /// First local data part.
     pub local_data1: u32,
+    /// Second local data part.
     pub local_data2: u32,
 }
 
 impl LargeCommunity {
+    /// Create a new large community value.
     #[must_use]
     pub fn new(global_admin: u32, local_data1: u32, local_data2: u32) -> Self {
         Self {
@@ -355,10 +371,15 @@ impl fmt::Display for LargeCommunity {
 /// are preserved as `RawAttribute` for pass-through with the Partial bit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathAttribute {
+    /// `ORIGIN` attribute (type 1).
     Origin(Origin),
+    /// `AS_PATH` attribute (type 2).
     AsPath(AsPath),
+    /// `NEXT_HOP` attribute (type 3).
     NextHop(Ipv4Addr),
+    /// `LOCAL_PREF` attribute (type 5).
     LocalPref(u32),
+    /// `MULTI_EXIT_DISC` attribute (type 4).
     Med(u32),
     /// RFC 1997 COMMUNITIES — each u32 is high16=ASN, low16=value.
     Communities(Vec<u32>),
@@ -425,8 +446,11 @@ impl PathAttribute {
 /// All other flags and bytes are preserved unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawAttribute {
+    /// Attribute flags byte (optional, transitive, partial, extended-length).
     pub flags: u8,
+    /// Attribute type code.
     pub type_code: u8,
+    /// Raw attribute value bytes.
     pub data: Bytes,
 }
 

@@ -12,10 +12,15 @@ use crate::update::UpdateMessage;
 /// A decoded BGP message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
+    /// BGP OPEN message.
     Open(OpenMessage),
+    /// BGP UPDATE message.
     Update(UpdateMessage),
+    /// BGP NOTIFICATION message.
     Notification(NotificationMessage),
+    /// BGP KEEPALIVE message (no body).
     Keepalive,
+    /// BGP ROUTE-REFRESH message.
     RouteRefresh(RouteRefreshMessage),
 }
 

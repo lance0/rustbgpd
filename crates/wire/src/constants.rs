@@ -39,15 +39,21 @@ pub const MIN_NOTIFICATION_LEN: u16 = 21;
 
 /// Message type codes.
 pub mod message_type {
+    /// OPEN message (type 1).
     pub const OPEN: u8 = 1;
+    /// UPDATE message (type 2).
     pub const UPDATE: u8 = 2;
+    /// NOTIFICATION message (type 3).
     pub const NOTIFICATION: u8 = 3;
+    /// KEEPALIVE message (type 4).
     pub const KEEPALIVE: u8 = 4;
+    /// ROUTE-REFRESH message (type 5, RFC 2918).
     pub const ROUTE_REFRESH: u8 = 5;
 }
 
 /// OPEN optional parameter type codes (RFC 5492).
 pub mod param_type {
+    /// Capabilities Optional Parameter (RFC 5492).
     pub const CAPABILITIES: u8 = 2;
 }
 
@@ -75,13 +81,21 @@ pub mod capability_code {
 
 /// Path attribute type codes (RFC 4271 §5).
 pub mod attr_type {
+    /// `ORIGIN` (type 1).
     pub const ORIGIN: u8 = 1;
+    /// `AS_PATH` (type 2).
     pub const AS_PATH: u8 = 2;
+    /// `NEXT_HOP` (type 3).
     pub const NEXT_HOP: u8 = 3;
+    /// `MULTI_EXIT_DISC` (type 4).
     pub const MULTI_EXIT_DISC: u8 = 4;
+    /// `LOCAL_PREF` (type 5).
     pub const LOCAL_PREF: u8 = 5;
+    /// `ATOMIC_AGGREGATE` (type 6).
     pub const ATOMIC_AGGREGATE: u8 = 6;
+    /// `AGGREGATOR` (type 7).
     pub const AGGREGATOR: u8 = 7;
+    /// `COMMUNITIES` (type 8, RFC 1997).
     pub const COMMUNITIES: u8 = 8;
     /// RFC 4456: `ORIGINATOR_ID`.
     pub const ORIGINATOR_ID: u8 = 9;
@@ -99,9 +113,13 @@ pub mod attr_type {
 
 /// Path attribute flag bits (RFC 4271 §4.3).
 pub mod attr_flags {
+    /// Bit 7: attribute is optional (vs. well-known).
     pub const OPTIONAL: u8 = 0x80;
+    /// Bit 6: attribute is transitive.
     pub const TRANSITIVE: u8 = 0x40;
+    /// Bit 5: attribute is partial (incomplete transitive).
     pub const PARTIAL: u8 = 0x20;
+    /// Bit 4: attribute length is 2 bytes (vs. 1 byte).
     pub const EXTENDED_LENGTH: u8 = 0x10;
 }
 

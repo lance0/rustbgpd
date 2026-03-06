@@ -27,20 +27,35 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+/// Path attribute types and codec (`ORIGIN`, `AS_PATH`, `NEXT_HOP`, etc.).
 pub mod attribute;
+/// BGP capability negotiation types and codec (RFC 5492).
 pub mod capability;
+/// Wire-format constants: markers, lengths, type codes.
 pub mod constants;
+/// Decode and encode error types.
 pub mod error;
+/// FlowSpec NLRI types and codec (RFC 8955 / RFC 8956).
 pub mod flowspec;
+/// BGP message header codec (RFC 4271 §4.1).
 pub mod header;
+/// KEEPALIVE message encoding and validation.
 pub mod keepalive;
+/// Top-level BGP message enum and codec dispatch.
 pub mod message;
+/// NLRI prefix types and codec (IPv4, IPv6, Add-Path).
 pub mod nlri;
+/// NOTIFICATION error codes, subcodes, and shutdown communication.
 pub mod notification;
+/// NOTIFICATION message struct and codec.
 pub mod notification_msg;
+/// OPEN message struct and codec.
 pub mod open;
+/// ROUTE-REFRESH message struct and codec (RFC 2918 / RFC 7313).
 pub mod route_refresh;
+/// UPDATE message struct, codec, and builder.
 pub mod update;
+/// UPDATE attribute semantic validation (RFC 4271 §6.3).
 pub mod validate;
 
 // Re-export primary public API

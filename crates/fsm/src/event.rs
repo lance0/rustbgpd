@@ -1,3 +1,5 @@
+//! Input events that drive BGP FSM state transitions.
+
 use bytes::Bytes;
 use rustbgpd_wire::{Afi, DecodeError, NotificationMessage, OpenMessage, Safi};
 
@@ -9,7 +11,10 @@ pub enum Event {
     ManualStart,
     /// Operator requests the session be torn down.
     /// Optional reason is included in the Cease NOTIFICATION data (RFC 8203).
-    ManualStop { reason: Option<Bytes> },
+    ManualStop {
+        /// Optional shutdown reason for RFC 8203 Cease NOTIFICATION.
+        reason: Option<Bytes>,
+    },
 
     // ── Timer ─────────────────────────────────────────
     /// The connect-retry timer has expired.
@@ -37,7 +42,12 @@ pub enum Event {
     /// A valid UPDATE was processed (routes forwarded to RIB by transport).
     UpdateReceived,
     /// A valid ROUTE-REFRESH was decoded from the peer.
-    RouteRefreshReceived { afi: Afi, safi: Safi },
+    RouteRefreshReceived {
+        /// Address family identifier.
+        afi: Afi,
+        /// Subsequent address family identifier.
+        safi: Safi,
+    },
     /// UPDATE validation failed — send NOTIFICATION and tear down.
     UpdateValidationError(NotificationMessage),
     /// The wire decoder failed to parse an incoming message.
