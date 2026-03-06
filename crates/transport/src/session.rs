@@ -1414,6 +1414,13 @@ impl PeerSession {
                 _ => None,
             })
             .unwrap_or_default();
+        let aspath_len: usize = route_attrs
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::AsPath(p) => Some(p.len()),
+                _ => None,
+            })
+            .unwrap_or(0);
 
         // Body NLRI routes (IPv4)
         let mut announced: Vec<Route> = parsed
@@ -1428,6 +1435,7 @@ impl PeerSession {
                     update_communities,
                     update_large_communities,
                     &aspath_str,
+                    aspath_len,
                     rustbgpd_wire::RpkiValidation::NotFound,
                 );
                 if result.action != rustbgpd_policy::PolicyAction::Permit {
@@ -1518,6 +1526,7 @@ impl PeerSession {
                                 update_communities,
                                 update_large_communities,
                                 &aspath_str,
+                                aspath_len,
                                 rustbgpd_wire::RpkiValidation::NotFound,
                             );
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
@@ -1555,6 +1564,7 @@ impl PeerSession {
                             update_communities,
                             update_large_communities,
                             &aspath_str,
+                            aspath_len,
                             rustbgpd_wire::RpkiValidation::NotFound,
                         );
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
@@ -3387,6 +3397,8 @@ mod tests {
                 match_community: vec![],
                 match_as_path: None,
                 match_rpki_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
@@ -3539,6 +3551,8 @@ mod tests {
                 match_community: vec![],
                 match_as_path: None,
                 match_rpki_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,

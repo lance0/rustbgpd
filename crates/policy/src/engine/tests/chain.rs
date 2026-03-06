@@ -78,6 +78,8 @@ fn chain_later_remove_overrides_earlier_add() {
             match_community: vec![],
             match_as_path: None,
             match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
             modifications: RouteModifications {
                 communities_add: vec![100],
                 ..Default::default()
@@ -94,6 +96,8 @@ fn chain_later_remove_overrides_earlier_add() {
             match_community: vec![],
             match_as_path: None,
             match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
             modifications: RouteModifications {
                 communities_remove: vec![100],
                 ..Default::default()
@@ -122,6 +126,8 @@ fn make_permit_policy_with_lp(lp: u32) -> Policy {
             match_community: vec![],
             match_as_path: None,
             match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
             modifications: RouteModifications {
                 set_local_pref: Some(lp),
                 ..Default::default()
@@ -145,6 +151,7 @@ fn eval_chain(chain: &PolicyChain) -> PolicyResult {
         &[],
         &[],
         "",
+        0,
         RpkiValidation::NotFound,
     )
 }
@@ -193,6 +200,8 @@ fn chain_two_permits_accumulate_communities() {
             match_community: vec![],
             match_as_path: None,
             match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
             modifications: RouteModifications {
                 communities_add: vec![100],
                 ..Default::default()
@@ -209,6 +218,8 @@ fn chain_two_permits_accumulate_communities() {
             match_community: vec![],
             match_as_path: None,
             match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
             modifications: RouteModifications {
                 communities_add: vec![200],
                 ..Default::default()
@@ -252,6 +263,7 @@ fn evaluate_chain_none_returns_permit() {
         &[],
         &[],
         "",
+        0,
         RpkiValidation::NotFound,
     );
     assert_eq!(r.action, PolicyAction::Permit);

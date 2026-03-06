@@ -267,6 +267,10 @@ pub struct PolicyStatementConfig {
     pub match_community: Vec<String>,
     /// `AS_PATH` regex pattern (Cisco/Quagga style: `_` = boundary anchor).
     pub match_as_path: Option<String>,
+    /// Minimum `AS_PATH` length (inclusive) to match.
+    pub match_as_path_length_ge: Option<u32>,
+    /// Maximum `AS_PATH` length (inclusive) to match.
+    pub match_as_path_length_le: Option<u32>,
     /// RPKI validation state to match: `"valid"`, `"invalid"`, or `"not_found"`.
     pub match_rpki_validation: Option<String>,
     /// Set `LOCAL_PREF` on matching routes.
@@ -461,10 +465,12 @@ fn parse_policy_statements(
         if prefix.is_none()
             && match_community.is_empty()
             && match_as_path.is_none()
+            && e.match_as_path_length_ge.is_none()
+            && e.match_as_path_length_le.is_none()
             && match_rpki_validation.is_none()
         {
             return Err(ConfigError::InvalidPolicyEntry {
-                reason: "entry must have at least one of 'prefix', 'match_community', 'match_as_path', or 'match_rpki_validation'".to_string(),
+                reason: "entry must have at least one of 'prefix', 'match_community', 'match_as_path', 'match_as_path_length_ge', 'match_as_path_length_le', or 'match_rpki_validation'".to_string(),
             });
         }
 
@@ -479,6 +485,8 @@ fn parse_policy_statements(
             match_community,
             match_as_path,
             match_rpki_validation,
+            match_as_path_length_ge: e.match_as_path_length_ge,
+            match_as_path_length_le: e.match_as_path_length_le,
             modifications,
         });
     }

@@ -152,6 +152,7 @@ impl RibManager {
             let aspath_str = candidate
                 .as_path()
                 .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+            let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let result = evaluate_chain(
                 export_pol,
                 *prefix,
@@ -159,6 +160,7 @@ impl RibManager {
                 candidate.communities(),
                 candidate.large_communities(),
                 &aspath_str,
+                aspath_len,
                 candidate.validation_state,
             );
             if result.action != PolicyAction::Permit {
@@ -256,6 +258,7 @@ impl RibManager {
         let aspath_str = best
             .as_path()
             .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+        let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let result = evaluate_chain(
             export_pol,
             *prefix,
@@ -263,6 +266,7 @@ impl RibManager {
             best.communities(),
             best.large_communities(),
             &aspath_str,
+            aspath_len,
             best.validation_state,
         );
         if result.action != PolicyAction::Permit {
@@ -365,6 +369,7 @@ impl RibManager {
                 let aspath_str = best
                     .as_path()
                     .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+                let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
                 let result = rustbgpd_policy::evaluate_chain(
                     export_pol,
                     prefix_for_policy,
@@ -372,6 +377,7 @@ impl RibManager {
                     best.communities(),
                     best.large_communities(),
                     &aspath_str,
+                    aspath_len,
                     rustbgpd_wire::RpkiValidation::NotFound,
                 );
                 if result.action == rustbgpd_policy::PolicyAction::Permit {
