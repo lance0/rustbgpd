@@ -772,10 +772,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
     let chain = PolicyChain::new(vec![
         Policy {
             entries: vec![PolicyStatement {
-                prefix: Some(Prefix::V4(Ipv4Prefix::new(
-                    Ipv4Addr::UNSPECIFIED,
-                    0,
-                ))),
+                prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0))),
                 ge: Some(25),
                 le: Some(32),
                 action: PolicyAction::Deny,
