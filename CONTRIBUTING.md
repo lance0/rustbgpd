@@ -13,7 +13,7 @@
 ```bash
 git clone https://github.com/lance0/rustbgpd
 cd rustbgpd
-cargo build
+cargo build --workspace          # builds rustbgpd + rustbgpctl
 cargo test --workspace
 ```
 

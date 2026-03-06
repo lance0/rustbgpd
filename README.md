@@ -51,7 +51,7 @@ FRR 10.3.1 and BIRD 2.0.12.
 ```bash
 # Prerequisites: Rust 1.88+, protobuf-compiler
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
-cargo build --release
+cargo build --workspace --release
 ```
 
 ### 2. Configure
@@ -223,6 +223,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
 | [docs/adr/](docs/adr/) | Architecture decision records (46 ADRs) |
+| [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, code style, PR process |
