@@ -84,6 +84,15 @@ impl Route {
             .unwrap_or(100)
     }
 
+    /// Extract the explicit `LOCAL_PREF` attribute value, if present.
+    #[must_use]
+    pub fn local_pref_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|a| match a {
+            PathAttribute::LocalPref(lp) => Some(*lp),
+            _ => None,
+        })
+    }
+
     /// Extract the MED attribute value, defaulting to 0.
     #[must_use]
     pub fn med(&self) -> u32 {
@@ -94,6 +103,15 @@ impl Route {
                 _ => None,
             })
             .unwrap_or(0)
+    }
+
+    /// Extract the explicit MED attribute value, if present.
+    #[must_use]
+    pub fn med_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|a| match a {
+            PathAttribute::Med(m) => Some(*m),
+            _ => None,
+        })
     }
 
     /// Extract COMMUNITIES (RFC 1997) values, returning empty slice if absent.
@@ -217,6 +235,15 @@ impl FlowSpecRoute {
             .unwrap_or(100)
     }
 
+    /// Extract the explicit `LOCAL_PREF` attribute value, if present.
+    #[must_use]
+    pub fn local_pref_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|a| match a {
+            PathAttribute::LocalPref(lp) => Some(*lp),
+            _ => None,
+        })
+    }
+
     /// Extract the MED attribute value, defaulting to 0.
     #[must_use]
     pub fn med(&self) -> u32 {
@@ -227,6 +254,15 @@ impl FlowSpecRoute {
                 _ => None,
             })
             .unwrap_or(0)
+    }
+
+    /// Extract the explicit MED attribute value, if present.
+    #[must_use]
+    pub fn med_attr(&self) -> Option<u32> {
+        self.attributes.iter().find_map(|a| match a {
+            PathAttribute::Med(m) => Some(*m),
+            _ => None,
+        })
     }
 
     /// Extract COMMUNITIES (RFC 1997) values, returning empty slice if absent.

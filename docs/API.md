@@ -123,12 +123,19 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 | `GetPolicy` | Return one named policy definition |
 | `SetPolicy` | Create or replace a named policy definition |
 | `DeletePolicy` | Delete a named policy definition (rejected while referenced) |
+| `ListNeighborSets` / `GetNeighborSet` | List or fetch a named neighbor set |
+| `SetNeighborSet` / `DeleteNeighborSet` | Create/replace or delete a named neighbor set |
 | `GetGlobalPolicyChains` | Return global import/export chain assignments |
 | `SetGlobalImportChain` / `SetGlobalExportChain` | Replace global chain assignment |
 | `ClearGlobalImportChain` / `ClearGlobalExportChain` | Remove the global chain assignment |
 | `GetNeighborPolicyChains` | Return one neighbor's import/export chain assignments |
 | `SetNeighborImportChain` / `SetNeighborExportChain` | Replace one neighbor's chain assignment |
 | `ClearNeighborImportChain` / `ClearNeighborExportChain` | Remove one neighbor's chain assignment |
+
+Policy statements support the same match surface as TOML config:
+`prefix`, `ge`, `le`, `match_community`, `match_as_path`,
+`match_neighbor_set`, `match_route_type`, `match_as_path_length_ge/le`,
+`match_local_pref_ge/le`, `match_med_ge/le`, and `match_rpki_validation`.
 
 ### Create or replace a named policy
 
@@ -167,12 +174,70 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.PolicyService/SetNeighborExportChain
 ```
 
+### Create a named neighbor set
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "name": "ix-clients",
+    "definition": {
+      "addresses": ["10.0.0.2", "10.0.0.3"],
+      "remote_asns": [65002, 65003],
+      "peer_groups": ["rs-clients"]
+    }
+  }' \
+  localhost:50051 rustbgpd.v1.PolicyService/SetNeighborSet
+```
+
 ### Delete a named policy
 
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"name": "tag-internal"}' \
   localhost:50051 rustbgpd.v1.PolicyService/DeletePolicy
+```
+
+---
+
+## PeerGroupService
+
+Peer-group CRUD plus neighbor membership assignment. Group definitions are
+full-replace and persist back to TOML. When an inherited setting changes, the
+daemon recomputes effective per-neighbor config and reconciles only the peers
+that reference that group.
+
+| RPC | Description |
+|-----|-------------|
+| `ListPeerGroups` | List all peer-group definitions |
+| `GetPeerGroup` | Return one peer-group definition |
+| `SetPeerGroup` | Create or replace a peer-group definition |
+| `DeletePeerGroup` | Delete a peer-group definition (rejected while referenced) |
+| `SetNeighborPeerGroup` | Assign one neighbor to a peer group |
+| `ClearNeighborPeerGroup` | Remove a neighbor's peer-group reference |
+
+### Create or replace a peer group
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "name": "rs-clients",
+    "definition": {
+      "description": "IX route-server clients",
+      "families": ["ipv4_unicast", "ipv6_unicast"],
+      "hold_time": 90,
+      "route_server_client": true,
+      "export_policy_chain": ["tag-ixp", "suppress-leaks"]
+    }
+  }' \
+  localhost:50051 rustbgpd.v1.PeerGroupService/SetPeerGroup
+```
+
+### Assign a neighbor to a peer group
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"address": "10.0.0.2", "peer_group": "rs-clients"}' \
+  localhost:50051 rustbgpd.v1.PeerGroupService/SetNeighborPeerGroup
 ```
 
 ---

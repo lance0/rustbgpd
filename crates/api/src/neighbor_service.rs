@@ -144,6 +144,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         max_prefixes: info.max_prefixes.unwrap_or(0),
         families,
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
+        peer_group: info.peer_group.clone().unwrap_or_default(),
     };
 
     let state = match info.state {
@@ -207,6 +208,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             address,
             remote_asn: config.remote_asn,
             description: config.description,
+            peer_group: if config.peer_group.trim().is_empty() {
+                None
+            } else {
+                Some(config.peer_group)
+            },
             hold_time: if config.hold_time > 0 {
                 Some(
                     u16::try_from(config.hold_time)
@@ -220,6 +226,8 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             } else {
                 None
             },
+            md5_password: None,
+            ttl_security: false,
             families,
             graceful_restart: true,
             gr_restart_time: 120,
@@ -483,6 +491,7 @@ mod tests {
                 hold_time: 90,
                 max_prefixes: 0,
                 families: Vec::new(),
+                peer_group: String::new(),
                 remove_private_as: String::new(),
             }),
         });
@@ -502,6 +511,7 @@ mod tests {
                 hold_time: 2,
                 max_prefixes: 0,
                 families: Vec::new(),
+                peer_group: String::new(),
                 remove_private_as: String::new(),
             }),
         });
@@ -574,6 +584,7 @@ mod tests {
                     address: addr,
                     remote_asn: 65001,
                     description: String::new(),
+                    peer_group: None,
                     state: rustbgpd_fsm::SessionState::Established,
                     enabled: true,
                     prefix_count: 5,
@@ -615,6 +626,7 @@ mod tests {
             address: "10.0.0.1".parse().unwrap(),
             remote_asn: 65001,
             description: String::new(),
+            peer_group: None,
             state: rustbgpd_fsm::SessionState::Established,
             enabled: true,
             prefix_count: 0,
@@ -652,6 +664,7 @@ mod tests {
                 hold_time: 90,
                 max_prefixes: 0,
                 families: Vec::new(),
+                peer_group: String::new(),
                 remove_private_as: String::new(),
             }),
         });
@@ -687,6 +700,7 @@ mod tests {
                 hold_time: 90,
                 max_prefixes: 0,
                 families: Vec::new(),
+                peer_group: String::new(),
                 remove_private_as: "bogus".into(),
             }),
         });
@@ -706,6 +720,7 @@ mod tests {
                 hold_time: 90,
                 max_prefixes: 0,
                 families: Vec::new(),
+                peer_group: String::new(),
                 remove_private_as: "all".into(),
             }),
         });

@@ -1,9 +1,10 @@
 use super::{
     Afi, CommunityMatch, ConfigError, ExtendedCommunity, HashMap, IpAddr, Ipv4Addr, Ipv4Prefix,
-    Ipv6Addr, Ipv6Prefix, LargeCommunity, NamedPolicyConfig, NextHopAction, Policy, PolicyAction,
-    PolicyChain, PolicyStatement, PolicyStatementConfig, Prefix, RouteModifications, Safi,
-    parse_community_match,
+    Ipv6Addr, Ipv6Prefix, LargeCommunity, NamedPolicyConfig, NeighborSetConfig, NextHopAction,
+    PeerGroupConfig, Policy, PolicyAction, PolicyChain, PolicyStatement, PolicyStatementConfig,
+    Prefix, RouteModifications, Safi, parse_community_match,
 };
+use rustbgpd_policy::{NeighborSetMatch, RouteType};
 
 /// Parse and validate a single CIDR prefix string with optional ge/le bounds.
 fn parse_prefix_entry(
@@ -75,8 +76,14 @@ fn parse_prefix_entry(
 }
 
 /// Parse a list of statement configs into `PolicyStatement`s.
+#[expect(
+    clippy::too_many_lines,
+    reason = "maps the full policy statement config surface into runtime matches"
+)]
 fn parse_policy_statements(
     entries: &[PolicyStatementConfig],
+    neighbor_sets: &HashMap<String, NeighborSetConfig>,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
 ) -> Result<Vec<PolicyStatement>, ConfigError> {
     let mut parsed = Vec::with_capacity(entries.len());
     for e in entries {
@@ -131,6 +138,18 @@ fn parse_policy_statements(
             None
         };
 
+        let match_neighbor_set = if let Some(ref name) = e.match_neighbor_set {
+            Some(resolve_neighbor_set(name, neighbor_sets, peer_groups)?)
+        } else {
+            None
+        };
+
+        let match_route_type = if let Some(ref value) = e.match_route_type {
+            Some(parse_route_type(value)?)
+        } else {
+            None
+        };
+
         if let (Some(ge), Some(le)) = (e.match_as_path_length_ge, e.match_as_path_length_le)
             && ge > le
         {
@@ -141,15 +160,37 @@ fn parse_policy_statements(
             });
         }
 
+        if let (Some(ge), Some(le)) = (e.match_local_pref_ge, e.match_local_pref_le)
+            && ge > le
+        {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("match_local_pref_ge ({ge}) exceeds match_local_pref_le ({le})"),
+            });
+        }
+
+        if let (Some(ge), Some(le)) = (e.match_med_ge, e.match_med_le)
+            && ge > le
+        {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!("match_med_ge ({ge}) exceeds match_med_le ({le})"),
+            });
+        }
+
         if prefix.is_none()
             && match_community.is_empty()
             && match_as_path.is_none()
+            && match_neighbor_set.is_none()
+            && match_route_type.is_none()
             && e.match_as_path_length_ge.is_none()
             && e.match_as_path_length_le.is_none()
+            && e.match_local_pref_ge.is_none()
+            && e.match_local_pref_le.is_none()
+            && e.match_med_ge.is_none()
+            && e.match_med_le.is_none()
             && match_rpki_validation.is_none()
         {
             return Err(ConfigError::InvalidPolicyEntry {
-                reason: "entry must have at least one of 'prefix', 'match_community', 'match_as_path', 'match_as_path_length_ge', 'match_as_path_length_le', or 'match_rpki_validation'".to_string(),
+                reason: "entry must have at least one match condition".to_string(),
             });
         }
 
@@ -163,9 +204,15 @@ fn parse_policy_statements(
             action,
             match_community,
             match_as_path,
+            match_neighbor_set,
+            match_route_type,
             match_rpki_validation,
             match_as_path_length_ge: e.match_as_path_length_ge,
             match_as_path_length_le: e.match_as_path_length_le,
+            match_local_pref_ge: e.match_local_pref_ge,
+            match_local_pref_le: e.match_local_pref_le,
+            match_med_ge: e.match_med_ge,
+            match_med_le: e.match_med_le,
             modifications,
         });
     }
@@ -175,11 +222,13 @@ fn parse_policy_statements(
 /// Parse inline policy entries into a single `Policy` with `default_action=Permit`.
 pub(super) fn parse_policy(
     entries: &[PolicyStatementConfig],
+    neighbor_sets: &HashMap<String, NeighborSetConfig>,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
 ) -> Result<Option<Policy>, ConfigError> {
     if entries.is_empty() {
         return Ok(None);
     }
-    let parsed = parse_policy_statements(entries)?;
+    let parsed = parse_policy_statements(entries, neighbor_sets, peer_groups)?;
     Ok(Some(Policy {
         entries: parsed,
         default_action: PolicyAction::Permit,
@@ -190,6 +239,8 @@ pub(super) fn parse_policy(
 pub(super) fn parse_named_policy(
     name: &str,
     cfg: &NamedPolicyConfig,
+    neighbor_sets: &HashMap<String, NeighborSetConfig>,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
 ) -> Result<Policy, ConfigError> {
     let default_action = match cfg.default_action.as_str() {
         "permit" => PolicyAction::Permit,
@@ -202,7 +253,7 @@ pub(super) fn parse_named_policy(
             });
         }
     };
-    let entries = parse_policy_statements(&cfg.statements)?;
+    let entries = parse_policy_statements(&cfg.statements, neighbor_sets, peer_groups)?;
     Ok(Policy {
         entries,
         default_action,
@@ -213,6 +264,8 @@ pub(super) fn parse_named_policy(
 pub(super) fn resolve_chain(
     names: &[String],
     definitions: &HashMap<String, NamedPolicyConfig>,
+    neighbor_sets: &HashMap<String, NeighborSetConfig>,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
 ) -> Result<Option<PolicyChain>, ConfigError> {
     if names.is_empty() {
         return Ok(None);
@@ -223,10 +276,74 @@ pub(super) fn resolve_chain(
             definitions
                 .get(name.as_str())
                 .ok_or_else(|| ConfigError::UndefinedPolicy { name: name.clone() })
-                .and_then(|cfg| parse_named_policy(name, cfg))
+                .and_then(|cfg| parse_named_policy(name, cfg, neighbor_sets, peer_groups))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Some(PolicyChain::new(policies)))
+}
+
+fn resolve_neighbor_set(
+    name: &str,
+    neighbor_sets: &HashMap<String, NeighborSetConfig>,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
+) -> Result<NeighborSetMatch, ConfigError> {
+    let set = neighbor_sets
+        .get(name)
+        .ok_or_else(|| ConfigError::InvalidNeighborSet {
+            reason: format!("undefined neighbor set {name:?}"),
+        })?;
+    parse_neighbor_set(name, set, peer_groups)
+}
+
+pub(super) fn parse_neighbor_set(
+    name: &str,
+    set: &NeighborSetConfig,
+    peer_groups: &HashMap<String, PeerGroupConfig>,
+) -> Result<NeighborSetMatch, ConfigError> {
+    if set.addresses.is_empty() && set.remote_asns.is_empty() && set.peer_groups.is_empty() {
+        return Err(ConfigError::InvalidNeighborSet {
+            reason: format!("neighbor_set {name:?} must not be empty"),
+        });
+    }
+
+    let addresses = set
+        .addresses
+        .iter()
+        .map(|value| {
+            value
+                .parse::<IpAddr>()
+                .map_err(|e| ConfigError::InvalidNeighborSet {
+                    reason: format!("neighbor_set {name:?}: invalid address {value:?}: {e}"),
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for group in &set.peer_groups {
+        if !peer_groups.contains_key(group) {
+            return Err(ConfigError::UndefinedPeerGroup {
+                name: group.clone(),
+            });
+        }
+    }
+
+    Ok(NeighborSetMatch {
+        addresses,
+        remote_asns: set.remote_asns.clone(),
+        peer_groups: set.peer_groups.clone(),
+    })
+}
+
+fn parse_route_type(value: &str) -> Result<RouteType, ConfigError> {
+    match value {
+        "local" => Ok(RouteType::Local),
+        "internal" => Ok(RouteType::Internal),
+        "external" => Ok(RouteType::External),
+        other => Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "invalid match_route_type {other:?}: expected \"local\", \"internal\", or \"external\""
+            ),
+        }),
+    }
 }
 
 /// Parse the `set_*` fields into `RouteModifications`, with validation.

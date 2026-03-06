@@ -3,12 +3,14 @@
 use std::net::IpAddr;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, NamedPolicyDefinition, NamedPolicySnapshot, PolicyAsPathPrependConfig,
-    PolicyChainAssignment, PolicyStatementDefinition,
+    AddPathDefinition, ConfigEvent, NamedNeighborSetSnapshot, NamedPeerGroupSnapshot,
+    NamedPolicyDefinition, NamedPolicySnapshot, NeighborSetDefinition, PeerGroupDefinition,
+    PolicyAsPathPrependConfig, PolicyChainAssignment, PolicyStatementDefinition,
 };
 
 use crate::config::{
-    AsPathPrependConfig, Config, ConfigError, NamedPolicyConfig, Neighbor, PolicyStatementConfig,
+    AddPathConfig, AsPathPrependConfig, Config, ConfigError, NamedPolicyConfig, Neighbor,
+    NeighborSetConfig, PeerGroupConfig, PolicyStatementConfig,
 };
 
 fn api_prepend_to_config(
@@ -29,6 +31,22 @@ fn config_prepend_to_api(
     })
 }
 
+fn api_add_path_to_config(add_path: Option<AddPathDefinition>) -> Option<AddPathConfig> {
+    add_path.map(|add_path| AddPathConfig {
+        receive: add_path.receive,
+        send: add_path.send,
+        send_max: add_path.send_max,
+    })
+}
+
+fn config_add_path_to_api(add_path: Option<&AddPathConfig>) -> Option<AddPathDefinition> {
+    add_path.map(|add_path| AddPathDefinition {
+        receive: add_path.receive,
+        send: add_path.send,
+        send_max: add_path.send_max,
+    })
+}
+
 fn api_statement_to_config(statement: PolicyStatementDefinition) -> PolicyStatementConfig {
     PolicyStatementConfig {
         action: statement.action,
@@ -37,8 +55,14 @@ fn api_statement_to_config(statement: PolicyStatementDefinition) -> PolicyStatem
         le: statement.le,
         match_community: statement.match_community,
         match_as_path: statement.match_as_path,
+        match_neighbor_set: statement.match_neighbor_set,
+        match_route_type: statement.match_route_type,
         match_as_path_length_ge: statement.match_as_path_length_ge,
         match_as_path_length_le: statement.match_as_path_length_le,
+        match_local_pref_ge: statement.match_local_pref_ge,
+        match_local_pref_le: statement.match_local_pref_le,
+        match_med_ge: statement.match_med_ge,
+        match_med_le: statement.match_med_le,
         match_rpki_validation: statement.match_rpki_validation,
         set_local_pref: statement.set_local_pref,
         set_med: statement.set_med,
@@ -57,8 +81,14 @@ fn config_statement_to_api(statement: &PolicyStatementConfig) -> PolicyStatement
         le: statement.le,
         match_community: statement.match_community.clone(),
         match_as_path: statement.match_as_path.clone(),
+        match_neighbor_set: statement.match_neighbor_set.clone(),
+        match_route_type: statement.match_route_type.clone(),
         match_as_path_length_ge: statement.match_as_path_length_ge,
         match_as_path_length_le: statement.match_as_path_length_le,
+        match_local_pref_ge: statement.match_local_pref_ge,
+        match_local_pref_le: statement.match_local_pref_le,
+        match_med_ge: statement.match_med_ge,
+        match_med_le: statement.match_med_le,
         match_rpki_validation: statement.match_rpki_validation.clone(),
         set_local_pref: statement.set_local_pref,
         set_med: statement.set_med,
@@ -88,6 +118,84 @@ fn config_definition_to_api(definition: &NamedPolicyConfig) -> NamedPolicyDefini
             .iter()
             .map(config_statement_to_api)
             .collect(),
+    }
+}
+
+fn api_neighbor_set_to_config(definition: NeighborSetDefinition) -> NeighborSetConfig {
+    NeighborSetConfig {
+        addresses: definition.addresses,
+        remote_asns: definition.remote_asns,
+        peer_groups: definition.peer_groups,
+    }
+}
+
+fn config_neighbor_set_to_api(definition: &NeighborSetConfig) -> NeighborSetDefinition {
+    NeighborSetDefinition {
+        addresses: definition.addresses.clone(),
+        remote_asns: definition.remote_asns.clone(),
+        peer_groups: definition.peer_groups.clone(),
+    }
+}
+
+fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig {
+    PeerGroupConfig {
+        hold_time: definition.hold_time,
+        max_prefixes: definition.max_prefixes,
+        md5_password: definition.md5_password,
+        ttl_security: definition.ttl_security,
+        families: definition.families,
+        graceful_restart: definition.graceful_restart,
+        gr_restart_time: definition.gr_restart_time,
+        gr_stale_routes_time: definition.gr_stale_routes_time,
+        llgr_stale_time: definition.llgr_stale_time,
+        local_ipv6_nexthop: definition.local_ipv6_nexthop,
+        route_reflector_client: definition.route_reflector_client,
+        route_server_client: definition.route_server_client,
+        remove_private_as: definition.remove_private_as,
+        add_path: api_add_path_to_config(definition.add_path),
+        import_policy: definition
+            .import_policy
+            .into_iter()
+            .map(api_statement_to_config)
+            .collect(),
+        export_policy: definition
+            .export_policy
+            .into_iter()
+            .map(api_statement_to_config)
+            .collect(),
+        import_policy_chain: definition.import_policy_chain,
+        export_policy_chain: definition.export_policy_chain,
+    }
+}
+
+fn config_peer_group_to_api(definition: &PeerGroupConfig) -> PeerGroupDefinition {
+    PeerGroupDefinition {
+        hold_time: definition.hold_time,
+        max_prefixes: definition.max_prefixes,
+        md5_password: definition.md5_password.clone(),
+        ttl_security: definition.ttl_security,
+        families: definition.families.clone(),
+        graceful_restart: definition.graceful_restart,
+        gr_restart_time: definition.gr_restart_time,
+        gr_stale_routes_time: definition.gr_stale_routes_time,
+        llgr_stale_time: definition.llgr_stale_time,
+        local_ipv6_nexthop: definition.local_ipv6_nexthop.clone(),
+        route_reflector_client: definition.route_reflector_client,
+        route_server_client: definition.route_server_client,
+        remove_private_as: definition.remove_private_as.clone(),
+        add_path: config_add_path_to_api(definition.add_path.as_ref()),
+        import_policy: definition
+            .import_policy
+            .iter()
+            .map(config_statement_to_api)
+            .collect(),
+        export_policy: definition
+            .export_policy
+            .iter()
+            .map(config_statement_to_api)
+            .collect(),
+        import_policy_chain: definition.import_policy_chain.clone(),
+        export_policy_chain: definition.export_policy_chain.clone(),
     }
 }
 
@@ -132,6 +240,92 @@ pub fn policy_references(config: &Config, name: &str) -> Vec<String> {
     refs
 }
 
+/// Return all policy statements that reference the named neighbor set.
+#[must_use]
+pub fn neighbor_set_references(config: &Config, name: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+
+    for (policy_name, definition) in &config.policy.definitions {
+        if definition
+            .statements
+            .iter()
+            .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
+        {
+            refs.push(format!("policy definition {policy_name}"));
+        }
+    }
+
+    if config
+        .policy
+        .import
+        .iter()
+        .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
+    {
+        refs.push("global import policy".to_string());
+    }
+    if config
+        .policy
+        .export
+        .iter()
+        .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
+    {
+        refs.push("global export policy".to_string());
+    }
+
+    for neighbor in &config.neighbors {
+        if neighbor
+            .import_policy
+            .iter()
+            .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
+        {
+            refs.push(format!("neighbor {} import_policy", neighbor.address));
+        }
+        if neighbor
+            .export_policy
+            .iter()
+            .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
+        {
+            refs.push(format!("neighbor {} export_policy", neighbor.address));
+        }
+    }
+
+    for (group_name, group) in &config.peer_groups {
+        if group
+            .import_policy
+            .iter()
+            .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
+        {
+            refs.push(format!("peer_group {group_name} import_policy"));
+        }
+        if group
+            .export_policy
+            .iter()
+            .any(|statement| statement.match_neighbor_set.as_deref() == Some(name))
+        {
+            refs.push(format!("peer_group {group_name} export_policy"));
+        }
+    }
+
+    refs
+}
+
+/// Return all references to the named peer group.
+#[must_use]
+pub fn peer_group_references(config: &Config, name: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    for neighbor in &config.neighbors {
+        if neighbor.peer_group.as_deref() == Some(name) {
+            refs.push(format!("neighbor {}", neighbor.address));
+        }
+    }
+    for (set_name, set) in &config.policy.neighbor_sets {
+        if set.peer_groups.iter().any(|group| group == name) {
+            refs.push(format!("neighbor_set {set_name}"));
+        }
+    }
+    refs
+}
+
 /// Apply a config event to a config snapshot and validate the result.
 #[expect(
     clippy::too_many_lines,
@@ -149,10 +343,11 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     address: cfg.address.to_string(),
                     remote_asn: cfg.remote_asn,
                     description: Some(cfg.description.clone()),
+                    peer_group: cfg.peer_group.clone(),
                     hold_time: cfg.hold_time,
                     max_prefixes: cfg.max_prefixes,
-                    md5_password: None,
-                    ttl_security: false,
+                    md5_password: cfg.md5_password.clone(),
+                    ttl_security: Some(cfg.ttl_security),
                     families: cfg
                         .families
                         .iter()
@@ -181,8 +376,8 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                         None
                     },
                     local_ipv6_nexthop: cfg.local_ipv6_nexthop.map(|addr| addr.to_string()),
-                    route_reflector_client: cfg.route_reflector_client,
-                    route_server_client: cfg.route_server_client,
+                    route_reflector_client: Some(cfg.route_reflector_client),
+                    route_server_client: Some(cfg.route_server_client),
                     remove_private_as: match cfg.remove_private_as {
                         rustbgpd_transport::RemovePrivateAs::Disabled => None,
                         rustbgpd_transport::RemovePrivateAs::Remove => Some("remove".to_string()),
@@ -222,6 +417,15 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         ConfigEvent::DeletePolicy { name } => {
             config.policy.definitions.remove(name);
         }
+        ConfigEvent::SetNeighborSet { name, definition } => {
+            config
+                .policy
+                .neighbor_sets
+                .insert(name.clone(), api_neighbor_set_to_config(definition.clone()));
+        }
+        ConfigEvent::DeleteNeighborSet { name } => {
+            config.policy.neighbor_sets.remove(name);
+        }
         ConfigEvent::SetGlobalImportChain { policy_names } => {
             config.policy.import_chain.clone_from(policy_names);
             config.policy.import.clear();
@@ -258,6 +462,23 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
         ConfigEvent::ClearNeighborExportChain { address } => {
             neighbor_mut(config, *address)?.export_policy_chain.clear();
         }
+        ConfigEvent::SetPeerGroup { name, definition } => {
+            config
+                .peer_groups
+                .insert(name.clone(), api_peer_group_to_config(definition.clone()));
+        }
+        ConfigEvent::DeletePeerGroup { name } => {
+            config.peer_groups.remove(name);
+        }
+        ConfigEvent::SetNeighborPeerGroup {
+            address,
+            peer_group,
+        } => {
+            neighbor_mut(config, *address)?.peer_group = Some(peer_group.clone());
+        }
+        ConfigEvent::ClearNeighborPeerGroup { address } => {
+            neighbor_mut(config, *address)?.peer_group = None;
+        }
     }
     config.validate()
 }
@@ -285,6 +506,54 @@ pub fn named_policy_from_config(config: &Config, name: &str) -> Option<NamedPoli
         .definitions
         .get(name)
         .map(config_definition_to_api)
+}
+
+/// Convert all named neighbor-set definitions from config schema to API payloads.
+#[must_use]
+pub fn named_neighbor_sets_from_config(config: &Config) -> Vec<NamedNeighborSetSnapshot> {
+    let mut neighbor_sets: Vec<_> = config
+        .policy
+        .neighbor_sets
+        .iter()
+        .map(|(name, definition)| NamedNeighborSetSnapshot {
+            name: name.clone(),
+            definition: config_neighbor_set_to_api(definition),
+        })
+        .collect();
+    neighbor_sets.sort_by(|a, b| a.name.cmp(&b.name));
+    neighbor_sets
+}
+
+/// Convert one named neighbor set from config schema to API payload.
+pub fn named_neighbor_set_from_config(
+    config: &Config,
+    name: &str,
+) -> Option<NeighborSetDefinition> {
+    config
+        .policy
+        .neighbor_sets
+        .get(name)
+        .map(config_neighbor_set_to_api)
+}
+
+/// Convert all peer-group definitions from config schema to API payloads.
+#[must_use]
+pub fn named_peer_groups_from_config(config: &Config) -> Vec<NamedPeerGroupSnapshot> {
+    let mut peer_groups: Vec<_> = config
+        .peer_groups
+        .iter()
+        .map(|(name, definition)| NamedPeerGroupSnapshot {
+            name: name.clone(),
+            definition: config_peer_group_to_api(definition),
+        })
+        .collect();
+    peer_groups.sort_by(|a, b| a.name.cmp(&b.name));
+    peer_groups
+}
+
+/// Convert one peer-group definition from config schema to API payload.
+pub fn named_peer_group_from_config(config: &Config, name: &str) -> Option<PeerGroupDefinition> {
+    config.peer_groups.get(name).map(config_peer_group_to_api)
 }
 
 /// Return the configured global named policy chains.
@@ -349,8 +618,14 @@ remote_asn = 65002
                         le: Some(16),
                         match_community: Vec::new(),
                         match_as_path: None,
+                        match_neighbor_set: None,
+                        match_route_type: None,
                         match_as_path_length_ge: None,
                         match_as_path_length_le: None,
+                        match_local_pref_ge: None,
+                        match_local_pref_le: None,
+                        match_med_ge: None,
+                        match_med_le: None,
                         match_rpki_validation: None,
                         set_local_pref: Some(200),
                         set_med: None,

@@ -42,7 +42,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Tokio transport — single task per peer, inbound listener, TCP MD5/GTSM, session counters, NLRI batching, TCP collision detection (RFC 4271 §6.8)
 - [x] RIB — Adj-RIB-In, Loc-RIB best-path (RFC 4271 §9.1.2 with eBGP preference), Adj-RIB-Out with split horizon, dirty peer resync, route injection, WatchRoutes streaming
 - [x] Policy — prefix lists with ge/le matching (IPv4 + IPv6), per-peer import/export, global fallback
-- [x] gRPC API — 6 services: Global, Neighbor, Policy, RIB, Injection, Control (all IPv6-capable)
+- [x] gRPC API — 7 services: Global, Neighbor, Policy, PeerGroup, RIB, Injection, Control (all IPv6-capable)
 - [x] Dynamic peer management — add, delete, enable, disable neighbors at runtime (IPv4 + IPv6)
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
@@ -132,6 +132,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [x] **Transparent route server mode** — `route_server_client` per neighbor: skip automatic local ASN prepend, preserve original NEXT_HOP on eBGP unicast re-advertisement for IX route-server clients; FlowSpec transparency remains deferred (ADR-0039)
 - [x] **GR restarting speaker** — minimal honest mode: static peers advertise `R=1` after coordinated restart via persisted marker file; `forwarding_preserved` remains false until FIB integration exists (ADR-0040)
 - [x] **Policy chaining + named policies** — named TOML definitions, GoBGP-style chain evaluation (permit=continue, deny=stop), configurable default_action (ADR-0036)
+- [x] **Peer groups + peer-aware policy matching** — reusable peer templates with runtime CRUD, neighbor-set matching, route-type matching, and MED / `LOCAL_PREF` comparison in policy; persisted through TOML config snapshots
 - [x] **Extended nexthop** (RFC 8950) — capability code 5, automatic dual-stack negotiation, IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [x] **CLI tool** — `rustbgpctl` wrapping gRPC with human-readable and JSON output; covers all supported RPCs
 - [x] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; threaded from gRPC DisableNeighbor through transport

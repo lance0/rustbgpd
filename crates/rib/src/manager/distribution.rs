@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use rustbgpd_policy::{PolicyAction, PolicyChain, RouteContext, evaluate_chain};
+use rustbgpd_policy::{PolicyAction, PolicyChain, RouteContext, RouteType, evaluate_chain};
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tracing::{debug, warn};
@@ -17,6 +17,14 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
 use crate::update::OutboundRouteUpdate;
+
+fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
+    match origin {
+        crate::route::RouteOrigin::Local => RouteType::Local,
+        crate::route::RouteOrigin::Ibgp => RouteType::Internal,
+        crate::route::RouteOrigin::Ebgp => RouteType::External,
+    }
+}
 
 impl RibManager {
     pub(super) fn handle_replace_peer_export_policy(
@@ -284,6 +292,8 @@ impl RibManager {
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         prefix: &Prefix,
         target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
         send_max: u32,
         target_is_ebgp: bool,
         target_is_rr_client: bool,
@@ -360,6 +370,12 @@ impl RibManager {
                 as_path_str: &aspath_str,
                 as_path_len: aspath_len,
                 validation_state: candidate.validation_state,
+                peer_address: Some(target_peer),
+                peer_asn: target_peer_asn,
+                peer_group: target_peer_group,
+                route_type: Some(route_type(candidate.origin_type)),
+                local_pref: candidate.local_pref_attr(),
+                med: candidate.med_attr(),
             };
             let result = evaluate_chain(export_pol, &ctx);
             if result.action != PolicyAction::Permit {
@@ -404,6 +420,8 @@ impl RibManager {
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         prefix: &Prefix,
         target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
         target_is_ebgp: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
@@ -466,6 +484,12 @@ impl RibManager {
             as_path_str: &aspath_str,
             as_path_len: aspath_len,
             validation_state: best.validation_state,
+            peer_address: Some(target_peer),
+            peer_asn: target_peer_asn,
+            peer_group: target_peer_group,
+            route_type: Some(route_type(best.origin_type)),
+            local_pref: best.local_pref_attr(),
+            med: best.med_attr(),
         };
         let result = evaluate_chain(export_pol, &ctx);
         if result.action != PolicyAction::Permit {
@@ -513,6 +537,9 @@ impl RibManager {
         rib_out: &AdjRibOut,
         peer_is_rr_client: &HashMap<IpAddr, bool>,
         rules: &HashSet<FlowSpecRule>,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
         target_is_ebgp: bool,
         target_is_rr_client: bool,
         cluster_id: Option<Ipv4Addr>,
@@ -577,6 +604,12 @@ impl RibManager {
                     as_path_str: &aspath_str,
                     as_path_len: aspath_len,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                    peer_address: Some(target_peer),
+                    peer_asn: target_peer_asn,
+                    peer_group: target_peer_group,
+                    route_type: Some(route_type(best.origin_type)),
+                    local_pref: best.local_pref_attr(),
+                    med: best.med_attr(),
                 };
                 let result = rustbgpd_policy::evaluate_chain(export_pol, &ctx);
                 if result.action == rustbgpd_policy::PolicyAction::Permit {
@@ -668,6 +701,8 @@ impl RibManager {
             let sendable = self.peer_sendable_families.get(&peer).cloned();
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+            let target_peer_asn = self.peer_asn.get(&peer).copied();
+            let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
             let cluster_id = self.cluster_id;
             let peer_add_path_send_max =
                 self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
@@ -700,6 +735,8 @@ impl RibManager {
                         &self.peer_is_rr_client,
                         prefix,
                         peer,
+                        target_peer_asn,
+                        target_peer_group,
                         prefix_send_max,
                         target_is_ebgp,
                         target_is_rr_client,
@@ -717,6 +754,8 @@ impl RibManager {
                         &self.peer_is_rr_client,
                         prefix,
                         peer,
+                        target_peer_asn,
+                        target_peer_group,
                         target_is_ebgp,
                         target_is_rr_client,
                         cluster_id,
@@ -735,6 +774,9 @@ impl RibManager {
                     rib_out,
                     &self.peer_is_rr_client,
                     &effective_flowspec_rules,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
@@ -872,6 +914,8 @@ impl RibManager {
 
             let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
             let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+            let target_peer_asn = self.peer_asn.get(&peer).copied();
+            let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
             let export_pol = self.export_policy_for(peer).cloned();
 
             let rib_out = self
@@ -886,6 +930,9 @@ impl RibManager {
                 rib_out,
                 &self.peer_is_rr_client,
                 &changed_rules,
+                peer,
+                target_peer_asn,
+                target_peer_group,
                 target_is_ebgp,
                 target_is_rr_client,
                 self.cluster_id,

@@ -14,6 +14,8 @@ pub struct Config {
     #[serde(default)]
     pub neighbors: Vec<Neighbor>,
     #[serde(default)]
+    pub peer_groups: HashMap<String, PeerGroupConfig>,
+    #[serde(default)]
     pub policy: PolicyConfig,
     #[serde(default)]
     pub rpki: Option<RpkiConfig>,
@@ -166,11 +168,12 @@ pub struct Neighbor {
     pub address: String,
     pub remote_asn: u32,
     pub description: Option<String>,
+    /// Optional peer-group reference for inherited transport/policy defaults.
+    pub peer_group: Option<String>,
     pub hold_time: Option<u16>,
     pub max_prefixes: Option<u32>,
     pub md5_password: Option<String>,
-    #[serde(default)]
-    pub ttl_security: bool,
+    pub ttl_security: Option<bool>,
     /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
     /// Default: `["ipv4_unicast"]`. If the neighbor address is IPv6, `"ipv6_unicast"`
     /// is also included by default.
@@ -193,15 +196,13 @@ pub struct Neighbor {
     pub local_ipv6_nexthop: Option<String>,
     /// Mark this neighbor as a route reflector client (RFC 4456).
     /// Only valid for iBGP neighbors (`remote_asn` == `global.asn`).
-    #[serde(default)]
-    pub route_reflector_client: bool,
+    pub route_reflector_client: Option<bool>,
     /// Mark this eBGP neighbor as a transparent route-server client.
     ///
     /// When enabled, outbound unicast advertisements preserve the original
     /// next hop and suppress automatic local-AS prepend. Explicit export
     /// policy next-hop rewrites still apply.
-    #[serde(default)]
-    pub route_server_client: bool,
+    pub route_server_client: Option<bool>,
     /// Remove private ASNs from `AS_PATH` before eBGP advertisement.
     ///
     /// - `"remove"` — only if the entire path consists of private ASNs
@@ -220,6 +221,35 @@ pub struct Neighbor {
     #[serde(default)]
     pub import_policy_chain: Vec<String>,
     /// Named policy chain for export (mutually exclusive with `export_policy`).
+    #[serde(default)]
+    pub export_policy_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerGroupConfig {
+    pub hold_time: Option<u16>,
+    pub max_prefixes: Option<u32>,
+    pub md5_password: Option<String>,
+    pub ttl_security: Option<bool>,
+    /// Address families to negotiate (e.g., `["ipv4_unicast", "ipv6_unicast"]`).
+    #[serde(default)]
+    pub families: Vec<String>,
+    pub graceful_restart: Option<bool>,
+    pub gr_restart_time: Option<u16>,
+    pub gr_stale_routes_time: Option<u64>,
+    pub llgr_stale_time: Option<u32>,
+    pub local_ipv6_nexthop: Option<String>,
+    pub route_reflector_client: Option<bool>,
+    pub route_server_client: Option<bool>,
+    pub remove_private_as: Option<String>,
+    pub add_path: Option<AddPathConfig>,
+    #[serde(default)]
+    pub import_policy: Vec<PolicyStatementConfig>,
+    #[serde(default)]
+    pub export_policy: Vec<PolicyStatementConfig>,
+    #[serde(default)]
+    pub import_policy_chain: Vec<String>,
     #[serde(default)]
     pub export_policy_chain: Vec<String>,
 }
@@ -247,12 +277,26 @@ pub struct PolicyConfig {
     /// Named policy definitions, reusable across neighbors and directions.
     #[serde(default)]
     pub definitions: HashMap<String, NamedPolicyConfig>,
+    /// Named neighbor-set definitions for policy matching.
+    #[serde(default)]
+    pub neighbor_sets: HashMap<String, NeighborSetConfig>,
     /// Global import policy chain (references named definitions).
     #[serde(default)]
     pub import_chain: Vec<String>,
     /// Global export policy chain (references named definitions).
     #[serde(default)]
     pub export_chain: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NeighborSetConfig {
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    #[serde(default)]
+    pub remote_asns: Vec<u32>,
+    #[serde(default)]
+    pub peer_groups: Vec<String>,
 }
 
 /// A named policy definition with configurable default action.
@@ -284,10 +328,22 @@ pub struct PolicyStatementConfig {
     pub match_community: Vec<String>,
     /// `AS_PATH` regex pattern (Cisco/Quagga style: `_` = boundary anchor).
     pub match_as_path: Option<String>,
+    /// Named neighbor-set to match against the evaluation peer.
+    pub match_neighbor_set: Option<String>,
+    /// Route source type to match: `"local"`, `"internal"`, or `"external"`.
+    pub match_route_type: Option<String>,
     /// Minimum `AS_PATH` length (inclusive) to match.
     pub match_as_path_length_ge: Option<u32>,
     /// Maximum `AS_PATH` length (inclusive) to match.
     pub match_as_path_length_le: Option<u32>,
+    /// Minimum `LOCAL_PREF` (inclusive) to match.
+    pub match_local_pref_ge: Option<u32>,
+    /// Maximum `LOCAL_PREF` (inclusive) to match.
+    pub match_local_pref_le: Option<u32>,
+    /// Minimum MED (inclusive) to match.
+    pub match_med_ge: Option<u32>,
+    /// Maximum MED (inclusive) to match.
+    pub match_med_le: Option<u32>,
     /// RPKI validation state to match: `"valid"`, `"invalid"`, or `"not_found"`.
     pub match_rpki_validation: Option<String>,
     /// Set `LOCAL_PREF` on matching routes.
@@ -345,6 +401,10 @@ pub enum ConfigError {
     InvalidRpkiConfig { reason: String },
     #[error("undefined policy {name:?} referenced in chain")]
     UndefinedPolicy { name: String },
+    #[error("undefined peer_group {name:?}")]
+    UndefinedPeerGroup { name: String },
+    #[error("invalid neighbor set: {reason}")]
+    InvalidNeighborSet { reason: String },
     #[error("invalid BMP collector config: {reason}")]
     InvalidBmpCollector { reason: String },
     #[error("invalid MRT config: {reason}")]

@@ -152,6 +152,34 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// List all named neighbor sets.
+    ListNeighborSets {
+        /// Reply channel returning all named neighbor sets.
+        reply: oneshot::Sender<Vec<NamedNeighborSetSnapshot>>,
+    },
+    /// Query a single named neighbor set.
+    GetNeighborSet {
+        /// Neighbor-set name.
+        name: String,
+        /// Reply channel returning the definition if found.
+        reply: oneshot::Sender<Option<NeighborSetDefinition>>,
+    },
+    /// Create or replace a named neighbor set.
+    SetNeighborSet {
+        /// Neighbor-set name.
+        name: String,
+        /// Full replacement definition.
+        definition: NeighborSetDefinition,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a named neighbor set.
+    DeleteNeighborSet {
+        /// Neighbor-set name.
+        name: String,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query global named import/export chains.
     GetGlobalPolicyChains {
         /// Reply channel returning configured chain names.
@@ -220,6 +248,50 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// List all peer groups.
+    ListPeerGroups {
+        /// Reply channel returning all peer-group definitions.
+        reply: oneshot::Sender<Vec<NamedPeerGroupSnapshot>>,
+    },
+    /// Query a single peer group.
+    GetPeerGroup {
+        /// Peer-group name.
+        name: String,
+        /// Reply channel returning the definition if found.
+        reply: oneshot::Sender<Option<PeerGroupDefinition>>,
+    },
+    /// Create or replace a peer group.
+    SetPeerGroup {
+        /// Peer-group name.
+        name: String,
+        /// Full replacement definition.
+        definition: PeerGroupDefinition,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Delete a peer group.
+    DeletePeerGroup {
+        /// Peer-group name.
+        name: String,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Assign a neighbor to a peer group.
+    SetNeighborPeerGroup {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Peer-group name.
+        peer_group: String,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Clear a neighbor's peer-group membership.
+    ClearNeighborPeerGroup {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Shut down all peers and exit the peer manager task.
     Shutdown,
 }
@@ -231,6 +303,17 @@ pub struct PolicyAsPathPrependConfig {
     pub asn: u32,
     /// Number of times to prepend.
     pub count: u8,
+}
+
+/// Add-Path settings in config-shaped form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddPathDefinition {
+    /// Enable Add-Path receive.
+    pub receive: bool,
+    /// Enable Add-Path send.
+    pub send: bool,
+    /// Maximum paths to send (`None` = default/unlimited).
+    pub send_max: Option<u32>,
 }
 
 /// One policy statement in config-shaped form.
@@ -248,10 +331,22 @@ pub struct PolicyStatementDefinition {
     pub match_community: Vec<String>,
     /// Optional Cisco/Quagga style `AS_PATH` regex.
     pub match_as_path: Option<String>,
+    /// Optional named neighbor-set match.
+    pub match_neighbor_set: Option<String>,
+    /// Optional route-source type match (`"local"`, `"internal"`, `"external"`).
+    pub match_route_type: Option<String>,
     /// Optional minimum `AS_PATH` length.
     pub match_as_path_length_ge: Option<u32>,
     /// Optional maximum `AS_PATH` length.
     pub match_as_path_length_le: Option<u32>,
+    /// Optional minimum `LOCAL_PREF` match.
+    pub match_local_pref_ge: Option<u32>,
+    /// Optional maximum `LOCAL_PREF` match.
+    pub match_local_pref_le: Option<u32>,
+    /// Optional minimum MED match.
+    pub match_med_ge: Option<u32>,
+    /// Optional maximum MED match.
+    pub match_med_le: Option<u32>,
     /// Optional RPKI validation state match.
     pub match_rpki_validation: Option<String>,
     /// Optional `LOCAL_PREF` rewrite.
@@ -266,6 +361,26 @@ pub struct PolicyStatementDefinition {
     pub set_community_remove: Vec<String>,
     /// Optional `AS_PATH` prepend rewrite.
     pub set_as_path_prepend: Option<PolicyAsPathPrependConfig>,
+}
+
+/// Full replacement definition for one named neighbor set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NeighborSetDefinition {
+    /// Exact peer addresses.
+    pub addresses: Vec<String>,
+    /// Remote ASNs in the set.
+    pub remote_asns: Vec<u32>,
+    /// Peer-group names in the set.
+    pub peer_groups: Vec<String>,
+}
+
+/// Named neighbor-set definition with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedNeighborSetSnapshot {
+    /// Neighbor-set name.
+    pub name: String,
+    /// Full definition payload.
+    pub definition: NeighborSetDefinition,
 }
 
 /// Full replacement definition for one named policy.
@@ -284,6 +399,56 @@ pub struct NamedPolicySnapshot {
     pub name: String,
     /// Full definition payload.
     pub definition: NamedPolicyDefinition,
+}
+
+/// Full replacement definition for one peer-group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerGroupDefinition {
+    /// Override hold time.
+    pub hold_time: Option<u16>,
+    /// Override max prefixes.
+    pub max_prefixes: Option<u32>,
+    /// Optional TCP MD5 password.
+    pub md5_password: Option<String>,
+    /// Optional TTL-security override.
+    pub ttl_security: Option<bool>,
+    /// Address families override.
+    pub families: Vec<String>,
+    /// Optional GR enable override.
+    pub graceful_restart: Option<bool>,
+    /// Optional GR restart time override.
+    pub gr_restart_time: Option<u16>,
+    /// Optional GR stale-routes-time override.
+    pub gr_stale_routes_time: Option<u64>,
+    /// Optional LLGR stale-time override.
+    pub llgr_stale_time: Option<u32>,
+    /// Optional explicit IPv6 next-hop.
+    pub local_ipv6_nexthop: Option<String>,
+    /// Optional route-reflector-client override.
+    pub route_reflector_client: Option<bool>,
+    /// Optional route-server-client override.
+    pub route_server_client: Option<bool>,
+    /// Optional private-AS removal mode.
+    pub remove_private_as: Option<String>,
+    /// Optional Add-Path override.
+    pub add_path: Option<AddPathDefinition>,
+    /// Inline import policy.
+    pub import_policy: Vec<PolicyStatementDefinition>,
+    /// Inline export policy.
+    pub export_policy: Vec<PolicyStatementDefinition>,
+    /// Named import chain.
+    pub import_policy_chain: Vec<String>,
+    /// Named export chain.
+    pub export_policy_chain: Vec<String>,
+}
+
+/// Named peer-group definition with its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedPeerGroupSnapshot {
+    /// Peer-group name.
+    pub name: String,
+    /// Full definition payload.
+    pub definition: PeerGroupDefinition,
 }
 
 /// Ordered import/export chain assignment.
@@ -305,10 +470,16 @@ pub struct PeerManagerNeighborConfig {
     pub remote_asn: u32,
     /// Human-readable peer description.
     pub description: String,
+    /// Optional peer-group reference used to derive defaults.
+    pub peer_group: Option<String>,
     /// Override hold time (None = use default).
     pub hold_time: Option<u16>,
     /// Maximum prefixes accepted before Cease/1 (None = unlimited).
     pub max_prefixes: Option<u32>,
+    /// Optional TCP MD5 password.
+    pub md5_password: Option<String>,
+    /// Whether GTSM / TTL security is enabled.
+    pub ttl_security: bool,
     /// Negotiated address families for this peer.
     pub families: Vec<(Afi, Safi)>,
     /// Whether to advertise Graceful Restart capability.
@@ -363,6 +534,18 @@ pub enum ConfigEvent {
         /// Policy definition name.
         name: String,
     },
+    /// Create or replace a named neighbor set.
+    SetNeighborSet {
+        /// Neighbor-set name.
+        name: String,
+        /// Full replacement definition.
+        definition: NeighborSetDefinition,
+    },
+    /// Delete a named neighbor set.
+    DeleteNeighborSet {
+        /// Neighbor-set name.
+        name: String,
+    },
     /// Replace the global import policy chain.
     SetGlobalImportChain {
         /// Ordered policy names.
@@ -401,6 +584,30 @@ pub enum ConfigEvent {
         /// Neighbor address.
         address: IpAddr,
     },
+    /// Create or replace a peer-group definition.
+    SetPeerGroup {
+        /// Peer-group name.
+        name: String,
+        /// Full replacement definition.
+        definition: PeerGroupDefinition,
+    },
+    /// Delete a peer-group definition.
+    DeletePeerGroup {
+        /// Peer-group name.
+        name: String,
+    },
+    /// Set a neighbor's peer-group membership.
+    SetNeighborPeerGroup {
+        /// Neighbor address.
+        address: IpAddr,
+        /// Peer-group name.
+        peer_group: String,
+    },
+    /// Clear a neighbor's peer-group membership.
+    ClearNeighborPeerGroup {
+        /// Neighbor address.
+        address: IpAddr,
+    },
 }
 
 /// Snapshot of a peer's state for queries.
@@ -412,6 +619,8 @@ pub struct PeerInfo {
     pub remote_asn: u32,
     /// Human-readable peer description.
     pub description: String,
+    /// Optional peer-group reference.
+    pub peer_group: Option<String>,
     /// Current FSM state.
     pub state: SessionState,
     /// Whether the peer is administratively enabled.

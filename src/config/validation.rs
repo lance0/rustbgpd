@@ -1,8 +1,10 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
-use super::parse::{parse_families, parse_named_policy, parse_policy, resolve_chain};
-use super::{Config, ConfigError, DEFAULT_HOLD_TIME};
+use super::parse::{
+    parse_families, parse_named_policy, parse_neighbor_set, parse_policy, resolve_chain,
+};
+use super::{Config, ConfigError, DEFAULT_HOLD_TIME, PeerGroupConfig};
 
 impl Config {
     #[expect(clippy::too_many_lines)]
@@ -99,17 +101,49 @@ impl Config {
         }
 
         // Eagerly validate all policies at load time
-        parse_policy(&self.policy.import)?;
-        parse_policy(&self.policy.export)?;
+        parse_policy(
+            &self.policy.import,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+        )?;
+        parse_policy(
+            &self.policy.export,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+        )?;
+
+        for (name, set) in &self.policy.neighbor_sets {
+            parse_neighbor_set(name, set, &self.peer_groups)?;
+        }
+
+        for (name, group) in &self.peer_groups {
+            validate_peer_group(
+                name,
+                group,
+                &self.policy.definitions,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?;
+        }
 
         // Validate named policy definitions
         for (name, cfg) in &self.policy.definitions {
-            parse_named_policy(name, cfg)?;
+            parse_named_policy(name, cfg, &self.policy.neighbor_sets, &self.peer_groups)?;
         }
 
         // Validate global chains
-        resolve_chain(&self.policy.import_chain, &self.policy.definitions)?;
-        resolve_chain(&self.policy.export_chain, &self.policy.definitions)?;
+        resolve_chain(
+            &self.policy.import_chain,
+            &self.policy.definitions,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+        )?;
+        resolve_chain(
+            &self.policy.export_chain,
+            &self.policy.definitions,
+            &self.policy.neighbor_sets,
+            &self.peer_groups,
+        )?;
 
         // Validate neighbor address uniqueness
         {
@@ -131,13 +165,32 @@ impl Config {
         }
 
         for neighbor in &self.neighbors {
-            let hold_time = neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
+            let group = neighbor
+                .peer_group
+                .as_deref()
+                .map(|name| {
+                    self.peer_groups
+                        .get(name)
+                        .ok_or_else(|| ConfigError::UndefinedPeerGroup {
+                            name: name.to_string(),
+                        })
+                })
+                .transpose()?;
+
+            let hold_time = neighbor
+                .hold_time
+                .or_else(|| group.and_then(|g| g.hold_time))
+                .unwrap_or(DEFAULT_HOLD_TIME);
             if hold_time != 0 && hold_time < 3 {
                 return Err(ConfigError::InvalidHoldTime { value: hold_time });
             }
 
             // Validate route_reflector_client: must be iBGP
-            if neighbor.route_reflector_client && neighbor.remote_asn != self.global.asn {
+            let route_reflector_client = neighbor
+                .route_reflector_client
+                .or_else(|| group.and_then(|g| g.route_reflector_client))
+                .unwrap_or(false);
+            if route_reflector_client && neighbor.remote_asn != self.global.asn {
                 return Err(ConfigError::InvalidRrConfig {
                     reason: format!(
                         "route_reflector_client requires iBGP (remote_asn {} != local asn {})",
@@ -146,7 +199,11 @@ impl Config {
                 });
             }
 
-            if neighbor.route_server_client && neighbor.remote_asn == self.global.asn {
+            let route_server_client = neighbor
+                .route_server_client
+                .or_else(|| group.and_then(|g| g.route_server_client))
+                .unwrap_or(false);
+            if route_server_client && neighbor.remote_asn == self.global.asn {
                 return Err(ConfigError::InvalidRouteServerConfig {
                     reason: format!(
                         "route_server_client requires eBGP (remote_asn {} == local asn {})",
@@ -155,8 +212,12 @@ impl Config {
                 });
             }
 
-            if let Some(ref mode) = neighbor.remove_private_as {
-                match mode.as_str() {
+            if let Some(mode) = neighbor
+                .remove_private_as
+                .as_deref()
+                .or_else(|| group.and_then(|g| g.remove_private_as.as_deref()))
+            {
+                match mode {
                     "remove" | "all" | "replace" => {}
                     other => {
                         return Err(ConfigError::InvalidRemovePrivateAs {
@@ -179,18 +240,29 @@ impl Config {
             // Validate families if explicitly configured
             if !neighbor.families.is_empty() {
                 parse_families(&neighbor.families)?;
+            } else if let Some(group) = group
+                && !group.families.is_empty()
+            {
+                parse_families(&group.families)?;
             }
 
             // Validate GR config
-            let gr_enabled = neighbor.graceful_restart.unwrap_or(true);
-            if let Some(t) = neighbor.gr_restart_time
+            let gr_enabled = neighbor
+                .graceful_restart
+                .or_else(|| group.and_then(|g| g.graceful_restart))
+                .unwrap_or(true);
+            if let Some(t) = neighbor
+                .gr_restart_time
+                .or_else(|| group.and_then(|g| g.gr_restart_time))
                 && t > 4095
             {
                 return Err(ConfigError::InvalidGrConfig {
                     reason: format!("gr_restart_time {t} exceeds 4095 (12-bit max)"),
                 });
             }
-            if let Some(0) = neighbor.gr_restart_time
+            if let Some(0) = neighbor
+                .gr_restart_time
+                .or_else(|| group.and_then(|g| g.gr_restart_time))
                 && gr_enabled
             {
                 return Err(ConfigError::InvalidGrConfig {
@@ -198,21 +270,27 @@ impl Config {
                         .to_string(),
                 });
             }
-            if let Some(t) = neighbor.gr_stale_routes_time
+            if let Some(t) = neighbor
+                .gr_stale_routes_time
+                .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
                 && t == 0
             {
                 return Err(ConfigError::InvalidGrConfig {
                     reason: "gr_stale_routes_time must be > 0".to_string(),
                 });
             }
-            if let Some(t) = neighbor.gr_stale_routes_time
+            if let Some(t) = neighbor
+                .gr_stale_routes_time
+                .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
                 && t > 3600
             {
                 return Err(ConfigError::InvalidGrConfig {
                     reason: format!("gr_stale_routes_time {t} exceeds 3600 (1 hour max)"),
                 });
             }
-            if let Some(t) = neighbor.llgr_stale_time
+            if let Some(t) = neighbor
+                .llgr_stale_time
+                .or_else(|| group.and_then(|g| g.llgr_stale_time))
                 && t > 16_777_215
             {
                 return Err(ConfigError::InvalidGrConfig {
@@ -221,7 +299,11 @@ impl Config {
             }
 
             // Validate local_ipv6_nexthop if configured
-            if let Some(ref nh) = neighbor.local_ipv6_nexthop {
+            if let Some(nh) = neighbor
+                .local_ipv6_nexthop
+                .as_ref()
+                .or_else(|| group.and_then(|g| g.local_ipv6_nexthop.as_ref()))
+            {
                 let addr =
                     nh.parse::<Ipv6Addr>()
                         .map_err(|e| ConfigError::InvalidLocalIpv6Nexthop {
@@ -236,8 +318,16 @@ impl Config {
                 }
             }
 
-            parse_policy(&neighbor.import_policy)?;
-            parse_policy(&neighbor.export_policy)?;
+            parse_policy(
+                &neighbor.import_policy,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?;
+            parse_policy(
+                &neighbor.export_policy,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?;
 
             // Inline and chain are mutually exclusive
             if !neighbor.import_policy.is_empty() && !neighbor.import_policy_chain.is_empty() {
@@ -256,8 +346,18 @@ impl Config {
                     ),
                 });
             }
-            resolve_chain(&neighbor.import_policy_chain, &self.policy.definitions)?;
-            resolve_chain(&neighbor.export_policy_chain, &self.policy.definitions)?;
+            resolve_chain(
+                &neighbor.import_policy_chain,
+                &self.policy.definitions,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?;
+            resolve_chain(
+                &neighbor.export_policy_chain,
+                &self.policy.definitions,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?;
         }
 
         // Validate RPKI cache server config
@@ -310,6 +410,132 @@ impl Config {
 
         Ok(())
     }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "peer-group validation mirrors the full inheritable neighbor surface"
+)]
+fn validate_peer_group(
+    name: &str,
+    group: &PeerGroupConfig,
+    definitions: &std::collections::HashMap<String, super::NamedPolicyConfig>,
+    neighbor_sets: &std::collections::HashMap<String, super::NeighborSetConfig>,
+    peer_groups: &std::collections::HashMap<String, PeerGroupConfig>,
+) -> Result<(), ConfigError> {
+    let hold_time = group.hold_time.unwrap_or(DEFAULT_HOLD_TIME);
+    if hold_time != 0 && hold_time < 3 {
+        return Err(ConfigError::InvalidHoldTime { value: hold_time });
+    }
+
+    if !group.families.is_empty() {
+        parse_families(&group.families)?;
+    }
+
+    if let Some(mode) = group.remove_private_as.as_deref() {
+        match mode {
+            "remove" | "all" | "replace" => {}
+            other => {
+                return Err(ConfigError::InvalidRemovePrivateAs {
+                    reason: format!(
+                        "peer_group {name:?}: unknown mode {other:?}, expected \"remove\", \"all\", or \"replace\""
+                    ),
+                });
+            }
+        }
+    }
+
+    let gr_enabled = group.graceful_restart.unwrap_or(true);
+    if let Some(t) = group.gr_restart_time
+        && t > 4095
+    {
+        return Err(ConfigError::InvalidGrConfig {
+            reason: format!("peer_group {name:?}: gr_restart_time {t} exceeds 4095 (12-bit max)"),
+        });
+    }
+    if let Some(0) = group.gr_restart_time
+        && gr_enabled
+    {
+        return Err(ConfigError::InvalidGrConfig {
+            reason: format!(
+                "peer_group {name:?}: gr_restart_time must be > 0 when graceful_restart is enabled"
+            ),
+        });
+    }
+    if let Some(t) = group.gr_stale_routes_time
+        && t == 0
+    {
+        return Err(ConfigError::InvalidGrConfig {
+            reason: format!("peer_group {name:?}: gr_stale_routes_time must be > 0"),
+        });
+    }
+    if let Some(t) = group.gr_stale_routes_time
+        && t > 3600
+    {
+        return Err(ConfigError::InvalidGrConfig {
+            reason: format!(
+                "peer_group {name:?}: gr_stale_routes_time {t} exceeds 3600 (1 hour max)"
+            ),
+        });
+    }
+    if let Some(t) = group.llgr_stale_time
+        && t > 16_777_215
+    {
+        return Err(ConfigError::InvalidGrConfig {
+            reason: format!(
+                "peer_group {name:?}: llgr_stale_time {t} exceeds 16777215 (24-bit max)"
+            ),
+        });
+    }
+
+    if let Some(nh) = group.local_ipv6_nexthop.as_deref() {
+        let addr = nh
+            .parse::<Ipv6Addr>()
+            .map_err(|e| ConfigError::InvalidLocalIpv6Nexthop {
+                value: nh.to_string(),
+                reason: e.to_string(),
+            })?;
+        if !rustbgpd_wire::is_valid_ipv6_nexthop(&addr) {
+            return Err(ConfigError::InvalidLocalIpv6Nexthop {
+                value: nh.to_string(),
+                reason:
+                    "address is not a valid IPv6 next-hop (loopback, link-local, multicast, or unspecified)"
+                        .to_string(),
+            });
+        }
+    }
+
+    parse_policy(&group.import_policy, neighbor_sets, peer_groups)?;
+    parse_policy(&group.export_policy, neighbor_sets, peer_groups)?;
+
+    if !group.import_policy.is_empty() && !group.import_policy_chain.is_empty() {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "peer_group {name:?}: import_policy and import_policy_chain are mutually exclusive"
+            ),
+        });
+    }
+    if !group.export_policy.is_empty() && !group.export_policy_chain.is_empty() {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "peer_group {name:?}: export_policy and export_policy_chain are mutually exclusive"
+            ),
+        });
+    }
+    resolve_chain(
+        &group.import_policy_chain,
+        definitions,
+        neighbor_sets,
+        peer_groups,
+    )?;
+    resolve_chain(
+        &group.export_policy_chain,
+        definitions,
+        neighbor_sets,
+        peer_groups,
+    )?;
+
+    Ok(())
 }
 
 fn validate_grpc_token_file(path: Option<&str>, field_name: &str) -> Result<(), ConfigError> {

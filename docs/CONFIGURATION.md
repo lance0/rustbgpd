@@ -114,6 +114,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `address`              | string   | yes      | --      | Peer IP address (IPv4 or IPv6)                   |
 | `remote_asn`           | u32      | yes      | --      | Peer's autonomous system number                  |
 | `description`          | string   | no       | --      | Human-readable label (used in logs; defaults to address if absent) |
+| `peer_group`           | string   | no       | --      | Named peer-group to inherit transport and policy defaults from      |
 | `hold_time`            | u16      | no       | 90      | BGP hold timer in seconds (0 or >= 3)            |
 | `max_prefixes`         | u32      | no       | --      | Maximum prefixes accepted before session teardown |
 | `md5_password`         | string   | no       | --      | TCP MD5 authentication password (RFC 2385, Linux only) |
@@ -146,6 +147,38 @@ address type:
 
 - IPv4 neighbor address → `["ipv4_unicast"]`
 - IPv6 neighbor address → `["ipv4_unicast", "ipv6_unicast"]`
+
+### Peer groups
+
+Peer groups are reusable neighbor templates defined at the top level under
+`[peer_groups.<name>]`. A neighbor can reference one with `peer_group = "..."`.
+Explicit neighbor settings win over peer-group settings. Peer-group definitions
+can also be managed at runtime through the gRPC `PeerGroupService`; successful
+mutations persist back to TOML.
+
+```toml
+[peer_groups.rs-clients]
+description = "IX route-server clients"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+export_policy_chain = ["tag-ixp"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "rs-clients"
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rs-clients"
+hold_time = 45  # neighbor override beats peer-group default
+```
+
+Peer-group fields mirror inheritable neighbor settings: timers, families,
+GR/LLGR, Add-Path, route-server / RR flags, private-AS handling, MD5/GTSM,
+`local_ipv6_nexthop`, and import/export inline policy or named chains.
 
 ```toml
 # IPv4 peer with dual-stack
@@ -574,6 +607,21 @@ set_next_hop = "self"
 | `default_action` | string | no       | `"permit"` | Action when no statement matches (`"permit"` or `"deny"`) |
 | `statements`     | array  | no       | `[]`       | Policy statements (same schema as inline entries) |
 
+### Neighbor sets
+
+Neighbor sets are reusable peer identity groups for policy matching. They live
+under `[policy.neighbor_sets.<name>]` and can match by exact neighbor address,
+remote ASN, and/or peer-group name. A policy statement references one with
+`match_neighbor_set = "..."`. Neighbor sets are also manageable at runtime via
+the gRPC `PolicyService`.
+
+```toml
+[policy.neighbor_sets.ixp-clients]
+addresses = ["10.0.0.2", "10.0.0.3"]
+remote_asns = [65002, 65003]
+peer_groups = ["rs-clients"]
+```
+
 ### Policy chains
 
 Policy chains reference named definitions by name, evaluated in order with
@@ -628,12 +676,21 @@ same entry are ANDed.
 | `le`                     | u8       | no       | Maximum prefix length to match (inclusive)            |
 | `match_community`        | [string] | no*      | Community match criteria (see below). OR within list. |
 | `match_as_path`          | string   | no*      | AS_PATH regex (Cisco/Quagga style, `_` = boundary)    |
+| `match_neighbor_set`     | string   | no*      | Named neighbor set matched against the evaluation peer |
+| `match_route_type`       | string   | no*      | Route source type: `"local"`, `"internal"`, `"external"` |
 | `match_as_path_length_ge`| u32      | no*      | Minimum AS_PATH length to match (inclusive)           |
 | `match_as_path_length_le`| u32      | no*      | Maximum AS_PATH length to match (inclusive)           |
+| `match_local_pref_ge`    | u32      | no*      | Minimum `LOCAL_PREF` to match (inclusive)             |
+| `match_local_pref_le`    | u32      | no*      | Maximum `LOCAL_PREF` to match (inclusive)             |
+| `match_med_ge`           | u32      | no*      | Minimum MED to match (inclusive)                      |
+| `match_med_le`           | u32      | no*      | Maximum MED to match (inclusive)                      |
 | `match_rpki_validation`  | string   | no*      | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` |
 | `action`                 | string   | yes      | `"permit"` or `"deny"`                                |
 
-*At least one of `prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, or `match_rpki_validation` is required.
+*At least one of `prefix`, `match_community`, `match_as_path`,
+`match_neighbor_set`, `match_route_type`, `match_as_path_length_ge`,
+`match_as_path_length_le`, `match_local_pref_ge`, `match_local_pref_le`,
+`match_med_ge`, `match_med_le`, or `match_rpki_validation` is required.
 
 ### Route modifications (set actions)
 
@@ -689,6 +746,33 @@ as a range. `AS_SET` counts as 1 per RFC 4271.
 match_as_path_length_ge = 3
 match_as_path_length_le = 8
 action = "deny"
+```
+
+### Neighbor-set, route-type, and MED / `LOCAL_PREF` matching
+
+`match_neighbor_set` evaluates against the peer currently being evaluated by
+policy:
+
+- import policy: the source peer that sent the route
+- export policy: the destination peer receiving the route
+
+`match_route_type` distinguishes:
+
+- `"external"` — learned from an eBGP peer
+- `"internal"` — learned from an iBGP peer
+- `"local"` — locally injected or originated
+
+`match_local_pref_*` and `match_med_*` are inclusive comparisons. If the route
+does not carry the relevant attribute, the comparison does not match.
+
+```toml
+[[policy.export]]
+match_neighbor_set = "ixp-clients"
+match_route_type = "external"
+match_local_pref_ge = 200
+match_med_le = 50
+action = "permit"
+set_community_add = ["65001:100"]
 ```
 
 ### Prefix length matching

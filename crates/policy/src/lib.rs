@@ -11,7 +11,7 @@
 pub mod engine;
 
 pub use engine::{
-    AsPathRegex, CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyResult,
-    PolicyStatement, RouteContext, RouteModifications, apply_modifications, evaluate_chain,
-    evaluate_policy, parse_community_match,
+    AsPathRegex, CommunityMatch, NeighborSetMatch, NextHopAction, Policy, PolicyAction,
+    PolicyChain, PolicyResult, PolicyStatement, RouteContext, RouteModifications, RouteType,
+    apply_modifications, evaluate_chain, evaluate_policy, parse_community_match,
 };

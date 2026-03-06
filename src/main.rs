@@ -534,11 +534,16 @@ async fn run(mut config: Config) {
     });
 
     // Add initial peers from config via PeerManager
-    let peer_configs = config.to_peer_configs().unwrap_or_else(|e| {
+    let peer_configs = config.resolved_neighbors().unwrap_or_else(|e| {
         error!("invalid policy configuration: {e}");
         process::exit(1);
     });
-    for (transport_config, label, import_policy, export_policy) in peer_configs {
+    for neighbor in peer_configs {
+        let transport_config = neighbor.transport_config;
+        let label = neighbor.label;
+        let import_policy = neighbor.import_policy;
+        let export_policy = neighbor.export_policy;
+        let peer_group = neighbor.peer_group;
         info!(
             peer = %transport_config.remote_addr,
             label = %label,
@@ -552,8 +557,11 @@ async fn run(mut config: Config) {
                     address: transport_config.remote_addr.ip(),
                     remote_asn: transport_config.peer.remote_asn,
                     description: label.clone(),
+                    peer_group,
                     hold_time: Some(transport_config.peer.hold_time),
                     max_prefixes: transport_config.max_prefixes,
+                    md5_password: transport_config.md5_password.clone(),
+                    ttl_security: transport_config.ttl_security,
                     families: transport_config.peer.families.clone(),
                     graceful_restart: transport_config.peer.graceful_restart,
                     gr_restart_time: transport_config.peer.gr_restart_time,
@@ -714,13 +722,17 @@ fn build_peer_mgr_config(
     label: &str,
     import: Option<&PolicyChain>,
     export: Option<&PolicyChain>,
+    peer_group: Option<String>,
 ) -> PeerManagerNeighborConfig {
     PeerManagerNeighborConfig {
         address: tc.remote_addr.ip(),
         remote_asn: tc.peer.remote_asn,
         description: label.to_string(),
+        peer_group,
         hold_time: Some(tc.peer.hold_time),
         max_prefixes: tc.max_prefixes,
+        md5_password: tc.md5_password.clone(),
+        ttl_security: tc.ttl_security,
         families: tc.peer.families.clone(),
         graceful_restart: tc.peer.graceful_restart,
         gr_restart_time: tc.peer.gr_restart_time,
@@ -743,6 +755,10 @@ fn build_peer_mgr_config(
 ///
 /// Only neighbor changes take effect — global/RPKI/BMP/metrics changes
 /// are logged as warnings and require a full restart.
+#[expect(
+    clippy::too_many_lines,
+    reason = "reload needs validation, diffing, reconciliation, and failure reporting in one place"
+)]
 async fn reload_config(
     config_path: &str,
     current: &Config,
@@ -783,7 +799,7 @@ async fn reload_config(
         "reconciling neighbors after config reload"
     );
 
-    let peer_configs = match new_config.to_peer_configs() {
+    let peer_configs = match new_config.resolved_neighbors() {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "config reload failed — invalid policy in new config");
@@ -794,15 +810,26 @@ async fn reload_config(
     // Lookup by address
     let peer_map: std::collections::HashMap<String, _> = peer_configs
         .into_iter()
-        .map(|(tc, label, imp, exp)| (tc.remote_addr.ip().to_string(), (tc, label, imp, exp)))
+        .map(|neighbor| {
+            (
+                neighbor.transport_config.remote_addr.ip().to_string(),
+                neighbor,
+            )
+        })
         .collect();
 
     let resolve = |neighbors: &[config::Neighbor]| -> Vec<PeerManagerNeighborConfig> {
         neighbors
             .iter()
             .filter_map(|n| {
-                peer_map.get(&n.address).map(|(tc, label, imp, exp)| {
-                    build_peer_mgr_config(tc, label, imp.as_ref(), exp.as_ref())
+                peer_map.get(&n.address).map(|neighbor| {
+                    build_peer_mgr_config(
+                        &neighbor.transport_config,
+                        &neighbor.label,
+                        neighbor.import_policy.as_ref(),
+                        neighbor.export_policy.as_ref(),
+                        neighbor.peer_group.clone(),
+                    )
                 })
             })
             .collect()
@@ -909,18 +936,19 @@ mod tests {
                     address: "10.0.0.2".to_string(),
                     remote_asn: 65002,
                     description: None,
+                    peer_group: None,
                     hold_time: None,
                     max_prefixes: None,
                     md5_password: None,
-                    ttl_security: false,
+                    ttl_security: Some(false),
                     families: Vec::new(),
                     graceful_restart: Some(true),
                     gr_restart_time: Some(90),
                     gr_stale_routes_time: None,
                     llgr_stale_time: None,
                     local_ipv6_nexthop: None,
-                    route_reflector_client: false,
-                    route_server_client: false,
+                    route_reflector_client: Some(false),
+                    route_server_client: Some(false),
                     remove_private_as: None,
                     add_path: None,
                     import_policy: Vec::new(),
@@ -932,18 +960,19 @@ mod tests {
                     address: "10.0.0.3".to_string(),
                     remote_asn: 65003,
                     description: None,
+                    peer_group: None,
                     hold_time: None,
                     max_prefixes: None,
                     md5_password: None,
-                    ttl_security: false,
+                    ttl_security: Some(false),
                     families: Vec::new(),
                     graceful_restart: Some(true),
                     gr_restart_time: Some(180),
                     gr_stale_routes_time: None,
                     llgr_stale_time: None,
                     local_ipv6_nexthop: None,
-                    route_reflector_client: false,
-                    route_server_client: false,
+                    route_reflector_client: Some(false),
+                    route_server_client: Some(false),
                     remove_private_as: None,
                     add_path: None,
                     import_policy: Vec::new(),
@@ -955,18 +984,19 @@ mod tests {
                     address: "10.0.0.4".to_string(),
                     remote_asn: 65004,
                     description: None,
+                    peer_group: None,
                     hold_time: None,
                     max_prefixes: None,
                     md5_password: None,
-                    ttl_security: false,
+                    ttl_security: Some(false),
                     families: Vec::new(),
                     graceful_restart: Some(false),
                     gr_restart_time: Some(300),
                     gr_stale_routes_time: None,
                     llgr_stale_time: None,
                     local_ipv6_nexthop: None,
-                    route_reflector_client: false,
-                    route_server_client: false,
+                    route_reflector_client: Some(false),
+                    route_server_client: Some(false),
                     remove_private_as: None,
                     add_path: None,
                     import_policy: Vec::new(),
@@ -975,6 +1005,7 @@ mod tests {
                     export_policy_chain: Vec::new(),
                 },
             ],
+            peer_groups: std::collections::HashMap::new(),
             policy: crate::config::PolicyConfig::default(),
             rpki: None,
             bmp: None,

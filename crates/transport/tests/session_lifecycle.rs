@@ -90,6 +90,7 @@ fn transport_config(addr: SocketAddr) -> TransportConfig {
         md5_password: None,
         ttl_security: false,
         local_ipv6_nexthop: None,
+        peer_group: None,
         gr_stale_routes_time: 360,
         llgr_stale_time: 0,
         gr_restart_until: None,

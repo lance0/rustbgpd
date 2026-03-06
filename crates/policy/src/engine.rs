@@ -62,6 +62,55 @@ pub struct RouteContext<'a> {
     pub as_path_len: usize,
     /// RPKI origin validation state (RFC 6811).
     pub validation_state: RpkiValidation,
+    /// Evaluation peer IP address.
+    pub peer_address: Option<IpAddr>,
+    /// Evaluation peer remote ASN.
+    pub peer_asn: Option<u32>,
+    /// Evaluation peer-group name.
+    pub peer_group: Option<&'a str>,
+    /// Route source type.
+    pub route_type: Option<RouteType>,
+    /// Explicit `LOCAL_PREF` attribute value.
+    pub local_pref: Option<u32>,
+    /// Explicit MED attribute value.
+    pub med: Option<u32>,
+}
+
+/// Route source class for policy matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteType {
+    /// Locally originated route.
+    Local,
+    /// Learned from an iBGP peer.
+    Internal,
+    /// Learned from an eBGP peer.
+    External,
+}
+
+/// Named neighbor-set match compiled from config.
+#[derive(Debug, Clone, Default)]
+pub struct NeighborSetMatch {
+    /// Exact peer-address matches.
+    pub addresses: Vec<IpAddr>,
+    /// Peer remote ASNs that match.
+    pub remote_asns: Vec<u32>,
+    /// Peer-group names that match.
+    pub peer_groups: Vec<String>,
+}
+
+impl NeighborSetMatch {
+    /// Returns `true` if the evaluation peer matches any set member.
+    #[must_use]
+    pub fn matches(
+        &self,
+        peer_address: Option<IpAddr>,
+        peer_asn: Option<u32>,
+        peer_group: Option<&str>,
+    ) -> bool {
+        peer_address.is_some_and(|addr| self.addresses.contains(&addr))
+            || peer_asn.is_some_and(|asn| self.remote_asns.contains(&asn))
+            || peer_group.is_some_and(|group| self.peer_groups.iter().any(|name| name == group))
+    }
 }
 
 /// What to do with the next-hop attribute.
@@ -425,12 +474,24 @@ pub struct PolicyStatement {
     pub match_community: Vec<CommunityMatch>,
     /// `AS_PATH` regex match criterion.
     pub match_as_path: Option<AsPathRegex>,
+    /// Evaluation peer neighbor-set match criterion.
+    pub match_neighbor_set: Option<NeighborSetMatch>,
+    /// Route source type match criterion.
+    pub match_route_type: Option<RouteType>,
     /// RPKI validation state match criterion (RFC 6811).
     pub match_rpki_validation: Option<RpkiValidation>,
     /// Minimum `AS_PATH` length (inclusive) to match.
     pub match_as_path_length_ge: Option<u32>,
     /// Maximum `AS_PATH` length (inclusive) to match.
     pub match_as_path_length_le: Option<u32>,
+    /// Minimum `LOCAL_PREF` attribute value (inclusive) to match.
+    pub match_local_pref_ge: Option<u32>,
+    /// Maximum `LOCAL_PREF` attribute value (inclusive) to match.
+    pub match_local_pref_le: Option<u32>,
+    /// Minimum MED attribute value (inclusive) to match.
+    pub match_med_ge: Option<u32>,
+    /// Maximum MED attribute value (inclusive) to match.
+    pub match_med_le: Option<u32>,
     /// Route modifications to apply when this statement matches.
     pub modifications: RouteModifications,
 }
@@ -458,6 +519,16 @@ impl PolicyStatement {
             None => true,
         };
 
+        let neighbor_set_ok = self
+            .match_neighbor_set
+            .as_ref()
+            .is_none_or(|set| set.matches(ctx.peer_address, ctx.peer_asn, ctx.peer_group));
+
+        let route_type_ok = self.match_route_type.is_none_or(|route_type| {
+            ctx.route_type
+                .is_some_and(|candidate| candidate == route_type)
+        });
+
         let rpki_ok = self
             .match_rpki_validation
             .is_none_or(|v| v == ctx.validation_state);
@@ -469,7 +540,29 @@ impl PolicyStatement {
                 .match_as_path_length_le
                 .is_none_or(|v| ctx.as_path_len <= v as usize);
 
-        prefix_ok && community_ok && aspath_ok && rpki_ok && aspath_len_ok
+        let local_pref_ok = self
+            .match_local_pref_ge
+            .is_none_or(|v| ctx.local_pref.is_some_and(|candidate| candidate >= v))
+            && self
+                .match_local_pref_le
+                .is_none_or(|v| ctx.local_pref.is_some_and(|candidate| candidate <= v));
+
+        let med_ok = self
+            .match_med_ge
+            .is_none_or(|v| ctx.med.is_some_and(|candidate| candidate >= v))
+            && self
+                .match_med_le
+                .is_none_or(|v| ctx.med.is_some_and(|candidate| candidate <= v));
+
+        prefix_ok
+            && community_ok
+            && aspath_ok
+            && neighbor_set_ok
+            && route_type_ok
+            && rpki_ok
+            && aspath_len_ok
+            && local_pref_ok
+            && med_ok
     }
 
     fn matches_prefix(&self, entry_prefix: Prefix, candidate: Prefix) -> bool {

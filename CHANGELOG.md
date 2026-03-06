@@ -18,6 +18,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   affect future inbound UPDATE processing; operators use `SoftResetIn` when
   they want existing Adj-RIB-In state re-evaluated. Export-chain changes
   trigger immediate outbound recomputation.
+- **Peer groups via gRPC.** New `PeerGroupService` adds full-replace peer-group
+  CRUD plus neighbor membership assignment. Effective peer config is resolved
+  through the existing config/peer-manager boundary and persisted back to TOML.
+- **Peer-aware policy matching.** Policy statements now support
+  `match_neighbor_set`, `match_route_type`, `match_local_pref_ge/le`, and
+  `match_med_ge/le`. Neighbor sets are managed under `PolicyService`, persist to
+  TOML, and evaluate against the current policy peer context on both import and
+  export.
 
 ---
 

@@ -109,6 +109,8 @@ message NeighborConfig {
   // Private AS removal mode: "", "remove", "all", or "replace".
   // Empty string means disabled (default).
   string remove_private_as = 7;
+  // Optional peer-group reference for inherited transport/policy defaults.
+  string peer_group = 8;
 }
 
 message NeighborState {
@@ -178,6 +180,10 @@ service PolicyService {
   rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse);
   rpc SetPolicy(SetPolicyRequest) returns (SetPolicyResponse);
   rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse);
+  rpc ListNeighborSets(ListNeighborSetsRequest) returns (ListNeighborSetsResponse);
+  rpc GetNeighborSet(GetNeighborSetRequest) returns (GetNeighborSetResponse);
+  rpc SetNeighborSet(SetNeighborSetRequest) returns (SetNeighborSetResponse);
+  rpc DeleteNeighborSet(DeleteNeighborSetRequest) returns (DeleteNeighborSetResponse);
   rpc GetGlobalPolicyChains(GetGlobalPolicyChainsRequest) returns (GlobalPolicyChains);
   rpc SetGlobalImportChain(SetGlobalImportChainRequest) returns (SetGlobalImportChainResponse);
   rpc SetGlobalExportChain(SetGlobalExportChainRequest) returns (SetGlobalExportChainResponse);
@@ -190,6 +196,15 @@ service PolicyService {
   rpc ClearNeighborExportChain(ClearNeighborExportChainRequest) returns (ClearNeighborExportChainResponse);
 }
 
+service PeerGroupService {
+  rpc ListPeerGroups(ListPeerGroupsRequest) returns (ListPeerGroupsResponse);
+  rpc GetPeerGroup(GetPeerGroupRequest) returns (GetPeerGroupResponse);
+  rpc SetPeerGroup(SetPeerGroupRequest) returns (SetPeerGroupResponse);
+  rpc DeletePeerGroup(DeletePeerGroupRequest) returns (DeletePeerGroupResponse);
+  rpc SetNeighborPeerGroup(SetNeighborPeerGroupRequest) returns (SetNeighborPeerGroupResponse);
+  rpc ClearNeighborPeerGroup(ClearNeighborPeerGroupRequest) returns (ClearNeighborPeerGroupResponse);
+}
+
 message PolicyDefinition {
   string default_action = 1;
   repeated PolicyStatement statements = 2;
@@ -198,6 +213,45 @@ message PolicyDefinition {
 message NamedPolicy {
   string name = 1;
   PolicyDefinition definition = 2;
+}
+
+message NeighborSetDefinition {
+  repeated string addresses = 1;
+  repeated uint32 remote_asns = 2;
+  repeated string peer_groups = 3;
+}
+
+message NamedNeighborSet {
+  string name = 1;
+  NeighborSetDefinition definition = 2;
+}
+
+message PeerGroupDefinition {
+  optional uint32 hold_time = 1;
+  optional uint32 max_prefixes = 2;
+  optional string md5_password = 3;
+  optional bool ttl_security = 4;
+  repeated string families = 5;
+  optional bool graceful_restart = 6;
+  optional uint32 gr_restart_time = 7;
+  optional uint64 gr_stale_routes_time = 8;
+  optional uint32 llgr_stale_time = 9;
+  optional string local_ipv6_nexthop = 10;
+  optional bool route_reflector_client = 11;
+  optional bool route_server_client = 12;
+  optional string remove_private_as = 13;
+  optional bool add_path_receive = 14;
+  optional bool add_path_send = 15;
+  optional uint32 add_path_send_max = 16;
+  repeated PolicyStatement import_policy = 17;
+  repeated PolicyStatement export_policy = 18;
+  repeated string import_policy_chain = 19;
+  repeated string export_policy_chain = 20;
+}
+
+message NamedPeerGroup {
+  string name = 1;
+  PeerGroupDefinition definition = 2;
 }
 
 message PolicyStatement {
@@ -216,6 +270,12 @@ message PolicyStatement {
   repeated string set_community_add = 13;
   repeated string set_community_remove = 14;
   AsPathPrepend set_as_path_prepend = 15;
+  optional string match_neighbor_set = 16;
+  optional string match_route_type = 17;
+  optional uint32 match_local_pref_ge = 18;
+  optional uint32 match_local_pref_le = 19;
+  optional uint32 match_med_ge = 20;
+  optional uint32 match_med_le = 21;
 }
 
 message AsPathPrepend {
@@ -250,6 +310,75 @@ message DeletePolicyRequest {
 }
 
 message DeletePolicyResponse {}
+
+message ListNeighborSetsRequest {}
+
+message ListNeighborSetsResponse {
+  repeated NamedNeighborSet neighbor_sets = 1;
+}
+
+message GetNeighborSetRequest {
+  string name = 1;
+}
+
+message GetNeighborSetResponse {
+  string name = 1;
+  NeighborSetDefinition definition = 2;
+}
+
+message SetNeighborSetRequest {
+  string name = 1;
+  NeighborSetDefinition definition = 2;
+}
+
+message SetNeighborSetResponse {}
+
+message DeleteNeighborSetRequest {
+  string name = 1;
+}
+
+message DeleteNeighborSetResponse {}
+
+message ListPeerGroupsRequest {}
+
+message ListPeerGroupsResponse {
+  repeated NamedPeerGroup peer_groups = 1;
+}
+
+message GetPeerGroupRequest {
+  string name = 1;
+}
+
+message GetPeerGroupResponse {
+  string name = 1;
+  PeerGroupDefinition definition = 2;
+}
+
+message SetPeerGroupRequest {
+  string name = 1;
+  PeerGroupDefinition definition = 2;
+}
+
+message SetPeerGroupResponse {}
+
+message DeletePeerGroupRequest {
+  string name = 1;
+}
+
+message DeletePeerGroupResponse {}
+
+message SetNeighborPeerGroupRequest {
+  string address = 1;
+  string peer_group = 2;
+}
+
+message SetNeighborPeerGroupResponse {}
+
+message ClearNeighborPeerGroupRequest {
+  string address = 1;
+}
+
+message ClearNeighborPeerGroupResponse {}
 
 message GlobalPolicyChains {
   repeated string import_policy_names = 1;

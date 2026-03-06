@@ -19,8 +19,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::policy_admin::{
-    apply_config_event, global_policy_chains_from_config, named_policies_from_config,
-    named_policy_from_config, neighbor_policy_chains_from_config, policy_references,
+    apply_config_event, global_policy_chains_from_config, named_neighbor_set_from_config,
+    named_neighbor_sets_from_config, named_peer_group_from_config, named_peer_groups_from_config,
+    named_policies_from_config, named_policy_from_config, neighbor_policy_chains_from_config,
+    neighbor_set_references, peer_group_references, policy_references,
 };
 
 const DEFAULT_HOLD_TIME: u16 = 90;
@@ -36,6 +38,7 @@ struct ManagedPeer {
     handle: PeerHandle,
     remote_asn: u32,
     description: String,
+    peer_group: Option<String>,
     enabled: bool,
     hold_time: Option<u16>,
     max_prefixes: Option<u32>,
@@ -109,6 +112,7 @@ impl PeerManager {
                     },
                 },
                 neighbors: Vec::new(),
+                peer_groups: HashMap::new(),
                 policy: crate::config::PolicyConfig::default(),
                 rpki: None,
                 bmp: None,
@@ -172,6 +176,9 @@ impl PeerManager {
         let remote_addr = SocketAddr::new(config.address, BGP_PORT);
         let mut transport = TransportConfig::new(peer, remote_addr);
         transport.max_prefixes = config.max_prefixes;
+        transport.peer_group.clone_from(&config.peer_group);
+        transport.md5_password.clone_from(&config.md5_password);
+        transport.ttl_security = config.ttl_security;
         transport.local_ipv6_nexthop = config.local_ipv6_nexthop;
         transport.gr_stale_routes_time = config.gr_stale_routes_time;
         transport.llgr_stale_time = config.llgr_stale_time;
@@ -249,41 +256,51 @@ impl PeerManager {
             return Err(format!("peer {} already exists", config.address));
         }
 
-        let (import_policy, export_policy, next_config) = if sync_config_snapshot {
-            let mut next_config = self.current_config.clone();
-            apply_config_event(
-                &mut next_config,
-                &ConfigEvent::NeighborAdded(config.clone()),
-            )
-            .map_err(|e| e.to_string())?;
-            let neighbor = next_config
-                .neighbors
-                .iter()
-                .find(|neighbor| neighbor.address == config.address.to_string())
-                .ok_or_else(|| {
-                    format!(
-                        "neighbor {} missing after config snapshot update",
-                        config.address
-                    )
-                })?;
-            let (import_policy, export_policy) = next_config
-                .effective_policy_chains_for_neighbor(neighbor)
+        let (transport, label, peer_group, import_policy, export_policy, next_config) =
+            if sync_config_snapshot {
+                let mut next_config = self.current_config.clone();
+                apply_config_event(
+                    &mut next_config,
+                    &ConfigEvent::NeighborAdded(config.clone()),
+                )
                 .map_err(|e| e.to_string())?;
-            (import_policy, export_policy, Some(next_config))
-        } else {
-            (
-                config.import_policy.clone(),
-                config.export_policy.clone(),
-                None,
-            )
-        };
+                let neighbor = next_config
+                    .neighbors
+                    .iter()
+                    .find(|neighbor| neighbor.address == config.address.to_string())
+                    .ok_or_else(|| {
+                        format!(
+                            "neighbor {} missing after config snapshot update",
+                            config.address
+                        )
+                    })?;
+                let resolved = next_config
+                    .resolve_neighbor(neighbor)
+                    .map_err(|e| e.to_string())?;
+                (
+                    resolved.transport_config,
+                    resolved.label,
+                    resolved.peer_group,
+                    resolved.import_policy,
+                    resolved.export_policy,
+                    Some(next_config),
+                )
+            } else {
+                (
+                    self.build_transport_config(&config),
+                    config.description.clone(),
+                    config.peer_group.clone(),
+                    config.import_policy.clone(),
+                    config.export_policy.clone(),
+                    None,
+                )
+            };
 
-        let transport = self.build_transport_config(&config);
         let address = config.address;
         let remote_asn = config.remote_asn;
-        let description = config.description.clone();
-        let hold_time = config.hold_time;
-        let max_prefixes = config.max_prefixes;
+        let description = label;
+        let hold_time = Some(transport.peer.hold_time);
+        let max_prefixes = transport.max_prefixes;
 
         let handle = PeerHandle::spawn(
             transport.clone(),
@@ -307,6 +324,7 @@ impl PeerManager {
                 handle,
                 remote_asn,
                 description,
+                peer_group,
                 enabled: true,
                 hold_time,
                 max_prefixes,
@@ -359,6 +377,7 @@ impl PeerManager {
             address,
             remote_asn: managed.remote_asn,
             description: managed.description.clone(),
+            peer_group: managed.peer_group.clone(),
             state: session_state
                 .as_ref()
                 .map_or(SessionState::Idle, |s| s.fsm_state),
@@ -390,6 +409,7 @@ impl PeerManager {
                 address: addr,
                 remote_asn: managed.remote_asn,
                 description: managed.description.clone(),
+                peer_group: managed.peer_group.clone(),
                 state: session_state
                     .as_ref()
                     .map_or(SessionState::Idle, |s| s.fsm_state),
@@ -493,6 +513,15 @@ impl PeerManager {
                 ));
             }
         }
+        if let ConfigEvent::DeleteNeighborSet { name } = &event {
+            let refs = neighbor_set_references(&self.current_config, name);
+            if !refs.is_empty() {
+                return Err(format!(
+                    "neighbor set {name} is still referenced by {}",
+                    refs.join(", ")
+                ));
+            }
+        }
 
         let mut next_config = self.current_config.clone();
         apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
@@ -515,6 +544,85 @@ impl PeerManager {
                 .map_err(|e| e.to_string())?;
             self.update_runtime_policies(address, import_policy, export_policy)
                 .await?;
+        }
+
+        self.current_config = next_config;
+        Ok(())
+    }
+
+    fn peer_manager_config_from_resolved(
+        resolved: crate::config::ResolvedNeighbor,
+        gr_restart_eligible: bool,
+    ) -> PeerManagerNeighborConfig {
+        let tc = resolved.transport_config;
+        PeerManagerNeighborConfig {
+            address: tc.remote_addr.ip(),
+            remote_asn: tc.peer.remote_asn,
+            description: resolved.label,
+            peer_group: resolved.peer_group,
+            hold_time: Some(tc.peer.hold_time),
+            max_prefixes: tc.max_prefixes,
+            md5_password: tc.md5_password.clone(),
+            ttl_security: tc.ttl_security,
+            families: tc.peer.families.clone(),
+            graceful_restart: tc.peer.graceful_restart,
+            gr_restart_time: tc.peer.gr_restart_time,
+            gr_stale_routes_time: tc.gr_stale_routes_time,
+            llgr_stale_time: tc.llgr_stale_time,
+            gr_restart_eligible,
+            local_ipv6_nexthop: tc.local_ipv6_nexthop,
+            route_reflector_client: tc.route_reflector_client,
+            route_server_client: tc.route_server_client,
+            remove_private_as: tc.remove_private_as,
+            add_path_receive: tc.peer.add_path_receive,
+            add_path_send: tc.peer.add_path_send,
+            add_path_send_max: tc.peer.add_path_send_max,
+            import_policy: resolved.import_policy,
+            export_policy: resolved.export_policy,
+        }
+    }
+
+    async fn apply_peer_group_change(
+        &mut self,
+        event: ConfigEvent,
+        affected_peers: Vec<IpAddr>,
+    ) -> Result<(), String> {
+        if let ConfigEvent::DeletePeerGroup { name } = &event {
+            let refs = peer_group_references(&self.current_config, name);
+            if !refs.is_empty() {
+                return Err(format!(
+                    "peer group {name} is still referenced by {}",
+                    refs.join(", ")
+                ));
+            }
+        }
+
+        let mut next_config = self.current_config.clone();
+        apply_config_event(&mut next_config, &event).map_err(|e| e.to_string())?;
+
+        for address in affected_peers {
+            let was_enabled = self
+                .peers
+                .get(&address)
+                .is_none_or(|managed| managed.enabled);
+            if self.peers.contains_key(&address) {
+                self.delete_peer(address, false).await?;
+            }
+
+            if let Some(neighbor) = next_config
+                .neighbors
+                .iter()
+                .find(|neighbor| neighbor.address == address.to_string())
+            {
+                let resolved = next_config
+                    .resolve_neighbor(neighbor)
+                    .map_err(|e| e.to_string())?;
+                let cfg = Self::peer_manager_config_from_resolved(resolved, false);
+                self.add_peer(cfg, false).await?;
+                if !was_enabled {
+                    self.disable_peer(address, None).await?;
+                }
+            }
         }
 
         self.current_config = next_config;
@@ -873,6 +981,26 @@ impl PeerManager {
                             ).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ListNeighborSets { reply } => {
+                            let _ = reply.send(named_neighbor_sets_from_config(&self.current_config));
+                        }
+                        PeerManagerCommand::GetNeighborSet { name, reply } => {
+                            let _ = reply.send(named_neighbor_set_from_config(&self.current_config, &name));
+                        }
+                        PeerManagerCommand::SetNeighborSet { name, definition, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::SetNeighborSet { name, definition },
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::DeleteNeighborSet { name, reply } => {
+                            let result = self.apply_policy_change(
+                                ConfigEvent::DeleteNeighborSet { name },
+                                None,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::GetGlobalPolicyChains { reply } => {
                             let _ = reply.send(global_policy_chains_from_config(&self.current_config));
                         }
@@ -935,6 +1063,46 @@ impl PeerManager {
                             ).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::ListPeerGroups { reply } => {
+                            let _ = reply.send(named_peer_groups_from_config(&self.current_config));
+                        }
+                        PeerManagerCommand::GetPeerGroup { name, reply } => {
+                            let _ = reply.send(named_peer_group_from_config(&self.current_config, &name));
+                        }
+                        PeerManagerCommand::SetPeerGroup { name, definition, reply } => {
+                            let affected: Vec<IpAddr> = self.current_config
+                                .neighbors
+                                .iter()
+                                .filter(|neighbor| neighbor.peer_group.as_deref() == Some(name.as_str()))
+                                .filter_map(|neighbor| neighbor.address.parse().ok())
+                                .collect();
+                            let result = self.apply_peer_group_change(
+                                ConfigEvent::SetPeerGroup { name, definition },
+                                affected,
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::DeletePeerGroup { name, reply } => {
+                            let result = self.apply_peer_group_change(
+                                ConfigEvent::DeletePeerGroup { name },
+                                Vec::new(),
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::SetNeighborPeerGroup { address, peer_group, reply } => {
+                            let result = self.apply_peer_group_change(
+                                ConfigEvent::SetNeighborPeerGroup { address, peer_group },
+                                vec![address],
+                            ).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ClearNeighborPeerGroup { address, reply } => {
+                            let result = self.apply_peer_group_change(
+                                ConfigEvent::ClearNeighborPeerGroup { address },
+                                vec![address],
+                            ).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::Shutdown => {
                             info!("peer manager shutting down {} peers", self.peers.len());
                             for (addr, managed) in self.peers.drain() {
@@ -984,8 +1152,11 @@ mod tests {
             address: addr,
             remote_asn: asn,
             description: format!("test-peer-{addr}"),
+            peer_group: None,
             hold_time: None,
             max_prefixes: None,
+            md5_password: None,
+            ttl_security: false,
             families: vec![(Afi::Ipv4, Safi::Unicast)],
             graceful_restart: true,
             gr_restart_time: 120,

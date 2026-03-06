@@ -70,10 +70,10 @@ Last updated: 2026-03-06
 | Large community matching | Yes | Yes | LC:global:local1:local2 |
 | AS_PATH regex | Yes | Yes | Cisco/Quagga `_` convention |
 | AS_PATH length match | Yes | Yes | `match_as_path_length_ge` / `match_as_path_length_le` |
-| Neighbor set matching | Yes | No | |
+| Neighbor set matching | Yes | Yes | Address / ASN / peer-group based |
 | RPKI validation result match | Yes | Yes | `match_rpki_validation` in policy |
-| Route type match (int/ext/local) | Yes | No | |
-| MED / LOCAL_PREF comparison | Yes | No | |
+| Route type match (int/ext/local) | Yes | Yes | `match_route_type` |
+| MED / LOCAL_PREF comparison | Yes | Yes | Inclusive `match_med_*` / `match_local_pref_*` |
 | Next-hop matching | Yes | No | |
 | Community add/remove/replace | Yes | Yes | Standard, extended, large |
 | MED manipulation | Yes | Yes | set_med |
@@ -87,9 +87,9 @@ Last updated: 2026-03-06
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | ~35 | |
+| Total RPCs | ~55 | ~46 | |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
-| Peer groups | Yes | No | |
+| Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | No | |
 | Path add/delete | Yes | Yes | IPv4 + IPv6 |
 | Streaming path injection | Yes | No | AddPathStream |
@@ -167,22 +167,22 @@ Last updated: 2026-03-06
 | Address families | 15 | 4 | ~27% |
 | Core protocol | 14 | 13.5 | ~96% |
 | Path attributes | 13 | 9 | ~69% |
-| Policy engine | 18 | 13 | ~72% |
-| gRPC RPCs | ~55 | ~35 | ~64% |
+| Policy engine | 18 | 17 | ~94% |
+| gRPC RPCs | ~55 | ~46 | ~84% |
 | Monitoring | 5 | 5 | 100% |
 | Security | 4 | 4 | 100% |
 | Best-path steps | 11 | 10.5 | ~95% |
 
 ## Weighted Parity Estimates
 
-### IX Route Server Use Case (~88% parity)
+### IX Route Server Use Case (~97% parity)
 
 The primary target deployment. Weighted toward what matters:
 
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
 - **Core protocol:** 96% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
-- **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self). Missing: neighbor set match, route type match, MED/LP comparison
+- **Policy:** 94%; covers peer-aware matching (neighbor sets, route type, MED/`LOCAL_PREF` comparison), community match/set, AS_PATH regex/prepend, and next-hop self
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
 - **BMP exporter:** RFC 7854 streaming to collectors, reconnect replay, periodic Stats Report
@@ -191,7 +191,7 @@ The primary target deployment. Weighted toward what matters:
 - **Config persistence + SIGHUP reload:** gRPC mutations survive restart; live neighbor reconciliation
 - **Operator packaging (v0.4.2):** systemd unit, example configs, operations guide, release checklist, container image CI
 
-**Remaining gaps for IX RS parity:** peer groups (~3%), neighbor set matching (~1%), route type match (~1%), MED/LOCAL_PREF comparison (~1%). Policy CRUD via gRPC is now complete, bringing IX route-server parity to roughly ~93%.
+**Remaining gaps for IX RS parity:** no major control-plane gaps remain for the target unicast route-server deployment. The notable remaining limitation is FlowSpec transparency in route-server client mode, plus broader operator polish like CLI integration tests and listener authorization split.
 
 ### General-Purpose BGP Speaker (~57% parity)
 
@@ -216,22 +216,16 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Top Gaps by Use Case
 
-### IX Route Server (current target, ~88% parity)
+### IX Route Server (current target, ~97% parity)
 
 These are the gaps that matter most for the stated alpha audience:
 
-1. **Peer groups** — template-based neighbor config. At 100+ members,
-   per-peer config becomes unwieldy. GoBGP solves this with peer groups and
-   apply-groups. Medium effort (config + API + transport threading).
-2. **Neighbor set matching** — match policy by peer address/ASN group. Small
-   effort, useful in combination with policy chains (e.g., "apply this chain
-   to all peers in AS-SET X").
-3. **Route type match (int/ext/local)** — match on route origin in policy.
-   Small effort, enables cleaner import/export separation without AS_PATH
-   regex workarounds.
-4. **MED / LOCAL_PREF comparison in policy** — match routes where MED or
-   LOCAL_PREF is above/below a threshold. Small effort, useful for
-   traffic engineering policies.
+1. **FlowSpec transparency in route-server mode** — unicast route-server
+   transparency is done; FlowSpec still uses the standard eBGP path.
+2. **Next-hop matching in policy** — current policy can rewrite next-hop but
+   cannot match on it.
+3. **Read-only vs mutating gRPC listener split** — operational/security polish,
+   not protocol parity.
 
 ### General-Purpose BGP Speaker (~57% parity)
 

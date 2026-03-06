@@ -3,7 +3,21 @@ use super::{
     NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode,
     debug, info, resolve_import_nexthop, warn,
 };
-use rustbgpd_policy::RouteContext;
+use rustbgpd_policy::{RouteContext, RouteType};
+
+fn explicit_local_pref(attrs: &[PathAttribute]) -> Option<u32> {
+    attrs.iter().find_map(|attr| match attr {
+        PathAttribute::LocalPref(value) => Some(*value),
+        _ => None,
+    })
+}
+
+fn explicit_med(attrs: &[PathAttribute]) -> Option<u32> {
+    attrs.iter().find_map(|attr| match attr {
+        PathAttribute::Med(value) => Some(*value),
+        _ => None,
+    })
+}
 
 impl PeerSession {
     /// Check whether a prefix's address family is among the negotiated families.
@@ -164,6 +178,12 @@ impl PeerSession {
         } else {
             rustbgpd_rib::RouteOrigin::Ibgp
         };
+        let policy_route_type = Some(match route_origin {
+            rustbgpd_rib::RouteOrigin::Local => RouteType::Local,
+            rustbgpd_rib::RouteOrigin::Ibgp => RouteType::Internal,
+            rustbgpd_rib::RouteOrigin::Ebgp => RouteType::External,
+        });
+        let policy_peer_asn = self.negotiated.as_ref().map(|n| n.peer_asn);
 
         // AS_PATH loop detection (RFC 4271 §9.1.2): discard all
         // announcements if our local ASN appears in the AS_PATH.
@@ -340,6 +360,8 @@ impl PeerSession {
                 _ => None,
             })
             .unwrap_or(0);
+        let policy_local_pref = explicit_local_pref(&route_attrs);
+        let policy_med = explicit_med(&route_attrs);
 
         // Body NLRI routes (IPv4)
         let mut announced: Vec<Route> = parsed
@@ -355,6 +377,12 @@ impl PeerSession {
                     as_path_str: &aspath_str,
                     as_path_len: aspath_len,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                    peer_address: Some(self.peer_ip),
+                    peer_asn: policy_peer_asn,
+                    peer_group: self.config.peer_group.as_deref(),
+                    route_type: policy_route_type,
+                    local_pref: policy_local_pref,
+                    med: policy_med,
                 };
                 let result = rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
                 if result.action != rustbgpd_policy::PolicyAction::Permit {
@@ -445,6 +473,12 @@ impl PeerSession {
                                 as_path_str: &aspath_str,
                                 as_path_len: aspath_len,
                                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                peer_address: Some(self.peer_ip),
+                                peer_asn: policy_peer_asn,
+                                peer_group: self.config.peer_group.as_deref(),
+                                route_type: policy_route_type,
+                                local_pref: policy_local_pref,
+                                med: policy_med,
                             };
                             let result =
                                 rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
@@ -484,6 +518,12 @@ impl PeerSession {
                             as_path_str: &aspath_str,
                             as_path_len: aspath_len,
                             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                            peer_address: Some(self.peer_ip),
+                            peer_asn: policy_peer_asn,
+                            peer_group: self.config.peer_group.as_deref(),
+                            route_type: policy_route_type,
+                            local_pref: policy_local_pref,
+                            med: policy_med,
                         };
                         let result =
                             rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);

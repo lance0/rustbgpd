@@ -58,6 +58,7 @@ impl RibManager {
         self.peer_add_path_send_max.remove(&peer);
         self.peer_add_path_send_families.remove(&peer);
         self.peer_asn.remove(&peer);
+        self.peer_group.remove(&peer);
         self.peer_bgp_id.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
@@ -118,6 +119,18 @@ impl RibManager {
         self.send_initial_table(peer);
     }
 
+    pub(super) fn handle_set_peer_policy_context(
+        &mut self,
+        peer: IpAddr,
+        peer_group: Option<String>,
+    ) {
+        if let Some(peer_group) = peer_group {
+            self.peer_group.insert(peer, peer_group);
+        } else {
+            self.peer_group.remove(&peer);
+        }
+    }
+
     /// Send the full Loc-RIB to a newly established peer (initial table dump).
     ///
     /// `AdjRibOut` is only populated after a successful channel send. On
@@ -134,6 +147,8 @@ impl RibManager {
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
         let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+        let target_peer_asn = self.peer_asn.get(&peer).copied();
+        let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
         let cluster_id = self.cluster_id;
         let peer_add_path_send_max = self.peer_add_path_send_max.get(&peer).copied().unwrap_or(0);
         let peer_add_path_send_families = self
@@ -167,6 +182,8 @@ impl RibManager {
                     &self.peer_is_rr_client,
                     prefix,
                     peer,
+                    target_peer_asn,
+                    target_peer_group,
                     prefix_send_max,
                     target_is_ebgp,
                     target_is_rr_client,
@@ -184,6 +201,8 @@ impl RibManager {
                     &self.peer_is_rr_client,
                     prefix,
                     peer,
+                    target_peer_asn,
+                    target_peer_group,
                     target_is_ebgp,
                     target_is_rr_client,
                     cluster_id,
@@ -207,6 +226,9 @@ impl RibManager {
                 &initial_view,
                 &self.peer_is_rr_client,
                 &all_flowspec_rules,
+                peer,
+                target_peer_asn,
+                target_peer_group,
                 target_is_ebgp,
                 target_is_rr_client,
                 cluster_id,

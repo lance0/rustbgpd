@@ -30,6 +30,8 @@ pub struct TransportConfig {
     pub connect_timeout: Duration,
     /// Maximum number of prefixes accepted from this peer before Cease/1.
     pub max_prefixes: Option<u32>,
+    /// Optional peer-group name used for policy matching and operator visibility.
+    pub peer_group: Option<String>,
     /// TCP MD5 authentication password (RFC 2385).
     pub md5_password: Option<String>,
     /// Enable GTSM / TTL security (RFC 5082).
@@ -69,6 +71,7 @@ impl TransportConfig {
             remote_addr,
             connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
             max_prefixes: None,
+            peer_group: None,
             md5_password: None,
             ttl_security: false,
             local_ipv6_nexthop: None,

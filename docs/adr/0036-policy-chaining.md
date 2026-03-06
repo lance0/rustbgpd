@@ -95,12 +95,14 @@ import_policy_chain = ["reject-bogons", "set-lp-customer"]
 
 ### Runtime CRUD extension
 
-Named policies and chain attachments are also exposed through the gRPC
-`PolicyService`. The runtime model is intentionally narrow:
+Named policies, neighbor sets, and chain attachments are also exposed through
+the gRPC `PolicyService`. The runtime model is intentionally narrow:
 
 - named policy definitions are full-replace (`SetPolicy`)
+- neighbor-set definitions are full-replace (`SetNeighborSet`)
 - global and per-neighbor chain assignments are full-replace
 - deleting a referenced named policy is rejected
+- deleting a referenced neighbor set is rejected
 - import-chain changes apply to future inbound UPDATE processing; operators use
   `SoftResetIn` when they want existing Adj-RIB-In state re-evaluated
 - export-chain changes trigger outbound recomputation immediately

@@ -46,8 +46,14 @@ fn proto_statement_to_input(
         le,
         match_community: statement.match_community,
         match_as_path: statement.match_as_path,
+        match_neighbor_set: statement.match_neighbor_set,
+        match_route_type: statement.match_route_type,
         match_as_path_length_ge: statement.match_as_path_length_ge,
         match_as_path_length_le: statement.match_as_path_length_le,
+        match_local_pref_ge: statement.match_local_pref_ge,
+        match_local_pref_le: statement.match_local_pref_le,
+        match_med_ge: statement.match_med_ge,
+        match_med_le: statement.match_med_le,
         match_rpki_validation: statement.match_rpki_validation,
         set_local_pref: statement.set_local_pref,
         set_med: statement.set_med,
@@ -66,8 +72,14 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
         le: statement.le.map(u32::from),
         match_community: statement.match_community.clone(),
         match_as_path: statement.match_as_path.clone(),
+        match_neighbor_set: statement.match_neighbor_set.clone(),
+        match_route_type: statement.match_route_type.clone(),
         match_as_path_length_ge: statement.match_as_path_length_ge,
         match_as_path_length_le: statement.match_as_path_length_le,
+        match_local_pref_ge: statement.match_local_pref_ge,
+        match_local_pref_le: statement.match_local_pref_le,
+        match_med_ge: statement.match_med_ge,
+        match_med_le: statement.match_med_le,
         match_rpki_validation: statement.match_rpki_validation.clone(),
         set_local_pref: statement.set_local_pref,
         set_med: statement.set_med,
@@ -272,6 +284,146 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         }
 
         Ok(Response::new(proto::DeletePolicyResponse {}))
+    }
+
+    async fn list_neighbor_sets(
+        &self,
+        _request: Request<proto::ListNeighborSetsRequest>,
+    ) -> Result<Response<proto::ListNeighborSetsResponse>, Status> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::ListNeighborSets { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let neighbor_sets = reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+        Ok(Response::new(proto::ListNeighborSetsResponse {
+            neighbor_sets: neighbor_sets
+                .into_iter()
+                .map(|neighbor_set| proto::NamedNeighborSet {
+                    name: neighbor_set.name,
+                    definition: Some(proto::NeighborSetDefinition {
+                        addresses: neighbor_set.definition.addresses,
+                        remote_asns: neighbor_set.definition.remote_asns,
+                        peer_groups: neighbor_set.definition.peer_groups,
+                    }),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn get_neighbor_set(
+        &self,
+        request: Request<proto::GetNeighborSetRequest>,
+    ) -> Result<Response<proto::GetNeighborSetResponse>, Status> {
+        let req = request.into_inner();
+        if req.name.trim().is_empty() {
+            return Err(Status::invalid_argument("name is required"));
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::GetNeighborSet {
+                name: req.name.clone(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        let definition = reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .ok_or_else(|| Status::not_found("neighbor set not found"))?;
+        Ok(Response::new(proto::GetNeighborSetResponse {
+            name: req.name,
+            definition: Some(proto::NeighborSetDefinition {
+                addresses: definition.addresses,
+                remote_asns: definition.remote_asns,
+                peer_groups: definition.peer_groups,
+            }),
+        }))
+    }
+
+    async fn set_neighbor_set(
+        &self,
+        request: Request<proto::SetNeighborSetRequest>,
+    ) -> Result<Response<proto::SetNeighborSetResponse>, Status> {
+        let req = request.into_inner();
+        if req.name.trim().is_empty() {
+            return Err(Status::invalid_argument("name is required"));
+        }
+        let definition = req
+            .definition
+            .ok_or_else(|| Status::invalid_argument("definition is required"))?;
+        let definition = crate::peer_types::NeighborSetDefinition {
+            addresses: definition.addresses,
+            remote_asns: definition.remote_asns,
+            peer_groups: definition.peer_groups,
+        };
+
+        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
+        let persisted = persist_permit.as_ref().map(|_| definition.clone());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::SetNeighborSet {
+                name: req.name.clone(),
+                definition,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .map_err(Status::invalid_argument)?;
+
+        if let (Some(permit), Some(definition)) = (persist_permit, persisted) {
+            permit.send(ConfigEvent::SetNeighborSet {
+                name: req.name,
+                definition,
+            });
+        }
+
+        Ok(Response::new(proto::SetNeighborSetResponse {}))
+    }
+
+    async fn delete_neighbor_set(
+        &self,
+        request: Request<proto::DeleteNeighborSetRequest>,
+    ) -> Result<Response<proto::DeleteNeighborSetResponse>, Status> {
+        let req = request.into_inner();
+        if req.name.trim().is_empty() {
+            return Err(Status::invalid_argument("name is required"));
+        }
+
+        let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::DeleteNeighborSet {
+                name: req.name.clone(),
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+        match reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+        {
+            Ok(()) => {}
+            Err(error) if error.contains("still referenced") => {
+                return Err(Status::failed_precondition(error));
+            }
+            Err(error) if error.contains("not found") => {
+                return Err(Status::not_found(error));
+            }
+            Err(error) => return Err(Status::invalid_argument(error)),
+        }
+
+        if let Some(permit) = persist_permit {
+            permit.send(ConfigEvent::DeleteNeighborSet { name: req.name });
+        }
+
+        Ok(Response::new(proto::DeleteNeighborSetResponse {}))
     }
 
     async fn get_global_policy_chains(
@@ -598,8 +750,14 @@ mod tests {
             le: Some(24),
             match_community: vec!["65001:100".into()],
             match_as_path: Some("_65002_".into()),
+            match_neighbor_set: None,
+            match_route_type: None,
             match_as_path_length_ge: Some(1),
             match_as_path_length_le: Some(5),
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
             match_rpki_validation: Some("valid".into()),
             set_local_pref: Some(200),
             set_med: Some(50),

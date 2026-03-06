@@ -115,7 +115,15 @@ impl Config {
         if let Some(ref cid) = self.global.cluster_id {
             return Some(cid.parse().expect("validated in Config::load"));
         }
-        if self.neighbors.iter().any(|n| n.route_reflector_client) {
+        if self.neighbors.iter().any(|n| {
+            n.route_reflector_client.unwrap_or_else(|| {
+                n.peer_group
+                    .as_deref()
+                    .and_then(|name| self.peer_groups.get(name))
+                    .and_then(|group| group.route_reflector_client)
+                    .unwrap_or(false)
+            })
+        }) {
             let router_id: Ipv4Addr = self
                 .global
                 .router_id
@@ -132,18 +140,38 @@ impl Config {
     /// the inline `import` entries as a single-policy chain.
     pub fn import_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
         if self.policy.import_chain.is_empty() {
-            Ok(parse_policy(&self.policy.import)?.map(|p| PolicyChain::new(vec![p])))
+            Ok(parse_policy(
+                &self.policy.import,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?
+            .map(|p| PolicyChain::new(vec![p])))
         } else {
-            resolve_chain(&self.policy.import_chain, &self.policy.definitions)
+            resolve_chain(
+                &self.policy.import_chain,
+                &self.policy.definitions,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )
         }
     }
 
     /// Resolve the global export policy chain.
     pub fn export_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
         if self.policy.export_chain.is_empty() {
-            Ok(parse_policy(&self.policy.export)?.map(|p| PolicyChain::new(vec![p])))
+            Ok(parse_policy(
+                &self.policy.export,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?
+            .map(|p| PolicyChain::new(vec![p])))
         } else {
-            resolve_chain(&self.policy.export_chain, &self.policy.definitions)
+            resolve_chain(
+                &self.policy.export_chain,
+                &self.policy.definitions,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )
         }
     }
 
@@ -155,23 +183,253 @@ impl Config {
         &self,
         neighbor: &Neighbor,
     ) -> Result<(Option<PolicyChain>, Option<PolicyChain>), ConfigError> {
+        let group = self.peer_group_for_neighbor(neighbor)?;
         let global_import = self.import_chain()?;
         let global_export = self.export_chain()?;
+        let group_import = if let Some(group) = group {
+            if group.import_policy_chain.is_empty() {
+                parse_policy(
+                    &group.import_policy,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                )?
+                .map(|p| PolicyChain::new(vec![p]))
+            } else {
+                resolve_chain(
+                    &group.import_policy_chain,
+                    &self.policy.definitions,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                )?
+            }
+        } else {
+            None
+        };
+        let group_export = if let Some(group) = group {
+            if group.export_policy_chain.is_empty() {
+                parse_policy(
+                    &group.export_policy,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                )?
+                .map(|p| PolicyChain::new(vec![p]))
+            } else {
+                resolve_chain(
+                    &group.export_policy_chain,
+                    &self.policy.definitions,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                )?
+            }
+        } else {
+            None
+        };
 
         let import = if neighbor.import_policy_chain.is_empty() {
-            parse_policy(&neighbor.import_policy)?.map(|p| PolicyChain::new(vec![p]))
+            if neighbor.import_policy.is_empty() {
+                group_import
+            } else {
+                parse_policy(
+                    &neighbor.import_policy,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                )?
+                .map(|p| PolicyChain::new(vec![p]))
+            }
         } else {
-            resolve_chain(&neighbor.import_policy_chain, &self.policy.definitions)?
+            resolve_chain(
+                &neighbor.import_policy_chain,
+                &self.policy.definitions,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?
         }
         .or_else(|| global_import.clone());
         let export = if neighbor.export_policy_chain.is_empty() {
-            parse_policy(&neighbor.export_policy)?.map(|p| PolicyChain::new(vec![p]))
+            if neighbor.export_policy.is_empty() {
+                group_export
+            } else {
+                parse_policy(
+                    &neighbor.export_policy,
+                    &self.policy.neighbor_sets,
+                    &self.peer_groups,
+                )?
+                .map(|p| PolicyChain::new(vec![p]))
+            }
         } else {
-            resolve_chain(&neighbor.export_policy_chain, &self.policy.definitions)?
+            resolve_chain(
+                &neighbor.export_policy_chain,
+                &self.policy.definitions,
+                &self.policy.neighbor_sets,
+                &self.peer_groups,
+            )?
         }
         .or_else(|| global_export.clone());
 
         Ok((import, export))
+    }
+
+    fn peer_group_for_neighbor(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<Option<&PeerGroupConfig>, ConfigError> {
+        neighbor
+            .peer_group
+            .as_deref()
+            .map(|name| {
+                self.peer_groups
+                    .get(name)
+                    .ok_or_else(|| ConfigError::UndefinedPeerGroup {
+                        name: name.to_string(),
+                    })
+            })
+            .transpose()
+    }
+
+    fn resolved_families(
+        neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
+        peer_addr: IpAddr,
+    ) -> Result<Vec<(Afi, Safi)>, ConfigError> {
+        if !neighbor.families.is_empty() {
+            return parse_families(&neighbor.families);
+        }
+        if let Some(group) = group
+            && !group.families.is_empty()
+        {
+            return parse_families(&group.families);
+        }
+
+        let mut f = vec![(Afi::Ipv4, Safi::Unicast)];
+        if peer_addr.is_ipv6() {
+            f.push((Afi::Ipv6, Safi::Unicast));
+        }
+        Ok(f)
+    }
+
+    fn resolved_remove_private_as(
+        neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
+    ) -> RemovePrivateAs {
+        match neighbor
+            .remove_private_as
+            .as_deref()
+            .or_else(|| group.and_then(|g| g.remove_private_as.as_deref()))
+        {
+            Some("remove") => RemovePrivateAs::Remove,
+            Some("all") => RemovePrivateAs::All,
+            Some("replace") => RemovePrivateAs::Replace,
+            _ => RemovePrivateAs::Disabled,
+        }
+    }
+
+    fn resolved_add_path(
+        neighbor: &Neighbor,
+        group: Option<&PeerGroupConfig>,
+    ) -> Option<AddPathConfig> {
+        neighbor
+            .add_path
+            .clone()
+            .or_else(|| group.and_then(|g| g.add_path.clone()))
+    }
+
+    pub(crate) fn resolve_neighbor(
+        &self,
+        neighbor: &Neighbor,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        let router_id: Ipv4Addr = self
+            .global
+            .router_id
+            .parse()
+            .expect("validated in Config::load");
+        let peer_addr: IpAddr = neighbor.address.parse().expect("validated in Config::load");
+        let group = self.peer_group_for_neighbor(neighbor)?;
+        let families = Self::resolved_families(neighbor, group, peer_addr)?;
+        let add_path = Self::resolved_add_path(neighbor, group);
+
+        let peer = PeerConfig {
+            local_asn: self.global.asn,
+            remote_asn: neighbor.remote_asn,
+            local_router_id: router_id,
+            hold_time: neighbor
+                .hold_time
+                .or_else(|| group.and_then(|g| g.hold_time))
+                .unwrap_or(DEFAULT_HOLD_TIME),
+            connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
+            families,
+            graceful_restart: neighbor
+                .graceful_restart
+                .or_else(|| group.and_then(|g| g.graceful_restart))
+                .unwrap_or(true),
+            gr_restart_time: neighbor
+                .gr_restart_time
+                .or_else(|| group.and_then(|g| g.gr_restart_time))
+                .unwrap_or(120),
+            llgr_stale_time: neighbor
+                .llgr_stale_time
+                .or_else(|| group.and_then(|g| g.llgr_stale_time))
+                .unwrap_or(0),
+            add_path_receive: add_path.as_ref().is_some_and(|c| c.receive),
+            add_path_send: add_path.as_ref().is_some_and(|c| c.send),
+            add_path_send_max: add_path.as_ref().and_then(|c| c.send_max).unwrap_or(0),
+        };
+
+        let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
+        let mut transport = TransportConfig::new(peer, remote_addr);
+        transport.max_prefixes = neighbor
+            .max_prefixes
+            .or_else(|| group.and_then(|g| g.max_prefixes));
+        transport.peer_group.clone_from(&neighbor.peer_group);
+        transport.md5_password = neighbor
+            .md5_password
+            .clone()
+            .or_else(|| group.and_then(|g| g.md5_password.clone()));
+        transport.ttl_security = neighbor
+            .ttl_security
+            .or_else(|| group.and_then(|g| g.ttl_security))
+            .unwrap_or(false);
+        transport.local_ipv6_nexthop = neighbor
+            .local_ipv6_nexthop
+            .as_ref()
+            .or_else(|| group.and_then(|g| g.local_ipv6_nexthop.as_ref()))
+            .map(|s| s.parse::<Ipv6Addr>().expect("validated in Config::load"));
+        transport.gr_stale_routes_time = neighbor
+            .gr_stale_routes_time
+            .or_else(|| group.and_then(|g| g.gr_stale_routes_time))
+            .unwrap_or(360);
+        transport.llgr_stale_time = neighbor
+            .llgr_stale_time
+            .or_else(|| group.and_then(|g| g.llgr_stale_time))
+            .unwrap_or(0);
+        transport.route_server_client = neighbor
+            .route_server_client
+            .or_else(|| group.and_then(|g| g.route_server_client))
+            .unwrap_or(false);
+        transport.route_reflector_client = neighbor
+            .route_reflector_client
+            .or_else(|| group.and_then(|g| g.route_reflector_client))
+            .unwrap_or(false);
+        transport.remove_private_as = Self::resolved_remove_private_as(neighbor, group);
+
+        let (import_policy, export_policy) = self.effective_policy_chains_for_neighbor(neighbor)?;
+
+        Ok(ResolvedNeighbor {
+            transport_config: transport,
+            label: neighbor
+                .description
+                .clone()
+                .unwrap_or_else(|| neighbor.address.clone()),
+            import_policy,
+            export_policy,
+            peer_group: neighbor.peer_group.clone(),
+        })
+    }
+
+    pub fn resolved_neighbors(&self) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
+        self.neighbors
+            .iter()
+            .map(|neighbor| self.resolve_neighbor(neighbor))
+            .collect()
     }
 
     /// Returns `(TransportConfig, label, import_chain, export_chain)` per neighbor.
@@ -179,6 +437,7 @@ impl Config {
     /// Per-neighbor policy overrides global; if neighbor has no policy entries,
     /// the corresponding value is `None` (caller falls back to global).
     #[expect(clippy::type_complexity)]
+    #[cfg(test)]
     pub fn to_peer_configs(
         &self,
     ) -> Result<
@@ -190,77 +449,29 @@ impl Config {
         )>,
         ConfigError,
     > {
-        let router_id: Ipv4Addr = self
-            .global
-            .router_id
-            .parse()
-            .expect("validated in Config::load");
-
-        let mut configs = Vec::with_capacity(self.neighbors.len());
-        for neighbor in &self.neighbors {
-            let peer_addr: IpAddr = neighbor.address.parse().expect("validated in Config::load");
-
-            let families = if neighbor.families.is_empty() {
-                // Default: IPv4 unicast always. If neighbor is IPv6, also add IPv6 unicast.
-                let mut f = vec![(Afi::Ipv4, Safi::Unicast)];
-                if peer_addr.is_ipv6() {
-                    f.push((Afi::Ipv6, Safi::Unicast));
-                }
-                f
-            } else {
-                parse_families(&neighbor.families)?
-            };
-
-            let peer = PeerConfig {
-                local_asn: self.global.asn,
-                remote_asn: neighbor.remote_asn,
-                local_router_id: router_id,
-                hold_time: neighbor.hold_time.unwrap_or(DEFAULT_HOLD_TIME),
-                connect_retry_secs: DEFAULT_CONNECT_RETRY_SECS,
-                families,
-                graceful_restart: neighbor.graceful_restart.unwrap_or(true),
-                gr_restart_time: neighbor.gr_restart_time.unwrap_or(120),
-                llgr_stale_time: neighbor.llgr_stale_time.unwrap_or(0),
-                add_path_receive: neighbor.add_path.as_ref().is_some_and(|c| c.receive),
-                add_path_send: neighbor.add_path.as_ref().is_some_and(|c| c.send),
-                add_path_send_max: neighbor
-                    .add_path
-                    .as_ref()
-                    .and_then(|c| c.send_max)
-                    .unwrap_or(0),
-            };
-
-            let remote_addr = SocketAddr::new(peer_addr, BGP_PORT);
-            let mut transport = TransportConfig::new(peer, remote_addr);
-            transport.max_prefixes = neighbor.max_prefixes;
-            transport.md5_password.clone_from(&neighbor.md5_password);
-            transport.ttl_security = neighbor.ttl_security;
-            transport.local_ipv6_nexthop = neighbor
-                .local_ipv6_nexthop
-                .as_ref()
-                .map(|s| s.parse::<Ipv6Addr>().expect("validated in Config::load"));
-            transport.gr_stale_routes_time = neighbor.gr_stale_routes_time.unwrap_or(360);
-            transport.llgr_stale_time = neighbor.llgr_stale_time.unwrap_or(0);
-            transport.route_server_client = neighbor.route_server_client;
-            transport.route_reflector_client = neighbor.route_reflector_client;
-            transport.remove_private_as = match neighbor.remove_private_as.as_deref() {
-                Some("remove") => RemovePrivateAs::Remove,
-                Some("all") => RemovePrivateAs::All,
-                Some("replace") => RemovePrivateAs::Replace,
-                _ => RemovePrivateAs::Disabled,
-            };
-
-            let label = neighbor
-                .description
-                .clone()
-                .unwrap_or_else(|| neighbor.address.clone());
-
-            let (import, export) = self.effective_policy_chains_for_neighbor(neighbor)?;
-
-            configs.push((transport, label, import, export));
-        }
-        Ok(configs)
+        self.resolved_neighbors().map(|neighbors| {
+            neighbors
+                .into_iter()
+                .map(|neighbor| {
+                    (
+                        neighbor.transport_config,
+                        neighbor.label,
+                        neighbor.import_policy,
+                        neighbor.export_policy,
+                    )
+                })
+                .collect()
+        })
     }
+}
+
+#[derive(Clone)]
+pub struct ResolvedNeighbor {
+    pub transport_config: TransportConfig,
+    pub label: String,
+    pub import_policy: Option<PolicyChain>,
+    pub export_policy: Option<PolicyChain>,
+    pub peer_group: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

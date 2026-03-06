@@ -77,6 +77,13 @@ pub enum RibUpdate {
         /// Maximum paths per prefix to send via Add-Path (0 = single-best only).
         add_path_send_max: u32,
     },
+    /// Update per-peer policy identity metadata used during export policy evaluation.
+    SetPeerPolicyContext {
+        /// Peer whose policy identity is being updated.
+        peer: IpAddr,
+        /// Optional peer-group membership.
+        peer_group: Option<String>,
+    },
     /// Inject a locally-originated route.
     InjectRoute {
         /// The route to inject.

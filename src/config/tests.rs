@@ -1,4 +1,6 @@
 use super::*;
+use rustbgpd_policy::RouteType;
+use rustbgpd_wire::{Afi, Safi};
 use tempfile::NamedTempFile;
 
 fn valid_toml() -> &'static str {
@@ -293,7 +295,7 @@ ttl_security = true
 "#;
     let config = parse(toml_str).unwrap();
     assert_eq!(config.neighbors[0].md5_password.as_deref(), Some("secret"));
-    assert!(config.neighbors[0].ttl_security);
+    assert_eq!(config.neighbors[0].ttl_security, Some(true));
 
     let peers = config.to_peer_configs().unwrap();
     assert_eq!(peers[0].0.md5_password.as_deref(), Some("secret"));
@@ -911,7 +913,7 @@ remote_asn = 65001
 route_reflector_client = true
 "#;
     let config = parse(toml_str).unwrap();
-    assert!(config.neighbors[0].route_reflector_client);
+    assert_eq!(config.neighbors[0].route_reflector_client, Some(true));
 }
 
 #[test]
@@ -932,7 +934,7 @@ remote_asn = 65002
 route_server_client = true
 "#;
     let config = parse(toml_str).unwrap();
-    assert!(config.neighbors[0].route_server_client);
+    assert_eq!(config.neighbors[0].route_server_client, Some(true));
 }
 
 #[test]
@@ -959,7 +961,7 @@ route_server_client = true
 #[test]
 fn route_server_client_defaults_to_false() {
     let config = parse(valid_toml()).unwrap();
-    assert!(!config.neighbors[0].route_server_client);
+    assert_eq!(config.neighbors[0].route_server_client, None);
 }
 
 #[test]
@@ -1655,7 +1657,13 @@ fn named_policy_default_deny() {
     let config = parse(&named_policy_toml()).unwrap();
     let def = &config.policy.definitions["reject-bogons"];
     assert_eq!(def.default_action, "deny");
-    let policy = parse_named_policy("reject-bogons", def).unwrap();
+    let policy = parse_named_policy(
+        "reject-bogons",
+        def,
+        &config.policy.neighbor_sets,
+        &config.peer_groups,
+    )
+    .unwrap();
     assert_eq!(policy.default_action, PolicyAction::Deny);
 }
 
@@ -1676,7 +1684,13 @@ remote_asn = 65003
     );
     let config = parse(&toml_str).unwrap();
     let def = &config.policy.definitions["deny-all"];
-    let policy = parse_named_policy("deny-all", def).unwrap();
+    let policy = parse_named_policy(
+        "deny-all",
+        def,
+        &config.policy.neighbor_sets,
+        &config.peer_groups,
+    )
+    .unwrap();
     assert_eq!(policy.entries.len(), 0);
     assert_eq!(policy.default_action, PolicyAction::Deny);
 }
@@ -1847,23 +1861,139 @@ remote_asn = 65003
     );
 }
 
+#[test]
+fn peer_group_inheritance_applies_to_resolved_neighbor() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[peer_groups.rs-clients]
+hold_time = 30
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rs-clients"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let resolved = config.resolve_neighbor(&config.neighbors[1]).unwrap();
+    assert_eq!(resolved.transport_config.peer.hold_time, 30);
+    assert_eq!(
+        resolved.transport_config.peer.families,
+        vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)]
+    );
+    assert!(resolved.transport_config.route_server_client);
+    assert_eq!(resolved.peer_group.as_deref(), Some("rs-clients"));
+}
+
+#[test]
+fn neighbor_values_override_peer_group_defaults() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[peer_groups.transit]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "transit"
+hold_time = 45
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let resolved = config.resolve_neighbor(&config.neighbors[1]).unwrap();
+    assert_eq!(resolved.transport_config.peer.hold_time, 45);
+}
+
+#[test]
+fn neighbor_set_and_route_shape_policy_fields_parse() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[peer_groups.rs-clients]
+hold_time = 90
+
+[policy.neighbor_sets.ixp]
+addresses = ["10.0.0.3"]
+remote_asns = [65003]
+peer_groups = ["rs-clients"]
+
+[policy.definitions.prefer-external]
+[[policy.definitions.prefer-external.statements]]
+action = "permit"
+match_neighbor_set = "ixp"
+match_route_type = "external"
+match_local_pref_ge = 200
+match_med_le = 50
+set_local_pref = 250
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "rs-clients"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let def = &config.policy.definitions["prefer-external"];
+    let policy = parse_named_policy(
+        "prefer-external",
+        def,
+        &config.policy.neighbor_sets,
+        &config.peer_groups,
+    )
+    .unwrap();
+    let statement = &policy.entries[0];
+    assert!(statement.match_neighbor_set.is_some());
+    assert_eq!(statement.match_route_type, Some(RouteType::External));
+    assert_eq!(statement.match_local_pref_ge, Some(200));
+    assert_eq!(statement.match_med_le, Some(50));
+    assert_eq!(statement.modifications.set_local_pref, Some(250));
+}
+
+#[test]
+fn undefined_peer_group_reference_is_rejected() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+peer_group = "missing"
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::UndefinedPeerGroup { .. }));
+}
+
 fn test_neighbor(addr: &str, asn: u32) -> Neighbor {
     Neighbor {
         address: addr.to_string(),
         remote_asn: asn,
         description: None,
+        peer_group: None,
         hold_time: None,
         max_prefixes: None,
         md5_password: None,
-        ttl_security: false,
+        ttl_security: Some(false),
         families: Vec::new(),
         graceful_restart: None,
         gr_restart_time: None,
         gr_stale_routes_time: None,
         llgr_stale_time: None,
         local_ipv6_nexthop: None,
-        route_reflector_client: false,
-        route_server_client: false,
+        route_reflector_client: Some(false),
+        route_server_client: Some(false),
         remove_private_as: None,
         add_path: None,
         import_policy: Vec::new(),

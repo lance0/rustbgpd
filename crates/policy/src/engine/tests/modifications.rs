@@ -14,9 +14,15 @@ fn evaluate_returns_modifications() {
             action: PolicyAction::Permit,
             match_community: vec![],
             match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
             match_rpki_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
             modifications: RouteModifications {
                 set_local_pref: Some(200),
                 ..RouteModifications::default()

@@ -81,6 +81,8 @@ pub struct RibManager {
     peer_add_path_send_max: HashMap<IpAddr, u32>,
     /// Peer ASN, tracked for MRT `PEER_INDEX_TABLE`.
     peer_asn: HashMap<IpAddr, u32>,
+    /// Peer-group membership used for export policy neighbor-set matching.
+    peer_group: HashMap<IpAddr, String>,
     /// Peer BGP router ID, tracked for MRT `PEER_INDEX_TABLE`.
     peer_bgp_id: HashMap<IpAddr, Ipv4Addr>,
     /// Families for which Add-Path Send/Both was negotiated per peer.
@@ -129,6 +131,7 @@ impl RibManager {
             peer_add_path_send_max: HashMap::new(),
             peer_add_path_send_families: HashMap::new(),
             peer_asn: HashMap::new(),
+            peer_group: HashMap::new(),
             peer_bgp_id: HashMap::new(),
             vrp_table: None,
             route_events_tx,
@@ -183,6 +186,10 @@ impl RibManager {
     }
 
     /// Process a single `RibUpdate` message.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "dispatcher needs one arm per RibUpdate variant"
+    )]
     fn handle_update(&mut self, update: RibUpdate) {
         match update {
             RibUpdate::RoutesReceived {
@@ -222,6 +229,9 @@ impl RibManager {
                 add_path_send_families,
                 add_path_send_max,
             ),
+            RibUpdate::SetPeerPolicyContext { peer, peer_group } => {
+                self.handle_set_peer_policy_context(peer, peer_group);
+            }
             RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
             RibUpdate::WithdrawInjected {
                 prefix,

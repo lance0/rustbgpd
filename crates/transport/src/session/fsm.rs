@@ -291,6 +291,10 @@ impl PeerSession {
                         add_path_send_families,
                         add_path_send_max,
                     });
+                    let _ = self.rib_tx.try_send(RibUpdate::SetPeerPolicyContext {
+                        peer: self.peer_ip,
+                        peer_group: self.config.peer_group.clone(),
+                    });
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");

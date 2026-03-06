@@ -10,6 +10,7 @@ mod chain;
 mod community;
 mod large_community;
 mod modifications;
+mod peer_context;
 mod prefix;
 mod rpki;
 
@@ -41,6 +42,12 @@ fn ctx<'a>(
         as_path_str,
         as_path_len,
         validation_state,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        local_pref: None,
+        med: None,
     }
 }
 
@@ -106,9 +113,15 @@ fn stmt(
         action,
         match_community: community,
         match_as_path: None,
+        match_neighbor_set: None,
+        match_route_type: None,
         match_rpki_validation: None,
         match_as_path_length_ge: None,
         match_as_path_length_le: None,
+        match_local_pref_ge: None,
+        match_local_pref_le: None,
+        match_med_ge: None,
+        match_med_le: None,
         modifications: RouteModifications::default(),
     }
 }
