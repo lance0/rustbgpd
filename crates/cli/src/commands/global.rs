@@ -15,7 +15,10 @@ pub async fn run(channel: Channel, json: bool) -> Result<(), CliError> {
             router_id: resp.router_id.clone(),
             listen_port: resp.listen_port,
         };
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize global state as JSON")
+        );
     } else {
         println!("ASN:         {}", resp.asn);
         println!("Router ID:   {}", resp.router_id);

@@ -32,7 +32,10 @@ pub async fn list(channel: Channel, json: bool) -> Result<(), CliError> {
                 }
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize neighbor list as JSON")
+        );
     } else if resp.neighbors.is_empty() {
         println!("No neighbors configured");
     } else {
@@ -72,7 +75,11 @@ pub async fn show(channel: Channel, address: &str, json: bool) -> Result<(), Cli
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
         };
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .expect("failed to serialize neighbor detail as JSON")
+        );
     } else {
         println!(
             "Neighbor:              {}",

@@ -39,7 +39,10 @@ fn route_to_json(r: &crate::proto::Route) -> JsonRoute {
 fn print_routes(routes: &[crate::proto::Route], json: bool) {
     if json {
         let out: Vec<JsonRoute> = routes.iter().map(route_to_json).collect();
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize route list as JSON")
+        );
     } else if routes.is_empty() {
         println!("No routes");
     } else {

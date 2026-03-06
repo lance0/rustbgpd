@@ -220,7 +220,10 @@ pub fn print_result(json: bool, action: &str, target: &str, message: &str) {
             "action": action,
             "target": target,
         });
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize command result as JSON")
+        );
     } else {
         println!("{message}");
     }

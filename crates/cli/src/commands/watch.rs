@@ -40,7 +40,10 @@ pub async fn run(
                 timestamp: event.timestamp.clone(),
                 path_id: event.path_id,
             };
-            println!("{}", serde_json::to_string(&out).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string(&out).expect("failed to serialize route event as JSON")
+            );
         } else {
             let path_id_str = if event.path_id > 0 {
                 format!(" path_id={}", event.path_id)

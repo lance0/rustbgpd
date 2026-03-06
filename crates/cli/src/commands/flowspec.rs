@@ -86,7 +86,11 @@ pub async fn list(channel: Channel, family: Option<i32>, json: bool) -> Result<(
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .expect("failed to serialize FlowSpec route list as JSON")
+        );
     } else if resp.routes.is_empty() {
         println!("No FlowSpec routes");
     } else {

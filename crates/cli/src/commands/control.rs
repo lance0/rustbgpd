@@ -16,7 +16,10 @@ pub async fn health(channel: Channel, json: bool) -> Result<(), CliError> {
             active_peers: resp.active_peers,
             total_routes: resp.total_routes,
         };
-        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize health output as JSON")
+        );
     } else {
         println!(
             "Status:  {}",

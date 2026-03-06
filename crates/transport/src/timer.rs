@@ -115,7 +115,7 @@ mod tests {
         // Should pend forever — use select to prove it doesn't fire
         tokio::select! {
             () = poll_timer(&mut timer) => {
-                panic!("poll_timer(None) should not resolve");
+                unreachable!("poll_timer(None) should not resolve");
             }
             () = tokio::time::sleep(Duration::from_millis(10)) => {
                 // Expected: the sleep won, poll_timer pended
