@@ -11,7 +11,7 @@ fuzz_target!(|data: &[u8]| {
     let mut buf = Bytes::copy_from_slice(data);
     if let Ok(update) = rustbgpd_wire::UpdateMessage::decode(&mut buf, data.len()) {
         // Try parsing with both 2-byte and 4-byte AS modes
-        let _ = update.parse(true);
-        let _ = update.parse(false);
+        let _ = update.parse(true, false, &[]);
+        let _ = update.parse(false, false, &[]);
     }
 });
