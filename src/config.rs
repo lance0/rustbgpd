@@ -462,6 +462,16 @@ fn parse_policy_statements(
             None
         };
 
+        if let (Some(ge), Some(le)) = (e.match_as_path_length_ge, e.match_as_path_length_le)
+            && ge > le
+        {
+            return Err(ConfigError::InvalidPolicyEntry {
+                reason: format!(
+                    "match_as_path_length_ge ({ge}) exceeds match_as_path_length_le ({le})"
+                ),
+            });
+        }
+
         if prefix.is_none()
             && match_community.is_empty()
             && match_as_path.is_none()
@@ -1829,6 +1839,27 @@ action = "deny"
 prefix = "10.0.0.0/8"
 ge = 24
 le = 16
+"#;
+        let err = parse(toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    }
+
+    #[test]
+    fn policy_aspath_length_ge_exceeds_le_rejected() {
+        let toml_str = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[policy.import]]
+action = "deny"
+match_as_path_length_ge = 50
+match_as_path_length_le = 10
 "#;
         let err = parse(toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
