@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-03-05
+Last updated: 2026-03-06
 
 ## Address Families
 
@@ -30,7 +30,7 @@ Last updated: 2026-03-05
 | 4-byte ASN (RFC 6793) | Yes | Yes | AS_TRANS mapping |
 | Capability negotiation (RFC 5492) | Yes | Yes | |
 | TCP collision detection (RFC 4271 §6.8) | Yes | Yes | |
-| Graceful Restart (RFC 4724) | Yes | Partial | Helper mode + minimal restarting-speaker `R=1`; no forwarding-preserved support yet |
+| Graceful Restart (RFC 4724) | Yes | Partial | Helper mode + minimal restarting-speaker `R=1`; `forwarding_preserved=false` (no FIB ownership) |
 | Long-Lived GR (RFC 9494) | Yes | Yes | Two-phase timer, three-tier best-path demotion, `LLGR_STALE`/`NO_LLGR` communities, per-AFI family scoping |
 | Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |
@@ -182,23 +182,25 @@ The primary target deployment. Weighted toward what matters:
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
 - **Core protocol:** 96% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
-- **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self)
+- **Policy:** 72% with named definitions and chaining; covers common operations (prefix match, community match/set, AS_PATH regex/prepend, next-hop self). Missing: neighbor set match, route type match, MED/LP comparison, gRPC policy CRUD
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with NEXT_HOP preservation
-- **BMP exporter:** RFC 7854 streaming to collectors implemented, including collector reconnect replay and periodic Stats Report export
-- **MRT dump:** RFC 6396 TABLE_DUMP_V2 periodic + on-demand snapshots with gzip; completes the monitoring/archival story
-- **LLGR (RFC 9494):** two-phase timer, three-tier best-path demotion, per-AFI family scoping — critical for large IXes
+- **BMP exporter:** RFC 7854 streaming to collectors, reconnect replay, periodic Stats Report
+- **MRT dump:** RFC 6396 TABLE_DUMP_V2 periodic + on-demand with gzip
+- **LLGR (RFC 9494):** two-phase timer, three-tier best-path demotion, per-AFI — critical for large IXes
 - **Config persistence + SIGHUP reload:** gRPC mutations survive restart; live neighbor reconciliation
+- **Operator packaging (v0.4.2):** systemd unit, example configs, operations guide, release checklist, container image CI
+
+**Remaining gaps for IX RS parity:** Policy CRUD via gRPC (~5%), peer groups (~3%), neighbor set matching (~1%), route type match (~1%). Closing policy CRUD alone would bring IX parity to ~93%.
 
 ### General-Purpose BGP Speaker (~57% parity)
 
 Competing head-to-head with GoBGP for all use cases:
 
-- Missing address families hurt badly (EVPN, VPN)
+- Missing address families hurt badly (EVPN, VPN, labeled unicast)
 - No confederation support limits SP deployments
-- `rustbgpctl` ships but has fewer subcommands than `gobgp`
-- gRPC API covers ~38% of GoBGP's RPC surface
-- Config persistence narrows the operational gap
+- gRPC API covers ~38% of GoBGP's RPC surface (no policy/VRF/peer-group CRUD)
+- No Zebra/FIB integration — cannot install routes into the kernel
 
 ## Advantages Over GoBGP
 
@@ -209,16 +211,41 @@ Competing head-to-head with GoBGP for all use cases:
 - **Structured logging** — tracing-subscriber JSON vs GoBGP's unstructured logs
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
+- **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
+- **Secure-by-default gRPC** — UDS default listener, optional token auth per listener; GoBGP defaults to open TCP
 
-## Top 5 Gaps for Maximum Parity Gain
+## Top Gaps by Use Case
+
+### IX Route Server (current target, ~88% parity)
+
+These are the gaps that matter most for the stated alpha audience:
+
+1. **Policy CRUD via gRPC** — runtime policy management without config file
+   edits. Most impactful missing API feature for IX operators who want to
+   adjust filtering at runtime. Moves gRPC parity from ~38% toward ~45%.
+2. **Peer groups** — template-based neighbor config. At 100+ members,
+   per-peer config becomes unwieldy. GoBGP solves this with peer groups and
+   apply-groups. Medium effort (config + API + transport threading).
+3. **Neighbor set matching** — match policy by peer address/ASN group. Small
+   effort, useful in combination with policy chains (e.g., "apply this chain
+   to all peers in AS-SET X").
+4. **Route type match (int/ext/local)** — match on route origin in policy.
+   Small effort, enables cleaner import/export separation without AS_PATH
+   regex workarounds.
+5. **MED / LOCAL_PREF comparison in policy** — match routes where MED or
+   LOCAL_PREF is above/below a threshold. Small effort, useful for
+   traffic engineering policies.
+
+### General-Purpose BGP Speaker (~57% parity)
+
+These close the biggest gaps for broader adoption but are out of scope for
+the current alpha:
 
 1. **Confederation (RFC 5065)** — required for service provider deployments
 2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
-3. **Policy CRUD via gRPC** — runtime policy management without config file edits
-4. **Peer groups** — template-based neighbor config reduces boilerplate for large deployments
-5. ~~**AS_PATH length match**~~ — done: `match_as_path_length_ge` / `match_as_path_length_le`
-
-Each moves the needle 3-5% on overall parity while disproportionately improving real-world usability.
+3. **VPNv4/v6 (RFC 4364)** — enterprise/SP VPN deployments
+4. **Dynamic neighbors (prefix-based)** — auto-accept peers from a prefix range
+5. **Zebra/FIB integration** — kernel route installation
 
 ## Pre-1.0 Tech Debt
 
@@ -229,7 +256,7 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 | ~~HIGH~~ | ~~`transport/session.rs` at 3,967 lines~~ | Done — split into `crates/transport/src/session/` submodules for core loop, FSM, I/O, inbound, outbound, commands, and tests |
 | ~~MEDIUM~~ | ~~Refactor policy `evaluate()` to take a `RouteContext` struct~~ | Done — `RouteContext<'a>` replaces 7+ params; `#[expect(clippy::too_many_arguments)]` removed from all production policy code |
 | ~~MEDIUM~~ | ~~`RibManager::handle_update()` at 615 lines~~ | Done — thin dispatcher in mod.rs delegates to focused handlers in distribution, peer_lifecycle, route_refresh, graceful_restart |
-| MEDIUM | Policy engine tests concentrated in one file | 70 tests exist in `engine.rs`; split into focused modules/files for maintainability |
+| ~~MEDIUM~~ | ~~Policy engine tests concentrated in one file~~ | Done — split into 8 focused test modules: prefix, community, large_community, aspath_regex, as_path_length, modifications, chain, rpki |
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | ~~MEDIUM~~ | ~~RTR expire_interval not enforced~~ | Done — stale VRPs now expire and are withdrawn if no fresh EndOfData arrives before the effective expiry timer |
 | MEDIUM | Unknown FlowSpec component types rejected | Should be preserved/skipped for forward compatibility with future RFCs |
