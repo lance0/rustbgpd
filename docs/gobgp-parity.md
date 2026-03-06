@@ -227,8 +227,8 @@ Each moves the needle 3-5% on overall parity while disproportionately improving 
 | ~~HIGH~~ | ~~manager.rs at ~8,318 lines~~ | Done — split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs) |
 | ~~HIGH~~ | ~~`config.rs` at 3,118 lines~~ | Done — split into `src/config/` submodules for schema, parsing, validation, and tests |
 | ~~HIGH~~ | ~~`transport/session.rs` at 3,967 lines~~ | Done — split into `crates/transport/src/session/` submodules for core loop, FSM, I/O, inbound, outbound, commands, and tests |
-| MEDIUM | Refactor policy `evaluate()` to take a `RouteContext` struct | 5 functions carry 8+ params with `#[expect(clippy::too_many_arguments)]`; a context struct prevents API churn as match criteria grow |
-| MEDIUM | `RibManager::handle_update()` at 615 lines | Giant match dispatch; extract per-variant handler methods |
+| ~~MEDIUM~~ | ~~Refactor policy `evaluate()` to take a `RouteContext` struct~~ | Done — `RouteContext<'a>` replaces 7+ params; `#[expect(clippy::too_many_arguments)]` removed from all production policy code |
+| ~~MEDIUM~~ | ~~`RibManager::handle_update()` at 615 lines~~ | Done — thin dispatcher in mod.rs delegates to focused handlers in distribution, peer_lifecycle, route_refresh, graceful_restart |
 | MEDIUM | Policy engine tests concentrated in one file | 70 tests exist in `engine.rs`; split into focused modules/files for maintainability |
 | ~~MEDIUM~~ | ~~No FlowSpec fuzz target~~ | Done — `decode_flowspec` target added |
 | ~~MEDIUM~~ | ~~RTR expire_interval not enforced~~ | Done — stale VRPs now expire and are withdrawn if no fresh EndOfData arrives before the effective expiry timer |

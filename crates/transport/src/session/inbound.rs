@@ -3,6 +3,7 @@ use super::{
     NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode,
     debug, info, resolve_import_nexthop, warn,
 };
+use rustbgpd_policy::RouteContext;
 
 impl PeerSession {
     /// Check whether a prefix's address family is among the negotiated families.
@@ -346,16 +347,16 @@ impl PeerSession {
             .iter()
             .filter_map(|entry| {
                 let prefix = Prefix::V4(entry.prefix);
-                let result = rustbgpd_policy::evaluate_chain(
-                    self.import_policy.as_ref(),
+                let ctx = RouteContext {
                     prefix,
-                    update_ecs,
-                    update_communities,
-                    update_large_communities,
-                    &aspath_str,
-                    aspath_len,
-                    rustbgpd_wire::RpkiValidation::NotFound,
-                );
+                    extended_communities: update_ecs,
+                    communities: update_communities,
+                    large_communities: update_large_communities,
+                    as_path_str: &aspath_str,
+                    as_path_len: aspath_len,
+                    validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                };
+                let result = rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
                 if result.action != rustbgpd_policy::PolicyAction::Permit {
                     return None;
                 }
@@ -434,19 +435,19 @@ impl PeerSession {
                             // Apply import policy using the destination prefix
                             // component (if present) for prefix matching
                             let dest_prefix = rule.destination_prefix();
-                            let result = rustbgpd_policy::evaluate_chain(
-                                self.import_policy.as_ref(),
-                                dest_prefix.unwrap_or(Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
-                                    Ipv4Addr::UNSPECIFIED,
-                                    0,
-                                ))),
-                                update_ecs,
-                                update_communities,
-                                update_large_communities,
-                                &aspath_str,
-                                aspath_len,
-                                rustbgpd_wire::RpkiValidation::NotFound,
-                            );
+                            let ctx = RouteContext {
+                                prefix: dest_prefix.unwrap_or(Prefix::V4(
+                                    rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+                                )),
+                                extended_communities: update_ecs,
+                                communities: update_communities,
+                                large_communities: update_large_communities,
+                                as_path_str: &aspath_str,
+                                as_path_len: aspath_len,
+                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                            };
+                            let result =
+                                rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
                             if result.action == rustbgpd_policy::PolicyAction::Permit {
                                 let mut attrs = mp_route_attrs.clone();
                                 let _nh_action = rustbgpd_policy::apply_modifications(
@@ -475,16 +476,17 @@ impl PeerSession {
 
                     // Unicast routes
                     for entry in &mp.announced {
-                        let result = rustbgpd_policy::evaluate_chain(
-                            self.import_policy.as_ref(),
-                            entry.prefix,
-                            update_ecs,
-                            update_communities,
-                            update_large_communities,
-                            &aspath_str,
-                            aspath_len,
-                            rustbgpd_wire::RpkiValidation::NotFound,
-                        );
+                        let ctx = RouteContext {
+                            prefix: entry.prefix,
+                            extended_communities: update_ecs,
+                            communities: update_communities,
+                            large_communities: update_large_communities,
+                            as_path_str: &aspath_str,
+                            as_path_len: aspath_len,
+                            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                        };
+                        let result =
+                            rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
                         if result.action == rustbgpd_policy::PolicyAction::Permit {
                             let mut attrs = mp_route_attrs.clone();
                             let nh_action = rustbgpd_policy::apply_modifications(

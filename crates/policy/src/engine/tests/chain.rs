@@ -145,7 +145,8 @@ fn make_deny_all_policy() -> Policy {
 }
 
 fn eval_chain(chain: &PolicyChain) -> PolicyResult {
-    chain.evaluate(
+    evaluate_chain(
+        Some(chain),
         v4_prefix([10, 0, 0, 0], 8),
         &[],
         &[],

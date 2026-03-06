@@ -1,13 +1,130 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
+use std::sync::Arc;
 
+use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, Prefix, Safi};
 use tracing::info;
 
 use super::RibManager;
-use super::helpers::gauge_val;
+use super::helpers::{LlgrPeerConfig, gauge_val, validate_route_rpki};
 
 impl RibManager {
+    #[expect(clippy::too_many_arguments)]
+    pub(super) fn handle_peer_graceful_restart(
+        &mut self,
+        peer: IpAddr,
+        restart_time: u16,
+        stale_routes_time: u64,
+        gr_families: Vec<(Afi, Safi)>,
+        peer_llgr_capable: bool,
+        peer_llgr_families: Vec<rustbgpd_wire::LlgrFamily>,
+        llgr_stale_time: u32,
+    ) {
+        info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
+
+        let mut affected = HashSet::new();
+
+        if let Some(rib) = self.ribs.get_mut(&peer) {
+            for &family in &gr_families {
+                rib.mark_stale(family);
+            }
+            let withdrawn = rib.withdraw_families_except(&gr_families);
+            if !withdrawn.is_empty() {
+                info!(%peer, count = withdrawn.len(), "withdrew non-GR family routes");
+            }
+            for prefix in withdrawn {
+                affected.insert(prefix);
+            }
+        }
+
+        if let Some(rib) = self.ribs.get(&peer) {
+            for route in rib.iter() {
+                affected.insert(route.prefix);
+            }
+            self.metrics
+                .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+        }
+
+        let changed = self.recompute_best(&affected);
+        self.distribute_changes(&changed, &affected);
+
+        self.outbound_peers.remove(&peer);
+        self.adj_ribs_out.remove(&peer);
+        self.peer_export_policies.remove(&peer);
+        self.peer_sendable_families.remove(&peer);
+        self.peer_is_ebgp.remove(&peer);
+        self.peer_is_rr_client.remove(&peer);
+        self.peer_add_path_send_max.remove(&peer);
+        self.peer_add_path_send_families.remove(&peer);
+        self.dirty_peers.remove(&peer);
+        self.pending_eor.remove(&peer);
+        self.clear_peer_refresh_state(peer);
+
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(u64::from(restart_time));
+        self.gr_stale_deadlines.insert(peer, deadline);
+        self.gr_stale_routes_time.insert(peer, stale_routes_time);
+        self.gr_peers
+            .insert(peer, gr_families.into_iter().collect());
+
+        if peer_llgr_capable && llgr_stale_time > 0 {
+            self.llgr_peer_config.insert(
+                peer,
+                LlgrPeerConfig {
+                    peer_llgr_capable,
+                    peer_llgr_families,
+                    local_llgr_stale_time: llgr_stale_time,
+                    stale_routes_time,
+                },
+            );
+        }
+
+        let peer_label = peer.to_string();
+        self.metrics.set_gr_active(&peer_label, true);
+        let stale_count = self
+            .ribs
+            .get(&peer)
+            .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
+        self.metrics
+            .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
+    }
+
+    pub(super) fn handle_rpki_cache_update(&mut self, table: Arc<VrpTable>) {
+        info!(
+            vrps = table.len(),
+            "RPKI cache update — re-validating routes"
+        );
+        self.vrp_table = Some(table);
+        let Some(table) = self.vrp_table.as_ref() else {
+            return;
+        };
+        self.metrics
+            .set_rpki_vrp_count("ipv4", gauge_val(table.v4_count()));
+        self.metrics
+            .set_rpki_vrp_count("ipv6", gauge_val(table.v6_count()));
+
+        let mut affected = HashSet::new();
+        for rib in self.ribs.values_mut() {
+            for route in rib.iter_mut() {
+                let new_state = validate_route_rpki(route, table);
+                if route.validation_state != new_state {
+                    route.validation_state = new_state;
+                    affected.insert(route.prefix);
+                }
+            }
+        }
+
+        if !affected.is_empty() {
+            info!(
+                changed = affected.len(),
+                "RPKI re-validation changed routes"
+            );
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+        }
+    }
+
     /// Sweep stale routes for a peer whose GR timer has expired.
     ///
     /// Two-phase timer (RFC 9494): if LLGR is configured for this peer,

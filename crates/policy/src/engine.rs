@@ -39,6 +39,18 @@ impl PolicyResult {
     }
 }
 
+/// Borrowed route data used for policy evaluation.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteContext<'a> {
+    pub prefix: Prefix,
+    pub extended_communities: &'a [ExtendedCommunity],
+    pub communities: &'a [u32],
+    pub large_communities: &'a [LargeCommunity],
+    pub as_path_str: &'a str,
+    pub as_path_len: usize,
+    pub validation_state: RpkiValidation,
+}
+
 /// What to do with the next-hop attribute.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NextHopAction {
@@ -386,19 +398,9 @@ pub struct PolicyStatement {
 
 impl PolicyStatement {
     /// Check whether a route matches this statement.
-    #[expect(clippy::too_many_arguments)]
-    fn matches(
-        &self,
-        candidate: Prefix,
-        ecs: &[ExtendedCommunity],
-        communities: &[u32],
-        lcs: &[rustbgpd_wire::LargeCommunity],
-        aspath_str: &str,
-        aspath_len: usize,
-        validation_state: RpkiValidation,
-    ) -> bool {
+    fn matches(&self, ctx: &RouteContext<'_>) -> bool {
         let prefix_ok = match self.prefix {
-            Some(p) => self.matches_prefix(p, candidate),
+            Some(p) => self.matches_prefix(p, ctx.prefix),
             None => true,
         };
 
@@ -406,27 +408,27 @@ impl PolicyStatement {
             true
         } else {
             self.match_community.iter().any(|cm| {
-                ecs.iter().any(|ec| cm.matches_ec(ec))
-                    || communities.iter().any(|c| cm.matches_standard(*c))
-                    || lcs.iter().any(|lc| cm.matches_large(lc))
+                ctx.extended_communities.iter().any(|ec| cm.matches_ec(ec))
+                    || ctx.communities.iter().any(|c| cm.matches_standard(*c))
+                    || ctx.large_communities.iter().any(|lc| cm.matches_large(lc))
             })
         };
 
         let aspath_ok = match &self.match_as_path {
-            Some(regex) => regex.is_match(aspath_str),
+            Some(regex) => regex.is_match(ctx.as_path_str),
             None => true,
         };
 
         let rpki_ok = self
             .match_rpki_validation
-            .is_none_or(|v| v == validation_state);
+            .is_none_or(|v| v == ctx.validation_state);
 
         let aspath_len_ok = self
             .match_as_path_length_ge
-            .is_none_or(|v| aspath_len >= v as usize)
+            .is_none_or(|v| ctx.as_path_len >= v as usize)
             && self
                 .match_as_path_length_le
-                .is_none_or(|v| aspath_len <= v as usize);
+                .is_none_or(|v| ctx.as_path_len <= v as usize);
 
         prefix_ok && community_ok && aspath_ok && rpki_ok && aspath_len_ok
     }
@@ -492,27 +494,9 @@ pub struct Policy {
 impl Policy {
     /// Evaluate a route against this policy. First matching entry wins.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
-    pub fn evaluate(
-        &self,
-        prefix: Prefix,
-        ecs: &[ExtendedCommunity],
-        communities: &[u32],
-        lcs: &[rustbgpd_wire::LargeCommunity],
-        aspath_str: &str,
-        aspath_len: usize,
-        validation_state: RpkiValidation,
-    ) -> PolicyResult {
+    pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {
         for entry in &self.entries {
-            if entry.matches(
-                prefix,
-                ecs,
-                communities,
-                lcs,
-                aspath_str,
-                aspath_len,
-                validation_state,
-            ) {
+            if entry.matches(ctx) {
                 return PolicyResult {
                     action: entry.action,
                     modifications: entry.modifications.clone(),
@@ -528,27 +512,9 @@ impl Policy {
 
 /// Convenience: evaluate an optional policy. Returns `Permit` with no modifications if no policy.
 #[must_use]
-#[expect(clippy::too_many_arguments)]
-pub fn evaluate_policy(
-    policy: Option<&Policy>,
-    prefix: Prefix,
-    ecs: &[ExtendedCommunity],
-    communities: &[u32],
-    lcs: &[rustbgpd_wire::LargeCommunity],
-    aspath_str: &str,
-    aspath_len: usize,
-    validation_state: RpkiValidation,
-) -> PolicyResult {
+pub fn evaluate_policy(policy: Option<&Policy>, ctx: &RouteContext<'_>) -> PolicyResult {
     match policy {
-        Some(p) => p.evaluate(
-            prefix,
-            ecs,
-            communities,
-            lcs,
-            aspath_str,
-            aspath_len,
-            validation_state,
-        ),
+        Some(p) => p.evaluate(ctx),
         None => PolicyResult::permit(),
     }
 }
@@ -573,28 +539,10 @@ impl PolicyChain {
 
     /// Evaluate a route against this chain of policies.
     #[must_use]
-    #[expect(clippy::too_many_arguments)]
-    pub fn evaluate(
-        &self,
-        prefix: Prefix,
-        ecs: &[ExtendedCommunity],
-        communities: &[u32],
-        lcs: &[LargeCommunity],
-        aspath_str: &str,
-        aspath_len: usize,
-        validation_state: RpkiValidation,
-    ) -> PolicyResult {
+    pub fn evaluate(&self, ctx: &RouteContext<'_>) -> PolicyResult {
         let mut accumulated = RouteModifications::default();
         for policy in &self.policies {
-            let result = policy.evaluate(
-                prefix,
-                ecs,
-                communities,
-                lcs,
-                aspath_str,
-                aspath_len,
-                validation_state,
-            );
+            let result = policy.evaluate(ctx);
             match result.action {
                 PolicyAction::Deny => return PolicyResult::deny(),
                 PolicyAction::Permit => accumulated.merge_from(result.modifications),
@@ -609,27 +557,9 @@ impl PolicyChain {
 
 /// Convenience: evaluate an optional policy chain. Returns `Permit` with no modifications if no chain.
 #[must_use]
-#[expect(clippy::too_many_arguments)]
-pub fn evaluate_chain(
-    chain: Option<&PolicyChain>,
-    prefix: Prefix,
-    ecs: &[ExtendedCommunity],
-    communities: &[u32],
-    lcs: &[LargeCommunity],
-    aspath_str: &str,
-    aspath_len: usize,
-    validation_state: RpkiValidation,
-) -> PolicyResult {
+pub fn evaluate_chain(chain: Option<&PolicyChain>, ctx: &RouteContext<'_>) -> PolicyResult {
     match chain {
-        Some(c) => c.evaluate(
-            prefix,
-            ecs,
-            communities,
-            lcs,
-            aspath_str,
-            aspath_len,
-            validation_state,
-        ),
+        Some(c) => c.evaluate(ctx),
         None => PolicyResult::permit(),
     }
 }
@@ -860,6 +790,76 @@ mod tests {
         v4_prefix(addr, len)
     }
 
+    fn ctx<'a>(
+        prefix: Prefix,
+        extended_communities: &'a [ExtendedCommunity],
+        communities: &'a [u32],
+        large_communities: &'a [LargeCommunity],
+        as_path_str: &'a str,
+        as_path_len: usize,
+        validation_state: RpkiValidation,
+    ) -> RouteContext<'a> {
+        RouteContext {
+            prefix,
+            extended_communities,
+            communities,
+            large_communities,
+            as_path_str,
+            as_path_len,
+            validation_state,
+        }
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn evaluate_policy(
+        policy: Option<&Policy>,
+        prefix: Prefix,
+        extended_communities: &[ExtendedCommunity],
+        communities: &[u32],
+        large_communities: &[LargeCommunity],
+        as_path_str: &str,
+        as_path_len: usize,
+        validation_state: RpkiValidation,
+    ) -> PolicyResult {
+        super::evaluate_policy(
+            policy,
+            &ctx(
+                prefix,
+                extended_communities,
+                communities,
+                large_communities,
+                as_path_str,
+                as_path_len,
+                validation_state,
+            ),
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn evaluate_chain(
+        chain: Option<&PolicyChain>,
+        prefix: Prefix,
+        extended_communities: &[ExtendedCommunity],
+        communities: &[u32],
+        large_communities: &[LargeCommunity],
+        as_path_str: &str,
+        as_path_len: usize,
+        validation_state: RpkiValidation,
+    ) -> PolicyResult {
+        super::evaluate_chain(
+            chain,
+            &ctx(
+                prefix,
+                extended_communities,
+                communities,
+                large_communities,
+                as_path_str,
+                as_path_len,
+                validation_state,
+            ),
+        )
+    }
+
     fn stmt(
         prefix: Option<Prefix>,
         action: PolicyAction,
@@ -954,7 +954,8 @@ mod tests {
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -967,7 +968,8 @@ mod tests {
             PolicyAction::Permit
         );
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 1, 0, 0], 24),
                 &[],
                 &[],
@@ -999,7 +1001,8 @@ mod tests {
             default_action: PolicyAction::Deny,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1012,7 +1015,8 @@ mod tests {
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 1, 0, 0], 16),
                 &[],
                 &[],
@@ -1037,7 +1041,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([192, 168, 0, 0], 16),
                 &[],
                 &[],
@@ -1065,7 +1070,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1172,7 +1178,8 @@ mod tests {
         };
         let ecs = [make_rt(65001, 100)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &ecs,
                 &[],
@@ -1201,7 +1208,8 @@ mod tests {
         };
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &ecs,
                 &[],
@@ -1230,7 +1238,8 @@ mod tests {
         };
         let ecs = [make_rt(65001, 100)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &ecs,
                 &[],
@@ -1244,7 +1253,8 @@ mod tests {
         );
         // Prefix mismatch
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([192, 168, 0, 0], 16),
                 &ecs,
                 &[],
@@ -1270,7 +1280,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[val],
@@ -1304,7 +1315,8 @@ mod tests {
         };
         let std_community = (65001u32 << 16) | 0x0064;
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[std_community],
@@ -1318,7 +1330,8 @@ mod tests {
         );
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &ecs,
                 &[],
@@ -1331,7 +1344,8 @@ mod tests {
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1360,7 +1374,8 @@ mod tests {
         };
         let target_ecs = [make_rt(65001, 100)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &target_ecs,
                 &[],
@@ -1374,7 +1389,8 @@ mod tests {
         );
         let origin_ecs = [make_ro(65001, 100)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &origin_ecs,
                 &[],
@@ -1411,7 +1427,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
                 &[],
                 &[],
@@ -1424,7 +1441,8 @@ mod tests {
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
                 &[],
                 &[],
@@ -1477,7 +1495,8 @@ mod tests {
         };
         let lcs = [LargeCommunity::new(65001, 100, 200)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1507,7 +1526,8 @@ mod tests {
         };
         let lcs = [LargeCommunity::new(65001, 999, 200)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1558,7 +1578,8 @@ mod tests {
         // LC match
         let lcs = [LargeCommunity::new(65003, 300, 400)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1573,7 +1594,8 @@ mod tests {
         // EC match
         let ecs = [make_rt(65002, 200)];
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &ecs,
                 &[],
@@ -1588,7 +1610,8 @@ mod tests {
         // Standard match
         let std_c = (65001u32 << 16) | 0x0064;
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[std_c],
@@ -1602,7 +1625,8 @@ mod tests {
         );
         // No match
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1640,7 +1664,8 @@ mod tests {
             }],
             default_action: PolicyAction::Deny,
         };
-        let r = pl.evaluate(
+        let r = evaluate_policy(
+            Some(&pl),
             v4_prefix([10, 0, 0, 0], 8),
             &[],
             &[],
@@ -1738,7 +1763,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1751,7 +1777,8 @@ mod tests {
             PolicyAction::Deny
         );
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1784,7 +1811,8 @@ mod tests {
         };
         // Both match → deny
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1798,7 +1826,8 @@ mod tests {
         );
         // Prefix matches, aspath doesn't → permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -1812,7 +1841,8 @@ mod tests {
         );
         // Aspath matches, prefix doesn't → permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([192, 168, 0, 0], 16),
                 &[],
                 &[],
@@ -1848,7 +1878,8 @@ mod tests {
         let std_c = (65001u32 << 16) | 0x0064;
         // Both match → deny
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[std_c],
@@ -1862,7 +1893,8 @@ mod tests {
         );
         // Community matches, aspath doesn't → permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[std_c],
@@ -2131,7 +2163,8 @@ mod tests {
         };
         // Invalid route → matches deny rule
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2145,7 +2178,8 @@ mod tests {
         );
         // Valid route → doesn't match, falls through to permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2159,7 +2193,8 @@ mod tests {
         );
         // NotFound route → doesn't match
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2194,7 +2229,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         // Valid route → matches, gets local_pref modification
-        let r = pl.evaluate(
+        let r = evaluate_policy(
+            Some(&pl),
             v4_prefix([10, 0, 0, 0], 8),
             &[],
             &[],
@@ -2207,7 +2243,8 @@ mod tests {
         assert_eq!(r.modifications.set_local_pref, Some(200));
 
         // NotFound route → doesn't match, gets default (no mods)
-        let r = pl.evaluate(
+        let r = evaluate_policy(
+            Some(&pl),
             v4_prefix([10, 0, 0, 0], 8),
             &[],
             &[],
@@ -2240,7 +2277,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         // NotFound → matches
-        let r = pl.evaluate(
+        let r = evaluate_policy(
+            Some(&pl),
             v4_prefix([10, 0, 0, 0], 8),
             &[],
             &[],
@@ -2276,8 +2314,17 @@ mod tests {
             RpkiValidation::NotFound,
         ] {
             assert_eq!(
-                pl.evaluate(v4_prefix([10, 0, 0, 0], 8), &[], &[], &[], "", 0, state)
-                    .action,
+                evaluate_policy(
+                    Some(&pl),
+                    v4_prefix([10, 0, 0, 0], 8),
+                    &[],
+                    &[],
+                    &[],
+                    "",
+                    0,
+                    state
+                )
+                .action,
                 PolicyAction::Deny,
                 "state={state:?} should still match"
             );
@@ -2304,7 +2351,8 @@ mod tests {
         };
         // Both match → deny
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2318,7 +2366,8 @@ mod tests {
         );
         // Prefix matches, RPKI doesn't → permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2332,7 +2381,8 @@ mod tests {
         );
         // RPKI matches, prefix doesn't → permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([192, 168, 0, 0], 16),
                 &[],
                 &[],
@@ -2369,7 +2419,8 @@ mod tests {
         };
         // length 3 → matches ge=3
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2383,7 +2434,8 @@ mod tests {
         );
         // length 5 → matches ge=3
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2397,7 +2449,8 @@ mod tests {
         );
         // length 2 → doesn't match ge=3
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2430,7 +2483,8 @@ mod tests {
         };
         // length 1 → matches le=3
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2444,7 +2498,8 @@ mod tests {
         );
         // length 3 → matches le=3
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2458,7 +2513,8 @@ mod tests {
         );
         // length 4 → doesn't match le=3
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2491,7 +2547,8 @@ mod tests {
         };
         // length 1 → below range
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2506,7 +2563,8 @@ mod tests {
         // length 2,3,4 → in range
         for len in [2, 3, 4] {
             assert_eq!(
-                pl.evaluate(
+                evaluate_policy(
+                    Some(&pl),
                     v4_prefix([10, 0, 0, 0], 8),
                     &[],
                     &[],
@@ -2522,7 +2580,8 @@ mod tests {
         }
         // length 5 → above range
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2556,7 +2615,8 @@ mod tests {
         };
         // regex matches, length matches → deny
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2570,7 +2630,8 @@ mod tests {
         );
         // regex matches, length doesn't → permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2584,7 +2645,8 @@ mod tests {
         );
         // regex doesn't match, length matches → permit
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2627,7 +2689,8 @@ mod tests {
             default_action: PolicyAction::Permit,
         };
         assert_eq!(
-            pl.evaluate(
+            evaluate_policy(
+                Some(&pl),
                 v4_prefix([10, 0, 0, 0], 8),
                 &[],
                 &[],
@@ -2662,7 +2725,8 @@ mod tests {
             }],
             default_action: PolicyAction::Deny,
         };
-        let r = pl.evaluate(
+        let r = evaluate_policy(
+            Some(&pl),
             v4_prefix([10, 0, 0, 0], 8),
             &[],
             &[],

@@ -1,12 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
-use rustbgpd_policy::{PolicyAction, PolicyChain, evaluate_chain};
+use rustbgpd_policy::{PolicyAction, PolicyChain, RouteContext, evaluate_chain};
+use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tracing::{debug, warn};
 
 use super::RibManager;
-use super::helpers::{gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner};
+use super::helpers::{
+    LOCAL_PEER, gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner,
+    validate_route_rpki,
+};
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
@@ -14,6 +19,96 @@ use crate::loc_rib::LocRib;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
+    pub(super) fn handle_routes_received(
+        &mut self,
+        peer: IpAddr,
+        announced: Vec<crate::route::Route>,
+        withdrawn: Vec<(Prefix, u32)>,
+        flowspec_announced: Vec<crate::route::FlowSpecRoute>,
+        flowspec_withdrawn: Vec<FlowSpecRule>,
+    ) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+        let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
+        let mut affected = HashSet::new();
+        let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
+
+        let (rib_len, flowspec_len) = {
+            let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+
+            for (prefix, path_id) in withdrawn {
+                if rib.withdraw(&prefix, path_id) {
+                    debug!(%peer, %prefix, path_id, "withdrawn");
+                    affected.insert(prefix);
+                }
+                if active_refresh.contains(&prefix_family(&prefix))
+                    && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
+                {
+                    stale.remove(&(prefix, path_id));
+                }
+            }
+
+            for mut route in announced {
+                if let Some(ref table) = vrp_table {
+                    route.validation_state = validate_route_rpki(&route, table);
+                }
+                debug!(%peer, prefix = %route.prefix, "announced");
+                affected.insert(route.prefix);
+                let prefix = route.prefix;
+                let path_id = route.path_id;
+                rib.insert(route);
+                if active_refresh.contains(&prefix_family(&prefix))
+                    && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
+                {
+                    stale.remove(&(prefix, path_id));
+                }
+            }
+
+            for rule in flowspec_withdrawn {
+                if rib.withdraw_flowspec(&rule, 0) {
+                    debug!(%peer, rule = %rule, "flowspec withdrawn");
+                    fs_affected.insert(rule.clone());
+                }
+                if active_refresh.iter().any(|(afi, safi)| {
+                    *safi == Safi::FlowSpec && matches!(afi, Afi::Ipv4 | Afi::Ipv6)
+                }) && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
+                {
+                    stale.retain(|(_, stale_rule, _)| stale_rule != &rule);
+                }
+            }
+
+            for route in flowspec_announced {
+                debug!(%peer, rule = %route.rule, "flowspec announced");
+                let stale_key = (route.afi, route.rule.clone(), route.path_id);
+                fs_affected.insert(route.rule.clone());
+                rib.insert_flowspec(route);
+                if active_refresh.contains(&(stale_key.0, Safi::FlowSpec))
+                    && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
+                {
+                    stale.remove(&stale_key);
+                }
+            }
+
+            debug!(%peer, routes = rib.len(), "rib updated");
+            (rib.len(), rib.flowspec_len())
+        };
+
+        let peer_label = peer.to_string();
+        self.metrics
+            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+        self.metrics
+            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        let changed = self.recompute_best(&affected);
+        self.distribute_changes(&changed, &affected);
+
+        if !fs_affected.is_empty() {
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+    }
+
     /// Recompute Loc-RIB best path for a set of affected prefixes.
     /// Returns the set of prefixes that actually changed.
     /// Also emits route events to the broadcast channel.
@@ -71,6 +166,91 @@ impl RibManager {
         self.metrics
             .set_loc_rib_prefixes("all", gauge_val(self.loc_rib.len()));
         changed
+    }
+
+    pub(super) fn handle_inject_route(
+        &mut self,
+        route: crate::route::Route,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let prefix = route.prefix;
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        rib.insert(route);
+        debug!(%prefix, "injected local route");
+        self.metrics
+            .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
+
+        let mut affected = HashSet::new();
+        affected.insert(prefix);
+        let changed = self.recompute_best(&affected);
+        self.distribute_changes(&changed, &affected);
+
+        let _ = reply.send(Ok(()));
+    }
+
+    pub(super) fn handle_withdraw_injected(
+        &mut self,
+        prefix: Prefix,
+        path_id: u32,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        if rib.withdraw(&prefix, path_id) {
+            debug!(%prefix, "withdrawn injected route");
+            self.metrics
+                .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
+            let mut affected = HashSet::new();
+            affected.insert(prefix);
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+            let _ = reply.send(Ok(()));
+        } else {
+            let _ = reply.send(Err(format!("prefix {prefix} not found")));
+        }
+    }
+
+    pub(super) fn handle_inject_flowspec(
+        &mut self,
+        route: crate::route::FlowSpecRoute,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let rule = route.rule.clone();
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        rib.insert_flowspec(route);
+        debug!(rule = %rule, "injected local FlowSpec route");
+        let mut fs_affected = HashSet::new();
+        fs_affected.insert(rule);
+        self.recompute_and_distribute_flowspec(&fs_affected);
+        let _ = reply.send(Ok(()));
+    }
+
+    pub(super) fn handle_withdraw_flowspec(
+        &mut self,
+        rule: FlowSpecRule,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        if rib.withdraw_flowspec(&rule, 0) {
+            debug!(rule = %rule, "withdrawn injected FlowSpec route");
+            let mut fs_affected = HashSet::new();
+            fs_affected.insert(rule);
+            self.recompute_and_distribute_flowspec(&fs_affected);
+            let _ = reply.send(Ok(()));
+        } else {
+            let _ = reply.send(Err(format!("FlowSpec rule {rule} not found")));
+        }
     }
 
     /// Multi-path distribution for a single prefix to a single peer.
@@ -153,16 +333,16 @@ impl RibManager {
                 .as_path()
                 .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
             let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
-            let result = evaluate_chain(
-                export_pol,
-                *prefix,
-                candidate.extended_communities(),
-                candidate.communities(),
-                candidate.large_communities(),
-                &aspath_str,
-                aspath_len,
-                candidate.validation_state,
-            );
+            let ctx = RouteContext {
+                prefix: *prefix,
+                extended_communities: candidate.extended_communities(),
+                communities: candidate.communities(),
+                large_communities: candidate.large_communities(),
+                as_path_str: &aspath_str,
+                as_path_len: aspath_len,
+                validation_state: candidate.validation_state,
+            };
+            let result = evaluate_chain(export_pol, &ctx);
             if result.action != PolicyAction::Permit {
                 continue;
             }
@@ -259,16 +439,16 @@ impl RibManager {
             .as_path()
             .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
-        let result = evaluate_chain(
-            export_pol,
-            *prefix,
-            best.extended_communities(),
-            best.communities(),
-            best.large_communities(),
-            &aspath_str,
-            aspath_len,
-            best.validation_state,
-        );
+        let ctx = RouteContext {
+            prefix: *prefix,
+            extended_communities: best.extended_communities(),
+            communities: best.communities(),
+            large_communities: best.large_communities(),
+            as_path_str: &aspath_str,
+            as_path_len: aspath_len,
+            validation_state: best.validation_state,
+        };
+        let result = evaluate_chain(export_pol, &ctx);
         if result.action != PolicyAction::Permit {
             for path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
@@ -370,16 +550,16 @@ impl RibManager {
                     .as_path()
                     .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
                 let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
-                let result = rustbgpd_policy::evaluate_chain(
-                    export_pol,
-                    prefix_for_policy,
-                    best.extended_communities(),
-                    best.communities(),
-                    best.large_communities(),
-                    &aspath_str,
-                    aspath_len,
-                    rustbgpd_wire::RpkiValidation::NotFound,
-                );
+                let ctx = RouteContext {
+                    prefix: prefix_for_policy,
+                    extended_communities: best.extended_communities(),
+                    communities: best.communities(),
+                    large_communities: best.large_communities(),
+                    as_path_str: &aspath_str,
+                    as_path_len: aspath_len,
+                    validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                };
+                let result = rustbgpd_policy::evaluate_chain(export_pol, &ctx);
                 if result.action == rustbgpd_policy::PolicyAction::Permit {
                     fs_announce.push(best.clone());
                 } else if rib_out.get_flowspec(rule).is_some() {

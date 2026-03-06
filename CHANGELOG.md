@@ -140,6 +140,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Policy `RouteContext` struct.** Policy evaluate functions now take a
+  borrowed `RouteContext<'a>` instead of 7+ individual parameters,
+  eliminating `#[expect(clippy::too_many_arguments)]` from all production
+  policy code. Public API: `rustbgpd_policy::RouteContext`.
+- **`RibManager::handle_update()` extraction.** The 615-line match
+  dispatch is now a thin dispatcher delegating to focused handler methods
+  in `distribution.rs`, `peer_lifecycle.rs`, `route_refresh.rs`, and
+  `graceful_restart.rs`. Structural refactor only.
 - **Config and peer-session module splits.** `src/config.rs` is now
   organized as `src/config/` submodules (`mod.rs`, `schema.rs`,
   `parse.rs`, `validation.rs`, `tests.rs`). The transport peer runtime

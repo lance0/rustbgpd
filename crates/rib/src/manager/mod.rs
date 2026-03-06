@@ -16,18 +16,18 @@ use rustbgpd_rpki::VrpTable;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::RouteEvent;
 use crate::loc_rib::LocRib;
-use crate::update::{OutboundRouteUpdate, RibUpdate};
+use crate::update::{MrtPeerEntry, MrtSnapshotData, OutboundRouteUpdate, RibUpdate};
 
-use helpers::{
-    DIRTY_RESYNC_INTERVAL, ERR_REFRESH_TIMEOUT, LOCAL_PEER, LlgrPeerConfig, gauge_val,
-    prefix_family, validate_route_rpki,
-};
+use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, prefix_family};
+
+#[cfg(test)]
+use helpers::{ERR_REFRESH_TIMEOUT, LOCAL_PEER, validate_route_rpki};
 
 /// Central RIB manager that owns all Adj-RIB-In, Loc-RIB, and Adj-RIB-Out state.
 ///
@@ -182,7 +182,6 @@ impl RibManager {
     }
 
     /// Process a single `RibUpdate` message.
-    #[expect(clippy::too_many_lines)]
     fn handle_update(&mut self, update: RibUpdate) {
         match update {
             RibUpdate::RoutesReceived {
@@ -191,141 +190,14 @@ impl RibManager {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
-            } => {
-                let active_refresh = self
-                    .refresh_in_progress
-                    .get(&peer)
-                    .cloned()
-                    .unwrap_or_default();
-                let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
-                let mut affected = HashSet::new();
-
-                for &(prefix, path_id) in &withdrawn {
-                    if rib.withdraw(&prefix, path_id) {
-                        debug!(%peer, %prefix, path_id, "withdrawn");
-                        affected.insert(prefix);
-                    }
-                    if active_refresh.contains(&prefix_family(&prefix))
-                        && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
-                    {
-                        stale.remove(&(prefix, path_id));
-                    }
-                }
-
-                for mut route in announced {
-                    if let Some(ref table) = self.vrp_table {
-                        route.validation_state = validate_route_rpki(&route, table);
-                    }
-                    debug!(%peer, prefix = %route.prefix, "announced");
-                    affected.insert(route.prefix);
-                    let prefix = route.prefix;
-                    let path_id = route.path_id;
-                    rib.insert(route);
-                    if active_refresh.contains(&prefix_family(&prefix))
-                        && let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
-                    {
-                        stale.remove(&(prefix, path_id));
-                    }
-                }
-
-                // FlowSpec routes
-                let mut fs_affected: HashSet<rustbgpd_wire::FlowSpecRule> = HashSet::new();
-                for rule in &flowspec_withdrawn {
-                    if rib.withdraw_flowspec(rule, 0) {
-                        debug!(%peer, rule = %rule, "flowspec withdrawn");
-                        fs_affected.insert(rule.clone());
-                    }
-                    if active_refresh.iter().any(|(afi, safi)| {
-                        *safi == Safi::FlowSpec && matches!(afi, Afi::Ipv4 | Afi::Ipv6)
-                    }) && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
-                    {
-                        stale.retain(|(_, stale_rule, _)| stale_rule != rule);
-                    }
-                }
-                for route in flowspec_announced {
-                    debug!(%peer, rule = %route.rule, "flowspec announced");
-                    let stale_key = (route.afi, route.rule.clone(), route.path_id);
-                    fs_affected.insert(route.rule.clone());
-                    rib.insert_flowspec(route);
-                    if active_refresh.contains(&(stale_key.0, Safi::FlowSpec))
-                        && let Some(stale) = self.refresh_stale_flowspec.get_mut(&peer)
-                    {
-                        stale.remove(&stale_key);
-                    }
-                }
-
-                debug!(%peer, routes = rib.len(), "rib updated");
-                let peer_label = peer.to_string();
-                self.metrics
-                    .set_rib_prefixes(&peer_label, "all", gauge_val(rib.len()));
-                self.metrics.set_rib_prefixes(
-                    &peer_label,
-                    "flowspec",
-                    gauge_val(rib.flowspec_len()),
-                );
-                let changed = self.recompute_best(&affected);
-                self.distribute_changes(&changed, &affected);
-
-                if !fs_affected.is_empty() {
-                    self.recompute_and_distribute_flowspec(&fs_affected);
-                }
-            }
-
-            RibUpdate::PeerDown { peer } => {
-                // If GR was active for this peer, abort it and sweep stale routes
-                if self.gr_peers.remove(&peer).is_some() {
-                    self.gr_stale_deadlines.remove(&peer);
-                    self.gr_stale_routes_time.remove(&peer);
-                    self.llgr_peer_config.remove(&peer);
-                    info!(%peer, "peer down during graceful restart — aborting GR");
-                    let peer_label = peer.to_string();
-                    self.metrics.set_gr_active(&peer_label, false);
-                    self.metrics.set_gr_stale_routes(&peer_label, 0);
-                }
-
-                // If LLGR was active for this peer, abort it
-                if self.llgr_peers.remove(&peer).is_some() {
-                    self.llgr_stale_deadlines.remove(&peer);
-                    info!(%peer, "peer down during LLGR — aborting LLGR");
-                    let peer_label = peer.to_string();
-                    self.metrics.set_gr_active(&peer_label, false);
-                    self.metrics.set_gr_stale_routes(&peer_label, 0);
-                }
-
-                if let Some(rib) = self.ribs.get_mut(&peer) {
-                    let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
-                    let count = rib.len();
-                    // Collect FlowSpec rules before clearing
-                    let fs_affected: HashSet<rustbgpd_wire::FlowSpecRule> =
-                        rib.iter_flowspec().map(|r| r.rule.clone()).collect();
-                    rib.clear();
-                    rib.clear_flowspec();
-                    debug!(%peer, cleared = count, "peer down — rib cleared");
-                    self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
-                    let changed = self.recompute_best(&affected);
-                    self.distribute_changes(&changed, &affected);
-                    if !fs_affected.is_empty() {
-                        self.recompute_and_distribute_flowspec(&fs_affected);
-                    }
-                }
-                // Clean up outbound state
-                self.adj_ribs_out.remove(&peer);
-                self.metrics
-                    .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
-                self.outbound_peers.remove(&peer);
-                self.peer_export_policies.remove(&peer);
-                self.peer_sendable_families.remove(&peer);
-                self.peer_is_ebgp.remove(&peer);
-                self.peer_is_rr_client.remove(&peer);
-                self.peer_add_path_send_max.remove(&peer);
-                self.peer_add_path_send_families.remove(&peer);
-                self.peer_asn.remove(&peer);
-                self.peer_bgp_id.remove(&peer);
-                self.dirty_peers.remove(&peer);
-                self.pending_eor.remove(&peer);
-                self.clear_peer_refresh_state(peer);
-            }
-
+            } => self.handle_routes_received(
+                peer,
+                announced,
+                withdrawn,
+                flowspec_announced,
+                flowspec_withdrawn,
+            ),
+            RibUpdate::PeerDown { peer } => self.handle_peer_down(peer),
             RibUpdate::PeerUp {
                 peer,
                 peer_asn,
@@ -337,277 +209,48 @@ impl RibManager {
                 route_reflector_client,
                 add_path_send_families,
                 add_path_send_max,
-            } => {
-                self.peer_asn.insert(peer, peer_asn);
-                self.peer_bgp_id.insert(peer, peer_router_id);
-                // If the peer re-establishes during graceful restart, keep
-                // routes stale and wait for End-of-RIB per family (RFC 4724
-                // §4.2).  Reset the timer from restart_time (session window)
-                // to stale_routes_time (EoR window).
-                if self.gr_peers.contains_key(&peer) {
-                    if let Some(&srt) = self.gr_stale_routes_time.get(&peer) {
-                        let deadline =
-                            tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
-                        self.gr_stale_deadlines.insert(peer, deadline);
-                    }
-                    info!(%peer, "peer re-established during GR — waiting for End-of-RIB");
-                } else if self.llgr_peers.contains_key(&peer) {
-                    // Peer re-established during LLGR — promote LLGR families
-                    // back to GR-awaiting-EoR so EndOfRib clears the stale flag.
-                    if let Some(llgr_families) = self.llgr_peers.remove(&peer) {
-                        self.llgr_stale_deadlines.remove(&peer);
-                        // Recover configured stale_routes_time from LLGR config
-                        let srt = self
-                            .llgr_peer_config
-                            .get(&peer)
-                            .map_or(360, |c| c.stale_routes_time);
-                        self.gr_stale_routes_time.insert(peer, srt);
-                        self.gr_peers.insert(peer, llgr_families);
-                        let deadline =
-                            tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
-                        self.gr_stale_deadlines.insert(peer, deadline);
-                        info!(%peer, stale_routes_time = srt, "peer re-established during LLGR — waiting for End-of-RIB");
-                    }
-                }
-
-                debug!(%peer, "peer up — registering for outbound updates");
-                let peer_label = peer.to_string();
-                self.metrics.set_rib_prefixes(&peer_label, "all", 0);
-                self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
-                self.outbound_peers.insert(peer, outbound_tx);
-                self.peer_export_policies.insert(peer, export_policy);
-                self.peer_sendable_families.insert(peer, sendable_families);
-                self.peer_is_ebgp.insert(peer, is_ebgp);
-                self.peer_is_rr_client.insert(peer, route_reflector_client);
-                self.peer_add_path_send_families
-                    .insert(peer, add_path_send_families);
-                self.peer_add_path_send_max.insert(peer, add_path_send_max);
-                self.send_initial_table(peer);
-            }
-
-            RibUpdate::InjectRoute { route, reply } => {
-                let prefix = route.prefix;
-                let rib = self
-                    .ribs
-                    .entry(LOCAL_PEER)
-                    .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-                rib.insert(route);
-                debug!(%prefix, "injected local route");
-                self.metrics
-                    .set_rib_prefixes(&LOCAL_PEER.to_string(), "all", gauge_val(rib.len()));
-
-                let mut affected = HashSet::new();
-                affected.insert(prefix);
-                let changed = self.recompute_best(&affected);
-                self.distribute_changes(&changed, &affected);
-
-                let _ = reply.send(Ok(()));
-            }
-
+            } => self.handle_peer_up(
+                peer,
+                peer_asn,
+                peer_router_id,
+                outbound_tx,
+                export_policy,
+                sendable_families,
+                is_ebgp,
+                route_reflector_client,
+                add_path_send_families,
+                add_path_send_max,
+            ),
+            RibUpdate::InjectRoute { route, reply } => self.handle_inject_route(route, reply),
             RibUpdate::WithdrawInjected {
                 prefix,
                 path_id,
                 reply,
-            } => {
-                let rib = self
-                    .ribs
-                    .entry(LOCAL_PEER)
-                    .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-                if rib.withdraw(&prefix, path_id) {
-                    debug!(%prefix, "withdrawn injected route");
-                    self.metrics.set_rib_prefixes(
-                        &LOCAL_PEER.to_string(),
-                        "all",
-                        gauge_val(rib.len()),
-                    );
-                    let mut affected = HashSet::new();
-                    affected.insert(prefix);
-                    let changed = self.recompute_best(&affected);
-                    self.distribute_changes(&changed, &affected);
-                    let _ = reply.send(Ok(()));
-                } else {
-                    let _ = reply.send(Err(format!("prefix {prefix} not found")));
-                }
-            }
-
+            } => self.handle_withdraw_injected(prefix, path_id, reply),
             RibUpdate::QueryReceivedRoutes { peer, reply } => {
-                let routes: Vec<_> = match peer {
-                    Some(peer_addr) => self
-                        .ribs
-                        .get(&peer_addr)
-                        .map(|rib| rib.iter().cloned().collect())
-                        .unwrap_or_default(),
-                    None => self
-                        .ribs
-                        .values()
-                        .flat_map(|rib| rib.iter().cloned())
-                        .collect(),
-                };
-
-                if reply.send(routes).is_err() {
-                    warn!("query caller dropped before receiving response");
-                }
+                self.handle_query_received_routes(peer, reply);
             }
-
-            RibUpdate::QueryBestRoutes { reply } => {
-                let routes: Vec<_> = self.loc_rib.iter().cloned().collect();
-                if reply.send(routes).is_err() {
-                    warn!("query caller dropped before receiving response");
-                }
-            }
-
+            RibUpdate::QueryBestRoutes { reply } => self.handle_query_best_routes(reply),
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
-                let routes: Vec<_> = self
-                    .adj_ribs_out
-                    .get(&peer)
-                    .map(|rib| rib.iter().cloned().collect())
-                    .unwrap_or_default();
-
-                if reply.send(routes).is_err() {
-                    warn!("query caller dropped before receiving response");
-                }
+                self.handle_query_advertised_routes(peer, reply);
             }
-
             RibUpdate::SubscribeRouteEvents { reply } => {
-                let rx = self.route_events_tx.subscribe();
-                let _ = reply.send(rx);
+                self.handle_subscribe_route_events(reply);
             }
-
-            RibUpdate::QueryLocRibCount { reply } => {
-                let _ = reply.send(self.loc_rib.len());
-            }
-
+            RibUpdate::QueryLocRibCount { reply } => self.handle_query_loc_rib_count(reply),
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
-                let count = self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
-                let _ = reply.send(count);
+                self.handle_query_advertised_count(peer, reply);
             }
-
-            RibUpdate::EndOfRib { peer, afi, safi } => {
-                info!(%peer, ?afi, ?safi, "received End-of-RIB");
-                let is_gr_peer = self.gr_peers.contains_key(&peer);
-                let is_llgr_peer = self.llgr_peers.contains_key(&peer);
-                if !is_gr_peer && !is_llgr_peer {
-                    debug!(%peer, ?afi, ?safi, "End-of-RIB received without active GR/LLGR state, ignoring");
-                }
-                if is_gr_peer {
-                    // Remove family from awaiting set
-                    if let Some(awaiting) = self.gr_peers.get_mut(&peer) {
-                        awaiting.remove(&(afi, safi));
-                    }
-
-                    // Clear stale flag on this family's routes
-                    if let Some(rib) = self.ribs.get_mut(&peer) {
-                        rib.clear_stale((afi, safi));
-                    }
-
-                    // Recompute best paths — routes are no longer demoted
-                    let affected: HashSet<Prefix> = self
-                        .ribs
-                        .get(&peer)
-                        .map(|rib| rib.iter().map(|r| r.prefix).collect())
-                        .unwrap_or_default();
-                    let changed = self.recompute_best(&affected);
-                    self.distribute_changes(&changed, &affected);
-
-                    // Update stale routes metric after partial clear
-                    let peer_label = peer.to_string();
-                    let stale_count = self
-                        .ribs
-                        .get(&peer)
-                        .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
-                    self.metrics
-                        .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
-
-                    // If all families received EoR, GR is complete
-                    let all_done = self.gr_peers.get(&peer).is_some_and(HashSet::is_empty);
-                    if all_done {
-                        info!(%peer, "graceful restart complete — all End-of-RIB received");
-                        self.gr_peers.remove(&peer);
-                        self.gr_stale_deadlines.remove(&peer);
-                        self.gr_stale_routes_time.remove(&peer);
-                        self.llgr_peer_config.remove(&peer);
-                        self.metrics.set_gr_active(&peer_label, false);
-                        self.metrics.set_gr_stale_routes(&peer_label, 0);
-                    }
-                } else if is_llgr_peer {
-                    // EoR during LLGR phase — clear LLGR-stale flag for this family
-                    if let Some(awaiting) = self.llgr_peers.get_mut(&peer) {
-                        awaiting.remove(&(afi, safi));
-                    }
-
-                    // Clear LLGR-stale flag on this family's routes
-                    if let Some(rib) = self.ribs.get_mut(&peer) {
-                        rib.clear_llgr_stale((afi, safi));
-                    }
-
-                    // Recompute best paths — routes are no longer demoted
-                    let affected: HashSet<Prefix> = self
-                        .ribs
-                        .get(&peer)
-                        .map(|rib| rib.iter().map(|r| r.prefix).collect())
-                        .unwrap_or_default();
-                    let changed = self.recompute_best(&affected);
-                    self.distribute_changes(&changed, &affected);
-
-                    let peer_label = peer.to_string();
-                    let llgr_stale_count = self
-                        .ribs
-                        .get(&peer)
-                        .map_or(0, |rib| rib.iter().filter(|r| r.is_llgr_stale).count());
-                    self.metrics
-                        .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_count));
-
-                    // If all LLGR families received EoR, LLGR is complete
-                    let all_done = self.llgr_peers.get(&peer).is_some_and(HashSet::is_empty);
-                    if all_done {
-                        info!(%peer, "LLGR complete — all End-of-RIB received");
-                        self.llgr_peers.remove(&peer);
-                        self.llgr_stale_deadlines.remove(&peer);
-                        self.metrics.set_gr_active(&peer_label, false);
-                        self.metrics.set_gr_stale_routes(&peer_label, 0);
-                    }
-                }
-            }
-
+            RibUpdate::EndOfRib { peer, afi, safi } => self.handle_end_of_rib(peer, afi, safi),
             RibUpdate::RouteRefreshRequest { peer, afi, safi } => {
-                info!(%peer, ?afi, ?safi, "handling route refresh request");
-                self.send_route_refresh_response(peer, afi, safi);
+                self.handle_route_refresh_request(peer, afi, safi);
             }
-
             RibUpdate::BeginRouteRefresh { peer, afi, safi } => {
-                info!(%peer, ?afi, ?safi, "beginning enhanced route refresh");
-                self.refresh_in_progress
-                    .entry(peer)
-                    .or_default()
-                    .insert((afi, safi));
-                self.refresh_deadlines.insert(
-                    (peer, afi, safi),
-                    tokio::time::Instant::now() + ERR_REFRESH_TIMEOUT,
-                );
-                if let Some(rib) = self.ribs.get(&peer) {
-                    if safi == Safi::FlowSpec {
-                        let stale = self.refresh_stale_flowspec.entry(peer).or_default();
-                        stale.retain(|(stale_afi, _, _)| *stale_afi != afi);
-                        for route in rib.iter_flowspec().filter(|route| route.afi == afi) {
-                            stale.insert((route.afi, route.rule.clone(), route.path_id));
-                        }
-                    } else {
-                        let stale = self.refresh_stale_routes.entry(peer).or_default();
-                        stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
-                        for route in rib
-                            .iter()
-                            .filter(|route| prefix_family(&route.prefix) == (afi, safi))
-                        {
-                            stale.insert((route.prefix, route.path_id));
-                        }
-                    }
-                }
+                self.handle_begin_route_refresh(peer, afi, safi);
             }
-
             RibUpdate::EndRouteRefresh { peer, afi, safi } => {
-                self.finish_route_refresh(peer, afi, safi, false);
+                self.handle_end_route_refresh(peer, afi, safi);
             }
-
             RibUpdate::PeerGracefulRestart {
                 peer,
                 restart_time,
@@ -616,187 +259,131 @@ impl RibManager {
                 peer_llgr_capable,
                 peer_llgr_families,
                 llgr_stale_time,
-            } => {
-                info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
-
-                let mut affected = HashSet::new();
-
-                if let Some(rib) = self.ribs.get_mut(&peer) {
-                    // Mark routes stale for families in the GR capability
-                    for &family in &gr_families {
-                        rib.mark_stale(family);
-                    }
-                    // Withdraw routes for families NOT in the GR capability
-                    let withdrawn = rib.withdraw_families_except(&gr_families);
-                    if !withdrawn.is_empty() {
-                        info!(%peer, count = withdrawn.len(), "withdrew non-GR family routes");
-                    }
-                    for prefix in withdrawn {
-                        affected.insert(prefix);
-                    }
-                }
-
-                // Include stale routes in affected set for best-path recompute
-                if let Some(rib) = self.ribs.get(&peer) {
-                    for route in rib.iter() {
-                        affected.insert(route.prefix);
-                    }
-                    self.metrics
-                        .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
-                }
-
-                let changed = self.recompute_best(&affected);
-                self.distribute_changes(&changed, &affected);
-
-                // Clean up outbound state — peer is down, dead channel would
-                // cause wasteful dirty-peer resync attempts.
-                self.outbound_peers.remove(&peer);
-                self.adj_ribs_out.remove(&peer);
-                self.peer_export_policies.remove(&peer);
-                self.peer_sendable_families.remove(&peer);
-                self.peer_is_ebgp.remove(&peer);
-                self.peer_is_rr_client.remove(&peer);
-                self.peer_add_path_send_max.remove(&peer);
-                self.peer_add_path_send_families.remove(&peer);
-                self.dirty_peers.remove(&peer);
-                self.pending_eor.remove(&peer);
-                self.clear_peer_refresh_state(peer);
-
-                // Initial timer = restart_time (window for session re-establishment).
-                // On PeerUp, this is reset to stale_routes_time for EoR.
-                let deadline = tokio::time::Instant::now()
-                    + std::time::Duration::from_secs(u64::from(restart_time));
-                self.gr_stale_deadlines.insert(peer, deadline);
-                self.gr_stale_routes_time.insert(peer, stale_routes_time);
-
-                // Record awaiting families
-                self.gr_peers
-                    .insert(peer, gr_families.into_iter().collect());
-
-                // Store LLGR config for two-phase timer
-                if peer_llgr_capable && llgr_stale_time > 0 {
-                    self.llgr_peer_config.insert(
-                        peer,
-                        LlgrPeerConfig {
-                            peer_llgr_capable,
-                            peer_llgr_families,
-                            local_llgr_stale_time: llgr_stale_time,
-                            stale_routes_time,
-                        },
-                    );
-                }
-
-                // Metrics
-                let peer_label = peer.to_string();
-                self.metrics.set_gr_active(&peer_label, true);
-                let stale_count = self
-                    .ribs
-                    .get(&peer)
-                    .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
-                self.metrics
-                    .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
-            }
-
-            RibUpdate::RpkiCacheUpdate { table } => {
-                info!(
-                    vrps = table.len(),
-                    "RPKI cache update — re-validating routes"
-                );
-                self.vrp_table = Some(Arc::clone(&table));
-                self.metrics
-                    .set_rpki_vrp_count("ipv4", gauge_val(table.v4_count()));
-                self.metrics
-                    .set_rpki_vrp_count("ipv6", gauge_val(table.v6_count()));
-
-                // Re-validate all routes in all Adj-RIB-Ins.
-                let mut affected = HashSet::new();
-                for rib in self.ribs.values_mut() {
-                    for route in rib.iter_mut() {
-                        let new_state = validate_route_rpki(route, &table);
-                        if route.validation_state != new_state {
-                            route.validation_state = new_state;
-                            affected.insert(route.prefix);
-                        }
-                    }
-                }
-
-                if !affected.is_empty() {
-                    info!(
-                        changed = affected.len(),
-                        "RPKI re-validation changed routes"
-                    );
-                    let changed = self.recompute_best(&affected);
-                    self.distribute_changes(&changed, &affected);
-                }
-            }
-
-            RibUpdate::InjectFlowSpec { route, reply } => {
-                let rule = route.rule.clone();
-                let rib = self
-                    .ribs
-                    .entry(LOCAL_PEER)
-                    .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-                rib.insert_flowspec(route);
-                debug!(rule = %rule, "injected local FlowSpec route");
-                let mut fs_affected = HashSet::new();
-                fs_affected.insert(rule);
-                self.recompute_and_distribute_flowspec(&fs_affected);
-                let _ = reply.send(Ok(()));
-            }
-
+            } => self.handle_peer_graceful_restart(
+                peer,
+                restart_time,
+                stale_routes_time,
+                gr_families,
+                peer_llgr_capable,
+                peer_llgr_families,
+                llgr_stale_time,
+            ),
+            RibUpdate::RpkiCacheUpdate { table } => self.handle_rpki_cache_update(table),
+            RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
             RibUpdate::WithdrawFlowSpec { rule, reply } => {
-                let rib = self
-                    .ribs
-                    .entry(LOCAL_PEER)
-                    .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
-                if rib.withdraw_flowspec(&rule, 0) {
-                    debug!(rule = %rule, "withdrawn injected FlowSpec route");
-                    let mut fs_affected = HashSet::new();
-                    fs_affected.insert(rule);
-                    self.recompute_and_distribute_flowspec(&fs_affected);
-                    let _ = reply.send(Ok(()));
-                } else {
-                    let _ = reply.send(Err(format!("FlowSpec rule {rule} not found")));
-                }
+                self.handle_withdraw_flowspec(rule, reply);
             }
-
             RibUpdate::QueryFlowSpecRoutes { reply } => {
-                let routes: Vec<_> = self.loc_rib.iter_flowspec().cloned().collect();
-                if reply.send(routes).is_err() {
-                    warn!("FlowSpec query caller dropped before receiving response");
-                }
+                self.handle_query_flowspec_routes(reply);
             }
+            RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
+        }
+    }
 
-            RibUpdate::QueryMrtSnapshot { reply } => {
-                use crate::update::{MrtPeerEntry, MrtSnapshotData};
+    fn handle_query_received_routes(
+        &mut self,
+        peer: Option<IpAddr>,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
+    ) {
+        let routes: Vec<_> = match peer {
+            Some(peer_addr) => self
+                .ribs
+                .get(&peer_addr)
+                .map(|rib| rib.iter().cloned().collect())
+                .unwrap_or_default(),
+            None => self
+                .ribs
+                .values()
+                .flat_map(|rib| rib.iter().cloned())
+                .collect(),
+        };
 
-                let peers: Vec<MrtPeerEntry> = self
-                    .peer_asn
-                    .iter()
-                    .map(|(&addr, &asn)| MrtPeerEntry {
-                        peer_addr: addr,
-                        peer_bgp_id: self
-                            .peer_bgp_id
-                            .get(&addr)
-                            .copied()
-                            .unwrap_or(Ipv4Addr::UNSPECIFIED),
-                        peer_asn: asn,
-                    })
-                    .collect();
+        if reply.send(routes).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
 
-                // TABLE_DUMP_V2 is built from Adj-RIB-In routes per peer.
-                // Avoid mixing Loc-RIB winners to prevent duplicate entries.
-                let routes: Vec<_> = self
-                    .ribs
-                    .values()
-                    .flat_map(|rib| rib.iter().cloned())
-                    .collect();
+    fn handle_query_best_routes(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
+    ) {
+        let routes: Vec<_> = self.loc_rib.iter().cloned().collect();
+        if reply.send(routes).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
 
-                let snapshot = MrtSnapshotData { peers, routes };
-                if reply.send(snapshot).is_err() {
-                    warn!("MRT snapshot query caller dropped before receiving response");
-                }
-            }
+    fn handle_query_advertised_routes(
+        &mut self,
+        peer: IpAddr,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::route::Route>>,
+    ) {
+        let routes: Vec<_> = self
+            .adj_ribs_out
+            .get(&peer)
+            .map(|rib| rib.iter().cloned().collect())
+            .unwrap_or_default();
+
+        if reply.send(routes).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    fn handle_subscribe_route_events(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<broadcast::Receiver<RouteEvent>>,
+    ) {
+        let rx = self.route_events_tx.subscribe();
+        let _ = reply.send(rx);
+    }
+
+    fn handle_query_loc_rib_count(&mut self, reply: tokio::sync::oneshot::Sender<usize>) {
+        let _ = reply.send(self.loc_rib.len());
+    }
+
+    fn handle_query_advertised_count(
+        &mut self,
+        peer: IpAddr,
+        reply: tokio::sync::oneshot::Sender<usize>,
+    ) {
+        let count = self.adj_ribs_out.get(&peer).map_or(0, AdjRibOut::len);
+        let _ = reply.send(count);
+    }
+
+    fn handle_query_flowspec_routes(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<Vec<crate::route::FlowSpecRoute>>,
+    ) {
+        let routes: Vec<_> = self.loc_rib.iter_flowspec().cloned().collect();
+        if reply.send(routes).is_err() {
+            warn!("FlowSpec query caller dropped before receiving response");
+        }
+    }
+
+    fn handle_query_mrt_snapshot(&mut self, reply: tokio::sync::oneshot::Sender<MrtSnapshotData>) {
+        let peers: Vec<MrtPeerEntry> = self
+            .peer_asn
+            .iter()
+            .map(|(&addr, &asn)| MrtPeerEntry {
+                peer_addr: addr,
+                peer_bgp_id: self
+                    .peer_bgp_id
+                    .get(&addr)
+                    .copied()
+                    .unwrap_or(Ipv4Addr::UNSPECIFIED),
+                peer_asn: asn,
+            })
+            .collect();
+
+        let routes: Vec<_> = self
+            .ribs
+            .values()
+            .flat_map(|rib| rib.iter().cloned())
+            .collect();
+
+        let snapshot = MrtSnapshotData { peers, routes };
+        if reply.send(snapshot).is_err() {
+            warn!("MRT snapshot query caller dropped before receiving response");
         }
     }
 

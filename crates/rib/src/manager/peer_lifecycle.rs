@@ -1,8 +1,10 @@
 use std::collections::HashSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
+use rustbgpd_policy::PolicyChain;
 use rustbgpd_wire::{FlowSpecRule, Prefix};
-use tracing::warn;
+use tokio::sync::mpsc;
+use tracing::{debug, info, warn};
 
 use super::RibManager;
 use super::helpers::{gauge_val, prefix_family};
@@ -10,6 +12,111 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
+    pub(super) fn handle_peer_down(&mut self, peer: IpAddr) {
+        if self.gr_peers.remove(&peer).is_some() {
+            self.gr_stale_deadlines.remove(&peer);
+            self.gr_stale_routes_time.remove(&peer);
+            self.llgr_peer_config.remove(&peer);
+            info!(%peer, "peer down during graceful restart — aborting GR");
+            let peer_label = peer.to_string();
+            self.metrics.set_gr_active(&peer_label, false);
+            self.metrics.set_gr_stale_routes(&peer_label, 0);
+        }
+
+        if self.llgr_peers.remove(&peer).is_some() {
+            self.llgr_stale_deadlines.remove(&peer);
+            info!(%peer, "peer down during LLGR — aborting LLGR");
+            let peer_label = peer.to_string();
+            self.metrics.set_gr_active(&peer_label, false);
+            self.metrics.set_gr_stale_routes(&peer_label, 0);
+        }
+
+        if let Some(rib) = self.ribs.get_mut(&peer) {
+            let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
+            let count = rib.len();
+            let fs_affected: HashSet<FlowSpecRule> =
+                rib.iter_flowspec().map(|r| r.rule.clone()).collect();
+            rib.clear();
+            rib.clear_flowspec();
+            debug!(%peer, cleared = count, "peer down — rib cleared");
+            self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+            if !fs_affected.is_empty() {
+                self.recompute_and_distribute_flowspec(&fs_affected);
+            }
+        }
+
+        self.adj_ribs_out.remove(&peer);
+        self.metrics
+            .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
+        self.outbound_peers.remove(&peer);
+        self.peer_export_policies.remove(&peer);
+        self.peer_sendable_families.remove(&peer);
+        self.peer_is_ebgp.remove(&peer);
+        self.peer_is_rr_client.remove(&peer);
+        self.peer_add_path_send_max.remove(&peer);
+        self.peer_add_path_send_families.remove(&peer);
+        self.peer_asn.remove(&peer);
+        self.peer_bgp_id.remove(&peer);
+        self.dirty_peers.remove(&peer);
+        self.pending_eor.remove(&peer);
+        self.clear_peer_refresh_state(peer);
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    pub(super) fn handle_peer_up(
+        &mut self,
+        peer: IpAddr,
+        peer_asn: u32,
+        peer_router_id: Ipv4Addr,
+        outbound_tx: mpsc::Sender<OutboundRouteUpdate>,
+        export_policy: Option<PolicyChain>,
+        sendable_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
+        is_ebgp: bool,
+        route_reflector_client: bool,
+        add_path_send_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
+        add_path_send_max: u32,
+    ) {
+        self.peer_asn.insert(peer, peer_asn);
+        self.peer_bgp_id.insert(peer, peer_router_id);
+
+        if self.gr_peers.contains_key(&peer) {
+            if let Some(&srt) = self.gr_stale_routes_time.get(&peer) {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
+                self.gr_stale_deadlines.insert(peer, deadline);
+            }
+            info!(%peer, "peer re-established during GR — waiting for End-of-RIB");
+        } else if self.llgr_peers.contains_key(&peer)
+            && let Some(llgr_families) = self.llgr_peers.remove(&peer)
+        {
+            self.llgr_stale_deadlines.remove(&peer);
+            let srt = self
+                .llgr_peer_config
+                .get(&peer)
+                .map_or(360, |c| c.stale_routes_time);
+            self.gr_stale_routes_time.insert(peer, srt);
+            self.gr_peers.insert(peer, llgr_families);
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(srt);
+            self.gr_stale_deadlines.insert(peer, deadline);
+            info!(%peer, stale_routes_time = srt, "peer re-established during LLGR — waiting for End-of-RIB");
+        }
+
+        debug!(%peer, "peer up — registering for outbound updates");
+        let peer_label = peer.to_string();
+        self.metrics.set_rib_prefixes(&peer_label, "all", 0);
+        self.metrics.set_adj_rib_out_prefixes(&peer_label, "all", 0);
+        self.outbound_peers.insert(peer, outbound_tx);
+        self.peer_export_policies.insert(peer, export_policy);
+        self.peer_sendable_families.insert(peer, sendable_families);
+        self.peer_is_ebgp.insert(peer, is_ebgp);
+        self.peer_is_rr_client.insert(peer, route_reflector_client);
+        self.peer_add_path_send_families
+            .insert(peer, add_path_send_families);
+        self.peer_add_path_send_max.insert(peer, add_path_send_max);
+        self.send_initial_table(peer);
+    }
+
     /// Send the full Loc-RIB to a newly established peer (initial table dump).
     ///
     /// `AdjRibOut` is only populated after a successful channel send. On

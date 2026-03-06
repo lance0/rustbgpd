@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::RibManager;
 use super::helpers::{ERR_REFRESH_TIMEOUT, gauge_val, prefix_family};
@@ -10,6 +10,123 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
+    pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+        info!(%peer, ?afi, ?safi, "received End-of-RIB");
+        let is_gr_peer = self.gr_peers.contains_key(&peer);
+        let is_llgr_peer = self.llgr_peers.contains_key(&peer);
+        if !is_gr_peer && !is_llgr_peer {
+            debug!(%peer, ?afi, ?safi, "End-of-RIB received without active GR/LLGR state, ignoring");
+        }
+        if is_gr_peer {
+            if let Some(awaiting) = self.gr_peers.get_mut(&peer) {
+                awaiting.remove(&(afi, safi));
+            }
+
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.clear_stale((afi, safi));
+            }
+
+            let affected: HashSet<Prefix> = self
+                .ribs
+                .get(&peer)
+                .map(|rib| rib.iter().map(|r| r.prefix).collect())
+                .unwrap_or_default();
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+
+            let peer_label = peer.to_string();
+            let stale_count = self
+                .ribs
+                .get(&peer)
+                .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
+            self.metrics
+                .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
+
+            let all_done = self.gr_peers.get(&peer).is_some_and(HashSet::is_empty);
+            if all_done {
+                info!(%peer, "graceful restart complete — all End-of-RIB received");
+                self.gr_peers.remove(&peer);
+                self.gr_stale_deadlines.remove(&peer);
+                self.gr_stale_routes_time.remove(&peer);
+                self.llgr_peer_config.remove(&peer);
+                self.metrics.set_gr_active(&peer_label, false);
+                self.metrics.set_gr_stale_routes(&peer_label, 0);
+            }
+        } else if is_llgr_peer {
+            if let Some(awaiting) = self.llgr_peers.get_mut(&peer) {
+                awaiting.remove(&(afi, safi));
+            }
+
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                rib.clear_llgr_stale((afi, safi));
+            }
+
+            let affected: HashSet<Prefix> = self
+                .ribs
+                .get(&peer)
+                .map(|rib| rib.iter().map(|r| r.prefix).collect())
+                .unwrap_or_default();
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+
+            let peer_label = peer.to_string();
+            let llgr_stale_count = self
+                .ribs
+                .get(&peer)
+                .map_or(0, |rib| rib.iter().filter(|r| r.is_llgr_stale).count());
+            self.metrics
+                .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_count));
+
+            let all_done = self.llgr_peers.get(&peer).is_some_and(HashSet::is_empty);
+            if all_done {
+                info!(%peer, "LLGR complete — all End-of-RIB received");
+                self.llgr_peers.remove(&peer);
+                self.llgr_stale_deadlines.remove(&peer);
+                self.metrics.set_gr_active(&peer_label, false);
+                self.metrics.set_gr_stale_routes(&peer_label, 0);
+            }
+        }
+    }
+
+    pub(super) fn handle_route_refresh_request(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+        info!(%peer, ?afi, ?safi, "handling route refresh request");
+        self.send_route_refresh_response(peer, afi, safi);
+    }
+
+    pub(super) fn handle_begin_route_refresh(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+        info!(%peer, ?afi, ?safi, "beginning enhanced route refresh");
+        self.refresh_in_progress
+            .entry(peer)
+            .or_default()
+            .insert((afi, safi));
+        self.refresh_deadlines.insert(
+            (peer, afi, safi),
+            tokio::time::Instant::now() + ERR_REFRESH_TIMEOUT,
+        );
+        if let Some(rib) = self.ribs.get(&peer) {
+            if safi == Safi::FlowSpec {
+                let stale = self.refresh_stale_flowspec.entry(peer).or_default();
+                stale.retain(|(stale_afi, _, _)| *stale_afi != afi);
+                for route in rib.iter_flowspec().filter(|route| route.afi == afi) {
+                    stale.insert((route.afi, route.rule.clone(), route.path_id));
+                }
+            } else {
+                let stale = self.refresh_stale_routes.entry(peer).or_default();
+                stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
+                for route in rib
+                    .iter()
+                    .filter(|route| prefix_family(&route.prefix) == (afi, safi))
+                {
+                    stale.insert((route.prefix, route.path_id));
+                }
+            }
+        }
+    }
+
+    pub(super) fn handle_end_route_refresh(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
+        self.finish_route_refresh(peer, afi, safi, false);
+    }
+
     /// Re-advertise the Loc-RIB for a given family to a peer, followed by `EoR`.
     /// Called when a peer sends ROUTE-REFRESH (RFC 2918).
     #[expect(clippy::too_many_lines)]
