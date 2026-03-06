@@ -2,8 +2,8 @@
 
 A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "drive it via gRPC" operating model.
 
-**Author:** Lance
-**Status:** pre-1.0 hardening — P0/P1/P2 complete, P2.5 in progress
+**Author:** lance0
+**Status:** pre-1.0 hardening — P0/P1/P2/P2.5 complete, publishing prep
 **Last updated:** 2026-03-05
 
 ---
@@ -48,105 +48,21 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 ## Architecture
 
-### High-Level Components
+For crate dependency graph, runtime model, ownership model, data flow, lifecycle flows, backpressure model, and the "where to change X" guide, see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
-**wire** (codec) — BGP message encode/decode: OPEN, KEEPALIVE, UPDATE, NOTIFICATION, ROUTE-REFRESH. Capability parsing/encoding (4-byte ASN, MP-BGP). IPv4 and IPv6 NLRI, path attributes including `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (RFC 4760). `Prefix` enum wraps `Ipv4Prefix` and `Ipv6Prefix` for AFI-agnostic route representation. This crate has zero internal dependencies — it is a pure codec library.
+### Key Design Choices
 
-**Path attribute representation:** The wire crate uses a typed + raw hybrid model. Known attributes (ORIGIN, AS_PATH, NEXT_HOP, etc.) are decoded into typed Rust enums. Unknown attributes are preserved as `RawAttribute { flags: u8, type_code: u8, data: Bytes }` alongside typed ones. This is a hard architectural requirement — the daemon must be able to re-emit unknown optional transitive attributes byte-for-byte with the Partial bit set correctly. Dropping unknown transitive attributes is a protocol correctness bug that breaks interop with peers running newer BGP extensions.
+**Path attribute representation:** The wire crate uses a typed + raw hybrid model. Known attributes (ORIGIN, AS_PATH, NEXT_HOP, etc.) are decoded into typed Rust enums. Unknown attributes are preserved as `RawAttribute { flags, type_code, data: Bytes }` alongside typed ones. This is a hard architectural requirement — the daemon must re-emit unknown optional transitive attributes byte-for-byte with the Partial bit set correctly. Dropping unknown transitive attributes is a protocol correctness bug.
 
-```rust
-// Illustrative API — types may evolve, but the typed + raw hybrid model is the commitment.
-enum PathAttribute {
-    Origin(Origin),
-    AsPath(AsPath),
-    NextHop(Ipv4Addr),
-    LocalPref(u32),
-    Med(u32),
-    // ... other known attributes
-    Unknown(RawAttribute),  // preserved raw bytes, re-emitted unchanged
-}
-
-struct RawAttribute {
-    flags: u8,
-    type_code: u8,
-    data: Bytes,
-}
-```
-
-**fsm** (session state machine) — RFC 4271 FSM: Idle, Connect, Active, OpenSent, OpenConfirm, Established. Timers modeled as inputs (not spawned internally). Negotiation result struct: negotiated caps, AFI/SAFI set, peer ASN, peer ID. Depends on `wire` types only.
-
-**transport** — TCP connection management via tokio. Read loop → decode → FSM input. FSM output → encode → write loop. Most paths use bounded queues; the session-notification channel used for collision handling is intentionally unbounded to avoid query/notification deadlock. This is the only crate that touches async I/O. Depends on `wire`, `fsm`, `rib`, `policy`, `telemetry`, and `bmp`.
-
-**rib** — AdjRibIn per neighbor, LocRib best-path selection, AdjRibOut computed per neighbor. Route objects keyed by `Prefix` (IPv4 and IPv6 coexist in the same HashMap). See ADR-0023.
-
-**policy** — Match+modify+filter engine: prefix (ge/le), community (standard, extended, large), AS_PATH regex matching. Route modifications: LOCAL_PREF, MED, next-hop, community add/remove, AS_PATH prepend. Extended community add/remove uses logical RT/RO equivalence across encodings.
-
-**api** — gRPC server exposing neighbor lifecycle, state queries, RIB queries, and route injection. Defined by `rustbgpd.proto` — our own types, not GoBGP's.
-
-**telemetry** — Prometheus metrics endpoint, structured tracing logs.
-
-**rpki** — RPKI origin validation: RTR client (RFC 8210), VRP table with binary-search prefix containment, multi-cache aggregation. `Arc<VrpTable>` snapshot pattern (exception to no-Arc rule). Depends on `wire`.
-
-**bmp** — BMP exporter (RFC 7854): message codec, per-collector TCP client with reconnect/backoff, fan-out manager with Peer Up replay cache. No internal crate dependencies.
-
-**mrt** — MRT dump export (RFC 6396): TABLE_DUMP_V2 codec, atomic file writer with optional gzip, periodic/on-demand dump manager. Depends on `wire` and `rib`.
-
-**cli** (`rustbgpctl`) — gRPC CLI tool. Client-only proto stubs, no internal crate dependencies. Human-readable tables and `--json` output.
-
-### Dependency Graph
-
-```
-wire           (no internal deps)
-fsm            ──► wire
-policy         ──► wire
-rpki           ──► wire
-bmp            (no internal deps)
-mrt            ──► wire, rib
-telemetry      (no internal deps)
-rib            ──► wire, policy, telemetry, rpki
-transport      ──► wire, fsm, rib, policy, telemetry, bmp
-api            ──► wire, fsm, rib, policy, transport, telemetry
-cli            (no internal deps — uses tonic codegen directly)
-```
-
-Hard rules:
-- `wire` depends on nothing internal. It is a pure codec library.
-- `fsm` depends on `wire` types (message enums, capability structs) and nothing else.
-- `fsm` never imports `tokio`, never touches a socket, never spawns a task.
-- `transport` is the adapter that owns TCP streams, runs async read/write loops, and feeds the FSM.
-- `rib` and `policy` are independent of transport and fsm — they consume route update events.
-- `api` provides the gRPC server; the binary crate (`src/main.rs`) wires everything together.
-
-### Runtime Model
-
-One tokio task per neighbor session, driven by a `tokio::select!` loop over socket I/O, timers, and commands. A central RIB task processes updates from all sessions sequentially via a bounded `tokio::mpsc` channel. The API layer pushes commands into the neighbor manager and RIB via channels.
-
-**Data flow:**
-
-```
-Session RX:  bytes → wire::decode → fsm::on_message → RibUpdate → RIB task
-RIB:         computes best path → AdjRibOut updates → per-neighbor TX channels
-Session TX:  AdjRibOut events → wire::encode → bytes
-API:         gRPC call → command → neighbor manager / RIB task
-```
-
-**Control plane ownership — where is truth:**
-- **Neighbor manager** is authoritative for desired configuration (which peers should exist, their parameters).
-- **FSM** is authoritative for session state (what state each peer is actually in).
-- **RIB** is authoritative for routing state (what routes exist, which is best).
-- **API** is an adapter layer. It translates gRPC requests into commands and queries against the authoritative components. It is never the source of truth for any state.
-
-**RIB concurrency (v1):** A single RIB task behind a bounded channel handles both IPv4 and IPv6 unicast. Sessions send `RibUpdate` messages; the RIB processes them sequentially; best-path results fan out to per-neighbor AdjRibOut channels. IPv4 and IPv6 routes coexist in the same `HashMap<Prefix, Route>` (ADR-0023). The sharding seam is at the channel boundary — if a third address family or scale demands it, split to one RIB task per AFI/SAFI without changing session code.
-
-**RIB snapshot model:** Snapshots are generation-based, not deep copies. The RIB stores immutable per-prefix route sets behind `Arc`. A snapshot is a `(generation_id, Arc<RibView>)` handle. Paginated gRPC queries iterate that handle. The active RIB can advance generations without blocking readers. This avoids O(n) cloning on every query — at 10M routes, a full clone per paginated request is a non-starter. Stale snapshots are dropped when the last reader releases its `Arc` handle.
+**RIB snapshot model:** Snapshots are generation-based, not deep copies. The RIB stores immutable per-prefix route sets behind `Arc`. Paginated gRPC queries iterate a snapshot handle while the active RIB advances generations without blocking readers. This avoids O(n) cloning on every query.
 
 **Redesign triggers (instrumented from day one):**
-- `rib_update_latency_p99` — per-batch processing time. If p99 exceeds 10ms under sustained load, evaluate sharding or batch coalescing.
-- `rib_channel_backpressure_total` — counter of sends that block because the RIB channel is full. Any non-zero sustained rate means session tasks are stalling, which risks cascading flaps.
-- `adjribout_channel_drops_total` — counter of AdjRibOut events dropped due to slow peers. Non-zero means a peer is falling behind and may receive stale routing state.
-- `rib_snapshot_generation_lag` — difference between current generation and oldest live snapshot. High lag means a slow consumer is pinning old state in memory.
+- `rib_update_latency_p99` — if p99 exceeds 10ms under sustained load, evaluate sharding or batch coalescing.
+- `rib_channel_backpressure_total` — any non-zero sustained rate means session tasks are stalling.
+- `adjribout_channel_drops_total` — non-zero means a peer is falling behind.
+- `rib_snapshot_generation_lag` — high lag means a slow consumer is pinning old state.
 
-These metrics exist from Milestone 0. The threshold for triggering a redesign conversation is: sustained p99 RIB latency above 10ms, or any backpressure-induced session flap in the interop test suite.
+The threshold for triggering a redesign conversation is: sustained p99 RIB latency above 10ms, or any backpressure-induced session flap in the interop test suite.
 
 ---
 
@@ -177,6 +93,7 @@ service NeighborService {
   rpc GetNeighborState(GetNeighborStateRequest) returns (NeighborState);
   rpc EnableNeighbor(EnableNeighborRequest)  returns (EnableNeighborResponse);
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
+  rpc SoftResetIn(SoftResetInRequest)        returns (SoftResetInResponse);
 }
 
 // RIB queries — paginated unary for point-in-time, streaming for live watch
@@ -188,12 +105,17 @@ service RibService {
 
   // Live update streams (backpressure via bounded channel; slow consumers get dropped)
   rpc WatchRoutes(WatchRoutesRequest)         returns (stream RouteEvent);
+
+  // FlowSpec RIB query
+  rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
 }
 
 // Route injection and withdrawal
 service InjectionService {
   rpc AddPath(AddPathRequest)       returns (AddPathResponse);
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
+  rpc AddFlowSpec(AddFlowSpecRequest)       returns (AddFlowSpecResponse);
+  rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
 }
 
 // Daemon control and health
@@ -201,6 +123,7 @@ service ControlService {
   rpc Shutdown(ShutdownRequest)     returns (ShutdownResponse);
   rpc GetHealth(HealthRequest)      returns (HealthResponse);
   rpc GetMetrics(MetricsRequest)    returns (MetricsResponse);
+  rpc TriggerMrtDump(TriggerMrtDumpRequest) returns (TriggerMrtDumpResponse);
 }
 ```
 
@@ -322,7 +245,7 @@ Shutdown is triggered by SIGTERM or by the `Shutdown` gRPC RPC:
 5. Flush final telemetry (last metrics scrape, final log entries).
 6. Exit.
 
-No state persistence in v1. Restart is a clean boot from the config file. This is a deliberate choice — stateless restart is simpler to reason about and debug.
+Neighbor add/delete mutations made via gRPC are persisted back to the config file (ADR-0043). Full route-state persistence remains deferred — restart replays the config file and re-learns routes from peers.
 
 ### Error and Event Philosophy
 
@@ -557,11 +480,8 @@ This section defines the security stance for rustbgpd. Not all items are v1 impl
 
 ### Memory Exhaustion Guards
 
-- Channels are bounded by default. One intentional exception exists for
-  collision-resolution session notifications (unbounded) to avoid bounded-send
-  deadlock with synchronous peer-state queries.
-- Per-peer prefix limits enforced at Adj-RIB-In insertion. Exceeding the limit produces NOTIFICATION (Cease, Maximum Number of Prefixes Reached) and session teardown.
-- Total route limit enforced at the RIB level (see Global Route Limit Policy below).
+Bounded channels, prefix limits, and backpressure behavior are detailed in [ARCHITECTURE.md — Failure and Backpressure Model](../ARCHITECTURE.md#failure-and-backpressure-model). Additional guards:
+
 - UPDATE attribute size limits enforced at decode time. Oversized attributes are rejected before allocation.
 - gRPC request size limits enforced by tonic configuration.
 
@@ -606,35 +526,7 @@ All limits are configurable via TOML and overridable per-peer via gRPC.
 
 ## Repository Layout
 
-```
-rustbgpd/
-  src/
-    main.rs             # binary entry point, wiring, config loading
-  crates/
-    wire/               # BGP codec (zero internal deps)
-    fsm/                # RFC 4271 FSM + timer model (depends on wire)
-    rib/                # RIB data structures and best-path
-    policy/             # policy engine (match + modify + chain)
-    api/                # gRPC server, tonic bindings
-    telemetry/          # metrics + structured logging
-    transport/          # tokio TCP, read/write loops, session runtime
-    bmp/                # BMP exporter (RFC 7854) — codec, client, manager
-    mrt/                # MRT dump export (RFC 6396) — codec, writer, manager
-    rpki/               # RTR client + VRP table + aggregation (RFC 8210/6811)
-    cli/                # rustbgpctl gRPC CLI
-  proto/
-    rustbgpd.proto      # our own proto definitions
-  docs/
-    DESIGN.md           # this document
-    RFC_NOTES.md        # implementation notes keyed to RFC sections
-    INTEROP.md          # interop test results and known behaviors
-  tests/
-    interop/            # containerlab topologies and test scripts
-    fuzz/               # fuzz harnesses
-  Cargo.toml            # workspace root
-```
-
-`cargo run` builds and runs the daemon directly. Everything under `crates/` is the library layer.
+See [ARCHITECTURE.md — Where to Change X](../ARCHITECTURE.md#where-to-change-x) for a task-oriented guide. The crate dependency graph and runtime model are also in ARCHITECTURE.md.
 
 ---
 
@@ -735,22 +627,6 @@ rustbgpd is:
 
 ---
 
-## Design Constraints We Will Not Violate
+## Design Invariants
 
-These are invariants. They are not negotiable, not deferrable, and not subject to "just this once" exceptions. Every contributor and every PR is measured against them.
-
-1. **The FSM is pure and testable without sockets.** It takes message and timer inputs, produces message and state outputs. It never imports tokio, never spawns a task, never touches a file descriptor.
-
-2. **The wire crate remains independently usable.** It has zero internal dependencies. Anyone should be able to `cargo add rustbgpd-wire` and use it as a standalone BGP codec library without pulling in the rest of the daemon.
-
-3. **No accidental unbounded channels.** Channels are bounded by default. The only intentional unbounded channel is session notifications used for collision handling to avoid bounded `send().await` deadlock with synchronous peer-state queries.
-
-4. **No silent attribute drops.** If an attribute is ignored, filtered, or rejected, a structured event is emitted. Operators must be able to explain every routing decision from logs alone.
-
-5. **No panics on malformed input.** Any input from the network is untrusted. A panic on malformed BGP data is a denial-of-service vulnerability. The wire decoder handles all malformed input gracefully with `Result` types.
-
-6. **All protocol violations produce structured events.** Every NOTIFICATION sent or received, every malformed message, every RFC violation detected — all produce machine-parseable structured log entries with peer address, error classification, and context.
-
-7. **Resource limits are enforced, not advisory.** Max prefixes, max message size, max channel depth — these are hard limits that produce defined behavior (NOTIFICATION, backpressure, rejection) when exceeded. Never silently ignored.
-
-8. **Interop is tested, not assumed.** No feature is considered complete until it has been validated against at least FRR and BIRD in a containerlab topology. Unit tests are necessary but not sufficient.
+The 8 non-negotiable constraints are defined in [ARCHITECTURE.md — Design Invariants](../ARCHITECTURE.md#design-invariants). They cover: pure FSM, independent wire crate, bounded channels, no silent drops, no panics on malformed input, structured protocol violation events, enforced resource limits, and interop-tested features.

@@ -92,6 +92,7 @@ All P0 features shipped. See Completed section above.
 Items identified during review that are not correctness bugs but improve strictness.
 
 - [ ] **Unknown FlowSpec component forward compatibility** — component types >13 currently cause hard decode errors; should skip unknown types to allow future RFC extensions without breaking interop
+- [x] **gRPC UDS + bearer auth hardening** — gRPC now defaults to a local Unix domain socket, TCP listeners are explicit opt-in, and per-listener bearer-token auth is available via `token_file`
 - [x] **FlowSpec fuzz target** — `decode_flowspec` fuzz target added for direct FlowSpec NLRI decoding coverage
 - [x] **Policy engine test modularization** — extracted the `merge_from` + `PolicyChain` test cluster into `engine/tests/chain.rs` to reduce monolithic test sprawl while preserving behavior
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
@@ -110,6 +111,9 @@ Items identified during review that are not correctness bugs but improve strictn
 - [ ] **CLI gRPC integration tests** — `rustbgpctl` has parser/format tests but no mock-server integration tests for command-to-RPC behavior
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
+- [ ] **gRPC listener split** — separate read-only and mutating RPC listeners / bind addresses so monitoring can be exposed without exposing control-plane writes
+- [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for operators who do not want an Envoy/nginx sidecar
+- [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 
 ### P1 — Core Protocol Gaps
 
@@ -185,7 +189,7 @@ Quality gates before tagging 1.0.0:
 - [x] Large communities (RFC 8092)
 - [ ] Real-world deployment feedback
 - [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
-- [ ] Comprehensive rustdoc for public API
+- [x] Comprehensive rustdoc for public API (hand-written crates; generated proto stubs excluded)
 - [ ] Security audit of gRPC surface
 - [x] **RibManager submodule split** — 8,318-line manager.rs split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs)
 - [x] **RTR expire_interval enforcement** — VRPs are now cleared if no fresh EndOfData arrives before the expiry window

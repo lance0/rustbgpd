@@ -65,7 +65,7 @@ docs: update interop matrix for BIRD 2.16
 
 ```
 src/main.rs              # Binary entry point — config, wiring, shutdown
-src/config.rs            # TOML config types, loading, validation
+src/config/              # TOML config types, loading, validation
 src/metrics_server.rs    # Prometheus /metrics HTTP endpoint
 crates/
   wire/                  # BGP codec — zero internal deps, independently publishable
@@ -75,6 +75,7 @@ crates/
   policy/                # Match + modify + filter engine: prefix, community, AS_PATH regex, RPKI
   rpki/                  # RPKI origin validation: RTR client (RFC 8210), VRP table
   bmp/                   # BMP exporter (RFC 7854): codec, per-collector client, manager
+  mrt/                   # MRT dump export (RFC 6396): codec, writer, manager
   api/                   # gRPC server (tonic) — 5 services
   telemetry/             # Prometheus metrics + structured tracing
   cli/                   # rustbgpctl — gRPC CLI with human-readable and JSON output
@@ -94,7 +95,7 @@ These are not guidelines — they are enforced invariants:
 - `rpki` depends only on `wire`
 - `bmp` and `telemetry` have no internal dependencies
 - `rib` depends on `wire`, `policy`, `telemetry`, and `rpki`
-- `transport` is the only crate that does async I/O — it depends on `wire`, `fsm`, `rib`, `policy`, `telemetry`, and `bmp`
+- `transport` owns BGP peer session I/O and drives the FSM — it depends on `wire`, `fsm`, `rib`, `policy`, `telemetry`, and `bmp`
 - `cli` has no internal crate dependencies (client-only proto stubs)
 
 ## Pull Request Process

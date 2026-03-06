@@ -237,7 +237,7 @@ impl CommunityMatch {
         }
     }
 
-    /// Check whether a single [`LargeCommunity`](rustbgpd_wire::LargeCommunity) matches this criterion.
+    /// Check whether a single [`LargeCommunity`] matches this criterion.
     #[must_use]
     pub fn matches_large(&self, lc: &rustbgpd_wire::LargeCommunity) -> bool {
         match self {

@@ -14,7 +14,7 @@
 //!
 //! - [`decode_message`] — decode a complete BGP message from bytes
 //! - [`encode_message`] — encode a BGP message to bytes
-//! - [`peek_message_length`](header::peek_message_length) — check if a
+//! - [`peek_message_length`] — check if a
 //!   complete message is available (for transport framing)
 //!
 //! # Invariants
