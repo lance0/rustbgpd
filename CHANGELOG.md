@@ -140,6 +140,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Config and peer-session module splits.** `src/config.rs` is now
+  organized as `src/config/` submodules (`mod.rs`, `schema.rs`,
+  `parse.rs`, `validation.rs`, `tests.rs`). The transport peer runtime
+  is likewise split from `crates/transport/src/session.rs` into
+  `crates/transport/src/session/` submodules (`mod.rs`, `fsm.rs`,
+  `io.rs`, `inbound.rs`, `outbound.rs`, `commands.rs`, `tests.rs`).
+  This is a structural refactor only; behavior and public interfaces are
+  unchanged.
 - **RibManager submodule split.** The 8,318-line `manager.rs` has been
   split into 7 files under `crates/rib/src/manager/`: `mod.rs` (893
   lines, struct + event loop), `distribution.rs` (729 lines),
