@@ -11,6 +11,67 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.4.2] — 2026-03-06
+
+First public alpha release. No protocol changes from v0.4.1 — this release
+focuses on operator experience, documentation accuracy, and release hygiene.
+
+### Added
+
+- **Operations guide** (`docs/OPERATIONS.md`). Covers configuration reload
+  (SIGHUP), upgrade procedure, state persistence, failure modes for gRPC /
+  RPKI / BMP / MRT, key metrics and log messages, session debugging, and
+  common operational tasks.
+
+- **Example configs.** Minimal single-peer config (`examples/minimal/`) and
+  IXP route-server config with RPKI, Add-Path, and policy chains
+  (`examples/route-server/`).
+
+- **systemd unit** (`examples/systemd/rustbgpd.service`). Hardened with
+  `ProtectSystem=strict`, `NoNewPrivileges`, `CAP_NET_BIND_SERVICE`, and
+  `ExecReload` for SIGHUP.
+
+- **Release checklist** (`docs/RELEASE_CHECKLIST.md`). Pre-release smoke
+  matrix covering CLI, UDS, token auth, interop, and Docker.
+
+- **Container image CI** (`.github/workflows/container.yml`). Publishes to
+  GHCR with semver tags on version tag push.
+
+- **Issue and PR templates.** Bug report, feature request, and pull request
+  templates.
+
+- **CI rustdoc gate.** `cargo doc --workspace --no-deps` with `-D warnings`.
+
+- **Project status statement** in README. Explicit alpha expectations for
+  config/API stability, supported OS, and target use case.
+
+### Fixed
+
+- **CLI examples in docs.** All `rustbgpctl` examples now match actual CLI
+  syntax (`neighbor <addr> add --asn`, `neighbor <addr> softreset`,
+  `rib received <addr>`, etc.).
+
+- **Build command.** README, CONTRIBUTING.md, Dockerfile, and release
+  checklist now use `cargo build --workspace --release` to build both
+  `rustbgpd` and `rustbgpctl`.
+
+- **systemd config persistence.** Unit file now includes `/etc/rustbgpd` in
+  `ReadWritePaths` so gRPC `AddNeighbor`/`DeleteNeighbor` can persist to the
+  config file under `ProtectSystem=strict`.
+
+- **Non-root quickstart.** Minimal example uses `runtime_state_dir =
+  "/tmp/rustbgpd"` so the quickstart works without root. README documents
+  `RUSTBGPD_ADDR` env var for matching UDS path.
+
+- **RTR reconnect docs.** Operations guide now correctly says "fixed
+  retry_interval" instead of "exponential backoff" for RTR client reconnect.
+
+- **Dockerfile.** Now includes `rustbgpctl` in the image and uses a
+  production-friendly default CMD. Interop clab topologies updated with
+  explicit `cmd: sleep infinity` override.
+
+---
+
 ## [0.4.1] — 2026-03-06
 
 ### Added
