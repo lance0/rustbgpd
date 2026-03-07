@@ -34,6 +34,10 @@ struct Cli {
     #[arg(long, short = 'j', global = true)]
     json: bool,
 
+    /// Disable colored output
+    #[arg(long, global = true, env = "NO_COLOR")]
+    no_color: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -254,6 +258,10 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    if cli.no_color || cli.json {
+        owo_colors::set_override(false);
+    }
 
     if let Err(e) = run(cli).await {
         eprintln!("Error: {e}");

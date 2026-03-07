@@ -24,6 +24,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tower = { version = "0.5", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+owo-colors.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

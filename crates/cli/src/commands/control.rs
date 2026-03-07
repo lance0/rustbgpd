@@ -21,10 +21,7 @@ pub async fn health(connection: Connection, json: bool) -> Result<(), CliError> 
             serde_json::to_string_pretty(&out).expect("failed to serialize health output as JSON")
         );
     } else {
-        println!(
-            "Status:  {}",
-            if resp.healthy { "healthy" } else { "unhealthy" }
-        );
+        println!("Status:  {}", output::colored_health(resp.healthy));
         println!("Uptime:  {}", output::format_duration(resp.uptime_seconds));
         println!("Peers:   {}", resp.active_peers);
         println!("Routes:  {}", resp.total_routes);

@@ -161,7 +161,7 @@ get blog posts written and make operators switch.
 
 #### CLI Polish
 
-- [ ] **Colored, tabular CLI output** — aligned tables, colored session states (green=Established, yellow=OpenSent, red=Idle/Active), human-readable uptime ("2d 4h 12m" not seconds), prefix counts with delta indicators. Make `rustbgpctl neighbor` look as good as a Grafana panel in a terminal.
+- [x] **Colored, tabular CLI output** — aligned tables, colored session states (green=Established, yellow=OpenSent, red=Idle/Active), human-readable uptime ("2d 4h 12m" not seconds), dynamic column widths, `--no-color` / `NO_COLOR` support. Uses `owo-colors` with auto-detection for piped output.
 - [ ] **Route filtering in CLI** — `rustbgpctl rib best --prefix 10.0.0.0/8 --longer --community 65001:100 --from 10.0.0.2`. Server-side filtering via gRPC, not client-side grep. This is what operators do 50 times a day.
 - [x] **`--version` flag** — both `rustbgpd --version` and `rustbgpctl --version`.
 - [ ] **`rustbgpctl diff`** — show what a pending config reload (SIGHUP) would change: peers added/removed/modified, policy changes, timer changes. Dry-run for config changes.

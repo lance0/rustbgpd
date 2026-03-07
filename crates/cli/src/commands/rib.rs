@@ -45,10 +45,7 @@ fn print_routes(routes: &[crate::proto::Route], json: bool) {
     } else if routes.is_empty() {
         println!("No routes");
     } else {
-        output::print_route_header();
-        for r in routes {
-            output::print_route_row(r);
-        }
+        output::print_route_table(routes);
     }
 }
 

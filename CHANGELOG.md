@@ -41,6 +41,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **FlowSpec route-server transparency.** `route_server_client = true` now skips
   automatic eBGP AS_PATH prepend on FlowSpec export too, matching transparent
   unicast behavior. FlowSpec still has no `NEXT_HOP` field on the wire.
+- **Colored CLI output.** `rustbgpctl` now uses colored session states
+  (green=Established, yellow=OpenSent/Connect/OpenConfirm, red=Idle/Active),
+  colored best-path markers, colored health/event output, human-readable
+  uptimes ("2d 4h 12m"), and dynamically aligned table columns. Colors
+  auto-disable when piped. Use `--no-color` or `NO_COLOR=1` to force plain
+  output.
 
 ---
 

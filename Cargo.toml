@@ -55,6 +55,7 @@ toml = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 serde_json = "1"
+owo-colors = { version = "4", features = ["supports-colors"] }
 
 [package]
 name = "rustbgpd"

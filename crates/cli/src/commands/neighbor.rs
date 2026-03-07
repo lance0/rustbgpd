@@ -39,10 +39,7 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
     } else if resp.neighbors.is_empty() {
         println!("No neighbors configured");
     } else {
-        output::print_neighbor_header();
-        for n in &resp.neighbors {
-            output::print_neighbor_row(n);
-        }
+        output::print_neighbor_table(&resp.neighbors);
     }
     Ok(())
 }
@@ -102,7 +99,7 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "Families:              {}",
             cfg.map(|c| c.families.join(", ")).unwrap_or_default()
         );
-        println!("State:                 {}", output::format_state(n.state));
+        println!("State:                 {}", output::colored_state(n.state));
         println!(
             "Uptime:                {}",
             output::format_duration(n.uptime_seconds)

@@ -53,7 +53,7 @@ pub async fn run(
             println!(
                 "[{}] {} {} from {}{}",
                 event.timestamp,
-                format_event_type(event.event_type),
+                output::colored_event_type(format_event_type(event.event_type)),
                 prefix,
                 event.peer_address,
                 path_id_str,

@@ -24,7 +24,9 @@ rustbgpctl shutdown                    # coordinated shutdown
 rustbgpctl mrt-dump                    # trigger MRT dump
 ```
 
-All commands support `--json` for machine-parseable output.
+All commands support `--json` for machine-parseable output and `--no-color`
+(or `NO_COLOR=1`) to disable colored output. Colors auto-disable when
+output is piped to a non-TTY.
 
 ## License
 

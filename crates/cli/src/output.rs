@@ -3,16 +3,29 @@ use serde::Serialize;
 use std::net::IpAddr;
 
 use crate::proto;
+use owo_colors::{OwoColorize, Stream::Stdout};
 
-/// Format seconds as HH:MM:SS or "never" if 0.
+/// Format seconds as human-readable duration or "never" if 0.
+///
+/// - >= 7 days: "7d 3h"
+/// - >= 1 day: "1d 4h 12m"
+/// - < 1 day: "01:23:45"
 pub fn format_duration(seconds: u64) -> String {
     if seconds == 0 {
         return "never".into();
     }
-    let h = seconds / 3600;
-    let m = (seconds % 3600) / 60;
-    let s = seconds % 60;
-    format!("{h:02}:{m:02}:{s:02}")
+    let days = seconds / 86400;
+    let hours = (seconds % 86400) / 3600;
+    let mins = (seconds % 3600) / 60;
+    let secs = seconds % 60;
+
+    if days >= 7 {
+        format!("{days}d {hours}h")
+    } else if days >= 1 {
+        format!("{days}d {hours}h {mins}m")
+    } else {
+        format!("{hours:02}:{mins:02}:{secs:02}")
+    }
 }
 
 /// Format an AS path from a list of ASNs.
@@ -54,6 +67,45 @@ pub fn format_state(state: i32) -> &'static str {
         5 => "OpenConfirm",
         6 => "Established",
         _ => "Unknown",
+    }
+}
+
+/// Return colored session state string.
+pub fn colored_state(state: i32) -> String {
+    let label = format_state(state);
+    match state {
+        6 => format!("{}", label.if_supports_color(Stdout, |s| s.green())),
+        2 | 4 | 5 => format!("{}", label.if_supports_color(Stdout, |s| s.yellow())),
+        _ => format!("{}", label.if_supports_color(Stdout, |s| s.red())),
+    }
+}
+
+/// Return colored best-path marker.
+pub fn colored_best_marker(best: bool) -> String {
+    if best {
+        format!("{}", "*>".if_supports_color(Stdout, |s| s.green()))
+    } else {
+        "  ".to_string()
+    }
+}
+
+/// Return colored health string.
+pub fn colored_health(healthy: bool) -> String {
+    if healthy {
+        format!("{}", "healthy".if_supports_color(Stdout, |s| s.green()))
+    } else {
+        format!("{}", "unhealthy".if_supports_color(Stdout, |s| s.red()))
+    }
+}
+
+/// Return colored event type string.
+pub fn colored_event_type(event_type: &str) -> String {
+    match event_type {
+        "added" | "best_changed" => {
+            format!("{}", event_type.if_supports_color(Stdout, |s| s.green()))
+        }
+        "withdrawn" => format!("{}", event_type.if_supports_color(Stdout, |s| s.red())),
+        _ => event_type.to_string(),
     }
 }
 
@@ -159,57 +211,157 @@ pub struct JsonRouteEvent {
     pub path_id: u32,
 }
 
-/// Print a table row with fixed column widths.
-pub fn print_neighbor_header() {
-    println!(
-        "{:<16} {:<8} {:<14} {:<10} {:>7} {:>7}  Description",
-        "Neighbor", "AS", "State", "Uptime", "Rx Pfx", "Tx Pfx"
-    );
+/// Compute extra bytes added by ANSI escape codes in a colored string.
+fn ansi_overhead(colored: &str, plain_len: usize) -> usize {
+    colored.len().saturating_sub(plain_len)
 }
 
-pub fn print_neighbor_row(n: &proto::NeighborState) {
-    let cfg = n.config.as_ref();
-    let addr = cfg.map(|c| c.address.as_str()).unwrap_or("");
-    let asn = cfg.map(|c| c.remote_asn).unwrap_or(0);
-    let desc = cfg.map(|c| c.description.as_str()).unwrap_or("");
+/// Print neighbor table with dynamic column widths and colored state.
+pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
+    // Compute column data and max widths
+    struct Row {
+        addr: String,
+        asn: String,
+        state_plain: String,
+        state_colored: String,
+        uptime: String,
+        rx: String,
+        tx: String,
+        desc: String,
+    }
+
+    let rows: Vec<Row> = neighbors
+        .iter()
+        .map(|n| {
+            let cfg = n.config.as_ref();
+            Row {
+                addr: cfg.map(|c| c.address.clone()).unwrap_or_default(),
+                asn: cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default(),
+                state_plain: format_state(n.state).to_string(),
+                state_colored: colored_state(n.state),
+                uptime: format_duration(n.uptime_seconds),
+                rx: n.prefixes_received.to_string(),
+                tx: n.prefixes_sent.to_string(),
+                desc: cfg.map(|c| c.description.clone()).unwrap_or_default(),
+            }
+        })
+        .collect();
+
+    let w_addr = rows.iter().map(|r| r.addr.len()).max().unwrap_or(0).max(8);
+    let w_asn = rows.iter().map(|r| r.asn.len()).max().unwrap_or(0).max(2);
+    let w_state = rows
+        .iter()
+        .map(|r| r.state_plain.len())
+        .max()
+        .unwrap_or(0)
+        .max(5);
+    let w_uptime = rows
+        .iter()
+        .map(|r| r.uptime.len())
+        .max()
+        .unwrap_or(0)
+        .max(6);
+    let w_rx = rows.iter().map(|r| r.rx.len()).max().unwrap_or(0).max(6);
+    let w_tx = rows.iter().map(|r| r.tx.len()).max().unwrap_or(0).max(6);
+
     println!(
-        "{:<16} {:<8} {:<14} {:<10} {:>7} {:>7}  {}",
-        addr,
-        asn,
-        format_state(n.state),
-        format_duration(n.uptime_seconds),
-        n.prefixes_received,
-        n.prefixes_sent,
-        desc,
+        "{:<w_addr$} {:<w_asn$} {:<w_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$}  Description",
+        "Neighbor", "AS", "State", "Uptime", "Rx Pfx", "Tx Pfx",
     );
+
+    for row in &rows {
+        let overhead = ansi_overhead(&row.state_colored, row.state_plain.len());
+        let padded_state = w_state + overhead;
+        println!(
+            "{:<w_addr$} {:<w_asn$} {:<padded_state$} {:<w_uptime$} {:>w_rx$} {:>w_tx$}  {}",
+            row.addr, row.asn, row.state_colored, row.uptime, row.rx, row.tx, row.desc,
+        );
+    }
 }
 
-pub fn print_route_header() {
-    println!(
-        "   {:<20} {:<17} {:<16} {:>4} {:>5}  {:<11} PathID",
-        "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin"
-    );
-}
+/// Print route table with dynamic column widths and colored best marker.
+pub fn print_route_table(routes: &[proto::Route]) {
+    struct Row {
+        marker_colored: String,
+        marker_plain_len: usize,
+        prefix: String,
+        next_hop: String,
+        as_path: String,
+        lp: String,
+        med: String,
+        origin: String,
+        path_id: String,
+    }
 
-pub fn print_route_row(r: &proto::Route) {
-    let prefix = format!("{}/{}", r.prefix, r.prefix_length);
-    let best_marker = if r.best { "*>" } else { "  " };
-    let path_id = if r.path_id > 0 {
-        r.path_id.to_string()
-    } else {
-        String::new()
-    };
+    let rows: Vec<Row> = routes
+        .iter()
+        .map(|r| {
+            let path_id = if r.path_id > 0 {
+                r.path_id.to_string()
+            } else {
+                String::new()
+            };
+            Row {
+                marker_colored: colored_best_marker(r.best),
+                marker_plain_len: 2,
+                prefix: format!("{}/{}", r.prefix, r.prefix_length),
+                next_hop: r.next_hop.clone(),
+                as_path: format_as_path(&r.as_path),
+                lp: r.local_pref.to_string(),
+                med: r.med.to_string(),
+                origin: format_origin(r.origin).to_string(),
+                path_id,
+            }
+        })
+        .collect();
+
+    let w_pfx = rows
+        .iter()
+        .map(|r| r.prefix.len())
+        .max()
+        .unwrap_or(0)
+        .max(6);
+    let w_nh = rows
+        .iter()
+        .map(|r| r.next_hop.len())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    let w_asp = rows
+        .iter()
+        .map(|r| r.as_path.len())
+        .max()
+        .unwrap_or(0)
+        .max(7);
+    let w_lp = rows.iter().map(|r| r.lp.len()).max().unwrap_or(0).max(2);
+    let w_med = rows.iter().map(|r| r.med.len()).max().unwrap_or(0).max(3);
+    let w_orig = rows
+        .iter()
+        .map(|r| r.origin.len())
+        .max()
+        .unwrap_or(0)
+        .max(6);
+
     println!(
-        "{} {:<20} {:<17} {:<16} {:>4} {:>5}  {:<11} {}",
-        best_marker,
-        prefix,
-        r.next_hop,
-        format_as_path(&r.as_path),
-        r.local_pref,
-        r.med,
-        format_origin(r.origin),
-        path_id,
+        "   {:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} PathID",
+        "Prefix", "Next Hop", "AS Path", "LP", "MED", "Origin",
     );
+
+    for row in &rows {
+        let overhead = ansi_overhead(&row.marker_colored, row.marker_plain_len);
+        let marker_width = 2 + overhead;
+        println!(
+            "{:<marker_width$} {:<w_pfx$} {:<w_nh$} {:<w_asp$} {:>w_lp$} {:>w_med$}  {:<w_orig$} {}",
+            row.marker_colored,
+            row.prefix,
+            row.next_hop,
+            row.as_path,
+            row.lp,
+            row.med,
+            row.origin,
+            row.path_id,
+        );
+    }
 }
 
 /// Print a mutating command result, either as JSON or plain text.
@@ -266,10 +418,19 @@ mod tests {
 
     #[test]
     fn test_format_duration() {
+        // Force colors off for test determinism
+        owo_colors::set_override(false);
+
         assert_eq!(format_duration(0), "never");
         assert_eq!(format_duration(61), "00:01:01");
         assert_eq!(format_duration(3661), "01:01:01");
-        assert_eq!(format_duration(86400), "24:00:00");
+        // >= 1 day
+        assert_eq!(format_duration(86400), "1d 0h 0m");
+        assert_eq!(format_duration(90000), "1d 1h 0m");
+        assert_eq!(format_duration(100000), "1d 3h 46m");
+        // >= 7 days
+        assert_eq!(format_duration(604800), "7d 0h");
+        assert_eq!(format_duration(615600), "7d 3h");
     }
 
     #[test]
@@ -298,6 +459,31 @@ mod tests {
         assert_eq!(format_state(1), "Idle");
         assert_eq!(format_state(6), "Established");
         assert_eq!(format_state(0), "Unknown");
+    }
+
+    #[test]
+    fn test_colored_state_contains_label() {
+        assert!(colored_state(6).contains("Established"));
+        assert!(colored_state(1).contains("Idle"));
+        assert!(colored_state(3).contains("Active"));
+        assert!(colored_state(2).contains("Connect"));
+        assert!(colored_state(4).contains("OpenSent"));
+        assert!(colored_state(5).contains("OpenConfirm"));
+        assert!(colored_state(0).contains("Unknown"));
+    }
+
+    #[test]
+    fn test_colored_health_contains_label() {
+        assert!(colored_health(true).contains("healthy"));
+        assert!(colored_health(false).contains("unhealthy"));
+    }
+
+    #[test]
+    fn test_colored_event_type_contains_label() {
+        assert!(colored_event_type("added").contains("added"));
+        assert!(colored_event_type("withdrawn").contains("withdrawn"));
+        assert!(colored_event_type("best_changed").contains("best_changed"));
+        assert_eq!(colored_event_type("unknown"), "unknown");
     }
 
     #[test]
