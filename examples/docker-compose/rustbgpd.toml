@@ -1,0 +1,22 @@
+# rustbgpd config for docker-compose quick-start
+#
+# AS 65001, peering with FRR (AS 65002) over IPv4 + IPv6.
+
+[global]
+asn = 65001
+router_id = "10.99.0.10"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.99.0.20"
+remote_asn = 65002
+description = "frr-peer"
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]

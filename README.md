@@ -82,7 +82,16 @@ instead. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 ./target/release/rustbgpd config.toml
 ```
 
-Or with Docker:
+Or try it with Docker Compose (includes an FRR peer with sample routes):
+
+```bash
+cd examples/docker-compose
+docker compose up -d
+docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
+docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
+```
+
+Or with a standalone Docker container:
 
 ```bash
 docker build -t rustbgpd .
@@ -174,6 +183,7 @@ and more explicit internal architecture.
 
 | Example | Description |
 |---------|-------------|
+| [`examples/docker-compose/`](examples/docker-compose/) | Quick-start with Docker Compose — rustbgpd + FRR peer with sample routes |
 | [`examples/minimal/`](examples/minimal/) | Smallest working config — single eBGP peer |
 | [`examples/route-server/`](examples/route-server/) | IXP route server with RPKI, Add-Path, policy chains |
 | [`examples/ddos-mitigation/`](examples/ddos-mitigation/) | FlowSpec + RTBH for automated DDoS mitigation |

@@ -175,7 +175,7 @@ get blog posts written and make operators switch.
 
 #### Advanced UX
 
-- [ ] **Live TUI dashboard** — `rustbgpctl top`: a terminal UI (ratatui) showing sessions, prefix counts, message rates per peer, memory usage, RPKI cache status, all updating live via WatchRoutes + metrics streams. Think `htop` for BGP. Nothing else in the BGP world has this.
+- [x] **Live TUI dashboard** — `rustbgpctl top`: a terminal UI (ratatui) showing sessions, prefix counts, message rates per peer, RPKI VRP counts, route events — all updating live via polling + WatchRoutes stream. Peer table with sort/navigate/detail, toggleable events panel, help overlay. Configurable poll interval (`-i`).
 - [ ] **Built-in looking glass** — `rustbgpd --looking-glass :8080`: read-only HTTP/JSON API for NOC dashboards and public looking glass pages. Single binary, zero config. IXes would love this for member-facing route queries.
 - [ ] **Config snippets / examples in error messages** — when a gRPC call fails validation, include a working example in the error detail: "invalid families value; try: `families: [\"ipv4_unicast\", \"ipv6_unicast\"]`"
 - [ ] **Neighbor auto-discovery logging** — when a peer connects that isn't configured, log it clearly with suggested config: "unknown peer 10.0.0.5 AS 65005 connected; to accept: `rustbgpctl neighbor 10.0.0.5 add --asn 65005`". Helps operators bootstrap new peers.

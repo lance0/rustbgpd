@@ -1,0 +1,51 @@
+# Quick-start: rustbgpd + FRR peer
+#
+# Spins up rustbgpd with an FRR neighbor that advertises sample prefixes.
+# Useful for trying out rustbgpctl commands without real routers.
+#
+# Usage:
+#   docker compose up -d
+#   docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
+#   docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
+#
+# From the host (gRPC exposed on localhost:50051):
+#   cargo run -p rustbgpctl -- -s http://127.0.0.1:50051 neighbor
+#   cargo run -p rustbgpctl -- -s http://127.0.0.1:50051 top
+
+services:
+  rustbgpd:
+    build: ../..
+    volumes:
+      - ./rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+    networks:
+      bgp:
+        ipv4_address: 10.99.0.10
+        ipv6_address: fd99::10
+    ports:
+      - "50051:50051"   # gRPC
+      - "9179:9179"     # Prometheus metrics
+    cap_add:
+      - NET_BIND_SERVICE
+
+  frr:
+    image: quay.io/frrouting/frr:10.3.1
+    volumes:
+      - ./frr-daemons:/etc/frr/daemons:ro
+      - ./frr.conf:/etc/frr/frr.conf:ro
+    networks:
+      bgp:
+        ipv4_address: 10.99.0.20
+        ipv6_address: fd99::20
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+      - SYS_ADMIN
+
+networks:
+  bgp:
+    driver: bridge
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 10.99.0.0/24
+        - subnet: fd99::/64

@@ -47,6 +47,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uptimes ("2d 4h 12m"), and dynamically aligned table columns. Colors
   auto-disable when piped. Use `--no-color` or `NO_COLOR=1` to force plain
   output.
+- **Live TUI dashboard.** `rustbgpctl top` launches a terminal UI (ratatui)
+  showing sessions, prefix counts, message rates, RPKI VRP counts, and
+  streaming route events — all updating live. Peer table with sort (cycle
+  with `s`/`S`), detail view (`Enter`), toggleable events panel (`e`), and
+  help overlay (`h`). Configurable poll interval (`-i`). Think `htop` for
+  BGP.
+- **Docker Compose quick-start.** New `examples/docker-compose/` spins up
+  rustbgpd peered with FRR (4 IPv4 + 3 IPv6 sample prefixes) in a single
+  `docker compose up -d`. gRPC exposed on localhost:50051 for immediate
+  `rustbgpctl` use from the host.
 
 ### Fixed
 

@@ -259,6 +259,16 @@ rustbgpctl neighbor 10.0.0.2 disable --reason "maintenance"
 rustbgpctl mrt-dump
 ```
 
+### Live dashboard
+
+```bash
+rustbgpctl top          # default 2s poll
+rustbgpctl top -i 5     # 5s poll interval
+```
+
+Shows sessions, prefix counts, message rates, RPKI VRP counts, and
+streaming route events in a terminal UI. Press `h` for keybindings.
+
 ### Check health
 
 ```bash
