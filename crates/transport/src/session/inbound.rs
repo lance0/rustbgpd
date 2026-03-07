@@ -371,6 +371,7 @@ impl PeerSession {
                 let prefix = Prefix::V4(entry.prefix);
                 let ctx = RouteContext {
                     prefix,
+                    next_hop: Some(body_next_hop),
                     extended_communities: update_ecs,
                     communities: update_communities,
                     large_communities: update_large_communities,
@@ -467,6 +468,7 @@ impl PeerSession {
                                 prefix: dest_prefix.unwrap_or(Prefix::V4(
                                     rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
                                 )),
+                                next_hop: None,
                                 extended_communities: update_ecs,
                                 communities: update_communities,
                                 large_communities: update_large_communities,
@@ -512,6 +514,7 @@ impl PeerSession {
                     for entry in &mp.announced {
                         let ctx = RouteContext {
                             prefix: entry.prefix,
+                            next_hop: Some(mp.next_hop),
                             extended_communities: update_ecs,
                             communities: update_communities,
                             large_communities: update_large_communities,

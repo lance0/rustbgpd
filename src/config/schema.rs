@@ -318,7 +318,7 @@ fn default_policy_action_str() -> String {
 #[serde(deny_unknown_fields)]
 pub struct PolicyStatementConfig {
     pub action: String,
-    /// CIDR prefix to match. Optional when `match_community` or `match_as_path` is set.
+    /// CIDR prefix to match. Optional when any other match criterion is set.
     pub prefix: Option<String>,
     pub ge: Option<u8>,
     pub le: Option<u8>,
@@ -344,6 +344,8 @@ pub struct PolicyStatementConfig {
     pub match_med_ge: Option<u32>,
     /// Maximum MED (inclusive) to match.
     pub match_med_le: Option<u32>,
+    /// Exact next-hop address to match.
+    pub match_next_hop: Option<String>,
     /// RPKI validation state to match: `"valid"`, `"invalid"`, or `"not_found"`.
     pub match_rpki_validation: Option<String>,
     /// Set `LOCAL_PREF` on matching routes.

@@ -6,7 +6,8 @@ use std::time::Instant;
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, Message, Origin, PathAttribute,
+    AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4NlriEntry,
+    Ipv4Prefix, Ipv6Prefix, Message, Origin, PathAttribute,
 };
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
@@ -114,6 +115,25 @@ fn make_route(local_pref: u32) -> Route {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+    }
+}
+
+fn make_flowspec_route() -> FlowSpecRoute {
+    FlowSpecRoute {
+        rule: FlowSpecRule {
+            components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+                Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+            ))],
+        },
+        afi: Afi::Ipv4,
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
     }
 }
 
@@ -681,6 +701,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -793,6 +814,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_local_pref_le: None,
                 match_med_ge: None,
                 match_med_le: None,
+                match_next_hop: None,
                 modifications: RouteModifications::default(),
             }],
             default_action: PolicyAction::Permit,
@@ -814,6 +836,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_local_pref_le: None,
                 match_med_ge: None,
                 match_med_le: None,
+                match_next_hop: None,
                 modifications: RouteModifications {
                     communities_add: vec![0xFDE9_0064],
                     ..Default::default()
@@ -838,6 +861,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_local_pref_le: None,
                 match_med_ge: None,
                 match_med_le: None,
+                match_next_hop: None,
                 modifications: RouteModifications {
                     set_local_pref: Some(200),
                     ..Default::default()
@@ -952,6 +976,7 @@ async fn update_import_policy_applies_to_future_updates() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -1061,6 +1086,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -1138,6 +1164,83 @@ async fn err_denied_replacement_is_swept_at_eorr() {
     drop(session);
     drop(rib_tx);
     manager_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn import_policy_match_next_hop_filters_route() {
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+
+    let deny_policy = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))),
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(deny_policy),
+        None,
+        None,
+        None,
+    );
+    session.negotiated = Some(negotiated_session(65002, false));
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let announced = vec![Ipv4NlriEntry {
+        path_id: 0,
+        prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+    }];
+    let update = UpdateMessage::build(&announced, &[], &attrs, true, false, Ipv4UnicastMode::Body);
+
+    session.process_update(update).await;
+
+    assert!(
+        rib_rx.try_recv().is_err(),
+        "route should be filtered by next-hop"
+    );
 }
 
 #[tokio::test]
@@ -1441,6 +1544,41 @@ fn route_server_skipped() {
         as_path.segments,
         vec![AsPathSegment::AsSequence(vec![64512])]
     );
+}
+
+#[test]
+fn flowspec_route_server_client_does_not_prepend_asn() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.route_server_client = true;
+    let mut route = make_flowspec_route();
+    route.attributes.push(PathAttribute::AsPath(AsPath {
+        segments: vec![AsPathSegment::AsSequence(vec![64512])],
+    }));
+
+    let attrs = session.prepare_outbound_attributes_flowspec(&route, true);
+    let as_path = attrs
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p),
+            _ => None,
+        })
+        .unwrap();
+
+    assert_eq!(
+        as_path.segments,
+        vec![AsPathSegment::AsSequence(vec![64512])]
+    );
+}
+
+#[test]
+fn flowspec_route_server_client_does_not_synthesize_as_path() {
+    let mut session = make_test_session(65001, 65002);
+    session.config.route_server_client = true;
+    let route = make_flowspec_route();
+
+    let attrs = session.prepare_outbound_attributes_flowspec(&route, true);
+
+    assert!(!attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))));
 }
 
 #[test]

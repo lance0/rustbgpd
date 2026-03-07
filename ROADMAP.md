@@ -129,10 +129,10 @@ Features that close meaningful protocol gaps vs GoBGP.
 Features that close the most impactful gaps vs GoBGP for the target user base.
 Each moves overall parity 3-5% while disproportionately improving real-world usability.
 
-- [x] **Transparent route server mode** — `route_server_client` per neighbor: skip automatic local ASN prepend, preserve original NEXT_HOP on eBGP unicast re-advertisement for IX route-server clients; FlowSpec transparency remains deferred (ADR-0039)
+- [x] **Transparent route server mode** — `route_server_client` per neighbor: skip automatic local ASN prepend on eBGP re-advertisement for IX route-server clients, preserve original unicast NEXT_HOP, and apply the same transparent AS_PATH behavior to FlowSpec export (ADR-0039)
 - [x] **GR restarting speaker** — minimal honest mode: static peers advertise `R=1` after coordinated restart via persisted marker file; `forwarding_preserved` remains false until FIB integration exists (ADR-0040)
 - [x] **Policy chaining + named policies** — named TOML definitions, GoBGP-style chain evaluation (permit=continue, deny=stop), configurable default_action (ADR-0036)
-- [x] **Peer groups + peer-aware policy matching** — reusable peer templates with runtime CRUD, neighbor-set matching, route-type matching, and MED / `LOCAL_PREF` comparison in policy; persisted through TOML config snapshots
+- [x] **Peer groups + peer-aware policy matching** — reusable peer templates with runtime CRUD, neighbor-set matching, route-type matching, exact next-hop matching, and MED / `LOCAL_PREF` comparison in policy; persisted through TOML config snapshots
 - [x] **Extended nexthop** (RFC 8950) — capability code 5, automatic dual-stack negotiation, IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)
 - [x] **CLI tool** — `rustbgpctl` wrapping gRPC with human-readable and JSON output; covers all supported RPCs
 - [x] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; threaded from gRPC DisableNeighbor through transport

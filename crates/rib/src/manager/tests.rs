@@ -1263,6 +1263,7 @@ async fn export_policy_blocks_denied() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -1393,6 +1394,7 @@ async fn per_peer_export_policy() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -1489,6 +1491,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -1550,6 +1553,76 @@ async fn replace_peer_export_policy_resyncs_outbound_state() {
 }
 
 #[tokio::test]
+async fn export_policy_match_next_hop_filters_route() {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+
+    let export_policy = Some(PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_rpki_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]));
+
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    assert!(
+        out_rx.try_recv().is_err(),
+        "export policy should filter the route by next-hop"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn peer_down_cleans_up_export_policy() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 
@@ -1576,6 +1649,7 @@ async fn peer_down_cleans_up_export_policy() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -6123,6 +6197,7 @@ async fn multipath_all_candidates_denied_by_export_policy() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,

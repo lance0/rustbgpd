@@ -86,6 +86,7 @@ fn chain_later_remove_overrides_earlier_add() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 communities_add: vec![100],
                 ..Default::default()
@@ -110,6 +111,7 @@ fn chain_later_remove_overrides_earlier_add() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 communities_remove: vec![100],
                 ..Default::default()
@@ -146,6 +148,7 @@ fn make_permit_policy_with_lp(lp: u32) -> Policy {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 set_local_pref: Some(lp),
                 ..Default::default()
@@ -227,6 +230,7 @@ fn chain_two_permits_accumulate_communities() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 communities_add: vec![100],
                 ..Default::default()
@@ -251,6 +255,7 @@ fn chain_two_permits_accumulate_communities() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 communities_add: vec![200],
                 ..Default::default()

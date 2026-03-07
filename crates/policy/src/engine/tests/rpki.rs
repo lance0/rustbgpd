@@ -21,6 +21,7 @@ fn rpki_match_invalid_deny() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -91,6 +92,7 @@ fn rpki_match_valid_accept() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 set_local_pref: Some(200),
                 ..RouteModifications::default()
@@ -145,6 +147,7 @@ fn rpki_match_not_found() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 set_local_pref: Some(100),
                 ..RouteModifications::default()
@@ -186,6 +189,7 @@ fn rpki_match_none_matches_all() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,
@@ -233,6 +237,7 @@ fn rpki_combined_with_prefix() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications::default(),
         }],
         default_action: PolicyAction::Permit,

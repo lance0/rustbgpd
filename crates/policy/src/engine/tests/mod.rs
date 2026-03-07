@@ -36,6 +36,7 @@ fn ctx<'a>(
 ) -> RouteContext<'a> {
     RouteContext {
         prefix,
+        next_hop: None,
         extended_communities,
         communities,
         large_communities,
@@ -122,6 +123,7 @@ fn stmt(
         match_local_pref_le: None,
         match_med_ge: None,
         match_med_le: None,
+        match_next_hop: None,
         modifications: RouteModifications::default(),
     }
 }

@@ -50,6 +50,8 @@ impl PolicyResult {
 pub struct RouteContext<'a> {
     /// The route's NLRI prefix.
     pub prefix: Prefix,
+    /// The route's resolved next-hop, if any.
+    pub next_hop: Option<IpAddr>,
     /// Extended communities attached to the route.
     pub extended_communities: &'a [ExtendedCommunity],
     /// Standard communities (RFC 1997) as raw u32 values.
@@ -457,7 +459,7 @@ impl fmt::Debug for AsPathRegex {
 
 /// A single policy statement (match conditions + action + modifications).
 ///
-/// Entries can match on prefix, community, `AS_PATH` regex, or combinations.
+/// Entries can match on prefix, next-hop, community, `AS_PATH` regex, or combinations.
 /// When multiple conditions are specified, all must be true (AND).
 /// Within community matching, any match suffices (OR).
 #[derive(Debug, Clone)]
@@ -492,6 +494,8 @@ pub struct PolicyStatement {
     pub match_med_ge: Option<u32>,
     /// Maximum MED attribute value (inclusive) to match.
     pub match_med_le: Option<u32>,
+    /// Exact next-hop address to match.
+    pub match_next_hop: Option<IpAddr>,
     /// Route modifications to apply when this statement matches.
     pub modifications: RouteModifications,
 }
@@ -554,6 +558,10 @@ impl PolicyStatement {
                 .match_med_le
                 .is_none_or(|v| ctx.med.is_some_and(|candidate| candidate <= v));
 
+        let next_hop_ok = self
+            .match_next_hop
+            .is_none_or(|next_hop| ctx.next_hop.is_some_and(|candidate| candidate == next_hop));
+
         prefix_ok
             && community_ok
             && aspath_ok
@@ -563,6 +571,7 @@ impl PolicyStatement {
             && aspath_len_ok
             && local_pref_ok
             && med_ok
+            && next_hop_ok
     }
 
     fn matches_prefix(&self, entry_prefix: Prefix, candidate: Prefix) -> bool {

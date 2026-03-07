@@ -150,6 +150,12 @@ fn parse_policy_statements(
             None
         };
 
+        let match_next_hop = if let Some(ref value) = e.match_next_hop {
+            Some(parse_match_next_hop(value)?)
+        } else {
+            None
+        };
+
         if let (Some(ge), Some(le)) = (e.match_as_path_length_ge, e.match_as_path_length_le)
             && ge > le
         {
@@ -187,6 +193,7 @@ fn parse_policy_statements(
             && e.match_local_pref_le.is_none()
             && e.match_med_ge.is_none()
             && e.match_med_le.is_none()
+            && match_next_hop.is_none()
             && match_rpki_validation.is_none()
         {
             return Err(ConfigError::InvalidPolicyEntry {
@@ -213,6 +220,7 @@ fn parse_policy_statements(
             match_local_pref_le: e.match_local_pref_le,
             match_med_ge: e.match_med_ge,
             match_med_le: e.match_med_le,
+            match_next_hop,
             modifications,
         });
     }
@@ -344,6 +352,12 @@ fn parse_route_type(value: &str) -> Result<RouteType, ConfigError> {
             ),
         }),
     }
+}
+
+fn parse_match_next_hop(value: &str) -> Result<IpAddr, ConfigError> {
+    value.parse().map_err(|_| ConfigError::InvalidPolicyEntry {
+        reason: format!("invalid match_next_hop {value:?}: expected an IP address"),
+    })
 }
 
 /// Parse the `set_*` fields into `RouteModifications`, with validation.

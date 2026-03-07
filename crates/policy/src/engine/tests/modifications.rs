@@ -23,6 +23,7 @@ fn evaluate_returns_modifications() {
             match_local_pref_le: None,
             match_med_ge: None,
             match_med_le: None,
+            match_next_hop: None,
             modifications: RouteModifications {
                 set_local_pref: Some(200),
                 ..RouteModifications::default()

@@ -135,7 +135,8 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 Policy statements support the same match surface as TOML config:
 `prefix`, `ge`, `le`, `match_community`, `match_as_path`,
 `match_neighbor_set`, `match_route_type`, `match_as_path_length_ge/le`,
-`match_local_pref_ge/le`, `match_med_ge/le`, and `match_rpki_validation`.
+`match_local_pref_ge/le`, `match_med_ge/le`, `match_next_hop`, and
+`match_rpki_validation`.
 
 ### Create or replace a named policy
 

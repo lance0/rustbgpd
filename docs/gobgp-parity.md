@@ -74,7 +74,7 @@ Last updated: 2026-03-06
 | RPKI validation result match | Yes | Yes | `match_rpki_validation` in policy |
 | Route type match (int/ext/local) | Yes | Yes | `match_route_type` |
 | MED / LOCAL_PREF comparison | Yes | Yes | Inclusive `match_med_*` / `match_local_pref_*` |
-| Next-hop matching | Yes | No | |
+| Next-hop matching | Yes | Yes | Exact IPv4/IPv6 equality for unicast routes |
 | Community add/remove/replace | Yes | Yes | Standard, extended, large |
 | MED manipulation | Yes | Yes | set_med |
 | LOCAL_PREF set | Yes | Yes | set_local_pref |
@@ -139,7 +139,7 @@ Last updated: 2026-03-06
 | Embeddable library | Yes (Go) | No | Wire crate is standalone |
 | CLI tool | Yes (gobgp) | Yes | `rustbgpctl` wraps gRPC API |
 | Docker image | Yes | Yes | |
-| Route server client mode | Yes | Partial | Transparent eBGP unicast mode via `route_server_client`; FlowSpec transparency deferred |
+| Route server client mode | Yes | Yes | Transparent eBGP export for unicast plus FlowSpec AS_PATH transparency |
 | Fuzz testing | No | Yes | Wire decoder fuzzing |
 | Interop test suite | No | Yes | Containerlab + FRR/BIRD |
 
@@ -167,7 +167,7 @@ Last updated: 2026-03-06
 | Address families | 15 | 4 | ~27% |
 | Core protocol | 14 | 13.5 | ~96% |
 | Path attributes | 13 | 9 | ~69% |
-| Policy engine | 18 | 17 | ~94% |
+| Policy engine | 18 | 18 | 100% |
 | gRPC RPCs | ~55 | ~46 | ~84% |
 | Monitoring | 5 | 5 | 100% |
 | Security | 4 | 4 | 100% |
@@ -175,23 +175,23 @@ Last updated: 2026-03-06
 
 ## Weighted Parity Estimates
 
-### IX Route Server Use Case (~97% parity)
+### IX Route Server Use Case (~100% parity)
 
 The primary target deployment. Weighted toward what matters:
 
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
 - **Core protocol:** 96% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
-- **Policy:** 94%; covers peer-aware matching (neighbor sets, route type, MED/`LOCAL_PREF` comparison), community match/set, AS_PATH regex/prepend, and next-hop self
+- **Policy:** 100%; covers peer-aware matching (neighbor sets, route type, MED/`LOCAL_PREF` comparison, exact next-hop match), community match/set, and AS_PATH regex/prepend
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
-- **Route server client mode:** transparent eBGP with NEXT_HOP preservation
+- **Route server client mode:** transparent eBGP with unicast NEXT_HOP preservation and FlowSpec AS_PATH transparency
 - **BMP exporter:** RFC 7854 streaming to collectors, reconnect replay, periodic Stats Report
 - **MRT dump:** RFC 6396 TABLE_DUMP_V2 periodic + on-demand with gzip
 - **LLGR (RFC 9494):** two-phase timer, three-tier best-path demotion, per-AFI — critical for large IXes
 - **Config persistence + SIGHUP reload:** gRPC mutations survive restart; live neighbor reconciliation
 - **Operator packaging (v0.4.2):** systemd unit, example configs, operations guide, release checklist, container image CI
 
-**Remaining gaps for IX RS parity:** no major control-plane gaps remain for the target unicast route-server deployment. The notable remaining limitation is FlowSpec transparency in route-server client mode, plus broader operator polish like CLI integration tests and listener authorization split.
+**Remaining gaps for IX RS parity:** no material control-plane gaps remain for the target deployment. Remaining work is operator polish: CLI integration tests, listener authorization split, and other non-protocol hardening.
 
 ### General-Purpose BGP Speaker (~73% parity)
 
@@ -216,16 +216,15 @@ Competing head-to-head with GoBGP for all use cases:
 
 ## Top Gaps by Use Case
 
-### IX Route Server (current target, ~97% parity)
+### IX Route Server (current target, ~100% parity)
 
 These are the gaps that matter most for the stated alpha audience:
 
-1. **FlowSpec transparency in route-server mode** — unicast route-server
-   transparency is done; FlowSpec still uses the standard eBGP path.
-2. **Next-hop matching in policy** — current policy can rewrite next-hop but
-   cannot match on it.
-3. **Read-only vs mutating gRPC listener split** — operational/security polish,
+1. **Read-only vs mutating gRPC listener split** — operational/security polish,
    not protocol parity.
+2. **CLI integration tests** — operator-quality hardening, not protocol parity.
+3. **Policy UX polish** — bulk editing / richer ergonomics rather than missing
+   route-server capability.
 
 ### General-Purpose BGP Speaker (~57% parity)
 

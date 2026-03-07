@@ -123,7 +123,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `graceful_restart`     | bool     | no       | true    | Enable Graceful Restart receiving speaker (RFC 4724) |
 | `gr_restart_time`      | u16      | no       | 120     | Restart time advertised in GR capability (seconds, 1--4095) |
 | `gr_stale_routes_time` | u64      | no       | 360     | Time to retain stale routes after peer reconnects (seconds, 1--3600) |
-| `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP unicast peers (see below) |
+| `route_server_client`  | bool     | no       | false   | Transparent route-server mode for eBGP peers (see below) |
 | `remove_private_as`   | string   | no       | --      | Remove private ASNs from AS_PATH: `"remove"`, `"all"`, or `"replace"` (eBGP only) |
 | `route_reflector_client` | bool   | no       | false   | Mark this iBGP peer as a route reflector client (RFC 4456) |
 | `local_ipv6_nexthop`   | string   | no       | --      | Override IPv6 next-hop for eBGP exports (must be valid non-link-local IPv6) |
@@ -319,25 +319,27 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true
 ```
 
-When enabled, outbound **unicast** advertisements to that peer:
+When enabled:
 
-- preserve the original next hop by default
-- skip the automatic local-AS prepend normally applied on eBGP export
-- still strip `LOCAL_PREF` (the peer is still eBGP)
-- still honor explicit export-policy next-hop rewrites (`set_next_hop`)
+- outbound **unicast** advertisements to that peer preserve the original next
+  hop by default
+- outbound **unicast** advertisements skip the automatic local-AS prepend
+  normally applied on eBGP export
+- outbound **FlowSpec** advertisements skip the automatic local-AS prepend
+- explicit export-policy next-hop rewrites (`set_next_hop`) still win for
+  unicast
+- `LOCAL_PREF` is still stripped, because the peer is still eBGP
 
 This applies to:
 
 - classic IPv4 unicast (`NEXT_HOP`)
 - IPv4 unicast over IPv6 next hop (RFC 8950)
 - IPv6 unicast (`MP_REACH_NLRI`)
+- IPv4 and IPv6 FlowSpec export (`AS_PATH` transparency only; FlowSpec has no
+  wire-level `NEXT_HOP`)
 
 `route_server_client` is only valid for eBGP neighbors. Config validation
 rejects it on iBGP peers.
-
-**Current scope:** transparent route-server behavior is implemented for
-unicast only. FlowSpec still uses the standard eBGP automatic AS_PATH prepend
-behavior and does not yet have a transparent mode.
 
 ### Private AS Removal
 
@@ -684,13 +686,15 @@ same entry are ANDed.
 | `match_local_pref_le`    | u32      | no*      | Maximum `LOCAL_PREF` to match (inclusive)             |
 | `match_med_ge`           | u32      | no*      | Minimum MED to match (inclusive)                      |
 | `match_med_le`           | u32      | no*      | Maximum MED to match (inclusive)                      |
+| `match_next_hop`         | string   | no*      | Exact next-hop IP address to match (unicast only)     |
 | `match_rpki_validation`  | string   | no*      | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` |
 | `action`                 | string   | yes      | `"permit"` or `"deny"`                                |
 
 *At least one of `prefix`, `match_community`, `match_as_path`,
 `match_neighbor_set`, `match_route_type`, `match_as_path_length_ge`,
 `match_as_path_length_le`, `match_local_pref_ge`, `match_local_pref_le`,
-`match_med_ge`, `match_med_le`, or `match_rpki_validation` is required.
+`match_med_ge`, `match_med_le`, `match_next_hop`, or
+`match_rpki_validation` is required.
 
 ### Route modifications (set actions)
 
@@ -748,7 +752,7 @@ match_as_path_length_le = 8
 action = "deny"
 ```
 
-### Neighbor-set, route-type, and MED / `LOCAL_PREF` matching
+### Neighbor-set, route-type, next-hop, and MED / `LOCAL_PREF` matching
 
 `match_neighbor_set` evaluates against the peer currently being evaluated by
 policy:
@@ -765,10 +769,15 @@ policy:
 `match_local_pref_*` and `match_med_*` are inclusive comparisons. If the route
 does not carry the relevant attribute, the comparison does not match.
 
+`match_next_hop` is exact IP equality against the route's resolved next hop.
+It applies to unicast routes. FlowSpec routes do not expose a policy-matchable
+next hop because FlowSpec `MP_REACH_NLRI` carries NH length 0.
+
 ```toml
 [[policy.export]]
 match_neighbor_set = "ixp-clients"
 match_route_type = "external"
+match_next_hop = "2001:db8::1"
 match_local_pref_ge = 200
 match_med_le = 50
 action = "permit"

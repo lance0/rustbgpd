@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::*;
 
@@ -121,5 +121,32 @@ fn local_pref_and_med_comparisons_require_present_attributes() {
     assert_eq!(policy.evaluate(&route_ctx).action, PolicyAction::Deny);
 
     route_ctx.med = Some(60);
+    assert_eq!(policy.evaluate(&route_ctx).action, PolicyAction::Permit);
+}
+
+#[test]
+fn next_hop_match_requires_exact_address() {
+    let mut statement = stmt(None, PolicyAction::Deny, vec![]);
+    statement.match_next_hop = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    let policy = Policy {
+        entries: vec![statement],
+        default_action: PolicyAction::Permit,
+    };
+
+    let mut route_ctx = ctx(
+        v4_prefix([203, 0, 113, 0], 24),
+        &[],
+        &[],
+        &[],
+        "",
+        0,
+        RpkiValidation::NotFound,
+    );
+    assert_eq!(policy.evaluate(&route_ctx).action, PolicyAction::Permit);
+
+    route_ctx.next_hop = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    assert_eq!(policy.evaluate(&route_ctx).action, PolicyAction::Deny);
+
+    route_ctx.next_hop = Some(IpAddr::V6(Ipv6Addr::LOCALHOST));
     assert_eq!(policy.evaluate(&route_ctx).action, PolicyAction::Permit);
 }

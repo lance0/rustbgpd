@@ -1931,6 +1931,7 @@ peer_groups = ["rs-clients"]
 action = "permit"
 match_neighbor_set = "ixp"
 match_route_type = "external"
+match_next_hop = "10.0.0.3"
 match_local_pref_ge = 200
 match_med_le = 50
 set_local_pref = 250
@@ -1954,9 +1955,34 @@ peer_group = "rs-clients"
     let statement = &policy.entries[0];
     assert!(statement.match_neighbor_set.is_some());
     assert_eq!(statement.match_route_type, Some(RouteType::External));
+    assert_eq!(statement.match_next_hop, Some("10.0.0.3".parse().unwrap()));
     assert_eq!(statement.match_local_pref_ge, Some(200));
     assert_eq!(statement.match_med_le, Some(50));
     assert_eq!(statement.modifications.set_local_pref, Some(250));
+}
+
+#[test]
+fn match_next_hop_invalid_rejected() {
+    let toml_str = format!(
+        r#"
+{GLOBAL_HEADER}
+
+[policy.definitions.bad]
+[[policy.definitions.bad.statements]]
+action = "permit"
+match_next_hop = "not-an-ip"
+set_local_pref = 200
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#,
+        GLOBAL_HEADER = valid_toml()
+    );
+
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidPolicyEntry { .. }));
+    assert!(err.to_string().contains("invalid match_next_hop"));
 }
 
 #[test]

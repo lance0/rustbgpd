@@ -276,6 +276,7 @@ message PolicyStatement {
   optional uint32 match_local_pref_le = 19;
   optional uint32 match_med_ge = 20;
   optional uint32 match_med_le = 21;
+  optional string match_next_hop = 22;
 }
 
 message AsPathPrepend {

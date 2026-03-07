@@ -26,6 +26,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `match_med_ge/le`. Neighbor sets are managed under `PolicyService`, persist to
   TOML, and evaluate against the current policy peer context on both import and
   export.
+- **Exact next-hop policy matching.** Policy statements now support
+  `match_next_hop` for unicast routes on both import and export. The field is
+  available in TOML config and the gRPC `PolicyService`, persists through config
+  snapshots, and evaluates as exact IPv4/IPv6 equality.
+- **FlowSpec route-server transparency.** `route_server_client = true` now skips
+  automatic eBGP AS_PATH prepend on FlowSpec export too, matching transparent
+  unicast behavior. FlowSpec still has no `NEXT_HOP` field on the wire.
 
 ---
 

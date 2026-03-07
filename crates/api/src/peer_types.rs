@@ -347,6 +347,8 @@ pub struct PolicyStatementDefinition {
     pub match_med_ge: Option<u32>,
     /// Optional maximum MED match.
     pub match_med_le: Option<u32>,
+    /// Optional exact next-hop match.
+    pub match_next_hop: Option<String>,
     /// Optional RPKI validation state match.
     pub match_rpki_validation: Option<String>,
     /// Optional `LOCAL_PREF` rewrite.

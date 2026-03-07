@@ -364,6 +364,7 @@ impl RibManager {
             let aspath_len = candidate.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let ctx = RouteContext {
                 prefix: *prefix,
+                next_hop: Some(candidate.next_hop),
                 extended_communities: candidate.extended_communities(),
                 communities: candidate.communities(),
                 large_communities: candidate.large_communities(),
@@ -478,6 +479,7 @@ impl RibManager {
         let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
         let ctx = RouteContext {
             prefix: *prefix,
+            next_hop: Some(best.next_hop),
             extended_communities: best.extended_communities(),
             communities: best.communities(),
             large_communities: best.large_communities(),
@@ -598,6 +600,7 @@ impl RibManager {
                 let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
                 let ctx = RouteContext {
                     prefix: prefix_for_policy,
+                    next_hop: None,
                     extended_communities: best.extended_communities(),
                     communities: best.communities(),
                     large_communities: best.large_communities(),

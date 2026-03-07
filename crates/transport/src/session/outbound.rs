@@ -730,7 +730,8 @@ impl PeerSession {
     ///
     /// `FlowSpec` has no `NEXT_HOP`. For eBGP: prepend ASN, strip `LOCAL_PREF`.
     /// For iBGP: ensure `LOCAL_PREF`. Route reflector attributes handled same
-    /// as unicast. Transparent route-server behavior is deferred for `FlowSpec`.
+    /// as unicast. Route-server clients skip automatic eBGP `AS_PATH` rewriting,
+    /// matching transparent unicast behavior.
     pub(super) fn prepare_outbound_attributes_flowspec(
         &self,
         route: &FlowSpecRoute,
@@ -741,7 +742,7 @@ impl PeerSession {
         for attr in &route.attributes {
             match attr {
                 PathAttribute::AsPath(as_path) => {
-                    if is_ebgp {
+                    if is_ebgp && !self.config.route_server_client {
                         // Apply private AS removal before prepending our ASN
                         let cleaned = remove_private_asns(
                             as_path,
@@ -795,7 +796,10 @@ impl PeerSession {
             attrs.push(PathAttribute::LocalPref(100));
         }
 
-        if is_ebgp && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_))) {
+        if is_ebgp
+            && !self.config.route_server_client
+            && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
+        {
             attrs.push(PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
             }));
