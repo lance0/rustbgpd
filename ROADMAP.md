@@ -147,7 +147,40 @@ Features that improve day-to-day operations.
 - [x] **LLGR** (RFC 9494) — two-phase GR timer with LLGR-stale promotion and configurable stale time per peer
 - [x] **MRT dump export** (RFC 6396) — TABLE_DUMP_V2 for offline analysis and archival; periodic + on-demand gRPC trigger, optional gzip, CLI `mrt-dump` subcommand (ADR-0044)
 
-### P3 — Scale & Hardening
+### P3 — Operator Experience ("wow factor")
+
+Make first use and continued use feel magical. These are the features that
+get blog posts written and make operators switch.
+
+#### First-Run Experience
+
+- [ ] **Rust-compiler-style config errors** — show the actual TOML with line numbers, underline the bad field, and suggest corrections ("did you mean `ipv4_unicast`?"). Every Rust developer will feel at home. Use `miette` or `ariadne` for rendering.
+- [ ] **`rustbgpd --check config.toml`** — validate config without starting the daemon. Print structured errors or "config OK". Operators run this before every reload and deploy.
+- [ ] **Startup banner with topology summary** — on boot, print a clean tree showing ASN, router-id, peer count by type, named policies, neighbor sets, listener endpoints, optional subsystems (RPKI caches, BMP collectors, MRT output). First thing an operator sees after starting the daemon.
+- [ ] **Shell completions** — generate bash/zsh/fish completions from clap derives. Ship in packaging (`examples/completions/`). Five minutes of work, daily QoL improvement.
+
+#### CLI Polish
+
+- [ ] **Colored, tabular CLI output** — aligned tables, colored session states (green=Established, yellow=OpenSent, red=Idle/Active), human-readable uptime ("2d 4h 12m" not seconds), prefix counts with delta indicators. Make `rustbgpctl neighbor` look as good as a Grafana panel in a terminal.
+- [ ] **Route filtering in CLI** — `rustbgpctl rib best --prefix 10.0.0.0/8 --longer --community 65001:100 --from 10.0.0.2`. Server-side filtering via gRPC, not client-side grep. This is what operators do 50 times a day.
+- [ ] **`--version` flag** — both `rustbgpd --version` and `rustbgpctl --version`. Include git hash for alpha builds. Basic but currently missing.
+- [ ] **`rustbgpctl diff`** — show what a pending config reload (SIGHUP) would change: peers added/removed/modified, policy changes, timer changes. Dry-run for config changes.
+
+#### Debugging & Observability
+
+- [ ] **Policy trace / route explain** — `rustbgpctl route explain 203.0.113.0/24`: show the route's full journey — which peer announced it, import policy evaluation step-by-step (which statement matched, what modifications applied), best-path selection with ranked candidates and tie-break reasons, then per-peer export policy evaluation showing why it was or wasn't advertised to each neighbor. No BGP daemon does this well. This is the flagship feature.
+- [ ] **Config diff on SIGHUP** — log exactly what changed on reload: "neighbor 10.0.0.2: hold_time 90->45, added to peer-group rs-clients". Currently operators have to guess what a reload did.
+- [ ] **Per-peer log filtering** — `rustbgpctl logs --peer 10.0.0.2` or structured log field `peer=10.0.0.2` that makes grep/jq filtering trivial. Currently all peers log to the same stream.
+- [ ] **Route diff on policy change** — after hot-applying an export policy change, log a summary: "export policy changed: 12 routes newly advertised to 10.0.0.2, 3 routes withdrawn". Currently operators see the recomputation but not the outcome.
+
+#### Advanced UX
+
+- [ ] **Live TUI dashboard** — `rustbgpctl top`: a terminal UI (ratatui) showing sessions, prefix counts, message rates per peer, memory usage, RPKI cache status, all updating live via WatchRoutes + metrics streams. Think `htop` for BGP. Nothing else in the BGP world has this.
+- [ ] **Built-in looking glass** — `rustbgpd --looking-glass :8080`: read-only HTTP/JSON API for NOC dashboards and public looking glass pages. Single binary, zero config. IXes would love this for member-facing route queries.
+- [ ] **Config snippets / examples in error messages** — when a gRPC call fails validation, include a working example in the error detail: "invalid families value; try: `families: [\"ipv4_unicast\", \"ipv6_unicast\"]`"
+- [ ] **Neighbor auto-discovery logging** — when a peer connects that isn't configured, log it clearly with suggested config: "unknown peer 10.0.0.5 AS 65005 connected; to accept: `rustbgpctl neighbor 10.0.0.5 add --asn 65005`". Helps operators bootstrap new peers.
+
+### P3.5 — Scale & Hardening
 
 Prove it works under pressure before 1.0.
 
@@ -165,7 +198,6 @@ Valuable but not blocking production use or 1.0.
 
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5 (GoBGP doesn't have it either)
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
-- [ ] **TUI mode** for `rustbgpctl` — interactive terminal UI for monitoring and management; follow-on to CLI
 - [ ] **YANG model / NETCONF** — alternative management interface for traditional NOC tooling
 
 ### Interop Test Coverage
@@ -239,14 +271,15 @@ Quality gates before tagging 1.0.0:
 rustbgpd is an **API-first BGP daemon**. The following are explicitly out of scope:
 
 - **Full routing suite.** No OSPF, IS-IS, LDP, MPLS, PIM. This is a BGP daemon.
-- **CLI-first operation.** The CLI is a convenience wrapper around gRPC,
-  not the primary interface. If you want rich CLI, use `grpcurl` or write
-  a client.
+- **CLI-first operation.** The gRPC API is the primary interface. The CLI
+  and TUI are convenience wrappers — polished and opinionated, but gRPC
+  is the contract.
 - **GoBGP proto compatibility.** Our protos are our own. A compat adapter
   can exist as a separate project if anyone wants it.
 - **Windows support.** Linux is the target. macOS for dev builds only.
-- **Web UI / dashboard.** Grafana + Prometheus is the monitoring story.
-  We export metrics, not render dashboards.
+- **Full web UI / dashboard.** Grafana + Prometheus is the monitoring story.
+  The built-in looking glass is read-only JSON for NOC integration, not a
+  full management UI.
 - **Plugin system in v1.** Policy is built-in and minimal. WASM/DSL
   plugins are post-v1 if the core is stable enough to warrant them.
 
