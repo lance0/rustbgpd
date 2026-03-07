@@ -2,6 +2,7 @@ mod commands;
 mod connection;
 mod error;
 mod output;
+mod tui;
 
 pub mod proto {
     tonic::include_proto!("rustbgpd.v1");
@@ -104,6 +105,13 @@ enum Command {
 
     /// Trigger an on-demand MRT dump
     MrtDump,
+
+    /// Live TUI dashboard
+    Top {
+        /// Poll interval in seconds (1-60)
+        #[arg(short = 'i', long, default_value = "2")]
+        interval: u64,
+    },
 
     /// Generate shell completions
     Completions {
@@ -427,6 +435,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Metrics => commands::control::metrics(connection).await,
         Command::Shutdown { reason } => commands::control::shutdown(connection, reason, json).await,
         Command::MrtDump => commands::control::mrt_dump(connection, json).await,
+        Command::Top { interval } => {
+            if !(1..=60).contains(&interval) {
+                return Err(CliError::Argument(
+                    "interval must be between 1 and 60 seconds".into(),
+                ));
+            }
+            tui::run(connection, interval).await
+        }
         Command::Completions { .. } => unreachable!("handled before connect"),
     }
 }

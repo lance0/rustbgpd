@@ -25,6 +25,8 @@ serde_json.workspace = true
 tower = { version = "0.5", features = ["util"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 owo-colors.workspace = true
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 [build-dependencies]
 tonic-build.workspace = true
