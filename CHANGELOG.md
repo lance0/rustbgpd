@@ -30,6 +30,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `match_next_hop` for unicast routes on both import and export. The field is
   available in TOML config and the gRPC `PolicyService`, persists through config
   snapshots, and evaluates as exact IPv4/IPv6 equality.
+- **`--version` and `--check` flags.** Both `rustbgpd --version` and
+  `rustbgpctl --version` now print the version. `rustbgpd --check config.toml`
+  validates config and exits without starting the daemon.
+- **Shell completions.** `rustbgpctl completions {bash,zsh,fish}` generates
+  shell completions. Pre-generated files shipped in `examples/completions/`.
+- **Startup banner.** The daemon now prints a human-friendly topology summary
+  on startup: ASN, router-id, peer counts by type, peer groups, named policies,
+  listener endpoints, and optional subsystems (RPKI, BMP, MRT).
 - **FlowSpec route-server transparency.** `route_server_client = true` now skips
   automatic eBGP AS_PATH prepend on FlowSpec export too, matching transparent
   unicast behavior. FlowSpec still has no `NEXT_HOP` field on the wire.

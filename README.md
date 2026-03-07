@@ -66,9 +66,13 @@ The minimal example sets `runtime_state_dir` to a user-writable path. For a
 route-server deployment, start from `examples/route-server/config.toml`
 instead. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
-### 3. Run
+### 3. Validate and run
 
 ```bash
+# Validate config without starting the daemon
+./target/release/rustbgpd --check config.toml
+
+# Start the daemon
 ./target/release/rustbgpd config.toml
 ```
 
@@ -115,6 +119,10 @@ kill -HUP $(pidof rustbgpd)
 
 # Graceful shutdown (writes GR marker, notifies peers)
 rustbgpctl shutdown
+
+# Enable shell completions (bash example)
+rustbgpctl completions bash > /etc/bash_completion.d/rustbgpctl
+# Or use pre-generated: examples/completions/
 ```
 
 gRPC defaults to a local Unix domain socket. For remote access, prefer an

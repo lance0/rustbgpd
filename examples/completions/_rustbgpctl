@@ -1,0 +1,981 @@
+#compdef rustbgpctl
+
+autoload -U is-at-least
+
+_rustbgpctl() {
+    typeset -A opt_args
+    typeset -a _arguments_options
+    local ret=1
+
+    if is-at-least 5.2; then
+        _arguments_options=(-s -S -C)
+    else
+        _arguments_options=(-s -C)
+    fi
+
+    local context curcontext="$curcontext" state line
+    _arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'-V[Print version]' \
+'--version[Print version]' \
+":: :_rustbgpctl_commands" \
+"*::: :->rustbgpctl" \
+&& ret=0
+    case $state in
+    (rustbgpctl)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-command-$line[1]:"
+        case $line[1] in
+            (global)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(neighbor)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::address -- Neighbor address (omit to list all):_default' \
+":: :_rustbgpctl__neighbor_commands" \
+"*::: :->neighbor" \
+&& ret=0
+
+    case $state in
+    (neighbor)
+        words=($line[2] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-neighbor-command-$line[2]:"
+        case $line[2] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'--asn=[Remote AS number]:ASN:_default' \
+'--description=[Description]:DESCRIPTION:_default' \
+'--hold-time=[Hold time in seconds]:HOLD_TIME:_default' \
+'--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
+'*--families=[Address families (comma-separated)]:FAMILIES:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+'--reason=[Disable reason]:REASON:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(softreset)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family to refresh]:FAMILY:_default' \
+'--family=[Address family to refresh]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__neighbor__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-neighbor-help-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(softreset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(rib)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
+'--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_rustbgpctl__rib_commands" \
+"*::: :->rib" \
+&& ret=0
+
+    case $state in
+    (rib)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-rib-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family filter]:FAMILY:_default' \
+'--family=[Address family filter]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':address -- Neighbor address:_default' \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family filter]:FAMILY:_default' \
+'--family=[Address family filter]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':address -- Neighbor address:_default' \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+'--nexthop=[Next hop address]:NEXTHOP:_default' \
+'--origin=[Origin (0=igp, 1=egp, 2=incomplete)]:ORIGIN:_default' \
+'--local-pref=[Local preference]:LOCAL_PREF:_default' \
+'--med=[MED]:MED:_default' \
+'*--as-path=[AS path (space-separated)]:AS_PATH:_default' \
+'*--communities=[Communities (e.g., 65001\:100)]:COMMUNITIES:_default' \
+'*--large-communities=[Large communities (e.g., 65001\:100\:200)]:LARGE_COMMUNITIES:_default' \
+'--path-id=[Path ID for Add-Path]:PATH_ID:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':prefix -- Prefix (e.g., 10.0.0.0/24):_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'--path-id=[Path ID for Add-Path]:PATH_ID:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':prefix -- Prefix (e.g., 10.0.0.0/24):_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__rib__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-rib-help-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(flowspec)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family (ipv4_flowspec, ipv6_flowspec)]:FAMILY:_default' \
+'--family=[Address family (ipv4_flowspec, ipv6_flowspec)]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_rustbgpctl__flowspec_commands" \
+"*::: :->flowspec" \
+&& ret=0
+
+    case $state in
+    (flowspec)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-flowspec-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'--family=[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'*--match=[Match components (e.g., dest=10.0.0.0/24 port==80)]:COMPONENTS:_default' \
+'*--action=[Actions (e.g., drop, rate=1000, redirect=65001\:100)]:ACTION:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'--family=[Address family (required\: ipv4_flowspec or ipv6_flowspec)]:FAMILY:_default' \
+'*--match=[Match components identifying the rule]:COMPONENTS:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__flowspec__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-flowspec-help-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(watch)
+_arguments "${_arguments_options[@]}" : \
+'-a+[Address family filter]:FAMILY:_default' \
+'--family=[Address family filter]:FAMILY:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::address -- Neighbor address filter:_default' \
+&& ret=0
+;;
+(health)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(metrics)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(shutdown)
+_arguments "${_arguments_options[@]}" : \
+'--reason=[Shutdown reason]:REASON:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(mrt-dump)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':shell -- Shell to generate completions for:(bash elvish fish powershell zsh)' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-command-$line[1]:"
+        case $line[1] in
+            (global)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(neighbor)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__help__neighbor_commands" \
+"*::: :->neighbor" \
+&& ret=0
+
+    case $state in
+    (neighbor)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-neighbor-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(enable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(disable)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(softreset)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(rib)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__help__rib_commands" \
+"*::: :->rib" \
+&& ret=0
+
+    case $state in
+    (rib)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-rib-command-$line[1]:"
+        case $line[1] in
+            (received)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(flowspec)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__help__flowspec_commands" \
+"*::: :->flowspec" \
+&& ret=0
+
+    case $state in
+    (flowspec)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-flowspec-command-$line[1]:"
+        case $line[1] in
+            (add)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(watch)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(health)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(metrics)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(shutdown)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(mrt-dump)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(completions)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+}
+
+(( $+functions[_rustbgpctl_commands] )) ||
+_rustbgpctl_commands() {
+    local commands; commands=(
+'global:Show daemon global configuration' \
+'neighbor:Manage BGP neighbors' \
+'rib:Query and manage the RIB' \
+'flowspec:Manage FlowSpec routes' \
+'watch:Watch route updates (streaming)' \
+'health:Check daemon health' \
+'metrics:Show Prometheus metrics' \
+'shutdown:Request daemon shutdown' \
+'mrt-dump:Trigger an on-demand MRT dump' \
+'completions:Generate shell completions' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__completions_commands] )) ||
+_rustbgpctl__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl completions commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__flowspec_commands] )) ||
+_rustbgpctl__flowspec_commands() {
+    local commands; commands=(
+'add:Add a FlowSpec rule' \
+'delete:Delete a FlowSpec rule' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl flowspec commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__flowspec__add_commands] )) ||
+_rustbgpctl__flowspec__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl flowspec add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__flowspec__delete_commands] )) ||
+_rustbgpctl__flowspec__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl flowspec delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__flowspec__help_commands] )) ||
+_rustbgpctl__flowspec__help_commands() {
+    local commands; commands=(
+'add:Add a FlowSpec rule' \
+'delete:Delete a FlowSpec rule' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl flowspec help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__flowspec__help__add_commands] )) ||
+_rustbgpctl__flowspec__help__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl flowspec help add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__flowspec__help__delete_commands] )) ||
+_rustbgpctl__flowspec__help__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl flowspec help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__flowspec__help__help_commands] )) ||
+_rustbgpctl__flowspec__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl flowspec help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__global_commands] )) ||
+_rustbgpctl__global_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl global commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__health_commands] )) ||
+_rustbgpctl__health_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl health commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help_commands] )) ||
+_rustbgpctl__help_commands() {
+    local commands; commands=(
+'global:Show daemon global configuration' \
+'neighbor:Manage BGP neighbors' \
+'rib:Query and manage the RIB' \
+'flowspec:Manage FlowSpec routes' \
+'watch:Watch route updates (streaming)' \
+'health:Check daemon health' \
+'metrics:Show Prometheus metrics' \
+'shutdown:Request daemon shutdown' \
+'mrt-dump:Trigger an on-demand MRT dump' \
+'completions:Generate shell completions' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__completions_commands] )) ||
+_rustbgpctl__help__completions_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help completions commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__flowspec_commands] )) ||
+_rustbgpctl__help__flowspec_commands() {
+    local commands; commands=(
+'add:Add a FlowSpec rule' \
+'delete:Delete a FlowSpec rule' \
+    )
+    _describe -t commands 'rustbgpctl help flowspec commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__flowspec__add_commands] )) ||
+_rustbgpctl__help__flowspec__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help flowspec add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__flowspec__delete_commands] )) ||
+_rustbgpctl__help__flowspec__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help flowspec delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__global_commands] )) ||
+_rustbgpctl__help__global_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help global commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__health_commands] )) ||
+_rustbgpctl__help__health_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help health commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__help_commands] )) ||
+_rustbgpctl__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__metrics_commands] )) ||
+_rustbgpctl__help__metrics_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help metrics commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__mrt-dump_commands] )) ||
+_rustbgpctl__help__mrt-dump_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help mrt-dump commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__neighbor_commands] )) ||
+_rustbgpctl__help__neighbor_commands() {
+    local commands; commands=(
+'add:Add a new neighbor' \
+'delete:Delete this neighbor' \
+'enable:Enable this neighbor' \
+'disable:Disable this neighbor' \
+'softreset:Trigger soft reset (inbound)' \
+    )
+    _describe -t commands 'rustbgpctl help neighbor commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__neighbor__add_commands] )) ||
+_rustbgpctl__help__neighbor__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__neighbor__delete_commands] )) ||
+_rustbgpctl__help__neighbor__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__neighbor__disable_commands] )) ||
+_rustbgpctl__help__neighbor__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor disable commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__neighbor__enable_commands] )) ||
+_rustbgpctl__help__neighbor__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor enable commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__neighbor__softreset_commands] )) ||
+_rustbgpctl__help__neighbor__softreset_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor softreset commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__rib_commands] )) ||
+_rustbgpctl__help__rib_commands() {
+    local commands; commands=(
+'received:Show received routes from a neighbor' \
+'advertised:Show advertised routes to a neighbor' \
+'add:Inject a route' \
+'delete:Withdraw a route' \
+    )
+    _describe -t commands 'rustbgpctl help rib commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__rib__add_commands] )) ||
+_rustbgpctl__help__rib__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help rib add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__rib__advertised_commands] )) ||
+_rustbgpctl__help__rib__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help rib advertised commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__rib__delete_commands] )) ||
+_rustbgpctl__help__rib__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help rib delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__rib__received_commands] )) ||
+_rustbgpctl__help__rib__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help rib received commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__shutdown_commands] )) ||
+_rustbgpctl__help__shutdown_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help shutdown commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__help__watch_commands] )) ||
+_rustbgpctl__help__watch_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help watch commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__metrics_commands] )) ||
+_rustbgpctl__metrics_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl metrics commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__mrt-dump_commands] )) ||
+_rustbgpctl__mrt-dump_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl mrt-dump commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor_commands] )) ||
+_rustbgpctl__neighbor_commands() {
+    local commands; commands=(
+'add:Add a new neighbor' \
+'delete:Delete this neighbor' \
+'enable:Enable this neighbor' \
+'disable:Disable this neighbor' \
+'softreset:Trigger soft reset (inbound)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl neighbor commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__add_commands] )) ||
+_rustbgpctl__neighbor__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__delete_commands] )) ||
+_rustbgpctl__neighbor__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__disable_commands] )) ||
+_rustbgpctl__neighbor__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor disable commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__enable_commands] )) ||
+_rustbgpctl__neighbor__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor enable commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__help_commands] )) ||
+_rustbgpctl__neighbor__help_commands() {
+    local commands; commands=(
+'add:Add a new neighbor' \
+'delete:Delete this neighbor' \
+'enable:Enable this neighbor' \
+'disable:Disable this neighbor' \
+'softreset:Trigger soft reset (inbound)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl neighbor help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__help__add_commands] )) ||
+_rustbgpctl__neighbor__help__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor help add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__help__delete_commands] )) ||
+_rustbgpctl__neighbor__help__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__help__disable_commands] )) ||
+_rustbgpctl__neighbor__help__disable_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor help disable commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__help__enable_commands] )) ||
+_rustbgpctl__neighbor__help__enable_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor help enable commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__help__help_commands] )) ||
+_rustbgpctl__neighbor__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__help__softreset_commands] )) ||
+_rustbgpctl__neighbor__help__softreset_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor help softreset commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__neighbor__softreset_commands] )) ||
+_rustbgpctl__neighbor__softreset_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor softreset commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib_commands] )) ||
+_rustbgpctl__rib_commands() {
+    local commands; commands=(
+'received:Show received routes from a neighbor' \
+'advertised:Show advertised routes to a neighbor' \
+'add:Inject a route' \
+'delete:Withdraw a route' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl rib commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__add_commands] )) ||
+_rustbgpctl__rib__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__advertised_commands] )) ||
+_rustbgpctl__rib__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib advertised commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__delete_commands] )) ||
+_rustbgpctl__rib__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__help_commands] )) ||
+_rustbgpctl__rib__help_commands() {
+    local commands; commands=(
+'received:Show received routes from a neighbor' \
+'advertised:Show advertised routes to a neighbor' \
+'add:Inject a route' \
+'delete:Withdraw a route' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl rib help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__help__add_commands] )) ||
+_rustbgpctl__rib__help__add_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib help add commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__help__advertised_commands] )) ||
+_rustbgpctl__rib__help__advertised_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib help advertised commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__help__delete_commands] )) ||
+_rustbgpctl__rib__help__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__help__help_commands] )) ||
+_rustbgpctl__rib__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__help__received_commands] )) ||
+_rustbgpctl__rib__help__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib help received commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__rib__received_commands] )) ||
+_rustbgpctl__rib__received_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib received commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__shutdown_commands] )) ||
+_rustbgpctl__shutdown_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl shutdown commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__watch_commands] )) ||
+_rustbgpctl__watch_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl watch commands' commands "$@"
+}
+
+if [ "$funcstack[1]" = "_rustbgpctl" ]; then
+    _rustbgpctl "$@"
+else
+    compdef _rustbgpctl rustbgpctl
+fi

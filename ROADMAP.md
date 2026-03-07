@@ -155,15 +155,15 @@ get blog posts written and make operators switch.
 #### First-Run Experience
 
 - [ ] **Rust-compiler-style config errors** — show the actual TOML with line numbers, underline the bad field, and suggest corrections ("did you mean `ipv4_unicast`?"). Every Rust developer will feel at home. Use `miette` or `ariadne` for rendering.
-- [ ] **`rustbgpd --check config.toml`** — validate config without starting the daemon. Print structured errors or "config OK". Operators run this before every reload and deploy.
-- [ ] **Startup banner with topology summary** — on boot, print a clean tree showing ASN, router-id, peer count by type, named policies, neighbor sets, listener endpoints, optional subsystems (RPKI caches, BMP collectors, MRT output). First thing an operator sees after starting the daemon.
-- [ ] **Shell completions** — generate bash/zsh/fish completions from clap derives. Ship in packaging (`examples/completions/`). Five minutes of work, daily QoL improvement.
+- [x] **`rustbgpd --check config.toml`** — validate config without starting the daemon. Print structured errors or "config OK". Operators run this before every reload and deploy.
+- [x] **Startup banner with topology summary** — on boot, print a clean tree showing ASN, router-id, peer count by type, named policies, neighbor sets, listener endpoints, optional subsystems (RPKI caches, BMP collectors, MRT output). First thing an operator sees after starting the daemon.
+- [x] **Shell completions** — `rustbgpctl completions {bash,zsh,fish}` generates completions from clap derives. Pre-generated files shipped in `examples/completions/`.
 
 #### CLI Polish
 
 - [ ] **Colored, tabular CLI output** — aligned tables, colored session states (green=Established, yellow=OpenSent, red=Idle/Active), human-readable uptime ("2d 4h 12m" not seconds), prefix counts with delta indicators. Make `rustbgpctl neighbor` look as good as a Grafana panel in a terminal.
 - [ ] **Route filtering in CLI** — `rustbgpctl rib best --prefix 10.0.0.0/8 --longer --community 65001:100 --from 10.0.0.2`. Server-side filtering via gRPC, not client-side grep. This is what operators do 50 times a day.
-- [ ] **`--version` flag** — both `rustbgpd --version` and `rustbgpctl --version`. Include git hash for alpha builds. Basic but currently missing.
+- [x] **`--version` flag** — both `rustbgpd --version` and `rustbgpctl --version`.
 - [ ] **`rustbgpctl diff`** — show what a pending config reload (SIGHUP) would change: peers added/removed/modified, policy changes, timer changes. Dry-run for config changes.
 
 #### Debugging & Observability

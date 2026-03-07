@@ -10,7 +10,8 @@ pub mod proto {
 use crate::connection::connect;
 use crate::error::CliError;
 use crate::output::parse_family;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 #[derive(Parser)]
 #[command(name = "rustbgpctl", about = "CLI for rustbgpd", version)]
@@ -96,6 +97,12 @@ enum Command {
 
     /// Trigger an on-demand MRT dump
     MrtDump,
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate completions for
+        shell: Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -255,6 +262,17 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
+    // Shell completions don't need a gRPC connection.
+    if let Command::Completions { shell } = cli.command {
+        clap_complete::generate(
+            shell,
+            &mut Cli::command(),
+            "rustbgpctl",
+            &mut std::io::stdout(),
+        );
+        return Ok(());
+    }
+
     let connection = connect(&cli.addr, cli.token_file.as_deref()).await?;
     let json = cli.json;
 
@@ -397,6 +415,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Metrics => commands::control::metrics(connection).await,
         Command::Shutdown { reason } => commands::control::shutdown(connection, reason, json).await,
         Command::MrtDump => commands::control::mrt_dump(connection, json).await,
+        Command::Completions { .. } => unreachable!("handled before connect"),
     }
 }
 

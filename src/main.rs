@@ -141,10 +141,146 @@ fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
     }
 }
 
+fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
+    let ebgp = config
+        .neighbors
+        .iter()
+        .filter(|n| n.remote_asn != config.global.asn)
+        .count();
+    let ibgp = config.neighbors.len() - ebgp;
+    let peer_groups = config.peer_groups.len();
+    let policies = config.policy.definitions.len();
+    let neighbor_sets = config.policy.neighbor_sets.len();
+
+    eprintln!();
+    eprintln!(
+        "  rustbgpd {} | AS {} | router-id {}",
+        env!("CARGO_PKG_VERSION"),
+        config.global.asn,
+        config.global.router_id,
+    );
+
+    // Peers
+    let mut peer_parts = Vec::new();
+    if ebgp > 0 {
+        peer_parts.push(format!("{ebgp} eBGP"));
+    }
+    if ibgp > 0 {
+        peer_parts.push(format!("{ibgp} iBGP"));
+    }
+    let peer_summary = if peer_parts.is_empty() {
+        "0 peers (dynamic-only)".to_string()
+    } else {
+        format!(
+            "{} peers ({})",
+            config.neighbors.len(),
+            peer_parts.join(", ")
+        )
+    };
+    let pg_suffix = if peer_groups > 0 {
+        format!(
+            " in {peer_groups} peer group{}",
+            if peer_groups == 1 { "" } else { "s" }
+        )
+    } else {
+        String::new()
+    };
+    eprintln!("  |- {peer_summary}{pg_suffix}");
+
+    // Policy
+    if policies > 0 || neighbor_sets > 0 {
+        let mut parts = Vec::new();
+        if policies > 0 {
+            parts.push(format!(
+                "{policies} named polic{}",
+                if policies == 1 { "y" } else { "ies" }
+            ));
+        }
+        if neighbor_sets > 0 {
+            parts.push(format!(
+                "{neighbor_sets} neighbor set{}",
+                if neighbor_sets == 1 { "" } else { "s" }
+            ));
+        }
+        eprintln!("  |- {}", parts.join(", "));
+    }
+
+    // Listeners
+    for listener in grpc_listeners {
+        let label = match &listener.endpoint {
+            ListenerEndpoint::Tcp(addr) => format!("grpc: tcp://{addr}"),
+            ListenerEndpoint::Uds { path, .. } => format!("grpc: unix://{}", path.display()),
+        };
+        let auth = if listener.auth_token.is_some() {
+            " (token auth)"
+        } else {
+            ""
+        };
+        eprintln!("  |- {label}{auth}");
+    }
+
+    // Metrics
+    eprintln!("  |- metrics: http://{}/metrics", config.prometheus_addr(),);
+
+    // Optional subsystems
+    if let Some(ref rpki) = config.rpki {
+        let n = rpki.cache_servers.len();
+        if n > 0 {
+            eprintln!("  |- rpki: {n} cache{}", if n == 1 { "" } else { "s" },);
+        }
+    }
+    if let Some(ref bmp) = config.bmp {
+        let n = bmp.collectors.len();
+        if n > 0 {
+            eprintln!("  |- bmp: {n} collector{}", if n == 1 { "" } else { "s" },);
+        }
+    }
+    if let Some(ref mrt) = config.mrt {
+        eprintln!("  |- mrt: {}", mrt.output_dir);
+    }
+
+    eprintln!();
+}
+
 fn main() {
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "/etc/rustbgpd/config.toml".to_string());
+    let args: Vec<String> = std::env::args().collect();
+
+    // Handle --version / -V before anything else.
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("rustbgpd {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
+    // Handle --help / -h.
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!(
+            "rustbgpd {} — API-first BGP daemon\n\n\
+             Usage: rustbgpd [OPTIONS] [CONFIG_PATH]\n\n\
+             Arguments:\n  \
+               CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
+             Options:\n  \
+               --check      Validate config and exit without starting the daemon\n  \
+               --version    Print version and exit\n  \
+               --help       Print this help message",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
+
+    // Parse --check flag and config path from remaining args.
+    let mut check_only = false;
+    let mut config_path = "/etc/rustbgpd/config.toml".to_string();
+    for arg in &args[1..] {
+        if arg == "--check" {
+            check_only = true;
+        } else if !arg.starts_with('-') {
+            config_path.clone_from(arg);
+        } else {
+            eprintln!("error: unknown option: {arg}");
+            eprintln!("usage: rustbgpd [--check] [--version] [CONFIG_PATH]");
+            process::exit(1);
+        }
+    }
 
     let config = match Config::load(&config_path) {
         Ok(c) => c,
@@ -153,6 +289,11 @@ fn main() {
             process::exit(1);
         }
     };
+
+    if check_only {
+        println!("config OK: {config_path}");
+        return;
+    }
 
     if let Err(e) = init_logging() {
         eprintln!("error: failed to initialize logging: {e}");
@@ -239,6 +380,9 @@ async fn run(mut config: Config) {
         error!(error = %e, "invalid gRPC listener configuration");
         process::exit(1);
     });
+
+    // Startup banner — human-friendly topology summary on stderr.
+    print_startup_banner(&config, &grpc_listeners);
     let router_id: Ipv4Addr = config
         .global
         .router_id
