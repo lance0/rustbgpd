@@ -33,14 +33,20 @@ FRR 10.3.1 and BIRD 2.0.12.
 
 ## Good fit
 
-- Internet exchange route-server deployments
-- Programmable BGP control planes driven from automation
-- Lab and test environments where API-driven peering matters
-- Teams that want a well-factored Rust codebase they can extend
+- **DDoS mitigation platforms** — FlowSpec + RTBH route injection from automation
+- **Hosting provider prefix management** — API-driven customer prefix announcements
+- **Internet exchange route servers** — transparent mode, Add-Path, RPKI, per-member policy
+- **SDN / network automation controllers** — programmable BGP control plane
+- **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP
+- **Lab and test environments** — clean API, structured logs, containerlab interop
+
+See [docs/USE_CASES.md](docs/USE_CASES.md) for detailed deployment scenarios with
+architecture diagrams, example configs, and API workflows.
 
 ## Not the best fit today
 
 - Full general-purpose router deployments requiring FIB integration
+- EVPN / VPN datacenter fabric overlays
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
 
@@ -170,6 +176,9 @@ and more explicit internal architecture.
 |---------|-------------|
 | [`examples/minimal/`](examples/minimal/) | Smallest working config — single eBGP peer |
 | [`examples/route-server/`](examples/route-server/) | IXP route server with RPKI, Add-Path, policy chains |
+| [`examples/ddos-mitigation/`](examples/ddos-mitigation/) | FlowSpec + RTBH for automated DDoS mitigation |
+| [`examples/hosting-provider/`](examples/hosting-provider/) | iBGP route injector for customer prefix management |
+| [`examples/route-collector/`](examples/route-collector/) | Passive collector with MRT dumps and BMP export |
 | [`examples/envoy-mtls/`](examples/envoy-mtls/) | Remote gRPC access via Envoy mTLS proxy |
 | [`examples/systemd/`](examples/systemd/) | systemd unit file with security hardening |
 
@@ -225,6 +234,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 
 | Document | Content |
 |----------|---------|
+| [docs/USE_CASES.md](docs/USE_CASES.md) | Deployment scenarios: DDoS, hosting, IX, SDN, collector |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Crate graph, runtime model, ownership, data flow |
 | [docs/DESIGN.md](docs/DESIGN.md) | Tradeoffs, protocol scope, rationale |
 | [docs/API.md](docs/API.md) | gRPC API reference with examples for every RPC |

@@ -1,0 +1,73 @@
+# Route collector / looking glass configuration
+#
+# rustbgpd as a passive route collector. Accepts full tables from upstream
+# peers, exports nothing. Provides route data via gRPC queries, MRT dumps,
+# and BMP streaming.
+#
+# Architecture:
+#   Upstreams (eBGP) → rustbgpd (collector) → gRPC / MRT / BMP
+#
+# See docs/USE_CASES.md for detailed walkthrough and API examples.
+
+[global]
+asn = 65534                      # Collector ASN (private, or use your own)
+router_id = "10.255.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+# gRPC TCP listener for looking glass queries
+[global.telemetry.grpc_tcp]
+enabled = true
+address = "0.0.0.0:50051"
+
+# RPKI — annotate every route with validation state
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+
+# MRT periodic dumps for offline analysis and archival
+# Compatible with bgpdump, BGPKIT parser, RouteViews/RIPE RIS tooling
+[mrt]
+output_dir = "/var/lib/rustbgpd/mrt"
+dump_interval = 7200             # Every 2 hours
+compress = true
+file_prefix = "collector"
+
+# BMP stream to OpenBMP or pmacct
+[bmp]
+sys_name = "rustbgpd-collector"
+[[bmp.collectors]]
+address = "10.0.0.100:5000"
+
+# --- Global export policy: deny everything ---
+# A collector never advertises routes to peers.
+
+[[policy.export]]
+action = "deny"
+prefix = "0.0.0.0/0"
+le = 32
+
+[[policy.export]]
+action = "deny"
+prefix = "::/0"
+le = 128
+
+# --- Upstream peers ---
+# Accept full tables. Adjust max_prefixes to your expected table size.
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 64501
+description = "upstream-a"
+families = ["ipv4_unicast", "ipv6_unicast"]
+max_prefixes = 1000000
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 64502
+description = "upstream-b"
+families = ["ipv4_unicast", "ipv6_unicast"]
+max_prefixes = 1000000

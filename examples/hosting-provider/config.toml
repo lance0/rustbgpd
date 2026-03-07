@@ -1,0 +1,54 @@
+# Hosting provider prefix management configuration
+#
+# rustbgpd as a programmable route injection layer for a hosting provider.
+# Customer provisioning systems add/remove prefixes via gRPC. rustbgpd peers
+# with edge routers via iBGP; the edge routers install routes into the kernel
+# FIB and announce them upstream.
+#
+# Architecture:
+#   Customer portal → Provisioning API → rustbgpd (gRPC) → Edge routers (iBGP)
+#
+# See docs/USE_CASES.md for detailed walkthrough and API examples.
+
+[global]
+asn = 65100
+router_id = "10.255.0.1"
+listen_port = 1179               # Non-standard port — edge routers own 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# gRPC TCP listener for provisioning system access
+[global.telemetry.grpc_tcp]
+enabled = true
+address = "127.0.0.1:50051"
+# Uncomment and create the token file for bearer-token auth:
+# token_file = "/etc/rustbgpd/grpc-token"
+
+# RPKI validation — don't announce prefixes we can't prove we hold
+[rpki]
+[[rpki.cache_servers]]
+address = "127.0.0.1:3323"
+
+# BMP export for audit trail
+[bmp]
+sys_name = "rustbgpd-hosting"
+[[bmp.collectors]]
+address = "10.0.0.100:5000"
+
+# --- iBGP to edge routers ---
+# Same ASN = iBGP. Edge routers run FRR/BIRD with FIB integration and
+# handle eBGP sessions to transits and IXPs.
+
+[[neighbors]]
+address = "10.255.0.2"
+remote_asn = 65100
+description = "edge-router-1"
+families = ["ipv4_unicast", "ipv6_unicast"]
+
+[[neighbors]]
+address = "10.255.0.3"
+remote_asn = 65100
+description = "edge-router-2"
+families = ["ipv4_unicast", "ipv6_unicast"]

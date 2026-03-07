@@ -1,0 +1,53 @@
+# DDoS mitigation configuration
+#
+# rustbgpd as a FlowSpec + RTBH route injector for automated DDoS mitigation.
+# A mitigation platform (e.g., prefixd, custom automation) pushes FlowSpec
+# rules and blackhole routes via gRPC. rustbgpd distributes them to edge
+# routers that enforce filtering at line rate.
+#
+# Architecture:
+#   Detection → Mitigation platform → rustbgpd (gRPC) → Edge routers (eBGP)
+#
+# See docs/USE_CASES.md for detailed walkthrough and API examples.
+
+[global]
+asn = 65500
+router_id = "10.255.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# gRPC TCP listener for mitigation platform access.
+# Secure with a bearer token. For remote access, use an mTLS proxy
+# (see examples/envoy-mtls/).
+[global.telemetry.grpc_tcp]
+enabled = true
+address = "127.0.0.1:50051"
+# Uncomment and create the token file for bearer-token auth:
+# token_file = "/etc/rustbgpd/grpc-token"
+
+# BMP export for audit trail — stream every rule change to your collector
+[bmp]
+sys_name = "rustbgpd-ddos"
+[[bmp.collectors]]
+address = "10.0.0.100:5000"
+
+# --- Edge routers ---
+# These enforce FlowSpec rules in hardware. Use short hold times so
+# rustbgpd can detect and react to router failures quickly.
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65001
+description = "edge-router-1"
+families = ["ipv4_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 30
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65001
+description = "edge-router-2"
+families = ["ipv4_unicast", "ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 30
