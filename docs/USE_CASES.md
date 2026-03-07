@@ -194,11 +194,13 @@ IXP member C (AS 64503) ──┘
 rustbgpctl neighbor 198.51.100.10 add --asn 64510 \
   --description "new-member" \
   --families ipv4_unicast,ipv6_unicast \
-  --route-server-client \
   --max-prefixes 10000
 
-# Assign to a peer group for shared policy
-rustbgpctl peer-group set-neighbor 198.51.100.10 --group rs-members
+# Assign to a peer group for shared policy via gRPC
+grpcurl -plaintext -d '{
+  "address": "198.51.100.10",
+  "peer_group": "rs-members"
+}' localhost:50051 rustbgpd.v1.PeerGroupService/SetNeighborPeerGroup
 
 # Verify the session comes up
 rustbgpctl neighbor 198.51.100.10
@@ -283,16 +285,16 @@ families = ["ipv4_unicast", "ipv6_unicast"]
 
 ```bash
 # Customer buys 203.0.113.0/24 — announce it
-rustbgpctl path add 203.0.113.0/24 --next-hop self
+rustbgpctl rib add 203.0.113.0/24 --nexthop 192.0.2.1
 
 # Customer buys an IPv6 block
-rustbgpctl path add 2001:db8:1000::/36 --next-hop self
+rustbgpctl rib add 2001:db8:1000::/36 --nexthop 2001:db8::1
 
 # Customer cancels — withdraw
-rustbgpctl path delete 203.0.113.0/24
+rustbgpctl rib delete 203.0.113.0/24
 
-# List all injected prefixes
-rustbgpctl rib local
+# List best routes
+rustbgpctl rib
 ```
 
 ---
@@ -448,11 +450,11 @@ max_prefixes = 1000000
 **API workflow — looking glass queries:**
 
 ```bash
-# Query best routes for a specific prefix
-rustbgpctl rib best --prefix 203.0.113.0/24
+# Query best routes
+rustbgpctl rib
 
 # List all routes received from a specific peer
-rustbgpctl rib received --peer 10.0.0.1
+rustbgpctl rib received 10.0.0.1
 
 # Trigger an on-demand MRT dump
 rustbgpctl mrt-dump

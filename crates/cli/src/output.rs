@@ -5,15 +5,12 @@ use std::net::IpAddr;
 use crate::proto;
 use owo_colors::{OwoColorize, Stream::Stdout};
 
-/// Format seconds as human-readable duration or "never" if 0.
+/// Format seconds as a human-readable uptime.
 ///
 /// - >= 7 days: "7d 3h"
 /// - >= 1 day: "1d 4h 12m"
 /// - < 1 day: "01:23:45"
 pub fn format_duration(seconds: u64) -> String {
-    if seconds == 0 {
-        return "never".into();
-    }
     let days = seconds / 86400;
     let hours = (seconds % 86400) / 3600;
     let mins = (seconds % 3600) / 60;
@@ -421,7 +418,7 @@ mod tests {
         // Force colors off for test determinism
         owo_colors::set_override(false);
 
-        assert_eq!(format_duration(0), "never");
+        assert_eq!(format_duration(0), "00:00:00");
         assert_eq!(format_duration(61), "00:01:01");
         assert_eq!(format_duration(3661), "01:01:01");
         // >= 1 day

@@ -48,6 +48,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   auto-disable when piped. Use `--no-color` or `NO_COLOR=1` to force plain
   output.
 
+### Fixed
+
+- **CLI `NO_COLOR` handling.** `rustbgpctl` now treats `NO_COLOR` as a
+  presence-based runtime override instead of asking clap to parse it as a
+  boolean, so environments with `NO_COLOR=1` no longer break argument parsing.
+- **CLI uptime display.** Zero-second uptimes now render as `00:00:00`
+  instead of `never`.
+- **Use-case command examples.** `docs/USE_CASES.md` now uses the actual
+  `rustbgpctl` command surface and a gRPC example for peer-group assignment.
+
 ---
 
 ## [0.4.2] — 2026-03-06

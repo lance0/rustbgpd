@@ -35,7 +35,10 @@ struct Cli {
     json: bool,
 
     /// Disable colored output
-    #[arg(long, global = true, env = "NO_COLOR")]
+    ///
+    /// The `NO_COLOR` environment variable is handled at runtime so its
+    /// presence disables color without requiring a boolean value.
+    #[arg(long, global = true)]
     no_color: bool,
 
     #[command(subcommand)]
@@ -259,7 +262,8 @@ fn parse_community_str(s: &str) -> Result<u32, String> {
 async fn main() {
     let cli = Cli::parse();
 
-    if cli.no_color || cli.json {
+    let no_color = cli.no_color || std::env::var_os("NO_COLOR").is_some();
+    if no_color || cli.json {
         owo_colors::set_override(false);
     }
 
@@ -556,6 +560,12 @@ mod tests {
     fn test_parse_json_flag() {
         let cli = Cli::try_parse_from(["rustbgpctl", "--json", "health"]).unwrap();
         assert!(cli.json);
+    }
+
+    #[test]
+    fn test_parse_no_color_flag() {
+        let cli = Cli::try_parse_from(["rustbgpctl", "--no-color", "health"]).unwrap();
+        assert!(cli.no_color);
     }
 
     #[test]
