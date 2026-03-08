@@ -171,7 +171,7 @@ get blog posts written and make operators switch.
 - [ ] **Policy trace / route explain** — `rustbgpctl route explain 203.0.113.0/24`: show the route's full journey — which peer announced it, import policy evaluation step-by-step (which statement matched, what modifications applied), best-path selection with ranked candidates and tie-break reasons, then per-peer export policy evaluation showing why it was or wasn't advertised to each neighbor. No BGP daemon does this well. This is the flagship feature.
 - [x] **Config diff on SIGHUP** — field-level change logging on reload: each changed neighbor logs exactly which fields differ (e.g. "hold_time: Some(90) → Some(45), families: [...] → [...]"). Sensitive fields (md5_password) log `<changed>` without revealing values.
 - [ ] **Per-peer log filtering** — `rustbgpctl logs --peer 10.0.0.2` or structured log field `peer=10.0.0.2` that makes grep/jq filtering trivial. Currently all peers log to the same stream.
-- [ ] **Route diff on policy change** — after hot-applying an export policy change, log a summary: "export policy changed: 12 routes newly advertised to 10.0.0.2, 3 routes withdrawn". Currently operators see the recomputation but not the outcome.
+- [x] **Route diff on policy change** — after hot-applying an export policy change, logs announced/withdrawn counts per peer at info level
 
 #### Advanced UX
 
@@ -303,7 +303,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
 - [x] Automated interop test scripts (M1, M3, M4, M10–M20)
-- [ ] Binary releases (GitHub Releases with cross-compiled binaries)
+- [x] Binary releases (GitHub Releases with cross-compiled linux-amd64/arm64 binaries)
 - [ ] Homebrew formula
 - [ ] crates.io publishing (`rustbgpd-wire` first, then workspace)
 

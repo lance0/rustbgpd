@@ -5,7 +5,7 @@ use std::sync::Arc;
 use rustbgpd_policy::{PolicyAction, PolicyChain, RouteContext, RouteType, evaluate_chain};
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::RibManager;
 use super::helpers::{
@@ -851,6 +851,12 @@ impl RibManager {
                         gauge_val(rib_out.flowspec_len()),
                     );
                     if is_dirty {
+                        info!(
+                            %peer,
+                            announced = announce.len(),
+                            withdrawn = withdraw.len(),
+                            "outbound routes updated after policy change"
+                        );
                         self.dirty_peers.remove(&peer);
                         if pending_eor.is_empty() {
                             self.flush_pending_eor(peer);
@@ -867,6 +873,7 @@ impl RibManager {
                 && fs_withdraw.is_empty()
             {
                 // Dirty peer with no diff — already in sync
+                debug!(%peer, "outbound routes unchanged after policy change");
                 self.dirty_peers.remove(&peer);
                 self.flush_pending_eor(peer);
                 self.retry_pending_refresh(peer);
