@@ -94,11 +94,15 @@ fn bench_update_build(c: &mut Criterion) {
                 prefix: p,
             })
             .collect();
-        group.bench_with_input(BenchmarkId::from_parameter(count), &entries, |b, entries| {
-            b.iter(|| {
-                UpdateMessage::build(entries, &[], &attrs, true, false, Ipv4UnicastMode::Body)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(count),
+            &entries,
+            |b, entries| {
+                b.iter(|| {
+                    UpdateMessage::build(entries, &[], &attrs, true, false, Ipv4UnicastMode::Body)
+                });
+            },
+        );
     }
     group.finish();
 }
@@ -114,8 +118,7 @@ fn bench_update_parse(c: &mut Criterion) {
                 prefix: p,
             })
             .collect();
-        let msg =
-            UpdateMessage::build(&entries, &[], &attrs, true, false, Ipv4UnicastMode::Body);
+        let msg = UpdateMessage::build(&entries, &[], &attrs, true, false, Ipv4UnicastMode::Body);
         group.bench_with_input(BenchmarkId::from_parameter(count), &msg, |b, msg| {
             b.iter(|| msg.parse(true, false, &[]).unwrap());
         });
@@ -140,13 +143,9 @@ fn bench_attr_decode(c: &mut Criterion) {
     let rich = rich_attributes();
     let mut rich_buf = Vec::new();
     encode_path_attributes(&rich, &mut rich_buf, true, false);
-    group.bench_with_input(
-        BenchmarkId::new("rich", rich.len()),
-        &rich_buf,
-        |b, buf| {
-            b.iter(|| decode_path_attributes(buf, true, &[]).unwrap());
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("rich", rich.len()), &rich_buf, |b, buf| {
+        b.iter(|| decode_path_attributes(buf, true, &[]).unwrap());
+    });
 
     group.finish();
 }
@@ -168,17 +167,13 @@ fn bench_attr_encode(c: &mut Criterion) {
     );
 
     let rich = rich_attributes();
-    group.bench_with_input(
-        BenchmarkId::new("rich", rich.len()),
-        &rich,
-        |b, attrs| {
-            b.iter(|| {
-                let mut buf = Vec::with_capacity(256);
-                encode_path_attributes(attrs, &mut buf, true, false);
-                buf
-            });
-        },
-    );
+    group.bench_with_input(BenchmarkId::new("rich", rich.len()), &rich, |b, attrs| {
+        b.iter(|| {
+            let mut buf = Vec::with_capacity(256);
+            encode_path_attributes(attrs, &mut buf, true, false);
+            buf
+        });
+    });
 
     group.finish();
 }

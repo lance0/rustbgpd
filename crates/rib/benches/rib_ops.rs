@@ -108,22 +108,18 @@ fn bench_adj_rib_in_insert(c: &mut Criterion) {
     for count in [10_000, 100_000, 500_000] {
         let prefixes = generate_prefixes(count);
         let routes: Vec<Route> = prefixes.iter().map(|p| make_route(*p, 1)).collect();
-        group.bench_with_input(
-            BenchmarkId::from_parameter(count),
-            &routes,
-            |b, routes| {
-                b.iter_batched(
-                    || AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
-                    |mut rib| {
-                        for route in routes {
-                            rib.insert(route.clone());
-                        }
-                        rib
-                    },
-                    BatchSize::LargeInput,
-                );
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(count), &routes, |b, routes| {
+            b.iter_batched(
+                || AdjRibIn::new(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 1))),
+                |mut rib| {
+                    for route in routes {
+                        rib.insert(route.clone());
+                    }
+                    rib
+                },
+                BatchSize::LargeInput,
+            );
+        });
     }
     group.finish();
 }
@@ -186,7 +182,8 @@ fn bench_rib_pipeline(c: &mut Criterion) {
                         }
                         // Recompute best path for each prefix
                         for prefix in *prefixes {
-                            let candidates = rib1.iter_prefix(prefix).chain(rib2.iter_prefix(prefix));
+                            let candidates =
+                                rib1.iter_prefix(prefix).chain(rib2.iter_prefix(prefix));
                             if loc.recompute(*prefix, candidates)
                                 && let Some(best) = loc.get(prefix)
                             {

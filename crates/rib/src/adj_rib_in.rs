@@ -108,9 +108,10 @@ impl AdjRibIn {
         let path_ids = self.prefix_index.get(prefix);
         let target = *prefix;
         let routes = &self.routes;
-        path_ids
-            .into_iter()
-            .flat_map(move |ids| ids.iter().filter_map(move |&pid| routes.get(&(target, pid))))
+        path_ids.into_iter().flat_map(move |ids| {
+            ids.iter()
+                .filter_map(move |&pid| routes.get(&(target, pid)))
+        })
     }
 
     /// Mark all routes matching the given address family as stale.
