@@ -72,9 +72,9 @@ fn arb_capability() -> impl Strategy<Value = Capability> {
         // Unknown capabilities: code must not collide with known codes
         // (1 = MultiProtocol, 2 = RouteRefresh, 5 = ExtendedNextHop,
         // 6 = ExtendedMessage, 64 = GracefulRestart, 65 = FourOctetAs,
-        // 69 = AddPath, 70 = EnhancedRouteRefresh).
+        // 69 = AddPath, 70 = EnhancedRouteRefresh, 71 = LLGR).
         (
-            prop_oneof![3..5u8, 7..64u8, 66..69u8, 71..=255u8],
+            prop_oneof![3..5u8, 7..64u8, 66..69u8, 72..=255u8],
             proptest::collection::vec(any::<u8>(), 0..32)
         )
             .prop_map(|(code, data)| Capability::Unknown {
