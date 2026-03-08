@@ -111,6 +111,14 @@ message NeighborConfig {
   string remove_private_as = 7;
   // Optional peer-group reference for inherited transport/policy defaults.
   string peer_group = 8;
+  // Whether this eBGP peer is a transparent route-server client.
+  bool route_server_client = 9;
+  // Enable Add-Path receive capability for this peer.
+  bool add_path_receive = 10;
+  // Enable Add-Path send capability for this peer.
+  bool add_path_send = 11;
+  // Maximum paths to advertise per prefix (Add-Path send).
+  uint32 add_path_send_max = 12;
 }
 
 message NeighborState {

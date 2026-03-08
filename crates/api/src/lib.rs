@@ -1,7 +1,8 @@
 //! rustbgpd-api — gRPC API server
 //!
-//! Tonic bindings for all five rustbgpd services:
-//! `GlobalService`, `NeighborService`, `RibService`, `InjectionService`, `ControlService`.
+//! Tonic bindings for all seven rustbgpd services:
+//! `GlobalService`, `NeighborService`, `PolicyService`, `PeerGroupService`,
+//! `RibService`, `InjectionService`, `ControlService`.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]

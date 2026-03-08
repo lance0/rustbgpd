@@ -139,6 +139,18 @@ enum NeighborAction {
         /// Address families (comma-separated)
         #[arg(long, value_delimiter = ',')]
         families: Vec<String>,
+        /// Enable transparent route-server client mode (eBGP only)
+        #[arg(long)]
+        route_server_client: bool,
+        /// Enable Add-Path receive
+        #[arg(long)]
+        add_path_receive: bool,
+        /// Enable Add-Path send
+        #[arg(long)]
+        add_path_send: bool,
+        /// Max paths per prefix for Add-Path send
+        #[arg(long, default_value = "0")]
+        add_path_send_max: u32,
     },
     /// Delete this neighbor
     Delete,
@@ -310,6 +322,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     hold_time,
                     max_prefixes,
                     families,
+                    route_server_client,
+                    add_path_receive,
+                    add_path_send,
+                    add_path_send_max,
                 }),
             ) => {
                 commands::neighbor::add(
@@ -321,6 +337,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         hold_time,
                         max_prefixes,
                         families,
+                        route_server_client,
+                        add_path_receive,
+                        add_path_send,
+                        add_path_send_max,
                     },
                     json,
                 )

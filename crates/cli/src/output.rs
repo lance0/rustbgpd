@@ -165,6 +165,13 @@ pub struct JsonNeighborDetail {
     pub description: String,
     pub hold_time: u32,
     pub families: Vec<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub peer_group: String,
+    pub route_server_client: bool,
+    pub add_path_receive: bool,
+    pub add_path_send: bool,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub add_path_send_max: u32,
 }
 
 #[derive(Serialize)]
@@ -412,6 +419,7 @@ pub fn parse_prefix(s: &str) -> Result<(String, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn test_format_duration() {
@@ -502,5 +510,41 @@ mod tests {
         assert!(parse_prefix("10.0.0.0/abc").is_err());
         assert!(parse_prefix("999.999.999.999/24").is_err());
         assert!(parse_prefix("not-an-ip").is_err());
+    }
+
+    #[test]
+    fn test_json_neighbor_detail_serializes_dynamic_peer_fields() {
+        let detail = JsonNeighborDetail {
+            address: "10.0.0.2".to_string(),
+            remote_asn: 65002,
+            state: "Established".to_string(),
+            uptime_seconds: 42,
+            prefixes_received: 1,
+            prefixes_sent: 2,
+            updates_received: 3,
+            updates_sent: 4,
+            notifications_received: 5,
+            notifications_sent: 6,
+            flap_count: 7,
+            last_error: String::new(),
+            description: "peer-2".to_string(),
+            hold_time: 90,
+            families: vec!["ipv4_unicast".to_string()],
+            peer_group: "rs-clients".to_string(),
+            route_server_client: true,
+            add_path_receive: true,
+            add_path_send: true,
+            add_path_send_max: 4,
+        };
+
+        let value: Value =
+            serde_json::from_str(&serde_json::to_string(&detail).expect("JSON serialize"))
+                .expect("JSON parse");
+
+        assert_eq!(value["peer_group"], "rs-clients");
+        assert_eq!(value["route_server_client"], true);
+        assert_eq!(value["add_path_receive"], true);
+        assert_eq!(value["add_path_send"], true);
+        assert_eq!(value["add_path_send_max"], 4);
     }
 }

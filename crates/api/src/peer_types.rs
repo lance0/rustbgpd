@@ -614,6 +614,7 @@ pub enum ConfigEvent {
 
 /// Snapshot of a peer's state for queries.
 #[derive(Debug, Clone)]
+#[expect(clippy::struct_excessive_bools)]
 pub struct PeerInfo {
     /// Remote peer IP address.
     pub address: IpAddr,
@@ -637,6 +638,14 @@ pub struct PeerInfo {
     pub families: Vec<(Afi, Safi)>,
     /// Private AS removal mode.
     pub remove_private_as: RemovePrivateAs,
+    /// Whether this eBGP peer is a transparent route-server client.
+    pub route_server_client: bool,
+    /// Add-Path receive enabled.
+    pub add_path_receive: bool,
+    /// Add-Path send enabled.
+    pub add_path_send: bool,
+    /// Maximum paths to advertise per prefix (Add-Path).
+    pub add_path_send_max: u32,
     /// Total UPDATE messages received.
     pub updates_received: u64,
     /// Total UPDATE messages sent.

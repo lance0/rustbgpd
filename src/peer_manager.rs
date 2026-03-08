@@ -387,6 +387,10 @@ impl PeerManager {
             max_prefixes: managed.max_prefixes,
             families: managed.transport_config.peer.families.clone(),
             remove_private_as: managed.transport_config.remove_private_as,
+            route_server_client: managed.transport_config.route_server_client,
+            add_path_receive: managed.transport_config.peer.add_path_receive,
+            add_path_send: managed.transport_config.peer.add_path_send,
+            add_path_send_max: managed.transport_config.peer.add_path_send_max,
             updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
             updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
             notifications_received: session_state
@@ -419,6 +423,10 @@ impl PeerManager {
                 max_prefixes: managed.max_prefixes,
                 families: managed.transport_config.peer.families.clone(),
                 remove_private_as: managed.transport_config.remove_private_as,
+                route_server_client: managed.transport_config.route_server_client,
+                add_path_receive: managed.transport_config.peer.add_path_receive,
+                add_path_send: managed.transport_config.peer.add_path_send,
+                add_path_send_max: managed.transport_config.peer.add_path_send_max,
                 updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
                 updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
                 notifications_received: session_state

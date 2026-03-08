@@ -33,7 +33,7 @@ cli            (no internal deps — uses tonic codegen directly)
 | `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
 | `rustbgpd-bmp` | BMP exporter: RFC 7854 codec, collector clients, manager fan-out. |
 | `rustbgpd-mrt` | MRT dump: RFC 6396 TABLE_DUMP_V2 codec, atomic writer, periodic manager. |
-| `rustbgpd-api` | gRPC server (tonic). Five services, proto codegen at build time. |
+| `rustbgpd-api` | gRPC server (tonic). Seven services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 | `rustbgpctl` | CLI tool. Client-only gRPC stubs, no internal crate deps. |
 

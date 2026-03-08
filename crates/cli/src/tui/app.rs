@@ -347,6 +347,7 @@ mod tests {
                 families: vec!["ipv4_unicast".into()],
                 remove_private_as: String::new(),
                 peer_group: String::new(),
+                ..Default::default()
             }),
             state: 6,
             uptime_seconds,

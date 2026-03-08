@@ -72,6 +72,11 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             description: cfg.map(|c| c.description.clone()).unwrap_or_default(),
             hold_time: cfg.map(|c| c.hold_time).unwrap_or(0),
             families: cfg.map(|c| c.families.clone()).unwrap_or_default(),
+            peer_group: cfg.map(|c| c.peer_group.clone()).unwrap_or_default(),
+            route_server_client: cfg.map(|c| c.route_server_client).unwrap_or(false),
+            add_path_receive: cfg.map(|c| c.add_path_receive).unwrap_or(false),
+            add_path_send: cfg.map(|c| c.add_path_send).unwrap_or(false),
+            add_path_send_max: cfg.map(|c| c.add_path_send_max).unwrap_or(0),
         };
         println!(
             "{}",
@@ -99,6 +104,26 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
             "Families:              {}",
             cfg.map(|c| c.families.join(", ")).unwrap_or_default()
         );
+        let peer_group = cfg.map(|c| c.peer_group.as_str()).unwrap_or("");
+        if !peer_group.is_empty() {
+            println!("Peer Group:            {peer_group}");
+        }
+        println!(
+            "Route Server Client:   {}",
+            cfg.map(|c| c.route_server_client).unwrap_or(false)
+        );
+        println!(
+            "Add-Path Receive:      {}",
+            cfg.map(|c| c.add_path_receive).unwrap_or(false)
+        );
+        println!(
+            "Add-Path Send:         {}",
+            cfg.map(|c| c.add_path_send).unwrap_or(false)
+        );
+        let add_path_send_max = cfg.map(|c| c.add_path_send_max).unwrap_or(0);
+        if add_path_send_max > 0 {
+            println!("Add-Path Send Max:     {add_path_send_max}");
+        }
         println!("State:                 {}", output::colored_state(n.state));
         println!(
             "Uptime:                {}",
@@ -124,6 +149,10 @@ pub struct AddNeighborOpts {
     pub hold_time: Option<u32>,
     pub max_prefixes: Option<u32>,
     pub families: Vec<String>,
+    pub route_server_client: bool,
+    pub add_path_receive: bool,
+    pub add_path_send: bool,
+    pub add_path_send_max: u32,
 }
 
 pub async fn add(
@@ -145,6 +174,10 @@ pub async fn add(
                 families: opts.families,
                 peer_group: String::new(),
                 remove_private_as: String::new(),
+                route_server_client: opts.route_server_client,
+                add_path_receive: opts.add_path_receive,
+                add_path_send: opts.add_path_send,
+                add_path_send_max: opts.add_path_send_max,
             }),
         })
         .await?;

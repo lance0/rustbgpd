@@ -28,8 +28,10 @@ resolved.
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does
   not reject LOCAL_PREF from eBGP peers because session type (iBGP vs
   eBGP) is not yet fully distinguished. Will be enforced post-v1.
-- **No gRPC TLS.** Server listens in plaintext. TLS and mTLS are
-  post-v1 scope. Default bind is localhost only.
+- **No native gRPC TLS.** The daemon defaults to a local Unix domain
+  socket and supports optional bearer-token auth on configured listeners,
+  but TCP listeners are still plaintext. Use local UDS access or an
+  mTLS proxy for remote management. Native TLS/mTLS is post-v1 scope.
 - **BMP drop/replay counters are not exported yet.** BMP channel-full
   conditions are logged, but no dedicated Prometheus counter currently tracks
   dropped/replayed BMP events for operational alerting.
@@ -78,18 +80,6 @@ resolved.
 - **Route Refresh is unconditional.** The ROUTE-REFRESH capability
   (code 2) is always advertised. Inbound route refresh requests check
   peer capability, but there is no config option to disable the feature.
-- **Add-Path via gRPC AddNeighbor defaults to disabled.** Dynamic peers
-  created via the gRPC `AddNeighbor` RPC do not enable Add-Path receive
-  or send. TOML config with `[neighbors.add_path]` is the only way
-  to enable it currently.
-- **Transparent route-server mode is unicast-only.** `route_server_client`
-  preserves original next hop and skips automatic local-AS prepend for
-  eBGP unicast export only. FlowSpec still uses the standard eBGP prepend
-  behavior. Transparent FlowSpec export is deferred.
-- **`route_server_client` not exposed via gRPC.** Dynamic peers created
-  via `AddNeighbor` always default to `route_server_client = false`.
-  Only static TOML neighbors can enable transparent route-server mode.
-  Exposing it in the proto and `NeighborService` is a small follow-up.
 - **TCP-AO not supported for RTR connections.** RPKI cache server
   connections use plain TCP. TCP-AO (RFC 5925) is not supported for
   either BGP or RTR sessions. Use network-level access controls or

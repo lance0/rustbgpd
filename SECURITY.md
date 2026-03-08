@@ -52,8 +52,11 @@ input from the network. It runs under continuous fuzzing in CI.
 - **TCP MD5 (RFC 2385):** Supported. Linux only.
 - **GTSM (RFC 5082):** Supported. Configurable per peer.
 - **TCP-AO (RFC 5925):** Not v1. Roadmap item.
-- **gRPC:** Localhost-only by default. TLS optional for non-localhost.
-  No auth/authz model in v1.
+- **gRPC:** Unix domain socket by default (local-only). TCP listeners
+  are opt-in via config. Per-listener bearer-token authentication is
+  available via `token_file`. No native mTLS or fine-grained per-RPC
+  authorization yet -- use an mTLS proxy (see `examples/envoy-mtls/`)
+  for remote access.
 
 ### Rate Limiting
 

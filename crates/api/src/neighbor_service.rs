@@ -145,6 +145,10 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         families,
         remove_private_as: remove_private_as_to_string(info.remove_private_as),
         peer_group: info.peer_group.clone().unwrap_or_default(),
+        route_server_client: info.route_server_client,
+        add_path_receive: info.add_path_receive,
+        add_path_send: info.add_path_send,
+        add_path_send_max: info.add_path_send_max,
     };
 
     let state = match info.state {
@@ -203,6 +207,12 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
                 config.remote_asn, self.local_asn
             )));
         }
+        if config.route_server_client && config.remote_asn == self.local_asn {
+            return Err(Status::invalid_argument(format!(
+                "route_server_client requires eBGP (remote_asn {} == local asn {})",
+                config.remote_asn, self.local_asn
+            )));
+        }
 
         let peer_config = PeerManagerNeighborConfig {
             address,
@@ -236,11 +246,11 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             gr_restart_eligible: false,
             local_ipv6_nexthop: None,
             route_reflector_client: false,
-            route_server_client: false,
+            route_server_client: config.route_server_client,
             remove_private_as,
-            add_path_receive: false,
-            add_path_send: false,
-            add_path_send_max: 0,
+            add_path_receive: config.add_path_receive,
+            add_path_send: config.add_path_send,
+            add_path_send_max: config.add_path_send_max,
             import_policy: None,
             export_policy: None,
         };
@@ -493,6 +503,7 @@ mod tests {
                 families: Vec::new(),
                 peer_group: String::new(),
                 remove_private_as: String::new(),
+                ..Default::default()
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -513,6 +524,7 @@ mod tests {
                 families: Vec::new(),
                 peer_group: String::new(),
                 remove_private_as: String::new(),
+                ..Default::default()
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -592,6 +604,10 @@ mod tests {
                     max_prefixes: None,
                     families: vec![(Afi::Ipv4, Safi::Unicast)],
                     remove_private_as: RemovePrivateAs::Disabled,
+                    route_server_client: false,
+                    add_path_receive: false,
+                    add_path_send: false,
+                    add_path_send_max: 0,
                     updates_received: 0,
                     updates_sent: 0,
                     notifications_received: 0,
@@ -634,6 +650,10 @@ mod tests {
             max_prefixes: None,
             families: vec![(Afi::Ipv4, Safi::Unicast), (Afi::Ipv6, Safi::Unicast)],
             remove_private_as: RemovePrivateAs::All,
+            route_server_client: false,
+            add_path_receive: false,
+            add_path_send: false,
+            add_path_send_max: 0,
             updates_received: 0,
             updates_sent: 0,
             notifications_received: 0,
@@ -666,6 +686,7 @@ mod tests {
                 families: Vec::new(),
                 peer_group: String::new(),
                 remove_private_as: String::new(),
+                ..Default::default()
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -702,6 +723,7 @@ mod tests {
                 families: Vec::new(),
                 peer_group: String::new(),
                 remove_private_as: "bogus".into(),
+                ..Default::default()
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
@@ -722,10 +744,33 @@ mod tests {
                 families: Vec::new(),
                 peer_group: String::new(),
                 remove_private_as: "all".into(),
+                ..Default::default()
             }),
         });
         let err = svc.add_neighbor(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("requires eBGP"));
+    }
+
+    #[tokio::test]
+    async fn add_neighbor_rejects_route_server_client_on_ibgp() {
+        let svc = make_service();
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 65001,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                peer_group: String::new(),
+                remove_private_as: String::new(),
+                route_server_client: true,
+                ..Default::default()
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("route_server_client"));
     }
 }
