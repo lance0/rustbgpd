@@ -965,6 +965,28 @@ async fn reload_config(
         changed = diff.changed.len(),
         "reconciling neighbors after config reload"
     );
+    for n in &diff.added {
+        info!(address = %n.address, asn = n.remote_asn, "neighbor added");
+    }
+    for addr in &diff.removed {
+        info!(address = %addr, "neighbor removed");
+    }
+    // Build old neighbor map for field-level diffing
+    let old_map: std::collections::HashMap<&str, &config::Neighbor> = current
+        .neighbors
+        .iter()
+        .map(|n| (n.address.as_str(), n))
+        .collect();
+    for n in &diff.changed {
+        if let Some(old_n) = old_map.get(n.address.as_str()) {
+            let changes = config::describe_neighbor_changes(old_n, n);
+            info!(
+                address = %n.address,
+                changes = %changes.join(", "),
+                "neighbor changed"
+            );
+        }
+    }
 
     let peer_configs = match new_config.resolved_neighbors() {
         Ok(p) => p,

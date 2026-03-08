@@ -169,7 +169,7 @@ get blog posts written and make operators switch.
 #### Debugging & Observability
 
 - [ ] **Policy trace / route explain** — `rustbgpctl route explain 203.0.113.0/24`: show the route's full journey — which peer announced it, import policy evaluation step-by-step (which statement matched, what modifications applied), best-path selection with ranked candidates and tie-break reasons, then per-peer export policy evaluation showing why it was or wasn't advertised to each neighbor. No BGP daemon does this well. This is the flagship feature.
-- [ ] **Config diff on SIGHUP** — log exactly what changed on reload: "neighbor 10.0.0.2: hold_time 90->45, added to peer-group rs-clients". Currently operators have to guess what a reload did.
+- [x] **Config diff on SIGHUP** — field-level change logging on reload: each changed neighbor logs exactly which fields differ (e.g. "hold_time: Some(90) → Some(45), families: [...] → [...]"). Sensitive fields (md5_password) log `<changed>` without revealing values.
 - [ ] **Per-peer log filtering** — `rustbgpctl logs --peer 10.0.0.2` or structured log field `peer=10.0.0.2` that makes grep/jq filtering trivial. Currently all peers log to the same stream.
 - [ ] **Route diff on policy change** — after hot-applying an export policy change, log a summary: "export policy changed: 12 routes newly advertised to 10.0.0.2, 3 routes withdrawn". Currently operators see the recomputation but not the outcome.
 
@@ -178,7 +178,7 @@ get blog posts written and make operators switch.
 - [x] **Live TUI dashboard** — `rustbgpctl top`: a terminal UI (ratatui) showing sessions, prefix counts, message rates per peer, RPKI VRP counts, route events — all updating live via polling + WatchRoutes stream. Peer table with sort/navigate/detail, toggleable events panel, help overlay. Configurable poll interval (`-i`).
 - [ ] **Built-in looking glass** — `rustbgpd --looking-glass :8080`: read-only HTTP/JSON API for NOC dashboards and public looking glass pages. Single binary, zero config. IXes would love this for member-facing route queries.
 - [ ] **Config snippets / examples in error messages** — when a gRPC call fails validation, include a working example in the error detail: "invalid families value; try: `families: [\"ipv4_unicast\", \"ipv6_unicast\"]`"
-- [ ] **Neighbor auto-discovery logging** — when a peer connects that isn't configured, log it clearly with suggested config: "unknown peer 10.0.0.5 AS 65005 connected; to accept: `rustbgpctl neighbor 10.0.0.5 add --asn 65005`". Helps operators bootstrap new peers.
+- [x] **Neighbor auto-discovery logging** — when an unknown peer connects, the warning includes a suggested `rustbgpctl neighbor <addr> add --asn <ASN>` command to help operators bootstrap new peers.
 
 ### P3.5 — Scale & Hardening
 

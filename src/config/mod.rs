@@ -509,6 +509,70 @@ pub struct NeighborDiff {
     pub changed: Vec<Neighbor>,
 }
 
+/// Describe which fields changed between two `Neighbor` configurations.
+///
+/// Returns a list of human-readable change descriptions (e.g. "`hold_time`: 90 → 45").
+pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    macro_rules! cmp_field {
+        ($field:ident) => {
+            if old.$field != new.$field {
+                changes.push(format!(
+                    "{}: {:?} → {:?}",
+                    stringify!($field),
+                    old.$field,
+                    new.$field
+                ));
+            }
+        };
+    }
+
+    cmp_field!(remote_asn);
+    cmp_field!(description);
+    cmp_field!(peer_group);
+    cmp_field!(hold_time);
+    cmp_field!(max_prefixes);
+    cmp_field!(ttl_security);
+    cmp_field!(families);
+    cmp_field!(graceful_restart);
+    cmp_field!(gr_restart_time);
+    cmp_field!(gr_stale_routes_time);
+    cmp_field!(llgr_stale_time);
+    cmp_field!(local_ipv6_nexthop);
+    cmp_field!(route_reflector_client);
+    cmp_field!(route_server_client);
+    cmp_field!(remove_private_as);
+    cmp_field!(add_path);
+
+    // md5_password: log change without revealing values
+    if old.md5_password != new.md5_password {
+        changes.push("md5_password: <changed>".to_string());
+    }
+
+    // Policy changes: summarize rather than dump full config
+    if old.import_policy != new.import_policy {
+        changes.push("import_policy: <changed>".to_string());
+    }
+    if old.export_policy != new.export_policy {
+        changes.push("export_policy: <changed>".to_string());
+    }
+    if old.import_policy_chain != new.import_policy_chain {
+        changes.push(format!(
+            "import_policy_chain: {:?} → {:?}",
+            old.import_policy_chain, new.import_policy_chain
+        ));
+    }
+    if old.export_policy_chain != new.export_policy_chain {
+        changes.push(format!(
+            "export_policy_chain: {:?} → {:?}",
+            old.export_policy_chain, new.export_policy_chain
+        ));
+    }
+
+    changes
+}
+
 /// Compare two neighbor lists and return the differences.
 ///
 /// Two neighbors with the same address but different configuration

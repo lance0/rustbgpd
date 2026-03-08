@@ -639,7 +639,13 @@ impl PeerManager {
 
     async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: IpAddr) {
         let Some(managed) = self.peers.get_mut(&peer_addr) else {
-            warn!(%peer_addr, "inbound connection from unknown peer, dropping");
+            warn!(
+                %peer_addr,
+                hint = %format_args!(
+                    "to accept: rustbgpctl neighbor {peer_addr} add --asn <REMOTE_ASN>"
+                ),
+                "inbound connection from unknown peer, dropping"
+            );
             return;
         };
 

@@ -2100,6 +2100,40 @@ fn diff_neighbors_no_changes() {
 }
 
 #[test]
+fn describe_neighbor_changes_detects_field_diffs() {
+    let old = test_neighbor("10.0.0.1", 65001);
+    let mut new = old.clone();
+    new.remote_asn = 65099;
+    new.hold_time = Some(45);
+    new.families = vec!["ipv4_unicast".into(), "ipv6_unicast".into()];
+
+    let changes = super::describe_neighbor_changes(&old, &new);
+    assert_eq!(changes.len(), 3);
+    assert!(changes[0].contains("remote_asn"));
+    assert!(changes[1].contains("hold_time"));
+    assert!(changes[2].contains("families"));
+}
+
+#[test]
+fn describe_neighbor_changes_empty_when_equal() {
+    let n = test_neighbor("10.0.0.1", 65001);
+    let changes = super::describe_neighbor_changes(&n, &n);
+    assert!(changes.is_empty());
+}
+
+#[test]
+fn describe_neighbor_changes_hides_md5_value() {
+    let old = test_neighbor("10.0.0.1", 65001);
+    let mut new = old.clone();
+    new.md5_password = Some("secret".into());
+
+    let changes = super::describe_neighbor_changes(&old, &new);
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0].contains("<changed>"));
+    assert!(!changes[0].contains("secret"));
+}
+
+#[test]
 fn config_round_trips_through_toml() {
     let config = parse(valid_toml()).unwrap();
     let toml_str = toml::to_string_pretty(&config).unwrap();
