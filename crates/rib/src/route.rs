@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rustbgpd_wire::{
@@ -27,7 +28,11 @@ pub struct Route {
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes (ORIGIN, `AS_PATH`, communities, etc.).
-    pub attributes: Vec<PathAttribute>,
+    ///
+    /// Wrapped in `Arc` for cheap cloning when routes are copied between
+    /// Adj-RIB-In, Loc-RIB, and Adj-RIB-Out. Use `Arc::make_mut()` for
+    /// the rare cases that need mutation (LLGR community injection).
+    pub attributes: Arc<Vec<PathAttribute>>,
     /// When this route was received (monotonic clock).
     pub received_at: Instant,
     /// How this route was learned (eBGP, iBGP, or locally originated).

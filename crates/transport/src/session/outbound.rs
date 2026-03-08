@@ -573,7 +573,7 @@ impl PeerSession {
         let route_server_client = self.config.route_server_client;
         let mut attrs = Vec::new();
 
-        for attr in &route.attributes {
+        for attr in route.attributes.iter() {
             match attr {
                 PathAttribute::AsPath(as_path) => {
                     if is_ebgp && !route_server_client {

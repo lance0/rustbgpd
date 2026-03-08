@@ -209,6 +209,7 @@ impl Default for LocRib {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_wire::{
@@ -225,13 +226,13 @@ mod tests {
             prefix: Prefix::V4(prefix),
             next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
-            attributes: vec![
+            attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65001])],
                 }),
                 PathAttribute::LocalPref(local_pref),
-            ],
+            ]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,

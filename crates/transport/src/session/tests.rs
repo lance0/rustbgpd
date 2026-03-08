@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use rustbgpd_fsm::PeerConfig;
@@ -144,14 +145,14 @@ fn make_route(local_pref: u32) -> Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
             PathAttribute::LocalPref(local_pref),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -341,10 +342,10 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -484,13 +485,13 @@ fn ibgp_default_local_pref_when_missing() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65002])],
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -518,7 +519,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -563,10 +564,10 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ibgp,
         peer_router_id: source_id,
@@ -685,12 +686,12 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: IpAddr::V6(v6_nh),
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            attributes: vec![
+            attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65002])],
                 }),
-            ],
+            ]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -747,12 +748,12 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             prefix: Prefix::V6(Ipv6Prefix::new(v6_nh, 64)),
             next_hop: IpAddr::V6(v6_nh),
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
-            attributes: vec![
+            attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65002])],
                 }),
-            ],
+            ]),
             received_at: Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1150,13 +1151,13 @@ async fn err_denied_replacement_is_swept_at_eorr() {
                 prefix: Prefix::V4(denied_prefix),
                 next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
                 peer,
-                attributes: vec![
+                attributes: Arc::new(vec![
                     PathAttribute::Origin(Origin::Igp),
                     PathAttribute::AsPath(AsPath {
                         segments: vec![AsPathSegment::AsSequence(vec![65002])],
                     }),
                     PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-                ],
+                ]),
                 received_at: Instant::now(),
                 origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
                 peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1626,14 +1627,14 @@ fn ibgp_unaffected() {
     let mut session = make_test_session(65001, 65001);
     session.config.remove_private_as = RemovePrivateAs::All;
     let mut route = make_route(100);
-    route.attributes = vec![
+    route.attributes = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64512])],
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
         PathAttribute::LocalPref(100),
-    ];
+    ]);
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
     let as_path = attrs
@@ -1656,13 +1657,13 @@ fn route_server_skipped() {
     session.config.route_server_client = true;
     session.config.remove_private_as = RemovePrivateAs::All;
     let mut route = make_route(100);
-    route.attributes = vec![
+    route.attributes = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64512])],
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-    ];
+    ]);
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
     let as_path = attrs
         .iter()
@@ -1718,13 +1719,13 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
     let mut session = make_test_session(100, 200);
     session.config.remove_private_as = RemovePrivateAs::All;
     let mut route = make_route(100);
-    route.attributes = vec![
+    route.attributes = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![64512, 65535])],
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
-    ];
+    ]);
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
     let as_path = attrs
         .iter()

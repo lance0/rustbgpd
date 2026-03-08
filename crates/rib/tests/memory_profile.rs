@@ -5,6 +5,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
@@ -110,7 +111,7 @@ fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
-        attributes: attrs.to_vec(),
+        attributes: Arc::new(attrs.to_vec()),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(10, 0, peer_idx as u8, 1),

@@ -138,7 +138,7 @@ pub fn encode_peer_index_table(
 /// - IPv6: `PathAttribute::MpReachNlri` with IPv6 next-hop, empty NLRI
 #[must_use]
 pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
-    let mut attrs = route.attributes.clone();
+    let mut attrs = (*route.attributes).clone();
 
     match route.prefix {
         Prefix::V4(_) => {
@@ -400,6 +400,7 @@ fn prefix_family_sort_key(prefix: Prefix) -> (u8, Vec<u8>, u8) {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_rib::route::{Route, RouteOrigin};
@@ -426,13 +427,13 @@ mod tests {
             prefix,
             next_hop,
             peer,
-            attributes: vec![
+            attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],
                 }),
                 PathAttribute::LocalPref(100),
-            ],
+            ]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::new(10, 0, 0, 1),

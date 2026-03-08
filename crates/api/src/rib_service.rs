@@ -135,7 +135,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut extended_communities = Vec::new();
     let mut large_communities = Vec::new();
 
-    for attr in &route.attributes {
+    for attr in route.attributes.iter() {
         match attr {
             PathAttribute::Origin(o) => origin = *o as u32,
             PathAttribute::AsPath(path) => {
@@ -640,12 +640,13 @@ mod tests {
     fn filter_routes_unspecified_returns_all() {
         use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
         use std::net::Ipv4Addr;
+        use std::sync::Arc;
 
         let v4 = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: "10.0.0.1".parse().unwrap(),
             peer: "10.0.0.1".parse().unwrap(),
-            attributes: vec![],
+            attributes: Arc::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -658,7 +659,7 @@ mod tests {
             prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
             next_hop: "2001:db8::1".parse().unwrap(),
             peer: "2001:db8::1".parse().unwrap(),
-            attributes: vec![],
+            attributes: Arc::new(vec![]),
             received_at: std::time::Instant::now(),
             origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,

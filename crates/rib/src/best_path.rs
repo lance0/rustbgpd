@@ -109,6 +109,7 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_wire::{AsPath, AsPathSegment, Ipv4Prefix, Origin, PathAttribute, Prefix};
@@ -121,13 +122,13 @@ mod tests {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
-            attributes: vec![
+            attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath {
                     segments: vec![AsPathSegment::AsSequence(vec![65001])],
                 }),
                 PathAttribute::LocalPref(100),
-            ],
+            ]),
             received_at: Instant::now(),
             origin_type: RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -139,31 +140,28 @@ mod tests {
     }
 
     fn with_local_pref(mut r: Route, lp: u32) -> Route {
-        r.attributes
-            .retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
-        r.attributes.push(PathAttribute::LocalPref(lp));
+        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
+        Arc::make_mut(&mut r.attributes).push(PathAttribute::LocalPref(lp));
         r
     }
 
     fn with_as_path(mut r: Route, asns: Vec<u32>) -> Route {
-        r.attributes
-            .retain(|a| !matches!(a, PathAttribute::AsPath(_)));
-        r.attributes.push(PathAttribute::AsPath(AsPath {
+        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::AsPath(_)));
+        Arc::make_mut(&mut r.attributes).push(PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(asns)],
         }));
         r
     }
 
     fn with_origin(mut r: Route, origin: Origin) -> Route {
-        r.attributes
-            .retain(|a| !matches!(a, PathAttribute::Origin(_)));
-        r.attributes.push(PathAttribute::Origin(origin));
+        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::Origin(_)));
+        Arc::make_mut(&mut r.attributes).push(PathAttribute::Origin(origin));
         r
     }
 
     fn with_med(mut r: Route, med: u32) -> Route {
-        r.attributes.retain(|a| !matches!(a, PathAttribute::Med(_)));
-        r.attributes.push(PathAttribute::Med(med));
+        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::Med(_)));
+        Arc::make_mut(&mut r.attributes).push(PathAttribute::Med(med));
         r
     }
 
@@ -232,8 +230,7 @@ mod tests {
     fn default_local_pref_when_absent() {
         // Route with no LOCAL_PREF attribute should default to 100
         let mut a = base_route(Ipv4Addr::new(1, 0, 0, 1));
-        a.attributes
-            .retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
+        Arc::make_mut(&mut a.attributes).retain(|a| !matches!(a, PathAttribute::LocalPref(_)));
         let b = with_local_pref(base_route(Ipv4Addr::new(1, 0, 0, 2)), 100);
         // Same local_pref, same as_path, same origin, no MED → peer tiebreak
         assert_eq!(best_path_cmp(&a, &b), Ordering::Less);
@@ -286,16 +283,14 @@ mod tests {
     }
 
     fn with_cluster_list(mut r: Route, ids: Vec<Ipv4Addr>) -> Route {
-        r.attributes
-            .retain(|a| !matches!(a, PathAttribute::ClusterList(_)));
-        r.attributes.push(PathAttribute::ClusterList(ids));
+        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::ClusterList(_)));
+        Arc::make_mut(&mut r.attributes).push(PathAttribute::ClusterList(ids));
         r
     }
 
     fn with_originator_id(mut r: Route, id: Ipv4Addr) -> Route {
-        r.attributes
-            .retain(|a| !matches!(a, PathAttribute::OriginatorId(_)));
-        r.attributes.push(PathAttribute::OriginatorId(id));
+        Arc::make_mut(&mut r.attributes).retain(|a| !matches!(a, PathAttribute::OriginatorId(_)));
+        Arc::make_mut(&mut r.attributes).push(PathAttribute::OriginatorId(id));
         r
     }
 
@@ -425,6 +420,7 @@ mod tests {
 #[cfg(test)]
 mod proptests {
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use proptest::prelude::*;
@@ -487,7 +483,7 @@ mod proptests {
                         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
                         next_hop: IpAddr::V4(peer),
                         peer: IpAddr::V4(peer),
-                        attributes,
+                        attributes: Arc::new(attributes),
                         received_at: Instant::now(),
                         origin_type,
                         peer_router_id: Ipv4Addr::UNSPECIFIED,

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{
     Afi, Event, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NotificationCode,
     NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode,
@@ -402,7 +404,7 @@ impl PeerSession {
                     prefix,
                     next_hop,
                     peer: self.peer_ip,
-                    attributes: attrs,
+                    attributes: Arc::new(attrs),
                     received_at: now,
                     origin_type: route_origin,
                     peer_router_id: self
@@ -546,7 +548,7 @@ impl PeerSession {
                                 prefix: entry.prefix,
                                 next_hop,
                                 peer: self.peer_ip,
-                                attributes: attrs,
+                                attributes: Arc::new(attrs),
                                 received_at: now,
                                 origin_type: route_origin,
                                 peer_router_id: self

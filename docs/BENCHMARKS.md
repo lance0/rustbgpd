@@ -166,51 +166,56 @@ Measured using a tracking global allocator that counts every `alloc` and
 
 | Type | Size |
 |------|------|
-| `Route` | 104 bytes |
+| `Route` | 88 bytes |
 | `Prefix` | 18 bytes |
 | `PathAttribute` | 72 bytes |
 | `AsPath` | 24 bytes |
 | `AdjRibIn` | 216 bytes |
 | `LocRib` | 96 bytes |
 
+`Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
+Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via
+reference counting. Mutation uses `Arc::make_mut()` (copy-on-write).
+
 ### Per-Route Heap Allocation
 
 | Attribute set | Heap | Stack | Total |
 |---------------|------|-------|-------|
-| Typical (6 attrs, 3-ASN path, 2 communities) | 484 B | 104 B | 588 B |
-| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 696 B | 104 B | 800 B |
+| Typical (6 attrs, 3-ASN path, 2 communities) | 524 B | 88 B | 612 B |
+| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 736 B | 88 B | 824 B |
 
 ### AdjRibIn at Scale (single peer, typical attrs)
 
 | Routes | Resident | Per-route |
 |--------|----------|-----------|
-| 10,000 | 8.1 MB | 850 B |
-| 100,000 | 74.8 MB | 784 B |
-| 500,000 | 450 MB | 943 B |
-| 900,000 | 648 MB | 755 B |
+| 10,000 | 8.2 MB | 864 B |
+| 100,000 | 76.7 MB | 803 B |
+| 500,000 | 453 MB | 950 B |
+| 900,000 | 667 MB | 776 B |
 
-Per-route cost is ~755-943 bytes including HashMap and prefix index overhead.
+Per-route cost is ~776-950 bytes including HashMap and prefix index overhead.
 Variance comes from HashMap load factor at different sizes.
 
 ### Full RIB: 2 Peers + LocRib (typical attrs)
 
 | Prefixes | Total memory | Per-prefix |
 |----------|-------------|------------|
-| 100,000 | 212 MB | 2.2 KB |
-| 500,000 | 1.23 GB | 2.6 KB |
-| 900,000 | 1.80 GB | 2.1 KB |
+| 100,000 | 167 MB | 1.7 KB |
+| 500,000 | 1.02 GB | 2.1 KB |
+| 900,000 | 1.41 GB | 1.6 KB |
 
 A full Internet table (900k prefixes) with 2 peers and best-path selection uses
-**1.8 GB**. Each prefix stores 3 Route instances (2x Adj-RIB-In + 1x Loc-RIB)
-plus HashMap/index overhead. This is 4-9x less than GoBGP (8-16+ GB) but larger
-than BIRD (~325 MB for 30 peers) which shares path attribute storage across
-routes with identical attributes.
+**1.41 GB**. Each prefix stores 3 Route instances (2x Adj-RIB-In + 1x Loc-RIB)
+but the `Arc<Vec<PathAttribute>>` sharing means the Loc-RIB copy does not
+duplicate the attribute allocation. This is 6-11x less than GoBGP (8-16+ GB)
+but larger than BIRD (~325 MB for 30 peers) which shares path attribute storage
+across routes with identical attributes.
 
 ### Optimization Opportunities
 
 - **Path attribute interning** — routes from the same peer often share identical
-  attributes. A `HashMap<Arc<Vec<PathAttribute>>, ...>` dedup table could reduce
-  memory 3-5x for large tables, approaching BIRD-class efficiency.
+  attributes. A dedup table could reduce memory 3-5x for large tables,
+  approaching BIRD-class efficiency.
 - **HashMap pre-sizing** — `with_capacity()` on AdjRibIn construction would
   reduce peak allocation by avoiding rehash copies.
 
@@ -255,7 +260,7 @@ most natural comparison. Published bgperf2 results for GoBGP 2.29.0:
 |--------|-------|----------|-------|
 | Route ingestion (100k routes, 10 peers) | ~11k routes/sec | 2.6M routes/sec (insert only) | GoBGP is end-to-end; rustbgpd is RIB insert micro-benchmark |
 | CPU usage (100k routes) | 1450% (all cores) | Single-threaded | GoBGP uses goroutine-per-peer; rustbgpd uses single-owner RIB |
-| Memory (full table, ~900k) | 8-16+ GB | 1.8 GB (2 peers + LocRib) | 4-9x less than GoBGP |
+| Memory (full table, ~900k) | 8-16+ GB | 1.41 GB (2 peers + LocRib) | 6-11x less than GoBGP |
 | Full table convergence | Test abandoned (too slow) | ~1.5s estimated (pipeline extrapolation) | GoBGP was excluded from full-table rounds of bgperf2 |
 
 GoBGP's Go runtime incurs GC pressure, interface boxing overhead, and
@@ -287,7 +292,7 @@ enough for full-table scale. The remaining unknowns are:
 
 1. **End-to-end throughput** — how fast can the full daemon ingest routes from
    live BGP peers? This requires bgperf2 or equivalent system benchmarks.
-2. **Memory footprint** — 1.8 GB for a full table with 2 peers. 4-9x less than
+2. **Memory footprint** — 1.41 GB for a full table with 2 peers. 6-11x less than
    GoBGP, but larger than BIRD. Path attribute interning could close the gap.
 3. **Multi-peer scaling** — the single-owner RIB avoids lock contention but
    serializes all RIB operations through one tokio task. Channel backpressure

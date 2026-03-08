@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 
@@ -229,8 +230,8 @@ impl AdjRibIn {
                 route.is_stale = false;
                 route.is_llgr_stale = true;
                 // Add LLGR_STALE community
-                if let Some(PathAttribute::Communities(comms)) = route
-                    .attributes
+                let attrs = Arc::make_mut(&mut route.attributes);
+                if let Some(PathAttribute::Communities(comms)) = attrs
                     .iter_mut()
                     .find(|a| matches!(a, PathAttribute::Communities(_)))
                 {
@@ -240,9 +241,7 @@ impl AdjRibIn {
                             .insert((route.prefix, route.path_id));
                     }
                 } else {
-                    route
-                        .attributes
-                        .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
                     self.llgr_stale_local_tags
                         .insert((route.prefix, route.path_id));
                 }
@@ -388,7 +387,8 @@ impl AdjRibIn {
 /// Remove the `LLGR_STALE` community from a route's attributes, if present.
 fn remove_llgr_stale_community(route: &mut Route) {
     use rustbgpd_wire::{COMMUNITY_LLGR_STALE, PathAttribute};
-    for attr in &mut route.attributes {
+    use std::sync::Arc;
+    for attr in Arc::make_mut(&mut route.attributes) {
         if let PathAttribute::Communities(comms) = attr {
             comms.retain(|&c| c != COMMUNITY_LLGR_STALE);
         }
@@ -407,6 +407,7 @@ fn route_matches_family(route: &Route, family: (Afi, Safi)) -> bool {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
     use std::time::Instant;
 
     use rustbgpd_wire::{COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, PathAttribute};
@@ -418,7 +419,7 @@ mod tests {
             prefix: Prefix::V4(prefix),
             next_hop: IpAddr::V4(next_hop),
             peer: IpAddr::V4(next_hop),
-            attributes: vec![],
+            attributes: Arc::new(vec![]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -434,7 +435,7 @@ mod tests {
             prefix: Prefix::V6(prefix),
             next_hop: IpAddr::V6(next_hop),
             peer: IpAddr::V6(next_hop),
-            attributes: vec![],
+            attributes: Arc::new(vec![]),
             received_at: Instant::now(),
             origin_type: crate::route::RouteOrigin::Ebgp,
             peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -670,8 +671,7 @@ mod tests {
 
         let mut route = make_route(prefix, Ipv4Addr::new(10, 0, 0, 1));
         route.is_llgr_stale = true;
-        route
-            .attributes
+        Arc::make_mut(&mut route.attributes)
             .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
         rib.insert(route);
 

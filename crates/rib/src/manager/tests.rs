@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_wire::{
@@ -66,7 +67,7 @@ fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(next_hop),
         peer: IpAddr::V4(next_hop),
-        attributes: vec![],
+        attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -82,7 +83,7 @@ fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
         prefix: Prefix::V6(prefix),
         next_hop: IpAddr::V6(next_hop),
         peer: IpAddr::V6(next_hop),
-        attributes: vec![],
+        attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -98,13 +99,13 @@ fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref: u32) -> Ro
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(peer),
         peer: IpAddr::V4(peer),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001])],
             }),
             PathAttribute::LocalPref(local_pref),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -712,7 +713,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(next_hop),
         peer: IpAddr::V4(next_hop),
-        attributes: vec![],
+        attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ibgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -974,7 +975,7 @@ async fn local_route_sent_to_ibgp_peer() {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         peer: LOCAL_PEER,
-        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1013,7 +1014,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         peer: LOCAL_PEER,
-        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1131,10 +1132,10 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         peer: LOCAL_PEER,
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 1)),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -1199,7 +1200,7 @@ async fn withdraw_injected_removes_and_distributes() {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         peer: LOCAL_PEER,
-        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2737,7 +2738,7 @@ async fn distribute_changes_filters_unsendable_families() {
         prefix: Prefix::V6(v6_prefix),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         peer: source,
-        attributes: vec![],
+        attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2797,7 +2798,7 @@ async fn send_initial_table_filters_unsendable_families() {
         prefix: Prefix::V6(v6_prefix),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         peer: source,
-        attributes: vec![],
+        attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -2876,7 +2877,7 @@ async fn dual_stack_peer_receives_both_families() {
         prefix: Prefix::V6(v6_prefix),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
         peer: source,
-        attributes: vec![],
+        attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -3847,7 +3848,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         prefix: Prefix::V6(v6_prefix),
         next_hop: "2001:db8::1".parse().unwrap(),
         peer: source,
-        attributes: vec![],
+        attributes: Arc::new(vec![]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4559,7 +4560,7 @@ async fn rr_local_route_to_all_ibgp() {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         peer: LOCAL_PEER,
-        attributes: vec![PathAttribute::Origin(Origin::Igp)],
+        attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Local,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4593,13 +4594,13 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(peer),
         peer: IpAddr::V4(peer),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(asns)],
             }),
             PathAttribute::LocalPref(100),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -4706,11 +4707,11 @@ fn validate_route_rpki_empty_as_path() {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
         peer: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath { segments: vec![] }),
             PathAttribute::LocalPref(100),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5078,13 +5079,13 @@ fn make_multipath_route(
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(peer),
         peer: IpAddr::V4(peer),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(asns)],
             }),
             PathAttribute::LocalPref(local_pref),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5108,13 +5109,13 @@ fn make_multipath_route_v6(
         prefix: Prefix::V6(prefix),
         next_hop: IpAddr::V6(next_hop),
         peer: IpAddr::V4(peer),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(asns)],
             }),
             PathAttribute::LocalPref(local_pref),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,
@@ -5753,13 +5754,13 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         prefix: Prefix::V6(prefix),
         next_hop: "2001:db8::1".parse().unwrap(),
         peer: IpAddr::V4(peer_addr),
-        attributes: vec![
+        attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
             PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![asn])],
             }),
             PathAttribute::LocalPref(local_pref),
-        ],
+        ]),
         received_at: Instant::now(),
         origin_type: crate::route::RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::UNSPECIFIED,

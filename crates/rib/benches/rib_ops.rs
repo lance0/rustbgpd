@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -43,7 +44,7 @@ fn make_route(prefix: Prefix, peer_idx: u32) -> Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
-        attributes: typical_attributes(peer_idx),
+        attributes: Arc::new(typical_attributes(peer_idx)),
         received_at: Instant::now(),
         origin_type: RouteOrigin::Ebgp,
         peer_router_id: Ipv4Addr::new(10, 0, peer_idx as u8, 1),
@@ -71,14 +72,14 @@ fn bench_best_path_cmp(c: &mut Criterion) {
 
     // LOCAL_PREF difference — early exit at step 1
     let mut b_lp = make_route(prefix, 2);
-    b_lp.attributes = vec![
+    b_lp.attributes = Arc::new(vec![
         PathAttribute::Origin(Origin::Igp),
         PathAttribute::AsPath(AsPath {
             segments: vec![AsPathSegment::AsSequence(vec![65002, 65100, 65200])],
         }),
         PathAttribute::NextHop(Ipv4Addr::new(10, 0, 2, 1)),
         PathAttribute::LocalPref(200),
-    ];
+    ]);
     group.bench_function("local_pref_diff", |bench| {
         bench.iter(|| {
             for _ in 0..1000 {

@@ -164,7 +164,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             prefix,
             next_hop: next_hop_ip,
             peer: LOCAL_PEER,
-            attributes,
+            attributes: std::sync::Arc::new(attributes),
             received_at: std::time::Instant::now(),
             origin_type: RouteOrigin::Local,
             peer_router_id: std::net::Ipv4Addr::UNSPECIFIED,

@@ -386,7 +386,7 @@ impl RibManager {
             // Apply export modifications
             let mut modified = (*candidate).clone();
             let nh_action = rustbgpd_policy::apply_modifications(
-                &mut modified.attributes,
+                std::sync::Arc::make_mut(&mut modified.attributes),
                 &result.modifications,
             );
             if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
@@ -503,8 +503,10 @@ impl RibManager {
 
         // Apply export modifications to a clone
         let mut modified = best.clone();
-        let nh_action =
-            rustbgpd_policy::apply_modifications(&mut modified.attributes, &result.modifications);
+        let nh_action = rustbgpd_policy::apply_modifications(
+            std::sync::Arc::make_mut(&mut modified.attributes),
+            &result.modifications,
+        );
         if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
             modified.next_hop = *addr;
         }
@@ -570,7 +572,7 @@ impl RibManager {
                         )),
                         next_hop: best.peer,
                         peer: best.peer,
-                        attributes: vec![],
+                        attributes: std::sync::Arc::new(vec![]),
                         received_at: best.received_at,
                         origin_type: best.origin_type,
                         peer_router_id: best.peer_router_id,
