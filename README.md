@@ -159,9 +159,10 @@ Seven services cover the full operational surface:
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 
 ```bash
-# Stream route changes in real time
-grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
-  localhost:50051 rustbgpd.v1.RibService/WatchRoutes
+# Stream route changes in real time over the default UDS listener
+grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
+  -import-path . -proto proto/rustbgpd.proto \
+  rustbgpd.v1.RibService/WatchRoutes
 ```
 
 Full API reference: [docs/API.md](docs/API.md)

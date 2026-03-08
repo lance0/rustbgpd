@@ -2,9 +2,19 @@
 
 rustbgpd exposes seven gRPC services over one or more configured listeners. The
 default listener is a local Unix domain socket at
-`/var/lib/rustbgpd/grpc.sock`. The examples below use
+`/var/lib/rustbgpd/grpc.sock`.
+
+For same-host administration, prefer UDS:
+
+```bash
+grpcurl -plaintext -unix /var/lib/rustbgpd/grpc.sock \
+  -import-path . -proto proto/rustbgpd.proto \
+  rustbgpd.v1.GlobalService/GetGlobal
+```
+
+The remaining examples below use
 [grpcurl](https://github.com/fullstorydev/grpcurl) against an explicit local
-TCP listener for readability:
+TCP listener for readability. Those examples require `grpc_tcp` to be enabled:
 
 ```toml
 [global.telemetry.grpc_tcp]

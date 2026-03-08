@@ -119,7 +119,8 @@ Decode UPDATEs. Store in Adj-RIB-In. Expose via gRPC.
    - Proto codegen via `tonic_build` in `build.rs`
    - `ListReceivedRoutes` with offset pagination (default page_size=100)
    - Other RibService RPCs return `UNIMPLEMENTED`
-   - Server on configurable `grpc_addr` (default `127.0.0.1:50051`)
+   - Server on configurable gRPC listeners (UDS by default, optional explicit
+     TCP listener via `grpc_tcp`)
    - CI updated with `protobuf-compiler`, Dockerfile updated for builder stage
 
 8. **Interop validation** — 15/15 automated tests pass

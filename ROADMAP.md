@@ -112,6 +112,7 @@ Items identified during review that are not correctness bugs but improve strictn
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
 - [x] **gRPC listener split** — each configured gRPC listener can now run in `read_only` or `read_write` mode, allowing monitoring/query exposure without exposing mutating control-plane RPCs
+- [ ] **Optional Prometheus listener** — `prometheus_addr` is currently mandatory, which adds unnecessary config and an extra HTTP bind even for simple lab or local-only deployments; make metrics serving explicitly optional or give it a safe disabled/defaulted mode
 - [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for operators who do not want an Envoy/nginx sidecar
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 

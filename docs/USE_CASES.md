@@ -8,6 +8,10 @@ sits alongside it as the programmable layer that your automation talks to. The
 edge router (FRR, BIRD, Junos, EOS) handles forwarding. rustbgpd handles the
 control plane logic that's too dynamic or too complex for static config files.
 
+Note: rustbgpd defaults to a local UDS gRPC listener. The `grpcurl` examples
+below that target `localhost:50051` are paired with config snippets that
+explicitly enable `[global.telemetry.grpc_tcp]`.
+
 ---
 
 ## Origin Story: Why rustbgpd Exists
