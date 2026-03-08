@@ -216,10 +216,10 @@ post-M12.
 
 **Should-test (important, lower blast radius):**
 
-- [ ] **M17: Add-Path multi-path send** (RFC 7911) — rank-based path IDs, multiple candidates advertised to FRR
-- [ ] **M18: Extended next-hop** (RFC 8950) — IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI`
-- [ ] **M19: Transparent route server** — skip ASN prepend, preserve original NEXT_HOP on eBGP re-advertisement
-- [ ] **M20: Private AS removal** — all three modes (`remove`, `all`, `replace`) validated against FRR
+- [x] **M17: Add-Path multi-path send** (RFC 7911) — rank-based path IDs, multiple candidates advertised to FRR, AS_PATH differentiation (15/15)
+- [x] **M18: Extended next-hop** (RFC 8950) — IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI`, capability negotiation (9/9)
+- [x] **M19: Transparent route server** — skip ASN prepend, preserve original NEXT_HOP on eBGP re-advertisement; FRR 10.x requires per-neighbor `no enforce-first-as` (13/13)
+- [x] **M20: Private AS removal** — all three modes (`remove`, `all`, `replace`) validated against FRR with all-private and mixed AS_PATHs (22/22)
 
 **Deferred (hard to interop-test or low wire-level risk):**
 
@@ -293,7 +293,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
-- [x] Automated interop test scripts (M1, M3, M4, M10, M11, M12)
+- [x] Automated interop test scripts (M1, M3, M4, M10–M20)
 - [ ] Binary releases (GitHub Releases with cross-compiled binaries)
 - [ ] Homebrew formula
 - [ ] crates.io publishing (`rustbgpd-wire` first, then workspace)

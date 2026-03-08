@@ -68,6 +68,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sockets, covering health, global, neighbor add, and soft-reset RPC paths.
 - **BMP transport-path tests.** Session-to-BMP emission points (PeerUp,
   PeerDown, RouteMonitoring) are now covered by transport crate tests.
+- **M17-M20 interop tests.** Four new containerlab test suites validated
+  against FRR 10.3.1: Add-Path multi-path send (15 assertions), Extended
+  Next-Hop dual-stack (9), Transparent Route Server with NH preservation and
+  AS_PATH transparency (13), Private AS Removal in remove/all/replace modes
+  (22). Total: 59 new interop assertions.
 
 ### Fixed
 
