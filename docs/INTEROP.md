@@ -22,6 +22,10 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m14-rr-frr.clab.yml` | Tested (M14) | Route Reflector (RFC 4456) | 3-node iBGP: RR + 2 clients | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m15-rr-frr.clab.yml` | Tested (M15) | Route Refresh (RFC 2918) | SoftResetIn via gRPC | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m16-llgr-frr.clab.yml` | Tested (M16) | LLGR (RFC 9494) | GR→LLGR transition, stale clearing | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m17-addpath-frr.clab.yml` | Tested (M17) | Add-Path (RFC 7911) | Multi-path send, distinct path_ids | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m19-routeserver-frr.clab.yml` | Tested (M19) | Transparent Route Server | No ASN prepend, NH preservation | Needs per-neighbor `no enforce-first-as` |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -1151,6 +1155,341 @@ Automated test: `bash tests/interop/scripts/test-m16-llgr-frr.sh` — **8 passed
 
 ---
 
+## M17 Test Procedures (Add-Path — RFC 7911)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m17-addpath-frr.clab.yml`
+
+### Network Layout
+
+```
+M17 Add-Path (4-node):
+
+  FRR-A (AS 65002)            rustbgpd (AS 65001)             FRR-Client (AS 65004)
+  eth1: 10.0.0.2/24  ────  eth1: 10.0.0.1/24                 add_path send=true
+                             eth2: 10.0.1.1/24  ────  ...       send_max=4
+  FRR-B (AS 65003)           eth3: 10.0.2.1/24  ────  eth1: 10.0.2.2/24
+  eth1: 10.0.1.2/24  ────
+```
+
+FRR-A and FRR-B both advertise 192.168.10.0/24 (shared prefix with different AS_PATHs).
+FRR-A also advertises 192.168.1.0/24; FRR-B also advertises 192.168.2.0/24.
+
+FRR-Client has `neighbor X addpath-rx-all-paths` to accept multiple paths.
+
+### Test 1: Routes from Both Source Peers
+
+Verify all 4 routes appear in Adj-RIB-In (2 from FRR-A, 2 from FRR-B).
+
+### Test 2: Multi-path on Client
+
+Verify FRR-Client receives 2 paths for 192.168.10.0/24.
+
+### Test 3: Distinct Path IDs
+
+Verify the 2 advertised routes for 192.168.10.0/24 have distinct `path_id` values.
+
+### Test 4: Unique Prefixes Forwarded
+
+Verify unique prefixes (192.168.1.0/24, 192.168.2.0/24) are advertised to the client.
+
+### Test 5: Different AS_PATHs
+
+Verify the two paths for 192.168.10.0/24 on FRR-Client have different AS_PATHs
+(one via AS 65002, one via AS 65003). Note: eBGP next-hop-self means both paths
+share the same next-hop (rustbgpd's address), so AS_PATH is the correct differentiator.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m17-addpath-frr.sh
+```
+
+---
+
+## M17 Add-Path FRR Test Results (2026-03-07, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m17-addpath-frr.sh` — **15 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment (FRR-A) | PASS | Established on first attempt |
+| Session establishment (FRR-B) | PASS | Established |
+| Session establishment (FRR-Client) | PASS | Established |
+| Routes received (4/4) | PASS | All 4 routes in RIB |
+| FRR-A 192.168.10.0 present | PASS | Shared prefix from source A |
+| FRR-A 192.168.1.0 present | PASS | Unique prefix from source A |
+| FRR-B 192.168.10.0 present | PASS | Shared prefix from source B |
+| FRR-B 192.168.2.0 present | PASS | Unique prefix from source B |
+| Multi-path on client (2 paths) | PASS | FRR-Client has 2 paths for 192.168.10.0/24 |
+| Distinct path_ids | PASS | 2 unique path IDs for shared prefix |
+| 192.168.1.0/24 forwarded | PASS | Unique prefix advertised to client |
+| 192.168.2.0/24 forwarded | PASS | Unique prefix advertised to client |
+| Path via AS 65002 | PASS | AS_PATH differentiation correct |
+| Path via AS 65003 | PASS | AS_PATH differentiation correct |
+
+---
+
+## M18 Test Procedures (Extended Next-Hop — RFC 8950)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m18-extnexthop-frr.clab.yml`
+
+### Network Layout
+
+```
+M18 Extended Next-Hop (dual-stack):
+
+  rustbgpd (AS 65001)               FRR (AS 65002)
+  eth1: 10.0.0.1/24                 eth1: 10.0.0.2/24
+  eth1: fd00::1/64                  eth1: fd00::2/64
+       │                                 │
+       └─────────── eth1 ────────────────┘
+```
+
+Both sides negotiate Extended Next-Hop capability. rustbgpd has
+`families = ["ipv4_unicast", "ipv6_unicast"]` and `local_ipv6_nexthop = "fd00::1"`.
+
+FRR has `capability extended-nexthop` and advertises:
+- IPv4: 192.168.1.0/24, 192.168.2.0/24
+- IPv6: 2001:db8:1::/48
+
+### Test 1: Session with Extended Next-Hop Capability
+
+Verify session reaches Established and Extended Next-Hop capability is negotiated.
+
+### Test 2: IPv4 Routes Received
+
+Verify both IPv4 prefixes are received.
+
+### Test 3: IPv6 Routes Received
+
+Verify the IPv6 prefix is received via MP_REACH_NLRI.
+
+### Test 4: Injected Route Reaches FRR
+
+Inject 10.99.0.0/24 via gRPC `AddPath` and verify FRR receives it.
+
+### Test 5: Extended Next-Hop Negotiation Succeeded
+
+Verify FRR receives the injected route (proves outbound encoding works with
+Extended Next-Hop negotiated).
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m18-extnexthop-frr.sh
+```
+
+---
+
+## M18 Extended Next-Hop FRR Test Results (2026-03-07, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m18-extnexthop-frr.sh` — **9 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment | PASS | Established on first attempt |
+| Routes received (3/3) | PASS | All 3 routes in RIB |
+| Session Established state | PASS | Via FRR neighbor JSON |
+| Extended Next-Hop capability | PASS | Present in neighbor capabilities |
+| IPv4 192.168.1.0 received | PASS | Standard IPv4 route |
+| IPv4 192.168.2.0 received | PASS | Standard IPv4 route |
+| IPv6 2001:db8:1:: received | PASS | Via MP_REACH_NLRI |
+| Injected route reaches FRR | PASS | 10.99.0.0/24 via AddPath |
+| Extended NH negotiation works | PASS | Route received with valid next-hop |
+
+---
+
+## M19 Test Procedures (Transparent Route Server)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m19-routeserver-frr.clab.yml`
+
+### Network Layout
+
+```
+M19 Transparent Route Server (3-node):
+
+  FRR-A (AS 65002)       rustbgpd RS (AS 65001)       FRR-B (AS 65003)
+  eth1: 10.0.0.2/24  ──  eth1: 10.0.0.1/24
+  route_server_client     eth2: 10.0.1.1/24  ──  eth1: 10.0.1.2/24
+                          ip_forward=1                 route_server_client
+```
+
+FRR-A advertises: 192.168.1.0/24, 192.168.2.0/24.
+FRR-B advertises: 192.168.3.0/24.
+
+Both peers are `route_server_client = true` on rustbgpd.
+
+### Route Server Nuances
+
+**Cross-subnet next-hop reachability:** Peers are on separate /24 subnets
+(containerlab point-to-point links). Because `route_server_client` preserves
+the original NEXT_HOP, FRR-B receives routes with NH=10.0.0.2 (a different
+subnet). Each FRR peer needs a static route to the other's subnet via
+rustbgpd, and rustbgpd needs `ip_forward=1`.
+
+**FRR enforce-first-as (critical):** FRR 10.x enables `enforce-first-as` by
+default. When rustbgpd (AS 65001) transparently forwards a route with
+AS_PATH `[65002]`, FRR-B rejects it with `"incorrect first AS (must be 65001)"`.
+The fix is `no neighbor X.X.X.X enforce-first-as` **per-neighbor** in each FRR
+config. The global `no bgp enforce-first-as` alone is insufficient in FRR 10.3.1.
+
+### Test 1: No ASN Prepend on FRR-B
+
+Verify routes from FRR-A arrive at FRR-B with AS_PATH `[65002]` (no 65001 inserted).
+
+### Test 2: NEXT_HOP Preserved on FRR-B
+
+Verify routes show NEXT_HOP = 10.0.0.2 (FRR-A's original address).
+
+### Test 3: No ASN Prepend on FRR-A
+
+Verify routes from FRR-B arrive at FRR-A with AS_PATH `[65003]`.
+
+### Test 4: NEXT_HOP Preserved on FRR-A
+
+Verify routes show NEXT_HOP = 10.0.1.2 (FRR-B's original address).
+
+### Test 5: All Prefixes Forwarded
+
+Verify both FRR-A prefixes (192.168.1.0/24, 192.168.2.0/24) are present on FRR-B.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m19-routeserver-frr.sh
+```
+
+---
+
+## M19 Route Server FRR Test Results (2026-03-07, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m19-routeserver-frr.sh` — **13 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment (FRR-A) | PASS | Established on first attempt |
+| Session establishment (FRR-B) | PASS | Established on first attempt |
+| Routes in RIB (3/3) | PASS | All routes from both peers |
+| FRR-B routes (3 total) | PASS | 1 local + 2 from FRR-A |
+| FRR-A routes (3 total) | PASS | 2 local + 1 from FRR-B |
+| AS_PATH on FRR-B contains 65002 | PASS | Origin AS preserved |
+| AS_PATH on FRR-B no 65001 | PASS | Route server ASN not prepended |
+| NEXT_HOP on FRR-B = 10.0.0.2 | PASS | FRR-A's original NH preserved |
+| AS_PATH on FRR-A contains 65003 | PASS | Origin AS preserved |
+| AS_PATH on FRR-A no 65001 | PASS | Route server ASN not prepended |
+| NEXT_HOP on FRR-A = 10.0.1.2 | PASS | FRR-B's original NH preserved |
+| 192.168.1.0/24 on FRR-B | PASS | Prefix forwarded |
+| 192.168.2.0/24 on FRR-B | PASS | Prefix forwarded |
+
+---
+
+## M20 Test Procedures (Private AS Removal)
+
+### Prerequisites (in addition to M1)
+
+- `grpcurl` installed on the host
+- Topology deployed: `containerlab deploy -t tests/interop/m20-privateas-frr.clab.yml`
+
+### Network Layout
+
+```
+M20 Private AS Removal (5-node):
+
+  FRR-Source (AS 64512)  ──  rustbgpd (AS 65001)  ──  FRR-Remove  (AS 65002)
+  private AS, advertises       │                       remove_private_as = "remove"
+  192.168.1.0/24 [64512]       │
+  192.168.2.0/24 [64512,64000] ├──  FRR-All     (AS 65003)
+  (route-map prepend)          │    remove_private_as = "all"
+                               │
+                               └──  FRR-Replace (AS 65004)
+                                    remove_private_as = "replace"
+```
+
+FRR-Source (AS 64512, private) advertises two prefixes:
+- 192.168.1.0/24 with AS_PATH `[64512]` (all-private)
+- 192.168.2.0/24 with AS_PATH `[64512, 64000]` (mixed — 64000 is public, prepended via route-map)
+
+Three observer peers each use a different `remove_private_as` mode:
+- **remove**: Strip private ASNs only when the ENTIRE original path is private.
+- **all**: Strip all private ASNs unconditionally.
+- **replace**: Replace each private ASN with the local ASN (65001).
+
+### Expected AS_PATHs (after rustbgpd prepends its own AS 65001)
+
+| Prefix | Loc-RIB | remove outbound | all outbound | replace outbound |
+|--------|---------|-----------------|--------------|------------------|
+| 192.168.1.0/24 | `[64512]` | `[65001]` | `[65001]` | `[65001, 65001]` |
+| 192.168.2.0/24 | `[64512, 64000]` | `[65001, 64512, 64000]` | `[65001, 64000]` | `[65001, 65001, 64000]` |
+
+Note: The public ASN in the mixed path must NOT be in the 64512-65534 or
+4200000000-4294967294 ranges (RFC 6996 private ASN ranges). The test uses
+64000 which is below the private range threshold.
+
+### Test 1: Source Routes Received
+
+Verify both prefixes arrive in rustbgpd's Adj-RIB-In.
+
+### Test 2: Remove Mode
+
+Verify 192.168.1.0/24 has private ASNs removed (all-private path) and
+192.168.2.0/24 retains private ASN 64512 (mixed path, not stripped in "remove" mode).
+
+### Test 3: All Mode
+
+Verify both prefixes have all private ASNs stripped. Public ASN 64000 preserved.
+
+### Test 4: Replace Mode
+
+Verify private ASNs are replaced with the local ASN (65001). Public ASN preserved.
+
+### Automated Test Script
+
+```sh
+bash tests/interop/scripts/test-m20-privateas-frr.sh
+```
+
+---
+
+## M20 Private AS Removal FRR Test Results (2026-03-07, FRR 10.3.1)
+
+Automated test: `bash tests/interop/scripts/test-m20-privateas-frr.sh` — **22 passed, 0 failed.**
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session establishment (Source) | PASS | Established |
+| Session establishment (Remove) | PASS | Established |
+| Session establishment (All) | PASS | Established |
+| Session establishment (Replace) | PASS | Established |
+| Routes in RIB (2/2) | PASS | Both prefixes from source |
+| Observer routes (Remove) | PASS | 2 routes received |
+| Observer routes (All) | PASS | 2 routes received |
+| Observer routes (Replace) | PASS | 2 routes received |
+| Source: 192.168.1.0 present | PASS | All-private path |
+| Source: 192.168.2.0 present | PASS | Mixed path |
+| Remove: 192.168.1.0 AS_PATH=[65001] | PASS | Private ASN removed |
+| Remove: 192.168.2.0 private preserved | PASS | Mixed path, not all-private |
+| Remove: 192.168.2.0 public 64000 present | PASS | Public ASN preserved |
+| All: 192.168.1.0 AS_PATH=[65001] | PASS | Private stripped |
+| All: 192.168.2.0 private removed | PASS | 64512 stripped |
+| All: 192.168.2.0 public 64000 preserved | PASS | Public ASN kept |
+| All: 192.168.2.0 local ASN prepended | PASS | 65001 present |
+| Replace: 192.168.1.0 2× 65001 | PASS | 1 replaced + 1 prepended |
+| Replace: 192.168.1.0 no 64512 | PASS | Private ASN replaced |
+| Replace: 192.168.2.0 2× 65001 | PASS | 1 replaced + 1 prepended |
+| Replace: 192.168.2.0 public 64000 preserved | PASS | Public ASN kept |
+| Replace: 192.168.2.0 no 64512 | PASS | Private ASN replaced |
+
+---
+
 ## Troubleshooting
 
 - **Docker network overlap:** Containerlab's default management network
@@ -1165,6 +1504,15 @@ Automated test: `bash tests/interop/scripts/test-m16-llgr-frr.sh` — **8 passed
   Without it, the build context exceeds 2 GB.
 - **BIRD "Cannot create control socket":** Run `mkdir -p /run/bird` inside the
   container before starting bird. The Debian package expects this directory.
+- **FRR "incorrect first AS" with route server:** FRR 10.x enables
+  `enforce-first-as` by default. For transparent route server setups where
+  the AS_PATH doesn't start with the route server's ASN, you must add
+  `no neighbor X.X.X.X enforce-first-as` per-neighbor in each FRR client
+  config. The global `no bgp enforce-first-as` is insufficient in FRR 10.3.1.
+- **Route server routes "0 accepted prefixes":** If FRR shows `PfxRcd=0` but
+  rustbgpd reports routes sent, check `enforce-first-as` (above) and also
+  verify cross-subnet next-hop reachability — preserved next-hops on different
+  subnets need static routes through the route server.
 - **BIRD shows "Active / Connection refused":** BIRD is trying outbound to
   rustbgpd's port 179, but rustbgpd only connects outbound in M0 (no listener).
   This is normal — rustbgpd's outbound connect will establish the session.

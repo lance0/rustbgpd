@@ -1,0 +1,42 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# FRR-Source: private ASN peer (no removal on inbound)
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 64512
+description = "frr-source"
+hold_time = 90
+
+# FRR-Remove: remove mode — only strips when entire AS_PATH is private
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65002
+description = "frr-remove"
+hold_time = 90
+remove_private_as = "remove"
+
+# FRR-All: all mode — unconditionally strips all private ASNs
+[[neighbors]]
+address = "10.0.2.2"
+remote_asn = 65003
+description = "frr-all"
+hold_time = 90
+remove_private_as = "all"
+
+# FRR-Replace: replace mode — replaces private ASNs with local ASN
+[[neighbors]]
+address = "10.0.3.2"
+remote_asn = 65004
+description = "frr-replace"
+hold_time = 90
+remove_private_as = "replace"

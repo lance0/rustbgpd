@@ -1,0 +1,84 @@
+# Containerlab topology: rustbgpd ↔ 2× FRR (M19 — Transparent Route Server)
+#
+# Validates: route_server_client = true skips local ASN prepend and preserves
+# original NEXT_HOP on eBGP re-advertisement.
+#
+# FRR-A (AS 65002) advertises: 192.168.1.0/24, 192.168.2.0/24
+# FRR-B (AS 65003) advertises: 192.168.3.0/24
+#
+# Both peers are route_server_client = true.
+#
+# Route Server Topology Notes:
+#
+#   Peers are on separate /24 subnets (point-to-point links via containerlab).
+#   Because route_server_client preserves the original NEXT_HOP, FRR-B receives
+#   routes with NH=10.0.0.2 (FRR-A's address on a different subnet). Two things
+#   are required for this to work:
+#
+#   1. Cross-subnet static routes — each FRR peer needs a route to the other's
+#      subnet via rustbgpd, and rustbgpd needs ip_forward=1. Without this,
+#      FRR's BGP next-hop tracking marks the preserved next-hop as unresolvable
+#      and the route won't be installed in the FIB (though it still appears in
+#      the BGP table).
+#
+#   2. FRR enforce-first-as — FRR 10.x enables enforce-first-as by default.
+#      In a transparent route server setup, the AS_PATH does NOT start with
+#      the route server's ASN (e.g., FRR-B receives AS_PATH [65002] from
+#      AS 65001). FRR rejects this with "incorrect first AS" unless
+#      "no neighbor X.X.X.X enforce-first-as" is set per-neighbor in the
+#      FRR config. The global "no bgp enforce-first-as" alone is insufficient
+#      in FRR 10.3.1 — the per-neighbor override is required.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m19-routeserver-frr.clab.yml
+#   containerlab destroy -t tests/interop/m19-routeserver-frr.clab.yml
+
+name: m19-routeserver-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m19-routeserver.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - sysctl -w net.ipv4.ip_forward=1
+      env:
+        RUST_LOG: info
+
+    frr-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m19-a.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.0.1.0/24 via 10.0.0.1
+
+    frr-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m19-b.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - ip route add 10.0.0.0/24 via 10.0.1.1
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-b:eth1"]
+
+# Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ FRR-A (10.0.0.2, AS 65002)
+# Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ FRR-B (10.0.1.2, AS 65003)
+# Cross-subnet static routes via rustbgpd for next-hop reachability

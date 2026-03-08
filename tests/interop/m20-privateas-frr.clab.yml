@@ -1,0 +1,91 @@
+# Containerlab topology: rustbgpd ↔ 4× FRR (M20 — Private AS Removal)
+#
+# Validates: remove_private_as modes (remove, all, replace) applied to
+# outbound eBGP advertisements.
+#
+# FRR-Source (AS 64512, private) advertises:
+#   - 192.168.1.0/24 with AS_PATH [64512] (all-private)
+#   - 192.168.2.0/24 with AS_PATH [64512, 65099] (mixed, via route-map prepend)
+#
+# Three observer peers, each with a different remove_private_as mode:
+#   - FRR-Remove (AS 65002): remove_private_as = "remove"
+#   - FRR-All    (AS 65003): remove_private_as = "all"
+#   - FRR-Replace(AS 65004): remove_private_as = "replace"
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m20-privateas-frr.clab.yml
+#   containerlab destroy -t tests/interop/m20-privateas-frr.clab.yml
+
+name: m20-privateas-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m20-privateas.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.2.1/24 dev eth3
+        - ip link set eth3 up
+        - ip addr add 10.0.3.1/24 dev eth4
+        - ip link set eth4 up
+      env:
+        RUST_LOG: info
+
+    frr-source:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m20-source.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-remove:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m20-observer.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-all:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m20-observer-all.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+
+    frr-replace:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m20-observer-replace.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.3.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr-source:eth1"]
+    - endpoints: ["rustbgpd:eth2", "frr-remove:eth1"]
+    - endpoints: ["rustbgpd:eth3", "frr-all:eth1"]
+    - endpoints: ["rustbgpd:eth4", "frr-replace:eth1"]
+
+# Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ FRR-Source  (10.0.0.2, AS 64512)
+# Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ FRR-Remove  (10.0.1.2, AS 65002)
+# Network C: 10.0.2.0/24 — rustbgpd (10.0.2.1) ↔ FRR-All     (10.0.2.2, AS 65003)
+# Network D: 10.0.3.0/24 — rustbgpd (10.0.3.1) ↔ FRR-Replace (10.0.3.2, AS 65004)
