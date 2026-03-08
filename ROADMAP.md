@@ -192,7 +192,9 @@ Prove it works under pressure before 1.0.
 - [ ] **gRPC churn** — concurrent AddNeighbor/DeleteNeighbor/SoftResetIn calls; verify no deadlocks or panics
 - [ ] **Repeated GR recovery** — back-to-back graceful restart cycles; verify stale sweep correctness
 - [ ] **Long-duration stability** — multi-hour runs with active route exchange; monitor memory and fd usage
-- [ ] **AdjRibIn prefix index** — `iter_prefix()` is O(N) linear scan; add `HashMap<Prefix, Vec<(IpAddr, u32)>>` secondary index for O(1) prefix lookup. Required for full-table (900k+) deployments; current cost is ~265ms for 10k prefixes × 2 peers, O(N^2) total
+- [x] **AdjRibIn prefix index** — secondary `HashMap<Prefix, HashSet<u32>>` index on `iter_prefix()` for O(1) prefix lookup. Pipeline 50k prefixes: 7.1s → 82ms (86x improvement). Full-table (900k) extrapolated ~1.5s
+- [ ] **End-to-end system benchmarks** — bgperf2-style multi-peer ingestion tests against live BGP peers; compare with BIRD and FRR
+- [ ] **Memory profiling** — measure per-route memory footprint under load; compare with GoBGP (8-16 GB for full table) and BIRD (~325 MB)
 
 ### P4 — Nice to Have
 

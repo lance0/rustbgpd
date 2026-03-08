@@ -223,7 +223,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 - No EVPN, VPNv4/v6, or Confederation support
 - No native gRPC TLS termination yet (prefer local UDS access or an mTLS proxy)
 - No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported
-- `iter_prefix()` uses O(N) linear scan over Adj-RIB-In -- adequate for sub-100k prefix deployments; full-table (900k+) would benefit from a secondary prefix index (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
+- End-to-end system benchmarks (bgperf2-style) not yet published -- micro-benchmarks show competitive data structure performance (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 
 ## Project status
 

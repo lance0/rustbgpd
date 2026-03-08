@@ -9,10 +9,15 @@ use crate::route::{FlowSpecRoute, Route};
 ///
 /// Routes are keyed by `(Prefix, path_id)` to support Add-Path (RFC 7911).
 /// Non-Add-Path peers always use `path_id = 0`.
+///
+/// A secondary `prefix_index` maps each prefix to its set of path IDs,
+/// enabling O(candidates) `iter_prefix()` lookups instead of O(N) full scans.
 #[derive(Debug)]
 pub struct AdjRibIn {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
+    /// Secondary index: prefix → set of path IDs stored for that prefix.
+    prefix_index: HashMap<Prefix, HashSet<u32>>,
     /// Route keys where `LLGR_STALE` was injected locally by this daemon.
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
     /// `FlowSpec` routes keyed by `(rule, path_id)`.
@@ -26,6 +31,7 @@ impl AdjRibIn {
         Self {
             peer,
             routes: HashMap::new(),
+            prefix_index: HashMap::new(),
             llgr_stale_local_tags: HashSet::new(),
             flowspec_routes: HashMap::new(),
         }
@@ -40,6 +46,10 @@ impl AdjRibIn {
     /// Insert or replace a route. Clears any stale tag on the key.
     pub fn insert(&mut self, route: Route) {
         let key = (route.prefix, route.path_id);
+        self.prefix_index
+            .entry(route.prefix)
+            .or_default()
+            .insert(route.path_id);
         self.llgr_stale_local_tags.remove(&key);
         self.routes.insert(key, route);
     }
@@ -48,12 +58,17 @@ impl AdjRibIn {
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
         let key = (*prefix, path_id);
         self.llgr_stale_local_tags.remove(&key);
-        self.routes.remove(&key).is_some()
+        let removed = self.routes.remove(&key).is_some();
+        if removed {
+            self.remove_from_prefix_index(prefix, path_id);
+        }
+        removed
     }
 
     /// Remove all routes and stale tags.
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.prefix_index.clear();
         self.llgr_stale_local_tags.clear();
     }
 
@@ -86,9 +101,16 @@ impl AdjRibIn {
     }
 
     /// Iterate over all routes for a given prefix (all path IDs).
+    ///
+    /// Uses a secondary prefix index for O(candidates) lookup instead of
+    /// scanning the entire RIB.
     pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> {
+        let path_ids = self.prefix_index.get(prefix);
         let target = *prefix;
-        self.routes.values().filter(move |r| r.prefix == target)
+        let routes = &self.routes;
+        path_ids
+            .into_iter()
+            .flat_map(move |ids| ids.iter().filter_map(move |&pid| routes.get(&(target, pid))))
     }
 
     /// Mark all routes matching the given address family as stale.
@@ -130,6 +152,7 @@ impl AdjRibIn {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
+            self.remove_from_prefix_index(&key.0, key.1);
         }
         prefixes
     }
@@ -147,6 +170,7 @@ impl AdjRibIn {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
+            self.remove_from_prefix_index(&key.0, key.1);
         }
         prefixes
     }
@@ -165,6 +189,7 @@ impl AdjRibIn {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
+            self.remove_from_prefix_index(&key.0, key.1);
         }
         prefixes
     }
@@ -194,6 +219,7 @@ impl AdjRibIn {
         for key in &no_llgr_keys {
             self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
+            self.remove_from_prefix_index(&key.0, key.1);
         }
 
         // Second pass: promote remaining stale routes to LLGR-stale
@@ -239,6 +265,7 @@ impl AdjRibIn {
             prefixes.push(key.0);
             self.llgr_stale_local_tags.remove(key);
             self.routes.remove(key);
+            self.remove_from_prefix_index(&key.0, key.1);
         }
         prefixes
     }
@@ -333,6 +360,16 @@ impl AdjRibIn {
         for route in self.flowspec_routes.values_mut() {
             if route.afi == family.0 {
                 route.is_stale = false;
+            }
+        }
+    }
+
+    /// Remove a `path_id` from the prefix index, cleaning up empty entries.
+    fn remove_from_prefix_index(&mut self, prefix: &Prefix, path_id: u32) {
+        if let Some(ids) = self.prefix_index.get_mut(prefix) {
+            ids.remove(&path_id);
+            if ids.is_empty() {
+                self.prefix_index.remove(prefix);
             }
         }
     }
