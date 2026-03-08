@@ -195,6 +195,7 @@ Prove it works under pressure before 1.0.
 - [x] **AdjRibIn prefix index** — secondary `HashMap<Prefix, HashSet<u32>>` index on `iter_prefix()` for O(1) prefix lookup. Pipeline 50k prefixes: 7.1s → 82ms (86x improvement). Full-table (900k) extrapolated ~1.5s
 - [ ] **End-to-end system benchmarks** — bgperf2-style multi-peer ingestion tests against live BGP peers; compare with BIRD and FRR
 - [ ] **Memory profiling** — measure per-route memory footprint under load; compare with GoBGP (8-16 GB for full table) and BIRD (~325 MB)
+- [ ] **Published performance comparison** — run bgperf2 against BIRD 2.0.12, FRR 10.3.1, and GoBGP at 10/30/100 peers x full table (800k+); measure routes/sec, convergence time, memory, CPU; publish results in BENCHMARKS.md with methodology and reproduction steps
 
 ### P4 — Nice to Have
 
