@@ -156,6 +156,64 @@ followed by 1,000 withdrawals, with best-path recomputation at each step.
 A 1k-prefix churn event reconverges in under 1ms, including both the announce
 and withdraw phases. This is 37x faster than the pre-index version (27.9ms).
 
+## Memory Footprint
+
+Measured using a tracking global allocator that counts every `alloc` and
+`dealloc`. Run with:
+`cargo test -p rustbgpd-rib --test memory_profile -- --nocapture`
+
+### Type Sizes (stack)
+
+| Type | Size |
+|------|------|
+| `Route` | 104 bytes |
+| `Prefix` | 18 bytes |
+| `PathAttribute` | 72 bytes |
+| `AsPath` | 24 bytes |
+| `AdjRibIn` | 216 bytes |
+| `LocRib` | 96 bytes |
+
+### Per-Route Heap Allocation
+
+| Attribute set | Heap | Stack | Total |
+|---------------|------|-------|-------|
+| Typical (6 attrs, 3-ASN path, 2 communities) | 484 B | 104 B | 588 B |
+| Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 696 B | 104 B | 800 B |
+
+### AdjRibIn at Scale (single peer, typical attrs)
+
+| Routes | Resident | Per-route |
+|--------|----------|-----------|
+| 10,000 | 8.1 MB | 850 B |
+| 100,000 | 74.8 MB | 784 B |
+| 500,000 | 450 MB | 943 B |
+| 900,000 | 648 MB | 755 B |
+
+Per-route cost is ~755-943 bytes including HashMap and prefix index overhead.
+Variance comes from HashMap load factor at different sizes.
+
+### Full RIB: 2 Peers + LocRib (typical attrs)
+
+| Prefixes | Total memory | Per-prefix |
+|----------|-------------|------------|
+| 100,000 | 212 MB | 2.2 KB |
+| 500,000 | 1.23 GB | 2.6 KB |
+| 900,000 | 1.80 GB | 2.1 KB |
+
+A full Internet table (900k prefixes) with 2 peers and best-path selection uses
+**1.8 GB**. Each prefix stores 3 Route instances (2x Adj-RIB-In + 1x Loc-RIB)
+plus HashMap/index overhead. This is 4-9x less than GoBGP (8-16+ GB) but larger
+than BIRD (~325 MB for 30 peers) which shares path attribute storage across
+routes with identical attributes.
+
+### Optimization Opportunities
+
+- **Path attribute interning** — routes from the same peer often share identical
+  attributes. A `HashMap<Arc<Vec<PathAttribute>>, ...>` dedup table could reduce
+  memory 3-5x for large tables, approaching BIRD-class efficiency.
+- **HashMap pre-sizing** — `with_capacity()` on AdjRibIn construction would
+  reduce peak allocation by avoiding rehash copies.
+
 ## Interpretation
 
 **Wire codec** — The codec is not a bottleneck. Parsing a full-size UPDATE (500
@@ -197,7 +255,7 @@ most natural comparison. Published bgperf2 results for GoBGP 2.29.0:
 |--------|-------|----------|-------|
 | Route ingestion (100k routes, 10 peers) | ~11k routes/sec | 2.6M routes/sec (insert only) | GoBGP is end-to-end; rustbgpd is RIB insert micro-benchmark |
 | CPU usage (100k routes) | 1450% (all cores) | Single-threaded | GoBGP uses goroutine-per-peer; rustbgpd uses single-owner RIB |
-| Memory (full table, ~800k) | 8-16+ GB | Not yet measured | GoBGP has known memory issues; Rust structs are much more compact |
+| Memory (full table, ~900k) | 8-16+ GB | 1.8 GB (2 peers + LocRib) | 4-9x less than GoBGP |
 | Full table convergence | Test abandoned (too slow) | ~1.5s estimated (pipeline extrapolation) | GoBGP was excluded from full-table rounds of bgperf2 |
 
 GoBGP's Go runtime incurs GC pressure, interface boxing overhead, and
@@ -213,7 +271,7 @@ bgperf2 results:
 |--------|------|---------|----------|
 | Route ingestion (100k, 10 peers) | ~25k routes/sec | ~33k routes/sec | 2.6M routes/sec (insert only) |
 | CPU usage (100k routes) | ~100% (single core) | ~100% (single core) | Single-threaded |
-| Memory (100k routes) | 15 MB | 100 MB | Not yet measured |
+| Memory (100k routes, 2 peers) | 15 MB | 100 MB | 212 MB |
 | Full table (800k x 30 peers) | Completes | Completes | Not yet tested |
 
 BIRD and FRR are mature, battle-tested stacks with radix-tree RIBs and decades
@@ -229,8 +287,8 @@ enough for full-table scale. The remaining unknowns are:
 
 1. **End-to-end throughput** — how fast can the full daemon ingest routes from
    live BGP peers? This requires bgperf2 or equivalent system benchmarks.
-2. **Memory footprint** — Rust's compact structs (no GC, no pointer boxing)
-   should be significantly smaller than GoBGP's. Measurement needed.
+2. **Memory footprint** — 1.8 GB for a full table with 2 peers. 4-9x less than
+   GoBGP, but larger than BIRD. Path attribute interning could close the gap.
 3. **Multi-peer scaling** — the single-owner RIB avoids lock contention but
    serializes all RIB operations through one tokio task. Channel backpressure
    under high peer counts needs testing.
