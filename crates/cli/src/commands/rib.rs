@@ -5,13 +5,39 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{AddPathRequest, DeletePathRequest, ListRoutesRequest};
 
-fn make_route_request(neighbor: Option<&str>, family: Option<i32>) -> ListRoutesRequest {
-    ListRoutesRequest {
+/// Parsed route filter options from CLI flags.
+pub struct RouteFilterOpts {
+    pub prefix: Option<String>,
+    pub longer: bool,
+    pub origin_asn: Option<u32>,
+    pub community: Vec<u32>,
+    pub large_community: Vec<String>,
+}
+
+fn make_route_request(
+    neighbor: Option<&str>,
+    family: Option<i32>,
+    filters: &RouteFilterOpts,
+) -> Result<ListRoutesRequest, CliError> {
+    let (prefix_filter, prefix_filter_length) = if let Some(ref p) = filters.prefix {
+        let (addr, len) = output::parse_prefix(p).map_err(CliError::Argument)?;
+        (addr, len)
+    } else {
+        (String::new(), 0)
+    };
+
+    Ok(ListRoutesRequest {
         neighbor_address: neighbor.unwrap_or("").to_string(),
         afi_safi: family.unwrap_or(0),
         page_size: 0,
         page_token: String::new(),
-    }
+        prefix_filter,
+        prefix_filter_length,
+        longer_prefixes: filters.longer,
+        origin_asn: filters.origin_asn.unwrap_or(0),
+        community_filter: filters.community.clone(),
+        large_community_filter: filters.large_community.clone(),
+    })
 }
 
 fn route_to_json(r: &crate::proto::Route) -> JsonRoute {
@@ -49,11 +75,16 @@ fn print_routes(routes: &[crate::proto::Route], json: bool) {
     }
 }
 
-pub async fn best(connection: Connection, family: Option<i32>, json: bool) -> Result<(), CliError> {
+pub async fn best(
+    connection: Connection,
+    family: Option<i32>,
+    filters: &RouteFilterOpts,
+    json: bool,
+) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
-        .list_best_routes(make_route_request(None, family))
+        .list_best_routes(make_route_request(None, family, filters)?)
         .await?
         .into_inner();
     print_routes(&resp.routes, json);
@@ -64,12 +95,13 @@ pub async fn received(
     connection: Connection,
     address: &str,
     family: Option<i32>,
+    filters: &RouteFilterOpts,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
-        .list_received_routes(make_route_request(Some(address), family))
+        .list_received_routes(make_route_request(Some(address), family, filters)?)
         .await?
         .into_inner();
     print_routes(&resp.routes, json);
@@ -80,12 +112,13 @@ pub async fn advertised(
     connection: Connection,
     address: &str,
     family: Option<i32>,
+    filters: &RouteFilterOpts,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
         RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
     let resp = client
-        .list_advertised_routes(make_route_request(Some(address), family))
+        .list_advertised_routes(make_route_request(Some(address), family, filters)?)
         .await?
         .into_inner();
     print_routes(&resp.routes, json);

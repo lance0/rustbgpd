@@ -10,7 +10,7 @@ use tracing::debug;
 
 use crate::proto;
 use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteEventType};
-use rustbgpd_wire::{Afi, AsPathSegment, PathAttribute, Prefix};
+use rustbgpd_wire::{Afi, AsPath, AsPathSegment, PathAttribute, Prefix};
 
 /// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
@@ -80,6 +80,136 @@ fn filter_routes_by_family(routes: Vec<Route>, afi_safi: i32) -> Vec<Route> {
             .collect(),
         _ => routes, // 0 (unspecified) = all
     }
+}
+
+/// Parsed route filters extracted from a `ListRoutesRequest`.
+struct RouteFilters {
+    /// Exact or covering prefix to match against.
+    prefix: Option<Prefix>,
+    /// If true, match any prefix that falls within `prefix` (longer-or-equal).
+    longer: bool,
+    /// Origin ASN (last ASN in `AS_PATH`). 0 = no filter.
+    origin_asn: u32,
+    /// Community values to match (OR logic).
+    communities: Vec<u32>,
+    /// Large community strings to match (OR logic).
+    large_communities: Vec<String>,
+}
+
+impl RouteFilters {
+    #[allow(clippy::result_large_err)]
+    fn from_request(req: &proto::ListRoutesRequest) -> Result<Self, Status> {
+        let prefix = if req.prefix_filter.is_empty() {
+            None
+        } else {
+            let addr: IpAddr = req.prefix_filter.parse().map_err(|e| {
+                Status::invalid_argument(format!("invalid prefix_filter address: {e}"))
+            })?;
+            let len = u8::try_from(req.prefix_filter_length)
+                .map_err(|_| Status::invalid_argument("prefix_filter_length must be 0-128"))?;
+            Some(match addr {
+                IpAddr::V4(v4) => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(v4, len)),
+                IpAddr::V6(v6) => Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(v6, len)),
+            })
+        };
+
+        Ok(Self {
+            prefix,
+            longer: req.longer_prefixes,
+            origin_asn: req.origin_asn,
+            communities: req.community_filter.clone(),
+            large_communities: req.large_community_filter.clone(),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.prefix.is_none()
+            && self.origin_asn == 0
+            && self.communities.is_empty()
+            && self.large_communities.is_empty()
+    }
+
+    fn matches(&self, route: &Route) -> bool {
+        if let Some(ref filter_prefix) = self.prefix {
+            if self.longer {
+                if !prefix_contains(filter_prefix, &route.prefix) {
+                    return false;
+                }
+            } else if route.prefix != *filter_prefix {
+                return false;
+            }
+        }
+
+        if self.origin_asn != 0 {
+            let origin_asn = route.as_path().and_then(AsPath::origin_asn);
+            if origin_asn != Some(self.origin_asn) {
+                return false;
+            }
+        }
+
+        if !self.communities.is_empty()
+            && !self
+                .communities
+                .iter()
+                .any(|c| route.communities().contains(c))
+        {
+            return false;
+        }
+
+        if !self.large_communities.is_empty() {
+            let route_lcs: Vec<String> = route
+                .large_communities()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            if !self
+                .large_communities
+                .iter()
+                .any(|lc| route_lcs.contains(lc))
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+/// Check if `container` prefix contains `candidate` (candidate is equal or more specific).
+fn prefix_contains(container: &Prefix, candidate: &Prefix) -> bool {
+    match (container, candidate) {
+        (Prefix::V4(c), Prefix::V4(p)) => {
+            if p.len < c.len {
+                return false;
+            }
+            let mask = if c.len == 0 {
+                0u32
+            } else {
+                u32::MAX << (32 - c.len)
+            };
+            u32::from(c.addr) & mask == u32::from(p.addr) & mask
+        }
+        (Prefix::V6(c), Prefix::V6(p)) => {
+            if p.len < c.len {
+                return false;
+            }
+            let mask = if c.len == 0 {
+                0u128
+            } else {
+                u128::MAX << (128 - c.len)
+            };
+            u128::from(c.addr) & mask == u128::from(p.addr) & mask
+        }
+        _ => false, // V4 vs V6 never matches
+    }
+}
+
+/// Apply route filters to a list of routes.
+fn apply_route_filters(routes: Vec<Route>, filters: &RouteFilters) -> Vec<Route> {
+    if filters.is_empty() {
+        return routes;
+    }
+    routes.into_iter().filter(|r| filters.matches(r)).collect()
 }
 
 fn parse_page_params(req: &proto::ListRoutesRequest) -> Result<(usize, usize), &'static str> {
@@ -199,8 +329,10 @@ impl proto::rib_service_server::RibService for RibService {
             )
         };
 
+        let filters = RouteFilters::from_request(&req)?;
         let all_routes = self.query_routes(peer).await?;
         let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
+        let all_routes = apply_route_filters(all_routes, &filters);
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
         Ok(Response::new(build_response(
             &all_routes,
@@ -216,8 +348,10 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ListRoutesResponse>, Status> {
         let req = request.into_inner();
         validate_afi_safi(req.afi_safi)?;
+        let filters = RouteFilters::from_request(&req)?;
         let all_routes = self.query_best_routes().await?;
         let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
+        let all_routes = apply_route_filters(all_routes, &filters);
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
         Ok(Response::new(build_response(
             &all_routes,
@@ -254,10 +388,12 @@ impl proto::rib_service_server::RibService for RibService {
             .await
             .map_err(|_| Status::internal("RIB manager unavailable"))?;
 
+        let filters = RouteFilters::from_request(&req)?;
         let all_routes = reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?;
         let all_routes = filter_routes_by_family(all_routes, req.afi_safi);
+        let all_routes = apply_route_filters(all_routes, &filters);
 
         let (offset, page_size) = parse_page_params(&req).map_err(Status::invalid_argument)?;
         Ok(Response::new(build_response(
@@ -628,6 +764,11 @@ fn format_bitmask_ops(ops: &[rustbgpd_wire::BitmaskMatch]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+
+    use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
+
     use super::*;
     use proto::rib_service_server::RibService as _;
 
@@ -638,10 +779,6 @@ mod tests {
 
     #[test]
     fn filter_routes_unspecified_returns_all() {
-        use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix};
-        use std::net::Ipv4Addr;
-        use std::sync::Arc;
-
         let v4 = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: "10.0.0.1".parse().unwrap(),
@@ -696,6 +833,12 @@ mod tests {
             afi_safi: 99, // unsupported value
             page_size: 0,
             page_token: String::new(),
+            prefix_filter: String::new(),
+            prefix_filter_length: 0,
+            longer_prefixes: false,
+            origin_asn: 0,
+            community_filter: vec![],
+            large_community_filter: vec![],
         });
         let err = svc.list_received_routes(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -743,5 +886,148 @@ mod tests {
             },
         ]);
         assert_eq!(rendered, "0x0002/match & !0x0004/match");
+    }
+
+    #[test]
+    fn prefix_contains_exact_match() {
+        let container = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
+        assert!(prefix_contains(&container, &container));
+    }
+
+    #[test]
+    fn prefix_contains_longer_match() {
+        let container = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
+        let longer = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 2, 0), 24));
+        assert!(prefix_contains(&container, &longer));
+    }
+
+    #[test]
+    fn prefix_contains_rejects_shorter() {
+        let container = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 16));
+        let shorter = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
+        assert!(!prefix_contains(&container, &shorter));
+    }
+
+    #[test]
+    fn prefix_contains_rejects_different_network() {
+        let container = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
+        let other = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(172, 16, 0, 0), 12));
+        assert!(!prefix_contains(&container, &other));
+    }
+
+    #[test]
+    fn prefix_contains_v4_v6_never_matches() {
+        let v4 = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8));
+        let v6 = Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32));
+        assert!(!prefix_contains(&v4, &v6));
+        assert!(!prefix_contains(&v6, &v4));
+    }
+
+    #[test]
+    fn route_filters_exact_prefix() {
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24)),
+            next_hop: "10.0.0.1".parse().unwrap(),
+            peer: "10.0.0.1".parse().unwrap(),
+            attributes: Arc::new(vec![]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        };
+
+        let filters = RouteFilters {
+            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24))),
+            longer: false,
+            origin_asn: 0,
+            communities: vec![],
+            large_communities: vec![],
+        };
+        assert!(filters.matches(&route));
+
+        let wrong_prefix = RouteFilters {
+            prefix: Some(Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 2, 0, 0), 24))),
+            longer: false,
+            origin_asn: 0,
+            communities: vec![],
+            large_communities: vec![],
+        };
+        assert!(!wrong_prefix.matches(&route));
+    }
+
+    #[test]
+    fn route_filters_community_match() {
+        let community_val = 65001u32 * 65536 + 100;
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: "10.0.0.1".parse().unwrap(),
+            peer: "10.0.0.1".parse().unwrap(),
+            attributes: Arc::new(vec![PathAttribute::Communities(vec![community_val])]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        };
+
+        let filters = RouteFilters {
+            prefix: None,
+            longer: false,
+            origin_asn: 0,
+            communities: vec![community_val],
+            large_communities: vec![],
+        };
+        assert!(filters.matches(&route));
+
+        let wrong_community = RouteFilters {
+            prefix: None,
+            longer: false,
+            origin_asn: 0,
+            communities: vec![65002u32 * 65536 + 200],
+            large_communities: vec![],
+        };
+        assert!(!wrong_community.matches(&route));
+    }
+
+    #[test]
+    fn route_filters_origin_asn() {
+        let route = Route {
+            prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
+            next_hop: "10.0.0.1".parse().unwrap(),
+            peer: "10.0.0.1".parse().unwrap(),
+            attributes: Arc::new(vec![PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001, 65002, 65003])],
+            })]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        };
+
+        let filters = RouteFilters {
+            prefix: None,
+            longer: false,
+            origin_asn: 65003,
+            communities: vec![],
+            large_communities: vec![],
+        };
+        assert!(filters.matches(&route));
+
+        let wrong_asn = RouteFilters {
+            prefix: None,
+            longer: false,
+            origin_asn: 65001,
+            communities: vec![],
+            large_communities: vec![],
+        };
+        assert!(!wrong_asn.matches(&route));
     }
 }

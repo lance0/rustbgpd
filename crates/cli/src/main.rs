@@ -70,6 +70,26 @@ enum Command {
         /// Address family filter (ipv4_unicast, ipv6_unicast)
         #[arg(short = 'a', long)]
         family: Option<String>,
+
+        /// Prefix filter (e.g., 10.0.0.0/24)
+        #[arg(short = 'p', long)]
+        prefix: Option<String>,
+
+        /// Show longer (more specific) prefixes matching --prefix
+        #[arg(short = 'l', long, requires = "prefix")]
+        longer: bool,
+
+        /// Filter by origin ASN (last ASN in AS_PATH)
+        #[arg(long)]
+        origin_asn: Option<u32>,
+
+        /// Filter by community (e.g., 65001:100); may be repeated
+        #[arg(short = 'c', long, value_delimiter = ',')]
+        community: Vec<String>,
+
+        /// Filter by large community (e.g., 65001:100:200); may be repeated
+        #[arg(long, value_delimiter = ',')]
+        large_community: Vec<String>,
     },
 
     /// Manage FlowSpec routes
@@ -365,23 +385,43 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             )),
         },
 
-        Command::Rib { action, family } => {
+        Command::Rib {
+            action,
+            family,
+            prefix,
+            longer,
+            origin_asn,
+            community,
+            large_community,
+        } => {
             let family_val = resolve_family(&family)?;
+            let parsed_filter_communities: Vec<u32> = community
+                .iter()
+                .map(|s| parse_community_str(s))
+                .collect::<Result<_, _>>()
+                .map_err(CliError::Argument)?;
+            let filters = commands::rib::RouteFilterOpts {
+                prefix,
+                longer,
+                origin_asn,
+                community: parsed_filter_communities,
+                large_community,
+            };
             match action {
-                None => commands::rib::best(connection, family_val, json).await,
+                None => commands::rib::best(connection, family_val, &filters, json).await,
                 Some(RibAction::Received {
                     address,
                     family: fam,
                 }) => {
                     let f = resolve_family(&fam.or(family))?;
-                    commands::rib::received(connection, &address, f, json).await
+                    commands::rib::received(connection, &address, f, &filters, json).await
                 }
                 Some(RibAction::Advertised {
                     address,
                     family: fam,
                 }) => {
                     let f = resolve_family(&fam.or(family))?;
-                    commands::rib::advertised(connection, &address, f, json).await
+                    commands::rib::advertised(connection, &address, f, &filters, json).await
                 }
                 Some(RibAction::Add {
                     prefix,
@@ -539,7 +579,8 @@ mod tests {
             cli.command,
             Command::Rib {
                 action: None,
-                family: None
+                family: None,
+                ..
             }
         ));
     }

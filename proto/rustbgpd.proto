@@ -469,6 +469,28 @@ message ListRoutesRequest {
   AddressFamily afi_safi = 2;
   uint32 page_size = 3;
   string page_token = 4;
+
+  // Route filters — all are optional; when set, only matching routes are returned.
+
+  // Prefix filter (e.g. "10.0.0.0" with prefix_filter_length=24).
+  // Empty string = no prefix filter.
+  string prefix_filter = 5;
+  uint32 prefix_filter_length = 6;
+  // If true, return all routes whose prefix falls within prefix_filter/prefix_filter_length
+  // (longer or equal match). If false, exact match only.
+  bool longer_prefixes = 7;
+
+  // Origin ASN filter — match routes whose AS_PATH originates from this ASN
+  // (last ASN in the path). 0 = no filter.
+  uint32 origin_asn = 8;
+
+  // Community filter — match routes containing this community (e.g. (65001 << 16) | 100).
+  // Empty = no filter. Multiple values are OR-matched.
+  repeated uint32 community_filter = 9;
+
+  // Large community filter — match routes containing this large community.
+  // Format: "global_admin:local_data1:local_data2". Empty = no filter.
+  repeated string large_community_filter = 10;
 }
 
 message ListRoutesResponse {

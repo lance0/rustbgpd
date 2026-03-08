@@ -162,7 +162,7 @@ get blog posts written and make operators switch.
 #### CLI Polish
 
 - [x] **Colored, tabular CLI output** — aligned tables, colored session states (green=Established, yellow=OpenSent, red=Idle/Active), human-readable uptime ("2d 4h 12m" not seconds), dynamic column widths, `--no-color` / `NO_COLOR` support. Uses `owo-colors` with auto-detection for piped output.
-- [ ] **Route filtering in CLI** — `rustbgpctl rib best --prefix 10.0.0.0/8 --longer --community 65001:100 --from 10.0.0.2`. Server-side filtering via gRPC, not client-side grep. This is what operators do 50 times a day.
+- [x] **Route filtering in CLI** — `rustbgpctl rib --prefix 10.0.0.0/8 --longer --community 65001:100 --origin-asn 65003`. Server-side filtering via gRPC with prefix (exact/longer), origin ASN, community, and large community filters. Works on best, received, and advertised views.
 - [x] **`--version` flag** — both `rustbgpd --version` and `rustbgpctl --version`.
 - [ ] **`rustbgpctl diff`** — show what a pending config reload (SIGHUP) would change: peers added/removed/modified, policy changes, timer changes. Dry-run for config changes.
 
@@ -202,6 +202,9 @@ Prove it works under pressure before 1.0.
 
 Valuable but not blocking production use or 1.0.
 
+- [ ] **Real-time BGP observability** — unified event bus (`broadcast::Sender<BgpEvent>`) streaming route_learned, route_withdrawn, best_path_changed, policy_filtered, session_state_change events; in-memory ring buffer for recent event history; gRPC `EventService` with `WatchEvents` streaming RPC and peer/prefix/type filtering; `bgpctl events` CLI with `--since`, `--peer`, `--prefix`, `--type` flags; foundation for TUI live event view
+- [ ] **Best-path explain** — `best_path_cmp` returns reason enum (ShorterAsPath, HigherLocalPref, LowerRouterId, etc.) instead of bare Ordering; gRPC `ExplainRoute` RPC shows all candidates with pairwise decision tree; `bgpctl explain <prefix>` CLI; answers "why did this route win?" without log correlation
+- [ ] **Route history** — per-prefix timeline of routing events (learned, withdrawn, best-path changes) queryable via gRPC and `bgpctl history <prefix>`; backed by ring buffer with configurable depth
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5 (GoBGP doesn't have it either)
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
 - [ ] **YANG model / NETCONF** — alternative management interface for traditional NOC tooling
