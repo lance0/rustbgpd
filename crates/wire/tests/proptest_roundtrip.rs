@@ -2,7 +2,9 @@ use std::net::Ipv4Addr;
 
 use bytes::Bytes;
 use proptest::prelude::*;
-use rustbgpd_wire::capability::{Afi, Capability, GracefulRestartFamily, Safi};
+use rustbgpd_wire::capability::{
+    AddPathFamily, AddPathMode, Afi, Capability, GracefulRestartFamily, LlgrFamily, Safi,
+};
 use rustbgpd_wire::constants::{BGP_VERSION, MAX_MESSAGE_LEN};
 use rustbgpd_wire::message::{Message, decode_message, encode_message};
 use rustbgpd_wire::notification::NotificationCode;
@@ -39,6 +41,35 @@ fn arb_gr_family() -> impl Strategy<Value = GracefulRestartFamily> {
     })
 }
 
+fn arb_llgr_family() -> impl Strategy<Value = LlgrFamily> {
+    (arb_afi(), arb_safi(), any::<bool>(), 0..=16_777_215u32).prop_map(
+        |(afi, safi, fp, stale_time)| LlgrFamily {
+            afi,
+            safi,
+            forwarding_preserved: fp,
+            stale_time,
+        },
+    )
+}
+
+fn arb_add_path_mode() -> impl Strategy<Value = AddPathMode> {
+    prop_oneof![
+        Just(AddPathMode::Receive),
+        Just(AddPathMode::Send),
+        Just(AddPathMode::Both),
+    ]
+}
+
+fn arb_add_path_family() -> impl Strategy<Value = AddPathFamily> {
+    (arb_afi(), arb_safi(), arb_add_path_mode()).prop_map(|(afi, safi, send_receive)| {
+        AddPathFamily {
+            afi,
+            safi,
+            send_receive,
+        }
+    })
+}
+
 fn arb_extended_nexthop_family() -> impl Strategy<Value = rustbgpd_wire::ExtendedNextHopFamily> {
     (arb_afi(), arb_safi(), arb_afi()).prop_map(|(nlri_afi, nlri_safi, next_hop_afi)| {
         rustbgpd_wire::ExtendedNextHopFamily {
@@ -68,6 +99,12 @@ fn arb_capability() -> impl Strategy<Value = Capability> {
                     families,
                 }
             }),
+        Just(Capability::RouteRefresh),
+        Just(Capability::EnhancedRouteRefresh),
+        Just(Capability::ExtendedMessage),
+        proptest::collection::vec(arb_llgr_family(), 0..=4)
+            .prop_map(Capability::LongLivedGracefulRestart),
+        proptest::collection::vec(arb_add_path_family(), 1..=4).prop_map(Capability::AddPath),
         any::<u32>().prop_map(|asn| Capability::FourOctetAs { asn }),
         // Unknown capabilities: code must not collide with known codes
         // (1 = MultiProtocol, 2 = RouteRefresh, 5 = ExtendedNextHop,
