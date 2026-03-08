@@ -223,7 +223,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 - No EVPN, VPNv4/v6, or Confederation support
 - No native gRPC TLS termination yet (prefer local UDS access or an mTLS proxy)
 - No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported
-- Performance benchmarks not yet published (P3 roadmap)
+- `iter_prefix()` uses O(N) linear scan over Adj-RIB-In -- adequate for sub-100k prefix deployments; full-table (900k+) would benefit from a secondary prefix index (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 
 ## Project status
 
@@ -252,6 +252,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Config reference and examples |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Running in production: reload, upgrade, failure modes, debugging |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
 | [docs/adr/](docs/adr/) | Architecture decision records (46 ADRs) |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |

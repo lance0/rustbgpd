@@ -184,13 +184,15 @@ get blog posts written and make operators switch.
 
 Prove it works under pressure before 1.0.
 
-- [ ] **RIB scale benchmarks** — large table import/export (100k+ prefixes), memory profiling, best-path convergence time
+- [x] **RIB scale benchmarks** — criterion benchmarks for AdjRibIn insert (10k–500k), best-path comparison, LocRib recompute, full pipeline, route churn
+- [x] **Wire codec benchmarks** — criterion benchmarks for NLRI encode/decode, UPDATE build/parse, path attribute codec, validation
 - [ ] **Churn benchmarks** — route flap throughput, reconvergence latency under UPDATE storms
 - [ ] **CI regression tracking** — automated benchmark runs with threshold-based alerts
 - [ ] **Peer flap storms** — repeated session up/down under load; verify no resource leaks
 - [ ] **gRPC churn** — concurrent AddNeighbor/DeleteNeighbor/SoftResetIn calls; verify no deadlocks or panics
 - [ ] **Repeated GR recovery** — back-to-back graceful restart cycles; verify stale sweep correctness
 - [ ] **Long-duration stability** — multi-hour runs with active route exchange; monitor memory and fd usage
+- [ ] **AdjRibIn prefix index** — `iter_prefix()` is O(N) linear scan; add `HashMap<Prefix, Vec<(IpAddr, u32)>>` secondary index for O(1) prefix lookup. Required for full-table (900k+) deployments; current cost is ~265ms for 10k prefixes × 2 peers, O(N^2) total
 
 ### P4 — Nice to Have
 

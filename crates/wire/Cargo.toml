@@ -16,3 +16,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 proptest = "1"
+criterion.workspace = true
+
+[[bench]]
+name = "codec"
+harness = false

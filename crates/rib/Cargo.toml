@@ -24,3 +24,8 @@ tokio-stream.workspace = true
 [dev-dependencies]
 proptest = "1"
 tokio = { workspace = true, features = ["test-util"] }
+criterion.workspace = true
+
+[[bench]]
+name = "rib_ops"
+harness = false
