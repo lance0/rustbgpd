@@ -67,6 +67,50 @@ fn make_test_session_with_rib(
     )
 }
 
+fn make_test_session_with_rib_and_bmp(
+    local_asn: u32,
+    remote_asn: u32,
+) -> (
+    PeerSession,
+    mpsc::Receiver<RibUpdate>,
+    mpsc::Receiver<BmpEvent>,
+) {
+    let peer_config = PeerConfig {
+        local_asn,
+        remote_asn,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, rib_rx) = mpsc::channel(64);
+    let (bmp_tx, bmp_rx) = mpsc::channel(16);
+
+    (
+        PeerSession::new(
+            config,
+            metrics,
+            cmd_rx,
+            rib_tx,
+            None,
+            None,
+            None,
+            Some(bmp_tx),
+        ),
+        rib_rx,
+        bmp_rx,
+    )
+}
+
 fn negotiated_session(remote_asn: u32, extended_nexthop: bool) -> NegotiatedSession {
     let mut extended_nexthop_families = HashMap::new();
     if extended_nexthop {
@@ -155,6 +199,94 @@ async fn read_single_bgp_message(stream: &mut TcpStream) -> Message {
     raw.extend_from_slice(&body);
     let mut buf = Bytes::from(raw);
     rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+}
+
+#[tokio::test]
+async fn session_established_emits_bmp_peer_up() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    let (client, _server) = connected_stream_pair().await;
+    session.stream = Some(client);
+    session.local_open_pdu = Some(Bytes::from_static(&[1, 2, 3]));
+    session.remote_open_pdu = Some(Bytes::from_static(&[4, 5, 6]));
+
+    session
+        .execute_actions(vec![Action::SessionEstablished(negotiated_session(
+            65002, false,
+        ))])
+        .await;
+
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::PeerUp {
+            peer_info,
+            local_open,
+            remote_open,
+            ..
+        } => {
+            assert_eq!(peer_info.peer_addr, session.peer_ip);
+            assert_eq!(peer_info.peer_asn, 65002);
+            assert_eq!(local_open.as_ref(), &[1, 2, 3]);
+            assert_eq!(remote_open.as_ref(), &[4, 5, 6]);
+        }
+        other => panic!("expected BMP PeerUp, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn session_down_emits_bmp_peer_down() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.established_at = Some(Instant::now());
+    session.last_down_reason = Some(PeerDownReason::RemoteNoNotification);
+
+    session.execute_actions(vec![Action::SessionDown]).await;
+
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::PeerDown { peer_info, reason } => {
+            assert_eq!(peer_info.peer_addr, session.peer_ip);
+            assert!(matches!(reason, PeerDownReason::RemoteNoNotification));
+        }
+        other => panic!("expected BMP PeerDown, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn inbound_update_emits_bmp_route_monitoring() {
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated_families = vec![(Afi::Ipv4, Safi::Unicast)];
+
+    let update = rustbgpd_wire::UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        }],
+        &[],
+        &[
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+        ],
+        true,
+        false,
+        rustbgpd_wire::Ipv4UnicastMode::Body,
+    );
+    let encoded = rustbgpd_wire::encode_message(&Message::Update(update)).unwrap();
+    session.read_buf.buf.extend_from_slice(&encoded);
+
+    session.process_read_buffer().await;
+
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::RouteMonitoring {
+            peer_info,
+            update_pdu,
+        } => {
+            assert_eq!(peer_info.peer_addr, session.peer_ip);
+            assert_eq!(update_pdu.as_ref(), encoded.as_ref());
+        }
+        other => panic!("expected BMP RouteMonitoring, got {other:?}"),
+    }
 }
 
 #[test]

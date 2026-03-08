@@ -10,6 +10,7 @@ use tonic::{Request, Response, Status};
 
 use crate::peer_types::{ConfigEvent, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig};
 use crate::proto;
+use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::RibUpdate;
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -42,6 +43,7 @@ fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status>
 #[allow(clippy::struct_field_names)]
 pub struct NeighborService {
     local_asn: u32,
+    access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     rib_tx: mpsc::Sender<RibUpdate>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -51,12 +53,14 @@ impl NeighborService {
     /// Create a new neighbor service with the given channels.
     pub fn new(
         local_asn: u32,
+        access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         rib_tx: mpsc::Sender<RibUpdate>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
         Self {
             local_asn,
+            access_mode,
             peer_mgr_tx,
             rib_tx,
             config_tx,
@@ -181,6 +185,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::AddNeighborRequest>,
     ) -> Result<Response<proto::AddNeighborResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let config = req
             .config
@@ -287,6 +294,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::DeleteNeighborRequest>,
     ) -> Result<Response<proto::DeleteNeighborResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -376,6 +386,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::EnableNeighborRequest>,
     ) -> Result<Response<proto::EnableNeighborResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -403,6 +416,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::SoftResetInRequest>,
     ) -> Result<Response<proto::SoftResetInResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -445,6 +461,9 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         &self,
         request: Request<proto::DisableNeighborRequest>,
     ) -> Result<Response<proto::DisableNeighborResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -487,7 +506,7 @@ mod tests {
     fn make_service() -> NeighborService {
         let (tx, _rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        NeighborService::new(65001, tx, rib_tx, None)
+        NeighborService::new(65001, AccessMode::ReadWrite, tx, rib_tx, None)
     }
 
     #[tokio::test]
@@ -532,6 +551,29 @@ mod tests {
         assert!(err.message().contains("hold_time"));
     }
 
+    #[tokio::test]
+    async fn add_neighbor_rejected_on_read_only_listener() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let svc = NeighborService::new(65001, AccessMode::ReadOnly, tx, rib_tx, None);
+        let req = Request::new(proto::AddNeighborRequest {
+            config: Some(proto::NeighborConfig {
+                address: "10.0.0.2".into(),
+                remote_asn: 65002,
+                description: String::new(),
+                hold_time: 90,
+                max_prefixes: 0,
+                families: Vec::new(),
+                peer_group: String::new(),
+                remove_private_as: String::new(),
+                ..Default::default()
+            }),
+        });
+        let err = svc.add_neighbor(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
     #[test]
     fn parse_families_proto_deduplicates() {
         let families = vec![
@@ -551,7 +593,7 @@ mod tests {
     async fn soft_reset_in_deduplicates_requested_families() {
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::SoftResetIn {
@@ -585,7 +627,7 @@ mod tests {
 
         let (peer_tx, mut peer_rx) = mpsc::channel(16);
         let (rib_tx, mut rib_rx) = mpsc::channel(16);
-        let svc = NeighborService::new(65001, peer_tx, rib_tx, None);
+        let svc = NeighborService::new(65001, AccessMode::ReadWrite, peer_tx, rib_tx, None);
 
         let addr: std::net::IpAddr = "10.0.0.1".parse().unwrap();
 
@@ -674,7 +716,13 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, config_rx) = mpsc::channel(1);
         drop(config_rx);
-        let svc = NeighborService::new(65001, peer_tx, rib_tx, Some(config_tx));
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_tx,
+            rib_tx,
+            Some(config_tx),
+        );
 
         let req = Request::new(proto::AddNeighborRequest {
             config: Some(proto::NeighborConfig {
@@ -700,7 +748,13 @@ mod tests {
         let (rib_tx, _rib_rx) = mpsc::channel(16);
         let (config_tx, config_rx) = mpsc::channel(1);
         drop(config_rx);
-        let svc = NeighborService::new(65001, peer_tx, rib_tx, Some(config_tx));
+        let svc = NeighborService::new(
+            65001,
+            AccessMode::ReadWrite,
+            peer_tx,
+            rib_tx,
+            Some(config_tx),
+        );
 
         let req = Request::new(proto::DeleteNeighborRequest {
             address: "10.0.0.2".into(),

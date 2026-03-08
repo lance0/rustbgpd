@@ -26,3 +26,22 @@ pub async fn run(connection: Connection, json: bool) -> Result<(), CliError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::connection::connect;
+    use crate::test_support::spawn_mock_server;
+
+    #[tokio::test]
+    async fn run_calls_get_global() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        run(connection, true).await.unwrap();
+
+        assert_eq!(server.state.global_calls.load(Ordering::SeqCst), 1);
+    }
+}

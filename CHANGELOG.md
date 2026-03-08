@@ -57,6 +57,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rustbgpd peered with FRR (4 IPv4 + 3 IPv6 sample prefixes) in a single
   `docker compose up -d`. gRPC exposed on localhost:50051 for immediate
   `rustbgpctl` use from the host.
+- **Per-listener gRPC access mode.** Each configured gRPC listener (TCP or UDS)
+  can independently set `access_mode = "read_write"` (default) or `"read_only"`.
+  Read-only listeners allow query and watch RPCs but reject all mutating RPCs
+  (neighbor add/delete, route injection, policy changes, peer-group changes,
+  shutdown, MRT trigger) with `PERMISSION_DENIED`. Intended for monitoring or
+  dashboard listeners that should not expose control-plane writes.
+- **CLI gRPC integration tests.** `rustbgpctl` commands now have mock-server
+  integration tests over both TCP (with bearer token auth) and Unix domain
+  sockets, covering health, global, neighbor add, and soft-reset RPC paths.
+- **BMP transport-path tests.** Session-to-BMP emission points (PeerUp,
+  PeerDown, RouteMonitoring) are now covered by transport crate tests.
 
 ### Fixed
 

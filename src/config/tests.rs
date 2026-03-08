@@ -208,6 +208,7 @@ fn grpc_listeners_default_to_uds() {
         vec![GrpcListener::Uds {
             path: PathBuf::from("/var/lib/rustbgpd/grpc.sock"),
             mode: 0o600,
+            access_mode: GrpcAccessMode::ReadWrite,
             token_file: None,
         }]
     );
@@ -224,6 +225,24 @@ fn grpc_tcp_listener_parses_when_enabled() {
         config.grpc_listeners(),
         vec![GrpcListener::Tcp {
             addr: "127.0.0.1:50051".parse().unwrap(),
+            access_mode: GrpcAccessMode::ReadWrite,
+            token_file: None,
+        }]
+    );
+}
+
+#[test]
+fn grpc_listener_access_mode_parses() {
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\naccess_mode = \"read_only\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    assert_eq!(
+        config.grpc_listeners(),
+        vec![GrpcListener::Tcp {
+            addr: "127.0.0.1:50051".parse().unwrap(),
+            access_mode: GrpcAccessMode::ReadOnly,
             token_file: None,
         }]
     );

@@ -13,6 +13,10 @@ address = "127.0.0.1:50051"
 
 The proto definition lives at `proto/rustbgpd.proto`.
 
+Each configured listener can independently set `access_mode = "read_write"` or
+`"read_only"`. Read-only listeners allow query and watch RPCs but reject all
+mutating RPCs with `PERMISSION_DENIED`.
+
 ---
 
 ## GlobalService

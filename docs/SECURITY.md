@@ -33,6 +33,9 @@ Preferred posture:
 - Keep rustbgpd itself bound to loopback or a local UDS.
 - Put an mTLS proxy or sidecar in front of it for remote access. Envoy is the
   recommended reference path; see [`examples/envoy-mtls/`](../examples/envoy-mtls/).
+- If you need to expose monitoring directly, prefer a dedicated
+  `access_mode = "read_only"` listener over exposing the mutating control
+  surface.
 - Restrict the exposed listener to a management VLAN/interface or a small set
   of management hosts.
 - Even behind a proxy, treat the API as privileged. Read-only RPCs still reveal
@@ -108,7 +111,6 @@ These protect BGP transport sessions, not the gRPC management surface.
 The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
-- Read-only vs read-write gRPC listener split
 - Native gRPC mTLS inside the daemon
 - Finer-grained gRPC authorization beyond "listener allowed / denied"
 
@@ -116,5 +118,6 @@ the roadmap:
 
 - No native TLS termination in the daemon today; use a proxy or sidecar for
   remote encrypted access
-- No built-in authorization tiers between read-only and mutating RPCs
+- Authorization is listener-wide (`read_only` vs `read_write`), not per-RPC or
+  per-role
 - No TCP-AO (RFC 5925); TCP MD5 and GTSM are the supported session protections

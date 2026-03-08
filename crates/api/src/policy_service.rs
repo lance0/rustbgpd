@@ -11,6 +11,7 @@ use crate::peer_types::{
     PolicyStatementDefinition,
 };
 use crate::proto;
+use crate::server::{AccessMode, read_only_rejection};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -142,6 +143,7 @@ async fn reserve_config_event_slot(
 
 /// gRPC service for named policy CRUD and chain assignment.
 pub struct PolicyService {
+    access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 }
@@ -149,10 +151,12 @@ pub struct PolicyService {
 impl PolicyService {
     /// Create a new policy service with the given channels.
     pub fn new(
+        access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
         Self {
+            access_mode,
             peer_mgr_tx,
             config_tx,
         }
@@ -214,6 +218,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetPolicyRequest>,
     ) -> Result<Response<proto::SetPolicyResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
@@ -254,6 +261,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::DeletePolicyRequest>,
     ) -> Result<Response<proto::DeletePolicyResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
@@ -349,6 +359,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetNeighborSetRequest>,
     ) -> Result<Response<proto::SetNeighborSetResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
@@ -393,6 +406,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::DeleteNeighborSetRequest>,
     ) -> Result<Response<proto::DeleteNeighborSetResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
@@ -450,6 +466,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetGlobalImportChainRequest>,
     ) -> Result<Response<proto::SetGlobalImportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let persisted = persist_permit.as_ref().map(|_| req.policy_names.clone());
@@ -478,6 +497,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetGlobalExportChainRequest>,
     ) -> Result<Response<proto::SetGlobalExportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let persisted = persist_permit.as_ref().map(|_| req.policy_names.clone());
@@ -506,6 +528,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         _request: Request<proto::ClearGlobalImportChainRequest>,
     ) -> Result<Response<proto::ClearGlobalImportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -528,6 +553,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         _request: Request<proto::ClearGlobalExportChainRequest>,
     ) -> Result<Response<proto::ClearGlobalExportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let persist_permit = reserve_config_event_slot(self.config_tx.clone()).await?;
         let (reply_tx, reply_rx) = oneshot::channel();
         self.peer_mgr_tx
@@ -578,6 +606,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetNeighborImportChainRequest>,
     ) -> Result<Response<proto::SetNeighborImportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -618,6 +649,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::SetNeighborExportChainRequest>,
     ) -> Result<Response<proto::SetNeighborExportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -658,6 +692,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::ClearNeighborImportChainRequest>,
     ) -> Result<Response<proto::ClearNeighborImportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -693,6 +730,9 @@ impl proto::policy_service_server::PolicyService for PolicyService {
         &self,
         request: Request<proto::ClearNeighborExportChainRequest>,
     ) -> Result<Response<proto::ClearNeighborExportChainResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address: IpAddr = req
             .address
@@ -790,7 +830,7 @@ mod tests {
     async fn set_policy_emits_config_event_after_runtime_success() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx));
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::SetPolicy {
@@ -828,10 +868,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_policy_rejected_on_read_only_listener() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PolicyService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+
+        let err = PolicyServiceRpc::set_policy(
+            &svc,
+            Request::new(proto::SetPolicyRequest {
+                name: "tag-internal".into(),
+                definition: Some(sample_proto_definition()),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
     async fn delete_policy_in_use_maps_to_failed_precondition() {
         let (peer_tx, mut peer_rx) = mpsc::channel(4);
         let (config_tx, mut config_rx) = mpsc::channel(4);
-        let svc = PolicyService::new(peer_tx, Some(config_tx));
+        let svc = PolicyService::new(AccessMode::ReadWrite, peer_tx, Some(config_tx));
 
         tokio::spawn(async move {
             if let Some(PeerManagerCommand::DeletePolicy { name, reply }) = peer_rx.recv().await {

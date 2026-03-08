@@ -68,3 +68,38 @@ pub async fn mrt_dump(connection: Connection, json: bool) -> Result<(), CliError
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::connection::connect;
+    use crate::test_support::{spawn_mock_server, spawn_mock_uds_server};
+
+    #[tokio::test]
+    async fn health_calls_rpc_on_token_protected_server() {
+        let server = spawn_mock_server(Some("secret")).await;
+        let token_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(token_file.path(), "secret\n").unwrap();
+        let connection = connect(&server.addr, Some(token_file.path().to_str().unwrap()))
+            .await
+            .unwrap();
+
+        health(connection, true).await.unwrap();
+
+        assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn health_calls_rpc_over_uds() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("rustbgpd.sock");
+        let server = spawn_mock_uds_server(&socket_path, None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        health(connection, true).await.unwrap();
+
+        assert_eq!(server.state.health_calls.load(Ordering::SeqCst), 1);
+    }
+}

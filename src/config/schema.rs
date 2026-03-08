@@ -140,6 +140,7 @@ pub struct GrpcTcpListenerConfig {
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     pub address: Option<String>,
+    pub access_mode: Option<GrpcAccessModeConfig>,
     pub token_file: Option<String>,
 }
 
@@ -151,7 +152,15 @@ pub struct GrpcUdsListenerConfig {
     pub path: Option<String>,
     #[serde(default = "default_grpc_uds_mode")]
     pub mode: u32,
+    pub access_mode: Option<GrpcAccessModeConfig>,
     pub token_file: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrpcAccessModeConfig {
+    ReadOnly,
+    ReadWrite,
 }
 
 fn default_enabled() -> bool {

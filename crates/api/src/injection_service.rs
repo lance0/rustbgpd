@@ -6,6 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
+use crate::server::{AccessMode, read_only_rejection};
 use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
     Afi, AsPath, AsPathSegment, BitmaskMatch, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix,
@@ -15,13 +16,17 @@ use rustbgpd_wire::{
 
 /// gRPC service for injecting and withdrawing locally-originated routes.
 pub struct InjectionService {
+    access_mode: AccessMode,
     rib_tx: mpsc::Sender<RibUpdate>,
 }
 
 impl InjectionService {
     /// Create a new injection service backed by the given RIB channel.
-    pub fn new(rib_tx: mpsc::Sender<RibUpdate>) -> Self {
-        Self { rib_tx }
+    pub fn new(rib_tx: mpsc::Sender<RibUpdate>, access_mode: AccessMode) -> Self {
+        Self {
+            access_mode,
+            rib_tx,
+        }
     }
 }
 
@@ -98,6 +103,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddPathRequest>,
     ) -> Result<Response<proto::AddPathResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
 
         let (prefix, next_hop_ip) =
@@ -187,6 +195,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::DeletePathRequest>,
     ) -> Result<Response<proto::DeletePathResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
 
         let addr: IpAddr = req
@@ -233,6 +244,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::AddFlowSpecRequest>,
     ) -> Result<Response<proto::AddFlowSpecResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let afi = parse_flowspec_afi(req.afi_safi)?;
 
@@ -298,6 +312,9 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         &self,
         request: Request<proto::DeleteFlowSpecRequest>,
     ) -> Result<Response<proto::DeleteFlowSpecResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let afi = parse_flowspec_afi(req.afi_safi)?;
 
@@ -604,7 +621,7 @@ mod tests {
 
     fn make_service() -> InjectionService {
         let (tx, _rx) = mpsc::channel(16);
-        InjectionService::new(tx)
+        InjectionService::new(tx, AccessMode::ReadWrite)
     }
 
     #[tokio::test]
@@ -647,6 +664,31 @@ mod tests {
         let err = svc.add_path(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("multicast"));
+    }
+
+    #[tokio::test]
+    async fn add_path_rejected_on_read_only_listener() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let req = Request::new(proto::AddPathRequest {
+            prefix: "10.0.0.0".into(),
+            prefix_length: 24,
+            next_hop: "10.0.0.1".into(),
+            origin: 0,
+            as_path: vec![],
+            local_pref: 0,
+            med: 0,
+            communities: vec![],
+            extended_communities: vec![],
+            large_communities: vec![],
+            path_id: 0,
+        });
+        let err = svc.add_path(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

@@ -76,7 +76,7 @@ Rationale: GoBGP's protos carry Go-specific patterns and years of accumulated fe
 
 ### Service Architecture
 
-Five separate gRPC services, not one. This forces API boundary clarity, prevents god-service creep, enables future permission scoping (e.g., monitoring gets read-only RIB access, cannot inject routes), and mirrors internal architecture.
+Seven separate gRPC services, not one. This forces API boundary clarity, prevents god-service creep, enables permission scoping (for example, read-only listeners for monitoring), and mirrors internal architecture.
 
 ```protobuf
 // Global daemon configuration and identity

@@ -33,3 +33,5 @@ tonic-build.workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+tokio-stream = { workspace = true, features = ["net"] }
+rustbgpd-api.workspace = true

@@ -2,6 +2,8 @@ mod commands;
 mod connection;
 mod error;
 mod output;
+#[cfg(test)]
+mod test_support;
 mod tui;
 
 pub mod proto {

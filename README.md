@@ -195,6 +195,7 @@ and more explicit internal architecture.
 ## Security posture
 
 - **Default listener:** Unix domain socket at `/var/lib/rustbgpd/grpc.sock` — local-only, no TCP exposure
+- **Optional read-only listeners:** expose monitoring/query RPCs without exposing mutating control RPCs
 - **Remote access:** prefer an mTLS proxy (Envoy example provided) over direct TCP
 - **Network controls:** put gRPC on a management VLAN/interface and firewall it to known hosts
 

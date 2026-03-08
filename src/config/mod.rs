@@ -59,6 +59,7 @@ impl Config {
             return vec![GrpcListener::Uds {
                 path: self.default_grpc_uds_path(),
                 mode: 0o600,
+                access_mode: GrpcAccessMode::ReadWrite,
                 token_file: None,
             }];
         }
@@ -73,6 +74,9 @@ impl Config {
                 .expect("validated in Config::load");
             listeners.push(GrpcListener::Tcp {
                 addr,
+                access_mode: cfg
+                    .access_mode
+                    .map_or(GrpcAccessMode::ReadWrite, Into::into),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
             });
         }
@@ -84,6 +88,9 @@ impl Config {
             listeners.push(GrpcListener::Uds {
                 path,
                 mode: cfg.mode,
+                access_mode: cfg
+                    .access_mode
+                    .map_or(GrpcAccessMode::ReadWrite, Into::into),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
             });
         }
@@ -478,13 +485,21 @@ pub struct ResolvedNeighbor {
 pub enum GrpcListener {
     Tcp {
         addr: SocketAddr,
+        access_mode: GrpcAccessMode,
         token_file: Option<PathBuf>,
     },
     Uds {
         path: PathBuf,
         mode: u32,
+        access_mode: GrpcAccessMode,
         token_file: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcAccessMode {
+    ReadOnly,
+    ReadWrite,
 }
 
 /// Differences between two neighbor lists, keyed by address.
@@ -527,6 +542,15 @@ pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
         added,
         removed,
         changed,
+    }
+}
+
+impl From<GrpcAccessModeConfig> for GrpcAccessMode {
+    fn from(value: GrpcAccessModeConfig) -> Self {
+        match value {
+            GrpcAccessModeConfig::ReadOnly => Self::ReadOnly,
+            GrpcAccessModeConfig::ReadWrite => Self::ReadWrite,
+        }
     }
 }
 

@@ -65,6 +65,7 @@ configured, rustbgpd enables this listener by default at
 | `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
 | `path`       | string | no       | `<runtime_state_dir>/grpc.sock` | Absolute Unix socket path |
 | `mode`       | u32    | no       | `0o600` | Filesystem mode applied to the socket after bind |
+| `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
 
 ### `[global.telemetry.grpc_tcp]`
@@ -76,10 +77,17 @@ container/network exposure.
 |--------------|--------|----------|---------|-------------|
 | `enabled`    | bool   | no       | `true`  | Enable this listener when the table is present |
 | `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
+| `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
 
 If either listener subtable is present, at least one gRPC listener must remain
 enabled after applying `enabled = false`.
+
+`access_mode = "read_only"` permits query and watch RPCs but rejects mutating
+RPCs such as neighbor add/delete, route injection, policy changes, peer-group
+changes, shutdown, and MRT trigger requests with `PERMISSION_DENIED`. This is
+intended for monitoring or dashboard listeners that should not expose control
+plane writes.
 
 **Token file lifecycle:** When `token_file` is configured, the file must exist
 and contain a non-empty token at daemon startup. The token is read once during
@@ -96,9 +104,11 @@ log_format = "json"
 [global.telemetry.grpc_uds]
 path = "/var/lib/rustbgpd/grpc.sock"
 mode = 0o660
+access_mode = "read_write"
 
 [global.telemetry.grpc_tcp]
 address = "127.0.0.1:50051"
+access_mode = "read_only"
 # token_file = "/etc/rustbgpd/grpc.token"
 ```
 
@@ -1086,6 +1096,7 @@ starting:
 | `grpc_tcp.address` must be a valid `ip:port` when `grpc_tcp` is enabled | `invalid gRPC config` |
 | `grpc_uds.path` must be absolute when configured | `invalid gRPC config` |
 | `grpc_uds.mode` must be <= `0o777` | `invalid gRPC config` |
+| `grpc_*.access_mode` must be `read_only` or `read_write` | `invalid gRPC config` |
 | `grpc_*.token_file` must exist, be readable, and contain a non-empty token when configured | `invalid gRPC config` |
 | If `grpc_tcp`/`grpc_uds` tables are present, at least one listener must be enabled | `invalid gRPC config` |
 | `hold_time` must be 0 (disabled) or >= 3 seconds | `invalid hold_time` |

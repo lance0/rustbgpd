@@ -53,7 +53,14 @@ pub struct ServeConfig {
 #[derive(Clone, Debug)]
 pub struct ListenerConfig {
     pub endpoint: ListenerEndpoint,
+    pub access_mode: AccessMode,
     pub auth_token: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessMode {
+    ReadOnly,
+    ReadWrite,
 }
 
 /// Listener transport.
@@ -72,6 +79,16 @@ impl AuthInterceptor {
     fn new(token: Option<String>) -> Self {
         let expected_header = token.map(|token| Arc::new(format!("Bearer {token}")));
         Self { expected_header }
+    }
+}
+
+pub(crate) fn read_only_rejection(access_mode: AccessMode) -> Option<Status> {
+    if access_mode == AccessMode::ReadOnly {
+        Some(Status::permission_denied(
+            "listener is read-only; mutating RPCs are not permitted",
+        ))
+    } else {
+        None
     }
 }
 
@@ -187,6 +204,7 @@ async fn run_listener(
         ListenerEndpoint::Tcp(addr) => {
             run_tcp_listener(
                 addr,
+                listener.access_mode,
                 listener.auth_token,
                 rib_tx,
                 peer_mgr_tx,
@@ -206,6 +224,7 @@ async fn run_listener(
             run_uds_listener(
                 path,
                 mode,
+                listener.access_mode,
                 listener.auth_token,
                 rib_tx,
                 peer_mgr_tx,
@@ -227,6 +246,7 @@ async fn run_listener(
 #[expect(clippy::too_many_arguments, reason = "startup wiring for one listener")]
 async fn run_tcp_listener(
     addr: SocketAddr,
+    access_mode: AccessMode,
     auth_token: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -242,6 +262,7 @@ async fn run_tcp_listener(
 ) -> Result<(), String> {
     info!(
         %addr,
+        access_mode = ?access_mode,
         auth_enabled = auth_token.is_some(),
         "starting gRPC TCP listener"
     );
@@ -252,19 +273,25 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
-            InjectionService::new(rib_tx.clone()),
+            InjectionService::new(rib_tx.clone(), access_mode),
             interceptor.clone(),
         ))
         .add_service(NeighborServiceServer::with_interceptor(
-            NeighborService::new(asn, peer_mgr_tx.clone(), rib_tx.clone(), config_tx.clone()),
+            NeighborService::new(
+                asn,
+                access_mode,
+                peer_mgr_tx.clone(),
+                rib_tx.clone(),
+                config_tx.clone(),
+            ),
             interceptor.clone(),
         ))
         .add_service(PeerGroupServiceServer::with_interceptor(
-            PeerGroupService::new(peer_mgr_tx.clone(), config_tx.clone()),
+            PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(PolicyServiceServer::with_interceptor(
-            PolicyService::new(peer_mgr_tx.clone(), config_tx.clone()),
+            PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(GlobalServiceServer::with_interceptor(
@@ -273,6 +300,7 @@ async fn run_tcp_listener(
         ))
         .add_service(ControlServiceServer::with_interceptor(
             ControlService::new(
+                access_mode,
                 start_time,
                 metrics,
                 peer_mgr_tx,
@@ -291,6 +319,7 @@ async fn run_tcp_listener(
 async fn run_uds_listener(
     path: PathBuf,
     mode: u32,
+    access_mode: AccessMode,
     auth_token: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -308,6 +337,7 @@ async fn run_uds_listener(
     let uds_listener = bind_uds_listener(&path, mode)?;
     info!(
         path = %path.display(),
+        access_mode = ?access_mode,
         auth_enabled,
         "starting gRPC UDS listener"
     );
@@ -318,19 +348,25 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
-            InjectionService::new(rib_tx.clone()),
+            InjectionService::new(rib_tx.clone(), access_mode),
             interceptor.clone(),
         ))
         .add_service(NeighborServiceServer::with_interceptor(
-            NeighborService::new(asn, peer_mgr_tx.clone(), rib_tx.clone(), config_tx.clone()),
+            NeighborService::new(
+                asn,
+                access_mode,
+                peer_mgr_tx.clone(),
+                rib_tx.clone(),
+                config_tx.clone(),
+            ),
             interceptor.clone(),
         ))
         .add_service(PeerGroupServiceServer::with_interceptor(
-            PeerGroupService::new(peer_mgr_tx.clone(), config_tx.clone()),
+            PeerGroupService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(PolicyServiceServer::with_interceptor(
-            PolicyService::new(peer_mgr_tx.clone(), config_tx.clone()),
+            PolicyService::new(access_mode, peer_mgr_tx.clone(), config_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(GlobalServiceServer::with_interceptor(
@@ -339,6 +375,7 @@ async fn run_uds_listener(
         ))
         .add_service(ControlServiceServer::with_interceptor(
             ControlService::new(
+                access_mode,
                 start_time,
                 metrics,
                 peer_mgr_tx,

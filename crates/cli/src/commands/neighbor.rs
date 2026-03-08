@@ -269,3 +269,61 @@ pub async fn softreset(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::connect;
+    use crate::test_support::spawn_mock_server;
+
+    #[tokio::test]
+    async fn add_sends_route_server_and_add_path_fields() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        add(
+            connection,
+            "10.0.0.2",
+            AddNeighborOpts {
+                asn: 65002,
+                description: Some("peer-2".to_string()),
+                hold_time: Some(90),
+                max_prefixes: Some(1000),
+                families: vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()],
+                route_server_client: true,
+                add_path_receive: true,
+                add_path_send: true,
+                add_path_send_max: 4,
+            },
+            true,
+        )
+        .await
+        .unwrap();
+
+        let request = server.state.last_add_neighbor.lock().await.clone().unwrap();
+        assert!(request.route_server_client);
+        assert!(request.add_path_receive);
+        assert!(request.add_path_send);
+        assert_eq!(request.add_path_send_max, 4);
+        assert_eq!(request.remote_asn, 65002);
+    }
+
+    #[tokio::test]
+    async fn softreset_sends_family_filter() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        softreset(
+            connection,
+            "10.0.0.2",
+            Some("ipv6_unicast".to_string()),
+            true,
+        )
+        .await
+        .unwrap();
+
+        let request = server.state.last_softreset.lock().await.clone().unwrap();
+        assert_eq!(request.address, "10.0.0.2");
+        assert_eq!(request.families, vec!["ipv6_unicast".to_string()]);
+    }
+}

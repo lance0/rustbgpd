@@ -26,10 +26,13 @@ use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
-use rustbgpd_api::server::{ListenerConfig as GrpcListenerConfig, ListenerEndpoint, ServeConfig};
+use rustbgpd_api::server::{
+    AccessMode as GrpcServerAccessMode, ListenerConfig as GrpcListenerConfig, ListenerEndpoint,
+    ServeConfig,
+};
 use rustbgpd_policy::PolicyChain;
 
-use crate::config::{Config, GrpcListener};
+use crate::config::{Config, GrpcAccessMode, GrpcListener};
 use crate::config_persister::{ConfigMutation, ConfigPersister};
 use crate::peer_manager::{InternalCommand, PeerManager};
 use crate::policy_admin::apply_config_event;
@@ -46,6 +49,15 @@ struct BmpRuntime {
     control_tx: mpsc::Sender<rustbgpd_bmp::BmpControlEvent>,
     manager_handle: JoinHandle<()>,
     client_handles: Vec<JoinHandle<()>>,
+}
+
+impl From<GrpcAccessMode> for GrpcServerAccessMode {
+    fn from(value: GrpcAccessMode) -> Self {
+        match value {
+            GrpcAccessMode::ReadOnly => Self::ReadOnly,
+            GrpcAccessMode::ReadWrite => Self::ReadWrite,
+        }
+    }
 }
 
 fn max_gr_restart_time_secs(config: &Config) -> Option<u64> {
@@ -117,16 +129,23 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
         .grpc_listeners()
         .into_iter()
         .map(|listener| match listener {
-            GrpcListener::Tcp { addr, token_file } => Ok(GrpcListenerConfig {
+            GrpcListener::Tcp {
+                addr,
+                access_mode,
+                token_file,
+            } => Ok(GrpcListenerConfig {
                 endpoint: ListenerEndpoint::Tcp(addr),
+                access_mode: access_mode.into(),
                 auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
             }),
             GrpcListener::Uds {
                 path,
                 mode,
+                access_mode,
                 token_file,
             } => Ok(GrpcListenerConfig {
                 endpoint: ListenerEndpoint::Uds { path, mode },
+                access_mode: access_mode.into(),
                 auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
             }),
         })
@@ -216,7 +235,11 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
         } else {
             ""
         };
-        eprintln!("  |- {label}{auth}");
+        let access = match listener.access_mode {
+            GrpcServerAccessMode::ReadOnly => " (read-only)",
+            GrpcServerAccessMode::ReadWrite => "",
+        };
+        eprintln!("  |- {label}{access}{auth}");
     }
 
     // Metrics

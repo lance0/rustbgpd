@@ -10,6 +10,7 @@ use crate::peer_types::{
     PolicyAsPathPrependConfig, PolicyStatementDefinition,
 };
 use crate::proto;
+use crate::server::{AccessMode, read_only_rejection};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -215,6 +216,7 @@ async fn reserve_config_event_slot(
 
 /// gRPC service for peer-group CRUD and neighbor membership assignment.
 pub struct PeerGroupService {
+    access_mode: AccessMode,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
 }
@@ -222,10 +224,12 @@ pub struct PeerGroupService {
 impl PeerGroupService {
     /// Create a new peer-group service with the given channels.
     pub fn new(
+        access_mode: AccessMode,
         peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
         config_tx: Option<mpsc::Sender<ConfigEvent>>,
     ) -> Self {
         Self {
+            access_mode,
             peer_mgr_tx,
             config_tx,
         }
@@ -287,6 +291,9 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         &self,
         request: Request<proto::SetPeerGroupRequest>,
     ) -> Result<Response<proto::SetPeerGroupResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
@@ -327,6 +334,9 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         &self,
         request: Request<proto::DeletePeerGroupRequest>,
     ) -> Result<Response<proto::DeletePeerGroupResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         if req.name.trim().is_empty() {
             return Err(Status::invalid_argument("name is required"));
@@ -366,6 +376,9 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         &self,
         request: Request<proto::SetNeighborPeerGroupRequest>,
     ) -> Result<Response<proto::SetNeighborPeerGroupResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address = req
             .address
@@ -408,6 +421,9 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         &self,
         request: Request<proto::ClearNeighborPeerGroupRequest>,
     ) -> Result<Response<proto::ClearNeighborPeerGroupResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
         let req = request.into_inner();
         let address = req
             .address
@@ -437,5 +453,41 @@ impl proto::peer_group_service_server::PeerGroupService for PeerGroupService {
         }
 
         Ok(Response::new(proto::ClearNeighborPeerGroupResponse {}))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::peer_group_service_server::PeerGroupService as PeerGroupServiceRpc;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    fn sample_definition() -> proto::PeerGroupDefinition {
+        proto::PeerGroupDefinition {
+            families: vec!["ipv4_unicast".into()],
+            route_server_client: Some(true),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn set_peer_group_rejected_on_read_only_listener() {
+        let (peer_tx, mut peer_rx) = mpsc::channel(4);
+        let (config_tx, mut config_rx) = mpsc::channel(4);
+        let svc = PeerGroupService::new(AccessMode::ReadOnly, peer_tx, Some(config_tx));
+
+        let err = PeerGroupServiceRpc::set_peer_group(
+            &svc,
+            Request::new(proto::SetPeerGroupRequest {
+                name: "rs-clients".into(),
+                definition: Some(sample_definition()),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(matches!(peer_rx.try_recv(), Err(TryRecvError::Empty)));
+        assert!(matches!(config_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }
