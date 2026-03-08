@@ -13,6 +13,11 @@ use crate::route::{FlowSpecRoute, Route};
 ///
 /// A secondary `prefix_index` maps each prefix to its set of path IDs,
 /// enabling O(candidates) `iter_prefix()` lookups instead of O(N) full scans.
+///
+/// Path attribute interning: routes from the same peer that share identical
+/// attributes reuse a single `Arc<Vec<PathAttribute>>` allocation.  This is
+/// common in bulk advertisements where every prefix has the same ORIGIN,
+/// `AS_PATH`, `NEXT_HOP`, `LOCAL_PREF`, MED, and communities.
 #[derive(Debug)]
 pub struct AdjRibIn {
     peer: IpAddr,
@@ -23,6 +28,11 @@ pub struct AdjRibIn {
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
     /// `FlowSpec` routes keyed by `(rule, path_id)`.
     flowspec_routes: HashMap<(FlowSpecRule, u32), FlowSpecRoute>,
+    /// Intern table: deduplicates identical attribute sets across routes.
+    /// Lookup by content returns the shared `Arc`.  Entries with
+    /// `strong_count == 1` (only the intern table itself) are garbage-
+    /// collected on `gc_intern_table()`.
+    attr_intern: HashSet<Arc<Vec<rustbgpd_wire::PathAttribute>>>,
 }
 
 impl AdjRibIn {
@@ -35,6 +45,7 @@ impl AdjRibIn {
             prefix_index: HashMap::new(),
             llgr_stale_local_tags: HashSet::new(),
             flowspec_routes: HashMap::new(),
+            attr_intern: HashSet::new(),
         }
     }
 
@@ -45,13 +56,25 @@ impl AdjRibIn {
     }
 
     /// Insert or replace a route. Clears any stale tag on the key.
-    pub fn insert(&mut self, route: Route) {
+    ///
+    /// The route's attributes are interned: if an identical attribute set
+    /// already exists from a previous route, the existing `Arc` is reused
+    /// instead of keeping a separate allocation.
+    pub fn insert(&mut self, mut route: Route) {
         let key = (route.prefix, route.path_id);
         self.prefix_index
             .entry(route.prefix)
             .or_default()
             .insert(route.path_id);
         self.llgr_stale_local_tags.remove(&key);
+
+        // Intern: reuse an existing Arc if one matches
+        if let Some(existing) = self.attr_intern.get(&route.attributes) {
+            route.attributes = existing.clone();
+        } else {
+            self.attr_intern.insert(route.attributes.clone());
+        }
+
         self.routes.insert(key, route);
     }
 
@@ -71,6 +94,7 @@ impl AdjRibIn {
         self.routes.clear();
         self.prefix_index.clear();
         self.llgr_stale_local_tags.clear();
+        self.attr_intern.clear();
     }
 
     /// Return the number of unicast routes stored.
@@ -283,6 +307,18 @@ impl AdjRibIn {
             }
         }
         self.clear_local_llgr_stale_community(&clear_local_llgr);
+    }
+
+    /// Garbage-collect interned attribute sets that are no longer referenced
+    /// by any route (only the intern table itself holds the `Arc`).
+    pub fn gc_intern_table(&mut self) {
+        self.attr_intern.retain(|arc| Arc::strong_count(arc) > 1);
+    }
+
+    /// Return the number of unique interned attribute sets.
+    #[must_use]
+    pub fn intern_len(&self) -> usize {
+        self.attr_intern.len()
     }
 
     // --- FlowSpec methods ---
@@ -703,5 +739,95 @@ mod tests {
         let route = rib.get(&Prefix::V4(prefix), 0).unwrap();
         assert!(!route.is_llgr_stale);
         assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn intern_deduplicates_identical_attributes() {
+        use rustbgpd_wire::Origin;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::LocalPref(100),
+        ];
+
+        let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+        let p3 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 3, 0), 24);
+
+        let mut r1 = make_route(p1, Ipv4Addr::new(10, 0, 0, 1));
+        r1.attributes = Arc::new(attrs.clone());
+        let mut r2 = make_route(p2, Ipv4Addr::new(10, 0, 0, 1));
+        r2.attributes = Arc::new(attrs.clone());
+        let mut r3 = make_route(p3, Ipv4Addr::new(10, 0, 0, 1));
+        r3.attributes = Arc::new(attrs);
+
+        rib.insert(r1);
+        rib.insert(r2);
+        rib.insert(r3);
+
+        // All three routes should share the same Arc
+        let a1 = &rib.get(&Prefix::V4(p1), 0).unwrap().attributes;
+        let a2 = &rib.get(&Prefix::V4(p2), 0).unwrap().attributes;
+        let a3 = &rib.get(&Prefix::V4(p3), 0).unwrap().attributes;
+        assert!(Arc::ptr_eq(a1, a2));
+        assert!(Arc::ptr_eq(a2, a3));
+
+        // Only one unique entry in the intern table
+        assert_eq!(rib.intern_len(), 1);
+    }
+
+    #[test]
+    fn intern_separates_different_attributes() {
+        use rustbgpd_wire::Origin;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+
+        let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+
+        let mut r1 = make_route(p1, Ipv4Addr::new(10, 0, 0, 1));
+        r1.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Igp)]);
+        let mut r2 = make_route(p2, Ipv4Addr::new(10, 0, 0, 1));
+        r2.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+
+        rib.insert(r1);
+        rib.insert(r2);
+
+        let a1 = &rib.get(&Prefix::V4(p1), 0).unwrap().attributes;
+        let a2 = &rib.get(&Prefix::V4(p2), 0).unwrap().attributes;
+        assert!(!Arc::ptr_eq(a1, a2));
+        assert_eq!(rib.intern_len(), 2);
+    }
+
+    #[test]
+    fn gc_intern_table_removes_orphaned_entries() {
+        use rustbgpd_wire::Origin;
+
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+
+        let p1 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+        let p2 = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 2, 0), 24);
+
+        let attrs = vec![PathAttribute::Origin(Origin::Igp)];
+        let mut r1 = make_route(p1, Ipv4Addr::new(10, 0, 0, 1));
+        r1.attributes = Arc::new(attrs.clone());
+        let mut r2 = make_route(p2, Ipv4Addr::new(10, 0, 0, 1));
+        r2.attributes = Arc::new(vec![PathAttribute::Origin(Origin::Egp)]);
+
+        rib.insert(r1);
+        rib.insert(r2);
+        assert_eq!(rib.intern_len(), 2);
+
+        // Withdraw p2 — its unique attrs become orphaned
+        rib.withdraw(&Prefix::V4(p2), 0);
+        assert_eq!(rib.intern_len(), 2); // still there before GC
+
+        rib.gc_intern_table();
+        assert_eq!(rib.intern_len(), 1); // orphan cleaned up
     }
 }

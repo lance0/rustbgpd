@@ -170,12 +170,18 @@ Measured using a tracking global allocator that counts every `alloc` and
 | `Prefix` | 18 bytes |
 | `PathAttribute` | 72 bytes |
 | `AsPath` | 24 bytes |
-| `AdjRibIn` | 216 bytes |
+| `AdjRibIn` | 264 bytes |
 | `LocRib` | 96 bytes |
 
 `Route.attributes` is `Arc<Vec<PathAttribute>>` — cloning a route between
 Adj-RIB-In, Loc-RIB, and Adj-RIB-Out shares the attribute allocation via
 reference counting. Mutation uses `Arc::make_mut()` (copy-on-write).
+
+Path attribute interning in `AdjRibIn` deduplicates identical attribute sets
+across routes from the same peer. A `HashSet<Arc<Vec<PathAttribute>>>` intern
+table maps each unique attribute set to a shared `Arc`. Routes with identical
+attributes (common in bulk advertisements) share one heap allocation instead of
+each having their own copy.
 
 ### Per-Route Heap Allocation
 
@@ -184,38 +190,51 @@ reference counting. Mutation uses `Arc::make_mut()` (copy-on-write).
 | Typical (6 attrs, 3-ASN path, 2 communities) | 524 B | 88 B | 612 B |
 | Rich (8 attrs, 5-ASN+SET path, 5 communities, ORIGINATOR_ID, CLUSTER_LIST) | 736 B | 88 B | 824 B |
 
+These are per-unique-attribute-set costs. With interning, routes sharing the
+same attributes pay only the 88-byte `Route` stack cost plus an 8-byte `Arc`
+pointer.
+
 ### AdjRibIn at Scale (single peer, typical attrs)
 
 | Routes | Resident | Per-route |
 |--------|----------|-----------|
-| 10,000 | 8.2 MB | 864 B |
-| 100,000 | 76.7 MB | 803 B |
-| 500,000 | 453 MB | 950 B |
-| 900,000 | 667 MB | 776 B |
+| 10,000 | 3.3 MB | 340 B |
+| 100,000 | 26.7 MB | 279 B |
+| 500,000 | 203 MB | 426 B |
+| 900,000 | 217 MB | 252 B |
 
-Per-route cost is ~776-950 bytes including HashMap and prefix index overhead.
-Variance comes from HashMap load factor at different sizes.
+Per-route cost is ~252-426 bytes including HashMap overhead, prefix index, and
+intern table. The dramatic reduction from pre-interning numbers (776-950 B/route)
+comes from sharing the ~524-byte attribute allocation across all routes with
+identical attributes. A typical peer's full table has only a handful of unique
+attribute sets (~50-200), so the attribute heap cost is effectively amortized
+to near zero per route.
 
 ### Full RIB: 2 Peers + LocRib (typical attrs)
 
 | Prefixes | Total memory | Per-prefix |
 |----------|-------------|------------|
-| 100,000 | 167 MB | 1.7 KB |
-| 500,000 | 1.02 GB | 2.1 KB |
-| 900,000 | 1.41 GB | 1.6 KB |
+| 100,000 | 68 MB | 707 B |
+| 500,000 | 519 MB | 1.1 KB |
+| 900,000 | 547 MB | 637 B |
 
 A full Internet table (900k prefixes) with 2 peers and best-path selection uses
-**1.41 GB**. Each prefix stores 3 Route instances (2x Adj-RIB-In + 1x Loc-RIB)
-but the `Arc<Vec<PathAttribute>>` sharing means the Loc-RIB copy does not
-duplicate the attribute allocation. This is 6-11x less than GoBGP (8-16+ GB)
-but larger than BIRD (~325 MB for 30 peers) which shares path attribute storage
-across routes with identical attributes.
+**547 MB**. Each prefix stores 3 Route instances (2x Adj-RIB-In + 1x Loc-RIB)
+with `Arc` sharing across all three copies. Path attribute interning within each
+`AdjRibIn` further reduces memory by sharing attribute allocations across routes
+with identical attributes. This is **15-29x less than GoBGP** (8-16+ GB) and
+approaching BIRD (~325 MB for 30 peers).
 
-### Optimization Opportunities
+### Optimization History
 
-- **Path attribute interning** — routes from the same peer often share identical
-  attributes. A dedup table could reduce memory 3-5x for large tables,
-  approaching BIRD-class efficiency.
+| Version | Full RIB (900k x 2 peers) | Per-prefix | vs GoBGP |
+|---------|--------------------------|------------|----------|
+| Pre-Arc (`Vec<PathAttribute>`) | 1.80 GB | 2.1 KB | 4-9x less |
+| Arc sharing (v0.4.2) | 1.41 GB | 1.6 KB | 6-11x less |
+| Arc + interning (current) | 547 MB | 637 B | 15-29x less |
+
+### Remaining Optimization Opportunities
+
 - **HashMap pre-sizing** — `with_capacity()` on AdjRibIn construction would
   reduce peak allocation by avoiding rehash copies.
 
@@ -260,7 +279,7 @@ most natural comparison. Published bgperf2 results for GoBGP 2.29.0:
 |--------|-------|----------|-------|
 | Route ingestion (100k routes, 10 peers) | ~11k routes/sec | 2.6M routes/sec (insert only) | GoBGP is end-to-end; rustbgpd is RIB insert micro-benchmark |
 | CPU usage (100k routes) | 1450% (all cores) | Single-threaded | GoBGP uses goroutine-per-peer; rustbgpd uses single-owner RIB |
-| Memory (full table, ~900k) | 8-16+ GB | 1.41 GB (2 peers + LocRib) | 6-11x less than GoBGP |
+| Memory (full table, ~900k) | 8-16+ GB | 547 MB (2 peers + LocRib) | 15-29x less than GoBGP |
 | Full table convergence | Test abandoned (too slow) | ~1.5s estimated (pipeline extrapolation) | GoBGP was excluded from full-table rounds of bgperf2 |
 
 GoBGP's Go runtime incurs GC pressure, interface boxing overhead, and
@@ -276,7 +295,7 @@ bgperf2 results:
 |--------|------|---------|----------|
 | Route ingestion (100k, 10 peers) | ~25k routes/sec | ~33k routes/sec | 2.6M routes/sec (insert only) |
 | CPU usage (100k routes) | ~100% (single core) | ~100% (single core) | Single-threaded |
-| Memory (100k routes, 2 peers) | 15 MB | 100 MB | 212 MB |
+| Memory (100k routes, 2 peers) | 15 MB | 100 MB | 68 MB |
 | Full table (800k x 30 peers) | Completes | Completes | Not yet tested |
 
 BIRD and FRR are mature, battle-tested stacks with radix-tree RIBs and decades
@@ -292,8 +311,8 @@ enough for full-table scale. The remaining unknowns are:
 
 1. **End-to-end throughput** — how fast can the full daemon ingest routes from
    live BGP peers? This requires bgperf2 or equivalent system benchmarks.
-2. **Memory footprint** — 1.41 GB for a full table with 2 peers. 6-11x less than
-   GoBGP, but larger than BIRD. Path attribute interning could close the gap.
+2. **Memory footprint** — 547 MB for a full table with 2 peers. 15-29x less than
+   GoBGP, approaching BIRD-class efficiency.
 3. **Multi-peer scaling** — the single-owner RIB avoids lock contention but
    serializes all RIB operations through one tokio task. Channel backpressure
    under high peer counts needs testing.

@@ -45,7 +45,7 @@ impl std::fmt::Display for Origin {
 }
 
 /// `AS_PATH` segment types per RFC 4271 §4.3.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AsPathSegment {
     /// `AS_SET` — unordered set of ASNs.
     AsSet(Vec<u32>),
@@ -54,7 +54,7 @@ pub enum AsPathSegment {
 }
 
 /// `AS_PATH` attribute.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AsPath {
     /// Ordered list of path segments.
     pub segments: Vec<AsPathSegment>,
@@ -164,7 +164,7 @@ pub fn is_private_asn(asn: u32) -> bool {
 ///
 /// Uses [`NlriEntry`] to carry Add-Path path IDs alongside each prefix.
 /// For non-Add-Path peers, `path_id` is always 0.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MpReachNlri {
     /// Address family.
     pub afi: Afi,
@@ -194,7 +194,7 @@ pub struct MpReachNlri {
 ///
 /// Uses [`NlriEntry`] to carry Add-Path path IDs alongside each prefix.
 /// For non-Add-Path peers, `path_id` is always 0.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MpUnreachNlri {
     /// Address family.
     pub afi: Afi,
@@ -369,7 +369,7 @@ impl fmt::Display for LargeCommunity {
 ///
 /// Known attributes are decoded into typed variants. Unknown attributes
 /// are preserved as `RawAttribute` for pass-through with the Partial bit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PathAttribute {
     /// `ORIGIN` attribute (type 1).
     Origin(Origin),
@@ -444,7 +444,7 @@ impl PathAttribute {
 ///
 /// On re-advertisement, the Partial bit (0x20) is OR'd into `flags`.
 /// All other flags and bytes are preserved unchanged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawAttribute {
     /// Attribute flags byte (optional, transitive, partial, extended-length).
     pub flags: u8,
