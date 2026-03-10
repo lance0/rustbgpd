@@ -7,7 +7,7 @@ use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tracing::{debug, info, warn};
 
-use super::RibManager;
+use super::{PendingRouteChunk, PendingRoutesReceived, RibManager};
 use super::helpers::{
     LOCAL_PEER, gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner,
     validate_route_rpki,
@@ -46,7 +46,7 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
-    pub(super) fn handle_routes_received(
+    pub(super) fn enqueue_routes_received(
         &mut self,
         peer: IpAddr,
         announced: Vec<crate::route::Route>,
@@ -54,17 +54,79 @@ impl RibManager {
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
         flowspec_withdrawn: Vec<FlowSpecRule>,
     ) {
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.ribs.entry(peer) {
+            let pending = PendingRoutesReceived::new(
+                peer,
+                announced,
+                withdrawn,
+                flowspec_announced,
+                flowspec_withdrawn,
+            );
+            entry.insert(
+                AdjRibIn::with_capacity(
+                    peer,
+                    pending.route_capacity_hint(),
+                    pending.flowspec_capacity_hint(),
+                ),
+            );
+            self.pending_route_batches.push_back(pending);
+            return;
+        }
+
+        self.pending_route_batches.push_back(PendingRoutesReceived::new(
+            peer,
+            announced,
+            withdrawn,
+            flowspec_announced,
+            flowspec_withdrawn,
+        ));
+    }
+
+    pub(super) fn process_next_route_chunk(&mut self) -> bool {
+        let Some(mut pending) = self.pending_route_batches.pop_front() else {
+            return false;
+        };
+
+        let peer = pending.peer();
+        let Some(chunk) = pending.next_chunk() else {
+            return false;
+        };
+
+        match chunk {
+            PendingRouteChunk::Withdrawn(withdrawn) => {
+                self.process_withdraw_chunk(peer, withdrawn);
+            }
+            PendingRouteChunk::Announced(announced) => {
+                self.process_announce_chunk(peer, announced);
+            }
+            PendingRouteChunk::FlowSpecWithdrawn(flowspec_withdrawn) => {
+                self.process_flowspec_withdraw_chunk(peer, flowspec_withdrawn);
+            }
+            PendingRouteChunk::FlowSpecAnnounced(flowspec_announced) => {
+                self.process_flowspec_announce_chunk(peer, flowspec_announced);
+            }
+        }
+
+        if pending.has_more() {
+            self.pending_route_batches.push_front(pending);
+        }
+
+        true
+    }
+
+    fn process_withdraw_chunk(&mut self, peer: IpAddr, withdrawn: Vec<(Prefix, u32)>) {
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
             .cloned()
             .unwrap_or_default();
-        let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
         let mut affected = HashSet::new();
-        let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
 
         let (rib_len, flowspec_len) = {
-            let rib = self.ribs.entry(peer).or_insert_with(|| AdjRibIn::new(peer));
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("peer rib must exist before chunk processing");
 
             for (prefix, path_id) in withdrawn {
                 if rib.withdraw(&prefix, path_id) {
@@ -77,6 +139,36 @@ impl RibManager {
                     stale.remove(&(prefix, path_id));
                 }
             }
+
+            debug!(%peer, routes = rib.len(), "rib updated");
+            (rib.len(), rib.flowspec_len())
+        };
+
+        let peer_label = peer.to_string();
+        self.metrics
+            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+        self.metrics
+            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        if !affected.is_empty() {
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+        }
+    }
+
+    fn process_announce_chunk(&mut self, peer: IpAddr, announced: Vec<crate::route::Route>) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+        let vrp_table: Option<Arc<VrpTable>> = self.vrp_table.as_ref().map(Arc::clone);
+        let mut affected = HashSet::new();
+
+        let (rib_len, flowspec_len) = {
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("peer rib must exist before chunk processing");
 
             for mut route in announced {
                 if let Some(ref table) = vrp_table {
@@ -94,6 +186,35 @@ impl RibManager {
                 }
             }
 
+            debug!(%peer, routes = rib.len(), "rib updated");
+            (rib.len(), rib.flowspec_len())
+        };
+
+        let peer_label = peer.to_string();
+        self.metrics
+            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+        self.metrics
+            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        if !affected.is_empty() {
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+        }
+    }
+
+    fn process_flowspec_withdraw_chunk(&mut self, peer: IpAddr, flowspec_withdrawn: Vec<FlowSpecRule>) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+        let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
+
+        let (rib_len, flowspec_len) = {
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("peer rib must exist before chunk processing");
+
             for rule in flowspec_withdrawn {
                 if rib.withdraw_flowspec(&rule, 0) {
                     debug!(%peer, rule = %rule, "flowspec withdrawn");
@@ -106,6 +227,38 @@ impl RibManager {
                     stale.retain(|(_, stale_rule, _)| stale_rule != &rule);
                 }
             }
+
+            debug!(%peer, routes = rib.len(), "rib updated");
+            (rib.len(), rib.flowspec_len())
+        };
+
+        let peer_label = peer.to_string();
+        self.metrics
+            .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+        self.metrics
+            .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
+        if !fs_affected.is_empty() {
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+    }
+
+    fn process_flowspec_announce_chunk(
+        &mut self,
+        peer: IpAddr,
+        flowspec_announced: Vec<crate::route::FlowSpecRoute>,
+    ) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+        let mut fs_affected: HashSet<FlowSpecRule> = HashSet::new();
+
+        let (rib_len, flowspec_len) = {
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("peer rib must exist before chunk processing");
 
             for route in flowspec_announced {
                 debug!(%peer, rule = %route.rule, "flowspec announced");
@@ -128,9 +281,6 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
         self.metrics
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
-        let changed = self.recompute_best(&affected);
-        self.distribute_changes(&changed, &affected);
-
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
         }

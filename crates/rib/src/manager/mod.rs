@@ -7,7 +7,7 @@ mod route_refresh;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -92,9 +92,137 @@ pub struct RibManager {
     route_events_tx: broadcast::Sender<RouteEvent>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
-    /// Priority channel for read-only queries (gRPC). Drained between route
-    /// processing to prevent management API stalls under heavy load.
+    /// Priority channel for read-only queries (gRPC).
     query_rx: mpsc::Receiver<RibUpdate>,
+    /// Large route batches that are being processed in chunks.
+    pending_route_batches: VecDeque<PendingRoutesReceived>,
+}
+
+const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
+const QUERY_BUDGET_PER_CHUNK: usize = 8;
+
+enum PendingRouteChunk {
+    Withdrawn(Vec<(Prefix, u32)>),
+    Announced(Vec<crate::route::Route>),
+    FlowSpecWithdrawn(Vec<FlowSpecRule>),
+    FlowSpecAnnounced(Vec<crate::route::FlowSpecRoute>),
+}
+
+enum PendingRoutePhase {
+    Withdrawn,
+    Announced,
+    FlowSpecWithdrawn,
+    FlowSpecAnnounced,
+    Done,
+}
+
+struct PendingRoutesReceived {
+    peer: IpAddr,
+    route_capacity_hint: usize,
+    flowspec_capacity_hint: usize,
+    withdrawn: std::vec::IntoIter<(Prefix, u32)>,
+    announced: std::vec::IntoIter<crate::route::Route>,
+    flowspec_withdrawn: std::vec::IntoIter<FlowSpecRule>,
+    flowspec_announced: std::vec::IntoIter<crate::route::FlowSpecRoute>,
+    phase: PendingRoutePhase,
+}
+
+impl PendingRoutesReceived {
+    fn new(
+        peer: IpAddr,
+        announced: Vec<crate::route::Route>,
+        withdrawn: Vec<(Prefix, u32)>,
+        flowspec_announced: Vec<crate::route::FlowSpecRoute>,
+        flowspec_withdrawn: Vec<FlowSpecRule>,
+    ) -> Self {
+        let route_capacity_hint = (announced.len() + withdrawn.len()).max(16);
+        let flowspec_capacity_hint = (flowspec_announced.len() + flowspec_withdrawn.len()).max(4);
+        Self {
+            peer,
+            route_capacity_hint,
+            flowspec_capacity_hint,
+            withdrawn: withdrawn.into_iter(),
+            announced: announced.into_iter(),
+            flowspec_withdrawn: flowspec_withdrawn.into_iter(),
+            flowspec_announced: flowspec_announced.into_iter(),
+            phase: PendingRoutePhase::Withdrawn,
+        }
+    }
+
+    fn route_capacity_hint(&self) -> usize {
+        self.route_capacity_hint
+    }
+
+    fn flowspec_capacity_hint(&self) -> usize {
+        self.flowspec_capacity_hint
+    }
+
+    fn peer(&self) -> IpAddr {
+        self.peer
+    }
+
+    fn next_chunk(&mut self) -> Option<PendingRouteChunk> {
+        loop {
+            match self.phase {
+                PendingRoutePhase::Withdrawn => {
+                    let chunk: Vec<_> = self
+                        .withdrawn
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::Announced;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::Withdrawn(chunk));
+                }
+                PendingRoutePhase::Announced => {
+                    let chunk: Vec<_> = self
+                        .announced
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::FlowSpecWithdrawn;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::Announced(chunk));
+                }
+                PendingRoutePhase::FlowSpecWithdrawn => {
+                    let chunk: Vec<_> = self
+                        .flowspec_withdrawn
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::FlowSpecAnnounced;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::FlowSpecWithdrawn(chunk));
+                }
+                PendingRoutePhase::FlowSpecAnnounced => {
+                    let chunk: Vec<_> = self
+                        .flowspec_announced
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::Done;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::FlowSpecAnnounced(chunk));
+                }
+                PendingRoutePhase::Done => return None,
+            }
+        }
+    }
+
+    fn has_more(&self) -> bool {
+        !self.withdrawn.as_slice().is_empty()
+            || !self.announced.as_slice().is_empty()
+            || !self.flowspec_withdrawn.as_slice().is_empty()
+            || !self.flowspec_announced.as_slice().is_empty()
+    }
 }
 
 impl RibManager {
@@ -142,6 +270,7 @@ impl RibManager {
             metrics,
             rx,
             query_rx,
+            pending_route_batches: VecDeque::new(),
         }
     }
 
@@ -190,12 +319,12 @@ impl RibManager {
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
     }
 
-    /// Drain all pending queries from the priority channel. Called after
-    /// processing each route update so that gRPC queries are serviced
-    /// between route batches instead of waiting behind thousands of
-    /// `RoutesReceived` messages.
-    fn drain_queries(&mut self) {
-        while let Ok(query) = self.query_rx.try_recv() {
+    /// Drain a bounded number of pending queries from the priority channel.
+    fn drain_queries(&mut self, limit: usize) {
+        for _ in 0..limit {
+            let Ok(query) = self.query_rx.try_recv() else {
+                break;
+            };
             self.handle_update(query);
         }
     }
@@ -213,7 +342,7 @@ impl RibManager {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
-            } => self.handle_routes_received(
+            } => self.enqueue_routes_received(
                 peer,
                 announced,
                 withdrawn,
@@ -483,9 +612,60 @@ impl RibManager {
             let needs_timers =
                 resync_armed || has_gr_timers || has_llgr_timers || has_refresh_timers;
 
-            if needs_timers {
+            if query_rx_open && self.query_rx.is_closed() {
+                query_rx_open = false;
+            }
+
+            let now = tokio::time::Instant::now();
+            if resync_armed && resync_sleep.deadline() <= now {
+                debug!(
+                    count = self.dirty_peers.len(),
+                    "resync timer fired for dirty peers"
+                );
+                self.distribute_changes(&HashSet::new(), &HashSet::new());
+                if self.dirty_peers.is_empty() {
+                    resync_armed = false;
+                } else {
+                    resync_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + DIRTY_RESYNC_INTERVAL);
+                }
+                continue;
+            }
+            if has_gr_timers && gr_sleep.deadline() <= now {
+                let expired: Vec<IpAddr> = self
+                    .gr_stale_deadlines
+                    .iter()
+                    .filter(|&(_, &deadline)| deadline <= now)
+                    .map(|(&peer, _)| peer)
+                    .collect();
+                for peer in expired {
+                    self.sweep_gr_stale(peer);
+                }
+                continue;
+            }
+            if has_llgr_timers && llgr_sleep.deadline() <= now {
+                let expired: Vec<IpAddr> = self
+                    .llgr_stale_deadlines
+                    .iter()
+                    .filter(|&(_, &deadline)| deadline <= now)
+                    .map(|(&peer, _)| peer)
+                    .collect();
+                for peer in expired {
+                    self.sweep_llgr_stale(peer);
+                }
+                continue;
+            }
+            if has_refresh_timers && refresh_sleep.deadline() <= now {
+                self.expire_refresh_windows();
+                continue;
+            }
+
+            if self.process_next_route_chunk() {
+                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
+                tokio::task::yield_now().await;
+            } else if needs_timers {
                 tokio::select! {
-                    biased;
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
                             Some(q) => self.handle_update(q),
@@ -496,7 +676,7 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.handle_update(update);
-                                self.drain_queries();
+                                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                             }
                             None => break,
                         }
@@ -550,7 +730,6 @@ impl RibManager {
             } else {
                 // No timers needed — wait for a route update or query.
                 tokio::select! {
-                    biased;
                     query = self.query_rx.recv(), if query_rx_open => {
                         match query {
                             Some(q) => self.handle_update(q),
@@ -561,7 +740,7 @@ impl RibManager {
                         match update {
                             Some(update) => {
                                 self.handle_update(update);
-                                self.drain_queries();
+                                self.drain_queries(QUERY_BUDGET_PER_CHUNK);
                             }
                             None => break,
                         }

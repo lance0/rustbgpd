@@ -83,6 +83,14 @@ fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     }
 }
 
+fn make_indexed_route(index: u32, next_hop: Ipv4Addr) -> Route {
+    let octets = index.to_be_bytes();
+    make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(10, octets[1], octets[2], octets[3]), 32),
+        next_hop,
+    )
+}
+
 fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
     Route {
         prefix: Prefix::V6(prefix),
@@ -195,6 +203,89 @@ async fn closed_query_channel_does_not_block_primary_channel() {
     assert_eq!(count, 0);
 
     drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn large_routes_received_batch_preserves_final_state() {
+    let (tx, rx) = mpsc::channel(64);
+    let (_query_tx, query_rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let next_hop = Ipv4Addr::new(10, 0, 0, 1);
+    let routes: Vec<Route> = (0..2500).map(|i| make_indexed_route(i, next_hop)).collect();
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: routes,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+
+    let count = tokio::time::timeout(Duration::from_secs(2), reply_rx)
+        .await
+        .expect("large chunked batch should still converge")
+        .unwrap();
+    assert_eq!(count, 2500);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn query_channel_observes_partial_progress_during_large_batch() {
+    let (tx, rx) = mpsc::channel(64);
+    let (query_tx, query_rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, query_rx, None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let next_hop = Ipv4Addr::new(10, 0, 0, 1);
+    let route_count = 20_000_u32;
+    let routes: Vec<Route> = (0..route_count)
+        .map(|i| make_indexed_route(i, next_hop))
+        .collect();
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: routes,
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tokio::task::yield_now().await;
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    query_tx
+        .send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+
+    let count = tokio::time::timeout(Duration::from_secs(2), reply_rx)
+        .await
+        .expect("priority query should respond during chunked processing")
+        .unwrap();
+    assert!(count > 0, "query should observe some inserted routes");
+    assert!(
+        count < route_count as usize,
+        "query should be serviced before the full batch completes"
+    );
+
+    drop(tx);
+    drop(query_tx);
     handle.await.unwrap();
 }
 
@@ -3089,7 +3180,11 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
     })
     .await
     .unwrap();
-    tokio::task::yield_now().await;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap();
     tokio::task::yield_now().await;
 
     tx.send(RibUpdate::RoutesReceived {
@@ -3151,7 +3246,11 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
     })
     .await
     .unwrap();
-    tokio::task::yield_now().await;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
         peer,
@@ -3307,7 +3406,11 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
     })
     .await
     .unwrap();
-    tokio::task::yield_now().await;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+    let _ = reply_rx.await.unwrap();
 
     tx.send(RibUpdate::RoutesReceived {
         peer,
@@ -3367,7 +3470,11 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
     })
     .await
     .unwrap();
-    tokio::task::yield_now().await;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryLocRibCount { reply: reply_tx })
+        .await
+        .unwrap();
+    let _ = reply_rx.await.unwrap();
 
     tokio::time::advance(ERR_REFRESH_TIMEOUT + Duration::from_secs(1)).await;
     tokio::task::yield_now().await;

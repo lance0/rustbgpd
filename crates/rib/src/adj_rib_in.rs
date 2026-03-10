@@ -39,13 +39,21 @@ impl AdjRibIn {
     /// Create a new empty Adj-RIB-In for the given peer.
     #[must_use]
     pub fn new(peer: IpAddr) -> Self {
+        Self::with_capacity(peer, 0, 0)
+    }
+
+    /// Create a new Adj-RIB-In with estimated capacities for the first batch.
+    #[must_use]
+    pub fn with_capacity(peer: IpAddr, route_capacity: usize, flowspec_capacity: usize) -> Self {
+        let route_capacity = route_capacity.max(16);
+        let flowspec_capacity = flowspec_capacity.max(4);
         Self {
             peer,
-            routes: HashMap::new(),
-            prefix_index: HashMap::new(),
+            routes: HashMap::with_capacity(route_capacity),
+            prefix_index: HashMap::with_capacity(route_capacity),
             llgr_stale_local_tags: HashSet::new(),
-            flowspec_routes: HashMap::new(),
-            attr_intern: HashSet::new(),
+            flowspec_routes: HashMap::with_capacity(flowspec_capacity),
+            attr_intern: HashSet::with_capacity(route_capacity.clamp(16, 64)),
         }
     }
 
