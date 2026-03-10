@@ -427,7 +427,10 @@ async fn run(mut config: Config) {
     // Spawn RIB manager
     let cluster_id = config.cluster_id();
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
-    tokio::spawn(RibManager::new(rib_rx, export_policy, cluster_id, metrics.clone()).run());
+    let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
+    tokio::spawn(
+        RibManager::new(rib_rx, rib_query_rx, export_policy, cluster_id, metrics.clone()).run(),
+    );
 
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
     if let Some(ref rpki_config) = config.rpki
@@ -647,6 +650,7 @@ async fn run(mut config: Config) {
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
+    let grpc_rib_query_tx = rib_query_tx;
     let grpc_peer_mgr_tx = peer_mgr_tx.clone();
     let serve_config = ServeConfig {
         asn: config.global.asn,
@@ -660,6 +664,7 @@ async fn run(mut config: Config) {
         rustbgpd_api::server::serve(
             grpc_listeners,
             grpc_rib_tx,
+            grpc_rib_query_tx,
             grpc_peer_mgr_tx,
             serve_config,
             grpc_shutdown_rx,

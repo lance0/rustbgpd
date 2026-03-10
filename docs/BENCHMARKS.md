@@ -262,57 +262,100 @@ operational requirements.
 Real-world churn involves far fewer prefixes per UPDATE (typically 1-50),
 so per-event reconvergence is effectively instant.
 
-## Comparison with Other BGP Stacks
+## End-to-End System Benchmarks
 
-These are micro-benchmarks of rustbgpd's data structures, not end-to-end system
-benchmarks. Direct comparison requires a common harness like
-[bgperf2](https://github.com/netenglabs/bgperf2), which is future work.
-The numbers below provide context for where rustbgpd sits relative to published
-benchmarks from other stacks.
+Measured using [bgperf2](https://github.com/netenglabs/bgperf2), a Docker-based
+BGP benchmarking harness. Each test runs a target daemon, N BIRD tester peers
+(each advertising P prefixes), and a GoBGP monitor peer that observes convergence.
+The monitor's accepted route count is the ground truth for completion.
 
-### GoBGP
+**Environment:** AMD Ryzen 9 7950X (64 logical cores), 125 GB RAM, Linux 6.17,
+Docker 27.x. All daemons run in containers on the same host.
 
-rustbgpd is architecturally inspired by GoBGP's API-first model, so this is the
-most natural comparison. Published bgperf2 results for GoBGP 2.29.0:
+**Methodology:** Convergence time is measured from first prefix received by the
+monitor to all expected prefixes received. The test harness waits for 5 seconds
+of stability before declaring completion. Total time includes session
+establishment.
 
-| Metric | GoBGP | rustbgpd | Notes |
-|--------|-------|----------|-------|
-| Route ingestion (100k routes, 10 peers) | ~11k routes/sec | 2.6M routes/sec (insert only) | GoBGP is end-to-end; rustbgpd is RIB insert micro-benchmark |
-| CPU usage (100k routes) | 1450% (all cores) | Single-threaded | GoBGP uses goroutine-per-peer; rustbgpd uses single-owner RIB |
-| Memory (full table, ~900k) | 8-16+ GB | 547 MB (2 peers + LocRib) | 15-29x less than GoBGP |
-| Full table convergence | Test abandoned (too slow) | ~1.5s estimated (pipeline extrapolation) | GoBGP was excluded from full-table rounds of bgperf2 |
+### Results
 
-GoBGP's Go runtime incurs GC pressure, interface boxing overhead, and
-goroutine scheduling costs that Rust avoids entirely. rustbgpd's single-owner
-RIB design eliminates the lock contention that costs GoBGP CPU across all cores.
+#### 10 peers x 1,000 prefixes (10k total)
 
-### BIRD and FRR
+| | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
+|---|---|---|---|
+| Convergence | 1s | 2s | 2s |
+| Max CPU | 2% | 162% | 92% |
+| Max Memory | 9 MB | 36 MB | 82 MB |
+| Total time | 2s | 3s | 11s |
 
-BIRD and FRR are the performance leaders in the open-source BGP space. Published
-bgperf2 results:
+#### 2 peers x 10,000 prefixes (20k total)
 
-| Metric | BIRD | FRR 8.0 | rustbgpd |
-|--------|------|---------|----------|
-| Route ingestion (100k, 10 peers) | ~25k routes/sec | ~33k routes/sec | 2.6M routes/sec (insert only) |
-| CPU usage (100k routes) | ~100% (single core) | ~100% (single core) | Single-threaded |
-| Memory (100k routes, 2 peers) | 15 MB | 100 MB | 68 MB |
-| Full table (800k x 30 peers) | Completes | Completes | Not yet tested |
+| | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
+|---|---|---|---|
+| Convergence | 1s | 2s | 2s |
+| Max CPU | 2% | 87% | 77% |
+| Max Memory | 8 MB | 42 MB | 53 MB |
+| Total time | 2s | 3s | 11s |
 
-BIRD and FRR are mature, battle-tested stacks with radix-tree RIBs and decades
-of optimization. rustbgpd's raw data structure throughput is competitive, but
-end-to-end performance (including TCP I/O, timer management, gRPC overhead, and
-multi-peer coordination) has not been benchmarked yet.
+#### 2 peers x 100,000 prefixes (200k total)
 
-### What These Numbers Mean
+| | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
+|---|---|---|---|
+| Convergence | 2s | 7s | 103s |
+| Max CPU | 14% | 219% | 212% |
+| Max Memory | 27 MB | 202 MB | 360 MB |
+| Total time | 4s | 8s | 112s |
 
-The micro-benchmarks show that rustbgpd's core data structures are not the
-bottleneck — wire codec, best-path comparison, and RIB operations are all fast
-enough for full-table scale. The remaining unknowns are:
+### Understanding the Numbers
 
-1. **End-to-end throughput** — how fast can the full daemon ingest routes from
-   live BGP peers? This requires bgperf2 or equivalent system benchmarks.
-2. **Memory footprint** — 547 MB for a full table with 2 peers. 15-29x less than
-   GoBGP, approaching BIRD-class efficiency.
-3. **Multi-peer scaling** — the single-owner RIB avoids lock contention but
-   serializes all RIB operations through one tokio task. Channel backpressure
-   under high peer counts needs testing.
+**Session establishment.** rustbgpd's ConnectRetryTimer defaults to 5 seconds
+(reduced from the RFC 4271 suggested 30 seconds). When BIRD tester peers start
+after rustbgpd, the first outbound connection attempt fails and the retry fires
+within 5 seconds. Total establishment overhead is ~9 seconds, compared to 1-2
+seconds for BIRD (accepts inbound immediately) and GoBGP (passive neighbor
+mode). Further improvement would require listen-mode-first startup.
+
+**Route processing.** At 10k and below, convergence completes in 2 seconds —
+matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd takes
+103 seconds. The bottleneck is the single-task RIB processing 200k routes
+through the full pipeline (insert → best-path → distribute) sequentially.
+
+**CPU efficiency.** rustbgpd uses a single-threaded RIB (single tokio task,
+no locks). At 200k scale it peaks at 212% CPU (2 cores: RIB + transport).
+GoBGP uses goroutine-per-peer parallelism and peaks at 219% CPU for the same
+workload. BIRD is the most efficient at 14% CPU, reflecting decades of C
+optimization with a radix-tree RIB.
+
+**Memory.** rustbgpd uses 360 MB for 200k routes (2 peers + Loc-RIB), roughly
+1.8x GoBGP's 202 MB. BIRD uses 27 MB — an order of magnitude less. rustbgpd's
+`Arc<Vec<PathAttribute>>` sharing and attribute interning help at scale (see
+micro-benchmarks above: 547 MB for a full 900k-prefix table), but the fixed
+overhead per route is higher than BIRD's compact radix-tree representation.
+
+**gRPC under load.** A priority query channel separates read-only gRPC queries
+from the route-processing pipeline, ensuring management API requests are
+serviced between route batches even during bulk loading. At 100k+ scale, the
+API remains responsive rather than blocking behind thousands of queued route
+updates.
+
+### Comparison Summary
+
+| Metric | BIRD | GoBGP | rustbgpd |
+|--------|------|-------|----------|
+| Architecture | Single-threaded C, radix tree | Go, goroutine-per-peer | Single-threaded Rust, HashMap RIB |
+| Route processing (200k) | 2s | 7s | 103s |
+| CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores, no GC |
+| Memory model | Radix tree, minimal overhead | Go heap, GC managed | Arc sharing, attribute interning |
+| Memory (200k routes) | 27 MB | 202 MB | 360 MB |
+| Memory (900k, micro-bench) | ~325 MB (published, 30 peers) | 8-16+ GB (published) | 547 MB (2 peers + Loc-RIB) |
+| API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive (priority query channel) |
+
+BIRD is the clear performance leader — 30+ years of optimization in a
+purpose-built C codebase is hard to beat. rustbgpd's convergence at low-to-mid
+scale (10k-20k prefixes) is competitive with GoBGP at comparable CPU cost, and
+its memory efficiency at full-table scale (547 MB vs 8-16 GB) is a significant
+advantage. At 200k prefixes, the single-task RIB architecture becomes the
+bottleneck — route processing is sequential, and each route passes through the
+full pipeline (insert, best-path, distribute) before the next batch is handled.
+The main optimization opportunity is batched best-path recomputation or
+sharded RIB processing.

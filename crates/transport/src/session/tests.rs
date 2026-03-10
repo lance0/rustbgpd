@@ -1137,7 +1137,8 @@ async fn update_import_policy_applies_to_future_updates() {
 async fn err_denied_replacement_is_swept_at_eorr() {
     let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
     let (rib_tx, rib_rx) = mpsc::channel(64);
-    let manager = rustbgpd_rib::RibManager::new(rib_rx, None, None, BgpMetrics::new());
+    let (_, query_rx) = mpsc::channel(1);
+    let manager = rustbgpd_rib::RibManager::new(rib_rx, query_rx, None, None, BgpMetrics::new());
     let manager_handle = tokio::spawn(manager.run());
 
     let denied_prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);

@@ -126,9 +126,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 /// Start all configured gRPC listeners. Runs until the shutdown signal fires
 /// or a listener exits unexpectedly.
+#[expect(clippy::too_many_arguments, reason = "startup wiring for gRPC server")]
 pub async fn serve(
     listeners: Vec<ListenerConfig>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config: ServeConfig,
     shutdown_rx: oneshot::Receiver<()>,
@@ -140,6 +142,7 @@ pub async fn serve(
 
     for listener in listeners {
         let rib_tx = rib_tx.clone();
+        let rib_query_tx = rib_query_tx.clone();
         let peer_mgr_tx = peer_mgr_tx.clone();
         let config = config.clone();
         let rpc_shutdown_tx = rpc_shutdown_tx.clone();
@@ -149,6 +152,7 @@ pub async fn serve(
             run_listener(
                 listener,
                 rib_tx,
+                rib_query_tx,
                 peer_mgr_tx,
                 config,
                 shutdown_rx,
@@ -184,9 +188,11 @@ pub async fn serve(
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "startup wiring for one listener")]
 async fn run_listener(
     listener: ListenerConfig,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     config: ServeConfig,
     shutdown_rx: watch::Receiver<bool>,
@@ -207,6 +213,7 @@ async fn run_listener(
                 listener.access_mode,
                 listener.auth_token,
                 rib_tx,
+                rib_query_tx,
                 peer_mgr_tx,
                 asn,
                 router_id,
@@ -227,6 +234,7 @@ async fn run_listener(
                 listener.access_mode,
                 listener.auth_token,
                 rib_tx,
+                rib_query_tx,
                 peer_mgr_tx,
                 asn,
                 router_id,
@@ -249,6 +257,7 @@ async fn run_tcp_listener(
     access_mode: AccessMode,
     auth_token: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     asn: u32,
     router_id: String,
@@ -269,11 +278,11 @@ async fn run_tcp_listener(
     let interceptor = AuthInterceptor::new(auth_token);
     Server::builder()
         .add_service(RibServiceServer::with_interceptor(
-            RibService::new(rib_tx.clone()),
+            RibService::new(rib_query_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
-            InjectionService::new(rib_tx.clone(), access_mode),
+            InjectionService::new(rib_tx, access_mode),
             interceptor.clone(),
         ))
         .add_service(NeighborServiceServer::with_interceptor(
@@ -281,7 +290,7 @@ async fn run_tcp_listener(
                 asn,
                 access_mode,
                 peer_mgr_tx.clone(),
-                rib_tx.clone(),
+                rib_query_tx.clone(),
                 config_tx.clone(),
             ),
             interceptor.clone(),
@@ -304,7 +313,7 @@ async fn run_tcp_listener(
                 start_time,
                 metrics,
                 peer_mgr_tx,
-                rib_tx,
+                rib_query_tx,
                 rpc_shutdown_tx,
                 mrt_trigger_tx,
             ),
@@ -322,6 +331,7 @@ async fn run_uds_listener(
     access_mode: AccessMode,
     auth_token: Option<String>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
     asn: u32,
     router_id: String,
@@ -344,11 +354,11 @@ async fn run_uds_listener(
     let interceptor = AuthInterceptor::new(auth_token);
     let result = Server::builder()
         .add_service(RibServiceServer::with_interceptor(
-            RibService::new(rib_tx.clone()),
+            RibService::new(rib_query_tx.clone()),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
-            InjectionService::new(rib_tx.clone(), access_mode),
+            InjectionService::new(rib_tx, access_mode),
             interceptor.clone(),
         ))
         .add_service(NeighborServiceServer::with_interceptor(
@@ -356,7 +366,7 @@ async fn run_uds_listener(
                 asn,
                 access_mode,
                 peer_mgr_tx.clone(),
-                rib_tx.clone(),
+                rib_query_tx.clone(),
                 config_tx.clone(),
             ),
             interceptor.clone(),
@@ -379,7 +389,7 @@ async fn run_uds_listener(
                 start_time,
                 metrics,
                 peer_mgr_tx,
-                rib_tx,
+                rib_query_tx,
                 rpc_shutdown_tx,
                 mrt_trigger_tx,
             ),

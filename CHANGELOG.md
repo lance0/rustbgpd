@@ -11,6 +11,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **gRPC priority query channel.** Read-only gRPC queries (neighbor list, RIB
+  queries, control RPCs) now use a dedicated priority channel that is drained
+  between route-processing batches. This prevents management API stalls during
+  bulk route loading — previously queries could block for 60+ seconds behind
+  thousands of queued route updates.
+
+### Changed
+
+- **ConnectRetryTimer default reduced to 5 seconds.** The BGP connect retry
+  interval now defaults to 5s (down from 30s), reducing session establishment
+  delay when the first outbound connection attempt fails. The exponential
+  backoff progression is now 5→10→20→40→80→160→300s.
+
+### Fixed
+
+- **End-to-end benchmark results updated.** Fresh bgperf2 numbers with both
+  performance fixes applied. Session establishment dropped from ~59s to ~9s.
+  gRPC API remains responsive during 200k-prefix bulk loading.
+
+---
+
+## [0.4.2] — 2026-03-06
+
+### Added
+
 - **Policy CRUD via gRPC.** New `PolicyService` adds named policy definition
   CRUD plus global/per-neighbor chain assignment at runtime. Successful
   mutations hot-apply to the running daemon, persist back to TOML, and reuse

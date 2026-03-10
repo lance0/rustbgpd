@@ -26,7 +26,7 @@ use crate::policy_admin::{
 };
 
 const DEFAULT_HOLD_TIME: u16 = 90;
-const DEFAULT_CONNECT_RETRY_SECS: u32 = 30;
+const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 const BGP_PORT: u16 = 179;
 const BMP_STATS_INTERVAL_SECS: u64 = 60;
 

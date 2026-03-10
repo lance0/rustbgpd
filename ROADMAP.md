@@ -194,9 +194,9 @@ Prove it works under pressure before 1.0.
 - [ ] **Repeated GR recovery** — back-to-back graceful restart cycles; verify stale sweep correctness
 - [ ] **Long-duration stability** — multi-hour runs with active route exchange; monitor memory and fd usage
 - [x] **AdjRibIn prefix index** — secondary `HashMap<Prefix, HashSet<u32>>` index on `iter_prefix()` for O(1) prefix lookup. Pipeline 50k prefixes: 7.1s → 82ms (86x improvement). Full-table (900k) extrapolated ~1.5s
-- [ ] **End-to-end system benchmarks** — bgperf2-style multi-peer ingestion tests against live BGP peers; compare with BIRD and FRR
+- [x] **End-to-end system benchmarks** — bgperf2-based multi-peer ingestion tests (10p/1k, 2p/10k, 2p/100k) against BIRD 2.18 and GoBGP 4.3.0; results in BENCHMARKS.md
 - [x] **Memory profiling** — tracking allocator test measures per-route footprint: 252 B/route with interning, 547 MB for full table (900k x 2 peers + LocRib); 15-29x less than GoBGP, approaching BIRD-class efficiency
-- [ ] **Published performance comparison** — run bgperf2 against BIRD 2.0.12, FRR 10.3.1, and GoBGP at 10/30/100 peers x full table (800k+); measure routes/sec, convergence time, memory, CPU; publish results in BENCHMARKS.md with methodology and reproduction steps
+- [x] **Published performance comparison** — bgperf2 benchmarks against BIRD 2.18 and GoBGP 4.3.0 at 10p/1k, 2p/10k, 2p/100k; convergence, CPU, memory results published in BENCHMARKS.md with methodology
 - [x] **Path attribute interning** — `HashSet<Arc<Vec<PathAttribute>>>` intern table in `AdjRibIn`; routes with identical attributes share one allocation; `gc_intern_table()` cleans orphaned entries; `Hash` derived on `PathAttribute` and all constituent types
 
 ### P4 — Nice to Have

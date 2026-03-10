@@ -92,6 +92,9 @@ pub struct RibManager {
     route_events_tx: broadcast::Sender<RouteEvent>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
+    /// Priority channel for read-only queries (gRPC). Drained between route
+    /// processing to prevent management API stalls under heavy load.
+    query_rx: mpsc::Receiver<RibUpdate>,
 }
 
 impl RibManager {
@@ -99,6 +102,7 @@ impl RibManager {
     #[must_use]
     pub fn new(
         rx: mpsc::Receiver<RibUpdate>,
+        query_rx: mpsc::Receiver<RibUpdate>,
         export_policy: Option<PolicyChain>,
         cluster_id: Option<Ipv4Addr>,
         metrics: BgpMetrics,
@@ -137,6 +141,7 @@ impl RibManager {
             route_events_tx,
             metrics,
             rx,
+            query_rx,
         }
     }
 
@@ -183,6 +188,16 @@ impl RibManager {
         self.refresh_stale_flowspec.remove(&peer);
         self.refresh_deadlines
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
+    }
+
+    /// Drain all pending queries from the priority channel. Called after
+    /// processing each route update so that gRPC queries are serviced
+    /// between route batches instead of waiting behind thousands of
+    /// `RoutesReceived` messages.
+    fn drain_queries(&mut self) {
+        while let Ok(query) = self.query_rx.try_recv() {
+            self.handle_update(query);
+        }
     }
 
     /// Process a single `RibUpdate` message.
@@ -411,12 +426,14 @@ impl RibManager {
     /// started when `dirty_peers` transitions from empty to non-empty and
     /// reset after each retry tick; it is not recreated per loop iteration,
     /// so incoming messages cannot starve it.
+    #[expect(clippy::too_many_lines, reason = "event loop with timer arms and query draining")]
     pub async fn run(mut self) {
         // Persistent timer: starts far in the future (disabled). Reset to
         // DIRTY_RESYNC_INTERVAL when dirty_peers becomes non-empty.
         let resync_sleep = tokio::time::sleep(DIRTY_RESYNC_INTERVAL);
         tokio::pin!(resync_sleep);
         let mut resync_armed = false;
+        let mut query_rx_open = true;
 
         // GR stale sweep timer — reset each iteration to the nearest deadline.
         let gr_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
@@ -468,9 +485,19 @@ impl RibManager {
 
             if needs_timers {
                 tokio::select! {
+                    biased;
+                    query = self.query_rx.recv(), if query_rx_open => {
+                        match query {
+                            Some(q) => self.handle_update(q),
+                            None => query_rx_open = false,
+                        }
+                    }
                     update = self.rx.recv() => {
                         match update {
-                            Some(update) => self.handle_update(update),
+                            Some(update) => {
+                                self.handle_update(update);
+                                self.drain_queries();
+                            }
                             None => break,
                         }
                     }
@@ -521,10 +548,24 @@ impl RibManager {
                     }
                 }
             } else {
-                // No timers needed — just wait for the next message.
-                match self.rx.recv().await {
-                    Some(update) => self.handle_update(update),
-                    None => break,
+                // No timers needed — wait for a route update or query.
+                tokio::select! {
+                    biased;
+                    query = self.query_rx.recv(), if query_rx_open => {
+                        match query {
+                            Some(q) => self.handle_update(q),
+                            None => query_rx_open = false,
+                        }
+                    }
+                    update = self.rx.recv() => {
+                        match update {
+                            Some(update) => {
+                                self.handle_update(update);
+                                self.drain_queries();
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
 

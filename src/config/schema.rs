@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub(super) const DEFAULT_HOLD_TIME: u16 = 90;
-pub(super) const DEFAULT_CONNECT_RETRY_SECS: u32 = 30;
+pub(super) const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 pub(super) const BGP_PORT: u16 = 179;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
