@@ -24,6 +24,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **AdjRibIn pre-sizing.** New `AdjRibIn::with_capacity()` constructor uses
   first-batch size hints to pre-allocate routes, prefix index, and intern
   table, reducing HashMap rehash stalls during bulk insert.
+- **Outbound UPDATE construction optimization.** The export hot path now uses
+  `try_reserve`-based enqueue/commit to avoid clone-before-send overhead,
+  pointer fast-paths in route equality, hash-indexed attribute grouping, and
+  per-call prepared-attribute caching in `send_route_update()`. This reduces
+  per-route allocation and repeated attribute rewrites during large outbound
+  batches without changing wire behavior.
 
 ### Changed
 

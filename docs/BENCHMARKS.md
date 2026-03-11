@@ -235,8 +235,13 @@ approaching BIRD (~325 MB for 30 peers).
 
 ### Remaining Optimization Opportunities
 
-- **HashMap pre-sizing** — `with_capacity()` on AdjRibIn construction would
-  reduce peak allocation by avoiding rehash copies.
+- **Bulk initial load mode** — initial full-table floods still distribute on
+  every chunk. Coalescing more of the initial export work could reduce best-path
+  recomputation churn and emit fewer, larger UPDATEs.
+- **Updated end-to-end benchmark rerun** — the current code now includes
+  first-batch `AdjRibIn` pre-sizing plus outbound attribute grouping/caching
+  optimizations, but the published bgperf2 numbers have not yet been rerun on
+  this exact revision.
 
 ## Interpretation
 

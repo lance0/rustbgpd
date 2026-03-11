@@ -200,10 +200,10 @@ Prove it works under pressure before 1.0.
 - [x] **Path attribute interning** — `HashSet<Arc<Vec<PathAttribute>>>` intern table in `AdjRibIn`; routes with identical attributes share one allocation; `gc_intern_table()` cleans orphaned entries; `Hash` derived on `PathAttribute` and all constituent types
 - [x] **Chunked RoutesReceived processing** — `PendingRoutesReceived` splits large batches into 1024-prefix chunks with per-chunk recompute/distribute; `VecDeque` queue preserves ordering; main channel blocked while chunks pending to prevent control message reordering
 - [x] **Bounded fair RIB scheduling** — replaced biased priority query drain with bounded fair scheduling: process one route chunk, then up to 8 queries, then yield; prevents trading route starvation for query starvation at scale
-- [ ] **Outbound UPDATE construction optimization** — improve `send_route_update()` hot path: hash-based attribute grouping instead of `Vec::find()`, reduce per-route `prepare_outbound_attributes()` overhead, maximize prefixes per wire UPDATE for identical attribute sets
+- [x] **Outbound UPDATE construction optimization** — `send_route_update()` now uses hash-indexed attribute grouping instead of `Vec::find()`, per-call prepared outbound attribute caching, and pointer fast-paths for outbound route equality; RIB-to-transport send sites use `try_reserve()` to avoid clone-before-send overhead
 - [ ] **Bulk initial load mode** — special-case initial table flood: accumulate larger affected-prefix sets before distribution, emit fewer/larger outbound updates; initial load tradeoffs differ from steady-state churn
 - [x] **AdjRibIn/AdjRibOut pre-sizing** — `AdjRibIn::with_capacity()` constructor; first `RoutesReceived` per peer uses batch size hints to pre-size routes, prefix_index, and intern table maps
-- [ ] **Outbound attribute caching** — reuse prepared outbound attribute sets for identical route classes across peers; extends inbound interning concept to the export path; medium-term win for large homogeneous route streams
+- [x] **Outbound attribute caching** — per-call prepared outbound attribute cache reuses identical attribute rewrites inside `send_route_update()`, covering unicast export without introducing long-lived invalidation state
 
 ### P4 — Nice to Have
 
