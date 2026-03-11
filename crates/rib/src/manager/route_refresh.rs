@@ -246,20 +246,20 @@ impl RibManager {
             }
         }
 
-        if let Some(tx) = self.outbound_peers.get(&peer) {
-            let update = OutboundRouteUpdate {
-                next_hop_override: nh_override_flags.clone(),
-                announce: announce.clone(),
-                withdraw: withdraw.clone(),
-                end_of_rib: vec![family],
-                refresh_markers: vec![
+        if self.outbound_peers.contains_key(&peer) {
+            if !self.try_send_and_commit_outbound_update(
+                peer,
+                nh_override_flags,
+                announce,
+                withdraw,
+                vec![family],
+                vec![
                     (afi, safi, RouteRefreshSubtype::BoRR),
                     (afi, safi, RouteRefreshSubtype::EoRR),
                 ],
-                flowspec_announce: fs_announce.clone(),
-                flowspec_withdraw: fs_withdraw.clone(),
-            };
-            if tx.try_send(update).is_err() {
+                fs_announce,
+                fs_withdraw,
+            ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
                 self.pending_refresh.entry(peer).or_default().insert(family);
@@ -270,34 +270,6 @@ impl RibManager {
                 .entry(peer)
                 .or_default()
                 .remove(&family);
-
-            // Update AdjRibOut
-            let rib_out = self
-                .adj_ribs_out
-                .entry(peer)
-                .or_insert_with(|| AdjRibOut::new(peer));
-            for route in &announce {
-                rib_out.insert(route.clone());
-            }
-            for (prefix, path_id) in &withdraw {
-                rib_out.withdraw(prefix, *path_id);
-            }
-            for route in &fs_announce {
-                rib_out.insert_flowspec(route.clone());
-            }
-            for rule in &fs_withdraw {
-                rib_out.remove_flowspec(rule);
-            }
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "all",
-                gauge_val(rib_out.len()),
-            );
-            self.metrics.set_adj_rib_out_prefixes(
-                &peer.to_string(),
-                "flowspec",
-                gauge_val(rib_out.flowspec_len()),
-            );
         }
     }
 

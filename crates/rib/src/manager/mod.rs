@@ -555,7 +555,10 @@ impl RibManager {
     /// started when `dirty_peers` transitions from empty to non-empty and
     /// reset after each retry tick; it is not recreated per loop iteration,
     /// so incoming messages cannot starve it.
-    #[expect(clippy::too_many_lines, reason = "event loop with timer arms and query draining")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "event loop with timer arms and query draining"
+    )]
     pub async fn run(mut self) {
         // Persistent timer: starts far in the future (disabled). Reset to
         // DIRTY_RESYNC_INTERVAL when dirty_peers becomes non-empty.

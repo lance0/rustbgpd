@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use super::RibManager;
-use super::helpers::{gauge_val, prefix_family};
+use super::helpers::prefix_family;
 use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
@@ -246,77 +246,49 @@ impl RibManager {
             .cloned()
             .unwrap_or_default();
 
-        if let Some(tx) = self.outbound_peers.get(&peer) {
-            if !announce.is_empty()
-                || !withdraw.is_empty()
-                || !fs_announce.is_empty()
-                || !fs_withdraw.is_empty()
-            {
-                let update = OutboundRouteUpdate {
-                    next_hop_override: nh_override_flags.clone(),
-                    announce: announce.clone(),
-                    withdraw: withdraw.clone(),
-                    end_of_rib: vec![],
-                    refresh_markers: vec![],
-                    flowspec_announce: fs_announce.clone(),
-                    flowspec_withdraw: fs_withdraw.clone(),
-                };
-                if tx.try_send(update).is_err() {
-                    warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
-                    self.metrics.record_outbound_route_drop(&peer.to_string());
-                    for f in &eor_families {
-                        self.pending_eor.entry(peer).or_default().insert(*f);
-                    }
-                    self.dirty_peers.insert(peer);
-                    return;
-                }
-                // Commit: populate AdjRibOut with what was actually sent
-                let rib_out = self
-                    .adj_ribs_out
-                    .entry(peer)
-                    .or_insert_with(|| AdjRibOut::new(peer));
-                for route in &announce {
-                    rib_out.insert(route.clone());
-                }
-                for (prefix, path_id) in &withdraw {
-                    rib_out.withdraw(prefix, *path_id);
-                }
-                for route in &fs_announce {
-                    rib_out.insert_flowspec(route.clone());
-                }
-                for rule in &fs_withdraw {
-                    rib_out.remove_flowspec(rule);
-                }
-                self.metrics.set_adj_rib_out_prefixes(
-                    &peer.to_string(),
-                    "all",
-                    gauge_val(rib_out.len()),
-                );
-                self.metrics.set_adj_rib_out_prefixes(
-                    &peer.to_string(),
-                    "flowspec",
-                    gauge_val(rib_out.flowspec_len()),
-                );
+        if (!announce.is_empty()
+            || !withdraw.is_empty()
+            || !fs_announce.is_empty()
+            || !fs_withdraw.is_empty())
+            && !self.try_send_and_commit_outbound_update(
+                peer,
+                nh_override_flags,
+                announce,
+                withdraw,
+                vec![],
+                vec![],
+                fs_announce,
+                fs_withdraw,
+            )
+        {
+            warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
+            self.metrics.record_outbound_route_drop(&peer.to_string());
+            for f in &eor_families {
+                self.pending_eor.entry(peer).or_default().insert(*f);
             }
+            self.dirty_peers.insert(peer);
+            return;
+        }
 
-            // Send End-of-RIB markers for all sendable families
-            if !eor_families.is_empty() {
-                let eor = OutboundRouteUpdate {
-                    next_hop_override: vec![],
-                    announce: vec![],
-                    withdraw: vec![],
-                    end_of_rib: eor_families.clone(),
-                    refresh_markers: vec![],
-                    flowspec_announce: vec![],
-                    flowspec_withdraw: vec![],
-                };
-                if tx.try_send(eor).is_err() {
-                    warn!(%peer, "outbound channel full — `EoR` deferred");
-                    for f in &eor_families {
-                        self.pending_eor.entry(peer).or_default().insert(*f);
-                    }
-                    self.dirty_peers.insert(peer);
+        // Send End-of-RIB markers for all sendable families
+        if !eor_families.is_empty()
+            && let Some(tx) = self.outbound_peers.get(&peer)
+        {
+            let eor = OutboundRouteUpdate {
+                next_hop_override: vec![],
+                announce: vec![],
+                withdraw: vec![],
+                end_of_rib: eor_families.clone(),
+                refresh_markers: vec![],
+                flowspec_announce: vec![],
+                flowspec_withdraw: vec![],
+            };
+            if tx.try_send(eor).is_err() {
+                warn!(%peer, "outbound channel full — `EoR` deferred");
+                for f in &eor_families {
+                    self.pending_eor.entry(peer).or_default().insert(*f);
                 }
+                self.dirty_peers.insert(peer);
             }
         }
     }

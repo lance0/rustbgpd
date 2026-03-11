@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use super::{
     Afi, AsPath, AsPathSegment, FlowSpecRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry,
     Ipv4UnicastMode, Ipv6Addr, Message, MpReachNlri, MpUnreachNlri, NlriEntry, OutboundRouteUpdate,
@@ -5,7 +8,111 @@ use super::{
     RouteRefreshSubtype, Safi, UpdateMessage, info, is_private_asn, warn,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum NextHopOverrideKey {
+    None,
+    Self_,
+    Specific(IpAddr),
+}
+
+impl From<Option<&rustbgpd_policy::NextHopAction>> for NextHopOverrideKey {
+    fn from(value: Option<&rustbgpd_policy::NextHopAction>) -> Self {
+        match value {
+            None => Self::None,
+            Some(rustbgpd_policy::NextHopAction::Self_) => Self::Self_,
+            Some(rustbgpd_policy::NextHopAction::Specific(addr)) => Self::Specific(*addr),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PreparedAttrCacheKey {
+    attrs_ptr: usize,
+    is_ipv4: bool,
+    route_next_hop: IpAddr,
+    origin_type: u8,
+    peer_router_id: Ipv4Addr,
+    is_ebgp: bool,
+    local_ipv4: Ipv4Addr,
+    nh_override: NextHopOverrideKey,
+}
+
+#[derive(Clone)]
+struct PreparedAttrCacheValue {
+    with_next_hop: Arc<Vec<PathAttribute>>,
+    without_next_hop: Arc<Vec<PathAttribute>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct AttrGroupKey {
+    attrs_ptr: usize,
+    next_hop: Option<IpAddr>,
+}
+
+struct V4BodyGroup {
+    attrs: Arc<Vec<PathAttribute>>,
+    prefixes: Vec<Ipv4NlriEntry>,
+}
+
+struct MpGroup {
+    attrs: Arc<Vec<PathAttribute>>,
+    next_hop: IpAddr,
+    prefixes: Vec<NlriEntry>,
+}
+
 impl PeerSession {
+    fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
+        match origin {
+            rustbgpd_rib::RouteOrigin::Ebgp => 0,
+            rustbgpd_rib::RouteOrigin::Ibgp => 1,
+            rustbgpd_rib::RouteOrigin::Local => 2,
+        }
+    }
+
+    fn prepared_attr_cache_key(
+        route: &Route,
+        is_ebgp: bool,
+        local_ipv4: Ipv4Addr,
+        nh_override: Option<&rustbgpd_policy::NextHopAction>,
+    ) -> PreparedAttrCacheKey {
+        PreparedAttrCacheKey {
+            attrs_ptr: Arc::as_ptr(&route.attributes) as usize,
+            is_ipv4: matches!(route.prefix, Prefix::V4(_)),
+            route_next_hop: route.next_hop,
+            origin_type: Self::route_origin_key(route.origin_type),
+            peer_router_id: route.peer_router_id,
+            is_ebgp,
+            local_ipv4,
+            nh_override: nh_override.into(),
+        }
+    }
+
+    fn prepared_outbound_attributes_cached<'a>(
+        &'a self,
+        cache: &'a mut HashMap<PreparedAttrCacheKey, PreparedAttrCacheValue>,
+        route: &Route,
+        is_ebgp: bool,
+        local_ipv4: Ipv4Addr,
+        nh_override: Option<&rustbgpd_policy::NextHopAction>,
+    ) -> &'a PreparedAttrCacheValue {
+        let key = Self::prepared_attr_cache_key(route, is_ebgp, local_ipv4, nh_override);
+        cache.entry(key).or_insert_with(|| {
+            let with_next_hop =
+                Arc::new(self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, nh_override));
+            let without_next_hop = Arc::new(
+                with_next_hop
+                    .iter()
+                    .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
+                    .cloned()
+                    .collect(),
+            );
+            PreparedAttrCacheValue {
+                with_next_hop,
+                without_next_hop,
+            }
+        })
+    }
+
     /// Send an outbound route update as wire UPDATE messages.
     #[expect(clippy::too_many_lines)]
     pub(super) async fn send_route_update(&mut self, update: OutboundRouteUpdate) {
@@ -81,6 +188,8 @@ impl PeerSession {
             IpAddr::V6(v6) => Some(v6),
             IpAddr::V4(_) => None,
         });
+        let mut prepared_attr_cache: HashMap<PreparedAttrCacheKey, PreparedAttrCacheValue> =
+            HashMap::new();
 
         // Split withdrawals by address family, filtering by negotiated families
         let mut v4_withdraw: Vec<Ipv4NlriEntry> = Vec::new();
@@ -191,15 +300,21 @@ impl PeerSession {
                 .local_ipv6_nexthop
                 .or(local_ipv6)
                 .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
-            let mut v4_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<NlriEntry>)> = Vec::new();
+            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
+            let mut v4_groups: Vec<MpGroup> = Vec::new();
             for (route, nh_override_ref) in &v4_routes {
                 let nh_override = *nh_override_ref;
-                let attrs_with_next_hop =
-                    self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, nh_override);
-                let attrs: Vec<PathAttribute> = attrs_with_next_hop
-                    .into_iter()
-                    .filter(|attr| !matches!(attr, PathAttribute::NextHop(_)))
-                    .collect();
+                let attrs = Arc::clone(
+                    &self
+                        .prepared_outbound_attributes_cached(
+                            &mut prepared_attr_cache,
+                            route,
+                            is_ebgp,
+                            local_ipv4,
+                            nh_override,
+                        )
+                        .without_next_hop,
+                );
                 let force_nh_self =
                     matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
                 let next_hop = match nh_override {
@@ -222,25 +337,29 @@ impl PeerSession {
                     path_id: route.path_id,
                     prefix: route.prefix,
                 };
-                if let Some(group) =
-                    v4_groups
-                        .iter_mut()
-                        .find(|(existing_attrs, existing_nh, _)| {
-                            *existing_attrs == attrs && *existing_nh == next_hop
-                        })
-                {
-                    group.2.push(entry);
+                let key = AttrGroupKey {
+                    attrs_ptr: Arc::as_ptr(&attrs) as usize,
+                    next_hop: Some(next_hop),
+                };
+                if let Some(&idx) = v4_group_index.get(&key) {
+                    v4_groups[idx].prefixes.push(entry);
                 } else {
-                    v4_groups.push((attrs, next_hop, vec![entry]));
+                    v4_group_index.insert(key, v4_groups.len());
+                    v4_groups.push(MpGroup {
+                        attrs,
+                        next_hop,
+                        prefixes: vec![entry],
+                    });
                 }
             }
 
-            for (mut attrs, next_hop, prefixes) in v4_groups {
+            for group in v4_groups {
+                let mut attrs = group.attrs.as_ref().clone();
                 attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
                     afi: Afi::Ipv4,
                     safi: Safi::Unicast,
-                    next_hop,
-                    announced: prefixes,
+                    next_hop: group.next_hop,
+                    announced: group.prefixes,
                     flowspec_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
@@ -260,28 +379,46 @@ impl PeerSession {
                 self.metrics.record_message_sent(&self.peer_label, "update");
             }
         } else {
-            let mut v4_groups: Vec<(Vec<PathAttribute>, Vec<Ipv4NlriEntry>)> = Vec::new();
+            let mut v4_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
+            let mut v4_groups: Vec<V4BodyGroup> = Vec::new();
             for (route, nh_override) in &v4_routes {
-                let attrs =
-                    self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, *nh_override);
+                let attrs = Arc::clone(
+                    &self
+                        .prepared_outbound_attributes_cached(
+                            &mut prepared_attr_cache,
+                            route,
+                            is_ebgp,
+                            local_ipv4,
+                            *nh_override,
+                        )
+                        .with_next_hop,
+                );
                 if let Prefix::V4(v4) = route.prefix {
                     let entry = Ipv4NlriEntry {
                         path_id: route.path_id,
                         prefix: v4,
                     };
-                    if let Some(group) = v4_groups.iter_mut().find(|(a, _)| *a == attrs) {
-                        group.1.push(entry);
+                    let key = AttrGroupKey {
+                        attrs_ptr: Arc::as_ptr(&attrs) as usize,
+                        next_hop: None,
+                    };
+                    if let Some(&idx) = v4_group_index.get(&key) {
+                        v4_groups[idx].prefixes.push(entry);
                     } else {
-                        v4_groups.push((attrs, vec![entry]));
+                        v4_group_index.insert(key, v4_groups.len());
+                        v4_groups.push(V4BodyGroup {
+                            attrs,
+                            prefixes: vec![entry],
+                        });
                     }
                 }
             }
 
-            for (attrs, prefixes) in &v4_groups {
+            for group in &v4_groups {
                 let msg = UpdateMessage::build(
-                    prefixes,
+                    &group.prefixes,
                     &[],
-                    attrs,
+                    group.attrs.as_ref(),
                     four_octet_as,
                     add_path_ipv4_send,
                     Ipv4UnicastMode::Body,
@@ -328,10 +465,21 @@ impl PeerSession {
 
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
-        let mut v6_groups: Vec<(Vec<PathAttribute>, IpAddr, Vec<NlriEntry>)> = Vec::new();
+        let mut v6_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
+        let mut v6_groups: Vec<MpGroup> = Vec::new();
         for (route, nh_override_ref) in &v6_routes {
             let nh_override = *nh_override_ref;
-            let attrs = self.prepare_outbound_attributes(route, is_ebgp, local_ipv4, nh_override);
+            let attrs = Arc::clone(
+                &self
+                    .prepared_outbound_attributes_cached(
+                        &mut prepared_attr_cache,
+                        route,
+                        is_ebgp,
+                        local_ipv4,
+                        nh_override,
+                    )
+                    .with_next_hop,
+            );
             let force_nh_self = matches!(nh_override, Some(rustbgpd_policy::NextHopAction::Self_));
             let nh = if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh_override {
                 // Policy explicitly set a next-hop — use it
@@ -357,22 +505,29 @@ impl PeerSession {
                 path_id: route.path_id,
                 prefix: route.prefix,
             };
-            if let Some(group) = v6_groups
-                .iter_mut()
-                .find(|(a, h, _)| *a == attrs && *h == nh)
-            {
-                group.2.push(nlri_entry);
+            let key = AttrGroupKey {
+                attrs_ptr: Arc::as_ptr(&attrs) as usize,
+                next_hop: Some(nh),
+            };
+            if let Some(&idx) = v6_group_index.get(&key) {
+                v6_groups[idx].prefixes.push(nlri_entry);
             } else {
-                v6_groups.push((attrs, nh, vec![nlri_entry]));
+                v6_group_index.insert(key, v6_groups.len());
+                v6_groups.push(MpGroup {
+                    attrs,
+                    next_hop: nh,
+                    prefixes: vec![nlri_entry],
+                });
             }
         }
 
-        for (mut attrs, nh, prefixes) in v6_groups {
+        for group in v6_groups {
+            let mut attrs = group.attrs.as_ref().clone();
             attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
-                next_hop: nh,
-                announced: prefixes,
+                next_hop: group.next_hop,
+                announced: group.prefixes,
                 flowspec_announced: vec![],
             }));
             let msg = UpdateMessage::build(

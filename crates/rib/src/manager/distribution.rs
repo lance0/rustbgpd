@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use rustbgpd_policy::{PolicyAction, PolicyChain, RouteContext, RouteType, evaluate_chain};
 use rustbgpd_rpki::VrpTable;
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
-use super::{PendingRouteChunk, PendingRoutesReceived, RibManager};
 use super::helpers::{
     LOCAL_PEER, gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner,
     validate_route_rpki,
 };
+use super::{PendingRouteChunk, PendingRoutesReceived, RibManager};
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
@@ -27,6 +27,70 @@ fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
 }
 
 impl RibManager {
+    #[expect(clippy::too_many_arguments)]
+    pub(super) fn try_send_and_commit_outbound_update(
+        &mut self,
+        peer: IpAddr,
+        next_hop_override: Vec<Option<rustbgpd_policy::NextHopAction>>,
+        announce: Vec<crate::route::Route>,
+        withdraw: Vec<(Prefix, u32)>,
+        end_of_rib: Vec<(Afi, Safi)>,
+        refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
+        flowspec_announce: Vec<crate::route::FlowSpecRoute>,
+        flowspec_withdraw: Vec<FlowSpecRule>,
+    ) -> bool {
+        let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
+            return false;
+        };
+        let Ok(permit) = tx.try_reserve() else {
+            return false;
+        };
+
+        if !announce.is_empty()
+            || !withdraw.is_empty()
+            || !flowspec_announce.is_empty()
+            || !flowspec_withdraw.is_empty()
+        {
+            let rib_out = self
+                .adj_ribs_out
+                .entry(peer)
+                .or_insert_with(|| AdjRibOut::new(peer));
+            for route in &announce {
+                rib_out.insert(route.clone());
+            }
+            for (prefix, path_id) in &withdraw {
+                rib_out.withdraw(prefix, *path_id);
+            }
+            for route in &flowspec_announce {
+                rib_out.insert_flowspec(route.clone());
+            }
+            for rule in &flowspec_withdraw {
+                rib_out.remove_flowspec(rule);
+            }
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer.to_string(),
+                "all",
+                gauge_val(rib_out.len()),
+            );
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer.to_string(),
+                "flowspec",
+                gauge_val(rib_out.flowspec_len()),
+            );
+        }
+
+        permit.send(OutboundRouteUpdate {
+            announce,
+            withdraw,
+            end_of_rib,
+            refresh_markers,
+            next_hop_override,
+            flowspec_announce,
+            flowspec_withdraw,
+        });
+        true
+    }
+
     pub(super) fn handle_replace_peer_export_policy(
         &mut self,
         peer: IpAddr,
@@ -62,24 +126,23 @@ impl RibManager {
                 flowspec_announced,
                 flowspec_withdrawn,
             );
-            entry.insert(
-                AdjRibIn::with_capacity(
-                    peer,
-                    pending.route_capacity_hint(),
-                    pending.flowspec_capacity_hint(),
-                ),
-            );
+            entry.insert(AdjRibIn::with_capacity(
+                peer,
+                pending.route_capacity_hint(),
+                pending.flowspec_capacity_hint(),
+            ));
             self.pending_route_batches.push_back(pending);
             return;
         }
 
-        self.pending_route_batches.push_back(PendingRoutesReceived::new(
-            peer,
-            announced,
-            withdrawn,
-            flowspec_announced,
-            flowspec_withdrawn,
-        ));
+        self.pending_route_batches
+            .push_back(PendingRoutesReceived::new(
+                peer,
+                announced,
+                withdrawn,
+                flowspec_announced,
+                flowspec_withdrawn,
+            ));
     }
 
     pub(super) fn process_next_route_chunk(&mut self) -> bool {
@@ -201,7 +264,11 @@ impl RibManager {
         }
     }
 
-    fn process_flowspec_withdraw_chunk(&mut self, peer: IpAddr, flowspec_withdrawn: Vec<FlowSpecRule>) {
+    fn process_flowspec_withdraw_chunk(
+        &mut self,
+        peer: IpAddr,
+        flowspec_withdrawn: Vec<FlowSpecRule>,
+    ) {
         let active_refresh = self
             .refresh_in_progress
             .get(&peer)
@@ -942,11 +1009,10 @@ impl RibManager {
                 );
             }
 
-            if (!announce.is_empty()
+            if !announce.is_empty()
                 || !withdraw.is_empty()
                 || !fs_announce.is_empty()
-                || !fs_withdraw.is_empty())
-                && let Some(tx) = self.outbound_peers.get(&peer)
+                || !fs_withdraw.is_empty()
             {
                 // If a prior initial dump / route-refresh EoR was deferred,
                 // piggyback it on the successful dirty resync update so it
@@ -959,52 +1025,23 @@ impl RibManager {
                 } else {
                     vec![]
                 };
-                let update = OutboundRouteUpdate {
-                    next_hop_override: nh_override_flags.clone(),
-                    announce: announce.clone(),
-                    withdraw: withdraw.clone(),
-                    end_of_rib: pending_eor.clone(),
-                    refresh_markers: vec![],
-                    flowspec_announce: fs_announce.clone(),
-                    flowspec_withdraw: fs_withdraw.clone(),
-                };
-                if tx.try_send(update).is_err() {
-                    warn!(%peer, "outbound channel full or closed — marking dirty for resync");
-                    self.metrics.record_outbound_route_drop(&peer.to_string());
-                    self.dirty_peers.insert(peer);
-                } else {
-                    // Commit: apply staged mutations to AdjRibOut
-                    let rib_out = self
-                        .adj_ribs_out
-                        .get_mut(&peer)
-                        .expect("rib_out just accessed");
-                    for route in &announce {
-                        rib_out.insert(route.clone());
-                    }
-                    for &(ref prefix, path_id) in &withdraw {
-                        rib_out.withdraw(prefix, path_id);
-                    }
-                    for route in &fs_announce {
-                        rib_out.insert_flowspec(route.clone());
-                    }
-                    for rule in &fs_withdraw {
-                        rib_out.remove_flowspec(rule);
-                    }
-                    self.metrics.set_adj_rib_out_prefixes(
-                        &peer.to_string(),
-                        "all",
-                        gauge_val(rib_out.len()),
-                    );
-                    self.metrics.set_adj_rib_out_prefixes(
-                        &peer.to_string(),
-                        "flowspec",
-                        gauge_val(rib_out.flowspec_len()),
-                    );
+                let announced_count = announce.len();
+                let withdrawn_count = withdraw.len();
+                if self.try_send_and_commit_outbound_update(
+                    peer,
+                    nh_override_flags,
+                    announce,
+                    withdraw,
+                    pending_eor.clone(),
+                    vec![],
+                    fs_announce,
+                    fs_withdraw,
+                ) {
                     if is_dirty {
                         info!(
                             %peer,
-                            announced = announce.len(),
-                            withdrawn = withdraw.len(),
+                            announced = announced_count,
+                            withdrawn = withdrawn_count,
                             "outbound routes updated after policy change"
                         );
                         self.dirty_peers.remove(&peer);
@@ -1015,6 +1052,10 @@ impl RibManager {
                         }
                         self.retry_pending_refresh(peer);
                     }
+                } else {
+                    warn!(%peer, "outbound channel full or closed — marking dirty for resync");
+                    self.metrics.record_outbound_route_drop(&peer.to_string());
+                    self.dirty_peers.insert(peer);
                 }
             } else if is_dirty
                 && announce.is_empty()
@@ -1105,38 +1146,19 @@ impl RibManager {
             );
 
             if (!fs_announce.is_empty() || !fs_withdraw.is_empty())
-                && let Some(tx) = self.outbound_peers.get(&peer)
+                && !self.try_send_and_commit_outbound_update(
+                    peer,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    fs_announce,
+                    fs_withdraw,
+                )
             {
-                let update = OutboundRouteUpdate {
-                    announce: vec![],
-                    withdraw: vec![],
-                    end_of_rib: vec![],
-                    refresh_markers: vec![],
-                    next_hop_override: vec![],
-                    flowspec_announce: fs_announce.clone(),
-                    flowspec_withdraw: fs_withdraw.clone(),
-                };
-                if tx.try_send(update).is_err() {
-                    warn!(%peer, "outbound channel full — FlowSpec update deferred");
-                    self.dirty_peers.insert(peer);
-                } else {
-                    // Commit to AdjRibOut
-                    let rib_out = self
-                        .adj_ribs_out
-                        .get_mut(&peer)
-                        .expect("rib_out just accessed");
-                    for route in &fs_announce {
-                        rib_out.insert_flowspec(route.clone());
-                    }
-                    for rule in &fs_withdraw {
-                        rib_out.remove_flowspec(rule);
-                    }
-                    self.metrics.set_adj_rib_out_prefixes(
-                        &peer.to_string(),
-                        "flowspec",
-                        gauge_val(rib_out.flowspec_len()),
-                    );
-                }
+                warn!(%peer, "outbound channel full — FlowSpec update deferred");
+                self.dirty_peers.insert(peer);
             }
         }
     }

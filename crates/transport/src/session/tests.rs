@@ -479,6 +479,142 @@ fn route_server_client_force_next_hop_self_still_wins() {
     assert_eq!(nh, local_ipv4);
 }
 
+#[tokio::test]
+async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.stream = Some(client);
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let attrs = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ]);
+    let route1 = Route {
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
+        next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::clone(&attrs),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+    };
+    let route2 = Route {
+        prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
+        ..route1.clone()
+    };
+
+    session
+        .send_route_update(OutboundRouteUpdate {
+            announce: vec![route1, route2],
+            withdraw: vec![],
+            end_of_rib: vec![],
+            refresh_markers: vec![],
+            next_hop_override: vec![None, None],
+            flowspec_announce: vec![],
+            flowspec_withdraw: vec![],
+        })
+        .await;
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    assert_eq!(parsed.announced.len(), 2);
+}
+
+#[tokio::test]
+async fn send_route_update_splits_ipv6_routes_by_next_hop() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.stream = Some(client);
+    session.config.route_server_client = true;
+
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let attrs = Arc::new(vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+    ]);
+    let route1 = Route {
+        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
+        next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::clone(&attrs),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+    };
+    let route2 = Route {
+        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)),
+        next_hop: IpAddr::V6("2001:db8::2".parse().unwrap()),
+        ..route1.clone()
+    };
+
+    session
+        .send_route_update(OutboundRouteUpdate {
+            announce: vec![route1, route2],
+            withdraw: vec![],
+            end_of_rib: vec![],
+            refresh_markers: vec![],
+            next_hop_override: vec![None, None],
+            flowspec_announce: vec![],
+            flowspec_withdraw: vec![],
+        })
+        .await;
+
+    let Message::Update(first) = read_single_bgp_message(&mut server).await else {
+        panic!("expected first UPDATE");
+    };
+    let first = first.parse(true, false, &[]).unwrap();
+    let first_mp = first
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(first_mp.announced.len(), 1);
+
+    let Message::Update(second) = read_single_bgp_message(&mut server).await else {
+        panic!("expected second UPDATE");
+    };
+    let second = second.parse(true, false, &[]).unwrap();
+    let second_mp = second
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(second_mp.announced.len(), 1);
+    assert_ne!(first_mp.next_hop, second_mp.next_hop);
+}
+
 #[test]
 fn route_server_client_still_strips_local_pref() {
     let mut session = make_test_session(65001, 65002);

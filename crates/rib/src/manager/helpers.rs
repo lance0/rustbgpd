@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 use rustbgpd_rpki::VrpTable;
 use rustbgpd_wire::{Afi, LlgrFamily, Prefix, RpkiValidation, Safi};
@@ -32,7 +33,9 @@ pub(super) fn gauge_val(n: usize) -> i64 {
 /// Compare two routes for outbound equality (same attributes, next-hop, peer).
 /// Used to avoid re-announcing unchanged routes to multi-path peers.
 pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> bool {
-    a.next_hop == b.next_hop && a.peer == b.peer && a.attributes == b.attributes
+    a.next_hop == b.next_hop
+        && a.peer == b.peer
+        && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
 #[must_use]

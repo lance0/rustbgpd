@@ -1388,7 +1388,13 @@ async fn export_policy_blocks_denied() {
     }]);
 
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), Some(export_policy), None, BgpMetrics::new());
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(export_policy),
+        None,
+        BgpMetrics::new(),
+    );
     let handle = tokio::spawn(manager.run());
 
     let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
@@ -6338,7 +6344,13 @@ async fn multipath_all_candidates_denied_by_export_policy() {
     }]);
 
     let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), Some(export_policy), None, BgpMetrics::new());
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(export_policy),
+        None,
+        BgpMetrics::new(),
+    );
     let handle = tokio::spawn(manager.run());
 
     let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));

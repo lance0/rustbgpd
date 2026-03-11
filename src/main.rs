@@ -429,7 +429,14 @@ async fn run(mut config: Config) {
     let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4096);
     let (rib_query_tx, rib_query_rx) = mpsc::channel::<RibUpdate>(256);
     tokio::spawn(
-        RibManager::new(rib_rx, rib_query_rx, export_policy, cluster_id, metrics.clone()).run(),
+        RibManager::new(
+            rib_rx,
+            rib_query_rx,
+            export_policy,
+            cluster_id,
+            metrics.clone(),
+        )
+        .run(),
     );
 
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
