@@ -12,6 +12,8 @@ use crate::route::{FlowSpecRoute, Route};
 pub struct AdjRibOut {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
+    /// Secondary index: prefix → path IDs for O(1) per-prefix lookup.
+    prefix_path_ids: HashMap<Prefix, Vec<u32>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
 }
@@ -23,6 +25,7 @@ impl AdjRibOut {
         Self {
             peer,
             routes: HashMap::new(),
+            prefix_path_ids: HashMap::new(),
             flowspec_routes: HashMap::new(),
         }
     }
@@ -35,12 +38,28 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised route.
     pub fn insert(&mut self, route: Route) {
-        self.routes.insert((route.prefix, route.path_id), route);
+        let prefix = route.prefix;
+        let path_id = route.path_id;
+        self.routes.insert((prefix, path_id), route);
+        let ids = self.prefix_path_ids.entry(prefix).or_default();
+        if !ids.contains(&path_id) {
+            ids.push(path_id);
+        }
     }
 
     /// Withdraw a route by prefix and path ID. Returns `true` if it existed.
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
-        self.routes.remove(&(*prefix, path_id)).is_some()
+        if self.routes.remove(&(*prefix, path_id)).is_some() {
+            if let Some(ids) = self.prefix_path_ids.get_mut(prefix) {
+                ids.retain(|&id| id != path_id);
+                if ids.is_empty() {
+                    self.prefix_path_ids.remove(prefix);
+                }
+            }
+            true
+        } else {
+            false
+        }
     }
 
     /// Look up a route by prefix and path ID.
@@ -55,25 +74,30 @@ impl AdjRibOut {
     }
 
     /// Iterate over all routes for a given prefix (all path IDs).
-    pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> {
-        let target = *prefix;
-        self.routes.values().filter(move |r| r.prefix == target)
+    pub fn iter_prefix(&self, prefix: &Prefix) -> impl Iterator<Item = &Route> + '_ {
+        let prefix = *prefix;
+        self.prefix_path_ids
+            .get(&prefix)
+            .into_iter()
+            .flat_map(move |ids| {
+                ids.iter()
+                    .filter_map(move |&id| self.routes.get(&(prefix, id)))
+            })
     }
 
     /// Return all path IDs currently advertised for a given prefix.
     #[must_use]
     pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> Vec<u32> {
-        let target = *prefix;
-        self.routes
-            .keys()
-            .filter(|(p, _)| *p == target)
-            .map(|(_, id)| *id)
-            .collect()
+        self.prefix_path_ids
+            .get(prefix)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Remove all advertised routes.
     pub fn clear(&mut self) {
         self.routes.clear();
+        self.prefix_path_ids.clear();
     }
 
     /// Return the number of advertised routes.
@@ -120,5 +144,140 @@ impl AdjRibOut {
     /// Remove all advertised `FlowSpec` routes.
     pub fn clear_flowspec(&mut self) {
         self.flowspec_routes.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    use rustbgpd_wire::{Ipv4Prefix, Prefix};
+
+    use crate::route::{Route, RouteOrigin};
+
+    fn make_route(prefix: Prefix, path_id: u32) -> Route {
+        Route {
+            prefix,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            peer: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            attributes: Arc::new(vec![]),
+            received_at: std::time::Instant::now(),
+            origin_type: RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::new(1, 1, 1, 1),
+            is_stale: false,
+            is_llgr_stale: false,
+            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            path_id,
+        }
+    }
+
+    fn prefix_a() -> Prefix {
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24))
+    }
+
+    fn prefix_b() -> Prefix {
+        Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 1, 0), 24))
+    }
+
+    #[test]
+    fn index_tracks_single_best_insert_withdraw() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let p = prefix_a();
+
+        assert!(rib.path_ids_for_prefix(&p).is_empty());
+        rib.insert(make_route(p, 0));
+        assert_eq!(rib.path_ids_for_prefix(&p), vec![0]);
+
+        assert!(rib.withdraw(&p, 0));
+        assert!(rib.path_ids_for_prefix(&p).is_empty());
+        assert!(!rib.withdraw(&p, 0));
+    }
+
+    #[test]
+    fn index_tracks_add_path_multiple_ids() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let p = prefix_a();
+
+        rib.insert(make_route(p, 1));
+        rib.insert(make_route(p, 2));
+        rib.insert(make_route(p, 3));
+
+        let mut ids = rib.path_ids_for_prefix(&p);
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        rib.withdraw(&p, 2);
+        let mut ids = rib.path_ids_for_prefix(&p);
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[test]
+    fn index_handles_duplicate_insert() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let p = prefix_a();
+
+        rib.insert(make_route(p, 0));
+        rib.insert(make_route(p, 0)); // replace, not duplicate
+        assert_eq!(rib.path_ids_for_prefix(&p), vec![0]);
+        assert_eq!(rib.len(), 1);
+    }
+
+    #[test]
+    fn index_isolated_per_prefix() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let pa = prefix_a();
+        let pb = prefix_b();
+
+        rib.insert(make_route(pa, 0));
+        rib.insert(make_route(pb, 0));
+        rib.insert(make_route(pb, 1));
+
+        assert_eq!(rib.path_ids_for_prefix(&pa), vec![0]);
+        let mut ids_b = rib.path_ids_for_prefix(&pb);
+        ids_b.sort_unstable();
+        assert_eq!(ids_b, vec![0, 1]);
+
+        rib.withdraw(&pa, 0);
+        assert!(rib.path_ids_for_prefix(&pa).is_empty());
+        assert_eq!(rib.path_ids_for_prefix(&pb).len(), 2);
+    }
+
+    #[test]
+    fn clear_resets_index() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        rib.insert(make_route(prefix_a(), 0));
+        rib.insert(make_route(prefix_b(), 1));
+
+        rib.clear();
+        assert!(rib.path_ids_for_prefix(&prefix_a()).is_empty());
+        assert!(rib.path_ids_for_prefix(&prefix_b()).is_empty());
+        assert!(rib.is_empty());
+    }
+
+    #[test]
+    fn iter_prefix_uses_index() {
+        let mut rib = AdjRibOut::new(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let pa = prefix_a();
+        let pb = prefix_b();
+
+        rib.insert(make_route(pa, 1));
+        rib.insert(make_route(pa, 2));
+        rib.insert(make_route(pb, 0));
+
+        let routes_a: Vec<_> = rib.iter_prefix(&pa).collect();
+        assert_eq!(routes_a.len(), 2);
+        assert!(routes_a.iter().all(|r| r.prefix == pa));
+
+        let routes_b: Vec<_> = rib.iter_prefix(&pb).collect();
+        assert_eq!(routes_b.len(), 1);
+
+        let routes_none: Vec<_> = rib.iter_prefix(&Prefix::V4(Ipv4Prefix::new(
+            Ipv4Addr::new(192, 168, 0, 0),
+            16,
+        ))).collect();
+        assert!(routes_none.is_empty());
     }
 }

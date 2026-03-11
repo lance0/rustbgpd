@@ -75,8 +75,8 @@ At 500 prefixes, parse throughput is ~151M prefixes/sec. The fixed cost
 
 The RIB data structures (`rustbgpd-rib`) are pure synchronous structs with no
 async or locking overhead. `RibManager` owns them in a single tokio task.
-`AdjRibIn` uses a secondary prefix index (`HashMap<Prefix, HashSet<u32>>`) for
-O(1) prefix lookup, avoiding the O(N) full-scan that dominated earlier versions.
+Both `AdjRibIn` and `AdjRibOut` use secondary prefix indexes for O(1)
+per-prefix lookup, avoiding the O(N) full-scans that dominated earlier versions.
 
 ### Best-Path Comparison
 
@@ -235,6 +235,10 @@ approaching BIRD (~325 MB for 30 peers).
 
 ### Remaining Optimization Opportunities
 
+- **AdjRibOut index memory compaction** — the secondary prefix index uses
+  `HashMap<Prefix, Vec<u32>>`. For the common single-best case (path_id=0),
+  a `SmallVec<[u32; 1]>` or specialized single-entry encoding would reduce
+  per-prefix overhead.
 - **Bulk initial load mode** — initial full-table floods still distribute on
   every chunk. Coalescing more of the initial export work could reduce best-path
   recomputation churn and emit fewer, larger UPDATEs.
@@ -302,10 +306,10 @@ establishment.
 
 | | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
 |---|---|---|---|
-| Convergence | 2s | 5s | 74s |
-| Max CPU | 13% | 16% | 93% |
-| Max Memory | 7 MB | 578 MB | 168 MB |
-| Total time | 3s | 6s | 83s |
+| Convergence | 2s | 5s | 12s |
+| Max CPU | 13% | 16% | 195% |
+| Max Memory | 7 MB | 578 MB | 406 MB |
+| Total time | 3s | 6s | 21s |
 
 ### Understanding the Numbers
 
@@ -317,25 +321,27 @@ seconds for BIRD (accepts inbound immediately) and GoBGP (passive neighbor
 mode). Further improvement would require listen-mode-first startup.
 
 **Route processing.** At 10k and below, convergence completes in 2 seconds —
-matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd takes
-74 seconds with chunked processing (1024-prefix chunks with per-chunk
-recompute/distribute). The remaining bottleneck is per-chunk distribution
-overhead — each 1024-prefix chunk triggers a full best-path recomputation and
-outbound serialization pass.
+matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd
+converges in 12 seconds — competitive with GoBGP (5s) and within striking
+distance of BIRD (2s). The key optimization was adding a secondary prefix
+index to `AdjRibOut`, converting per-prefix lookup from O(N) full-scan to O(1)
+HashMap lookup. Before this fix, `distribute_changes()` cost scaled from
+1.4 µs/prefix (small table) to 780 µs/prefix (200k entries), causing the
+71-second bottleneck.
 
 **CPU efficiency.** rustbgpd uses a single-threaded RIB (single tokio task,
-no locks). At 200k scale it peaks at 93% CPU (RIB + transport), down from
-135% before outbound attribute caching and try_reserve send optimization.
-BIRD is the most efficient at 13% CPU, reflecting decades of C optimization
-with a radix-tree RIB.
+no locks). At 200k scale it peaks at 195% CPU (RIB + transport tasks), up from
+93% pre-index because distribution now runs fast enough that RIB processing
+and transport serialization overlap more heavily. BIRD is the most efficient
+at 13% CPU, reflecting decades of C optimization with a radix-tree RIB.
 
-**Memory.** rustbgpd uses 168 MB for 200k routes (2 peers + Loc-RIB), **3.4x
-less than GoBGP** (578 MB). The try_reserve/permit-send pattern avoids cloning
-route vectors before confirming channel capacity, and per-call outbound
-attribute caching eliminates redundant allocations. BIRD uses 7 MB — still an
-order of magnitude less, reflecting its compact radix-tree representation.
-At full-table scale (900k prefixes, micro-bench), rustbgpd uses 547 MB vs
-GoBGP's published 8-16+ GB.
+**Memory.** rustbgpd uses 406 MB for 200k routes (2 peers + Loc-RIB +
+Adj-RIB-Out), **1.4x less than GoBGP** (578 MB). The increase from 168 MB
+(pre-index) reflects the `AdjRibOut` secondary prefix index
+(`HashMap<Prefix, Vec<u32>>`) trading memory for O(1) lookup speed. BIRD uses
+7 MB — still an order of magnitude less, reflecting its compact radix-tree
+representation. At full-table scale (900k prefixes, micro-bench), rustbgpd
+uses 547 MB for Adj-RIB-In + Loc-RIB vs GoBGP's published 8-16+ GB.
 
 **gRPC under load.** A priority query channel separates read-only gRPC queries
 from the route-processing pipeline, ensuring management API requests are
@@ -348,19 +354,20 @@ updates.
 | Metric | BIRD | GoBGP | rustbgpd |
 |--------|------|-------|----------|
 | Architecture | Single-threaded C, radix tree | Go, goroutine-per-peer | Single-threaded Rust, HashMap RIB |
-| Route processing (200k) | 2s | 5s | 74s |
+| Route processing (200k) | 2s | 5s | 12s |
 | CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores, no GC |
 | Memory model | Radix tree, minimal overhead | Go heap, GC managed | Arc sharing, attribute interning |
-| Memory (200k routes) | 7 MB | 578 MB | 168 MB |
+| Memory (200k routes) | 7 MB | 578 MB | 406 MB |
 | Memory (900k, micro-bench) | ~325 MB (published, 30 peers) | 8-16+ GB (published) | 547 MB (2 peers + Loc-RIB) |
 | API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive (priority query channel) |
 
 BIRD is the clear performance leader — 30+ years of optimization in a
-purpose-built C codebase is hard to beat. rustbgpd's convergence at low-to-mid
-scale (10k-20k prefixes) is competitive with GoBGP at comparable CPU cost, and
-its memory efficiency at both 200k (168 MB vs 578 MB) and full-table scale
-(547 MB vs 8-16 GB) is a significant advantage over GoBGP. At 200k prefixes,
-convergence takes 74s (chunked 1024-prefix batches with interleaved query
-servicing). The remaining gap vs GoBGP (5s) is dominated by per-chunk
-distribution overhead. The main remaining optimization opportunity is bulk
-initial load mode (deferred distribution until table load completes).
+purpose-built C codebase is hard to beat. rustbgpd converges 200k prefixes in
+12 seconds — 2.4x slower than GoBGP (5s) and 6x slower than BIRD (2s), but a
+dramatic improvement from the pre-index 71 seconds. Memory at 406 MB is 1.4x
+less than GoBGP (578 MB); at full-table scale (900k, micro-bench) the gap
+widens further (547 MB vs 8-16 GB). The `AdjRibOut` secondary prefix index
+eliminated the dominant O(N^2) bottleneck in outbound distribution. Remaining
+optimization opportunities include `AdjRibOut` index memory compaction
+(e.g. `SmallVec<[u32; 1]>` for the common single-best case) and bulk initial
+load coalescing.

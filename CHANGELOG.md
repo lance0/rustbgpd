@@ -30,6 +30,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-call prepared-attribute caching in `send_route_update()`. This reduces
   per-route allocation and repeated attribute rewrites during large outbound
   batches without changing wire behavior.
+- **AdjRibOut secondary prefix index.** `AdjRibOut` now maintains a
+  `HashMap<Prefix, Vec<u32>>` secondary index for O(1) per-prefix path ID
+  lookup. Previously, `path_ids_for_prefix()` and `iter_prefix()` scanned the
+  entire route HashMap — O(N) per call, called per-prefix during outbound
+  distribution. At 200k routes this caused a 560x cost blowup (1.4 µs/prefix
+  early → 780 µs/prefix late). With the index, 200k-prefix convergence dropped
+  from 71s to 12s (5.9x improvement). Memory increases from 168 MB to 406 MB
+  due to the secondary index, still 1.4x less than GoBGP (578 MB).
 
 ### Changed
 

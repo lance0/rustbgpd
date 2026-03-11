@@ -204,6 +204,8 @@ Prove it works under pressure before 1.0.
 - [ ] **Bulk initial load mode** — special-case initial table flood: accumulate larger affected-prefix sets before distribution, emit fewer/larger outbound updates; initial load tradeoffs differ from steady-state churn
 - [x] **AdjRibIn/AdjRibOut pre-sizing** — `AdjRibIn::with_capacity()` constructor; first `RoutesReceived` per peer uses batch size hints to pre-size routes, prefix_index, and intern table maps
 - [x] **Outbound attribute caching** — per-call prepared outbound attribute cache reuses identical attribute rewrites inside `send_route_update()`, covering unicast export without introducing long-lived invalidation state
+- [x] **AdjRibOut secondary prefix index** — `HashMap<Prefix, Vec<u32>>` index for O(1) `path_ids_for_prefix()` and `iter_prefix()`. Previous O(N) full-scan caused 560x cost blowup at 200k routes; 2p/100k convergence: 71s → 12s (5.9x). Memory tradeoff: 168 MB → 406 MB (still 1.4x less than GoBGP)
+- [ ] **AdjRibOut index memory compaction** — replace `Vec<u32>` with `SmallVec<[u32; 1]>` or specialized single-entry encoding for the common single-best case; profile heap ownership before further structural changes
 
 ### P4 — Nice to Have
 
