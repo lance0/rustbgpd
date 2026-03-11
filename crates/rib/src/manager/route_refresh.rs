@@ -12,42 +12,9 @@ use crate::update::OutboundRouteUpdate;
 impl RibManager {
     pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "received End-of-RIB");
-        let mut handled_initial_load = false;
-        let (initial_load_done, affected) =
-            if let Some(awaiting) = self.initial_load_awaiting.get_mut(&peer) {
-                handled_initial_load = true;
-                awaiting.remove(&(afi, safi));
-                let done = awaiting.is_empty();
-                let affected = self
-                    .initial_load_affected
-                    .get_mut(&peer)
-                    .map(|prefixes| {
-                        let family = (afi, safi);
-                        let selected: HashSet<Prefix> = prefixes
-                            .iter()
-                            .copied()
-                            .filter(|prefix| prefix_family(prefix) == family)
-                            .collect();
-                        prefixes.retain(|prefix| prefix_family(prefix) != family);
-                        selected
-                    })
-                    .unwrap_or_default();
-                (done, affected)
-            } else {
-                (false, HashSet::new())
-            };
-        if !affected.is_empty() {
-            self.distribute_changes(&affected, &affected);
-        }
-        if initial_load_done {
-            self.initial_load_awaiting.remove(&peer);
-            self.initial_load_affected.remove(&peer);
-            info!(%peer, "initial table load complete — flushed deferred outbound distribution");
-        }
-
         let is_gr_peer = self.gr_peers.contains_key(&peer);
         let is_llgr_peer = self.llgr_peers.contains_key(&peer);
-        if !is_gr_peer && !is_llgr_peer && !handled_initial_load {
+        if !is_gr_peer && !is_llgr_peer {
             debug!(%peer, ?afi, ?safi, "End-of-RIB received without active GR/LLGR state, ignoring");
         }
         if is_gr_peer {

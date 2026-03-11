@@ -327,167 +327,6 @@ async fn peer_down_clears_routes() {
 }
 
 #[tokio::test]
-async fn initial_load_defers_outbound_distribution_until_eor() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
-
-    let source_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
-    let (target_out_tx, mut target_out_rx) = mpsc::channel(64);
-
-    for (peer, peer_asn, peer_router_id, outbound_tx) in [
-        (
-            source_peer,
-            65001,
-            Ipv4Addr::new(10, 0, 0, 1),
-            source_out_tx,
-        ),
-        (
-            target_peer,
-            65002,
-            Ipv4Addr::new(10, 0, 0, 2),
-            target_out_tx,
-        ),
-    ] {
-        tx.send(RibUpdate::PeerUp {
-            peer,
-            peer_asn,
-            peer_router_id,
-            outbound_tx,
-            export_policy: None,
-            sendable_families: ipv4_sendable(),
-            is_ebgp: true,
-            route_reflector_client: false,
-            add_path_send_families: vec![],
-            add_path_send_max: 0,
-            peer_gr_capable: true,
-        })
-        .await
-        .unwrap();
-    }
-
-    drain_eor(&mut source_out_rx).await;
-    drain_eor(&mut target_out_rx).await;
-
-    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
-    tx.send(RibUpdate::RoutesReceived {
-        peer: source_peer,
-        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-    })
-    .await
-    .unwrap();
-
-    let best = query_best_routes(&tx).await;
-    assert_eq!(best.len(), 1);
-    assert_eq!(best[0].prefix, Prefix::V4(prefix));
-
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), target_out_rx.recv())
-            .await
-            .is_err(),
-        "target peer should not receive initial-load updates before End-of-RIB"
-    );
-
-    tx.send(RibUpdate::EndOfRib {
-        peer: source_peer,
-        afi: Afi::Ipv4,
-        safi: Safi::Unicast,
-    })
-    .await
-    .unwrap();
-
-    let update = tokio::time::timeout(Duration::from_secs(1), target_out_rx.recv())
-        .await
-        .expect("deferred initial-load update should flush on End-of-RIB")
-        .unwrap();
-    assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
-
-    drop(tx);
-    handle.await.unwrap();
-}
-
-#[tokio::test]
-async fn post_eor_routes_distribute_immediately() {
-    let (tx, rx) = mpsc::channel(64);
-    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
-    let handle = tokio::spawn(manager.run());
-
-    let source_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-    let target_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
-    let (target_out_tx, mut target_out_rx) = mpsc::channel(64);
-
-    for (peer, peer_asn, peer_router_id, outbound_tx) in [
-        (
-            source_peer,
-            65001,
-            Ipv4Addr::new(10, 0, 0, 1),
-            source_out_tx,
-        ),
-        (
-            target_peer,
-            65002,
-            Ipv4Addr::new(10, 0, 0, 2),
-            target_out_tx,
-        ),
-    ] {
-        tx.send(RibUpdate::PeerUp {
-            peer,
-            peer_asn,
-            peer_router_id,
-            outbound_tx,
-            export_policy: None,
-            sendable_families: ipv4_sendable(),
-            is_ebgp: true,
-            route_reflector_client: false,
-            add_path_send_families: vec![],
-            add_path_send_max: 0,
-            peer_gr_capable: true,
-        })
-        .await
-        .unwrap();
-    }
-
-    drain_eor(&mut source_out_rx).await;
-    drain_eor(&mut target_out_rx).await;
-
-    tx.send(RibUpdate::EndOfRib {
-        peer: source_peer,
-        afi: Afi::Ipv4,
-        safi: Safi::Unicast,
-    })
-    .await
-    .unwrap();
-
-    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
-    tx.send(RibUpdate::RoutesReceived {
-        peer: source_peer,
-        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
-        withdrawn: vec![],
-        flowspec_announced: vec![],
-        flowspec_withdrawn: vec![],
-    })
-    .await
-    .unwrap();
-
-    let update = tokio::time::timeout(Duration::from_secs(1), target_out_rx.recv())
-        .await
-        .expect("steady-state routes should distribute immediately after EoR")
-        .unwrap();
-    assert_eq!(update.announce.len(), 1);
-    assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
-
-    drop(tx);
-    handle.await.unwrap();
-}
-
-#[tokio::test]
 async fn withdrawal_removes_route() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -830,7 +669,6 @@ async fn peer_up_triggers_initial_table_dump() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -864,7 +702,6 @@ async fn route_change_distributes_to_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -909,7 +746,6 @@ async fn single_best_send_normalizes_path_id_to_zero() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -957,7 +793,6 @@ async fn split_horizon_prevents_echo() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1039,7 +874,6 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1085,7 +919,6 @@ async fn ibgp_route_sent_to_ebgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1135,7 +968,6 @@ async fn ebgp_route_sent_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1176,7 +1008,6 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1250,7 +1081,6 @@ async fn local_route_sent_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1333,7 +1163,6 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1369,7 +1198,6 @@ async fn peer_down_cleans_up_outbound() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1411,7 +1239,6 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1480,7 +1307,6 @@ async fn withdraw_injected_removes_and_distributes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1584,7 +1410,6 @@ async fn export_policy_blocks_denied() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1635,7 +1460,6 @@ async fn query_advertised_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1719,7 +1543,6 @@ async fn per_peer_export_policy() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1737,7 +1560,6 @@ async fn per_peer_export_policy() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1816,7 +1638,6 @@ async fn replace_peer_export_policy_resyncs_outbound_state() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1899,7 +1720,6 @@ async fn export_policy_match_next_hop_filters_route() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -1970,7 +1790,6 @@ async fn peer_down_cleans_up_export_policy() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -2019,7 +1838,6 @@ async fn channel_full_marks_dirty_and_resyncs() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -2163,7 +1981,6 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -2291,7 +2108,6 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -2365,7 +2181,6 @@ async fn initial_dump_failure_resyncs_via_timer() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -2872,7 +2687,6 @@ async fn adj_rib_out_gauge_tracks_advertised() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -2962,7 +2776,6 @@ async fn query_advertised_count() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3034,7 +2847,6 @@ async fn distribute_changes_filters_unsendable_families() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3145,7 +2957,6 @@ async fn send_initial_table_filters_unsendable_families() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3224,7 +3035,6 @@ async fn dual_stack_peer_receives_both_families() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3270,7 +3080,6 @@ async fn send_initial_table_includes_flowspec_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3322,7 +3131,6 @@ async fn route_refresh_flowspec_re_advertises_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3711,7 +3519,6 @@ async fn dirty_resync_retries_flowspec_updates() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3772,7 +3579,6 @@ async fn gr_marks_stale_and_demotes_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -3998,7 +3804,6 @@ async fn gr_peer_up_defers_stale_to_eor() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4088,7 +3893,6 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4426,7 +4230,6 @@ async fn llgr_eor_clears_llgr_stale() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4595,7 +4398,6 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4613,7 +4415,6 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4632,7 +4433,6 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4646,14 +4446,6 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
-    })
-    .await
-    .unwrap();
-
-    tx.send(RibUpdate::EndOfRib {
-        peer: source,
-        afi: Afi::Ipv4,
-        safi: Safi::Unicast,
     })
     .await
     .unwrap();
@@ -4700,7 +4492,6 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4718,7 +4509,6 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         route_reflector_client: true,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4737,7 +4527,6 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4751,14 +4540,6 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
-    })
-    .await
-    .unwrap();
-
-    tx.send(RibUpdate::EndOfRib {
-        peer: source,
-        afi: Afi::Ipv4,
-        safi: Safi::Unicast,
     })
     .await
     .unwrap();
@@ -4804,7 +4585,6 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4857,7 +4637,6 @@ async fn rr_ebgp_route_to_all_ibgp() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -4909,7 +4688,6 @@ async fn rr_local_route_to_all_ibgp() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5378,7 +5156,6 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5542,7 +5319,6 @@ async fn multipath_send_advertises_multiple_routes() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5608,7 +5384,6 @@ async fn multipath_send_respects_send_max() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 2,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5681,7 +5456,6 @@ async fn multipath_send_split_horizon() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5725,7 +5499,6 @@ async fn multipath_withdrawal_on_candidate_removal() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5842,7 +5615,6 @@ async fn single_best_peer_unaffected_by_multipath_config() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5888,7 +5660,6 @@ async fn multipath_peer_down_cleans_up_state() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5927,7 +5698,6 @@ async fn multipath_peer_down_cleans_up_state() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -5964,7 +5734,6 @@ async fn multipath_send_incremental_route_addition() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6075,7 +5844,6 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6093,7 +5861,6 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6173,7 +5940,6 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6253,7 +6019,6 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6342,7 +6107,6 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6431,7 +6195,6 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
         route_reflector_client: false,
         add_path_send_families: vec![(Afi::Ipv4, Safi::Unicast)],
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6531,7 +6294,6 @@ async fn multipath_send_max_one_uses_path_id_one() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 1,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6609,7 +6371,6 @@ async fn multipath_all_candidates_denied_by_export_policy() {
         route_reflector_client: false,
         add_path_send_families: ipv4_sendable(),
         add_path_send_max: 5,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();
@@ -6711,7 +6472,6 @@ async fn mrt_peer_metadata_retained_during_gr() {
         route_reflector_client: false,
         add_path_send_families: vec![],
         add_path_send_max: 0,
-        peer_gr_capable: false,
     })
     .await
     .unwrap();

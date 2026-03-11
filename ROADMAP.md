@@ -201,13 +201,9 @@ Prove it works under pressure before 1.0.
 - [x] **Chunked RoutesReceived processing** — `PendingRoutesReceived` splits large batches into 1024-prefix chunks with per-chunk recompute/distribute; `VecDeque` queue preserves ordering; main channel blocked while chunks pending to prevent control message reordering
 - [x] **Bounded fair RIB scheduling** — replaced biased priority query drain with bounded fair scheduling: process one route chunk, then up to 8 queries, then yield; prevents trading route starvation for query starvation at scale
 - [x] **Outbound UPDATE construction optimization** — `send_route_update()` now uses hash-indexed attribute grouping instead of `Vec::find()`, per-call prepared outbound attribute caching, and pointer fast-paths for outbound route equality; RIB-to-transport send sites use `try_reserve()` to avoid clone-before-send overhead
-- [x] **Bulk initial load mode** — while a peer is still in initial unicast table load, keep `Adj-RIB-In` and `Loc-RIB` current on every chunk but defer outbound distribution until `EndOfRib`; flush one accumulated export pass at initial-load completion instead of distributing every initial-load chunk
+- [ ] **Bulk initial load mode** — special-case initial table flood: accumulate larger affected-prefix sets before distribution, emit fewer/larger outbound updates; initial load tradeoffs differ from steady-state churn
 - [x] **AdjRibIn/AdjRibOut pre-sizing** — `AdjRibIn::with_capacity()` constructor; first `RoutesReceived` per peer uses batch size hints to pre-size routes, prefix_index, and intern table maps
 - [x] **Outbound attribute caching** — per-call prepared outbound attribute cache reuses identical attribute rewrites inside `send_route_update()`, covering unicast export without introducing long-lived invalidation state
-- [ ] **Cross-message initial-load coalescing** — current initial-load deferral is keyed to `EndOfRib`, but very large table floods still arrive as multiple queued `RoutesReceived` messages. Coalescing more of that per-peer initial export work could cut bookkeeping and wakeups further.
-- [ ] **Adaptive initial-load chunk sizing** — use larger `RoutesReceived` chunks while a peer is in initial load, then fall back to smaller chunks for steady-state churn where query latency matters more
-- [ ] **FlowSpec initial-load deferral** — extend initial-load outbound deferral to FlowSpec once the withdraw path carries enough family context to accumulate and flush FlowSpec exports safely
-- [ ] **Snapshot-backed read path** — move heavy read-only query traffic off the live RIB mailbox onto a periodically refreshed snapshot if query pressure becomes the next scaling limiter after chunking and initial-load deferral
 
 ### P4 — Nice to Have
 

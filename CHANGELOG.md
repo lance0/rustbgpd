@@ -30,12 +30,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-call prepared-attribute caching in `send_route_update()`. This reduces
   per-route allocation and repeated attribute rewrites during large outbound
   batches without changing wire behavior.
-- **Deferred initial-load outbound distribution.** For GR-capable peers,
-  outbound distribution is deferred during initial table load — affected
-  prefixes accumulate until End-of-RIB, then flush in a single export pass
-  instead of distributing per-chunk. Non-GR peers distribute immediately
-  (they never send EoR). Combined with outbound optimization, 200k-prefix
-  convergence improved from 74s to 16s (4.6x), total time from 83s to 26s.
 
 ### Changed
 
@@ -112,10 +106,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Next-Hop dual-stack (9), Transparent Route Server with NH preservation and
   AS_PATH transparency (13), Private AS Removal in remove/all/replace modes
   (22). Total: 59 new interop assertions.
-- **Initial-load outbound deferral.** While a peer is still loading its initial
-  unicast table, the RIB now keeps `Adj-RIB-In` and `Loc-RIB` current on every
-  chunk but defers outbound distribution until `EndOfRib`, flushing one
-  accumulated export pass instead of distributing every initial-load chunk.
 
 ### Fixed
 

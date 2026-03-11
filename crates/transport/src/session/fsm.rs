@@ -293,10 +293,6 @@ impl PeerSession {
                         route_reflector_client: self.config.route_reflector_client,
                         add_path_send_families,
                         add_path_send_max,
-                        peer_gr_capable: self
-                            .negotiated
-                            .as_ref()
-                            .is_some_and(|n| n.peer_gr_capable),
                     });
                     let _ = self.rib_tx.try_send(RibUpdate::SetPeerPolicyContext {
                         peer: self.peer_ip,
