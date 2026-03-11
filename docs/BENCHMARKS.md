@@ -238,10 +238,6 @@ approaching BIRD (~325 MB for 30 peers).
 - **Bulk initial load mode** — initial full-table floods still distribute on
   every chunk. Coalescing more of the initial export work could reduce best-path
   recomputation churn and emit fewer, larger UPDATEs.
-- **Updated end-to-end benchmark rerun** — the current code now includes
-  first-batch `AdjRibIn` pre-sizing plus outbound attribute grouping/caching
-  optimizations, but the published bgperf2 numbers have not yet been rerun on
-  this exact revision.
 
 ## Interpretation
 
@@ -289,8 +285,8 @@ establishment.
 | | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
 |---|---|---|---|
 | Convergence | 1s | 2s | 2s |
-| Max CPU | 2% | 129% | 60% |
-| Max Memory | 9 MB | 37 MB | 77 MB |
+| Max CPU | 9% | 10% | 18% |
+| Max Memory | 2 MB | 188 MB | 80 MB |
 | Total time | 2s | 3s | 11s |
 
 #### 2 peers x 10,000 prefixes (20k total)
@@ -298,17 +294,17 @@ establishment.
 | | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
 |---|---|---|---|
 | Convergence | 1s | 2s | 2s |
-| Max CPU | 1% | 65% | 50% |
-| Max Memory | 9 MB | 44 MB | 50 MB |
+| Max CPU | 9% | 10% | 18% |
+| Max Memory | 1 MB | 89 MB | 62 MB |
 | Total time | 2s | 3s | 11s |
 
 #### 2 peers x 100,000 prefixes (200k total)
 
 | | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
 |---|---|---|---|
-| Convergence | 1s | 5s | 74s |
-| Max CPU | 10% | 589% | 135% |
-| Max Memory | 27 MB | 198 MB | 350 MB |
+| Convergence | 2s | 5s | 74s |
+| Max CPU | 13% | 16% | 93% |
+| Max Memory | 7 MB | 578 MB | 168 MB |
 | Total time | 3s | 6s | 83s |
 
 ### Understanding the Numbers
@@ -323,20 +319,23 @@ mode). Further improvement would require listen-mode-first startup.
 **Route processing.** At 10k and below, convergence completes in 2 seconds —
 matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd takes
 74 seconds with chunked processing (1024-prefix chunks with per-chunk
-recompute/distribute). The remaining bottleneck is per-chunk outbound
-serialization and distribution overhead.
+recompute/distribute). The remaining bottleneck is per-chunk distribution
+overhead — each 1024-prefix chunk triggers a full best-path recomputation and
+outbound serialization pass.
 
 **CPU efficiency.** rustbgpd uses a single-threaded RIB (single tokio task,
-no locks). At 200k scale it peaks at 135% CPU (RIB + transport). GoBGP uses
-goroutine-per-peer parallelism and peaks at 589% CPU (6 cores) for the same
-workload. BIRD is the most efficient at 10% CPU, reflecting decades of C
-optimization with a radix-tree RIB.
+no locks). At 200k scale it peaks at 93% CPU (RIB + transport), down from
+135% before outbound attribute caching and try_reserve send optimization.
+BIRD is the most efficient at 13% CPU, reflecting decades of C optimization
+with a radix-tree RIB.
 
-**Memory.** rustbgpd uses 350 MB for 200k routes (2 peers + Loc-RIB), roughly
-1.8x GoBGP's 198 MB. BIRD uses 27 MB — an order of magnitude less. rustbgpd's
-`Arc<Vec<PathAttribute>>` sharing and attribute interning help at scale (see
-micro-benchmarks above: 547 MB for a full 900k-prefix table), but the fixed
-overhead per route is higher than BIRD's compact radix-tree representation.
+**Memory.** rustbgpd uses 168 MB for 200k routes (2 peers + Loc-RIB), **3.4x
+less than GoBGP** (578 MB). The try_reserve/permit-send pattern avoids cloning
+route vectors before confirming channel capacity, and per-call outbound
+attribute caching eliminates redundant allocations. BIRD uses 7 MB — still an
+order of magnitude less, reflecting its compact radix-tree representation.
+At full-table scale (900k prefixes, micro-bench), rustbgpd uses 547 MB vs
+GoBGP's published 8-16+ GB.
 
 **gRPC under load.** A priority query channel separates read-only gRPC queries
 from the route-processing pipeline, ensuring management API requests are
@@ -349,20 +348,19 @@ updates.
 | Metric | BIRD | GoBGP | rustbgpd |
 |--------|------|-------|----------|
 | Architecture | Single-threaded C, radix tree | Go, goroutine-per-peer | Single-threaded Rust, HashMap RIB |
-| Route processing (200k) | 1s | 5s | 74s |
+| Route processing (200k) | 2s | 5s | 74s |
 | CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores, no GC |
 | Memory model | Radix tree, minimal overhead | Go heap, GC managed | Arc sharing, attribute interning |
-| Memory (200k routes) | 27 MB | 198 MB | 350 MB |
+| Memory (200k routes) | 7 MB | 578 MB | 168 MB |
 | Memory (900k, micro-bench) | ~325 MB (published, 30 peers) | 8-16+ GB (published) | 547 MB (2 peers + Loc-RIB) |
 | API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive (priority query channel) |
 
 BIRD is the clear performance leader — 30+ years of optimization in a
 purpose-built C codebase is hard to beat. rustbgpd's convergence at low-to-mid
 scale (10k-20k prefixes) is competitive with GoBGP at comparable CPU cost, and
-its memory efficiency at full-table scale (547 MB vs 8-16 GB) is a significant
-advantage. At 200k prefixes, chunked processing (1024-prefix batches with interleaved
-query servicing) reduced convergence from 103s to 74s. The remaining gap vs
-GoBGP (5s) is dominated by per-chunk outbound distribution overhead. The main
-optimization opportunities are outbound UPDATE construction (hash-based
-attribute grouping, reduced per-route serialization) and bulk initial load
-mode (deferred distribution until table load completes).
+its memory efficiency at both 200k (168 MB vs 578 MB) and full-table scale
+(547 MB vs 8-16 GB) is a significant advantage over GoBGP. At 200k prefixes,
+convergence takes 74s (chunked 1024-prefix batches with interleaved query
+servicing). The remaining gap vs GoBGP (5s) is dominated by per-chunk
+distribution overhead. The main remaining optimization opportunity is bulk
+initial load mode (deferred distribution until table load completes).
