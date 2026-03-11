@@ -12,10 +12,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **gRPC priority query channel.** Read-only gRPC queries (neighbor list, RIB
-  queries, control RPCs) now use a dedicated priority channel that is drained
-  between route-processing batches. This prevents management API stalls during
-  bulk route loading — previously queries could block for 60+ seconds behind
-  thousands of queued route updates.
+  queries, control RPCs) now use a dedicated channel with bounded fair
+  scheduling (8 queries per route chunk). This prevents management API stalls
+  during bulk route loading — previously queries could block for 60+ seconds
+  behind thousands of queued route updates.
+- **Chunked RIB processing.** Large `RoutesReceived` batches are now split
+  into 1024-prefix chunks with per-chunk recompute/distribute. Between chunks,
+  bounded query servicing and timer checks proceed. Main channel ordering is
+  preserved: control messages (EoR, PeerDown) cannot overtake unfinished route
+  work. At 200k prefixes, convergence improved from 103s to 74s (28%).
+- **AdjRibIn pre-sizing.** New `AdjRibIn::with_capacity()` constructor uses
+  first-batch size hints to pre-allocate routes, prefix index, and intern
+  table, reducing HashMap rehash stalls during bulk insert.
 
 ### Changed
 
@@ -23,12 +31,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interval now defaults to 5s (down from 30s), reducing session establishment
   delay when the first outbound connection attempt fails. The exponential
   backoff progression is now 5→10→20→40→80→160→300s.
-
-### Fixed
-
-- **End-to-end benchmark results updated.** Fresh bgperf2 numbers with both
-  performance fixes applied. Session establishment dropped from ~59s to ~9s.
-  gRPC API remains responsive during 200k-prefix bulk loading.
 
 ---
 
