@@ -235,9 +235,16 @@ approaching BIRD (~325 MB for 30 peers).
 
 ### Remaining Optimization Opportunities
 
-- **Bulk initial load mode** — initial full-table floods still distribute on
-  every chunk. Coalescing more of the initial export work could reduce best-path
-  recomputation churn and emit fewer, larger UPDATEs.
+- **Cross-message initial-load coalescing** — initial unicast load now defers
+  outbound distribution until `EndOfRib`, but very large table floods still
+  arrive as multiple queued `RoutesReceived` messages. A more explicit per-peer
+  coalescing path could reduce intermediate bookkeeping further.
+- **Adaptive initial-load chunk sizing** — larger chunks during initial table
+  load should reduce scheduler and channel overhead further, while the current
+  smaller chunks remain a better fit for steady-state churn and query latency.
+- **Snapshot-backed query reads** — query responsiveness is now good enough for
+  bgperf and operator tooling, but long-term read scaling still points toward a
+  snapshot-backed path instead of routing every query through the live RIB task.
 
 ## Interpretation
 
@@ -361,6 +368,6 @@ scale (10k-20k prefixes) is competitive with GoBGP at comparable CPU cost, and
 its memory efficiency at both 200k (168 MB vs 578 MB) and full-table scale
 (547 MB vs 8-16 GB) is a significant advantage over GoBGP. At 200k prefixes,
 convergence takes 74s (chunked 1024-prefix batches with interleaved query
-servicing). The remaining gap vs GoBGP (5s) is dominated by per-chunk
-distribution overhead. The main remaining optimization opportunity is bulk
-initial load mode (deferred distribution until table load completes).
+servicing). The remaining gap vs GoBGP (5s) now appears to be dominated by
+repeated large-batch distribution/bookkeeping costs across the full initial
+load rather than raw codec or RIB data-structure speed.
