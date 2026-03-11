@@ -530,7 +530,7 @@ impl RibManager {
         };
         if !sendable.is_some_and(|f| f.contains(&family)) {
             // Withdraw all previously advertised paths for this prefix
-            for path_id in rib_out.path_ids_for_prefix(prefix) {
+            for &path_id in rib_out.path_ids_for_prefix(prefix) {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -624,7 +624,7 @@ impl RibManager {
         }
 
         // Withdraw any previously advertised path_ids beyond the new set
-        for path_id in rib_out.path_ids_for_prefix(prefix) {
+        for &path_id in rib_out.path_ids_for_prefix(prefix) {
             if path_id >= next_rank {
                 withdraw.push((*prefix, path_id));
             }
@@ -652,7 +652,7 @@ impl RibManager {
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
 
         let Some(best) = loc_rib.get(prefix) else {
-            for path_id in existing_path_ids {
+            for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -660,7 +660,7 @@ impl RibManager {
 
         // Split horizon: don't send route back to its source
         if best.peer == target_peer {
-            for path_id in existing_path_ids {
+            for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -674,7 +674,7 @@ impl RibManager {
             cluster_id,
             peer_is_rr_client,
         ) {
-            for path_id in existing_path_ids {
+            for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -683,7 +683,7 @@ impl RibManager {
         // Sendable family check
         let family = prefix_family(prefix);
         if !sendable.is_some_and(|f| f.contains(&family)) {
-            for path_id in existing_path_ids {
+            for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -712,7 +712,7 @@ impl RibManager {
         };
         let result = evaluate_chain(export_pol, &ctx);
         if result.action != PolicyAction::Permit {
-            for path_id in existing_path_ids {
+            for &path_id in existing_path_ids {
                 withdraw.push((*prefix, path_id));
             }
             return;
@@ -739,7 +739,7 @@ impl RibManager {
 
         // Clean up any stale multi-path entries if this prefix was previously
         // advertised via Add-Path and is now single-best.
-        for path_id in existing_path_ids {
+        for &path_id in existing_path_ids {
             if path_id != 0 {
                 withdraw.push((*prefix, path_id));
             }

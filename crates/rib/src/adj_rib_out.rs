@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use rustbgpd_wire::{FlowSpecRule, Prefix};
+use smallvec::SmallVec;
 
 use crate::route::{FlowSpecRoute, Route};
 
@@ -13,7 +14,9 @@ pub struct AdjRibOut {
     peer: IpAddr,
     routes: HashMap<(Prefix, u32), Route>,
     /// Secondary index: prefix → path IDs for O(1) per-prefix lookup.
-    prefix_path_ids: HashMap<Prefix, Vec<u32>>,
+    /// `SmallVec<[u32; 1]>` inlines the single-best case (`path_id=0`) without
+    /// heap allocation; Add-Path multi-path spills to heap transparently.
+    prefix_path_ids: HashMap<Prefix, SmallVec<[u32; 1]>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
 }
@@ -51,7 +54,7 @@ impl AdjRibOut {
     pub fn withdraw(&mut self, prefix: &Prefix, path_id: u32) -> bool {
         if self.routes.remove(&(*prefix, path_id)).is_some() {
             if let Some(ids) = self.prefix_path_ids.get_mut(prefix) {
-                ids.retain(|&id| id != path_id);
+                ids.retain(|id| *id != path_id);
                 if ids.is_empty() {
                     self.prefix_path_ids.remove(prefix);
                 }
@@ -87,11 +90,10 @@ impl AdjRibOut {
 
     /// Return all path IDs currently advertised for a given prefix.
     #[must_use]
-    pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> Vec<u32> {
+    pub fn path_ids_for_prefix(&self, prefix: &Prefix) -> &[u32] {
         self.prefix_path_ids
             .get(prefix)
-            .cloned()
-            .unwrap_or_default()
+            .map_or(&[], SmallVec::as_slice)
     }
 
     /// Remove all advertised routes.
@@ -188,7 +190,7 @@ mod tests {
 
         assert!(rib.path_ids_for_prefix(&p).is_empty());
         rib.insert(make_route(p, 0));
-        assert_eq!(rib.path_ids_for_prefix(&p), vec![0]);
+        assert_eq!(rib.path_ids_for_prefix(&p), [0]);
 
         assert!(rib.withdraw(&p, 0));
         assert!(rib.path_ids_for_prefix(&p).is_empty());
@@ -204,14 +206,14 @@ mod tests {
         rib.insert(make_route(p, 2));
         rib.insert(make_route(p, 3));
 
-        let mut ids = rib.path_ids_for_prefix(&p);
+        let mut ids = rib.path_ids_for_prefix(&p).to_vec();
         ids.sort_unstable();
-        assert_eq!(ids, vec![1, 2, 3]);
+        assert_eq!(ids, [1, 2, 3]);
 
         rib.withdraw(&p, 2);
-        let mut ids = rib.path_ids_for_prefix(&p);
+        let mut ids = rib.path_ids_for_prefix(&p).to_vec();
         ids.sort_unstable();
-        assert_eq!(ids, vec![1, 3]);
+        assert_eq!(ids, [1, 3]);
     }
 
     #[test]
@@ -221,7 +223,7 @@ mod tests {
 
         rib.insert(make_route(p, 0));
         rib.insert(make_route(p, 0)); // replace, not duplicate
-        assert_eq!(rib.path_ids_for_prefix(&p), vec![0]);
+        assert_eq!(rib.path_ids_for_prefix(&p), [0]);
         assert_eq!(rib.len(), 1);
     }
 
@@ -235,10 +237,10 @@ mod tests {
         rib.insert(make_route(pb, 0));
         rib.insert(make_route(pb, 1));
 
-        assert_eq!(rib.path_ids_for_prefix(&pa), vec![0]);
-        let mut ids_b = rib.path_ids_for_prefix(&pb);
+        assert_eq!(rib.path_ids_for_prefix(&pa), [0]);
+        let mut ids_b = rib.path_ids_for_prefix(&pb).to_vec();
         ids_b.sort_unstable();
-        assert_eq!(ids_b, vec![0, 1]);
+        assert_eq!(ids_b, [0, 1]);
 
         rib.withdraw(&pa, 0);
         assert!(rib.path_ids_for_prefix(&pa).is_empty());
@@ -274,10 +276,12 @@ mod tests {
         let routes_b: Vec<_> = rib.iter_prefix(&pb).collect();
         assert_eq!(routes_b.len(), 1);
 
-        let routes_none: Vec<_> = rib.iter_prefix(&Prefix::V4(Ipv4Prefix::new(
-            Ipv4Addr::new(192, 168, 0, 0),
-            16,
-        ))).collect();
+        let routes_none: Vec<_> = rib
+            .iter_prefix(&Prefix::V4(Ipv4Prefix::new(
+                Ipv4Addr::new(192, 168, 0, 0),
+                16,
+            )))
+            .collect();
         assert!(routes_none.is_empty());
     }
 }

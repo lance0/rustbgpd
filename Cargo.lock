@@ -2041,6 +2041,7 @@ dependencies = [
  "rustbgpd-rpki",
  "rustbgpd-telemetry",
  "rustbgpd-wire",
+ "smallvec",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",
