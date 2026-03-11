@@ -110,8 +110,11 @@ impl PeerSession {
                     self.timers.stop(timer_type);
                 }
                 Action::InitiateTcpConnection => {
-                    if let Some(event) = self.attempt_connect().await {
-                        follow_up.push(event);
+                    if self.stream.is_some() {
+                        debug!(peer = %self.peer_label, "already connected (inbound)");
+                        follow_up.push(Event::TcpConnectionConfirmed);
+                    } else {
+                        self.start_connect_attempt();
                     }
                 }
                 Action::CloseTcpConnection => {

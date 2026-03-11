@@ -26,6 +26,7 @@ use rustbgpd_wire::{
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tracing::{debug, error, info, warn};
 
@@ -71,6 +72,9 @@ pub(crate) struct PeerSession {
     /// this timer fires after the connect-retry interval to avoid a hot
     /// reconnect loop (e.g., persistent OPEN validation failures).
     reconnect_timer: Option<Pin<Box<Sleep>>>,
+    /// In-flight outbound TCP connect attempt. Polled by the main event loop
+    /// so control commands remain responsive during connection establishment.
+    connect_task: Option<JoinHandle<std::io::Result<TcpStream>>>,
     /// Receiver for outbound route updates from the RIB manager.
     outbound_rx: mpsc::Receiver<OutboundRouteUpdate>,
     /// Sender clone held to give to RIB manager on `PeerUp`.
@@ -198,6 +202,7 @@ impl PeerSession {
             negotiated_families: Vec::new(),
             stop_requested: false,
             reconnect_timer: None,
+            connect_task: None,
             outbound_rx,
             outbound_tx,
             import_policy,
@@ -253,6 +258,7 @@ impl PeerSession {
             negotiated_families: Vec::new(),
             stop_requested: false,
             reconnect_timer: None,
+            connect_task: None,
             outbound_rx,
             outbound_tx,
             import_policy,
@@ -312,6 +318,7 @@ impl PeerSession {
                 timers,
                 commands,
                 reconnect_timer,
+                connect_task,
                 outbound_rx,
                 ..
             } = self;
@@ -367,6 +374,26 @@ impl PeerSession {
                     self.reconnect_timer = None;
                     debug!(peer = %self.peer_label, "reconnect timer fired");
                     self.drive_fsm(Event::ManualStart).await;
+                }
+
+                // In-flight outbound TCP connect completion
+                result = io::poll_connect(connect_task), if connect_task.is_some() => {
+                    self.connect_task = None;
+                    match result {
+                        Ok(Ok(stream)) => {
+                            info!(peer = %self.peer_label, "TCP connected");
+                            self.stream = Some(stream);
+                            self.drive_fsm(Event::TcpConnectionConfirmed).await;
+                        }
+                        Ok(Err(e)) => {
+                            debug!(peer = %self.peer_label, error = %e, "TCP connect failed");
+                            self.drive_fsm(Event::TcpConnectionFails).await;
+                        }
+                        Err(e) => {
+                            debug!(peer = %self.peer_label, error = %e, "TCP connect task failed");
+                            self.drive_fsm(Event::TcpConnectionFails).await;
+                        }
+                    }
                 }
 
                 // Outbound route updates from RIB manager

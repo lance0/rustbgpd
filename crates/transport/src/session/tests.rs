@@ -2,7 +2,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
@@ -200,6 +200,21 @@ async fn read_single_bgp_message(stream: &mut TcpStream) -> Message {
     raw.extend_from_slice(&body);
     let mut buf = Bytes::from(raw);
     rustbgpd_wire::decode_message(&mut buf, rustbgpd_wire::MAX_MESSAGE_LEN).unwrap()
+}
+
+#[tokio::test]
+async fn shutdown_aborts_inflight_connect_task() {
+    let mut session = make_test_session(65001, 65002);
+    session.connect_task = Some(tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        unreachable!("connect task should have been aborted by shutdown");
+    }));
+
+    assert_eq!(
+        session.handle_command(PeerCommand::Shutdown).await,
+        ControlFlow::Break(())
+    );
+    assert!(session.connect_task.is_none());
 }
 
 #[tokio::test]

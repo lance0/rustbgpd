@@ -3,6 +3,8 @@ use super::{
     RibUpdate, RouteRefreshSubtype, TcpStream, TransportError, cease_subcode, debug, error, info,
     warn,
 };
+use crate::config::TransportConfig;
+use tokio::task::{JoinError, JoinHandle};
 
 impl PeerSession {
     /// Encode and send a BGP message to the peer.
@@ -23,88 +25,37 @@ impl PeerSession {
         }
     }
 
-    /// Attempt an outbound TCP connection with timeout.
-    ///
-    /// If a stream is already connected (inbound session), return
-    /// `TcpConnectionConfirmed` immediately without connecting.
-    ///
-    /// Uses `socket2` to create the socket so that MD5 and GTSM options can be
-    /// applied before connecting.
-    pub(super) async fn attempt_connect(&mut self) -> Option<Event> {
-        // Inbound session: stream already connected
-        if self.stream.is_some() {
-            debug!(peer = %self.peer_label, "already connected (inbound)");
-            return Some(Event::TcpConnectionConfirmed);
+    /// Start an outbound TCP connection in the background so the main session
+    /// loop can continue servicing commands while connect is in flight.
+    pub(super) fn start_connect_attempt(&mut self) {
+        if self.stream.is_some() || self.connect_task.is_some() {
+            return;
         }
 
-        debug!(peer = %self.peer_label, addr = %self.config.remote_addr, "connecting");
-
-        match tokio::time::timeout(self.config.connect_timeout, self.create_and_connect()).await {
-            Ok(Ok(stream)) => {
-                info!(peer = %self.peer_label, "TCP connected");
-                self.stream = Some(stream);
-                Some(Event::TcpConnectionConfirmed)
+        let config = self.config.clone();
+        let peer_label = self.peer_label.clone();
+        debug!(peer = %peer_label, addr = %config.remote_addr, "connecting");
+        self.connect_task = Some(tokio::spawn(async move {
+            match tokio::time::timeout(
+                config.connect_timeout,
+                create_and_connect(config.clone(), peer_label.clone()),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("TCP connect to {} timed out", config.remote_addr),
+                )),
             }
-            Ok(Err(e)) => {
-                debug!(peer = %self.peer_label, error = %e, "TCP connect failed");
-                Some(Event::TcpConnectionFails)
-            }
-            Err(_elapsed) => {
-                debug!(peer = %self.peer_label, "TCP connect timed out");
-                Some(Event::TcpConnectionFails)
-            }
-        }
-    }
-
-    /// Create a socket with MD5/GTSM options and connect to the peer.
-    async fn create_and_connect(&self) -> std::io::Result<TcpStream> {
-        use socket2::{Domain, Protocol, SockAddr, Type};
-
-        let domain = if self.config.remote_addr.is_ipv4() {
-            Domain::IPV4
-        } else {
-            Domain::IPV6
-        };
-
-        let socket = socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
-
-        // Apply MD5 authentication before connect
-        if let Some(ref password) = self.config.md5_password {
-            crate::socket_opts::set_tcp_md5sig(&socket, self.config.remote_addr, password)?;
-            debug!(peer = %self.peer_label, "TCP MD5 authentication configured");
-        }
-
-        // Apply GTSM / TTL security before connect
-        if self.config.ttl_security {
-            crate::socket_opts::set_gtsm(&socket)?;
-            debug!(peer = %self.peer_label, "GTSM / TTL security configured");
-        }
-
-        socket.set_nonblocking(true)?;
-
-        let addr = SockAddr::from(self.config.remote_addr);
-        match socket.connect(&addr) {
-            Ok(()) => {}
-            Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
-            Err(e) => return Err(e),
-        }
-
-        let std_stream: std::net::TcpStream = socket.into();
-        let stream = TcpStream::from_std(std_stream)?;
-
-        // Wait for connection to complete
-        stream.writable().await?;
-
-        // Check for connection errors
-        if let Some(err) = stream.take_error()? {
-            return Err(err);
-        }
-
-        Ok(stream)
+        }));
     }
 
     /// Drop the TCP stream and clear the read buffer.
     pub(super) fn close_tcp(&mut self) {
+        if let Some(task) = self.connect_task.take() {
+            task.abort();
+        }
         if self.stream.take().is_some() {
             debug!(peer = %self.peer_label, "TCP connection closed");
         }
@@ -114,6 +65,9 @@ impl PeerSession {
     /// Clear TCP state after disconnect or error.
     pub(super) fn handle_tcp_disconnect(&mut self) {
         debug!(peer = %self.peer_label, "TCP disconnected");
+        if let Some(task) = self.connect_task.take() {
+            task.abort();
+        }
         self.stream = None;
         self.read_buf.clear();
     }
@@ -357,6 +311,59 @@ impl PeerSession {
             }
         }
     }
+}
+
+pub(super) async fn poll_connect(
+    connect_task: &mut Option<JoinHandle<std::io::Result<TcpStream>>>,
+) -> Result<std::io::Result<TcpStream>, JoinError> {
+    let Some(task) = connect_task.as_mut() else {
+        unreachable!("poll_connect called without an active connect task");
+    };
+    task.await
+}
+
+async fn create_and_connect(
+    config: TransportConfig,
+    peer_label: String,
+) -> std::io::Result<TcpStream> {
+    use socket2::{Domain, Protocol, SockAddr, Type};
+
+    let domain = if config.remote_addr.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+
+    let socket = socket2::Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+
+    if let Some(ref password) = config.md5_password {
+        crate::socket_opts::set_tcp_md5sig(&socket, config.remote_addr, password)?;
+        debug!(peer = %peer_label, "TCP MD5 authentication configured");
+    }
+
+    if config.ttl_security {
+        crate::socket_opts::set_gtsm(&socket)?;
+        debug!(peer = %peer_label, "GTSM / TTL security configured");
+    }
+
+    socket.set_nonblocking(true)?;
+
+    let addr = SockAddr::from(config.remote_addr);
+    match socket.connect(&addr) {
+        Ok(()) => {}
+        Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        Err(e) => return Err(e),
+    }
+
+    let std_stream: std::net::TcpStream = socket.into();
+    let stream = TcpStream::from_std(std_stream)?;
+    stream.writable().await?;
+
+    if let Some(err) = stream.take_error()? {
+        return Err(err);
+    }
+
+    Ok(stream)
 }
 
 /// Read from TCP into the buffer. Extracted as a freestanding async fn
