@@ -367,6 +367,7 @@ impl RibManager {
                 route_reflector_client,
                 add_path_send_families,
                 add_path_send_max,
+                peer_gr_capable,
             } => self.handle_peer_up(
                 peer,
                 peer_asn,
@@ -378,6 +379,7 @@ impl RibManager {
                 route_reflector_client,
                 add_path_send_families,
                 add_path_send_max,
+                peer_gr_capable,
             ),
             RibUpdate::SetPeerPolicyContext { peer, peer_group } => {
                 self.handle_set_peer_policy_context(peer, peer_group);

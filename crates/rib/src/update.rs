@@ -76,6 +76,10 @@ pub enum RibUpdate {
         add_path_send_families: Vec<(Afi, Safi)>,
         /// Maximum paths per prefix to send via Add-Path (0 = single-best only).
         add_path_send_max: u32,
+        /// Whether the peer negotiated Graceful Restart capability.
+        /// When true, the peer is expected to send End-of-RIB markers, so
+        /// outbound distribution can be deferred until `EoR`.
+        peer_gr_capable: bool,
     },
     /// Update per-peer policy identity metadata used during export policy evaluation.
     SetPeerPolicyContext {

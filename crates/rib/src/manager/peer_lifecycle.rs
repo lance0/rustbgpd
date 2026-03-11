@@ -80,6 +80,7 @@ impl RibManager {
         route_reflector_client: bool,
         add_path_send_families: Vec<(rustbgpd_wire::Afi, rustbgpd_wire::Safi)>,
         add_path_send_max: u32,
+        peer_gr_capable: bool,
     ) {
         self.peer_asn.insert(peer, peer_asn);
         self.peer_bgp_id.insert(peer, peer_router_id);
@@ -118,7 +119,13 @@ impl RibManager {
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
         self.peer_add_path_send_max.insert(peer, add_path_send_max);
-        if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
+        // Only defer initial-load distribution for GR-capable peers, which are
+        // guaranteed to send End-of-RIB. Non-GR peers may never send EoR, so
+        // their routes must distribute immediately (the pre-deferral behavior).
+        if peer_gr_capable
+            && !self.gr_peers.contains_key(&peer)
+            && !self.llgr_peers.contains_key(&peer)
+        {
             self.initial_load_awaiting.insert(
                 peer,
                 self.peer_sendable_families[&peer].iter().copied().collect(),
