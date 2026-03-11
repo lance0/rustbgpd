@@ -62,6 +62,8 @@ impl RibManager {
         self.peer_bgp_id.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
+        self.initial_load_awaiting.remove(&peer);
+        self.initial_load_affected.remove(&peer);
         self.clear_peer_refresh_state(peer);
     }
 
@@ -116,6 +118,13 @@ impl RibManager {
         self.peer_add_path_send_families
             .insert(peer, add_path_send_families);
         self.peer_add_path_send_max.insert(peer, add_path_send_max);
+        if !self.gr_peers.contains_key(&peer) && !self.llgr_peers.contains_key(&peer) {
+            self.initial_load_awaiting.insert(
+                peer,
+                self.peer_sendable_families[&peer].iter().copied().collect(),
+            );
+            self.initial_load_affected.remove(&peer);
+        }
         self.send_initial_table(peer);
     }
 

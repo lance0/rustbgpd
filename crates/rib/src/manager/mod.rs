@@ -52,6 +52,10 @@ pub struct RibManager {
     dirty_peers: HashSet<IpAddr>,
     /// `EoR` markers that failed to enqueue and must be retried.
     pending_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Families still in the initial table-load phase per peer.
+    initial_load_awaiting: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
+    /// Prefixes whose outbound distribution is deferred until initial-load `EoR`.
+    initial_load_affected: HashMap<IpAddr, HashSet<Prefix>>,
     /// Families with an outstanding enhanced route refresh response retry.
     pending_refresh: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Active inbound enhanced route refresh windows by peer/family.
@@ -249,6 +253,8 @@ impl RibManager {
             cluster_id,
             dirty_peers: HashSet::new(),
             pending_eor: HashMap::new(),
+            initial_load_awaiting: HashMap::new(),
+            initial_load_affected: HashMap::new(),
             pending_refresh: HashMap::new(),
             refresh_in_progress: HashMap::new(),
             refresh_deadlines: HashMap::new(),

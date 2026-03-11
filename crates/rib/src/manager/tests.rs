@@ -327,6 +327,165 @@ async fn peer_down_clears_routes() {
 }
 
 #[tokio::test]
+async fn initial_load_defers_outbound_distribution_until_eor() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    let (target_out_tx, mut target_out_rx) = mpsc::channel(64);
+
+    for (peer, peer_asn, peer_router_id, outbound_tx) in [
+        (
+            source_peer,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            source_out_tx,
+        ),
+        (
+            target_peer,
+            65002,
+            Ipv4Addr::new(10, 0, 0, 2),
+            target_out_tx,
+        ),
+    ] {
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            peer_asn,
+            peer_router_id,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+        })
+        .await
+        .unwrap();
+    }
+
+    drain_eor(&mut source_out_rx).await;
+    drain_eor(&mut target_out_rx).await;
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source_peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best = query_best_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert_eq!(best[0].prefix, Prefix::V4(prefix));
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), target_out_rx.recv())
+            .await
+            .is_err(),
+        "target peer should not receive initial-load updates before End-of-RIB"
+    );
+
+    tx.send(RibUpdate::EndOfRib {
+        peer: source_peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+
+    let update = tokio::time::timeout(Duration::from_secs(1), target_out_rx.recv())
+        .await
+        .expect("deferred initial-load update should flush on End-of-RIB")
+        .unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn post_eor_routes_distribute_immediately() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target_peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    let (target_out_tx, mut target_out_rx) = mpsc::channel(64);
+
+    for (peer, peer_asn, peer_router_id, outbound_tx) in [
+        (
+            source_peer,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            source_out_tx,
+        ),
+        (
+            target_peer,
+            65002,
+            Ipv4Addr::new(10, 0, 0, 2),
+            target_out_tx,
+        ),
+    ] {
+        tx.send(RibUpdate::PeerUp {
+            peer,
+            peer_asn,
+            peer_router_id,
+            outbound_tx,
+            export_policy: None,
+            sendable_families: ipv4_sendable(),
+            is_ebgp: true,
+            route_reflector_client: false,
+            add_path_send_families: vec![],
+            add_path_send_max: 0,
+        })
+        .await
+        .unwrap();
+    }
+
+    drain_eor(&mut source_out_rx).await;
+    drain_eor(&mut target_out_rx).await;
+
+    tx.send(RibUpdate::EndOfRib {
+        peer: source_peer,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source_peer,
+        announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let update = tokio::time::timeout(Duration::from_secs(1), target_out_rx.recv())
+        .await
+        .expect("steady-state routes should distribute immediately after EoR")
+        .unwrap();
+    assert_eq!(update.announce.len(), 1);
+    assert_eq!(update.announce[0].prefix, Prefix::V4(prefix));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn withdrawal_removes_route() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -4450,6 +4609,14 @@ async fn rr_client_route_reflected_to_all_ibgp() {
     .await
     .unwrap();
 
+    tx.send(RibUpdate::EndOfRib {
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+    })
+    .await
+    .unwrap();
+
     // Both targets should receive the reflected route
     let client_update = client_rx.recv().await.unwrap();
     assert!(
@@ -4540,6 +4707,14 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::EndOfRib {
+        peer: source,
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
     })
     .await
     .unwrap();

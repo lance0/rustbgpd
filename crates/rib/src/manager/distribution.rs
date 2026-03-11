@@ -27,6 +27,27 @@ fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
 }
 
 impl RibManager {
+    fn split_initial_load_unicast(
+        &mut self,
+        peer: IpAddr,
+        affected: HashSet<Prefix>,
+    ) -> HashSet<Prefix> {
+        let Some(awaiting) = self.initial_load_awaiting.get(&peer) else {
+            return affected;
+        };
+
+        let mut immediate = HashSet::new();
+        let deferred = self.initial_load_affected.entry(peer).or_default();
+        for prefix in affected {
+            if awaiting.contains(&prefix_family(&prefix)) {
+                deferred.insert(prefix);
+            } else {
+                immediate.insert(prefix);
+            }
+        }
+        immediate
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,
@@ -214,7 +235,14 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
         if !affected.is_empty() {
             let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
+            let immediate_affected = self.split_initial_load_unicast(peer, affected);
+            let immediate_changed: HashSet<Prefix> = changed
+                .into_iter()
+                .filter(|prefix| immediate_affected.contains(prefix))
+                .collect();
+            if !immediate_affected.is_empty() {
+                self.distribute_changes(&immediate_changed, &immediate_affected);
+            }
         }
     }
 
@@ -260,7 +288,14 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
         if !affected.is_empty() {
             let changed = self.recompute_best(&affected);
-            self.distribute_changes(&changed, &affected);
+            let immediate_affected = self.split_initial_load_unicast(peer, affected);
+            let immediate_changed: HashSet<Prefix> = changed
+                .into_iter()
+                .filter(|prefix| immediate_affected.contains(prefix))
+                .collect();
+            if !immediate_affected.is_empty() {
+                self.distribute_changes(&immediate_changed, &immediate_affected);
+            }
         }
     }
 
