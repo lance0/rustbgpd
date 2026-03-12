@@ -50,17 +50,54 @@ architecture diagrams, example configs, and API workflows.
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
 
-## Quick start (5 minutes)
+## Try it (60 seconds)
 
-### 1. Build
+The fastest way to see rustbgpd in action. Spins up the daemon with an FRR
+peer that advertises sample IPv4 and IPv6 prefixes — no real routers needed.
+
+```bash
+cd examples/docker-compose
+docker compose up -d
+```
+
+Once both containers are running (a few seconds):
+
+```bash
+# See the FRR peer come up
+docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
+
+# Browse the RIB
+docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 rib
+
+# Live TUI dashboard — sessions, prefix counts, message rates
+docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
+```
+
+Press `q` to exit the TUI. When you're done: `docker compose down`.
+
+## Install
+
+### From source
 
 ```bash
 # Prerequisites: Rust 1.88+, protobuf-compiler
 sudo apt-get install -y protobuf-compiler   # Debian/Ubuntu
 cargo build --workspace --release
+
+# Binaries are at target/release/rustbgpd and target/release/rustbgpctl
 ```
 
-### 2. Configure
+### Docker
+
+```bash
+docker build -t rustbgpd .
+```
+
+## Quick start (bare metal)
+
+For running rustbgpd on a real host with real peers.
+
+### 1. Configure
 
 ```bash
 # Copy and edit the minimal example
@@ -73,7 +110,7 @@ includes the required `prometheus_addr`. For a route-server deployment, start
 from `examples/route-server/config.toml` instead. Full reference:
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
-### 3. Validate and run
+### 2. Validate and run
 
 ```bash
 # Validate config without starting the daemon
@@ -83,7 +120,7 @@ from `examples/route-server/config.toml` instead. Full reference:
 ./target/release/rustbgpd config.toml
 ```
 
-### 4. Verify
+### 3. Verify
 
 ```bash
 # The minimal example uses /tmp/rustbgpd as state dir, so point the CLI there:
@@ -92,19 +129,13 @@ export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 rustbgpctl health
 rustbgpctl neighbor
 rustbgpctl rib
-
-# Or grpcurl directly
-grpcurl -plaintext -unix /tmp/rustbgpd/grpc.sock \
-  -import-path . -proto proto/rustbgpd.proto \
-  rustbgpd.v1.NeighborService/ListNeighbors
+rustbgpctl top       # live TUI dashboard
 ```
 
 In production with the systemd unit, the default UDS path
 (`/var/lib/rustbgpd/grpc.sock`) matches the CLI default — no env var needed.
-The minimal config also enables Prometheus on `127.0.0.1:9179`; that listener
-is still required today.
 
-### 5. Operate
+### 4. Operate
 
 ```bash
 # Add a peer at runtime (persisted to config file automatically)
@@ -125,21 +156,9 @@ gRPC defaults to a local Unix domain socket. For remote access, prefer an
 mTLS proxy — see [`examples/envoy-mtls/`](examples/envoy-mtls/) and
 [docs/SECURITY.md](docs/SECURITY.md).
 
-### Alternative launch paths
-
-Docker Compose example (includes an FRR peer with sample routes):
+### Docker (standalone)
 
 ```bash
-cd examples/docker-compose
-docker compose up -d
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
-```
-
-Standalone Docker container:
-
-```bash
-docker build -t rustbgpd .
 docker run -d --name rustbgpd \
   -v $(pwd)/config.toml:/etc/rustbgpd/config.toml:ro \
   -v rustbgpd-state:/var/lib/rustbgpd \
