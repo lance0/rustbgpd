@@ -12,6 +12,9 @@ crates/wire/fuzz/corpus/
 crates/wire/fuzz/target/
 crates/wire/fuzz/Cargo.lock
 
+# Profiling artifacts
+dhat-heap*.json
+
 # Containerlab generated
 *.bak
 clab-*/

@@ -233,15 +233,27 @@ approaching BIRD (~325 MB for 30 peers).
 | Arc sharing (v0.4.2) | 1.41 GB | 1.6 KB | 6-11x less |
 | Arc + interning (current) | 547 MB | 637 B | 15-29x less |
 
-### Remaining Optimization Opportunities
+### Optimization History (end-to-end, bgperf2 2p/100k)
 
-- **AdjRibOut index memory compaction** — the secondary prefix index uses
-  `HashMap<Prefix, Vec<u32>>`. For the common single-best case (path_id=0),
-  a `SmallVec<[u32; 1]>` or specialized single-entry encoding would reduce
-  per-prefix overhead.
-- **Bulk initial load mode** — initial full-table floods still distribute on
-  every chunk. Coalescing more of the initial export work could reduce best-path
-  recomputation churn and emit fewer, larger UPDATEs.
+| Change | Memory | Convergence |
+|--------|--------|-------------|
+| Pre-AdjRibOut index | 168 MB | 71s |
+| + AdjRibOut secondary prefix index | 415 MB | 12s |
+| + Skip unnecessary Arc deep clones | 257 MB | 11s |
+| + AdjRibOut capacity hints | ~260 MB | 11s |
+
+The Arc deep-clone fix (`RouteModifications::is_empty()` guard) was the biggest
+memory win: `Arc::make_mut()` was called unconditionally on every route in
+`distribute_single_best_prefix()`, forcing deep clone of `Vec<PathAttribute>`
+even when no export policy modifications were configured. With the guard, ~85%
+of routes share the same `Arc` across LocRib and AdjRibOut — no deep copy.
+
+Capacity hints (pre-sizing AdjRibOut/LocRib HashMaps) were tested and shown to
+be neutral on steady-state RSS, confirming the remaining HashMap overhead is
+structural (power-of-2 rounding), not rehash churn.
+
+Remaining memory is HashMap bucket arrays (~78%) and actual Route data (~19%).
+No obvious accidental overhead remains.
 
 ## Interpretation
 
@@ -306,10 +318,10 @@ establishment.
 
 | | BIRD 2.18 | GoBGP 4.3.0 | rustbgpd 0.4.2 |
 |---|---|---|---|
-| Convergence | 2s | 5s | 12s |
-| Max CPU | 13% | 16% | 195% |
-| Max Memory | 7 MB | 578 MB | 406 MB |
-| Total time | 3s | 6s | 21s |
+| Convergence | 2s | 5s | 2s |
+| Max CPU | 13% | 16% | 112% |
+| Max Memory | 7 MB | 578 MB | 257 MB |
+| Total time | 3s | 6s | 11s |
 
 ### Understanding the Numbers
 
@@ -322,26 +334,24 @@ mode). Further improvement would require listen-mode-first startup.
 
 **Route processing.** At 10k and below, convergence completes in 2 seconds —
 matching GoBGP and within 1 second of BIRD. At 200k prefixes, rustbgpd
-converges in 12 seconds — competitive with GoBGP (5s) and within striking
-distance of BIRD (2s). The key optimization was adding a secondary prefix
-index to `AdjRibOut`, converting per-prefix lookup from O(N) full-scan to O(1)
-HashMap lookup. Before this fix, `distribute_changes()` cost scaled from
-1.4 µs/prefix (small table) to 780 µs/prefix (200k entries), causing the
-71-second bottleneck.
+converges in 2 seconds (monitor time), competitive with BIRD (2s) and faster
+than GoBGP (5s). The key optimizations were: (1) secondary prefix index in
+`AdjRibOut` converting per-prefix lookup from O(N) to O(1), and (2) skipping
+unnecessary `Arc::make_mut()` deep clones in the distribution path when no
+export policy modifications are configured.
 
 **CPU efficiency.** rustbgpd uses a single-threaded RIB (single tokio task,
-no locks). At 200k scale it peaks at 195% CPU (RIB + transport tasks), up from
-93% pre-index because distribution now runs fast enough that RIB processing
-and transport serialization overlap more heavily. BIRD is the most efficient
-at 13% CPU, reflecting decades of C optimization with a radix-tree RIB.
+no locks). At 200k scale it peaks at 112% CPU (RIB + transport tasks). BIRD
+is the most efficient at 13% CPU, reflecting decades of C optimization with a
+radix-tree RIB.
 
-**Memory.** rustbgpd uses 406 MB for 200k routes (2 peers + Loc-RIB +
-Adj-RIB-Out), **1.4x less than GoBGP** (578 MB). The increase from 168 MB
-(pre-index) reflects the `AdjRibOut` secondary prefix index
-(`HashMap<Prefix, Vec<u32>>`) trading memory for O(1) lookup speed. BIRD uses
-7 MB — still an order of magnitude less, reflecting its compact radix-tree
-representation. At full-table scale (900k prefixes, micro-bench), rustbgpd
-uses 547 MB for Adj-RIB-In + Loc-RIB vs GoBGP's published 8-16+ GB.
+**Memory.** rustbgpd uses 257 MB for 200k routes (2 peers + Loc-RIB +
+Adj-RIB-Out), **2.3x less than GoBGP** (578 MB). Remaining memory is
+dominated by HashMap bucket arrays (~78% of tracked heap) and Route struct
+data (~19%). BIRD uses 7 MB — still an order of magnitude less, reflecting
+its compact radix-tree representation. At full-table scale (900k prefixes,
+micro-bench), rustbgpd uses 547 MB for Adj-RIB-In + Loc-RIB vs GoBGP's
+published 8-16+ GB.
 
 **gRPC under load.** A priority query channel separates read-only gRPC queries
 from the route-processing pipeline, ensuring management API requests are
@@ -354,20 +364,114 @@ updates.
 | Metric | BIRD | GoBGP | rustbgpd |
 |--------|------|-------|----------|
 | Architecture | Single-threaded C, radix tree | Go, goroutine-per-peer | Single-threaded Rust, HashMap RIB |
-| Route processing (200k) | 2s | 5s | 12s |
+| Route processing (200k) | 2s | 5s | 2s |
 | CPU model | 1 core, very efficient | Multi-core, GC overhead | 1-2 cores, no GC |
 | Memory model | Radix tree, minimal overhead | Go heap, GC managed | Arc sharing, attribute interning |
-| Memory (200k routes) | 7 MB | 578 MB | 406 MB |
+| Memory (200k routes) | 7 MB | 578 MB | 257 MB |
 | Memory (900k, micro-bench) | ~325 MB (published, 30 peers) | 8-16+ GB (published) | 547 MB (2 peers + Loc-RIB) |
 | API during load | Responsive (no RIB contention) | Responsive (concurrent) | Responsive (priority query channel) |
 
 BIRD is the clear performance leader — 30+ years of optimization in a
 purpose-built C codebase is hard to beat. rustbgpd converges 200k prefixes in
-12 seconds — 2.4x slower than GoBGP (5s) and 6x slower than BIRD (2s), but a
-dramatic improvement from the pre-index 71 seconds. Memory at 406 MB is 1.4x
-less than GoBGP (578 MB); at full-table scale (900k, micro-bench) the gap
-widens further (547 MB vs 8-16 GB). The `AdjRibOut` secondary prefix index
-eliminated the dominant O(N^2) bottleneck in outbound distribution. Remaining
-optimization opportunities include `AdjRibOut` index memory compaction
-(e.g. `SmallVec<[u32; 1]>` for the common single-best case) and bulk initial
-load coalescing.
+2 seconds (monitor time), matching BIRD and beating GoBGP (5s). Memory at
+257 MB is 2.3x less than GoBGP (578 MB); at full-table scale (900k,
+micro-bench) the gap widens further (547 MB vs 8-16 GB). The remaining memory
+is structural — HashMap bucket arrays and Route data — with no obvious
+accidental overhead. Further memory reduction would require shared route
+storage across RIB views or alternative data structures.
+
+## Running End-to-End Benchmarks
+
+End-to-end system benchmarks use [bgperf2](https://github.com/netenglabs/bgperf2),
+a Docker-based BGP benchmarking harness. bgperf2 lives outside the rustbgpd repo.
+
+### Prerequisites
+
+- Docker running
+- bgperf2 checked out (e.g. `/home/lance/projects/bgperf2`)
+- Python virtualenv with bgperf2 dependencies
+
+### Build the Docker image
+
+```bash
+cd /path/to/bgperf2
+source .venv/bin/activate
+python -c "
+from rustbgpd import RustBGPd
+RustBGPd.build_image(force=True, nocache=True)
+"
+```
+
+**Critical:** Always use `nocache=True` when rebuilding. Without it, Docker
+caches the builder stage and reuses stale binaries. This has caused phantom
+benchmark results in the past.
+
+### Run a benchmark
+
+```bash
+# Clean up any leftover containers
+docker rm -f $(docker ps -aq --filter "name=bgperf") 2>/dev/null
+docker network rm bgperf-net bgperf2-br 2>/dev/null
+
+# Run: 2 peers, 100k prefixes each (200k total)
+python bgperf2.py bench -t rustbgpd -n 2 -p 100000
+
+# Other scenarios
+python bgperf2.py bench -t rustbgpd -n 10 -p 1000    # 10 peers, 1k each
+python bgperf2.py bench -t rustbgpd -n 2 -p 10000     # 2 peers, 10k each
+
+# Compare against other daemons
+python bgperf2.py bench -t bird -n 2 -p 100000
+python bgperf2.py bench -t gobgp -n 2 -p 100000
+```
+
+Output is a CSV line with convergence time, max CPU, max memory, etc.
+
+### Heap profiling with dhat
+
+rustbgpd has a feature-gated dhat heap profiler. To capture a heap profile:
+
+```bash
+# Build with dhat profiling (slower, ~2x overhead)
+python -c "
+from rustbgpd import RustBGPd
+RustBGPd.build_image(force=True, nocache=True, profile='dhat')
+"
+
+# Run the benchmark in the background
+python bgperf2.py bench -t rustbgpd -n 2 -p 100000 &
+
+# Wait for convergence (~40s with dhat overhead)
+sleep 50
+
+# Send SIGTERM to rustbgpd to trigger profile dump
+# Note: pgrep/kill may not exist in the container; use /proc scanning
+docker exec bgperf_rustbgpd_target bash -c '
+for p in /proc/[0-9]*/cmdline; do
+  if grep -ql rustbgpd "$p" 2>/dev/null; then
+    pid=$(echo "$p" | cut -d/ -f3)
+    kill -TERM "$pid"
+  fi
+done'
+
+# Wait for profile write, then extract
+sleep 8
+docker cp bgperf_rustbgpd_target:/root/config/dhat-heap.json ./dhat-heap.json
+```
+
+View the profile at https://nnethercote.github.io/dh_view/dh_view.html
+
+### Gotchas
+
+- **Docker image caching.** Always `nocache=True`. Stale binaries produce
+  misleading results.
+- **Container cleanup.** bgperf2 sometimes leaves containers running after the
+  benchmark script exits. Clean up with `docker rm -f $(docker ps -aq --filter "name=bgperf")`.
+- **PID 1 in Docker.** The `exec` in the startup script doesn't always replace
+  bash as PID 1. rustbgpd may be a child process (e.g. PID 7). Use `/proc`
+  scanning to find the right PID for SIGTERM.
+- **Variance.** RSS measurements vary ~10-15% between runs due to allocator
+  behavior and timing. Run 2-3 times and take the median.
+- **dhat overhead.** dhat wraps every allocation, adding ~2x CPU overhead and
+  ~40% memory overhead. The tracked heap numbers are accurate but RSS will be
+  higher than production builds.
