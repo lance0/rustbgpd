@@ -73,6 +73,8 @@ docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 rib
 docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
 ```
 
+![rustbgpctl top — live TUI dashboard](docs/images/tui-screenshot.png)
+
 Press `q` to exit the TUI. When you're done: `docker compose down`.
 
 ## Install
