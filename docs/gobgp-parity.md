@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-03-06
+Last updated: 2026-03-12
 
 ## Address Families
 
@@ -30,7 +30,7 @@ Last updated: 2026-03-06
 | 4-byte ASN (RFC 6793) | Yes | Yes | AS_TRANS mapping |
 | Capability negotiation (RFC 5492) | Yes | Yes | |
 | TCP collision detection (RFC 4271 §6.8) | Yes | Yes | |
-| Graceful Restart (RFC 4724) | Yes | Partial | Helper mode + minimal restarting-speaker `R=1`; `forwarding_preserved=false` (no FIB ownership) |
+| Graceful Restart (RFC 4724) | Yes | Yes | Helper mode + restarting-speaker `R=1`; `forwarding_preserved=false` (no FIB ownership — same as GoBGP default) |
 | Long-Lived GR (RFC 9494) | Yes | Yes | Two-phase timer, three-tier best-path demotion, `LLGR_STALE`/`NO_LLGR` communities, per-AFI family scoping |
 | Notification GR (RFC 8538) | Yes | Yes | N-bit (RFC 8538 §2), Cease/Hard Reset bypass |
 | Route Refresh (RFC 2918) | Yes | Yes | |
@@ -87,7 +87,7 @@ Last updated: 2026-03-06
 
 | Feature | GoBGP | rustbgpd | Notes |
 |---------|:-----:|:--------:|-------|
-| Total RPCs | ~55 | ~46 | |
+| Total RPCs | ~55 | 47 | |
 | Peer CRUD | Yes | Yes | Add/Delete/List/Enable/Disable |
 | Peer groups | Yes | Yes | `PeerGroupService` + neighbor membership RPCs |
 | Dynamic neighbors (prefix-based) | Yes | No | |
@@ -127,6 +127,7 @@ Last updated: 2026-03-06
 | GTSM / TTL Security (RFC 5082) | Yes | Yes | |
 | RPKI/RTR (RFC 6811/8210) | Yes | Yes | Persistent RTR session with `SerialNotify`, fallback serial polling, and enforced expiry |
 | Private AS removal | Yes | Yes | Three modes: `remove`, `all`, `replace` (ADR-0045) |
+| LLGR_STALE stripping (RFC 9494 §4.6) | N/A | Yes | Strip `LLGR_STALE` from exports to non-LLGR peers |
 
 ## Operations
 
@@ -138,6 +139,8 @@ Last updated: 2026-03-06
 | Prefix limits | Yes | Yes | Cease/1 enforcement |
 | Embeddable library | Yes (Go) | No | Wire crate is standalone |
 | CLI tool | Yes (gobgp) | Yes | `rustbgpctl` wraps gRPC API |
+| Live TUI dashboard | No | Yes | `rustbgpctl top` — sessions, prefix counts, message rates, route events |
+| Rustc-style config errors | No | Yes | Source-line spans with column markers on validation errors |
 | Docker image | Yes | Yes | |
 | Route server client mode | Yes | Yes | Transparent eBGP export for unicast plus FlowSpec AS_PATH transparency |
 | Fuzz testing | No | Yes | Wire decoder fuzzing |
@@ -165,10 +168,10 @@ Last updated: 2026-03-06
 | Category | GoBGP | rustbgpd | Parity |
 |----------|:-----:|:--------:|:------:|
 | Address families | 15 | 4 | ~27% |
-| Core protocol | 14 | 13.5 | ~96% |
+| Core protocol | 14 | 14 | 100% |
 | Path attributes | 13 | 9 | ~69% |
 | Policy engine | 18 | 18 | 100% |
-| gRPC RPCs | ~55 | ~46 | ~84% |
+| gRPC RPCs | ~55 | 47 | ~85% |
 | Monitoring | 5 | 5 | 100% |
 | Security | 4 | 4 | 100% |
 | Best-path steps | 11 | 10.5 | ~95% |
@@ -181,7 +184,7 @@ The primary target deployment. Weighted toward what matters:
 
 - **Address families:** only need IPv4+IPv6 unicast + FlowSpec = 100% parity
 - **Best-path:** 95%, missing piece (AIGP) rarely used at IXes
-- **Core protocol:** 96% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
+- **Core protocol:** 100% — GR helper + restarting speaker, LLGR, Notification GR, Enhanced RR, Add-Path, Extended Nexthop all landed
 - **Policy:** 100%; covers peer-aware matching (neighbor sets, route type, MED/`LOCAL_PREF` comparison, exact next-hop match), community match/set, and AS_PATH regex/prepend
 - **Add-Path send:** critical for route servers, fully implemented with multi-path
 - **Route server client mode:** transparent eBGP with unicast NEXT_HOP preservation and FlowSpec AS_PATH transparency
@@ -212,19 +215,21 @@ Competing head-to-head with GoBGP for all use cases:
 - **RPKI integrated into best-path** — clean architecture vs GoBGP's bolt-on
 - **Config persistence** — gRPC mutations atomically persisted to TOML; GoBGP doesn't persist runtime changes
 - **Operator packaging** — systemd unit, example configs, operations guide, release checklist, container image CI out of the box
-- **Secure-by-default gRPC** — UDS default listener, optional token auth per listener; GoBGP defaults to open TCP
+- **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP
+- **Rustc-style config diagnostics** — validation errors show TOML source lines with column markers; GoBGP prints plain-text errors
+- **Live TUI dashboard** — `rustbgpctl top` with session table, prefix counts, message rates, and route events; GoBGP has no built-in TUI
 
 ## Top Gaps by Use Case
 
 ### IX Route Server (current target, ~100% parity)
 
-These are the gaps that matter most for the stated alpha audience:
+No material protocol gaps remain. Remaining work is operator polish:
 
-1. **Read-only vs mutating gRPC listener split** — operational/security polish,
-   not protocol parity.
-2. **CLI integration tests** — operator-quality hardening, not protocol parity.
-3. **Policy UX polish** — bulk editing / richer ergonomics rather than missing
+1. **CLI integration tests** — operator-quality hardening, not protocol parity.
+2. **Policy UX polish** — bulk editing / richer ergonomics rather than missing
    route-server capability.
+3. **Built-in looking glass** — read-only HTTP/JSON for NOC dashboards; nice-to-have,
+   not blocking.
 
 ### General-Purpose BGP Speaker (~57% parity)
 
