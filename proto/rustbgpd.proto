@@ -608,8 +608,8 @@ message AddPathRequest {
   string next_hop = 3;
   repeated uint32 as_path = 4;
   uint32 origin = 5;
-  uint32 local_pref = 6;
-  uint32 med = 7;
+  optional uint32 local_pref = 6;
+  optional uint32 med = 7;
   repeated uint32 communities = 8;
   repeated uint64 extended_communities = 9;
   // Format: "global_admin:local_data1:local_data2" (e.g. "65001:100:200").

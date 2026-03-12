@@ -89,7 +89,27 @@ All P0 features shipped. See Completed section above.
 
 ### Deferred Hardening
 
-Items identified during review that are not correctness bugs but improve strictness.
+Items identified during review that improve strictness, correctness, or long-run operational safety.
+
+#### Highest Priority
+
+- [x] **Critical control message channel-full resilience** — inbound `EoR`, route-refresh lifecycle markers, `PeerUp`, `SetPeerPolicyContext`, `PeerDown`, and `PeerGracefulRestart` now use reliable `send(...).await` delivery to the RIB instead of lossy `try_send`
+- [x] **GR timer vs buffered `EoR` race** — the RIB manager now drains already-buffered main-channel updates before executing GR/LLGR/refresh timer sweeps so buffered `EoR` work is processed first
+- [ ] **LLGR_STALE community stripping for non-LLGR peers** — RFC 9494 §4.6 requires `LLGR_STALE` (65535:6) MUST NOT be advertised to peers that have not advertised the LLGR capability; distribution does not yet track outbound LLGR capability or strip the community
+- [x] **Attribute intern table garbage collection** — `AdjRibIn::gc_intern_table()` now runs on unicast withdraw chunks, and empty per-peer `AdjRibIn` entries are removed on `PeerDown`
+
+#### API / Wire Correctness
+
+- [x] **Injection API zero-value local_pref/MED** — injection now uses presence semantics, allowing valid `local_pref=0` and `med=0` values
+- [x] **Peer group API validation parity** — peer group families and `remove_private_as` strings are validated and normalized through the same helpers as dynamic neighbors
+- [x] **Policy action string validation at API layer** — invalid `default_action` and statement actions are now rejected with `INVALID_ARGUMENT`
+- [ ] **Add-Path explain support** — route explain currently operates on the single Loc-RIB best path only; for Add-Path peers, non-best candidates that are actually advertised are invisible to explain
+- [ ] **FlowSpec NLRI length encoding >4095 bytes** — FlowSpec length prefix uses a 12-bit mask; rules exceeding 4095 bytes get a silently truncated length on the wire
+- [x] **AS_PATH segment >255 ASN encoding** — long `AS_SEQUENCE`/`AS_SET` segments are now split into multiple wire segments during encode instead of silently truncating via `u8` wrap
+- [ ] **IPv6 next-hop policy rewrite completeness** — IPv4 next-hop rewrite updates both the path attribute and returns a `NextHopAction`; IPv6 rewrite only returns the action without updating `MP_REACH_NLRI` attributes
+- [ ] **LOCAL_PREF/MED policy match implicit defaults** — `match_local_pref_ge/le` and `match_med_ge/le` currently return false when the attribute is absent; decide whether policy matching should use BGP implicit defaults (100 for `LOCAL_PREF`, 0 for `MED`) instead
+
+#### Operational / Observability Hardening
 
 - [ ] **Unknown FlowSpec component forward compatibility** — component types >13 currently cause hard decode errors; should skip unknown types to allow future RFC extensions without breaking interop
 - [x] **gRPC UDS + bearer auth hardening** — gRPC now defaults to a local Unix domain socket, TCP listeners are explicit opt-in, and per-listener bearer-token auth is available via `token_file`
@@ -116,18 +136,7 @@ Items identified during review that are not correctness bugs but improve strictn
 - [ ] **Optional Prometheus listener** — `prometheus_addr` is currently mandatory, which adds unnecessary config and an extra HTTP bind even for simple lab or local-only deployments; make metrics serving explicitly optional or give it a safe disabled/defaulted mode
 - [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for operators who do not want an Envoy/nginx sidecar
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
-- [ ] **LLGR_STALE community stripping for non-LLGR peers** — RFC 9494 §4.6 requires LLGR_STALE (65535:6) MUST NOT be advertised to peers that have not advertised the LLGR capability; distribution does not track outbound LLGR capability or strip the community
-- [ ] **Critical control message channel-full resilience** — EoR and PeerGracefulRestart use `try_send` on the RIB channel; if full, EoR is silently dropped causing valid routes to be swept by GR timer, and PeerGracefulRestart drop causes immediate route purge instead of preservation
-- [ ] **Injection API zero-value local_pref/MED** — `if req.local_pref > 0` guard makes it impossible to inject routes with `local_pref=0` or `med=0`, both valid BGP values
-- [ ] **Add-Path explain support** — route explain only operates on the single Loc-RIB best path; for Add-Path peers, non-best candidates that are actually advertised are invisible to explain
-- [ ] **Peer group API validation parity** — peer group families and `remove_private_as` strings are not validated at the API layer, unlike `NeighborService` which validates both
-- [ ] **Policy action string validation at API layer** — `default_action` and statement action accept arbitrary strings without rejection; invalid values like `"foo"` are silently accepted
-- [ ] **LOCAL_PREF/MED policy match implicit defaults** — `match_local_pref_ge/le` and `match_med_ge/le` return false when the attribute is absent; BGP implicit defaults are 100 (LOCAL_PREF) and 0 (MED), which should be used for comparison
-- [ ] **FlowSpec NLRI length encoding >4095 bytes** — FlowSpec length prefix uses a 12-bit mask; rules exceeding 4095 bytes get a silently truncated length on the wire
-- [ ] **Attribute intern table garbage collection** — `gc_intern_table()` exists on AdjRibIn but is never called; orphaned interned attributes accumulate under route churn, causing unbounded memory growth
-- [ ] **AS_PATH segment >255 ASN encoding** — AS_SEQUENCE/AS_SET segment length is `u8`; segments with >255 ASNs silently wrap via `as u8` cast instead of splitting into multiple segments
 - [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
-- [ ] **IPv6 next-hop policy rewrite completeness** — IPv4 next-hop rewrite updates both the path attribute and returns a `NextHopAction`; IPv6 rewrite only returns the action without updating `MP_REACH_NLRI` attributes
 
 ### P1 — Core Protocol Gaps
 

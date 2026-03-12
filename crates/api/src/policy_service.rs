@@ -15,10 +15,21 @@ use crate::server::{AccessMode, read_only_rejection};
 
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[allow(clippy::result_large_err)]
+fn validate_policy_action(action: &str) -> Result<(), Status> {
+    match action {
+        "permit" | "deny" => Ok(()),
+        other => Err(Status::invalid_argument(format!(
+            "invalid policy action {other:?}, expected \"permit\" or \"deny\""
+        ))),
+    }
+}
+
 #[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
 fn proto_statement_to_input(
     statement: proto::PolicyStatement,
 ) -> Result<PolicyStatementDefinition, Status> {
+    validate_policy_action(&statement.action)?;
     let ge = statement
         .ge
         .map(u8::try_from)
@@ -102,6 +113,7 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
 fn proto_definition_to_input(
     definition: proto::PolicyDefinition,
 ) -> Result<NamedPolicyDefinition, Status> {
+    validate_policy_action(&definition.default_action)?;
     let statements = definition
         .statements
         .into_iter()

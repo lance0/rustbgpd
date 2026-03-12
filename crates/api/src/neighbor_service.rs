@@ -17,7 +17,7 @@ const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Parse a list of family strings from the gRPC proto into `(Afi, Safi)` pairs.
 #[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
-fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status> {
+pub(crate) fn parse_families_proto(families: &[String]) -> Result<Vec<(Afi, Safi)>, Status> {
     if families.is_empty() {
         return Ok(vec![(Afi::Ipv4, Safi::Unicast)]);
     }
@@ -103,7 +103,7 @@ async fn query_advertised_count(
     Ok(u64::try_from(count).unwrap_or(u64::MAX))
 }
 
-fn family_to_string(afi: Afi, safi: Safi) -> String {
+pub(crate) fn family_to_string(afi: Afi, safi: Safi) -> String {
     match (afi, safi) {
         (Afi::Ipv4, Safi::Unicast) => "ipv4_unicast".to_string(),
         (Afi::Ipv6, Safi::Unicast) => "ipv6_unicast".to_string(),
@@ -112,7 +112,7 @@ fn family_to_string(afi: Afi, safi: Safi) -> String {
 }
 
 #[allow(clippy::result_large_err)] // tonic::Status is the standard gRPC error type
-fn parse_remove_private_as_proto(mode: &str) -> Result<RemovePrivateAs, Status> {
+pub(crate) fn parse_remove_private_as_proto(mode: &str) -> Result<RemovePrivateAs, Status> {
     match mode {
         "" => Ok(RemovePrivateAs::Disabled),
         "remove" => Ok(RemovePrivateAs::Remove),

@@ -31,13 +31,11 @@ impl RibManager {
             self.metrics.set_gr_stale_routes(&peer_label, 0);
         }
 
-        if let Some(rib) = self.ribs.get_mut(&peer) {
+        if let Some(rib) = self.ribs.remove(&peer) {
             let affected: HashSet<Prefix> = rib.iter().map(|r| r.prefix).collect();
             let count = rib.len();
             let fs_affected: HashSet<FlowSpecRule> =
                 rib.iter_flowspec().map(|r| r.rule.clone()).collect();
-            rib.clear();
-            rib.clear_flowspec();
             debug!(%peer, cleared = count, "peer down — rib cleared");
             self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
             let changed = self.recompute_best(&affected);

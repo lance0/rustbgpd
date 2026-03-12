@@ -369,6 +369,7 @@ impl RibManager {
                     stale.remove(&(prefix, path_id));
                 }
             }
+            rib.gc_intern_table();
 
             debug!(%peer, routes = rib.len(), "rib updated");
             (rib.len(), rib.flowspec_len())

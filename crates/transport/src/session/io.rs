@@ -206,16 +206,17 @@ impl PeerSession {
                                     );
                                     if self
                                         .rib_tx
-                                        .try_send(RibUpdate::RouteRefreshRequest {
+                                        .send(RibUpdate::RouteRefreshRequest {
                                             peer: self.peer_ip,
                                             afi,
                                             safi,
                                         })
+                                        .await
                                         .is_err()
                                     {
                                         warn!(
                                             peer = %self.peer_label,
-                                            "RIB channel full — route refresh request dropped"
+                                            "RIB manager unavailable — route refresh request dropped"
                                         );
                                     }
                                 }
@@ -232,16 +233,17 @@ impl PeerSession {
                                         );
                                     } else if self
                                         .rib_tx
-                                        .try_send(RibUpdate::BeginRouteRefresh {
+                                        .send(RibUpdate::BeginRouteRefresh {
                                             peer: self.peer_ip,
                                             afi,
                                             safi,
                                         })
+                                        .await
                                         .is_err()
                                     {
                                         warn!(
                                             peer = %self.peer_label,
-                                            "RIB channel full — BeginRouteRefresh dropped"
+                                            "RIB manager unavailable — BeginRouteRefresh dropped"
                                         );
                                     } else {
                                         info!(
@@ -264,16 +266,17 @@ impl PeerSession {
                                         );
                                     } else if self
                                         .rib_tx
-                                        .try_send(RibUpdate::EndRouteRefresh {
+                                        .send(RibUpdate::EndRouteRefresh {
                                             peer: self.peer_ip,
                                             afi,
                                             safi,
                                         })
+                                        .await
                                         .is_err()
                                     {
                                         warn!(
                                             peer = %self.peer_label,
-                                            "RIB channel full — EndRouteRefresh dropped"
+                                            "RIB manager unavailable — EndRouteRefresh dropped"
                                         );
                                     } else {
                                         info!(

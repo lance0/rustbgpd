@@ -1232,17 +1232,19 @@ fn encode_as_path(as_path: &AsPath, buf: &mut Vec<u8>, four_octet_as: bool) {
             AsPathSegment::AsSet(asns) => (as_path_segment::AS_SET, asns),
             AsPathSegment::AsSequence(asns) => (as_path_segment::AS_SEQUENCE, asns),
         };
-        buf.push(seg_type);
-        #[expect(clippy::cast_possible_truncation)]
-        buf.push(asns.len() as u8);
-        for &asn in asns {
-            if four_octet_as {
-                buf.extend_from_slice(&asn.to_be_bytes());
-            } else {
-                // RFC 6793: ASNs > 65535 are mapped to AS_TRANS (23456)
-                // in 2-octet AS_PATH encoding.
-                let as2 = u16::try_from(asn).unwrap_or(crate::constants::AS_TRANS);
-                buf.extend_from_slice(&as2.to_be_bytes());
+        for chunk in asns.chunks(u8::MAX as usize) {
+            buf.push(seg_type);
+            #[expect(clippy::cast_possible_truncation)]
+            buf.push(chunk.len() as u8);
+            for &asn in chunk {
+                if four_octet_as {
+                    buf.extend_from_slice(&asn.to_be_bytes());
+                } else {
+                    // RFC 6793: ASNs > 65535 are mapped to AS_TRANS (23456)
+                    // in 2-octet AS_PATH encoding.
+                    let as2 = u16::try_from(asn).unwrap_or(crate::constants::AS_TRANS);
+                    buf.extend_from_slice(&as2.to_be_bytes());
+                }
             }
         }
     }

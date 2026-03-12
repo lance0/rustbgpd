@@ -5,6 +5,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
+use crate::neighbor_service::{
+    family_to_string, parse_families_proto, parse_remove_private_as_proto,
+};
 use crate::peer_types::{
     AddPathDefinition, ConfigEvent, PeerGroupDefinition, PeerManagerCommand,
     PolicyAsPathPrependConfig, PolicyStatementDefinition,
@@ -15,9 +18,20 @@ use crate::server::{AccessMode, read_only_rejection};
 const CONFIG_PERSIST_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[allow(clippy::result_large_err)]
+fn validate_policy_action(action: &str) -> Result<(), Status> {
+    match action {
+        "permit" | "deny" => Ok(()),
+        other => Err(Status::invalid_argument(format!(
+            "invalid policy action {other:?}, expected \"permit\" or \"deny\""
+        ))),
+    }
+}
+
+#[allow(clippy::result_large_err)]
 fn proto_statement_to_input(
     statement: proto::PolicyStatement,
 ) -> Result<PolicyStatementDefinition, Status> {
+    validate_policy_action(&statement.action)?;
     let ge = statement
         .ge
         .map(u8::try_from)
@@ -122,13 +136,28 @@ fn proto_definition_to_input(
         .into_iter()
         .map(proto_statement_to_input)
         .collect::<Result<Vec<_>, _>>()?;
+    let families = parse_families_proto(&definition.families)?
+        .into_iter()
+        .map(|(afi, safi)| family_to_string(afi, safi))
+        .collect();
+    let remove_private_as = definition
+        .remove_private_as
+        .as_deref()
+        .map(parse_remove_private_as_proto)
+        .transpose()?
+        .map_or_else(String::new, |mode| match mode {
+            rustbgpd_transport::RemovePrivateAs::Disabled => String::new(),
+            rustbgpd_transport::RemovePrivateAs::Remove => "remove".to_string(),
+            rustbgpd_transport::RemovePrivateAs::All => "all".to_string(),
+            rustbgpd_transport::RemovePrivateAs::Replace => "replace".to_string(),
+        });
 
     Ok(PeerGroupDefinition {
         hold_time,
         max_prefixes: definition.max_prefixes,
         md5_password: definition.md5_password,
         ttl_security: definition.ttl_security,
-        families: definition.families,
+        families,
         graceful_restart: definition.graceful_restart,
         gr_restart_time,
         gr_stale_routes_time: definition.gr_stale_routes_time,
@@ -136,7 +165,11 @@ fn proto_definition_to_input(
         local_ipv6_nexthop: definition.local_ipv6_nexthop,
         route_reflector_client: definition.route_reflector_client,
         route_server_client: definition.route_server_client,
-        remove_private_as: definition.remove_private_as,
+        remove_private_as: if remove_private_as.is_empty() {
+            None
+        } else {
+            Some(remove_private_as)
+        },
         add_path: definition
             .add_path_receive
             .map(|receive| AddPathDefinition {

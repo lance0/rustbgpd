@@ -11,6 +11,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Reliable GR / route-refresh control delivery.** Inbound `EndOfRib`,
+  `RouteRefreshRequest`, `BeginRouteRefresh`, `EndRouteRefresh`, and
+  transport lifecycle updates (`PeerUp`, `SetPeerPolicyContext`, `PeerDown`,
+  `PeerGracefulRestart`) now use reliable `send(...).await` delivery to the
+  RIB instead of lossy `try_send`, eliminating dropped control messages when
+  the RIB channel is full.
+- **GR timer vs buffered `EoR` race.** Before firing GR, LLGR, or refresh
+  timer sweeps, the RIB manager now drains already-buffered main-channel
+  updates so a buffered `EndOfRib` is processed before stale routes are swept.
+- **Injection API zero-value `local_pref` / `MED`.** `AddPathRequest`
+  `local_pref` and `med` are now presence-based optional fields, so valid
+  zero values can be injected instead of being silently treated as unset.
+- **Peer-group / policy API validation parity.** Peer-group family strings and
+  `remove_private_as` values now reuse the dynamic-neighbor validation helpers,
+  and `PolicyService` / `PeerGroupService` reject invalid policy action strings
+  at the API boundary.
+- **AS_PATH segment encode overflow.** `AS_SEQUENCE` and `AS_SET` segments
+  longer than 255 ASNs are now split into multiple wire segments during
+  encode instead of silently truncating the length via `u8` wraparound.
+- **Adj-RIB-In teardown cleanup.** `PeerDown` now removes empty per-peer
+  `AdjRibIn` entries entirely, and unicast withdraw chunks trigger intern-table
+  garbage collection to prevent orphaned attribute intern entries from growing
+  without bound under churn.
 - **Route explain global export policy fallback.** `ExplainAdvertisedRoute`
   now uses the per-peer → global export policy fallback (via
   `export_policy_for()`), matching the actual distribution path. Previously

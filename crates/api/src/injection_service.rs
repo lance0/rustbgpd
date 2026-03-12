@@ -132,11 +132,11 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             }));
         }
 
-        if req.local_pref > 0 {
-            attributes.push(PathAttribute::LocalPref(req.local_pref));
+        if let Some(local_pref) = req.local_pref {
+            attributes.push(PathAttribute::LocalPref(local_pref));
         }
-        if req.med > 0 {
-            attributes.push(PathAttribute::Med(req.med));
+        if let Some(med) = req.med {
+            attributes.push(PathAttribute::Med(med));
         }
         if !req.communities.is_empty() {
             attributes.push(PathAttribute::Communities(req.communities));
@@ -633,8 +633,8 @@ mod tests {
             next_hop: "0.0.0.0".into(),
             origin: 0,
             as_path: vec![],
-            local_pref: 0,
-            med: 0,
+            local_pref: None,
+            med: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
@@ -654,8 +654,8 @@ mod tests {
             next_hop: "224.0.0.1".into(),
             origin: 0,
             as_path: vec![],
-            local_pref: 0,
-            med: 0,
+            local_pref: None,
+            med: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],
@@ -676,8 +676,8 @@ mod tests {
             next_hop: "10.0.0.1".into(),
             origin: 0,
             as_path: vec![],
-            local_pref: 0,
-            med: 0,
+            local_pref: None,
+            med: None,
             communities: vec![],
             extended_communities: vec![],
             large_communities: vec![],

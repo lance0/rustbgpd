@@ -279,7 +279,7 @@ impl PeerSession {
                     }
 
                     // Register with RIB manager for outbound updates
-                    let _ = self.rib_tx.try_send(RibUpdate::PeerUp {
+                    let _ = self.rib_tx.send(RibUpdate::PeerUp {
                         peer: self.peer_ip,
                         peer_asn: self.config.peer.remote_asn,
                         peer_router_id: self
@@ -293,11 +293,11 @@ impl PeerSession {
                         route_reflector_client: self.config.route_reflector_client,
                         add_path_send_families,
                         add_path_send_max,
-                    });
-                    let _ = self.rib_tx.try_send(RibUpdate::SetPeerPolicyContext {
+                    }).await;
+                    let _ = self.rib_tx.send(RibUpdate::SetPeerPolicyContext {
                         peer: self.peer_ip,
                         peer_group: self.config.peer_group.clone(),
-                    });
+                    }).await;
                 }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
@@ -373,7 +373,7 @@ impl PeerSession {
                     self.outbound_rx = new_rx;
 
                     let rib_msg = gr_update.unwrap_or(RibUpdate::PeerDown { peer: self.peer_ip });
-                    let _ = self.rib_tx.try_send(rib_msg);
+                    let _ = self.rib_tx.send(rib_msg).await;
                 }
             }
         }

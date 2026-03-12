@@ -331,6 +331,15 @@ impl RibManager {
         }
     }
 
+    fn drain_ready_updates(&mut self) -> bool {
+        let mut drained = false;
+        while let Ok(update) = self.rx.try_recv() {
+            drained = true;
+            self.handle_update(update);
+        }
+        drained
+    }
+
     /// Process a single `RibUpdate` message.
     #[expect(
         clippy::too_many_lines,
@@ -673,6 +682,9 @@ impl RibManager {
                 continue;
             }
             if has_gr_timers && gr_sleep.deadline() <= now {
+                if self.drain_ready_updates() {
+                    continue;
+                }
                 let expired: Vec<IpAddr> = self
                     .gr_stale_deadlines
                     .iter()
@@ -685,6 +697,9 @@ impl RibManager {
                 continue;
             }
             if has_llgr_timers && llgr_sleep.deadline() <= now {
+                if self.drain_ready_updates() {
+                    continue;
+                }
                 let expired: Vec<IpAddr> = self
                     .llgr_stale_deadlines
                     .iter()
@@ -697,6 +712,9 @@ impl RibManager {
                 continue;
             }
             if has_refresh_timers && refresh_sleep.deadline() <= now {
+                if self.drain_ready_updates() {
+                    continue;
+                }
                 self.expire_refresh_windows();
                 continue;
             }
@@ -738,6 +756,9 @@ impl RibManager {
                         }
                     }
                     () = gr_sleep.as_mut(), if has_gr_timers => {
+                        if self.drain_ready_updates() {
+                            continue;
+                        }
                         // Find all peers whose GR deadline has expired
                         let now = tokio::time::Instant::now();
                         let expired: Vec<IpAddr> = self
@@ -751,6 +772,9 @@ impl RibManager {
                         }
                     }
                     () = llgr_sleep.as_mut(), if has_llgr_timers => {
+                        if self.drain_ready_updates() {
+                            continue;
+                        }
                         // Find all peers whose LLGR deadline has expired
                         let now = tokio::time::Instant::now();
                         let expired: Vec<IpAddr> = self
@@ -764,6 +788,9 @@ impl RibManager {
                         }
                     }
                     () = refresh_sleep.as_mut(), if has_refresh_timers => {
+                        if self.drain_ready_updates() {
+                            continue;
+                        }
                         self.expire_refresh_windows();
                     }
                 }
