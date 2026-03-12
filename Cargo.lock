@@ -2025,6 +2025,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "toml",
+ "toml_edit",
  "tracing",
  "tracing-subscriber",
 ]

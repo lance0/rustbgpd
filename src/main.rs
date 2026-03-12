@@ -313,10 +313,10 @@ fn main() {
         }
     }
 
-    let config = match Config::load(&config_path) {
+    let config = match Config::load_with_diagnostics(&config_path) {
         Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: failed to load config from {config_path}: {e}");
+        Err(diagnostic) => {
+            eprintln!("{diagnostic}");
             process::exit(1);
         }
     };
@@ -345,7 +345,7 @@ fn main() {
 }
 
 #[expect(clippy::too_many_lines)]
-async fn run<T>(mut config: Config, _profiler: Option<T>) {
+async fn run<T>(mut config: Config, profiler: Option<T>) {
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
     let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
@@ -851,7 +851,7 @@ async fn run<T>(mut config: Config, _profiler: Option<T>) {
 
     // Drop the profiler now while all data structures are still alive,
     // so the heap snapshot captures the live working set.
-    drop(_profiler);
+    drop(profiler);
 
     // Coordinated shutdown:
     // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)
@@ -970,10 +970,10 @@ async fn reload_config(
     current: &Config,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
 ) -> Option<Config> {
-    let new_config = match Config::load(config_path) {
+    let new_config = match Config::load_with_diagnostics(config_path) {
         Ok(c) => c,
-        Err(e) => {
-            error!(error = %e, "config reload failed — keeping current config");
+        Err(diagnostic) => {
+            error!("{diagnostic}");
             return None;
         }
     };

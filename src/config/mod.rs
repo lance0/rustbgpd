@@ -1,3 +1,4 @@
+pub mod diagnostic;
 mod parse;
 mod schema;
 mod validation;
@@ -23,11 +24,29 @@ use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 use self::parse::parse_named_policy;
 
 impl Config {
-    pub fn load(path: &str) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
-        let mut config: Config = toml::from_str(&content)?;
+    /// Load config and, on failure, render a diagnostic with source context.
+    ///
+    /// Returns the rendered diagnostic string on error (suitable for direct
+    /// printing to stderr). Falls back to plain `Display` if no source span
+    /// can be determined.
+    pub fn load_with_diagnostics(path: &str) -> Result<Self, String> {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return Err(format!("error: failed to read {path}: {e}")),
+        };
+        let mut config: Config = match toml::from_str(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                let error = ConfigError::Parse(e);
+                return Err(diagnostic::render_diagnostic(&content, path, &error)
+                    .unwrap_or_else(|| format!("error: {error}")));
+            }
+        };
         config.file_path = Some(PathBuf::from(path));
-        config.validate()?;
+        if let Err(error) = config.validate() {
+            return Err(diagnostic::render_diagnostic(&content, path, &error)
+                .unwrap_or_else(|| format!("error: {error}")));
+        }
         Ok(config)
     }
 
