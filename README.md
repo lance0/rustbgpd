@@ -82,28 +82,6 @@ instead. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 ./target/release/rustbgpd config.toml
 ```
 
-Or try it with Docker Compose (includes an FRR peer with sample routes):
-
-```bash
-cd examples/docker-compose
-docker compose up -d
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
-docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
-```
-
-Or with a standalone Docker container:
-
-```bash
-docker build -t rustbgpd .
-docker run -d --name rustbgpd \
-  -v $(pwd)/config.toml:/etc/rustbgpd/config.toml:ro \
-  -v rustbgpd-state:/var/lib/rustbgpd \
-  -p 179:179 -p 9179:9179 \
-  rustbgpd
-```
-
-Or with systemd (see `examples/systemd/rustbgpd.service`).
-
 ### 4. Verify
 
 ```bash
@@ -122,6 +100,8 @@ grpcurl -plaintext -unix /tmp/rustbgpd/grpc.sock \
 
 In production with the systemd unit, the default UDS path
 (`/var/lib/rustbgpd/grpc.sock`) matches the CLI default — no env var needed.
+The minimal config also enables Prometheus on `127.0.0.1:9179`; that listener
+is still required today.
 
 ### 5. Operate
 
@@ -143,6 +123,30 @@ rustbgpctl completions bash > /etc/bash_completion.d/rustbgpctl
 gRPC defaults to a local Unix domain socket. For remote access, prefer an
 mTLS proxy — see [`examples/envoy-mtls/`](examples/envoy-mtls/) and
 [docs/SECURITY.md](docs/SECURITY.md).
+
+### Alternative launch paths
+
+Docker Compose example (includes an FRR peer with sample routes):
+
+```bash
+cd examples/docker-compose
+docker compose up -d
+docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 neighbor
+docker compose exec rustbgpd rustbgpctl -s http://127.0.0.1:50051 top
+```
+
+Standalone Docker container:
+
+```bash
+docker build -t rustbgpd .
+docker run -d --name rustbgpd \
+  -v $(pwd)/config.toml:/etc/rustbgpd/config.toml:ro \
+  -v rustbgpd-state:/var/lib/rustbgpd \
+  -p 179:179 -p 9179:9179 \
+  rustbgpd
+```
+
+Or use systemd with [`examples/systemd/rustbgpd.service`](examples/systemd/rustbgpd.service).
 
 ## gRPC API
 

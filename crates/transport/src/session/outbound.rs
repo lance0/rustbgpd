@@ -61,6 +61,29 @@ struct MpGroup {
 }
 
 impl PeerSession {
+    fn peer_accepts_llgr_stale(&self, family: (Afi, Safi)) -> bool {
+        self.negotiated.as_ref().is_some_and(|neg| {
+            neg.peer_llgr_capable
+                && neg
+                    .peer_llgr_families
+                    .iter()
+                    .any(|f| (f.afi, f.safi) == family)
+        })
+    }
+
+    fn strip_llgr_stale_if_needed(&self, attrs: &mut Vec<PathAttribute>, family: (Afi, Safi)) {
+        if self.peer_accepts_llgr_stale(family) {
+            return;
+        }
+        attrs.retain_mut(|attr| match attr {
+            PathAttribute::Communities(comms) => {
+                comms.retain(|&c| c != rustbgpd_wire::COMMUNITY_LLGR_STALE);
+                !comms.is_empty()
+            }
+            _ => true,
+        });
+    }
+
     fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
         match origin {
             rustbgpd_rib::RouteOrigin::Ebgp => 0,
@@ -443,26 +466,6 @@ impl PeerSession {
             .or(local_ipv6)
             .filter(rustbgpd_wire::is_valid_ipv6_nexthop);
 
-        // Guard: if eBGP has no valid IPv6 NH, skip all v6 routes. The RIB's
-        // sendable_families filter should prevent this, but defend in depth.
-        if is_ebgp
-            && !self.config.route_server_client
-            && ebgp_ipv6_nh.is_none()
-            && !v6_routes.is_empty()
-        {
-            debug_assert!(
-                false,
-                "RIB sent {} IPv6 routes to eBGP peer with no valid IPv6 next-hop",
-                v6_routes.len()
-            );
-            warn!(
-                peer = %self.peer_label,
-                count = v6_routes.len(),
-                "BUG: IPv6 routes reached transport for eBGP peer with no valid next-hop; dropping"
-            );
-            v6_routes.clear();
-        }
-
         // Group by (attributes, next-hop) so routes with different next-hops
         // get separate UPDATEs with correct MP_REACH_NLRI next-hop values.
         let mut v6_group_index: HashMap<AttrGroupKey, usize> = HashMap::new();
@@ -484,15 +487,27 @@ impl PeerSession {
             let nh = if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh_override {
                 // Policy explicitly set a next-hop — use it
                 *addr
-            } else if force_nh_self {
-                // For next-hop-self, use local IPv6 address when available.
-                if let Some(v6) = ebgp_ipv6_nh {
-                    IpAddr::V6(v6)
-                } else {
-                    route.next_hop
-                }
             } else if is_ebgp && !self.config.route_server_client {
-                // Non-transparent eBGP uses next-hop-self.
+                // Non-transparent eBGP uses next-hop-self unless policy set
+                // an explicit next-hop. If no usable local IPv6 next-hop is
+                // available, drop the route rather than advertising the peer's
+                // original next-hop by mistake.
+                let Some(v6) = ebgp_ipv6_nh else {
+                    debug_assert!(
+                        false,
+                        "RIB sent IPv6 route to eBGP peer with no valid IPv6 next-hop and no explicit policy override"
+                    );
+                    warn!(
+                        peer = %self.peer_label,
+                        prefix = %route.prefix,
+                        "dropping IPv6 route: no usable local IPv6 next-hop and no explicit export next-hop override"
+                    );
+                    continue;
+                };
+                IpAddr::V6(v6)
+            } else if force_nh_self {
+                // For next-hop-self on non-eBGP paths, use local IPv6 address
+                // when available; otherwise leave the stored next-hop in place.
                 if let Some(v6) = ebgp_ipv6_nh {
                     IpAddr::V6(v6)
                 } else {
@@ -878,6 +893,12 @@ impl PeerSession {
             }
         }
 
+        let family = match route.prefix {
+            Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+            Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+        };
+        self.strip_llgr_stale_if_needed(&mut attrs, family);
+
         attrs
     }
 
@@ -983,6 +1004,8 @@ impl PeerSession {
                 attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
             }
         }
+
+        self.strip_llgr_stale_if_needed(&mut attrs, (route.afi, Safi::FlowSpec));
 
         attrs
     }

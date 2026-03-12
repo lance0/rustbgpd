@@ -1955,6 +1955,82 @@ async fn explain_advertised_route_reports_modifications() {
 }
 
 #[tokio::test]
+async fn explain_advertised_route_reports_ipv6_next_hop_override() {
+    let (tx, rx) = mpsc::channel(64);
+    let export_policy = rustbgpd_policy::PolicyChain {
+        policies: vec![rustbgpd_policy::Policy {
+            default_action: rustbgpd_policy::PolicyAction::Permit,
+            entries: vec![rustbgpd_policy::PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                match_community: vec![],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_rpki_validation: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: rustbgpd_policy::RouteModifications {
+                    set_next_hop: Some(rustbgpd_policy::NextHopAction::Specific(IpAddr::V6(
+                        "2001:db8::42".parse().unwrap(),
+                    ))),
+                    ..rustbgpd_policy::RouteModifications::default()
+                },
+                action: rustbgpd_policy::PolicyAction::Permit,
+            }],
+        }],
+    };
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: Some(export_policy),
+        sendable_families: vec![(Afi::Ipv6, Safi::Unicast)],
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let prefix = Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![make_v6_route(prefix, "2001:db8::1".parse().unwrap())],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let explain = query_explain_advertised_route(&tx, target, Prefix::V6(prefix)).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(
+        explain.next_hop,
+        Some(IpAddr::V6("2001:db8::42".parse().unwrap()))
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn peer_down_cleans_up_export_policy() {
     use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 

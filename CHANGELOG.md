@@ -58,6 +58,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flags for the completed family, recomputes/distributes affected
   FlowSpec routes, and removes locally injected `LLGR_STALE`
   communities when the route returns to fresh state.
+- **IPv6 export next-hop rewrite locked down.** Export policy
+  `set_next_hop = "<ipv6>"` is now covered by transport and explain
+  regression tests, confirming the MP_REACH export path and
+  `ExplainAdvertisedRoute` report the same effective IPv6 next hop.
+- **LLGR_STALE stripped for non-LLGR peers.** Outbound transport now removes
+  the `LLGR_STALE` community when the destination peer did not negotiate
+  LLGR for that family, matching RFC 9494 §4.6. LLGR-capable peers still
+  receive the community unchanged.
 
 ### Added
 

@@ -8,7 +8,7 @@ use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
 use rustbgpd_wire::{
     AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4NlriEntry,
-    Ipv4Prefix, Ipv6Prefix, Message, Origin, PathAttribute,
+    Ipv4Prefix, Ipv6Prefix, LlgrFamily, Message, Origin, PathAttribute,
 };
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
@@ -152,6 +152,27 @@ fn make_route(local_pref: u32) -> Route {
             }),
             PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
             PathAttribute::LocalPref(local_pref),
+        ]),
+        received_at: Instant::now(),
+        origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        is_stale: false,
+        is_llgr_stale: false,
+        path_id: 0,
+        validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+    }
+}
+
+fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
+    Route {
+        prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
+        next_hop: IpAddr::V6(next_hop),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
         ]),
         received_at: Instant::now(),
         origin_type: rustbgpd_rib::RouteOrigin::Ebgp,
@@ -613,6 +634,110 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         .unwrap();
     assert_eq!(second_mp.announced.len(), 1);
     assert_ne!(first_mp.next_hop, second_mp.next_hop);
+}
+
+#[tokio::test]
+async fn send_route_update_uses_ipv6_specific_next_hop_override() {
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.stream = Some(client);
+
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let route = make_v6_unicast_route("2001:db8::1".parse().unwrap());
+    let override_nh =
+        rustbgpd_policy::NextHopAction::Specific(IpAddr::V6("2001:db8::42".parse().unwrap()));
+
+    session
+        .send_route_update(OutboundRouteUpdate {
+            announce: vec![route],
+            withdraw: vec![],
+            end_of_rib: vec![],
+            refresh_markers: vec![],
+            next_hop_override: vec![Some(override_nh)],
+            flowspec_announce: vec![],
+            flowspec_withdraw: vec![],
+        })
+        .await;
+
+    let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
+        panic!("expected UPDATE");
+    };
+    let parsed = msg.parse(true, false, &[]).unwrap();
+    let mp = parsed
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            PathAttribute::MpReachNlri(mp) => Some(mp),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(mp.next_hop, IpAddr::V6("2001:db8::42".parse().unwrap()));
+}
+
+#[test]
+fn non_llgr_peer_strips_llgr_stale_community() {
+    let session = make_test_session(65001, 65002);
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_LLGR_STALE]),
+        ]),
+        ..make_route(100)
+    };
+
+    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+    assert!(!attrs.iter().any(|a| {
+        matches!(
+            a,
+            PathAttribute::Communities(comms)
+                if comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        )
+    }));
+}
+
+#[test]
+fn llgr_peer_keeps_llgr_stale_community() {
+    let mut session = make_test_session(65001, 65002);
+    let mut negotiated = negotiated_session(65002, false);
+    negotiated.peer_llgr_capable = true;
+    negotiated.peer_llgr_families = vec![LlgrFamily {
+        afi: Afi::Ipv4,
+        safi: Safi::Unicast,
+        stale_time: 3600,
+        forwarding_preserved: false,
+    }];
+    session.negotiated = Some(negotiated);
+
+    let route = Route {
+        attributes: Arc::new(vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65002])],
+            }),
+            PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+            PathAttribute::Communities(vec![rustbgpd_wire::COMMUNITY_LLGR_STALE]),
+        ]),
+        ..make_route(100)
+    };
+
+    let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
+    assert!(attrs.iter().any(|a| {
+        matches!(
+            a,
+            PathAttribute::Communities(comms)
+                if comms.contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+        )
+    }));
 }
 
 #[test]

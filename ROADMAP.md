@@ -95,7 +95,7 @@ Items identified during review that improve strictness, correctness, or long-run
 
 - [x] **Critical control message channel-full resilience** — inbound `EoR`, route-refresh lifecycle markers, `PeerUp`, `SetPeerPolicyContext`, `PeerDown`, and `PeerGracefulRestart` now use reliable `send(...).await` delivery to the RIB instead of lossy `try_send`
 - [x] **GR timer vs buffered `EoR` race** — the RIB manager now drains already-buffered main-channel updates before executing GR/LLGR/refresh timer sweeps so buffered `EoR` work is processed first
-- [ ] **LLGR_STALE community stripping for non-LLGR peers** — RFC 9494 §4.6 requires `LLGR_STALE` (65535:6) MUST NOT be advertised to peers that have not advertised the LLGR capability; distribution does not yet track outbound LLGR capability or strip the community
+- [x] **LLGR_STALE community stripping for non-LLGR peers** — outbound transport now strips `LLGR_STALE` (65535:6) for destination peers that did not negotiate LLGR for that family, matching RFC 9494 §4.6
 - [x] **Attribute intern table garbage collection** — `AdjRibIn::gc_intern_table()` now runs on unicast withdraw chunks, and empty per-peer `AdjRibIn` entries are removed on `PeerDown`
 
 #### API / Wire Correctness
@@ -106,7 +106,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **Add-Path explain support** — route explain currently operates on the single Loc-RIB best path only; for Add-Path peers, non-best candidates that are actually advertised are invisible to explain
 - [ ] **FlowSpec NLRI length encoding >4095 bytes** — FlowSpec length prefix uses a 12-bit mask; rules exceeding 4095 bytes get a silently truncated length on the wire
 - [x] **AS_PATH segment >255 ASN encoding** — long `AS_SEQUENCE`/`AS_SET` segments are now split into multiple wire segments during encode instead of silently truncating via `u8` wrap
-- [ ] **IPv6 next-hop policy rewrite completeness** — IPv4 next-hop rewrite updates both the path attribute and returns a `NextHopAction`; IPv6 rewrite only returns the action without updating `MP_REACH_NLRI` attributes
+- [x] **IPv6 next-hop policy rewrite completeness** — export policy `set_next_hop = "<ipv6>"` is covered end-to-end for MP_REACH exports and route explain; classic IPv4 `NEXT_HOP` handling remains unchanged
 - [ ] **LOCAL_PREF/MED policy match implicit defaults** — `match_local_pref_ge/le` and `match_med_ge/le` currently return false when the attribute is absent; decide whether policy matching should use BGP implicit defaults (100 for `LOCAL_PREF`, 0 for `MED`) instead
 
 #### Operational / Observability Hardening
