@@ -7,6 +7,10 @@ resolved.
 
 ## Resolved
 
+- **CLI gRPC integration tests added (fixed).** `rustbgpctl` now has
+  mock-server integration tests covering health, global, neighbor add,
+  and soft-reset command-to-RPC paths over both TCP+token and UDS.
+
 - **Hot reconnect loop on persistent OPEN rejection (fixed).** When a peer
   consistently rejected OPENs (e.g., ASN mismatch), auto-reconnect fired
   `ManualStart` immediately as a synchronous follow-up, causing 29K+ cycles
@@ -35,9 +39,6 @@ resolved.
 - **BMP drop/replay counters are not exported yet.** BMP channel-full
   conditions are logged, but no dedicated Prometheus counter currently tracks
   dropped/replayed BMP events for operational alerting.
-- **CLI lacks gRPC integration tests.** `rustbgpctl` has parser/formatter
-  coverage but does not yet run mock-server integration tests for command ↔ RPC
-  behavior.
 - **SIGHUP reconcile is not transactional.** Reload now logs structured
   per-peer failures and keeps the prior in-memory config snapshot when
   reconciliation is incomplete, but runtime peer changes applied before a
@@ -93,6 +94,18 @@ resolved.
   (or any future RFC extension) cause a hard decode error rather than
   being preserved or skipped. This breaks forward compatibility if a
   future RFC defines type 14+. Should switch to skip-unknown behavior.
+- **FlowSpec NLRI length encoding limited to 4095 bytes.** The FlowSpec
+  length prefix uses a 12-bit mask. Rules exceeding 4095 bytes get a
+  silently truncated length on the wire. Extremely unlikely in practice
+  (a single FlowSpec rule would need hundreds of match components).
+- **Add-Path explain only covers best path.** `ExplainAdvertisedRoute`
+  operates on the single Loc-RIB best path. For Add-Path peers, non-best
+  candidates that are actually advertised are invisible to explain.
+- **Policy match on absent LOCAL_PREF/MED returns false.**
+  `match_local_pref_ge/le` and `match_med_ge/le` return false when the
+  attribute is absent rather than using BGP implicit defaults (100 for
+  LOCAL_PREF, 0 for MED). This means policies matching on these values
+  won't fire for routes that rely on the implicit default.
 - **FlowSpec `encode_numeric_ops()` overwrites `end_of_list` flag.**
   The encoder computes `end_of_list` from position (last element gets
   `true`), silently discarding the original flag on round-trip. This is
