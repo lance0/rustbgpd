@@ -24,6 +24,7 @@ impl RibManager {
 
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.clear_stale((afi, safi));
+                rib.clear_stale_flowspec((afi, safi));
             }
 
             let affected: HashSet<Prefix> = self
@@ -59,6 +60,7 @@ impl RibManager {
 
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.clear_llgr_stale((afi, safi));
+                rib.clear_llgr_stale_flowspec((afi, safi));
             }
 
             let affected: HashSet<Prefix> = self

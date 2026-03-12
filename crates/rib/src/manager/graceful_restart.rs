@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_rpki::VrpTable;
-use rustbgpd_wire::{Afi, Prefix, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tracing::info;
 
 use super::RibManager;
@@ -28,6 +28,7 @@ impl RibManager {
         if let Some(rib) = self.ribs.get_mut(&peer) {
             for &family in &gr_families {
                 rib.mark_stale(family);
+                rib.mark_stale_flowspec(family);
             }
             let withdrawn = rib.withdraw_families_except(&gr_families);
             if !withdrawn.is_empty() {
@@ -59,6 +60,7 @@ impl RibManager {
         self.peer_add_path_send_families.remove(&peer);
         self.dirty_peers.remove(&peer);
         self.pending_eor.remove(&peer);
+        self.pending_route_batches.retain(|prb| prb.peer() != peer);
         self.clear_peer_refresh_state(peer);
 
         let deadline =
@@ -129,6 +131,7 @@ impl RibManager {
     ///
     /// Two-phase timer (RFC 9494): if LLGR is configured for this peer,
     /// promote GR-stale routes to LLGR-stale instead of purging.
+    #[expect(clippy::too_many_lines, reason = "LLGR promotion has unicast + FlowSpec paths")]
     pub(super) fn sweep_gr_stale(&mut self, peer: IpAddr) {
         let gr_families: Vec<(Afi, Safi)> = self
             .gr_peers
@@ -176,6 +179,7 @@ impl RibManager {
             let effective_stale_time = peer_min_stale.min(llgr_config.local_llgr_stale_time);
 
             let mut affected = HashSet::new();
+            let mut fs_affected = HashSet::new();
             let mut rib_len = 0;
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 // Promote LLGR-negotiated families to LLGR-stale
@@ -184,12 +188,20 @@ impl RibManager {
                     for p in promoted {
                         affected.insert(p);
                     }
+                    let fs_promoted = rib.promote_to_llgr_stale_flowspec(family);
+                    for r in fs_promoted {
+                        fs_affected.insert(r);
+                    }
                 }
                 // Sweep families NOT in LLGR — these cannot be preserved
                 for &family in &non_llgr_families {
                     let swept = rib.sweep_stale_family(family);
                     for p in swept {
                         affected.insert(p);
+                    }
+                    let fs_swept = rib.sweep_stale_flowspec_family(family);
+                    for r in fs_swept {
+                        fs_affected.insert(r);
                     }
                 }
                 rib_len = rib.len();
@@ -201,6 +213,9 @@ impl RibManager {
                 info!(%peer, count = affected.len(), "promoted routes to LLGR stale");
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed, &affected);
+            }
+            if !fs_affected.is_empty() {
+                self.recompute_and_distribute_flowspec(&fs_affected);
             }
             self.metrics
                 .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
@@ -222,6 +237,7 @@ impl RibManager {
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
             let swept = rib.sweep_stale();
+            let fs_swept = rib.sweep_stale_flowspec();
             if !swept.is_empty() {
                 info!(%peer, count = swept.len(), "swept stale routes");
                 let affected: HashSet<Prefix> = swept.into_iter().collect();
@@ -229,6 +245,10 @@ impl RibManager {
                     .set_rib_prefixes(&peer_label, "all", gauge_val(rib.len()));
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed, &affected);
+            }
+            if !fs_swept.is_empty() {
+                let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
+                self.recompute_and_distribute_flowspec(&fs_affected);
             }
         }
     }
@@ -244,6 +264,7 @@ impl RibManager {
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
             let swept = rib.sweep_llgr_stale();
+            let fs_swept = rib.sweep_llgr_stale_flowspec();
             if !swept.is_empty() {
                 info!(%peer, count = swept.len(), "swept LLGR-stale routes");
                 let affected: HashSet<Prefix> = swept.into_iter().collect();
@@ -251,6 +272,10 @@ impl RibManager {
                     .set_rib_prefixes(&peer_label, "all", gauge_val(rib.len()));
                 let changed = self.recompute_best(&affected);
                 self.distribute_changes(&changed, &affected);
+            }
+            if !fs_swept.is_empty() {
+                let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
+                self.recompute_and_distribute_flowspec(&fs_affected);
             }
         }
     }

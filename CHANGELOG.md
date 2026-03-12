@@ -9,6 +9,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Route explain global export policy fallback.** `ExplainAdvertisedRoute`
+  now uses the per-peer → global export policy fallback (via
+  `export_policy_for()`), matching the actual distribution path. Previously
+  it only checked per-peer export policy, returning incorrect results for
+  peers using the global default.
+- **Drain pending route batches on PeerDown/GR.** `handle_peer_down()` and
+  `handle_peer_graceful_restart()` now drain any in-progress chunked route
+  batches for the departing peer. Previously, pending chunks could be
+  processed after the peer's RIB was cleared, re-inserting ghost routes.
+- **FSM double-increment of connect_retry_counter on DecodeError.** The
+  `DecodeError` handler in Connect, Active, OpenSent, OpenConfirm, and
+  Established states incremented the counter before calling
+  `enter_idle_with_notification()` / `enter_idle_silent()`, which also
+  increments — resulting in double-counting. Removed the redundant
+  increment from all five handlers.
+- **FlowSpec routes not stale-marked or swept during GR/LLGR.** Graceful
+  restart and LLGR now correctly mark, sweep, promote, and clear stale
+  flags on FlowSpec routes alongside unicast routes. Added
+  `promote_to_llgr_stale_flowspec()`, `sweep_llgr_stale_flowspec()`,
+  `clear_llgr_stale_flowspec()`, and `sweep_stale_flowspec_family()` to
+  `AdjRibIn`. End-of-RIB handling now clears FlowSpec stale/LLGR-stale
+  flags for the completed family.
+
 ### Added
 
 - **Rustc-style config error diagnostics.** Config validation errors now show

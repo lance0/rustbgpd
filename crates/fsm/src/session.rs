@@ -97,7 +97,7 @@ impl Session {
     #[expect(clippy::needless_pass_by_value)]
     fn handle_connect(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop { .. } => self.enter_idle_silent(),
+            Event::ManualStop { .. } | Event::DecodeError(_) => self.enter_idle_silent(),
 
             Event::ConnectRetryTimerExpires => {
                 let mut actions = vec![
@@ -129,12 +129,6 @@ impl Session {
                 actions
             }
 
-            // Decode errors on the wire → close and go to Idle
-            Event::DecodeError(_) => {
-                self.connect_retry_counter += 1;
-                self.enter_idle_silent()
-            }
-
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
@@ -142,7 +136,7 @@ impl Session {
     #[expect(clippy::needless_pass_by_value)]
     fn handle_active(&mut self, event: Event) -> Vec<Action> {
         match event {
-            Event::ManualStop { .. } => self.enter_idle_silent(),
+            Event::ManualStop { .. } | Event::DecodeError(_) => self.enter_idle_silent(),
 
             Event::ConnectRetryTimerExpires => {
                 let mut actions = vec![
@@ -171,11 +165,6 @@ impl Session {
                 ];
                 actions.push(self.transition_to(SessionState::Active));
                 actions
-            }
-
-            Event::DecodeError(_) => {
-                self.connect_retry_counter += 1;
-                self.enter_idle_silent()
             }
 
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
@@ -246,7 +235,6 @@ impl Session {
 
             Event::DecodeError(ref e) => {
                 let (code, subcode, data) = e.to_notification();
-                self.connect_retry_counter += 1;
                 self.enter_idle_with_notification(code, subcode, data)
             }
 
@@ -321,7 +309,6 @@ impl Session {
 
             Event::DecodeError(ref e) => {
                 let (code, subcode, data) = e.to_notification();
-                self.connect_retry_counter += 1;
                 self.enter_idle_with_notification(code, subcode, data)
             }
 
@@ -419,7 +406,6 @@ impl Session {
 
             Event::DecodeError(ref e) => {
                 let (code, subcode, data) = e.to_notification();
-                self.connect_retry_counter += 1;
                 self.negotiated = None;
                 let mut actions = vec![Action::SessionDown];
                 actions.extend(self.enter_idle_with_notification(code, subcode, data));

@@ -518,9 +518,7 @@ impl RibManager {
             self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
             self.cluster_id,
             Some(sendable),
-            self.peer_export_policies
-                .get(&peer)
-                .and_then(Option::as_ref),
+            self.export_policy_for(peer),
         );
 
         if reply.send(Some(explanation)).is_err() {

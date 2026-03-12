@@ -404,6 +404,110 @@ impl AdjRibIn {
         for route in self.flowspec_routes.values_mut() {
             if route.afi == family.0 {
                 route.is_stale = false;
+                route.is_llgr_stale = false;
+            }
+        }
+    }
+
+    /// Remove stale `FlowSpec` routes for a specific family, returning their rules.
+    pub fn sweep_stale_flowspec_family(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecRule> {
+        if family.1 != Safi::FlowSpec {
+            return Vec::new();
+        }
+        let stale: Vec<(FlowSpecRule, u32)> = self
+            .flowspec_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale && r.afi == family.0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut rules = Vec::new();
+        for key in &stale {
+            rules.push(key.0.clone());
+            self.flowspec_routes.remove(key);
+        }
+        rules
+    }
+
+    /// Promote GR-stale `FlowSpec` routes to LLGR-stale for the given family.
+    ///
+    /// Routes with `NO_LLGR` community are removed. Remaining stale routes
+    /// get `is_stale=false`, `is_llgr_stale=true`, `LLGR_STALE` community added.
+    ///
+    /// Returns rules affected (for best-path recalc).
+    pub fn promote_to_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) -> Vec<FlowSpecRule> {
+        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR, PathAttribute};
+
+        if family.1 != Safi::FlowSpec {
+            return Vec::new();
+        }
+
+        // First pass: remove routes with NO_LLGR community
+        let no_llgr_keys: Vec<(FlowSpecRule, u32)> = self
+            .flowspec_routes
+            .iter()
+            .filter(|(_, r)| {
+                r.is_stale
+                    && r.afi == family.0
+                    && r.attributes
+                        .iter()
+                        .any(|a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_NO_LLGR)))
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut affected: Vec<FlowSpecRule> = no_llgr_keys.iter().map(|(r, _)| r.clone()).collect();
+        for key in &no_llgr_keys {
+            self.flowspec_routes.remove(key);
+        }
+
+        // Second pass: promote remaining stale routes to LLGR-stale
+        for route in self.flowspec_routes.values_mut() {
+            if route.is_stale && route.afi == family.0 {
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                if let Some(PathAttribute::Communities(comms)) = route
+                    .attributes
+                    .iter_mut()
+                    .find(|a| matches!(a, PathAttribute::Communities(_)))
+                {
+                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
+                        comms.push(COMMUNITY_LLGR_STALE);
+                    }
+                } else {
+                    route
+                        .attributes
+                        .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                }
+                affected.push(route.rule.clone());
+            }
+        }
+
+        affected
+    }
+
+    /// Remove all LLGR-stale `FlowSpec` routes, returning their rules.
+    pub fn sweep_llgr_stale_flowspec(&mut self) -> Vec<FlowSpecRule> {
+        let stale: Vec<(FlowSpecRule, u32)> = self
+            .flowspec_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale)
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut rules = Vec::new();
+        for key in &stale {
+            rules.push(key.0.clone());
+            self.flowspec_routes.remove(key);
+        }
+        rules
+    }
+
+    /// Clear the LLGR-stale flag on `FlowSpec` routes matching the given family.
+    pub fn clear_llgr_stale_flowspec(&mut self, family: (Afi, Safi)) {
+        if family.1 != Safi::FlowSpec {
+            return;
+        }
+        for route in self.flowspec_routes.values_mut() {
+            if route.afi == family.0 {
+                route.is_llgr_stale = false;
             }
         }
     }
