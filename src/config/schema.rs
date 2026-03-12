@@ -222,6 +222,9 @@ pub struct Neighbor {
     pub remove_private_as: Option<String>,
     /// Add-Path (RFC 7911) configuration for this neighbor.
     pub add_path: Option<AddPathConfig>,
+    /// Override log level for this peer: `"error"`, `"warn"`, `"info"`,
+    /// `"debug"`, or `"trace"`.
+    pub log_level: Option<String>,
     #[serde(default)]
     pub import_policy: Vec<PolicyStatementConfig>,
     #[serde(default)]
@@ -253,6 +256,8 @@ pub struct PeerGroupConfig {
     pub route_server_client: Option<bool>,
     pub remove_private_as: Option<String>,
     pub add_path: Option<AddPathConfig>,
+    /// Override log level for peers in this group.
+    pub log_level: Option<String>,
     #[serde(default)]
     pub import_policy: Vec<PolicyStatementConfig>,
     #[serde(default)]
@@ -422,4 +427,6 @@ pub enum ConfigError {
     InvalidMrtConfig { reason: String },
     #[error("invalid remove_private_as config: {reason}")]
     InvalidRemovePrivateAs { reason: String },
+    #[error("invalid log_level {value:?}: expected error, warn, info, debug, or trace")]
+    InvalidLogLevel { value: String },
 }

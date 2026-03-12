@@ -13,6 +13,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use tracing::Instrument;
+
 use crate::config::TransportConfig;
 use crate::error::TransportError;
 use crate::session::PeerSession;
@@ -139,19 +141,26 @@ impl PeerHandle {
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
-        let task = tokio::spawn(async move {
-            let mut session = PeerSession::new(
-                config,
-                metrics,
-                rx,
-                rib_tx,
-                import_policy,
-                export_policy,
-                session_notify_tx,
-                bmp_tx,
-            );
-            session.run().await
-        });
+        let peer_addr = config.remote_addr.ip();
+        let remote_asn = config.peer.remote_asn;
+        let peer_group = config.peer_group.clone().unwrap_or_default();
+        let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
+        let task = tokio::spawn(
+            async move {
+                let mut session = PeerSession::new(
+                    config,
+                    metrics,
+                    rx,
+                    rib_tx,
+                    import_policy,
+                    export_policy,
+                    session_notify_tx,
+                    bmp_tx,
+                );
+                session.run().await
+            }
+            .instrument(span),
+        );
         Self { commands: tx, task }
     }
 
@@ -172,20 +181,27 @@ impl PeerHandle {
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
-        let task = tokio::spawn(async move {
-            let mut session = PeerSession::new_inbound(
-                config,
-                metrics,
-                rx,
-                rib_tx,
-                import_policy,
-                export_policy,
-                stream,
-                session_notify_tx,
-                bmp_tx,
-            );
-            session.run().await
-        });
+        let peer_addr = config.remote_addr.ip();
+        let remote_asn = config.peer.remote_asn;
+        let peer_group = config.peer_group.clone().unwrap_or_default();
+        let span = tracing::info_span!("peer", %peer_addr, remote_asn, %peer_group);
+        let task = tokio::spawn(
+            async move {
+                let mut session = PeerSession::new_inbound(
+                    config,
+                    metrics,
+                    rx,
+                    rib_tx,
+                    import_policy,
+                    export_policy,
+                    stream,
+                    session_notify_tx,
+                    bmp_tx,
+                );
+                session.run().await
+            }
+            .instrument(span),
+        );
         Self { commands: tx, task }
     }
 

@@ -326,7 +326,8 @@ fn main() {
         return;
     }
 
-    if let Err(e) = init_logging() {
+    let log_directives = config.per_peer_log_directives();
+    if let Err(e) = init_logging(&log_directives) {
         eprintln!("error: failed to initialize logging: {e}");
         process::exit(1);
     }
@@ -1183,6 +1184,7 @@ mod tests {
                     export_policy: Vec::new(),
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
+                    log_level: None,
                 },
                 crate::config::Neighbor {
                     address: "10.0.0.3".to_string(),
@@ -1207,6 +1209,7 @@ mod tests {
                     export_policy: Vec::new(),
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
+                    log_level: None,
                 },
                 crate::config::Neighbor {
                     address: "10.0.0.4".to_string(),
@@ -1231,6 +1234,7 @@ mod tests {
                     export_policy: Vec::new(),
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
+                    log_level: None,
                 },
             ],
             peer_groups: std::collections::HashMap::new(),

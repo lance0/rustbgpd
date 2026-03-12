@@ -90,6 +90,12 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
         ConfigError::InvalidRemovePrivateAs { reason } => {
             find_value_anywhere(source, "remove_private_as", "", reason)
         }
+        ConfigError::InvalidLogLevel { value } => find_value_anywhere(
+            source,
+            "log_level",
+            value,
+            "expected error, warn, info, debug, or trace",
+        ),
         _ => None,
     }
 }

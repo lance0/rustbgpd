@@ -489,6 +489,29 @@ impl Config {
                 .collect()
         })
     }
+    /// Build `tracing` filter directives for per-peer log level overrides.
+    ///
+    /// Returns directives like `peer{peer_addr=10.0.0.1}=debug` that can be
+    /// appended to an `EnvFilter`.
+    pub fn per_peer_log_directives(&self) -> Vec<String> {
+        let mut directives = Vec::new();
+        for neighbor in &self.neighbors {
+            let level = neighbor.log_level.as_deref().or_else(|| {
+                neighbor
+                    .peer_group
+                    .as_deref()
+                    .and_then(|name| self.peer_groups.get(name))
+                    .and_then(|g| g.log_level.as_deref())
+            });
+            if let Some(level) = level {
+                directives.push(format!(
+                    "peer{{peer_addr={addr}}}={level}",
+                    addr = neighbor.address
+                ));
+            }
+        }
+        directives
+    }
 }
 
 #[derive(Clone)]
@@ -563,6 +586,7 @@ pub fn describe_neighbor_changes(old: &Neighbor, new: &Neighbor) -> Vec<String> 
     cmp_field!(route_server_client);
     cmp_field!(remove_private_as);
     cmp_field!(add_path);
+    cmp_field!(log_level);
 
     // md5_password: log change without revealing values
     if old.md5_password != new.md5_password {

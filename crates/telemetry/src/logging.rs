@@ -9,12 +9,22 @@ use tracing_subscriber::fmt;
 /// Call once at startup.  Defaults to `info` level if `RUST_LOG` is not
 /// set.
 ///
+/// `extra_directives` are appended to the filter and can include
+/// per-peer span filters such as `peer{peer_addr=10.0.0.1}=debug`.
+///
 /// # Errors
 ///
 /// Returns a [`LoggingError`] if the global subscriber has already been
 /// set (e.g., called twice or a test already installed one).
-pub fn init_logging() -> Result<(), LoggingError> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+pub fn init_logging(extra_directives: &[String]) -> Result<(), LoggingError> {
+    let mut filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    for directive in extra_directives {
+        filter = filter.add_directive(directive.parse().map_err(|e| {
+            LoggingError::InvalidDirective(format!("{directive}: {e}"))
+        })?);
+    }
 
     fmt()
         .json()
@@ -32,6 +42,9 @@ pub enum LoggingError {
     /// The global tracing subscriber was already set.
     #[error("logging subscriber already initialized: {0}")]
     AlreadyInitialized(String),
+    /// A per-peer log filter directive was malformed.
+    #[error("invalid log filter directive: {0}")]
+    InvalidDirective(String),
 }
 
 #[cfg(test)]
@@ -43,7 +56,7 @@ mod tests {
         // We can't reliably test init_logging() in unit tests because the
         // global subscriber may already be set by another test. Instead,
         // verify that calling it produces a well-formed Result.
-        let result = init_logging();
+        let result = init_logging(&[]);
         // Either Ok (first call) or Err (already set) — neither should panic.
         assert!(result.is_ok() || result.is_err());
     }

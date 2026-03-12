@@ -167,6 +167,7 @@ fn api_peer_group_to_config(definition: PeerGroupDefinition) -> PeerGroupConfig 
             .collect(),
         import_policy_chain: definition.import_policy_chain,
         export_policy_chain: definition.export_policy_chain,
+        log_level: None,
     }
 }
 
@@ -403,6 +404,7 @@ pub fn apply_config_event(config: &mut Config, event: &ConfigEvent) -> Result<()
                     export_policy: Vec::new(),
                     import_policy_chain: Vec::new(),
                     export_policy_chain: Vec::new(),
+                    log_level: None,
                 });
             }
         }

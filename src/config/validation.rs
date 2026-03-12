@@ -246,6 +246,14 @@ impl Config {
                 parse_families(&group.families)?;
             }
 
+            // Validate log_level
+            validate_log_level(
+                neighbor
+                    .log_level
+                    .as_deref()
+                    .or_else(|| group.and_then(|g| g.log_level.as_deref())),
+            )?;
+
             // Validate GR config
             let gr_enabled = neighbor
                 .graceful_restart
@@ -445,6 +453,8 @@ fn validate_peer_group(
         }
     }
 
+    validate_log_level(group.log_level.as_deref())?;
+
     let gr_enabled = group.graceful_restart.unwrap_or(true);
     if let Some(t) = group.gr_restart_time
         && t > 4095
@@ -535,6 +545,20 @@ fn validate_peer_group(
         peer_groups,
     )?;
 
+    Ok(())
+}
+
+fn validate_log_level(level: Option<&str>) -> Result<(), ConfigError> {
+    if let Some(level) = level {
+        match level {
+            "error" | "warn" | "info" | "debug" | "trace" => {}
+            _ => {
+                return Err(ConfigError::InvalidLogLevel {
+                    value: level.to_string(),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
