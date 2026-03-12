@@ -155,7 +155,7 @@ get blog posts written and make operators switch.
 
 #### First-Run Experience
 
-- [ ] **Rust-compiler-style config errors** — show the actual TOML with line numbers, underline the bad field, and suggest corrections ("did you mean `ipv4_unicast`?"). Every Rust developer will feel at home. Use `miette` or `ariadne` for rendering.
+- [x] **Rust-compiler-style config errors** — config validation errors display the offending TOML source line with column markers and underlined spans, using `toml_edit::ImDocument` for span lookup. Zero new deps (hand-rolled renderer, `toml_edit` already transitive).
 - [x] **`rustbgpd --check config.toml`** — validate config without starting the daemon. Print structured errors or "config OK". Operators run this before every reload and deploy.
 - [x] **Startup banner with topology summary** — on boot, print a clean tree showing ASN, router-id, peer count by type, named policies, neighbor sets, listener endpoints, optional subsystems (RPKI caches, BMP collectors, MRT output). First thing an operator sees after starting the daemon.
 - [x] **Shell completions** — `rustbgpctl completions {bash,zsh,fish}` generates completions from clap derives. Pre-generated files shipped in `examples/completions/`.
@@ -171,7 +171,7 @@ get blog posts written and make operators switch.
 
 - [ ] **Policy trace / route explain** — `rustbgpctl route explain 203.0.113.0/24`: show the route's full journey — which peer announced it, import policy evaluation step-by-step (which statement matched, what modifications applied), best-path selection with ranked candidates and tie-break reasons, then per-peer export policy evaluation showing why it was or wasn't advertised to each neighbor. No BGP daemon does this well. This is the flagship feature.
 - [x] **Config diff on SIGHUP** — field-level change logging on reload: each changed neighbor logs exactly which fields differ (e.g. "hold_time: Some(90) → Some(45), families: [...] → [...]"). Sensitive fields (md5_password) log `<changed>` without revealing values.
-- [ ] **Per-peer log filtering** — `rustbgpctl logs --peer 10.0.0.2` or structured log field `peer=10.0.0.2` that makes grep/jq filtering trivial. Currently all peers log to the same stream.
+- [x] **Per-peer log filtering** — each peer session runs in a tracing span with `peer_addr`, `remote_asn`, `peer_group` fields. Per-peer `log_level` config field overrides the global `RUST_LOG` default. Also filterable via `RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug`.
 - [x] **Route diff on policy change** — after hot-applying an export policy change, logs announced/withdrawn counts per peer at info level
 
 #### Advanced UX

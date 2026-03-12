@@ -141,6 +141,7 @@ dynamic-only deployment where peers are added at runtime via gRPC.
 | `export_policy_chain`  | [string] | no       | --      | Named policy chain for export (mutually exclusive with inline export_policy) |
 | `llgr_stale_time`      | u32      | no       | 0       | LLGR stale time in seconds (0 = disabled, max 16777215; RFC 9494)    |
 | `add_path`             | table    | no       | --      | Add-Path (RFC 7911) config table (see below)                         |
+| `log_level`            | string   | no       | --      | Override log level for this peer: `"error"`, `"warn"`, `"info"`, `"debug"`, or `"trace"` |
 
 ### Address families
 
@@ -188,7 +189,8 @@ hold_time = 45  # neighbor override beats peer-group default
 
 Peer-group fields mirror inheritable neighbor settings: timers, families,
 GR/LLGR, Add-Path, route-server / RR flags, private-AS handling, MD5/GTSM,
-`local_ipv6_nexthop`, and import/export inline policy or named chains.
+`local_ipv6_nexthop`, `log_level`, and import/export inline policy or named
+chains.
 
 ```toml
 # IPv4 peer with dual-stack

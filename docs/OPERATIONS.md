@@ -18,12 +18,38 @@ Or via systemd (see `examples/systemd/rustbgpd.service`):
 sudo systemctl start rustbgpd
 ```
 
-The daemon validates the config file at startup. Any validation error prints
-a message to stderr and exits with code 1 — the daemon never starts with an
-invalid config.
+The daemon validates the config file at startup. Validation errors display
+rustc-style diagnostics showing the offending TOML line with column markers:
+
+```
+error: invalid hold_time 2: must be 0 or >= 3
+  --> /etc/rustbgpd/config.toml:12:13
+   |
+12 | hold_time = 2
+   |             ^ must be 0 or >= 3
+```
+
+The daemon exits with code 1 — it never starts with an invalid config.
 
 On success, structured JSON logs go to stdout. The daemon is ready when you
 see the `starting rustbgpd` log line with version, ASN, and router ID.
+
+### Per-peer log filtering
+
+Set `log_level` on any neighbor or peer group to override the global log level:
+
+```toml
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65001
+log_level = "debug"
+```
+
+Or filter via `RUST_LOG` using the per-peer tracing span:
+
+```bash
+RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug rustbgpd /etc/rustbgpd/config.toml
+```
 
 ---
 

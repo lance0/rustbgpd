@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Rustc-style config error diagnostics.** Config validation errors now show
+  the offending TOML source line with column markers and underlined spans, like
+  `rustc` error messages. Uses `toml_edit::ImDocument` for span-preserving
+  key/value lookup on semantic errors, and `toml::de::Error::span()` for parse
+  errors. Falls back to plain text when no span is available.
+- **Per-peer log level filtering.** New `log_level` field on `[[neighbors]]`
+  and `[peer_groups.<name>]` overrides the global `RUST_LOG` level for
+  individual peers. Each peer session runs inside a tracing span with
+  `peer_addr`, `remote_asn`, and `peer_group` fields, enabling targeted
+  filtering via config (`log_level = "debug"`) or environment
+  (`RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug`).
 - **gRPC priority query channel.** Read-only gRPC queries (neighbor list, RIB
   queries, control RPCs) now use a dedicated channel with bounded fair
   scheduling (8 queries per route chunk). This prevents management API stalls
