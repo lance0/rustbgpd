@@ -106,6 +106,23 @@ resolved.
   attribute is absent rather than using BGP implicit defaults (100 for
   LOCAL_PREF, 0 for MED). This means policies matching on these values
   won't fire for routes that rely on the implicit default.
+- **Silent config persistence failures on gRPC mutations.** Several
+  `permit.send(ConfigEvent::...)` call sites in `policy_service.rs` and
+  `peer_group_service.rs` do not check for send errors. If the config
+  persistence sink disconnects, mutations apply to runtime state but
+  silently fail to persist. Not critical (restart re-reads the last
+  successfully written config file) but could cause operator confusion
+  when runtime changes disappear after restart.
+- **String-based error matching in API deletion handlers.** Policy and
+  peer-group deletion operations match `PeerManager` error messages with
+  `error.contains("still referenced")` to distinguish precondition
+  failures from not-found errors. Fragile coupling that could break if
+  error messages are changed.
+- **MRT `originated_time` silently clamps to `u32::MAX`.** The MRT
+  `TABLE_DUMP_V2` encoder clamps `originated_time` to `u32::MAX`
+  instead of returning an error when the timestamp exceeds the 32-bit
+  range. Correct per RFC 6396 wire format (field is 4 bytes) but will
+  lose precision after 2106.
 - **FlowSpec `encode_numeric_ops()` overwrites `end_of_list` flag.**
   The encoder computes `end_of_list` from position (last element gets
   `true`), silently discarding the original flag on round-trip. This is
