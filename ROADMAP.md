@@ -207,7 +207,8 @@ Prove it works under pressure before 1.0.
 - [x] **AdjRibOut secondary prefix index** — `HashMap<Prefix, Vec<u32>>` index for O(1) `path_ids_for_prefix()` and `iter_prefix()`. Previous O(N) full-scan caused 560x cost blowup at 200k routes; 2p/100k convergence: 71s → 12s (5.9x). Memory tradeoff: 168 MB → 406 MB (still 1.4x less than GoBGP)
 - [x] **AdjRibOut index memory compaction** — `SmallVec<[u32; 1]>` for single-best case; zero-alloc `&[u32]` return from `path_ids_for_prefix()`; marginal RSS impact (~9 MB) confirming memory is structural
 - [x] **dhat heap profiling** — feature-gated `dhat-heap` profiler with Docker/bgperf2 integration; SIGTERM handler for clean PID 1 shutdown; 284 MB live heap captured at 2p/100k
-- [ ] **Shared route storage across RIBs** — store route payload once and reference from AdjRibIn/LocRib/AdjRibOut via lightweight handles; dhat profile shows ~91 MB in `Vec::clone` of attributes between RIBs
+- [x] **Skip unnecessary Arc deep clones in distribution** — `Arc::make_mut()` was called unconditionally on every route in `distribute_single_best_prefix()`, forcing deep clone of `Vec<PathAttribute>` even when no export policy modifications were needed (~85% of routes). Added `RouteModifications::is_empty()` guard; unmodified routes now share the same `Arc` across LocRib and AdjRibOut. 2p/100k memory: 415 MB → 257 MB (-38%)
+- [ ] **Shared route storage across RIBs** — store route payload once and reference from AdjRibIn/LocRib/AdjRibOut via lightweight handles
 - [ ] **Compact RIB indexing** — reduce HashMap count/shape overhead; dhat profile shows ~160 MB in hashbrown bucket arrays across ~10+ large HashMaps
 
 ### P4 — Nice to Have

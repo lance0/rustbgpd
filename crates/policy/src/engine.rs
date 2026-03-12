@@ -150,6 +150,21 @@ pub struct RouteModifications {
 }
 
 impl RouteModifications {
+    /// Returns `true` if no modifications are configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.set_local_pref.is_none()
+            && self.set_med.is_none()
+            && self.set_next_hop.is_none()
+            && self.as_path_prepend.is_none()
+            && self.communities_add.is_empty()
+            && self.communities_remove.is_empty()
+            && self.extended_communities_add.is_empty()
+            && self.extended_communities_remove.is_empty()
+            && self.large_communities_add.is_empty()
+            && self.large_communities_remove.is_empty()
+    }
+
     /// Merge another set of modifications into this one.
     ///
     /// Scalar fields (`set_local_pref`, `set_med`, `set_next_hop`,

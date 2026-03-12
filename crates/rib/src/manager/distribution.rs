@@ -600,15 +600,20 @@ impl RibManager {
                 continue;
             }
 
-            // Apply export modifications
+            // Apply export modifications — skip deep clone when no mods needed
             let mut modified = (*candidate).clone();
-            let nh_action = rustbgpd_policy::apply_modifications(
-                std::sync::Arc::make_mut(&mut modified.attributes),
-                &result.modifications,
-            );
-            if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
-                modified.next_hop = *addr;
-            }
+            let nh_action = if result.modifications.is_empty() {
+                None
+            } else {
+                let nh = rustbgpd_policy::apply_modifications(
+                    std::sync::Arc::make_mut(&mut modified.attributes),
+                    &result.modifications,
+                );
+                if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh {
+                    modified.next_hop = *addr;
+                }
+                nh
+            };
             modified.path_id = next_rank;
 
             // Only announce if different from what's already in AdjRibOut
@@ -718,15 +723,21 @@ impl RibManager {
             return;
         }
 
-        // Apply export modifications to a clone
+        // Apply export modifications to a clone — skip the deep clone of
+        // the Arc<Vec<PathAttribute>> when no modifications are needed.
         let mut modified = best.clone();
-        let nh_action = rustbgpd_policy::apply_modifications(
-            std::sync::Arc::make_mut(&mut modified.attributes),
-            &result.modifications,
-        );
-        if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh_action {
-            modified.next_hop = *addr;
-        }
+        let nh_action = if result.modifications.is_empty() {
+            None
+        } else {
+            let nh = rustbgpd_policy::apply_modifications(
+                std::sync::Arc::make_mut(&mut modified.attributes),
+                &result.modifications,
+            );
+            if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = &nh {
+                modified.next_hop = *addr;
+            }
+            nh
+        };
         modified.path_id = 0;
 
         let changed = rib_out
