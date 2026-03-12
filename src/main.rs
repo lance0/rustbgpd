@@ -2,9 +2,17 @@
 //!
 //! Binary entry point. Loads config, wires components, starts runtime.
 
-#![deny(unsafe_code)]
+#![cfg_attr(not(any(feature = "jemalloc", feature = "dhat-heap")), deny(unsafe_code))]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod config;
 mod config_persister;
@@ -323,12 +331,21 @@ fn main() {
         process::exit(1);
     }
 
+    #[cfg(feature = "dhat-heap")]
+    let profiler = Some(
+        dhat::Profiler::builder()
+            .file_name("dhat-heap.json")
+            .build(),
+    );
+    #[cfg(not(feature = "dhat-heap"))]
+    let profiler: Option<()> = None;
+
     let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-    rt.block_on(run(config));
+    rt.block_on(run(config, profiler));
 }
 
 #[expect(clippy::too_many_lines)]
-async fn run(mut config: Config) {
+async fn run<T>(mut config: Config, _profiler: Option<T>) {
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
     let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
@@ -768,18 +785,24 @@ async fn run(mut config: Config) {
         }
     }
 
-    // SIGHUP handler for config reload (unix-only, which is our target)
+    // Signal handlers (unix-only, which is our target)
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
     let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .expect("failed to register SIGHUP handler");
 
-    // Wait for shutdown signal: ctrl_c, Shutdown RPC, unexpected gRPC exit, or SIGHUP
+    // Wait for shutdown signal: SIGINT, SIGTERM, Shutdown RPC, unexpected gRPC exit, or SIGHUP
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
                 match result {
-                    Ok(()) => info!("received shutdown signal"),
-                    Err(e) => error!(error = %e, "failed to listen for shutdown signal"),
+                    Ok(()) => info!("received SIGINT"),
+                    Err(e) => error!(error = %e, "failed to listen for SIGINT"),
                 }
+                break;
+            }
+            _ = sigterm.recv() => {
+                info!("received SIGTERM");
                 break;
             }
             changed = rpc_shutdown_rx.changed() => {
@@ -825,6 +848,10 @@ async fn run(mut config: Config) {
             }
         }
     }
+
+    // Drop the profiler now while all data structures are still alive,
+    // so the heap snapshot captures the live working set.
+    drop(_profiler);
 
     // Coordinated shutdown:
     // 1. Tell PeerManager to shut down (sends NOTIFICATIONs to all peers)

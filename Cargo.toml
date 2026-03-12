@@ -58,6 +58,8 @@ serde_json = "1"
 owo-colors = { version = "4", features = ["supports-colors"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 smallvec = "1"
+tikv-jemallocator = { version = "0.6", features = ["profiling"] }
+dhat = "0.3"
 
 [package]
 name = "rustbgpd"
@@ -70,7 +72,13 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+jemalloc = ["tikv-jemallocator"]
+dhat-heap = ["dhat"]
+
 [dependencies]
+tikv-jemallocator = { workspace = true, optional = true }
+dhat = { workspace = true, optional = true }
 rustbgpd-wire.workspace = true
 rustbgpd-fsm.workspace = true
 rustbgpd-transport.workspace = true
@@ -97,3 +105,8 @@ tempfile = "3"
 lto = true
 codegen-units = 1
 strip = "symbols"
+
+[profile.release-prof]
+inherits = "release"
+strip = false
+debug = 1
