@@ -208,6 +208,7 @@ Prove it works under pressure before 1.0.
 - [x] **AdjRibOut index memory compaction** — `SmallVec<[u32; 1]>` for single-best case; zero-alloc `&[u32]` return from `path_ids_for_prefix()`; marginal RSS impact (~9 MB) confirming memory is structural
 - [x] **dhat heap profiling** — feature-gated `dhat-heap` profiler with Docker/bgperf2 integration; SIGTERM handler for clean PID 1 shutdown; 284 MB live heap captured at 2p/100k
 - [x] **Skip unnecessary Arc deep clones in distribution** — `Arc::make_mut()` was called unconditionally on every route in `distribute_single_best_prefix()`, forcing deep clone of `Vec<PathAttribute>` even when no export policy modifications were needed (~85% of routes). Added `RouteModifications::is_empty()` guard; unmodified routes now share the same `Arc` across LocRib and AdjRibOut. 2p/100k memory: 415 MB → 257 MB (-38%)
+- [x] **AdjRibOut capacity pre-sizing** — `AdjRibOut::with_capacity()` constructor; all distribution-path creation sites use `loc_rib.len()` as capacity hint. Eliminates rehash churn during initial table load.
 - [ ] **Shared route storage across RIBs** — store route payload once and reference from AdjRibIn/LocRib/AdjRibOut via lightweight handles
 - [ ] **Compact RIB indexing** — reduce HashMap count/shape overhead; dhat profile shows ~160 MB in hashbrown bucket arrays across ~10+ large HashMaps
 

@@ -22,8 +22,14 @@ impl LocRib {
     /// Create an empty Loc-RIB.
     #[must_use]
     pub fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    /// Create a Loc-RIB with pre-sized capacity for the routes map.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            routes: HashMap::new(),
+            routes: HashMap::with_capacity(capacity),
             flowspec_routes: HashMap::new(),
         }
     }

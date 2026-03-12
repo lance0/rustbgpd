@@ -51,10 +51,11 @@ impl RibManager {
             || !flowspec_announce.is_empty()
             || !flowspec_withdraw.is_empty()
         {
+            let loc_rib_len = self.loc_rib.len();
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
-                .or_insert_with(|| AdjRibOut::new(peer));
+                .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
             for route in &announce {
                 rib_out.insert(route.clone());
             }
@@ -945,11 +946,12 @@ impl RibManager {
                 .cloned()
                 .unwrap_or_default();
             let loc_rib = &self.loc_rib;
+            let loc_rib_len = loc_rib.len();
 
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
-                .or_insert_with(|| AdjRibOut::new(peer));
+                .or_insert_with(|| AdjRibOut::with_capacity(peer, loc_rib_len));
 
             // Stage: compute delta without mutating AdjRibOut
             for prefix in &effective_prefixes {
@@ -1132,10 +1134,11 @@ impl RibManager {
             let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
             let export_pol = self.export_policy_for(peer).cloned();
 
+            let loc_rib_len = self.loc_rib.len();
             let rib_out = self
                 .adj_ribs_out
                 .entry(peer)
-                .or_insert_with(|| crate::adj_rib_out::AdjRibOut::new(peer));
+                .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
 
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();

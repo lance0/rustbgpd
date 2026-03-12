@@ -25,10 +25,19 @@ impl AdjRibOut {
     /// Create a new empty Adj-RIB-Out for the given peer.
     #[must_use]
     pub fn new(peer: IpAddr) -> Self {
+        Self::with_capacity(peer, 0)
+    }
+
+    /// Create a new Adj-RIB-Out with pre-sized capacity.
+    ///
+    /// Use `LocRib::len()` as a good estimate — each peer's outbound view
+    /// converges to approximately the same prefix count as the best-path table.
+    #[must_use]
+    pub fn with_capacity(peer: IpAddr, capacity: usize) -> Self {
         Self {
             peer,
-            routes: HashMap::new(),
-            prefix_path_ids: HashMap::new(),
+            routes: HashMap::with_capacity(capacity),
+            prefix_path_ids: HashMap::with_capacity(capacity),
             flowspec_routes: HashMap::new(),
         }
     }
