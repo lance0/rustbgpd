@@ -83,6 +83,14 @@ async fn query_mrt_snapshot(tx: &mpsc::Sender<RibUpdate>) -> crate::update::MrtS
     reply_rx.await.unwrap()
 }
 
+async fn query_flowspec_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<FlowSpecRoute> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryFlowSpecRoutes { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
 fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
@@ -3818,6 +3826,108 @@ async fn gr_marks_stale_and_demotes_routes() {
     let best = reply_rx.await.unwrap();
     assert_eq!(best.len(), 1);
     assert!(best[0].is_stale, "route should be marked stale");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn gr_flowspec_eor_recomputes_and_redistributes() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100));
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_flowspec_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let source_a = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let source_b = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let mut route_a = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 1));
+    route_a.attributes.push(PathAttribute::LocalPref(200));
+    let mut route_b = make_flowspec_route(Ipv4Addr::new(10, 0, 0, 2));
+    route_b.attributes.push(PathAttribute::LocalPref(100));
+    let rule = route_a.rule.clone();
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source_a,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![route_a],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let initial = out_rx.recv().await.unwrap();
+    assert_eq!(initial.flowspec_announce.len(), 1);
+    assert_eq!(initial.flowspec_announce[0].peer, source_a);
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source_b,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![route_b],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let best_before = query_flowspec_routes(&tx).await;
+    assert_eq!(best_before.len(), 1);
+    assert_eq!(best_before[0].peer, source_a);
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source_a,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::Ipv4, Safi::FlowSpec)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let stale_switch = out_rx.recv().await.unwrap();
+    assert_eq!(stale_switch.flowspec_announce.len(), 1);
+    assert_eq!(stale_switch.flowspec_announce[0].peer, source_b);
+
+    let best_during_gr = query_flowspec_routes(&tx).await;
+    assert_eq!(best_during_gr.len(), 1);
+    assert_eq!(best_during_gr[0].peer, source_b);
+
+    tx.send(RibUpdate::EndOfRib {
+        peer: source_a,
+        afi: Afi::Ipv4,
+        safi: Safi::FlowSpec,
+    })
+    .await
+    .unwrap();
+
+    let eor_switch = out_rx.recv().await.unwrap();
+    assert_eq!(eor_switch.flowspec_announce.len(), 1);
+    assert_eq!(eor_switch.flowspec_announce[0].peer, source_a);
+    assert_eq!(eor_switch.flowspec_announce[0].rule, rule);
+
+    let best_after_eor = query_flowspec_routes(&tx).await;
+    assert_eq!(best_after_eor.len(), 1);
+    assert_eq!(best_after_eor[0].peer, source_a);
 
     drop(tx);
     handle.await.unwrap();

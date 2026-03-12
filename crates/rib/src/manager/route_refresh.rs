@@ -22,6 +22,17 @@ impl RibManager {
                 awaiting.remove(&(afi, safi));
             }
 
+            let fs_affected: HashSet<FlowSpecRule> = self
+                .ribs
+                .get(&peer)
+                .map(|rib| {
+                    rib.iter_flowspec()
+                        .filter(|route| route.afi == afi)
+                        .map(|route| route.rule.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.clear_stale((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));
@@ -34,6 +45,9 @@ impl RibManager {
                 .unwrap_or_default();
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
+            if !fs_affected.is_empty() {
+                self.recompute_and_distribute_flowspec(&fs_affected);
+            }
 
             let peer_label = peer.to_string();
             let stale_count = self
@@ -58,6 +72,17 @@ impl RibManager {
                 awaiting.remove(&(afi, safi));
             }
 
+            let fs_affected: HashSet<FlowSpecRule> = self
+                .ribs
+                .get(&peer)
+                .map(|rib| {
+                    rib.iter_flowspec()
+                        .filter(|route| route.afi == afi)
+                        .map(|route| route.rule.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.clear_llgr_stale((afi, safi));
                 rib.clear_llgr_stale_flowspec((afi, safi));
@@ -70,6 +95,9 @@ impl RibManager {
                 .unwrap_or_default();
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
+            if !fs_affected.is_empty() {
+                self.recompute_and_distribute_flowspec(&fs_affected);
+            }
 
             let peer_label = peer.to_string();
             let llgr_stale_count = self

@@ -32,7 +32,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `promote_to_llgr_stale_flowspec()`, `sweep_llgr_stale_flowspec()`,
   `clear_llgr_stale_flowspec()`, and `sweep_stale_flowspec_family()` to
   `AdjRibIn`. End-of-RIB handling now clears FlowSpec stale/LLGR-stale
-  flags for the completed family.
+  flags for the completed family, recomputes/distributes affected
+  FlowSpec routes, and removes locally injected `LLGR_STALE`
+  communities when the route returns to fresh state.
 
 ### Added
 

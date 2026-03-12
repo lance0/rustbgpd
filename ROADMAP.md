@@ -94,6 +94,7 @@ Items identified during review that are not correctness bugs but improve strictn
 - [ ] **Unknown FlowSpec component forward compatibility** — component types >13 currently cause hard decode errors; should skip unknown types to allow future RFC extensions without breaking interop
 - [x] **gRPC UDS + bearer auth hardening** — gRPC now defaults to a local Unix domain socket, TCP listeners are explicit opt-in, and per-listener bearer-token auth is available via `token_file`
 - [x] **FlowSpec fuzz target** — `decode_flowspec` fuzz target added for direct FlowSpec NLRI decoding coverage
+- [x] **FlowSpec GR/LLGR lifecycle parity** — FlowSpec routes now stale-mark, promote/sweep, clear on `EoR`, recompute/distribute, and remove locally injected `LLGR_STALE` tags in lockstep with unicast GR/LLGR handling
 - [x] **Policy engine test modularization** — extracted the `merge_from` + `PolicyChain` test cluster into `engine/tests/chain.rs` to reduce monolithic test sprawl while preserving behavior
 - [ ] **Large community duplicate normalization** — received UPDATEs with duplicate large communities are stored and re-advertised unchanged; strict RFC 8092 behavior would dedup on receipt and before encode
 - [x] **RTR persistent session + Serial Notify** — RTR client now keeps the TCP session open after EndOfData, honors Serial Notify for immediate updates, and uses refresh_interval as a fallback serial-poll timer (RFC 8210 §8)

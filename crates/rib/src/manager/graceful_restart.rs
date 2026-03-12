@@ -24,6 +24,7 @@ impl RibManager {
         info!(%peer, restart_time, stale_routes_time, llgr_stale_time, "peer entered graceful restart");
 
         let mut affected = HashSet::new();
+        let mut fs_affected = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
             for &family in &gr_families {
@@ -43,12 +44,20 @@ impl RibManager {
             for route in rib.iter() {
                 affected.insert(route.prefix);
             }
+            for route in rib.iter_flowspec() {
+                if gr_families.contains(&(route.afi, Safi::FlowSpec)) {
+                    fs_affected.insert(route.rule.clone());
+                }
+            }
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
         }
 
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
+        if !fs_affected.is_empty() {
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
 
         self.outbound_peers.remove(&peer);
         self.adj_ribs_out.remove(&peer);

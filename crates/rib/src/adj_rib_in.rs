@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, FlowSpecRule, PathAttribute, Prefix, Safi};
 
 use crate::route::{FlowSpecRoute, Route};
 
@@ -28,6 +28,8 @@ pub struct AdjRibIn {
     llgr_stale_local_tags: HashSet<(Prefix, u32)>,
     /// `FlowSpec` routes keyed by `(rule, path_id)`.
     flowspec_routes: HashMap<(FlowSpecRule, u32), FlowSpecRoute>,
+    /// `FlowSpec` route keys where `LLGR_STALE` was injected locally.
+    flowspec_llgr_stale_local_tags: HashSet<(FlowSpecRule, u32)>,
     /// Intern table: deduplicates identical attribute sets across routes.
     /// Lookup by content returns the shared `Arc`.  Entries with
     /// `strong_count == 1` (only the intern table itself) are garbage-
@@ -53,6 +55,7 @@ impl AdjRibIn {
             prefix_index: HashMap::with_capacity(route_capacity),
             llgr_stale_local_tags: HashSet::new(),
             flowspec_routes: HashMap::with_capacity(flowspec_capacity),
+            flowspec_llgr_stale_local_tags: HashSet::new(),
             attr_intern: HashSet::with_capacity(route_capacity.clamp(16, 64)),
         }
     }
@@ -102,6 +105,7 @@ impl AdjRibIn {
         self.routes.clear();
         self.prefix_index.clear();
         self.llgr_stale_local_tags.clear();
+        self.flowspec_llgr_stale_local_tags.clear();
         self.attr_intern.clear();
     }
 
@@ -333,12 +337,16 @@ impl AdjRibIn {
 
     /// Insert or replace a `FlowSpec` route.
     pub fn insert_flowspec(&mut self, route: FlowSpecRoute) {
+        self.flowspec_llgr_stale_local_tags
+            .remove(&(route.rule.clone(), route.path_id));
         self.flowspec_routes
             .insert((route.rule.clone(), route.path_id), route);
     }
 
     /// Withdraw a `FlowSpec` route by rule and path ID. Returns `true` if it existed.
     pub fn withdraw_flowspec(&mut self, rule: &FlowSpecRule, path_id: u32) -> bool {
+        self.flowspec_llgr_stale_local_tags
+            .remove(&(rule.clone(), path_id));
         self.flowspec_routes
             .remove(&(rule.clone(), path_id))
             .is_some()
@@ -386,6 +394,7 @@ impl AdjRibIn {
         let mut rules = Vec::new();
         for key in &stale {
             rules.push(key.0.clone());
+            self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
         rules
@@ -394,6 +403,7 @@ impl AdjRibIn {
     /// Clear all `FlowSpec` routes.
     pub fn clear_flowspec(&mut self) {
         self.flowspec_routes.clear();
+        self.flowspec_llgr_stale_local_tags.clear();
     }
 
     /// Clear the stale flag on `FlowSpec` routes matching the given family.
@@ -423,6 +433,7 @@ impl AdjRibIn {
         let mut rules = Vec::new();
         for key in &stale {
             rules.push(key.0.clone());
+            self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
         rules
@@ -471,11 +482,15 @@ impl AdjRibIn {
                 {
                     if !comms.contains(&COMMUNITY_LLGR_STALE) {
                         comms.push(COMMUNITY_LLGR_STALE);
+                        self.flowspec_llgr_stale_local_tags
+                            .insert((route.rule.clone(), route.path_id));
                     }
                 } else {
                     route
                         .attributes
                         .push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    self.flowspec_llgr_stale_local_tags
+                        .insert((route.rule.clone(), route.path_id));
                 }
                 affected.push(route.rule.clone());
             }
@@ -495,6 +510,7 @@ impl AdjRibIn {
         let mut rules = Vec::new();
         for key in &stale {
             rules.push(key.0.clone());
+            self.flowspec_llgr_stale_local_tags.remove(key);
             self.flowspec_routes.remove(key);
         }
         rules
@@ -505,11 +521,17 @@ impl AdjRibIn {
         if family.1 != Safi::FlowSpec {
             return;
         }
+        let mut clear_local_llgr = Vec::new();
         for route in self.flowspec_routes.values_mut() {
             if route.afi == family.0 {
                 route.is_llgr_stale = false;
+                let key = (route.rule.clone(), route.path_id);
+                if self.flowspec_llgr_stale_local_tags.contains(&key) {
+                    clear_local_llgr.push(key);
+                }
             }
         }
+        self.clear_local_llgr_stale_flowspec_community(&clear_local_llgr);
     }
 
     /// Remove a `path_id` from the prefix index, cleaning up empty entries.
@@ -530,13 +552,26 @@ impl AdjRibIn {
             self.llgr_stale_local_tags.remove(key);
         }
     }
+
+    fn clear_local_llgr_stale_flowspec_community(&mut self, keys: &[(FlowSpecRule, u32)]) {
+        for key in keys {
+            if let Some(route) = self.flowspec_routes.get_mut(key) {
+                remove_llgr_stale_community_attrs(&mut route.attributes);
+            }
+            self.flowspec_llgr_stale_local_tags.remove(key);
+        }
+    }
 }
 
 /// Remove the `LLGR_STALE` community from a route's attributes, if present.
 fn remove_llgr_stale_community(route: &mut Route) {
-    use rustbgpd_wire::{COMMUNITY_LLGR_STALE, PathAttribute};
     use std::sync::Arc;
-    for attr in Arc::make_mut(&mut route.attributes) {
+    remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+}
+
+fn remove_llgr_stale_community_attrs(attrs: &mut Vec<PathAttribute>) {
+    use rustbgpd_wire::COMMUNITY_LLGR_STALE;
+    for attr in attrs {
         if let PathAttribute::Communities(comms) = attr {
             comms.retain(|&c| c != COMMUNITY_LLGR_STALE);
         }
@@ -558,7 +593,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    use rustbgpd_wire::{COMMUNITY_LLGR_STALE, Ipv4Prefix, Ipv6Prefix, PathAttribute};
+    use rustbgpd_wire::{
+        COMMUNITY_LLGR_STALE, Afi, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
+        Ipv6Prefix, PathAttribute, Safi,
+    };
 
     use super::*;
 
@@ -591,6 +629,26 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        }
+    }
+
+    fn make_flowspec_route() -> FlowSpecRoute {
+        let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+        FlowSpecRoute {
+            rule: FlowSpecRule {
+                components: vec![FlowSpecComponent::DestinationPrefix(FlowSpecPrefix::V4(
+                    prefix,
+                ))],
+            },
+            afi: Afi::Ipv4,
+            peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            attributes: vec![],
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::UNSPECIFIED,
+            is_stale: false,
+            is_llgr_stale: false,
+            path_id: 0,
         }
     }
 
@@ -851,6 +909,36 @@ mod tests {
         let route = rib.get(&Prefix::V4(prefix), 0).unwrap();
         assert!(!route.is_llgr_stale);
         assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn clear_llgr_stale_flowspec_removes_locally_added_llgr_stale_community() {
+        let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer);
+
+        let mut route = make_flowspec_route();
+        route.is_stale = true;
+        rib.insert_flowspec(route);
+
+        rib.promote_to_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+        let route = rib.iter_flowspec().next().unwrap();
+        assert!(route.is_llgr_stale);
+        assert!(
+            route
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE)))
+        );
+
+        rib.clear_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
+        let route = rib.iter_flowspec().next().unwrap();
+        assert!(!route.is_llgr_stale);
+        assert!(
+            !route
+                .attributes
+                .iter()
+                .any(|a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE)))
+        );
     }
 
     #[test]
