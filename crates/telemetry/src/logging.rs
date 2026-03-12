@@ -17,13 +17,14 @@ use tracing_subscriber::fmt;
 /// Returns a [`LoggingError`] if the global subscriber has already been
 /// set (e.g., called twice or a test already installed one).
 pub fn init_logging(extra_directives: &[String]) -> Result<(), LoggingError> {
-    let mut filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     for directive in extra_directives {
-        filter = filter.add_directive(directive.parse().map_err(|e| {
-            LoggingError::InvalidDirective(format!("{directive}: {e}"))
-        })?);
+        filter = filter.add_directive(
+            directive
+                .parse()
+                .map_err(|e| LoggingError::InvalidDirective(format!("{directive}: {e}")))?,
+        );
     }
 
     fmt()

@@ -9,7 +9,9 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 
 use crate::proto;
-use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteEventType};
+use rustbgpd_rib::{
+    ExplainAdvertisedRoute, ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType,
+};
 use rustbgpd_wire::{Afi, AsPath, AsPathSegment, PathAttribute, Prefix};
 
 /// gRPC service for querying the RIB (received, best, advertised routes).
@@ -42,6 +44,26 @@ impl RibService {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::QueryBestRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))
+    }
+
+    async fn query_explain_advertised_route(
+        &self,
+        peer: IpAddr,
+        prefix: Prefix,
+    ) -> Result<Option<ExplainAdvertisedRoute>, Status> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::ExplainAdvertisedRoute {
+                peer,
+                prefix,
+                reply: reply_tx,
+            })
             .await
             .map_err(|_| Status::internal("RIB manager unavailable"))?;
 
@@ -256,6 +278,102 @@ fn build_response(
     }
 }
 
+#[allow(clippy::result_large_err)]
+fn parse_prefix_request(prefix: &str, prefix_length: u32) -> Result<Prefix, Status> {
+    let addr: IpAddr = prefix
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
+    let len = u8::try_from(prefix_length)
+        .map_err(|_| Status::invalid_argument("prefix_length must be 0-128"))?;
+    Ok(match addr {
+        IpAddr::V4(v4) => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(v4, len)),
+        IpAddr::V6(v6) => Prefix::V6(rustbgpd_wire::Ipv6Prefix::new(v6, len)),
+    })
+}
+
+fn explain_modifications_to_proto(
+    modifications: &rustbgpd_policy::RouteModifications,
+) -> proto::ExplainModifications {
+    let (as_path_prepend_asn, as_path_prepend_count) = modifications
+        .as_path_prepend
+        .map_or((None, None), |(asn, count)| {
+            (Some(asn), Some(u32::from(count)))
+        });
+    proto::ExplainModifications {
+        set_local_pref: modifications.set_local_pref,
+        set_med: modifications.set_med,
+        set_next_hop: modifications
+            .set_next_hop
+            .as_ref()
+            .map_or_else(String::new, |nh| match nh {
+                rustbgpd_policy::NextHopAction::Self_ => "self".to_string(),
+                rustbgpd_policy::NextHopAction::Specific(addr) => addr.to_string(),
+            }),
+        communities_add: modifications.communities_add.clone(),
+        communities_remove: modifications.communities_remove.clone(),
+        extended_communities_add: modifications
+            .extended_communities_add
+            .iter()
+            .map(|ec| ec.as_u64())
+            .collect(),
+        extended_communities_remove: modifications
+            .extended_communities_remove
+            .iter()
+            .map(|ec| ec.as_u64())
+            .collect(),
+        large_communities_add: modifications
+            .large_communities_add
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        large_communities_remove: modifications
+            .large_communities_remove
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        as_path_prepend_asn,
+        as_path_prepend_count,
+    }
+}
+
+fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertisedRouteResponse {
+    proto::ExplainAdvertisedRouteResponse {
+        decision: match explain.decision {
+            ExplainDecision::Advertise => proto::ExplainDecision::Advertise as i32,
+            ExplainDecision::Deny => proto::ExplainDecision::Deny as i32,
+            ExplainDecision::NoBestRoute => proto::ExplainDecision::NoBestRoute as i32,
+            ExplainDecision::UnsupportedFamily => proto::ExplainDecision::UnsupportedFamily as i32,
+        },
+        peer_address: explain.peer.to_string(),
+        prefix: explain.prefix.addr_string(),
+        prefix_length: u32::from(explain.prefix.prefix_len()),
+        next_hop: explain
+            .next_hop
+            .map_or_else(String::new, |nh| nh.to_string()),
+        path_id: explain.path_id,
+        route_peer_address: explain
+            .route_peer
+            .map_or_else(String::new, |peer| peer.to_string()),
+        route_type: explain.route_type.map_or_else(String::new, |route_type| {
+            match route_type {
+                rustbgpd_policy::RouteType::Local => "local",
+                rustbgpd_policy::RouteType::Internal => "internal",
+                rustbgpd_policy::RouteType::External => "external",
+            }
+            .to_string()
+        }),
+        reasons: explain
+            .reasons
+            .into_iter()
+            .map(|reason| proto::ExplainReason {
+                code: reason.code.to_string(),
+                message: reason.message,
+            })
+            .collect(),
+        modifications: Some(explain_modifications_to_proto(&explain.modifications)),
+    }
+}
+
 fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut origin = 0u32;
     let mut as_path = Vec::new();
@@ -402,6 +520,24 @@ impl proto::rib_service_server::RibService for RibService {
             page_size,
             false,
         )))
+    }
+
+    async fn explain_advertised_route(
+        &self,
+        request: Request<proto::ExplainAdvertisedRouteRequest>,
+    ) -> Result<Response<proto::ExplainAdvertisedRouteResponse>, Status> {
+        let req = request.into_inner();
+        let peer: IpAddr = req
+            .peer_address
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?;
+        let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
+        let Some(explain) = self.query_explain_advertised_route(peer, prefix).await? else {
+            return Err(Status::not_found(
+                "peer not registered for outbound updates",
+            ));
+        };
+        Ok(Response::new(explain_to_proto(explain)))
     }
 
     async fn watch_routes(
@@ -842,6 +978,70 @@ mod tests {
         });
         let err = svc.list_received_routes(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn explain_advertised_route_rejects_invalid_peer_address() {
+        let svc = make_service();
+        let req = Request::new(proto::ExplainAdvertisedRouteRequest {
+            peer_address: "not-an-ip".to_string(),
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+        });
+        let err = svc.explain_advertised_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn explain_advertised_route_round_trips() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let svc = RibService::new(tx);
+        let req = Request::new(proto::ExplainAdvertisedRouteRequest {
+            peer_address: "192.0.2.1".to_string(),
+            prefix: "203.0.113.0".to_string(),
+            prefix_length: 24,
+        });
+
+        let call = tokio::spawn(async move { svc.explain_advertised_route(req).await });
+        let update = rx.recv().await.unwrap();
+        let reply = match update {
+            RibUpdate::ExplainAdvertisedRoute {
+                peer,
+                prefix,
+                reply,
+            } => {
+                assert_eq!(peer, "192.0.2.1".parse::<IpAddr>().unwrap());
+                assert_eq!(
+                    prefix,
+                    Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24))
+                );
+                reply
+            }
+            _ => panic!("unexpected update variant"),
+        };
+        reply
+            .send(Some(ExplainAdvertisedRoute {
+                decision: ExplainDecision::Advertise,
+                peer: "192.0.2.1".parse().unwrap(),
+                prefix: Prefix::V4(Ipv4Prefix::new("203.0.113.0".parse().unwrap(), 24)),
+                next_hop: Some("198.51.100.1".parse().unwrap()),
+                path_id: 0,
+                route_peer: Some("198.51.100.2".parse().unwrap()),
+                route_type: Some(rustbgpd_policy::RouteType::External),
+                reasons: vec![rustbgpd_rib::ExplainReason {
+                    code: "policy_permitted",
+                    message: "export policy permitted this route".to_string(),
+                }],
+                modifications: rustbgpd_policy::RouteModifications::default(),
+            }))
+            .unwrap();
+
+        let resp = call.await.unwrap().unwrap().into_inner();
+        assert_eq!(resp.decision, proto::ExplainDecision::Advertise as i32);
+        assert_eq!(resp.peer_address, "192.0.2.1");
+        assert_eq!(resp.route_peer_address, "198.51.100.2");
+        assert_eq!(resp.route_type, "external");
+        assert_eq!(resp.reasons.len(), 1);
     }
 
     #[test]

@@ -460,6 +460,7 @@ service RibService {
   rpc ListReceivedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ListBestRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+  rpc ExplainAdvertisedRoute(ExplainAdvertisedRouteRequest) returns (ExplainAdvertisedRouteResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
 }
@@ -497,6 +498,52 @@ message ListRoutesResponse {
   repeated Route routes = 1;
   string next_page_token = 2;
   uint64 total_count = 3;
+}
+
+enum ExplainDecision {
+  EXPLAIN_DECISION_UNSPECIFIED = 0;
+  EXPLAIN_DECISION_ADVERTISE = 1;
+  EXPLAIN_DECISION_DENY = 2;
+  EXPLAIN_DECISION_NO_BEST_ROUTE = 3;
+  EXPLAIN_DECISION_UNSUPPORTED_FAMILY = 4;
+}
+
+message ExplainAdvertisedRouteRequest {
+  string peer_address = 1;
+  string prefix = 2;
+  uint32 prefix_length = 3;
+}
+
+message ExplainReason {
+  string code = 1;
+  string message = 2;
+}
+
+message ExplainModifications {
+  optional uint32 set_local_pref = 1;
+  optional uint32 set_med = 2;
+  string set_next_hop = 3;
+  repeated uint32 communities_add = 4;
+  repeated uint32 communities_remove = 5;
+  repeated uint64 extended_communities_add = 6;
+  repeated uint64 extended_communities_remove = 7;
+  repeated string large_communities_add = 8;
+  repeated string large_communities_remove = 9;
+  optional uint32 as_path_prepend_asn = 10;
+  optional uint32 as_path_prepend_count = 11;
+}
+
+message ExplainAdvertisedRouteResponse {
+  ExplainDecision decision = 1;
+  string peer_address = 2;
+  string prefix = 3;
+  uint32 prefix_length = 4;
+  string next_hop = 5;
+  uint32 path_id = 6;
+  string route_peer_address = 7;
+  string route_type = 8;
+  repeated ExplainReason reasons = 9;
+  ExplainModifications modifications = 10;
 }
 
 message Route {

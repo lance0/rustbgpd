@@ -16,6 +16,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustc` error messages. Uses `toml_edit::ImDocument` for span-preserving
   key/value lookup on semantic errors, and `toml::de::Error::span()` for parse
   errors. Falls back to plain text when no span is available.
+- **Minimal export route explain.** New `RibService.ExplainAdvertisedRoute`
+  and `rustbgpctl rib advertised <peer> --prefix <CIDR> --explain` explain
+  whether the current best route for one prefix would be advertised to one peer,
+  including decisive reasons and any export modifications. This v1 scope is
+  export-only and does not yet include best-path explain, import explain, or
+  named policy/statement attribution.
 - **Per-peer log level filtering.** New `log_level` field on `[[neighbors]]`
   and `[peer_groups.<name>]` overrides the global `RUST_LOG` level for
   individual peers. Each peer session runs inside a tracing span with

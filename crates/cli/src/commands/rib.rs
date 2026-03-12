@@ -1,9 +1,14 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::output::{self, JsonRoute};
+use crate::output::{
+    self, JsonExplainAdvertisedRoute, JsonExplainModifications, JsonExplainReason, JsonRoute,
+};
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
-use crate::proto::{AddPathRequest, DeletePathRequest, ListRoutesRequest};
+use crate::proto::{
+    AddPathRequest, DeletePathRequest, ExplainAdvertisedRouteRequest, ExplainDecision,
+    ListRoutesRequest,
+};
 
 /// Parsed route filter options from CLI flags.
 pub struct RouteFilterOpts {
@@ -75,6 +80,194 @@ fn print_routes(routes: &[crate::proto::Route], json: bool) {
     }
 }
 
+fn explain_to_json(
+    explain: &crate::proto::ExplainAdvertisedRouteResponse,
+) -> JsonExplainAdvertisedRoute {
+    JsonExplainAdvertisedRoute {
+        decision: match ExplainDecision::try_from(explain.decision)
+            .unwrap_or(ExplainDecision::Unspecified)
+        {
+            ExplainDecision::Advertise => "advertise",
+            ExplainDecision::Deny => "deny",
+            ExplainDecision::NoBestRoute => "no_best_route",
+            ExplainDecision::UnsupportedFamily => "unsupported_family",
+            ExplainDecision::Unspecified => "unspecified",
+        }
+        .to_string(),
+        peer_address: explain.peer_address.clone(),
+        prefix: format!("{}/{}", explain.prefix, explain.prefix_length),
+        next_hop: explain.next_hop.clone(),
+        path_id: explain.path_id,
+        route_peer_address: explain.route_peer_address.clone(),
+        route_type: explain.route_type.clone(),
+        reasons: explain
+            .reasons
+            .iter()
+            .map(|reason| JsonExplainReason {
+                code: reason.code.clone(),
+                message: reason.message.clone(),
+            })
+            .collect(),
+        modifications: explain.modifications.as_ref().map_or_else(
+            || JsonExplainModifications {
+                set_local_pref: None,
+                set_med: None,
+                set_next_hop: String::new(),
+                communities_add: vec![],
+                communities_remove: vec![],
+                extended_communities_add: vec![],
+                extended_communities_remove: vec![],
+                large_communities_add: vec![],
+                large_communities_remove: vec![],
+                as_path_prepend_asn: None,
+                as_path_prepend_count: None,
+            },
+            |mods| JsonExplainModifications {
+                set_local_pref: mods.set_local_pref,
+                set_med: mods.set_med,
+                set_next_hop: mods.set_next_hop.clone(),
+                communities_add: mods
+                    .communities_add
+                    .iter()
+                    .map(|c| output::format_community(*c))
+                    .collect(),
+                communities_remove: mods
+                    .communities_remove
+                    .iter()
+                    .map(|c| output::format_community(*c))
+                    .collect(),
+                extended_communities_add: mods.extended_communities_add.clone(),
+                extended_communities_remove: mods.extended_communities_remove.clone(),
+                large_communities_add: mods.large_communities_add.clone(),
+                large_communities_remove: mods.large_communities_remove.clone(),
+                as_path_prepend_asn: mods.as_path_prepend_asn,
+                as_path_prepend_count: mods.as_path_prepend_count,
+            },
+        ),
+    }
+}
+
+fn print_explain_advertised(explain: &crate::proto::ExplainAdvertisedRouteResponse, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&explain_to_json(explain))
+                .expect("failed to serialize advertised-route explain as JSON")
+        );
+        return;
+    }
+
+    let decision =
+        match ExplainDecision::try_from(explain.decision).unwrap_or(ExplainDecision::Unspecified) {
+            ExplainDecision::Advertise => "Advertise",
+            ExplainDecision::Deny => "Deny",
+            ExplainDecision::NoBestRoute => "No Best Route",
+            ExplainDecision::UnsupportedFamily => "Unsupported Family",
+            ExplainDecision::Unspecified => "Unspecified",
+        };
+    println!(
+        "{decision}: {}/{} to {}",
+        explain.prefix, explain.prefix_length, explain.peer_address
+    );
+    if !explain.route_peer_address.is_empty() {
+        println!("Route peer: {}", explain.route_peer_address);
+    }
+    if !explain.route_type.is_empty() {
+        println!("Route type: {}", explain.route_type);
+    }
+    if !explain.next_hop.is_empty() {
+        println!("Next hop:   {}", explain.next_hop);
+    }
+    if explain.path_id != 0 {
+        println!("Path ID:    {}", explain.path_id);
+    }
+    if !explain.reasons.is_empty() {
+        println!("Reasons:");
+        for reason in &explain.reasons {
+            println!("- {}: {}", reason.code, reason.message);
+        }
+    }
+    if let Some(mods) = explain.modifications.as_ref()
+        && (mods.set_local_pref.is_some()
+            || mods.set_med.is_some()
+            || !mods.set_next_hop.is_empty()
+            || !mods.communities_add.is_empty()
+            || !mods.communities_remove.is_empty()
+            || !mods.extended_communities_add.is_empty()
+            || !mods.extended_communities_remove.is_empty()
+            || !mods.large_communities_add.is_empty()
+            || !mods.large_communities_remove.is_empty()
+            || mods.as_path_prepend_asn.is_some()
+            || mods.as_path_prepend_count.is_some())
+    {
+        println!("Modifications:");
+        if let Some(value) = mods.set_local_pref {
+            println!("- set_local_pref: {value}");
+        }
+        if let Some(value) = mods.set_med {
+            println!("- set_med: {value}");
+        }
+        if !mods.set_next_hop.is_empty() {
+            println!("- set_next_hop: {}", mods.set_next_hop);
+        }
+        if !mods.communities_add.is_empty() {
+            println!(
+                "- communities_add: {}",
+                mods.communities_add
+                    .iter()
+                    .map(|c| output::format_community(*c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !mods.communities_remove.is_empty() {
+            println!(
+                "- communities_remove: {}",
+                mods.communities_remove
+                    .iter()
+                    .map(|c| output::format_community(*c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !mods.extended_communities_add.is_empty() {
+            println!(
+                "- extended_communities_add: {}",
+                mods.extended_communities_add
+                    .iter()
+                    .map(|ec| format!("0x{ec:016x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !mods.extended_communities_remove.is_empty() {
+            println!(
+                "- extended_communities_remove: {}",
+                mods.extended_communities_remove
+                    .iter()
+                    .map(|ec| format!("0x{ec:016x}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        if !mods.large_communities_add.is_empty() {
+            println!(
+                "- large_communities_add: {}",
+                mods.large_communities_add.join(", ")
+            );
+        }
+        if !mods.large_communities_remove.is_empty() {
+            println!(
+                "- large_communities_remove: {}",
+                mods.large_communities_remove.join(", ")
+            );
+        }
+        if let (Some(asn), Some(count)) = (mods.as_path_prepend_asn, mods.as_path_prepend_count) {
+            println!("- as_path_prepend: {asn} x {count}");
+        }
+    }
+}
+
 pub async fn best(
     connection: Connection,
     family: Option<i32>,
@@ -122,6 +315,27 @@ pub async fn advertised(
         .await?
         .into_inner();
     print_routes(&resp.routes, json);
+    Ok(())
+}
+
+pub async fn explain_advertised(
+    connection: Connection,
+    address: &str,
+    prefix: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .explain_advertised_route(ExplainAdvertisedRouteRequest {
+            peer_address: address.to_string(),
+            prefix: addr,
+            prefix_length: len,
+        })
+        .await?
+        .into_inner();
+    print_explain_advertised(&resp, json);
     Ok(())
 }
 
@@ -187,4 +401,32 @@ pub async fn delete_route(
         &format!("Route {prefix} deleted"),
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connection::connect;
+    use crate::test_support::spawn_mock_server;
+
+    #[tokio::test]
+    async fn explain_advertised_calls_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        explain_advertised(connection, "192.0.2.1", "203.0.113.0/24", false)
+            .await
+            .unwrap();
+
+        let req = server
+            .state
+            .last_explain_advertised
+            .lock()
+            .await
+            .clone()
+            .expect("explain request captured");
+        assert_eq!(req.peer_address, "192.0.2.1");
+        assert_eq!(req.prefix, "203.0.113.0");
+        assert_eq!(req.prefix_length, 24);
+    }
 }

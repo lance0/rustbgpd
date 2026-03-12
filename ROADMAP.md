@@ -169,7 +169,7 @@ get blog posts written and make operators switch.
 
 #### Debugging & Observability
 
-- [ ] **Policy trace / route explain** — `rustbgpctl route explain 203.0.113.0/24`: show the route's full journey — which peer announced it, import policy evaluation step-by-step (which statement matched, what modifications applied), best-path selection with ranked candidates and tie-break reasons, then per-peer export policy evaluation showing why it was or wasn't advertised to each neighbor. No BGP daemon does this well. This is the flagship feature.
+- [x] **Minimal route explain (export)** — `rustbgpctl rib advertised <peer> --prefix 203.0.113.0/24 --explain` explains whether the current best route would be advertised to one peer, with decisive reasons and applied export modifications. gRPC: `RibService.ExplainAdvertisedRoute`.
 - [x] **Config diff on SIGHUP** — field-level change logging on reload: each changed neighbor logs exactly which fields differ (e.g. "hold_time: Some(90) → Some(45), families: [...] → [...]"). Sensitive fields (md5_password) log `<changed>` without revealing values.
 - [x] **Per-peer log filtering** — each peer session runs in a tracing span with `peer_addr`, `remote_asn`, `peer_group` fields. Per-peer `log_level` config field overrides the global `RUST_LOG` default. Also filterable via `RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug`.
 - [x] **Route diff on policy change** — after hot-applying an export policy change, logs announced/withdrawn counts per peer at info level
@@ -180,6 +180,14 @@ get blog posts written and make operators switch.
 - [ ] **Built-in looking glass** — `rustbgpd --looking-glass :8080`: read-only HTTP/JSON API for NOC dashboards and public looking glass pages. Single binary, zero config. IXes would love this for member-facing route queries.
 - [ ] **Config snippets / examples in error messages** — when a gRPC call fails validation, include a working example in the error detail: "invalid families value; try: `families: [\"ipv4_unicast\", \"ipv6_unicast\"]`"
 - [x] **Neighbor auto-discovery logging** — when an unknown peer connects, the warning includes a suggested `rustbgpctl neighbor <addr> add --asn <ASN>` command to help operators bootstrap new peers.
+
+Deferred explain follow-ups:
+- [ ] **Best-path explain** — explain why one candidate won over the other current candidates for a prefix
+- [ ] **Named policy / statement attribution in explain** — include exact policy and statement identity in explain output
+- [ ] **Import explain** — dry-run import policy, RPKI, and inbound acceptance for one received route
+- [ ] **Verbose policy trace** — include non-match steps and full decision trace instead of only decisive reasons
+- [ ] **Route history / why-changed timeline** — retain explain history across best-path and policy changes
+- [ ] **Looking glass integration for explain** — expose explain output via the future read-only HTTP/JSON looking glass
 
 ### P3.5 — Scale & Hardening
 

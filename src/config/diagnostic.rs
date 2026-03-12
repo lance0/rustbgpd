@@ -43,27 +43,24 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
             "not a valid socket address",
         ),
         ConfigError::InvalidHoldTime { value } => find_hold_time_span(source, *value),
-        ConfigError::InvalidLocalIpv6Nexthop { value, .. } => {
-            find_value_anywhere(source, "local_ipv6_nexthop", value, "not a valid IPv6 address")
-        }
-        ConfigError::InvalidRuntimeStateDir { .. } => {
-            lookup_value_span(source, &["global", "runtime_state_dir"], "must not be empty")
-        }
+        ConfigError::InvalidLocalIpv6Nexthop { value, .. } => find_value_anywhere(
+            source,
+            "local_ipv6_nexthop",
+            value,
+            "not a valid IPv6 address",
+        ),
+        ConfigError::InvalidRuntimeStateDir { .. } => lookup_value_span(
+            source,
+            &["global", "runtime_state_dir"],
+            "must not be empty",
+        ),
         ConfigError::InvalidGrpcConfig { reason } => {
             if reason.contains("grpc_tcp.address") {
                 lookup_key_span(source, &["global", "telemetry", "grpc_tcp"], reason)
             } else if reason.contains("grpc_uds.path") {
-                lookup_value_span(
-                    source,
-                    &["global", "telemetry", "grpc_uds", "path"],
-                    reason,
-                )
+                lookup_value_span(source, &["global", "telemetry", "grpc_uds", "path"], reason)
             } else if reason.contains("grpc_uds.mode") {
-                lookup_value_span(
-                    source,
-                    &["global", "telemetry", "grpc_uds", "mode"],
-                    reason,
-                )
+                lookup_value_span(source, &["global", "telemetry", "grpc_uds", "mode"], reason)
             } else {
                 None
             }
@@ -145,11 +142,7 @@ fn parse_im(source: &str) -> Option<ImDocument<String>> {
 }
 
 /// Look up a value span via a dotted key path.
-fn lookup_value_span(
-    source: &str,
-    keys: &[&str],
-    label: &str,
-) -> Option<(Range<usize>, String)> {
+fn lookup_value_span(source: &str, keys: &[&str], label: &str) -> Option<(Range<usize>, String)> {
     let doc = parse_im(source)?;
     let mut item = doc.as_item();
     for key in keys {
@@ -160,11 +153,7 @@ fn lookup_value_span(
 }
 
 /// Look up a key span (the key itself, not the value).
-fn lookup_key_span(
-    source: &str,
-    keys: &[&str],
-    label: &str,
-) -> Option<(Range<usize>, String)> {
+fn lookup_key_span(source: &str, keys: &[&str], label: &str) -> Option<(Range<usize>, String)> {
     let doc = parse_im(source)?;
     let mut table = doc.as_table();
     for (i, key) in keys.iter().enumerate() {
@@ -407,8 +396,7 @@ hold_time = 2
 ",
         )
         .unwrap();
-        let err =
-            super::super::Config::load_with_diagnostics(path.to_str().unwrap()).unwrap_err();
+        let err = super::super::Config::load_with_diagnostics(path.to_str().unwrap()).unwrap_err();
         assert!(err.contains("hold_time = 2"), "got: {err}");
         assert!(err.contains("must be 0 or >= 3"), "got: {err}");
         assert!(err.contains('^'), "got: {err}");

@@ -192,6 +192,49 @@ pub struct JsonRoute {
     pub validation_state: String,
 }
 
+#[derive(Serialize)]
+pub struct JsonExplainReason {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Serialize)]
+pub struct JsonExplainModifications {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_local_pref: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set_med: Option<u32>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub set_next_hop: String,
+    pub communities_add: Vec<String>,
+    pub communities_remove: Vec<String>,
+    pub extended_communities_add: Vec<u64>,
+    pub extended_communities_remove: Vec<u64>,
+    pub large_communities_add: Vec<String>,
+    pub large_communities_remove: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub as_path_prepend_asn: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub as_path_prepend_count: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct JsonExplainAdvertisedRoute {
+    pub decision: String,
+    pub peer_address: String,
+    pub prefix: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub next_hop: String,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub path_id: u32,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub route_peer_address: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub route_type: String,
+    pub reasons: Vec<JsonExplainReason>,
+    pub modifications: JsonExplainModifications,
+}
+
 fn is_zero(v: &u32) -> bool {
     *v == 0
 }

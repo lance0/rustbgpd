@@ -59,6 +59,22 @@ async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Ve
     reply_rx.await.unwrap()
 }
 
+async fn query_explain_advertised_route(
+    tx: &mpsc::Sender<RibUpdate>,
+    peer: IpAddr,
+    prefix: Prefix,
+) -> crate::update::ExplainAdvertisedRoute {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ExplainAdvertisedRoute {
+        peer,
+        prefix,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap()
+}
+
 async fn query_mrt_snapshot(tx: &mpsc::Sender<RibUpdate>) -> crate::update::MrtSnapshotData {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryMrtSnapshot { reply: reply_tx })
@@ -1741,6 +1757,190 @@ async fn export_policy_match_next_hop_filters_route() {
         out_rx.try_recv().is_err(),
         "export policy should filter the route by next-hop"
     );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn explain_advertised_route_reports_no_best_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let explain = query_explain_advertised_route(&tx, target, prefix).await;
+    assert_eq!(
+        explain.decision,
+        crate::update::ExplainDecision::NoBestRoute
+    );
+    assert_eq!(explain.reasons[0].code, "no_best_route");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn explain_advertised_route_reports_policy_deny_without_mutation() {
+    let (tx, rx) = mpsc::channel(64);
+    let deny_policy = rustbgpd_policy::PolicyChain {
+        policies: vec![rustbgpd_policy::Policy {
+            default_action: rustbgpd_policy::PolicyAction::Deny,
+            entries: vec![],
+        }],
+    };
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: Some(deny_policy),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let explain = query_explain_advertised_route(&tx, target, prefix).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Deny);
+    assert_eq!(explain.reasons[0].code, "policy_denied");
+
+    let advertised = {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(RibUpdate::QueryAdvertisedRoutes {
+            peer: target,
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
+        reply_rx.await.unwrap()
+    };
+    assert!(advertised.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn explain_advertised_route_reports_modifications() {
+    let (tx, rx) = mpsc::channel(64);
+    let export_policy = rustbgpd_policy::PolicyChain {
+        policies: vec![rustbgpd_policy::Policy {
+            default_action: rustbgpd_policy::PolicyAction::Permit,
+            entries: vec![rustbgpd_policy::PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                match_community: vec![],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_rpki_validation: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: rustbgpd_policy::RouteModifications {
+                    set_local_pref: Some(200),
+                    ..rustbgpd_policy::RouteModifications::default()
+                },
+                action: rustbgpd_policy::PolicyAction::Permit,
+            }],
+        }],
+    };
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: Some(export_policy),
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let route = make_route(
+        Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24),
+        Ipv4Addr::new(10, 0, 0, 1),
+    );
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![route],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24));
+    let explain = query_explain_advertised_route(&tx, target, prefix).await;
+    assert_eq!(explain.decision, crate::update::ExplainDecision::Advertise);
+    assert_eq!(explain.route_peer, Some(source));
+    assert_eq!(
+        explain.route_type,
+        Some(rustbgpd_policy::RouteType::External)
+    );
+    assert_eq!(explain.modifications.set_local_pref, Some(200));
+    assert_eq!(explain.reasons[0].code, "ebgp_route");
+    assert_eq!(explain.reasons[1].code, "policy_permitted");
 
     drop(tx);
     handle.await.unwrap();

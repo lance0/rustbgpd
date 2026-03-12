@@ -16,7 +16,7 @@ use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::{RouteEvent, RouteEventType};
 use crate::loc_rib::LocRib;
-use crate::update::OutboundRouteUpdate;
+use crate::update::{ExplainAdvertisedRoute, ExplainDecision, ExplainReason, OutboundRouteUpdate};
 
 fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
     match origin {
@@ -26,7 +26,173 @@ fn route_type(origin: crate::route::RouteOrigin) -> RouteType {
     }
 }
 
+fn route_type_label(route_type: RouteType) -> &'static str {
+    match route_type {
+        RouteType::Local => "local_route",
+        RouteType::Internal => "ibgp_route",
+        RouteType::External => "ebgp_route",
+    }
+}
+
+fn route_type_message(route_type: RouteType) -> &'static str {
+    match route_type {
+        RouteType::Local => "best route is locally originated",
+        RouteType::Internal => "best route was learned from an iBGP peer",
+        RouteType::External => "best route was learned from an eBGP peer",
+    }
+}
+
 impl RibManager {
+    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(super) fn explain_single_best_prefix(
+        loc_rib: &LocRib,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        prefix: Prefix,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        target_is_ebgp: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+    ) -> ExplainAdvertisedRoute {
+        let mut explain = ExplainAdvertisedRoute {
+            decision: ExplainDecision::NoBestRoute,
+            peer: target_peer,
+            prefix,
+            next_hop: None,
+            path_id: 0,
+            route_peer: None,
+            route_type: None,
+            reasons: Vec::new(),
+            modifications: rustbgpd_policy::RouteModifications::default(),
+        };
+
+        let Some(best) = loc_rib.get(&prefix) else {
+            explain.reasons.push(ExplainReason {
+                code: "no_best_route",
+                message: "no best route exists for this prefix".to_string(),
+            });
+            return explain;
+        };
+
+        explain.route_peer = Some(best.peer);
+        explain.route_type = Some(route_type(best.origin_type));
+
+        if best.peer == target_peer {
+            explain.decision = ExplainDecision::Deny;
+            explain.reasons.push(ExplainReason {
+                code: "ibgp_split_horizon",
+                message: "route is suppressed by split horizon because it originated from the target peer".to_string(),
+            });
+            return explain;
+        }
+
+        if should_suppress_ibgp_inner(
+            best,
+            target_is_ebgp,
+            target_is_rr_client,
+            cluster_id,
+            peer_is_rr_client,
+        ) {
+            explain.decision = ExplainDecision::Deny;
+            let code = if !target_is_ebgp
+                && !best.is_ebgp()
+                && cluster_id.is_some()
+                && !peer_is_rr_client.get(&best.peer).copied().unwrap_or(false)
+                && !target_is_rr_client
+            {
+                "rr_non_client_to_non_client"
+            } else {
+                "ibgp_split_horizon"
+            };
+            let message = if code == "rr_non_client_to_non_client" {
+                "route reflector will not reflect a non-client iBGP route to another non-client"
+                    .to_string()
+            } else {
+                "iBGP split horizon suppresses advertisement of this route".to_string()
+            };
+            explain.reasons.push(ExplainReason { code, message });
+            return explain;
+        }
+
+        let family = prefix_family(&prefix);
+        if !sendable.is_some_and(|f| f.contains(&family)) {
+            explain.decision = ExplainDecision::UnsupportedFamily;
+            explain.reasons.push(ExplainReason {
+                code: "family_not_sendable",
+                message: format!(
+                    "peer cannot receive {} {} routes",
+                    match family.0 {
+                        Afi::Ipv4 => "ipv4",
+                        Afi::Ipv6 => "ipv6",
+                    },
+                    match family.1 {
+                        Safi::Unicast => "unicast",
+                        Safi::FlowSpec => "flowspec",
+                        Safi::Multicast => "multicast",
+                    }
+                ),
+            });
+            return explain;
+        }
+
+        let aspath_str = best
+            .as_path()
+            .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+        let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+        let ctx = RouteContext {
+            prefix,
+            next_hop: Some(best.next_hop),
+            extended_communities: best.extended_communities(),
+            communities: best.communities(),
+            large_communities: best.large_communities(),
+            as_path_str: &aspath_str,
+            as_path_len: aspath_len,
+            validation_state: best.validation_state,
+            peer_address: Some(target_peer),
+            peer_asn: target_peer_asn,
+            peer_group: target_peer_group,
+            route_type: explain.route_type,
+            local_pref: best.local_pref_attr(),
+            med: best.med_attr(),
+        };
+        let result = evaluate_chain(export_pol, &ctx);
+        if result.action != PolicyAction::Permit {
+            explain.decision = ExplainDecision::Deny;
+            explain.reasons.push(ExplainReason {
+                code: "policy_denied",
+                message: "export policy denied this route".to_string(),
+            });
+            return explain;
+        }
+
+        explain.decision = ExplainDecision::Advertise;
+        explain.modifications = result.modifications.clone();
+        if let Some(route_type) = explain.route_type {
+            explain.reasons.push(ExplainReason {
+                code: route_type_label(route_type),
+                message: route_type_message(route_type).to_string(),
+            });
+        }
+        if export_pol.is_some() {
+            explain.reasons.push(ExplainReason {
+                code: "policy_permitted",
+                message: "export policy permitted this route".to_string(),
+            });
+        }
+
+        let mut next_hop = best.next_hop;
+        if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) =
+            explain.modifications.set_next_hop.clone()
+        {
+            next_hop = addr;
+        }
+        explain.next_hop = Some(next_hop);
+        explain
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub(super) fn try_send_and_commit_outbound_update(
         &mut self,

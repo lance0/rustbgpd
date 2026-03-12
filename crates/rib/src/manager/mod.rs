@@ -22,7 +22,9 @@ use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
 use crate::event::RouteEvent;
 use crate::loc_rib::LocRib;
-use crate::update::{MrtPeerEntry, MrtSnapshotData, OutboundRouteUpdate, RibUpdate};
+use crate::update::{
+    ExplainAdvertisedRoute, MrtPeerEntry, MrtSnapshotData, OutboundRouteUpdate, RibUpdate,
+};
 
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, prefix_family};
 
@@ -389,6 +391,11 @@ impl RibManager {
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
                 self.handle_query_advertised_routes(peer, reply);
             }
+            RibUpdate::ExplainAdvertisedRoute {
+                peer,
+                prefix,
+                reply,
+            } => self.handle_explain_advertised_route(peer, prefix, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
             }
@@ -485,6 +492,38 @@ impl RibManager {
             .unwrap_or_default();
 
         if reply.send(routes).is_err() {
+            warn!("query caller dropped before receiving response");
+        }
+    }
+
+    fn handle_explain_advertised_route(
+        &mut self,
+        peer: IpAddr,
+        prefix: Prefix,
+        reply: tokio::sync::oneshot::Sender<Option<ExplainAdvertisedRoute>>,
+    ) {
+        let Some(sendable) = self.peer_sendable_families.get(&peer) else {
+            let _ = reply.send(None);
+            return;
+        };
+
+        let explanation = Self::explain_single_best_prefix(
+            &self.loc_rib,
+            &self.peer_is_rr_client,
+            prefix,
+            peer,
+            self.peer_asn.get(&peer).copied(),
+            self.peer_group.get(&peer).map(String::as_str),
+            self.peer_is_ebgp.get(&peer).copied().unwrap_or(true),
+            self.peer_is_rr_client.get(&peer).copied().unwrap_or(false),
+            self.cluster_id,
+            Some(sendable),
+            self.peer_export_policies
+                .get(&peer)
+                .and_then(Option::as_ref),
+        );
+
+        if reply.send(Some(explanation)).is_err() {
             warn!("query caller dropped before receiving response");
         }
     }

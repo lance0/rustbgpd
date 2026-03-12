@@ -265,6 +265,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListReceivedRoutes` | Adj-RIB-In: all routes received from peers |
 | `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
 | `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
+| `ExplainAdvertisedRoute` | Dry-run export decision for one prefix to one peer |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
@@ -295,6 +296,21 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"neighbor_address": "10.0.0.2"}' \
   localhost:50051 rustbgpd.v1.RibService/ListAdvertisedRoutes
 ```
+
+### Explain one advertised route decision
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"peer_address": "10.0.0.2", "prefix": "203.0.113.0", "prefix_length": 24}' \
+  localhost:50051 rustbgpd.v1.RibService/ExplainAdvertisedRoute
+```
+
+This dry-runs the current export decision for a single prefix and peer. The
+response includes the final decision, decisive reasons, selected best-route
+identity, and any export modifications that would be applied.
+
+Current scope is export explain only. Best-path explain, import explain, and
+exact policy/statement attribution are deferred.
 
 ### Address family filtering
 

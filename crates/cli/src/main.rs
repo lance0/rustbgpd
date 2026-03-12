@@ -209,6 +209,9 @@ enum RibAction {
         /// Address family filter
         #[arg(short = 'a', long)]
         family: Option<String>,
+        /// Explain whether this exact prefix would be advertised to the peer
+        #[arg(long)]
+        explain: bool,
     },
     /// Inject a route
     Add {
@@ -419,9 +422,33 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 Some(RibAction::Advertised {
                     address,
                     family: fam,
+                    explain,
                 }) => {
                     let f = resolve_family(&fam.or(family))?;
-                    commands::rib::advertised(connection, &address, f, &filters, json).await
+                    if explain {
+                        if filters.longer {
+                            return Err(CliError::Argument(
+                                "--explain does not support --longer".into(),
+                            ));
+                        }
+                        if filters.origin_asn.is_some()
+                            || !filters.community.is_empty()
+                            || !filters.large_community.is_empty()
+                        {
+                            return Err(CliError::Argument(
+                                "--explain does not support route filters other than --prefix"
+                                    .into(),
+                            ));
+                        }
+                        let Some(prefix) = filters.prefix.as_deref() else {
+                            return Err(CliError::Argument(
+                                "--explain requires --prefix with an exact CIDR".into(),
+                            ));
+                        };
+                        commands::rib::explain_advertised(connection, &address, prefix, json).await
+                    } else {
+                        commands::rib::advertised(connection, &address, f, &filters, json).await
+                    }
                 }
                 Some(RibAction::Add {
                     prefix,
@@ -596,6 +623,34 @@ mod tests {
             assert_eq!(address, "10.0.0.1");
         } else {
             panic!("expected Rib Received command");
+        }
+    }
+
+    #[test]
+    fn test_parse_rib_advertised_explain() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "rib",
+            "--prefix",
+            "203.0.113.0/24",
+            "advertised",
+            "192.0.2.1",
+            "--explain",
+        ])
+        .unwrap();
+        if let Command::Rib {
+            action: Some(RibAction::Advertised {
+                address, explain, ..
+            }),
+            prefix,
+            ..
+        } = cli.command
+        {
+            assert_eq!(address, "192.0.2.1");
+            assert!(explain);
+            assert_eq!(prefix.as_deref(), Some("203.0.113.0/24"));
+        } else {
+            panic!("expected Rib Advertised explain command");
         }
     }
 

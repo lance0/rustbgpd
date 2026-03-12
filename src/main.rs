@@ -2,7 +2,10 @@
 //!
 //! Binary entry point. Loads config, wires components, starts runtime.
 
-#![cfg_attr(not(any(feature = "jemalloc", feature = "dhat-heap")), deny(unsafe_code))]
+#![cfg_attr(
+    not(any(feature = "jemalloc", feature = "dhat-heap")),
+    deny(unsafe_code)
+)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 

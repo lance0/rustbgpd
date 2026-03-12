@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
+use tokio_stream::Stream;
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
 use tonic::metadata::MetadataValue;
 use tonic::service::Interceptor;
@@ -14,6 +15,7 @@ use rustbgpd_api::proto as server_proto;
 use rustbgpd_api::proto::control_service_server::ControlServiceServer;
 use rustbgpd_api::proto::global_service_server::GlobalServiceServer;
 use rustbgpd_api::proto::neighbor_service_server::NeighborServiceServer;
+use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 
 #[derive(Default)]
 pub(crate) struct MockState {
@@ -21,6 +23,7 @@ pub(crate) struct MockState {
     pub(crate) global_calls: AtomicUsize,
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
+    pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
 }
 
 pub(crate) struct MockServerHandle {
@@ -82,6 +85,9 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
     let neighbor = MockNeighborService {
         state: Arc::clone(&state),
     };
+    let rib = MockRibService {
+        state: Arc::clone(&state),
+    };
 
     tokio::spawn(async move {
         Server::builder()
@@ -95,8 +101,9 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
             ))
             .add_service(NeighborServiceServer::with_interceptor(
                 neighbor,
-                interceptor,
+                interceptor.clone(),
             ))
+            .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                 let _ = shutdown_rx.await;
             })
@@ -134,6 +141,9 @@ pub(crate) async fn spawn_mock_uds_server(
     let neighbor = MockNeighborService {
         state: Arc::clone(&state),
     };
+    let rib = MockRibService {
+        state: Arc::clone(&state),
+    };
 
     tokio::spawn(async move {
         Server::builder()
@@ -147,8 +157,9 @@ pub(crate) async fn spawn_mock_uds_server(
             ))
             .add_service(NeighborServiceServer::with_interceptor(
                 neighbor,
-                interceptor,
+                interceptor.clone(),
             ))
+            .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
                 let _ = shutdown_rx.await;
             })
@@ -321,5 +332,100 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
     ) -> Result<Response<server_proto::SoftResetInResponse>, Status> {
         *self.state.last_softreset.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::SoftResetInResponse {}))
+    }
+}
+
+struct MockRibService {
+    state: Arc<MockState>,
+}
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
+    type WatchRoutesStream =
+        std::pin::Pin<Box<dyn Stream<Item = Result<server_proto::RouteEvent, Status>> + Send>>;
+
+    async fn list_received_routes(
+        &self,
+        _request: Request<server_proto::ListRoutesRequest>,
+    ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
+        Ok(Response::new(server_proto::ListRoutesResponse {
+            routes: vec![],
+            next_page_token: String::new(),
+            total_count: 0,
+        }))
+    }
+
+    async fn list_best_routes(
+        &self,
+        _request: Request<server_proto::ListRoutesRequest>,
+    ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
+        Ok(Response::new(server_proto::ListRoutesResponse {
+            routes: vec![],
+            next_page_token: String::new(),
+            total_count: 0,
+        }))
+    }
+
+    async fn list_advertised_routes(
+        &self,
+        _request: Request<server_proto::ListRoutesRequest>,
+    ) -> Result<Response<server_proto::ListRoutesResponse>, Status> {
+        Ok(Response::new(server_proto::ListRoutesResponse {
+            routes: vec![],
+            next_page_token: String::new(),
+            total_count: 0,
+        }))
+    }
+
+    async fn explain_advertised_route(
+        &self,
+        request: Request<server_proto::ExplainAdvertisedRouteRequest>,
+    ) -> Result<Response<server_proto::ExplainAdvertisedRouteResponse>, Status> {
+        *self.state.last_explain_advertised.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::ExplainAdvertisedRouteResponse {
+                decision: server_proto::ExplainDecision::Advertise as i32,
+                peer_address: "192.0.2.1".to_string(),
+                prefix: "203.0.113.0".to_string(),
+                prefix_length: 24,
+                next_hop: "198.51.100.1".to_string(),
+                path_id: 0,
+                route_peer_address: "198.51.100.2".to_string(),
+                route_type: "external".to_string(),
+                reasons: vec![server_proto::ExplainReason {
+                    code: "policy_permitted".to_string(),
+                    message: "export policy permitted this route".to_string(),
+                }],
+                modifications: Some(server_proto::ExplainModifications {
+                    set_local_pref: Some(200),
+                    set_med: None,
+                    set_next_hop: String::new(),
+                    communities_add: vec![],
+                    communities_remove: vec![],
+                    extended_communities_add: vec![],
+                    extended_communities_remove: vec![],
+                    large_communities_add: vec![],
+                    large_communities_remove: vec![],
+                    as_path_prepend_asn: None,
+                    as_path_prepend_count: None,
+                }),
+            },
+        ))
+    }
+
+    async fn watch_routes(
+        &self,
+        _request: Request<server_proto::WatchRoutesRequest>,
+    ) -> Result<Response<Self::WatchRoutesStream>, Status> {
+        Err(Status::unimplemented("not used in CLI tests"))
+    }
+
+    async fn list_flow_spec_routes(
+        &self,
+        _request: Request<server_proto::ListFlowSpecRequest>,
+    ) -> Result<Response<server_proto::ListFlowSpecResponse>, Status> {
+        Ok(Response::new(server_proto::ListFlowSpecResponse {
+            routes: vec![],
+        }))
     }
 }

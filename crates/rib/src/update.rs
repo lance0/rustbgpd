@@ -30,6 +30,45 @@ pub struct OutboundRouteUpdate {
     pub flowspec_withdraw: Vec<FlowSpecRule>,
 }
 
+/// Structured explanation for whether a route would be advertised to a peer.
+#[derive(Debug, Clone)]
+pub struct ExplainAdvertisedRoute {
+    /// Final decision for this peer/prefix.
+    pub decision: ExplainDecision,
+    /// Target peer address.
+    pub peer: IpAddr,
+    /// Prefix being explained.
+    pub prefix: Prefix,
+    /// Resolved next-hop if the route would be advertised.
+    pub next_hop: Option<IpAddr>,
+    /// Add-Path identifier for the advertised route.
+    pub path_id: u32,
+    /// Peer that originated the selected best route.
+    pub route_peer: Option<IpAddr>,
+    /// Selected best route type.
+    pub route_type: Option<rustbgpd_policy::RouteType>,
+    /// Decisive explanation reasons, in order.
+    pub reasons: Vec<ExplainReason>,
+    /// Export modifications that would be applied.
+    pub modifications: rustbgpd_policy::RouteModifications,
+}
+
+/// Final decision for an advertised-route explanation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExplainDecision {
+    Advertise,
+    Deny,
+    NoBestRoute,
+    UnsupportedFamily,
+}
+
+/// One decisive reason in an advertised-route explanation.
+#[derive(Debug, Clone)]
+pub struct ExplainReason {
+    pub code: &'static str,
+    pub message: String,
+}
+
 /// Messages sent from peer sessions to the RIB manager.
 pub enum RibUpdate {
     /// Peer session sent us routes.
@@ -118,6 +157,15 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
+    },
+    /// Query: explain whether the current best route for a prefix would be advertised to a peer.
+    ExplainAdvertisedRoute {
+        /// The target peer.
+        peer: IpAddr,
+        /// Prefix to explain.
+        prefix: Prefix,
+        /// Response channel.
+        reply: oneshot::Sender<Option<ExplainAdvertisedRoute>>,
     },
     /// Subscribe to route change events via broadcast channel.
     SubscribeRouteEvents {
