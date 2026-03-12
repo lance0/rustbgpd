@@ -14,7 +14,7 @@ inject routes.
 control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 FlowSpec, BMP, MRT, and full gRPC/CLI management are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-1050+ workspace tests, fuzz targets, and 14 automated interop suites against
+1090+ workspace tests, fuzz targets, and 14 automated interop suites against
 FRR 10.3.1 and BIRD 2.0.12.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
@@ -240,7 +240,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN, VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1050+ workspace tests, fuzz targets, 14 automated interop suites (189 assertions) |
+| **Tests** | 1090+ workspace tests, fuzz targets, 14 automated interop suites (189 assertions) |
 
 ## Documentation
 
@@ -255,7 +255,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
-| [docs/adr/](docs/adr/) | Architecture decision records (46 ADRs) |
+| [docs/adr/](docs/adr/) | Architecture decision records (48 ADRs) |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
