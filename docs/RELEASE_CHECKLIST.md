@@ -42,6 +42,15 @@ export RUSTBGPD_ADDR=unix:///tmp/rustbgpd/grpc.sock
 kill $DAEMON_PID
 ```
 
+### README quickstart smoke
+
+Walk the exact README quickstart from a clean tree and confirm:
+
+- the minimal config validates with `--check`
+- the daemon creates the UDS socket under `/tmp/rustbgpd`
+- `rustbgpctl health`, `global`, and `neighbor` succeed with `RUSTBGPD_ADDR`
+- no undocumented prerequisite or manual workaround is needed
+
 ### UDS default smoke
 
 Verify the daemon creates the gRPC socket at the configured
@@ -106,6 +115,19 @@ containerlab destroy -t tests/interop/m13-policy-frr.clab.yml
 containerlab deploy -t tests/interop/m11-gr-frr.clab.yml
 bash tests/interop/scripts/test-m11-gr-frr.sh
 containerlab destroy -t tests/interop/m11-gr-frr.clab.yml
+
+# Extended next-hop / IPv6 export path
+containerlab deploy -t tests/interop/m18-extnexthop-frr.clab.yml
+bash tests/interop/scripts/test-m18-extnexthop-frr.sh
+containerlab destroy -t tests/interop/m18-extnexthop-frr.clab.yml
+```
+
+If the release includes recent LLGR changes, also run:
+
+```bash
+containerlab deploy -t tests/interop/m16-llgr-frr.clab.yml
+bash tests/interop/scripts/test-m16-llgr-frr.sh
+containerlab destroy -t tests/interop/m16-llgr-frr.clab.yml
 ```
 
 ### Docker smoke

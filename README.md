@@ -68,9 +68,10 @@ cp examples/minimal/config.toml config.toml
 $EDITOR config.toml   # set your ASN, router ID, and peer address
 ```
 
-The minimal example sets `runtime_state_dir` to a user-writable path. For a
-route-server deployment, start from `examples/route-server/config.toml`
-instead. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+The minimal example sets `runtime_state_dir` to a user-writable path and
+includes the required `prometheus_addr`. For a route-server deployment, start
+from `examples/route-server/config.toml` instead. Full reference:
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ### 3. Validate and run
 
@@ -228,7 +229,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 - No EVPN, VPNv4/v6, or Confederation support
 - No native gRPC TLS termination yet (prefer local UDS access or an mTLS proxy)
 - No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported
-- End-to-end system benchmarks (bgperf2-style) not yet published -- micro-benchmarks show competitive data structure performance (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
+- Published bgperf2 benchmarks currently cover 10 peers × 1k prefixes, 2 peers × 10k prefixes, and 2 peers × 100k prefixes; churn and long-duration benchmark automation remain future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 
 ## Project status
 
