@@ -140,7 +140,10 @@ impl RibManager {
     ///
     /// Two-phase timer (RFC 9494): if LLGR is configured for this peer,
     /// promote GR-stale routes to LLGR-stale instead of purging.
-    #[expect(clippy::too_many_lines, reason = "LLGR promotion has unicast + FlowSpec paths")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "LLGR promotion has unicast + FlowSpec paths"
+    )]
     pub(super) fn sweep_gr_stale(&mut self, peer: IpAddr) {
         let gr_families: Vec<(Afi, Safi)> = self
             .gr_peers

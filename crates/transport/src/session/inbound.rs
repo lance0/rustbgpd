@@ -128,11 +128,14 @@ impl PeerSession {
             // IPv4 EoR: empty UPDATE (no NLRI, no withdrawn, no attributes)
             if parsed.attributes.is_empty() {
                 info!(peer = %self.peer_label, family = "ipv4_unicast", "received End-of-RIB");
-                let _ = self.rib_tx.send(RibUpdate::EndOfRib {
-                    peer: self.peer_ip,
-                    afi: Afi::Ipv4,
-                    safi: Safi::Unicast,
-                }).await;
+                let _ = self
+                    .rib_tx
+                    .send(RibUpdate::EndOfRib {
+                        peer: self.peer_ip,
+                        afi: Afi::Ipv4,
+                        safi: Safi::Unicast,
+                    })
+                    .await;
                 self.drive_fsm(Event::UpdateReceived).await;
                 return;
             }
@@ -148,11 +151,14 @@ impl PeerSession {
                     safi = ?mp.safi,
                     "received End-of-RIB"
                 );
-                let _ = self.rib_tx.send(RibUpdate::EndOfRib {
-                    peer: self.peer_ip,
-                    afi: mp.afi,
-                    safi: mp.safi,
-                }).await;
+                let _ = self
+                    .rib_tx
+                    .send(RibUpdate::EndOfRib {
+                        peer: self.peer_ip,
+                        afi: mp.afi,
+                        safi: mp.safi,
+                    })
+                    .await;
                 self.drive_fsm(Event::UpdateReceived).await;
                 return;
             }

@@ -594,7 +594,7 @@ mod tests {
     use std::time::Instant;
 
     use rustbgpd_wire::{
-        COMMUNITY_LLGR_STALE, Afi, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
+        Afi, COMMUNITY_LLGR_STALE, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
         Ipv6Prefix, PathAttribute, Safi,
     };
 
@@ -923,22 +923,16 @@ mod tests {
         rib.promote_to_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
         let route = rib.iter_flowspec().next().unwrap();
         assert!(route.is_llgr_stale);
-        assert!(
-            route
-                .attributes
-                .iter()
-                .any(|a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE)))
-        );
+        assert!(route.attributes.iter().any(
+            |a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE))
+        ));
 
         rib.clear_llgr_stale_flowspec((Afi::Ipv4, Safi::FlowSpec));
         let route = rib.iter_flowspec().next().unwrap();
         assert!(!route.is_llgr_stale);
-        assert!(
-            !route
-                .attributes
-                .iter()
-                .any(|a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE)))
-        );
+        assert!(!route.attributes.iter().any(
+            |a| matches!(a, PathAttribute::Communities(c) if c.contains(&COMMUNITY_LLGR_STALE))
+        ));
     }
 
     #[test]
