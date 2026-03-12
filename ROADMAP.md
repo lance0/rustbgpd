@@ -108,7 +108,6 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **AS_PATH segment >255 ASN encoding** — long `AS_SEQUENCE`/`AS_SET` segments are now split into multiple wire segments during encode instead of silently truncating via `u8` wrap
 - [x] **IPv6 next-hop policy rewrite completeness** — export policy `set_next_hop = "<ipv6>"` is covered end-to-end for MP_REACH exports and route explain; classic IPv4 `NEXT_HOP` handling remains unchanged
 - [ ] **LOCAL_PREF/MED policy match implicit defaults** — `match_local_pref_ge/le` and `match_med_ge/le` currently return false when the attribute is absent; decide whether policy matching should use BGP implicit defaults (100 for `LOCAL_PREF`, 0 for `MED`) instead
-- [ ] **Config persistence send-error checking** — `permit.send(ConfigEvent::...)` in `policy_service.rs` and `peer_group_service.rs` does not check for errors; if the config sink disconnects, mutations apply to runtime but silently fail to persist
 - [ ] **Typed error variants for API deletion handlers** — policy and peer-group deletion operations match error messages with `error.contains("still referenced")` instead of typed error variants; fragile coupling to internal error strings
 - [ ] **Deduplicate `validate_policy_action()` / `proto_statement_to_input()`** — duplicated between `policy_service.rs` and `peer_group_service.rs`; extract to a shared validation module
 
