@@ -145,11 +145,33 @@ docker run --rm --entrypoint rustbgpctl rustbgpd:dev --help
 
 ## Release steps
 
+### Daemon release
+
 1. Update `CHANGELOG.md` with the new version section
-2. Bump version in root `Cargo.toml` (workspace version + internal deps)
+2. Bump version in root `Cargo.toml` (`[workspace.package] version`)
 3. Run the full checklist above
 4. Commit: `Bump version to vX.Y.Z`
 5. Tag: `git tag vX.Y.Z`
 6. Push: `git push origin main && git push origin vX.Y.Z`
 7. Verify CI passes on the tag
 8. Verify container image published to GHCR (tagged builds)
+
+### rustbgpd-wire crate release
+
+The wire crate has its own version in `crates/wire/Cargo.toml`, decoupled
+from the daemon workspace version. Only publish when the wire crate itself
+changed.
+
+1. **Did `crates/wire/` change since the last wire publish?**
+   - If no: skip. Do not publish a no-op release.
+   - If yes: continue.
+2. Decide semver bump (see below)
+3. Update `version` in `crates/wire/Cargo.toml`
+4. Add a `rustbgpd-wire` entry in `CHANGELOG.md`
+5. `cargo publish -p rustbgpd-wire --dry-run`
+6. `cargo publish -p rustbgpd-wire`
+
+**Wire crate semver:**
+- **Patch**: bug fixes, stricter validation, docs/test improvements
+- **Minor**: new message types, attributes, helper methods, additive API changes
+- **Major**: breaking API changes, changed method signatures, enum shape changes
