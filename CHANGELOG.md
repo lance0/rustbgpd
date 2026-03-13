@@ -7,6 +7,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.5.1] — 2026-03-13
+
+### Added
+
+- **Config reload dry-run (`rustbgpd --diff`).** Preview what a SIGHUP reload
+  would change before sending it. Output grouped into three sections:
+  reload-applied (neighbor add/remove/modify), restart-required
+  (global/rpki/bmp/mrt), and informational (peer-group/policy changes not yet
+  reconciled by current SIGHUP path). Supports `--json` for scripting with
+  `has_actionable_changes`, `has_informational_changes`, and `has_any_changes`
+  flags. Exit code 1 = actionable changes found, 0 = no actionable changes.
+- **Multi-implementation feature comparison.** New `docs/COMPARISON.md` compares
+  rustbgpd against FRR, BIRD, GoBGP, and OpenBGPd across address families, core
+  protocol, policy, security, observability, API, and operations.
+
+### Changed
+
+- **Wire crate version decoupled from workspace.** `rustbgpd-wire` now has its
+  own explicit version in `crates/wire/Cargo.toml` instead of inheriting from the
+  workspace. All internal crates are marked `publish = false`. Wire crate is only
+  published when `crates/wire/` actually changes.
+- **Roadmap aligned with market research.** Added "Next Up" section with ASPA
+  verification, Alice-LG/RFC 8522 looking glass API, and best-path explain.
+  Built-in looking glass replaced by API-first approach. Deprioritized EVPN/VPN,
+  YANG/NETCONF.
+
+---
+
 ## [0.5.0] — 2026-03-12
 
 ### Fixed
