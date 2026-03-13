@@ -74,14 +74,25 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ## Planned Features
 
-*Ordered by what unlocks production use. The policy engine is the critical
-path — without route manipulation, rustbgpd is observation-only.*
+*Ordered by market impact and what unlocks production adoption. Informed by
+operator feedback, competitive analysis, and IX/SDN market research (March 2026).*
 
-*For GoBGP feature parity details, see [docs/gobgp-parity.md](docs/gobgp-parity.md).*
+*For feature parity details, see [docs/gobgp-parity.md](docs/gobgp-parity.md)
+and [docs/COMPARISON.md](docs/COMPARISON.md).*
 
-### P0 — Production Blockers (Complete)
+### Next Up — High-Impact, Near-Term
 
-All P0 features shipped. See Completed section above.
+Features with clear market signal and manageable scope. These are the next
+items to ship.
+
+- [ ] **ASPA verification (RFC 9582)** — RIPE and ARIN now support ASPA object publishing in production (January 2026); Cloudflare deployed ASPA verification globally; IETF draft nearing Working Group Last Call. RTR plumbing already exists (RPKI crate). Receive ASPA records via RTR, validate customer-provider relationships in AS_PATH, integrate into best-path and policy engine. Being among the first Rust implementations with ASPA is a concrete differentiator.
+- [ ] **`rustbgpctl diff`** — show what a pending config reload (SIGHUP) would change: peers added/removed/modified, policy changes, timer changes. Dry-run for config changes. Quick win, operators love it.
+- [ ] **Alice-LG / looking glass API** — instead of a built-in web UI, expose an Alice-LG-compatible REST source backend or RFC 8522 `.well-known/looking-glass` endpoint. Alice-LG is the IXP standard (DE-CIX, LINX, Netnod). The gRPC API already has the data; this is a thin REST translation layer. More valuable than a custom web UI.
+- [ ] **Best-path explain** — `best_path_cmp` returns reason enum (ShorterAsPath, HigherLocalPref, LowerRouterId, etc.) instead of bare Ordering; gRPC `ExplainRoute` RPC shows all candidates with pairwise decision tree; `rustbgpctl explain <prefix>` CLI; answers "why did this route win?" without log correlation. Operators ask for this constantly.
+
+### P0–P2.5 — Complete
+
+All foundational features shipped. See Completed section above.
 
 - [x] **Policy actions** — route modification on import/export (ADR-0030)
 - [x] **AS_PATH regex matching** — Cisco/Quagga-style patterns in policy (ADR-0030)
@@ -189,7 +200,7 @@ get blog posts written and make operators switch.
 - [x] **Colored, tabular CLI output** — aligned tables, colored session states (green=Established, yellow=OpenSent, red=Idle/Active), human-readable uptime ("2d 4h 12m" not seconds), dynamic column widths, `--no-color` / `NO_COLOR` support. Uses `owo-colors` with auto-detection for piped output.
 - [x] **Route filtering in CLI** — `rustbgpctl rib --prefix 10.0.0.0/8 --longer --community 65001:100 --origin-asn 65003`. Server-side filtering via gRPC with prefix (exact/longer), origin ASN, community, and large community filters. Works on best, received, and advertised views.
 - [x] **`--version` flag** — both `rustbgpd --version` and `rustbgpctl --version`.
-- [ ] **`rustbgpctl diff`** — show what a pending config reload (SIGHUP) would change: peers added/removed/modified, policy changes, timer changes. Dry-run for config changes.
+- [ ] ~~**`rustbgpctl diff`**~~ — moved to "Next Up" section above
 
 #### Debugging & Observability
 
@@ -201,12 +212,11 @@ get blog posts written and make operators switch.
 #### Advanced UX
 
 - [x] **Live TUI dashboard** — `rustbgpctl top`: a terminal UI (ratatui) showing sessions, prefix counts, message rates per peer, RPKI VRP counts, route events — all updating live via polling + WatchRoutes stream. Peer table with sort/navigate/detail, toggleable events panel, help overlay. Configurable poll interval (`-i`).
-- [ ] **Built-in looking glass** — `rustbgpd --looking-glass :8080`: read-only HTTP/JSON API for NOC dashboards and public looking glass pages. Single binary, zero config. IXes would love this for member-facing route queries.
+- [ ] ~~**Built-in looking glass**~~ — replaced by Alice-LG / RFC 8522 API approach in "Next Up" section. Market research shows IXPs use external presentation layers (Alice-LG, IXP Manager); a built-in web UI is not a differentiator.
 - [ ] **Config snippets / examples in error messages** — when a gRPC call fails validation, include a working example in the error detail: "invalid families value; try: `families: [\"ipv4_unicast\", \"ipv6_unicast\"]`"
 - [x] **Neighbor auto-discovery logging** — when an unknown peer connects, the warning includes a suggested `rustbgpctl neighbor <addr> add --asn <ASN>` command to help operators bootstrap new peers.
 
-Deferred explain follow-ups:
-- [ ] **Best-path explain** — explain why one candidate won over the other current candidates for a prefix
+Deferred explain follow-ups (after best-path explain ships from "Next Up"):
 - [ ] **Named policy / statement attribution in explain** — include exact policy and statement identity in explain output
 - [ ] **Import explain** — dry-run import policy, RPKI, and inbound acceptance for one received route
 - [ ] **Verbose policy trace** — include non-match steps and full decision trace instead of only decisive reasons
@@ -244,16 +254,25 @@ Prove it works under pressure before 1.0.
 - [ ] **Shared route storage across RIBs** — store route payload once and reference from AdjRibIn/LocRib/AdjRibOut via lightweight handles
 - [ ] **Compact RIB indexing** — reduce HashMap count/shape overhead; dhat profile shows ~160 MB in hashbrown bucket arrays across ~10+ large HashMaps
 
-### P4 — Nice to Have
+### P4 — Future Work
 
-Valuable but not blocking production use or 1.0.
+Valuable but not blocking production use or 1.0. Ordered by market signal.
 
+- [ ] **Confederation** (RFC 5065) — required for service provider deployments but SPs are not the initial target market
+- [ ] **Dynamic neighbors** (prefix-based) — auto-accept peers from a prefix range; valuable for large IXPs
+- [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5; BIRD 3 just added it (April 2025); neither GoBGP nor rustbgpd has it
 - [ ] **Real-time BGP observability** — unified event bus (`broadcast::Sender<BgpEvent>`) streaming route_learned, route_withdrawn, best_path_changed, policy_filtered, session_state_change events; in-memory ring buffer for recent event history; gRPC `EventService` with `WatchEvents` streaming RPC and peer/prefix/type filtering; `bgpctl events` CLI with `--since`, `--peer`, `--prefix`, `--type` flags; foundation for TUI live event view
-- [ ] **Best-path explain** — `best_path_cmp` returns reason enum (ShorterAsPath, HigherLocalPref, LowerRouterId, etc.) instead of bare Ordering; gRPC `ExplainRoute` RPC shows all candidates with pairwise decision tree; `bgpctl explain <prefix>` CLI; answers "why did this route win?" without log correlation
 - [ ] **Route history** — per-prefix timeline of routing events (learned, withdrawn, best-path changes) queryable via gRPC and `bgpctl history <prefix>`; backed by ring buffer with configurable depth
-- [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5 (GoBGP doesn't have it either)
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
-- [ ] **YANG model / NETCONF** — alternative management interface for traditional NOC tooling
+
+### Deprioritized
+
+Features that market research indicates are lower value than originally planned.
+
+- **EVPN / VPN address families** — not needed for IX route server or SDN controller use cases; defer until general-purpose router positioning
+- **YANG model / NETCONF** — FRR can't finish their BGP YANG model; gRPC is the modern interface; low ROI
+- **Built-in web UI** — IXPs use Alice-LG / IXP Manager; replaced by API-first looking glass approach
+- **Kubernetes operator** — adjacent opportunity but premature; nail the IX/SDN use case first
 
 ### Interop Test Coverage
 
@@ -298,8 +317,9 @@ Quality gates before tagging 1.0.0:
 - [x] Extended communities
 - [x] Policy actions (match + modify + filter)
 - [x] Large communities (RFC 8092)
+- [ ] ASPA verification (RFC 9582) — all major competitors have it; RIRs deploying in production
 - [ ] Real-world deployment feedback
-- [ ] Wire crate API stability (`rustbgpd-wire` publishable as 1.0)
+- [x] Wire crate API stability (`rustbgpd-wire` published on crates.io)
 - [x] Comprehensive rustdoc for public API (hand-written crates; generated proto stubs excluded)
 - [ ] Security audit of gRPC surface
 - [x] **RibManager submodule split** — 8,318-line manager.rs split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs)
@@ -309,15 +329,20 @@ Quality gates before tagging 1.0.0:
 
 ## Competitive Landscape
 
+See [docs/COMPARISON.md](docs/COMPARISON.md) for a detailed feature comparison
+with FRR, BIRD, GoBGP, and OpenBGPd.
+
 | | FRR / BIRD | GoBGP | rustbgpd |
 |---|---|---|---|
 | **Primary interface** | CLI | gRPC | gRPC |
 | **Runtime** | C | Go (GC) | Rust (no GC) |
 | **Scope** | Full routing suite | BGP-only | BGP-only |
+| **Memory (200k routes)** | 7–30 MB | 578 MB | 257 MB |
 | **Dynamic peers** | Config reload | gRPC | gRPC |
 | **Real-time events** | Log parsing | BMP/MRT | gRPC streaming + BMP + MRT |
 | **Observability** | SNMP, CLI | Prometheus | Prometheus + structured logs |
-| **Wire codec reuse** | No | No | `rustbgpd-wire` standalone crate |
+| **Wire codec reuse** | No | No | `rustbgpd-wire` on crates.io |
+| **ASPA** | Yes (FRR, BIRD, OpenBGPd) | No | Planned |
 
 ---
 
@@ -351,7 +376,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Automated interop test scripts (M1, M3, M4, M10–M20)
 - [x] Binary releases (GitHub Releases with cross-compiled linux-amd64/arm64 binaries)
 - [ ] Homebrew formula
-- [ ] crates.io publishing (`rustbgpd-wire` first, then workspace)
+- [x] crates.io publishing (`rustbgpd-wire` published; other crates remain internal)
 
 ---
 
