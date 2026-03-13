@@ -76,7 +76,7 @@ crates/
   rpki/                  # RPKI origin validation: RTR client (RFC 8210), VRP table
   bmp/                   # BMP exporter (RFC 7854): codec, per-collector client, manager
   mrt/                   # MRT dump export (RFC 6396): codec, writer, manager
-  api/                   # gRPC server (tonic) — 5 services
+  api/                   # gRPC server (tonic) — 7 services
   telemetry/             # Prometheus metrics + structured tracing
   cli/                   # rustbgpctl — gRPC CLI with human-readable and JSON output
 proto/                   # gRPC proto definitions (rustbgpd.v1)
