@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::Instant as TokioInstant;
 use tracing::{debug, info, warn};
 
+use crate::aspa::AspaRecord;
 use crate::rtr_codec::{RtrDecodeError, RtrPdu};
 use crate::vrp::VrpEntry;
 
@@ -33,6 +34,8 @@ pub enum VrpUpdate {
         server: SocketAddr,
         /// All VRP entries from the full reset.
         entries: Vec<VrpEntry>,
+        /// All ASPA records from the full reset (RTR v2 only).
+        aspa_records: Vec<AspaRecord>,
     },
     /// Incremental delta from a Serial Query response.
     IncrementalUpdate {
@@ -42,6 +45,10 @@ pub enum VrpUpdate {
         announced: Vec<VrpEntry>,
         /// Withdrawn VRP entries.
         withdrawn: Vec<VrpEntry>,
+        /// Newly announced ASPA records (RTR v2 only).
+        aspa_announced: Vec<AspaRecord>,
+        /// Withdrawn ASPA records (RTR v2 only).
+        aspa_withdrawn: Vec<AspaRecord>,
     },
     /// Server connection lost — its entries should be expired.
     ServerDown {
@@ -231,6 +238,7 @@ impl RtrClient {
                         .send(VrpUpdate::FullTable {
                             server: self.config.server_addr,
                             entries: vec![],
+                            aspa_records: vec![],
                         })
                         .await;
                     self.session_id = None;
@@ -319,6 +327,8 @@ impl RtrClient {
             let mut collecting = false;
             let mut announced = Vec::new();
             let mut withdrawn = Vec::new();
+            let mut aspa_announced: Vec<AspaRecord> = Vec::new();
+            let mut aspa_withdrawn: Vec<AspaRecord> = Vec::new();
             let is_reset = self.send_query(stream, query).await?;
 
             loop {
@@ -339,6 +349,8 @@ impl RtrClient {
                             collecting = true;
                             announced.clear();
                             withdrawn.clear();
+                            aspa_announced.clear();
+                            aspa_withdrawn.clear();
                         }
                         RtrPdu::Ipv4Prefix {
                             flags,
@@ -378,6 +390,21 @@ impl RtrClient {
                                 withdrawn.push(entry);
                             }
                         }
+                        RtrPdu::Aspa {
+                            flags,
+                            customer_asn,
+                            provider_asns,
+                        } if collecting => {
+                            let record = AspaRecord {
+                                customer_asn,
+                                provider_asns,
+                            };
+                            if flags & 1 == 1 {
+                                aspa_announced.push(record);
+                            } else {
+                                aspa_withdrawn.push(record);
+                            }
+                        }
                         RtrPdu::EndOfData {
                             session_id,
                             serial,
@@ -400,31 +427,44 @@ impl RtrClient {
                             self.last_end_of_data_at = Some(now);
                             self.data_expires_at = Some(now + self.expire_interval);
 
+                            let aspa_count = aspa_announced.len() + aspa_withdrawn.len();
                             let update = if is_reset {
                                 info!(
                                     server = %self.config.server_addr,
                                     serial,
-                                    entries = announced.len(),
+                                    vrps = announced.len(),
+                                    aspa_records = aspa_announced.len(),
                                     "RTR full table received"
                                 );
                                 VrpUpdate::FullTable {
                                     server: self.config.server_addr,
                                     entries: std::mem::take(&mut announced),
+                                    aspa_records: std::mem::take(&mut aspa_announced),
                                 }
                             } else {
                                 info!(
                                     server = %self.config.server_addr,
                                     serial,
-                                    announced = announced.len(),
-                                    withdrawn = withdrawn.len(),
+                                    vrps_announced = announced.len(),
+                                    vrps_withdrawn = withdrawn.len(),
+                                    aspa_announced = aspa_announced.len(),
+                                    aspa_withdrawn = aspa_withdrawn.len(),
                                     "RTR incremental update received"
                                 );
                                 VrpUpdate::IncrementalUpdate {
                                     server: self.config.server_addr,
                                     announced: std::mem::take(&mut announced),
                                     withdrawn: std::mem::take(&mut withdrawn),
+                                    aspa_announced: std::mem::take(&mut aspa_announced),
+                                    aspa_withdrawn: std::mem::take(&mut aspa_withdrawn),
                                 }
                             };
+                            if aspa_count > 0 {
+                                debug!(
+                                    server = %self.config.server_addr,
+                                    "RTR v2 ASPA records received"
+                                );
+                            }
 
                             let _ = self.vrp_tx.send(update).await;
                             return Ok(());
@@ -439,6 +479,7 @@ impl RtrClient {
                                 .send(VrpUpdate::FullTable {
                                     server: self.config.server_addr,
                                     entries: vec![],
+                                    aspa_records: vec![],
                                 })
                                 .await;
                             self.session_id = None;
@@ -611,6 +652,7 @@ mod tests {
             VrpUpdate::FullTable {
                 server: addr,
                 entries: vec![entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 65001)],
+                aspa_records: vec![],
             }
         );
 
@@ -664,6 +706,8 @@ mod tests {
                 server: addr,
                 announced: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
                 withdrawn: vec![],
+                aspa_announced: vec![],
+                aspa_withdrawn: vec![],
             }
         );
 
@@ -739,6 +783,8 @@ mod tests {
                 server: addr,
                 announced: vec![],
                 withdrawn: vec![],
+                aspa_announced: vec![],
+                aspa_withdrawn: vec![],
             }
         );
 
@@ -848,6 +894,7 @@ mod tests {
             VrpUpdate::FullTable {
                 server: addr,
                 entries: vec![],
+                aspa_records: vec![],
             }
         );
 
@@ -886,6 +933,7 @@ mod tests {
             VrpUpdate::FullTable {
                 server: addr,
                 entries: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
+                aspa_records: vec![],
             }
         );
 

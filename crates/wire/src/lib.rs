@@ -110,6 +110,43 @@ impl std::str::FromStr for RpkiValidation {
     }
 }
 
+/// ASPA path verification state per draft-ietf-sidrops-aspa-verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AspaValidation {
+    /// All hops in the `AS_PATH` have authorized provider relationships.
+    Valid,
+    /// At least one hop has a proven unauthorized provider relationship.
+    Invalid,
+    /// Verification could not complete due to missing ASPA records.
+    #[default]
+    Unknown,
+}
+
+impl std::fmt::Display for AspaValidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Valid => write!(f, "valid"),
+            Self::Invalid => write!(f, "invalid"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+impl std::str::FromStr for AspaValidation {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "valid" => Ok(Self::Valid),
+            "invalid" => Ok(Self::Invalid),
+            "unknown" => Ok(Self::Unknown),
+            other => Err(format!(
+                "unknown ASPA validation state {other:?}, expected \"valid\", \"invalid\", or \"unknown\""
+            )),
+        }
+    }
+}
+
 // Re-export attribute types
 pub use attribute::{
     AsPath, AsPathSegment, ExtendedCommunity, LargeCommunity, MpReachNlri, MpUnreachNlri, Origin,
