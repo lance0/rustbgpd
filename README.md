@@ -50,6 +50,9 @@ architecture diagrams, example configs, and API workflows.
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
 
+See [docs/COMPARISON.md](docs/COMPARISON.md) for a detailed feature comparison
+with FRR, BIRD, GoBGP, and OpenBGPd.
+
 ## Try it (60 seconds)
 
 The fastest way to see rustbgpd in action. Spins up the daemon with an FRR
@@ -280,6 +283,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Running in production: reload, upgrade, failure modes, debugging |
 | [docs/SECURITY.md](docs/SECURITY.md) | Security posture, firewall guidance, deployment tiers |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
+| [docs/COMPARISON.md](docs/COMPARISON.md) | Feature comparison with FRR, BIRD, GoBGP, OpenBGPd |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
 | [docs/adr/](docs/adr/) | Architecture decision records (48 ADRs) |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
