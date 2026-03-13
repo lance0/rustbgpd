@@ -121,6 +121,9 @@ from `examples/route-server/config.toml` instead. Full reference:
 # Validate config without starting the daemon
 ./target/release/rustbgpd --check config.toml
 
+# Preview what a config reload (SIGHUP) would change
+./target/release/rustbgpd --diff new-config.toml config.toml
+
 # Start the daemon
 ./target/release/rustbgpd config.toml
 ```

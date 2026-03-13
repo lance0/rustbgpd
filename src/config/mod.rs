@@ -652,6 +652,325 @@ pub fn diff_neighbors(old: &[Neighbor], new: &[Neighbor]) -> NeighborDiff {
     }
 }
 
+/// Differences between two peer group maps, keyed by name.
+#[derive(Debug, serde::Serialize)]
+pub struct PeerGroupDiff {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub changed: Vec<String>,
+}
+
+/// Differences between two policy configurations.
+#[expect(clippy::struct_excessive_bools)]
+#[derive(Debug, serde::Serialize)]
+pub struct PolicyDiff {
+    pub definitions_added: Vec<String>,
+    pub definitions_removed: Vec<String>,
+    pub definitions_changed: Vec<String>,
+    pub neighbor_sets_added: Vec<String>,
+    pub neighbor_sets_removed: Vec<String>,
+    pub neighbor_sets_changed: Vec<String>,
+    pub import_changed: bool,
+    pub export_changed: bool,
+    pub import_chain_changed: bool,
+    pub export_chain_changed: bool,
+}
+
+impl PolicyDiff {
+    pub fn has_changes(&self) -> bool {
+        !self.definitions_added.is_empty()
+            || !self.definitions_removed.is_empty()
+            || !self.definitions_changed.is_empty()
+            || !self.neighbor_sets_added.is_empty()
+            || !self.neighbor_sets_removed.is_empty()
+            || !self.neighbor_sets_changed.is_empty()
+            || self.import_changed
+            || self.export_changed
+            || self.import_chain_changed
+            || self.export_chain_changed
+    }
+}
+
+/// Full config diff result.
+#[expect(clippy::struct_excessive_bools)]
+#[derive(Debug, serde::Serialize)]
+pub struct ConfigDiff {
+    pub neighbors: NeighborDiffSummary,
+    pub peer_groups: PeerGroupDiff,
+    pub peer_group_details: Vec<(String, Vec<String>)>,
+    pub policy: PolicyDiff,
+    pub global_changed: bool,
+    pub rpki_changed: bool,
+    pub bmp_changed: bool,
+    pub mrt_changed: bool,
+}
+
+/// Serializable neighbor diff summary (`NeighborDiff` uses `IpAddr` which is fine,
+/// but we want address strings + field-level details).
+#[derive(Debug, serde::Serialize)]
+pub struct NeighborDiffSummary {
+    pub added: Vec<NeighborAddSummary>,
+    pub removed: Vec<String>,
+    pub changed: Vec<NeighborChangeSummary>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct NeighborAddSummary {
+    pub address: String,
+    pub remote_asn: u32,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct NeighborChangeSummary {
+    pub address: String,
+    pub changes: Vec<String>,
+}
+
+impl ConfigDiff {
+    /// Changes that SIGHUP will actually reconcile (neighbor add/remove/modify).
+    pub fn has_reload_applied_changes(&self) -> bool {
+        !self.neighbors.added.is_empty()
+            || !self.neighbors.removed.is_empty()
+            || !self.neighbors.changed.is_empty()
+    }
+
+    /// Changes that require a full daemon restart.
+    pub fn has_restart_required_changes(&self) -> bool {
+        self.global_changed || self.rpki_changed || self.bmp_changed || self.mrt_changed
+    }
+
+    /// Changes detected but not applied by current SIGHUP (peer groups, policy).
+    pub fn has_informational_changes(&self) -> bool {
+        !self.peer_groups.added.is_empty()
+            || !self.peer_groups.removed.is_empty()
+            || !self.peer_groups.changed.is_empty()
+            || self.policy.has_changes()
+    }
+
+    /// Whether SIGHUP would take any action (reload-applied or restart-required).
+    pub fn has_actionable_changes(&self) -> bool {
+        self.has_reload_applied_changes() || self.has_restart_required_changes()
+    }
+
+    /// Whether any difference exists at all.
+    pub fn has_any_changes(&self) -> bool {
+        self.has_actionable_changes() || self.has_informational_changes()
+    }
+}
+
+/// Compare two full configurations and return a structured diff.
+pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
+    let neighbor_diff = diff_neighbors(&old.neighbors, &new.neighbors);
+
+    let old_map: HashMap<&str, &Neighbor> = old
+        .neighbors
+        .iter()
+        .map(|n| (n.address.as_str(), n))
+        .collect();
+
+    let neighbors = NeighborDiffSummary {
+        added: neighbor_diff
+            .added
+            .iter()
+            .map(|n| NeighborAddSummary {
+                address: n.address.clone(),
+                remote_asn: n.remote_asn,
+            })
+            .collect(),
+        removed: neighbor_diff
+            .removed
+            .iter()
+            .map(IpAddr::to_string)
+            .collect(),
+        changed: neighbor_diff
+            .changed
+            .iter()
+            .filter_map(|n| {
+                old_map
+                    .get(n.address.as_str())
+                    .map(|old_n| NeighborChangeSummary {
+                        address: n.address.clone(),
+                        changes: describe_neighbor_changes(old_n, n),
+                    })
+            })
+            .collect(),
+    };
+
+    let peer_groups = diff_peer_groups(&old.peer_groups, &new.peer_groups);
+    let peer_group_details = peer_groups
+        .changed
+        .iter()
+        .filter_map(|name| {
+            let old_pg = old.peer_groups.get(name)?;
+            let new_pg = new.peer_groups.get(name)?;
+            let changes = describe_peer_group_changes(old_pg, new_pg);
+            if changes.is_empty() {
+                None
+            } else {
+                Some((name.clone(), changes))
+            }
+        })
+        .collect();
+
+    let policy = diff_policy(&old.policy, &new.policy);
+
+    ConfigDiff {
+        neighbors,
+        peer_groups,
+        peer_group_details,
+        policy,
+        global_changed: old.global != new.global,
+        rpki_changed: old.rpki != new.rpki,
+        bmp_changed: old.bmp != new.bmp,
+        mrt_changed: old.mrt != new.mrt,
+    }
+}
+
+/// Compare two peer group maps and return names of added/removed/changed groups.
+pub fn diff_peer_groups(
+    old: &HashMap<String, PeerGroupConfig>,
+    new: &HashMap<String, PeerGroupConfig>,
+) -> PeerGroupDiff {
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    for (name, new_pg) in new {
+        match old.get(name) {
+            None => added.push(name.clone()),
+            Some(old_pg) => {
+                if old_pg != new_pg {
+                    changed.push(name.clone());
+                }
+            }
+        }
+    }
+    added.sort();
+    changed.sort();
+
+    let mut removed: Vec<String> = old
+        .keys()
+        .filter(|name| !new.contains_key(*name))
+        .cloned()
+        .collect();
+    removed.sort();
+
+    PeerGroupDiff {
+        added,
+        removed,
+        changed,
+    }
+}
+
+/// Describe which fields changed between two `PeerGroupConfig` values.
+pub fn describe_peer_group_changes(old: &PeerGroupConfig, new: &PeerGroupConfig) -> Vec<String> {
+    let mut changes = Vec::new();
+
+    macro_rules! cmp_field {
+        ($field:ident) => {
+            if old.$field != new.$field {
+                changes.push(format!(
+                    "{}: {:?} → {:?}",
+                    stringify!($field),
+                    old.$field,
+                    new.$field
+                ));
+            }
+        };
+    }
+
+    cmp_field!(hold_time);
+    cmp_field!(max_prefixes);
+    cmp_field!(ttl_security);
+    cmp_field!(families);
+    cmp_field!(graceful_restart);
+    cmp_field!(gr_restart_time);
+    cmp_field!(gr_stale_routes_time);
+    cmp_field!(llgr_stale_time);
+    cmp_field!(local_ipv6_nexthop);
+    cmp_field!(route_reflector_client);
+    cmp_field!(route_server_client);
+    cmp_field!(remove_private_as);
+    cmp_field!(add_path);
+    cmp_field!(log_level);
+
+    if old.md5_password != new.md5_password {
+        changes.push("md5_password: <changed>".to_string());
+    }
+    if old.import_policy != new.import_policy {
+        changes.push("import_policy: <changed>".to_string());
+    }
+    if old.export_policy != new.export_policy {
+        changes.push("export_policy: <changed>".to_string());
+    }
+    if old.import_policy_chain != new.import_policy_chain {
+        changes.push(format!(
+            "import_policy_chain: {:?} → {:?}",
+            old.import_policy_chain, new.import_policy_chain
+        ));
+    }
+    if old.export_policy_chain != new.export_policy_chain {
+        changes.push(format!(
+            "export_policy_chain: {:?} → {:?}",
+            old.export_policy_chain, new.export_policy_chain
+        ));
+    }
+
+    changes
+}
+
+/// Compare two policy configurations.
+pub fn diff_policy(old: &PolicyConfig, new: &PolicyConfig) -> PolicyDiff {
+    let definitions_added: Vec<String> = new
+        .definitions
+        .keys()
+        .filter(|k| !old.definitions.contains_key(*k))
+        .cloned()
+        .collect();
+    let definitions_removed: Vec<String> = old
+        .definitions
+        .keys()
+        .filter(|k| !new.definitions.contains_key(*k))
+        .cloned()
+        .collect();
+    let definitions_changed: Vec<String> = new
+        .definitions
+        .iter()
+        .filter(|(k, v)| old.definitions.get(*k).is_some_and(|old_v| old_v != *v))
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    let neighbor_sets_added: Vec<String> = new
+        .neighbor_sets
+        .keys()
+        .filter(|k| !old.neighbor_sets.contains_key(*k))
+        .cloned()
+        .collect();
+    let neighbor_sets_removed: Vec<String> = old
+        .neighbor_sets
+        .keys()
+        .filter(|k| !new.neighbor_sets.contains_key(*k))
+        .cloned()
+        .collect();
+    let neighbor_sets_changed: Vec<String> = new
+        .neighbor_sets
+        .iter()
+        .filter(|(k, v)| old.neighbor_sets.get(*k).is_some_and(|old_v| old_v != *v))
+        .map(|(k, _)| k.clone())
+        .collect();
+
+    PolicyDiff {
+        definitions_added,
+        definitions_removed,
+        definitions_changed,
+        neighbor_sets_added,
+        neighbor_sets_removed,
+        neighbor_sets_changed,
+        import_changed: old.import != new.import,
+        export_changed: old.export != new.export,
+        import_chain_changed: old.import_chain != new.import_chain,
+        export_chain_changed: old.export_chain != new.export_chain,
+    }
+}
+
 impl From<GrpcAccessModeConfig> for GrpcAccessMode {
     fn from(value: GrpcAccessModeConfig) -> Self {
         match value {

@@ -2141,3 +2141,237 @@ fn config_round_trips_through_toml() {
     let reloaded: Config = toml::from_str(&toml_str).unwrap();
     assert_eq!(config, reloaded);
 }
+
+// ── Config diff tests ────────────────────────────────────────────────
+
+#[test]
+fn diff_config_identical_has_no_changes() {
+    let config = parse(valid_toml()).unwrap();
+    let diff = super::diff_config(&config, &config);
+    assert!(!diff.has_any_changes());
+}
+
+#[test]
+fn diff_config_neighbor_added() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65003
+"#;
+    let new = parse(new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.has_any_changes());
+    assert_eq!(diff.neighbors.added.len(), 1);
+    assert_eq!(diff.neighbors.added[0].address, "10.0.0.3");
+    assert_eq!(diff.neighbors.added[0].remote_asn, 65003);
+    assert!(diff.neighbors.removed.is_empty());
+    assert!(diff.neighbors.changed.is_empty());
+}
+
+#[test]
+fn diff_config_neighbor_removed() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#;
+    let new = parse(new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.has_any_changes());
+    assert_eq!(diff.neighbors.removed.len(), 1);
+    assert_eq!(diff.neighbors.removed[0], "10.0.0.2");
+}
+
+#[test]
+fn diff_config_neighbor_changed() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 45
+"#;
+    let new = parse(new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.has_any_changes());
+    assert_eq!(diff.neighbors.changed.len(), 1);
+    assert_eq!(diff.neighbors.changed[0].address, "10.0.0.2");
+    assert!(
+        diff.neighbors.changed[0]
+            .changes
+            .iter()
+            .any(|c| c.contains("hold_time"))
+    );
+}
+
+#[test]
+fn diff_config_global_change_flags_restart() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.99"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+"#;
+    let new = parse(new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.has_any_changes());
+    assert!(diff.global_changed);
+    assert!(!diff.rpki_changed);
+}
+
+#[test]
+fn diff_config_peer_group_added() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+
+[peer_groups.upstream]
+hold_time = 30
+"#;
+    let new = parse(new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.has_any_changes());
+    assert_eq!(diff.peer_groups.added, vec!["upstream"]);
+}
+
+#[test]
+fn diff_config_policy_definition_added() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+
+[policy.definitions.reject-bogons]
+default_action = "permit"
+
+[[policy.definitions.reject-bogons.statements]]
+action = "deny"
+prefix = "0.0.0.0/0"
+"#;
+    let new = parse(new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.has_any_changes());
+    assert_eq!(diff.policy.definitions_added, vec!["reject-bogons"]);
+}
+
+#[test]
+fn diff_config_json_serializes() {
+    let old = parse(valid_toml()).unwrap();
+    let diff = super::diff_config(&old, &old);
+    let json = serde_json::to_string(&diff).unwrap();
+    assert!(json.contains("\"global_changed\":false"));
+}
+
+#[test]
+fn diff_peer_group_changes_detects_field_diffs() {
+    let old = PeerGroupConfig {
+        hold_time: Some(90),
+        ..Default::default()
+    };
+    let new = PeerGroupConfig {
+        hold_time: Some(45),
+        ..Default::default()
+    };
+    let changes = super::describe_peer_group_changes(&old, &new);
+    assert_eq!(changes.len(), 1);
+    assert!(changes[0].contains("hold_time"));
+    assert!(changes[0].contains("90"));
+    assert!(changes[0].contains("45"));
+}
+
+#[test]
+fn diff_config_policy_only_is_not_actionable() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "peer-1"
+hold_time = 90
+
+[policy.definitions.new-policy]
+default_action = "deny"
+"#;
+    let new = parse(new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+    assert!(diff.has_any_changes());
+    assert!(diff.has_informational_changes());
+    assert!(!diff.has_actionable_changes());
+}

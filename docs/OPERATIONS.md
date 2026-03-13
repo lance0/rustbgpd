@@ -53,6 +53,40 @@ RUST_LOG=info,peer{peer_addr=10.0.0.1}=debug rustbgpd /etc/rustbgpd/config.toml
 
 ---
 
+## Config validation
+
+Validate a config file without starting the daemon:
+
+```bash
+rustbgpd --check /etc/rustbgpd/config.toml
+```
+
+Prints rustc-style diagnostics on error, or `config OK` on success.
+
+## Config diff (dry-run reload)
+
+Preview what a SIGHUP reload would change before sending it:
+
+```bash
+# Compare proposed config against current config
+rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml
+
+# JSON output for scripting
+rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml --json
+```
+
+Output is grouped into three sections:
+
+- **Reload-applied changes** — neighbor add/remove/modify that SIGHUP will
+  reconcile immediately.
+- **Restart-required changes** — `[global]`, `[rpki]`, `[bmp]`, `[mrt]`
+  changes that require a full daemon restart.
+- **Informational** — peer group and policy changes that are detected but
+  not reconciled by the current SIGHUP path. Shown for visibility only.
+
+Exit codes: 0 = no actionable changes, 1 = actionable changes found,
+2 = error (bad config, missing file).
+
 ## Configuration reload (SIGHUP)
 
 ```bash
@@ -68,9 +102,14 @@ What happens:
    peers are removed and re-added.
 4. Global section changes (`[global]`, `[rpki]`, `[bmp]`, `[mrt]`) are logged
    as warnings and **require a full restart** to take effect.
+5. Peer group and policy changes are **not currently reconciled** — they are
+   detected and logged but not applied. This is a known limitation tracked
+   in the roadmap.
 
 Reload failures are logged per-peer. If reconciliation fails, the daemon
 keeps the previous in-memory config and continues running.
+
+Use `rustbgpd --diff` to preview changes before reloading.
 
 ---
 

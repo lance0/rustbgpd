@@ -86,7 +86,7 @@ Features with clear market signal and manageable scope. These are the next
 items to ship.
 
 - [ ] **ASPA verification (RFC 9582)** — RIPE and ARIN now support ASPA object publishing in production (January 2026); Cloudflare deployed ASPA verification globally; IETF draft nearing Working Group Last Call. RTR plumbing already exists (RPKI crate). Receive ASPA records via RTR, validate customer-provider relationships in AS_PATH, integrate into best-path and policy engine. Being among the first Rust implementations with ASPA is a concrete differentiator.
-- [ ] **`rustbgpctl diff`** — show what a pending config reload (SIGHUP) would change: peers added/removed/modified, policy changes, timer changes. Dry-run for config changes. Quick win, operators love it.
+- [x] **Config diff** — `rustbgpd --diff` previews what SIGHUP would change: neighbor add/remove/modify (reload-applied), global/rpki/bmp/mrt (restart-required), and peer-group/policy changes (informational). Human-readable colored output + `--json` for scripting. Exit code 1 = actionable changes.
 - [ ] **Alice-LG / looking glass API** — instead of a built-in web UI, expose an Alice-LG-compatible REST source backend or RFC 8522 `.well-known/looking-glass` endpoint. Alice-LG is the IXP standard (DE-CIX, LINX, Netnod). The gRPC API already has the data; this is a thin REST translation layer. More valuable than a custom web UI.
 - [ ] **Best-path explain** — `best_path_cmp` returns reason enum (ShorterAsPath, HigherLocalPref, LowerRouterId, etc.) instead of bare Ordering; gRPC `ExplainRoute` RPC shows all candidates with pairwise decision tree; `rustbgpctl explain <prefix>` CLI; answers "why did this route win?" without log correlation. Operators ask for this constantly.
 
@@ -144,6 +144,8 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **Duplicate BMP collector address detection** — two collectors with the same address are accepted without warning, resulting in duplicate data streams
 - [x] **CLI gRPC integration tests** — mock gRPC server over both TCP+token and UDS, covering health, global, neighbor add, and soft-reset command-to-RPC paths
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
+- [ ] **SIGHUP policy/peer-group reconciliation** — `reload_config()` only reconciles `[[neighbors]]` changes today; peer-group and policy changes are detected but not applied. Should recompute effective neighbor configs from resolved peer-group inheritance and trigger soft resets for affected peers when policy or peer-group fields change.
+- [ ] **Effective neighbor diff via peer-group resolution** — `rustbgpd --diff` shows raw peer-group changes separately from neighbor changes; should resolve peer-group inheritance for old/new configs and surface which neighbors are effectively impacted, including whether changes are hot-applied or require reconnect.
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
 - [x] **gRPC listener split** — each configured gRPC listener can now run in `read_only` or `read_write` mode, allowing monitoring/query exposure without exposing mutating control-plane RPCs
 - [ ] **Optional Prometheus listener** — `prometheus_addr` is currently mandatory, which adds unnecessary config and an extra HTTP bind even for simple lab or local-only deployments; make metrics serving explicitly optional or give it a safe disabled/defaulted mode
@@ -200,7 +202,7 @@ get blog posts written and make operators switch.
 - [x] **Colored, tabular CLI output** — aligned tables, colored session states (green=Established, yellow=OpenSent, red=Idle/Active), human-readable uptime ("2d 4h 12m" not seconds), dynamic column widths, `--no-color` / `NO_COLOR` support. Uses `owo-colors` with auto-detection for piped output.
 - [x] **Route filtering in CLI** — `rustbgpctl rib --prefix 10.0.0.0/8 --longer --community 65001:100 --origin-asn 65003`. Server-side filtering via gRPC with prefix (exact/longer), origin ASN, community, and large community filters. Works on best, received, and advertised views.
 - [x] **`--version` flag** — both `rustbgpd --version` and `rustbgpctl --version`.
-- [ ] ~~**`rustbgpctl diff`**~~ — moved to "Next Up" section above
+- [x] **Config diff** — shipped as `rustbgpd --diff` (daemon-side, alongside `--check`)
 
 #### Debugging & Observability
 

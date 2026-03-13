@@ -171,6 +171,127 @@ fn remove_gr_restart_marker(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[expect(clippy::too_many_lines)]
+fn print_config_diff(diff: &config::ConfigDiff) {
+    use owo_colors::OwoColorize;
+
+    // ── Reload-applied changes (what SIGHUP will actually reconcile) ──
+
+    if diff.has_reload_applied_changes() {
+        println!("{}", "Reload-applied changes:".green());
+        println!();
+        println!("  Neighbors:");
+        for n in &diff.neighbors.added {
+            println!("    {} {} (AS {})", "+".green(), n.address, n.remote_asn);
+        }
+        for addr in &diff.neighbors.removed {
+            println!("    {} {addr}", "-".red());
+        }
+        for n in &diff.neighbors.changed {
+            println!("    {} {}:", "~".yellow(), n.address);
+            for change in &n.changes {
+                println!("        {change}");
+            }
+        }
+        println!();
+    }
+
+    // ── Restart-required changes ──
+
+    let mut restart_sections = Vec::new();
+    if diff.global_changed {
+        restart_sections.push("[global]");
+    }
+    if diff.rpki_changed {
+        restart_sections.push("[rpki]");
+    }
+    if diff.bmp_changed {
+        restart_sections.push("[bmp]");
+    }
+    if diff.mrt_changed {
+        restart_sections.push("[mrt]");
+    }
+    if !restart_sections.is_empty() {
+        println!("{}", "Restart-required changes:".yellow());
+        for section in &restart_sections {
+            println!("  {} {section} changed", "!".yellow());
+        }
+        println!();
+    }
+
+    // ── Informational (not applied by current SIGHUP path) ──
+
+    let has_pg_changes = !diff.peer_groups.added.is_empty()
+        || !diff.peer_groups.removed.is_empty()
+        || !diff.peer_groups.changed.is_empty();
+
+    let p = &diff.policy;
+
+    if diff.has_informational_changes() {
+        println!(
+            "{}",
+            "Informational (not reconciled by current SIGHUP):".dimmed()
+        );
+        println!();
+
+        if has_pg_changes {
+            println!("  Peer groups:");
+            for name in &diff.peer_groups.added {
+                println!("    {} {name}", "+".green());
+            }
+            for name in &diff.peer_groups.removed {
+                println!("    {} {name}", "-".red());
+            }
+            for (name, details) in &diff.peer_group_details {
+                println!("    {} {name}:", "~".yellow());
+                for change in details {
+                    println!("        {change}");
+                }
+            }
+            println!();
+        }
+
+        if p.has_changes() {
+            println!("  Policy:");
+            for name in &p.definitions_added {
+                println!("    {} definition \"{name}\"", "+".green());
+            }
+            for name in &p.definitions_removed {
+                println!("    {} definition \"{name}\"", "-".red());
+            }
+            for name in &p.definitions_changed {
+                println!("    {} definition \"{name}\"", "~".yellow());
+            }
+            for name in &p.neighbor_sets_added {
+                println!("    {} neighbor_set \"{name}\"", "+".green());
+            }
+            for name in &p.neighbor_sets_removed {
+                println!("    {} neighbor_set \"{name}\"", "-".red());
+            }
+            for name in &p.neighbor_sets_changed {
+                println!("    {} neighbor_set \"{name}\"", "~".yellow());
+            }
+            if p.import_changed {
+                println!("    {} import policy", "~".yellow());
+            }
+            if p.export_changed {
+                println!("    {} export policy", "~".yellow());
+            }
+            if p.import_chain_changed {
+                println!("    {} import_chain", "~".yellow());
+            }
+            if p.export_chain_changed {
+                println!("    {} export_chain", "~".yellow());
+            }
+            println!();
+        }
+    }
+
+    if !diff.has_any_changes() {
+        println!("No changes.");
+    }
+}
+
 fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) {
     let ebgp = config
         .neighbors
@@ -276,6 +397,7 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
     eprintln!();
 }
 
+#[expect(clippy::too_many_lines)]
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -294,6 +416,8 @@ fn main() {
                CONFIG_PATH  Path to TOML config file [default: /etc/rustbgpd/config.toml]\n\n\
              Options:\n  \
                --check      Validate config and exit without starting the daemon\n  \
+               --diff PATH  Compare config against PATH and show what SIGHUP would change\n  \
+               --json       Output diff as JSON (only with --diff)\n  \
                --version    Print version and exit\n  \
                --help       Print this help message",
             env!("CARGO_PKG_VERSION")
@@ -301,19 +425,37 @@ fn main() {
         return;
     }
 
-    // Parse --check flag and config path from remaining args.
+    // Parse flags and config path from remaining args.
     let mut check_only = false;
+    let mut diff_path: Option<String> = None;
+    let mut json_output = false;
     let mut config_path = "/etc/rustbgpd/config.toml".to_string();
+    let mut expect_diff_path = false;
     for arg in &args[1..] {
-        if arg == "--check" {
+        if expect_diff_path {
+            diff_path = Some(arg.clone());
+            expect_diff_path = false;
+        } else if arg == "--check" {
             check_only = true;
+        } else if arg == "--diff" {
+            expect_diff_path = true;
+        } else if arg == "--json" {
+            json_output = true;
         } else if !arg.starts_with('-') {
             config_path.clone_from(arg);
         } else {
             eprintln!("error: unknown option: {arg}");
-            eprintln!("usage: rustbgpd [--check] [--version] [CONFIG_PATH]");
+            eprintln!("usage: rustbgpd [--check] [--diff PATH] [--json] [--version] [CONFIG_PATH]");
             process::exit(1);
         }
+    }
+    if expect_diff_path {
+        eprintln!("error: --diff requires a path argument");
+        process::exit(2);
+    }
+    if json_output && diff_path.is_none() {
+        eprintln!("error: --json can only be used with --diff");
+        process::exit(2);
     }
 
     let config = match Config::load_with_diagnostics(&config_path) {
@@ -327,6 +469,48 @@ fn main() {
     if check_only {
         println!("config OK: {config_path}");
         return;
+    }
+
+    if let Some(ref diff_target) = diff_path {
+        let new_config = match Config::load_with_diagnostics(diff_target) {
+            Ok(c) => c,
+            Err(diagnostic) => {
+                eprintln!("{diagnostic}");
+                process::exit(2);
+            }
+        };
+        let diff = config::diff_config(&config, &new_config);
+        if json_output {
+            let output = serde_json::json!({
+                "has_actionable_changes": diff.has_actionable_changes(),
+                "has_informational_changes": diff.has_informational_changes(),
+                "has_any_changes": diff.has_any_changes(),
+                "reload_applied": {
+                    "neighbors": &diff.neighbors,
+                },
+                "restart_required": {
+                    "global_changed": diff.global_changed,
+                    "rpki_changed": diff.rpki_changed,
+                    "bmp_changed": diff.bmp_changed,
+                    "mrt_changed": diff.mrt_changed,
+                },
+                "informational": {
+                    "peer_groups": &diff.peer_groups,
+                    "peer_group_details": &diff.peer_group_details,
+                    "policy": &diff.policy,
+                },
+            });
+            match serde_json::to_string_pretty(&output) {
+                Ok(json) => println!("{json}"),
+                Err(e) => {
+                    eprintln!("error: failed to serialize diff: {e}");
+                    process::exit(2);
+                }
+            }
+        } else {
+            print_config_diff(&diff);
+        }
+        process::exit(i32::from(diff.has_actionable_changes()));
     }
 
     let log_directives = config.per_peer_log_directives();
