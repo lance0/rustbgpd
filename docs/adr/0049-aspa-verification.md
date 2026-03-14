@@ -96,11 +96,12 @@ header(8) + flags(1) + zero(1) + provider_count(2) + customer_asn(4)
           + provider_asns(4 * count)
 ```
 
-Version negotiation: the client initially connects with v1 (no change to
-existing behavior). RTR v2 negotiation — where the client sends v2 and
-falls back to v1 on error — is deferred. ASPA records will only be
-received from caches that happen to send them on a v1 session, or when
-v2 negotiation is added later.
+Version negotiation: the client initially connects with v2. If the server
+responds with ErrorReport code 4 (Unsupported Protocol Version), the client
+falls back to v1 and retries immediately. The negotiated version persists
+across reconnects for that server. When running at v1, ASPA PDUs are not
+received and all routes remain `Unknown`. The fallback is logged at info
+level.
 
 ### Extend VrpManager (not separate AspaManager)
 
@@ -170,7 +171,7 @@ ingress and updated on ASPA table changes.
   validation runs post-ingress in the RIB manager
 - Downstream verification is not supported — requires future per-peer
   relationship config
-- RTR v2 version negotiation is not implemented — ASPA records are only
-  received if the cache sends them on an existing connection
+- RTR v2 version negotiation is implemented with automatic fallback to v1;
+  ASPA is only available when the cache supports RTR v2
 - No new config is needed for ASPA — it uses the same RTR cache servers
   as RPKI ROV

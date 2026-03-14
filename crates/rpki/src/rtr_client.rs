@@ -84,6 +84,8 @@ pub struct RtrClient {
     expire_interval: Duration,
     last_end_of_data_at: Option<TokioInstant>,
     data_expires_at: Option<TokioInstant>,
+    /// Negotiated RTR protocol version (2 = ASPA capable, 1 = VRP only).
+    negotiated_version: u8,
 }
 
 impl RtrClient {
@@ -100,6 +102,7 @@ impl RtrClient {
             config,
             session_id: None,
             serial: None,
+            negotiated_version: crate::rtr_codec::RTR_VERSION_2,
         }
     }
 
@@ -109,8 +112,26 @@ impl RtrClient {
         loop {
             match TcpStream::connect(self.config.server_addr).await {
                 Ok(stream) => {
-                    info!(server = %self.config.server_addr, "RTR connected");
+                    info!(
+                        server = %self.config.server_addr,
+                        rtr_version = self.negotiated_version,
+                        "RTR connected"
+                    );
                     if let Err(e) = self.run_session(stream).await {
+                        // RTR error code 4 = Unsupported Protocol Version.
+                        // Fall back from v2 to v1 and retry immediately.
+                        if matches!(&e, RtrError::ServerError { code: 4, .. })
+                            && self.negotiated_version == crate::rtr_codec::RTR_VERSION_2
+                        {
+                            info!(
+                                server = %self.config.server_addr,
+                                "RTR server does not support v2, falling back to v1 (no ASPA)"
+                            );
+                            self.negotiated_version = crate::rtr_codec::RTR_VERSION;
+                            self.session_id = None;
+                            self.serial = None;
+                            continue; // retry immediately without sleep
+                        }
                         warn!(
                             server = %self.config.server_addr,
                             error = %e,
@@ -172,7 +193,7 @@ impl RtrClient {
         let query_pdu = self.build_query_pdu(query);
         let is_reset = matches!(query_pdu, RtrPdu::ResetQuery);
         let mut send_buf = Vec::new();
-        query_pdu.encode(&mut send_buf);
+        query_pdu.encode_with_version(&mut send_buf, self.negotiated_version);
         stream.write_all(&send_buf).await.map_err(RtrError::Io)?;
         Ok(is_reset)
     }

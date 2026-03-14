@@ -335,32 +335,43 @@ impl RtrPdu {
         Ok((pdu, length))
     }
 
-    /// Encode this PDU into a byte buffer.
-    #[expect(clippy::too_many_lines)]
+    /// Encode this PDU into a byte buffer using the default version for each
+    /// PDU type (v1 for standard PDUs, v2 for ASPA).
     pub fn encode(&self, buf: &mut Vec<u8>) {
+        let version = if matches!(self, RtrPdu::Aspa { .. }) {
+            RTR_VERSION_2
+        } else {
+            RTR_VERSION
+        };
+        self.encode_with_version(buf, version);
+    }
+
+    /// Encode this PDU with an explicit protocol version byte.
+    #[expect(clippy::too_many_lines)]
+    pub fn encode_with_version(&self, buf: &mut Vec<u8>, version: u8) {
         match self {
             RtrPdu::SerialNotify { session_id, serial } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_SERIAL_NOTIFY);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&12u32.to_be_bytes());
                 buf.extend_from_slice(&serial.to_be_bytes());
             }
             RtrPdu::SerialQuery { session_id, serial } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_SERIAL_QUERY);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&12u32.to_be_bytes());
                 buf.extend_from_slice(&serial.to_be_bytes());
             }
             RtrPdu::ResetQuery => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_RESET_QUERY);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&8u32.to_be_bytes());
             }
             RtrPdu::CacheResponse { session_id } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_CACHE_RESPONSE);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&8u32.to_be_bytes());
@@ -372,7 +383,7 @@ impl RtrPdu {
                 prefix,
                 asn,
             } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_IPV4_PREFIX);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&20u32.to_be_bytes());
@@ -390,7 +401,7 @@ impl RtrPdu {
                 prefix,
                 asn,
             } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_IPV6_PREFIX);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&32u32.to_be_bytes());
@@ -408,7 +419,7 @@ impl RtrPdu {
                 retry,
                 expire,
             } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_END_OF_DATA);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&24u32.to_be_bytes());
@@ -418,7 +429,7 @@ impl RtrPdu {
                 buf.extend_from_slice(&expire.to_be_bytes());
             }
             RtrPdu::CacheReset => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_CACHE_RESET);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&8u32.to_be_bytes());
@@ -432,7 +443,7 @@ impl RtrPdu {
                 let total_len = (16 + provider_asns.len() * 4) as u32;
                 #[expect(clippy::cast_possible_truncation)]
                 let provider_count = provider_asns.len() as u16;
-                buf.push(RTR_VERSION_2);
+                buf.push(version);
                 buf.push(PDU_ASPA);
                 buf.extend_from_slice(&0u16.to_be_bytes()); // session_id / zero
                 buf.extend_from_slice(&total_len.to_be_bytes());
@@ -448,7 +459,7 @@ impl RtrPdu {
                 let text_bytes = text.as_bytes();
                 #[expect(clippy::cast_possible_truncation)]
                 let total_len = (16 + pdu.len() + text_bytes.len()) as u32;
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_ERROR_REPORT);
                 buf.extend_from_slice(&code.to_be_bytes());
                 buf.extend_from_slice(&total_len.to_be_bytes());
