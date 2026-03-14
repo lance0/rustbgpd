@@ -160,6 +160,7 @@ fn make_route(local_pref: u32) -> Route {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -181,6 +182,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -389,6 +391,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     let attrs = session.prepare_outbound_attributes(&route, true, Ipv4Addr::new(10, 0, 0, 1), None);
 
@@ -530,6 +533,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     let route2 = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24)),
@@ -587,6 +591,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     let route2 = Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:2::".parse().unwrap(), 64)),
@@ -775,6 +780,7 @@ fn ibgp_default_local_pref_when_missing() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     let attrs =
         session.prepare_outbound_attributes(&route, false, Ipv4Addr::new(10, 0, 0, 1), None);
@@ -803,6 +809,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     let attrs =
@@ -851,6 +858,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     let attrs =
@@ -975,6 +983,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         }],
         withdraw: vec![],
         end_of_rib: vec![],
@@ -1037,6 +1046,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         }],
         withdraw: vec![],
         end_of_rib: vec![],
@@ -1104,6 +1114,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -1217,6 +1228,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_neighbor_set: None,
                 match_route_type: None,
                 match_rpki_validation: None,
+                match_aspa_validation: None,
                 match_as_path_length_ge: None,
                 match_as_path_length_le: None,
                 match_local_pref_ge: None,
@@ -1239,6 +1251,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_neighbor_set: None,
                 match_route_type: None,
                 match_rpki_validation: None,
+                match_aspa_validation: None,
                 match_as_path_length_ge: None,
                 match_as_path_length_le: None,
                 match_local_pref_ge: None,
@@ -1264,6 +1277,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_neighbor_set: None,
                 match_route_type: None,
                 match_rpki_validation: None,
+                match_aspa_validation: None,
                 match_as_path_length_ge: None,
                 match_as_path_length_le: None,
                 match_local_pref_ge: None,
@@ -1379,6 +1393,7 @@ async fn update_import_policy_applies_to_future_updates() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -1442,6 +1457,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
                 is_llgr_stale: false,
                 path_id: 0,
                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             }],
             withdrawn: vec![],
             flowspec_announced: vec![],
@@ -1490,6 +1506,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -1608,6 +1625,7 @@ async fn import_policy_match_next_hop_filters_route() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,

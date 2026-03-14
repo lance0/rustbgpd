@@ -172,6 +172,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             is_llgr_stale: false,
             path_id: req.path_id,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();

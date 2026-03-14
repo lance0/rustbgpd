@@ -3,8 +3,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use regex::Regex;
 use rustbgpd_wire::{
-    AsPath, AsPathSegment, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
-    PathAttribute, Prefix, RpkiValidation,
+    AsPath, AsPathSegment, AspaValidation, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix,
+    LargeCommunity, PathAttribute, Prefix, RpkiValidation,
 };
 
 /// Action taken when a prefix matches a policy entry.
@@ -64,6 +64,8 @@ pub struct RouteContext<'a> {
     pub as_path_len: usize,
     /// RPKI origin validation state (RFC 6811).
     pub validation_state: RpkiValidation,
+    /// ASPA upstream path verification state.
+    pub aspa_state: AspaValidation,
     /// Evaluation peer IP address.
     pub peer_address: Option<IpAddr>,
     /// Evaluation peer remote ASN.
@@ -497,6 +499,8 @@ pub struct PolicyStatement {
     pub match_route_type: Option<RouteType>,
     /// RPKI validation state match criterion (RFC 6811).
     pub match_rpki_validation: Option<RpkiValidation>,
+    /// ASPA path verification state match criterion.
+    pub match_aspa_validation: Option<AspaValidation>,
     /// Minimum `AS_PATH` length (inclusive) to match.
     pub match_as_path_length_ge: Option<u32>,
     /// Maximum `AS_PATH` length (inclusive) to match.
@@ -552,6 +556,10 @@ impl PolicyStatement {
             .match_rpki_validation
             .is_none_or(|v| v == ctx.validation_state);
 
+        let aspa_ok = self
+            .match_aspa_validation
+            .is_none_or(|v| v == ctx.aspa_state);
+
         let aspath_len_ok = self
             .match_as_path_length_ge
             .is_none_or(|v| ctx.as_path_len >= v as usize)
@@ -583,6 +591,7 @@ impl PolicyStatement {
             && neighbor_set_ok
             && route_type_ok
             && rpki_ok
+            && aspa_ok
             && aspath_len_ok
             && local_pref_ok
             && med_ok

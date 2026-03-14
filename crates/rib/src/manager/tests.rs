@@ -104,6 +104,7 @@ fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -128,6 +129,7 @@ fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -150,6 +152,7 @@ fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref: u32) -> Ro
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -862,6 +865,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -1124,6 +1128,7 @@ async fn local_route_sent_to_ibgp_peer() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -1163,6 +1168,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -1284,6 +1290,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -1349,6 +1356,7 @@ async fn withdraw_injected_removes_and_distributes() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -1399,6 +1407,7 @@ async fn export_policy_blocks_denied() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -1536,6 +1545,7 @@ async fn per_peer_export_policy() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -1633,6 +1643,7 @@ async fn replace_peer_export_policy_resyncs_outbound_state() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -1715,6 +1726,7 @@ async fn export_policy_match_next_hop_filters_route() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -1889,6 +1901,7 @@ async fn explain_advertised_route_reports_modifications() {
                 match_as_path_length_ge: None,
                 match_as_path_length_le: None,
                 match_rpki_validation: None,
+                match_aspa_validation: None,
                 match_local_pref_ge: None,
                 match_local_pref_le: None,
                 match_med_ge: None,
@@ -1971,6 +1984,7 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
                 match_as_path_length_ge: None,
                 match_as_path_length_le: None,
                 match_rpki_validation: None,
+                match_aspa_validation: None,
                 match_local_pref_ge: None,
                 match_local_pref_le: None,
                 match_med_ge: None,
@@ -2051,6 +2065,7 @@ async fn peer_down_cleans_up_export_policy() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,
@@ -3153,6 +3168,7 @@ async fn distribute_changes_filters_unsendable_families() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     // Send both IPv4 and IPv6 routes
@@ -3213,6 +3229,7 @@ async fn send_initial_table_filters_unsendable_families() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     // Pre-populate Loc-RIB with both IPv4 and IPv6 routes
@@ -3292,6 +3309,7 @@ async fn dual_stack_peer_receives_both_families() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     // Pre-populate Loc-RIB
@@ -4381,6 +4399,7 @@ async fn gr_withdraws_non_gr_family_routes() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     tx.send(RibUpdate::RoutesReceived {
         peer: source,
@@ -5093,6 +5112,7 @@ async fn rr_local_route_to_all_ibgp() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     let (reply_tx, _) = oneshot::channel();
     tx.send(RibUpdate::InjectRoute {
@@ -5133,6 +5153,7 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -5244,6 +5265,7 @@ fn validate_route_rpki_empty_as_path() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
     assert_eq!(
         super::validate_route_rpki(&route, &table),
@@ -5618,6 +5640,7 @@ fn make_multipath_route(
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -5648,6 +5671,7 @@ fn make_multipath_route_v6(
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
@@ -6293,6 +6317,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     };
 
     tx.send(RibUpdate::RoutesReceived {
@@ -6717,6 +6742,7 @@ async fn multipath_all_candidates_denied_by_export_policy() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,

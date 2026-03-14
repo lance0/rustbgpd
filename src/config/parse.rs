@@ -214,6 +214,7 @@ fn parse_policy_statements(
             match_neighbor_set,
             match_route_type,
             match_rpki_validation,
+            match_aspa_validation: None,
             match_as_path_length_ge: e.match_as_path_length_ge,
             match_as_path_length_le: e.match_as_path_length_le,
             match_local_pref_ge: e.match_local_pref_ge,

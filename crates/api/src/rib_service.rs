@@ -927,6 +927,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         };
         let v6 = Route {
             prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
@@ -940,6 +941,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         };
 
         // Unspecified returns all
@@ -1137,6 +1139,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         };
 
         let filters = RouteFilters {
@@ -1173,6 +1176,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         };
 
         let filters = RouteFilters {
@@ -1210,6 +1214,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         };
 
         let filters = RouteFilters {

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rustbgpd_wire::{
-    Afi, AsPath, ExtendedCommunity, FlowSpecRule, LargeCommunity, Origin, PathAttribute, Prefix,
-    RpkiValidation,
+    Afi, AsPath, AspaValidation, ExtendedCommunity, FlowSpecRule, LargeCommunity, Origin,
+    PathAttribute, Prefix, RpkiValidation,
 };
 
 /// How a route was learned, used for best-path selection and iBGP split-horizon.
@@ -47,6 +47,8 @@ pub struct Route {
     pub path_id: u32,
     /// RPKI origin validation state (RFC 6811). Default: `NotFound`.
     pub validation_state: RpkiValidation,
+    /// ASPA upstream path verification state. Default: `Unknown`.
+    pub aspa_state: AspaValidation,
 }
 
 impl Route {

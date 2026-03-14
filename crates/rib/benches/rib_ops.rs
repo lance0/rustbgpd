@@ -52,6 +52,7 @@ fn make_route(prefix: Prefix, peer_idx: u32) -> Route {
         is_llgr_stale: false,
         path_id: 0,
         validation_state: RpkiValidation::NotFound,
+        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
     }
 }
 
