@@ -122,7 +122,7 @@ impl VrpManager {
                 // ASPA incremental
                 let aspa_table = self.server_aspa_tables.entry(server).or_default();
                 for w in &aspa_withdrawn {
-                    aspa_table.retain(|r| r.customer_asn != w.customer_asn);
+                    aspa_table.retain(|r| r != w);
                 }
                 aspa_table.extend(aspa_announced);
             }
@@ -417,5 +417,63 @@ mod tests {
 
         let update = aspa_rx.try_recv().unwrap();
         assert!(update.table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn aspa_incremental_withdraw_is_record_level() {
+        use crate::aspa::ProviderAuth;
+
+        let (_vrp_tx, vrp_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(16);
+        let (aspa_tx, mut aspa_rx) = mpsc::channel(16);
+        let mut mgr = VrpManager::new(vrp_rx, rib_tx).with_aspa_tx(aspa_tx);
+
+        // Two ASPA records for the same customer from different CAs
+        let record_a = AspaRecord {
+            customer_asn: 65001,
+            provider_asns: vec![65002],
+        };
+        let record_b = AspaRecord {
+            customer_asn: 65001,
+            provider_asns: vec![65003],
+        };
+
+        mgr.handle_update(VrpUpdate::FullTable {
+            server: server1(),
+            entries: vec![],
+            aspa_records: vec![record_a.clone(), record_b.clone()],
+        })
+        .await;
+        let update = aspa_rx.try_recv().unwrap();
+        // Both records merged: 65001 has providers {65002, 65003}
+        assert_eq!(
+            update.table.authorized(65001, 65002),
+            ProviderAuth::ProviderPlus
+        );
+        assert_eq!(
+            update.table.authorized(65001, 65003),
+            ProviderAuth::ProviderPlus
+        );
+
+        // Withdraw only record_a — record_b should survive
+        mgr.handle_update(VrpUpdate::IncrementalUpdate {
+            server: server1(),
+            announced: vec![],
+            withdrawn: vec![],
+            aspa_announced: vec![],
+            aspa_withdrawn: vec![record_a],
+        })
+        .await;
+        let update = aspa_rx.try_recv().unwrap();
+        // 65003 should still be authorized (from record_b)
+        assert_eq!(
+            update.table.authorized(65001, 65003),
+            ProviderAuth::ProviderPlus
+        );
+        // 65002 should no longer be authorized (record_a withdrawn)
+        assert_eq!(
+            update.table.authorized(65001, 65002),
+            ProviderAuth::NotProviderPlus
+        );
     }
 }
