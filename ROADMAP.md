@@ -152,6 +152,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for operators who do not want an Envoy/nginx sidecar
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 - [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
+- [ ] **Validation snapshot delivery to transport sessions** — `match_rpki_validation` and `match_aspa_validation` are currently export-only because validation runs post-ingress in the RIB manager. Fix: deliver `Arc<ValidationSnapshot>` (VRP + ASPA tables) to transport sessions via `tokio::sync::watch` channel. Each session holds the latest immutable snapshot and evaluates import policy against it. RIB-side revalidation remains the correctness backstop. This extends the existing immutable-snapshot pattern without adding locks or transport → rpki coupling.
 
 ### P1 — Core Protocol Gaps
 
