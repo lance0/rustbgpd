@@ -362,6 +362,8 @@ pub struct PolicyStatementConfig {
     pub match_next_hop: Option<String>,
     /// RPKI validation state to match: `"valid"`, `"invalid"`, or `"not_found"`.
     pub match_rpki_validation: Option<String>,
+    /// ASPA validation state to match: `"valid"`, `"invalid"`, or `"unknown"`.
+    pub match_aspa_validation: Option<String>,
     /// Set `LOCAL_PREF` on matching routes.
     pub set_local_pref: Option<u32>,
     /// Set MED on matching routes.

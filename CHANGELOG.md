@@ -7,6 +7,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **ASPA upstream path verification.** Validates AS_PATH
+  customer-provider relationships to detect route leaks. RTR v2 support with
+  automatic v1 fallback, ASPA PDU type 11 codec, `AspaTable` with multi-record
+  merge, upstream verification algorithm per
+  draft-ietf-sidrops-aspa-verification. Best-path step 0.7 (Valid > Unknown >
+  Invalid) between RPKI and LOCAL_PREF. Export policy `match_aspa_validation`
+  for filtering. `aspa_state` exposed in gRPC Route responses. Import policy
+  limitation: validation runs post-ingress, so validation-state matches are
+  now rejected in import policy config and remain export-only (same as
+  `match_rpki_validation`). Downstream verification deferred. (ADR-0049)
+
+---
+
 ## [0.5.1] — 2026-03-13
 
 ### Added

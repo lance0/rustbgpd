@@ -128,3 +128,9 @@ resolved.
   per wire semantics (the AFI comes from the MP_REACH attribute, not the
   rule itself) but worth noting — the AFI is always set correctly from
   the MP_REACH/MP_UNREACH framing.
+- **`match_rpki_validation` and `match_aspa_validation` are export-only.**
+  Import policy evaluates in the transport layer before the route reaches
+  the RIB, where RPKI and ASPA validation states are assigned. rustbgpd now
+  rejects these matches in import policy config rather than accepting inert
+  statements. Use best-path demotion and export policy for validation-based
+  filtering instead.

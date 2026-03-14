@@ -351,6 +351,8 @@ pub struct PolicyStatementDefinition {
     pub match_next_hop: Option<String>,
     /// Optional RPKI validation state match.
     pub match_rpki_validation: Option<String>,
+    /// Optional ASPA validation state match.
+    pub match_aspa_validation: Option<String>,
     /// Optional `LOCAL_PREF` rewrite.
     pub set_local_pref: Option<u32>,
     /// Optional `MED` rewrite.

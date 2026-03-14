@@ -4,7 +4,7 @@
 
 use std::cmp::Ordering;
 
-use rustbgpd_wire::{AsPath, RpkiValidation};
+use rustbgpd_wire::{AsPath, AspaValidation, RpkiValidation};
 
 use crate::route::Route;
 
@@ -14,6 +14,15 @@ fn rpki_preference(v: RpkiValidation) -> u8 {
         RpkiValidation::Valid => 2,
         RpkiValidation::NotFound => 1,
         RpkiValidation::Invalid => 0,
+    }
+}
+
+/// Numeric preference for ASPA path verification state: higher = more preferred.
+fn aspa_preference(v: AspaValidation) -> u8 {
+    match v {
+        AspaValidation::Valid => 2,
+        AspaValidation::Unknown => 1,
+        AspaValidation::Invalid => 0,
     }
 }
 
@@ -32,6 +41,7 @@ fn stale_rank(route: &Route) -> u8 {
 /// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
 /// 0. Non-stale preferred over stale (RFC 4724 / RFC 9494 three-tier)
 /// 0.5. RPKI validation: Valid > `NotFound` > Invalid (RFC 6811)
+/// 0.7. ASPA path verification: Valid > Unknown > Invalid
 /// 1. Highest `LOCAL_PREF` (default 100)
 /// 2. Shortest `AS_PATH` length (default 0)
 /// 3. Lowest ORIGIN — IGP < EGP < INCOMPLETE
@@ -50,6 +60,12 @@ pub fn best_path_cmp(a: &Route, b: &Route) -> Ordering {
 
     // 0.5. RPKI validation: Valid > NotFound > Invalid (higher preference wins)
     let cmp = rpki_preference(b.validation_state).cmp(&rpki_preference(a.validation_state));
+    if cmp != Ordering::Equal {
+        return cmp;
+    }
+
+    // 0.7. ASPA path verification: Valid > Unknown > Invalid
+    let cmp = aspa_preference(b.aspa_state).cmp(&aspa_preference(a.aspa_state));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -136,6 +152,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         }
     }
 
@@ -491,6 +508,7 @@ mod proptests {
                         is_llgr_stale: false,
                         path_id: 0,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                     }
                 },
             )

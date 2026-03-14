@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use super::helpers::{
     LOCAL_PEER, gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner,
-    validate_route_rpki,
+    validate_route_aspa, validate_route_rpki,
 };
 use super::{PendingRouteChunk, PendingRoutesReceived, RibManager};
 use crate::adj_rib_in::AdjRibIn;
@@ -151,6 +151,7 @@ impl RibManager {
             as_path_str: &aspath_str,
             as_path_len: aspath_len,
             validation_state: best.validation_state,
+            aspa_state: best.aspa_state,
             peer_address: Some(target_peer),
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
@@ -404,6 +405,9 @@ impl RibManager {
             for mut route in announced {
                 if let Some(ref table) = vrp_table {
                     route.validation_state = validate_route_rpki(&route, table);
+                }
+                if let Some(ref table) = self.aspa_table {
+                    route.aspa_state = validate_route_aspa(&route, table);
                 }
                 debug!(%peer, prefix = %route.prefix, "announced");
                 affected.insert(route.prefix);
@@ -756,6 +760,7 @@ impl RibManager {
                 as_path_str: &aspath_str,
                 as_path_len: aspath_len,
                 validation_state: candidate.validation_state,
+                aspa_state: candidate.aspa_state,
                 peer_address: Some(target_peer),
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
@@ -876,6 +881,7 @@ impl RibManager {
             as_path_str: &aspath_str,
             as_path_len: aspath_len,
             validation_state: best.validation_state,
+            aspa_state: best.aspa_state,
             peer_address: Some(target_peer),
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
@@ -976,6 +982,7 @@ impl RibManager {
                         is_llgr_stale: false,
                         path_id: 0,
                         validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                        aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                     },
                     target_is_ebgp,
                     target_is_rr_client,
@@ -1005,6 +1012,7 @@ impl RibManager {
                     as_path_str: &aspath_str,
                     as_path_len: aspath_len,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                    aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                     peer_address: Some(target_peer),
                     peer_asn: target_peer_asn,
                     peer_group: target_peer_group,

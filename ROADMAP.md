@@ -85,7 +85,7 @@ and [docs/COMPARISON.md](docs/COMPARISON.md).*
 Features with clear market signal and manageable scope. These are the next
 items to ship.
 
-- [ ] **ASPA verification (RFC 9582)** — RIPE and ARIN now support ASPA object publishing in production (January 2026); Cloudflare deployed ASPA verification globally; IETF draft nearing Working Group Last Call. RTR plumbing already exists (RPKI crate). Receive ASPA records via RTR, validate customer-provider relationships in AS_PATH, integrate into best-path and policy engine. Being among the first Rust implementations with ASPA is a concrete differentiator.
+- [x] **ASPA verification** — upstream path verification with RTR v2 support. AspaTable + verify_upstream() algorithm, RTR v2 codec (ASPA PDU type 11) with automatic v1 fallback, best-path step 0.7 (Valid > Unknown > Invalid), export policy `match_aspa_validation`, gRPC `aspa_state` exposure. Validation-state matches are export-only and rejected in import policy config because validation runs post-ingress. Downstream verification deferred (needs per-peer relationship config). (ADR-0049)
 - [x] **Config diff** — `rustbgpd --diff` previews what SIGHUP would change: neighbor add/remove/modify (reload-applied), global/rpki/bmp/mrt (restart-required), and peer-group/policy changes (informational). Human-readable colored output + `--json` for scripting. Exit code 1 = actionable changes.
 - [ ] **Alice-LG / looking glass API** — instead of a built-in web UI, expose an Alice-LG-compatible REST source backend or RFC 8522 `.well-known/looking-glass` endpoint. Alice-LG is the IXP standard (DE-CIX, LINX, Netnod). The gRPC API already has the data; this is a thin REST translation layer. More valuable than a custom web UI.
 - [ ] **Best-path explain** — `best_path_cmp` returns reason enum (ShorterAsPath, HigherLocalPref, LowerRouterId, etc.) instead of bare Ordering; gRPC `ExplainRoute` RPC shows all candidates with pairwise decision tree; `rustbgpctl explain <prefix>` CLI; answers "why did this route win?" without log correlation. Operators ask for this constantly.
@@ -152,6 +152,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for operators who do not want an Envoy/nginx sidecar
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 - [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
+- [ ] **Validation snapshot delivery to transport sessions** — `match_rpki_validation` and `match_aspa_validation` are currently export-only because validation runs post-ingress in the RIB manager. Fix: deliver `Arc<ValidationSnapshot>` (VRP + ASPA tables) to transport sessions via `tokio::sync::watch` channel. Each session holds the latest immutable snapshot and evaluates import policy against it. RIB-side revalidation remains the correctness backstop. This extends the existing immutable-snapshot pattern without adding locks or transport → rpki coupling.
 
 ### P1 — Core Protocol Gaps
 
@@ -319,7 +320,7 @@ Quality gates before tagging 1.0.0:
 - [x] Extended communities
 - [x] Policy actions (match + modify + filter)
 - [x] Large communities (RFC 8092)
-- [ ] ASPA verification (RFC 9582) — all major competitors have it; RIRs deploying in production
+- [x] ASPA verification — upstream verification with RTR v2 (ADR-0049)
 - [ ] Real-world deployment feedback
 - [x] Wire crate API stability (`rustbgpd-wire` published on crates.io)
 - [x] Comprehensive rustdoc for public API (hand-written crates; generated proto stubs excluded)
@@ -344,7 +345,7 @@ with FRR, BIRD, GoBGP, and OpenBGPd.
 | **Real-time events** | Log parsing | BMP/MRT | gRPC streaming + BMP + MRT |
 | **Observability** | SNMP, CLI | Prometheus | Prometheus + structured logs |
 | **Wire codec reuse** | No | No | `rustbgpd-wire` on crates.io |
-| **ASPA** | Yes (FRR, BIRD, OpenBGPd) | No | Planned |
+| **ASPA** | Yes (BIRD, OpenBGPd) | No | Yes (upstream) |
 
 ---
 

@@ -2,7 +2,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use super::parse::{
-    parse_families, parse_named_policy, parse_neighbor_set, parse_policy, resolve_chain,
+    parse_families, parse_named_policy, parse_neighbor_set, parse_policy,
+    reject_validation_state_matches_in_import_chain,
+    reject_validation_state_matches_in_import_policy, resolve_chain,
 };
 use super::{Config, ConfigError, DEFAULT_HOLD_TIME, PeerGroupConfig};
 
@@ -101,10 +103,14 @@ impl Config {
         }
 
         // Eagerly validate all policies at load time
-        parse_policy(
+        let global_import = parse_policy(
             &self.policy.import,
             &self.policy.neighbor_sets,
             &self.peer_groups,
+        )?;
+        reject_validation_state_matches_in_import_policy(
+            global_import.as_ref(),
+            "global import policy",
         )?;
         parse_policy(
             &self.policy.export,
@@ -132,11 +138,15 @@ impl Config {
         }
 
         // Validate global chains
-        resolve_chain(
+        let global_import_chain = resolve_chain(
             &self.policy.import_chain,
             &self.policy.definitions,
             &self.policy.neighbor_sets,
             &self.peer_groups,
+        )?;
+        reject_validation_state_matches_in_import_chain(
+            global_import_chain.as_ref(),
+            "global import_policy_chain",
         )?;
         resolve_chain(
             &self.policy.export_chain,
@@ -326,10 +336,14 @@ impl Config {
                 }
             }
 
-            parse_policy(
+            let neighbor_import = parse_policy(
                 &neighbor.import_policy,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+            )?;
+            reject_validation_state_matches_in_import_policy(
+                neighbor_import.as_ref(),
+                &format!("neighbor {} import_policy", neighbor.address),
             )?;
             parse_policy(
                 &neighbor.export_policy,
@@ -354,11 +368,15 @@ impl Config {
                     ),
                 });
             }
-            resolve_chain(
+            let neighbor_import_chain = resolve_chain(
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
+            )?;
+            reject_validation_state_matches_in_import_chain(
+                neighbor_import_chain.as_ref(),
+                &format!("neighbor {} import_policy_chain", neighbor.address),
             )?;
             resolve_chain(
                 &neighbor.export_policy_chain,
@@ -515,7 +533,11 @@ fn validate_peer_group(
         }
     }
 
-    parse_policy(&group.import_policy, neighbor_sets, peer_groups)?;
+    let group_import = parse_policy(&group.import_policy, neighbor_sets, peer_groups)?;
+    reject_validation_state_matches_in_import_policy(
+        group_import.as_ref(),
+        &format!("peer_group {name:?} import_policy"),
+    )?;
     parse_policy(&group.export_policy, neighbor_sets, peer_groups)?;
 
     if !group.import_policy.is_empty() && !group.import_policy_chain.is_empty() {
@@ -532,11 +554,15 @@ fn validate_peer_group(
             ),
         });
     }
-    resolve_chain(
+    let group_import_chain = resolve_chain(
         &group.import_policy_chain,
         definitions,
         neighbor_sets,
         peer_groups,
+    )?;
+    reject_validation_state_matches_in_import_chain(
+        group_import_chain.as_ref(),
+        &format!("peer_group {name:?} import_policy_chain"),
     )?;
     resolve_chain(
         &group.export_policy_chain,

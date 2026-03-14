@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use rustbgpd_rpki::VrpTable;
-use rustbgpd_wire::{Afi, LlgrFamily, Prefix, RpkiValidation, Safi};
+use rustbgpd_rpki::{AspaTable, VrpTable};
+use rustbgpd_wire::{Afi, AspaValidation, LlgrFamily, Prefix, RpkiValidation, Safi};
 
 /// Sentinel peer address for locally-injected routes.
 pub(super) const LOCAL_PEER: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
@@ -99,5 +99,19 @@ pub(super) fn validate_route_rpki(route: &crate::route::Route, table: &VrpTable)
     match origin {
         Some(asn) => table.validate(&route.prefix, asn),
         None => RpkiValidation::NotFound,
+    }
+}
+
+/// Validate a route's `AS_PATH` against the ASPA table (upstream verification).
+///
+/// Runs the upstream ASPA verification algorithm on the route's `AS_PATH`.
+/// Returns `Unknown` if no `AS_PATH` is present.
+pub(super) fn validate_route_aspa(
+    route: &crate::route::Route,
+    table: &AspaTable,
+) -> AspaValidation {
+    match route.as_path() {
+        Some(path) => rustbgpd_rpki::aspa_verify::verify_upstream(path, table),
+        None => AspaValidation::Unknown,
     }
 }

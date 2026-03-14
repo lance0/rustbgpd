@@ -82,6 +82,7 @@ Last updated: 2026-03-12
 | TCP-AO (RFC 5925) | No | No | No | No | No |
 | GTSM / TTL Security | Yes | Yes | Yes | Yes | Yes |
 | RPKI/RTR (RFC 6810/8210) | Yes | Yes | Yes | Yes | Yes |
+| ASPA verification | Yes | No | Yes | No | Yes |
 | Private AS removal | Yes | Yes | Yes | Yes | Yes |
 | Privilege separation | No | No | No | No | Yes |
 | Memory-safe language | Yes | No | No | Yes | No |

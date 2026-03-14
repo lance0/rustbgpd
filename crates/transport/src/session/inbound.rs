@@ -386,6 +386,7 @@ impl PeerSession {
                     as_path_str: &aspath_str,
                     as_path_len: aspath_len,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                    aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                     peer_address: Some(self.peer_ip),
                     peer_asn: policy_peer_asn,
                     peer_group: self.config.peer_group.as_deref(),
@@ -421,6 +422,7 @@ impl PeerSession {
                     is_llgr_stale: false,
                     path_id: entry.path_id,
                     validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                    aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                 })
             })
             .collect();
@@ -483,6 +485,7 @@ impl PeerSession {
                                 as_path_str: &aspath_str,
                                 as_path_len: aspath_len,
                                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                                 peer_address: Some(self.peer_ip),
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
@@ -529,6 +532,7 @@ impl PeerSession {
                             as_path_str: &aspath_str,
                             as_path_len: aspath_len,
                             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                             peer_address: Some(self.peer_ip),
                             peer_asn: policy_peer_asn,
                             peer_group: self.config.peer_group.as_deref(),
@@ -565,6 +569,7 @@ impl PeerSession {
                                 is_llgr_stale: false,
                                 path_id: entry.path_id,
                                 validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
                             });
                         }
                     }

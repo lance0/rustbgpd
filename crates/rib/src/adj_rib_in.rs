@@ -613,6 +613,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         }
     }
 
@@ -629,6 +630,7 @@ mod tests {
             is_llgr_stale: false,
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
         }
     }
 

@@ -138,6 +138,18 @@ fn parse_policy_statements(
             None
         };
 
+        let match_aspa_validation = if let Some(ref s) = e.match_aspa_validation {
+            Some(s.parse::<rustbgpd_wire::AspaValidation>().map_err(|_| {
+                ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "invalid match_aspa_validation {s:?}: expected \"valid\", \"invalid\", or \"unknown\""
+                    ),
+                }
+            })?)
+        } else {
+            None
+        };
+
         let match_neighbor_set = if let Some(ref name) = e.match_neighbor_set {
             Some(resolve_neighbor_set(name, neighbor_sets, peer_groups)?)
         } else {
@@ -195,6 +207,7 @@ fn parse_policy_statements(
             && e.match_med_le.is_none()
             && match_next_hop.is_none()
             && match_rpki_validation.is_none()
+            && match_aspa_validation.is_none()
         {
             return Err(ConfigError::InvalidPolicyEntry {
                 reason: "entry must have at least one match condition".to_string(),
@@ -214,6 +227,7 @@ fn parse_policy_statements(
             match_neighbor_set,
             match_route_type,
             match_rpki_validation,
+            match_aspa_validation,
             match_as_path_length_ge: e.match_as_path_length_ge,
             match_as_path_length_le: e.match_as_path_length_le,
             match_local_pref_ge: e.match_local_pref_ge,
@@ -241,6 +255,48 @@ pub(super) fn parse_policy(
         entries: parsed,
         default_action: PolicyAction::Permit,
     }))
+}
+
+fn policy_uses_validation_state_matches(policy: &Policy) -> bool {
+    policy
+        .entries
+        .iter()
+        .any(|entry| entry.match_rpki_validation.is_some() || entry.match_aspa_validation.is_some())
+}
+
+pub(super) fn reject_validation_state_matches_in_import_policy(
+    policy: Option<&Policy>,
+    context: &str,
+) -> Result<(), ConfigError> {
+    if policy.is_some_and(policy_uses_validation_state_matches) {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "{context} cannot use match_rpki_validation or match_aspa_validation: \
+                 validation runs post-ingress in the RIB manager; use export policy instead"
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn reject_validation_state_matches_in_import_chain(
+    chain: Option<&PolicyChain>,
+    context: &str,
+) -> Result<(), ConfigError> {
+    if let Some(chain) = chain
+        && chain
+            .policies
+            .iter()
+            .any(policy_uses_validation_state_matches)
+    {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "{context} cannot use match_rpki_validation or match_aspa_validation: \
+                 validation runs post-ingress in the RIB manager; use export policy instead"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Parse a named policy definition with configurable default action.

@@ -1,12 +1,16 @@
-//! RTR protocol (RFC 8210) PDU codec.
+//! RTR protocol (RFC 8210 / draft-ietf-sidrops-8210bis) PDU codec.
 //!
-//! Encode/decode for the RPKI-to-Router protocol, version 1.
+//! Encode/decode for the RPKI-to-Router protocol, versions 1 and 2.
+//! Version 2 adds ASPA PDU (type 11) support.
 //! Used by [`super::rtr_client`] to communicate with RPKI cache validators.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 /// RTR protocol version 1 (RFC 8210).
 pub const RTR_VERSION: u8 = 1;
+
+/// RTR protocol version 2 (draft-ietf-sidrops-8210bis) — adds ASPA support.
+pub const RTR_VERSION_2: u8 = 2;
 
 /// RTR PDU types (client perspective).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +86,15 @@ pub enum RtrPdu {
         /// Human-readable error text.
         text: String,
     },
+    /// Server → Client: ASPA record (type 11, RTR v2 only).
+    Aspa {
+        /// 1 = announce, 0 = withdraw.
+        flags: u8,
+        /// Customer ASN.
+        customer_asn: u32,
+        /// Authorized provider ASNs (sorted ascending).
+        provider_asns: Vec<u32>,
+    },
 }
 
 /// RTR decode errors.
@@ -118,6 +131,7 @@ const PDU_IPV6_PREFIX: u8 = 6;
 const PDU_END_OF_DATA: u8 = 7;
 const PDU_CACHE_RESET: u8 = 8;
 const PDU_ERROR_REPORT: u8 = 10;
+const PDU_ASPA: u8 = 11;
 
 impl RtrPdu {
     /// Peek at a buffer to determine the total PDU length.
@@ -146,7 +160,7 @@ impl RtrPdu {
         }
 
         let version = buf[0];
-        if version != RTR_VERSION {
+        if version != RTR_VERSION && version != RTR_VERSION_2 {
             return Err(RtrDecodeError::InvalidVersion(version));
         }
 
@@ -281,38 +295,86 @@ impl RtrPdu {
                     text,
                 }
             }
+            PDU_ASPA => {
+                if version != RTR_VERSION_2 {
+                    return Err(RtrDecodeError::InvalidType(pdu_type));
+                }
+                // ASPA PDU per draft-ietf-sidrops-8210bis:
+                //   byte 0: version (2)
+                //   byte 1: type (11)
+                //   byte 2: flags (bit 0 = announce/withdraw)
+                //   byte 3: zero
+                //   bytes 4-7: length
+                //   bytes 8-11: customer ASN
+                //   bytes 12+: provider ASNs (4 bytes each)
+                // Provider count derived from length: (length - 12) / 4
+                if length < 12 || !(length - 12).is_multiple_of(4) {
+                    return Err(RtrDecodeError::InvalidLength);
+                }
+                // Flags are at byte 2 (reuses the session_id high byte)
+                let flags = buf[2];
+                let customer_asn = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                let provider_count = (length - 12) / 4;
+                let mut provider_asns = Vec::with_capacity(provider_count);
+                for i in 0..provider_count {
+                    let offset = 12 + i * 4;
+                    let asn = u32::from_be_bytes([
+                        buf[offset],
+                        buf[offset + 1],
+                        buf[offset + 2],
+                        buf[offset + 3],
+                    ]);
+                    provider_asns.push(asn);
+                }
+                RtrPdu::Aspa {
+                    flags,
+                    customer_asn,
+                    provider_asns,
+                }
+            }
             _ => return Err(RtrDecodeError::InvalidType(pdu_type)),
         };
 
         Ok((pdu, length))
     }
 
-    /// Encode this PDU into a byte buffer.
-    #[expect(clippy::too_many_lines)]
+    /// Encode this PDU into a byte buffer using the default version for each
+    /// PDU type (v1 for standard PDUs, v2 for ASPA).
     pub fn encode(&self, buf: &mut Vec<u8>) {
+        let version = if matches!(self, RtrPdu::Aspa { .. }) {
+            RTR_VERSION_2
+        } else {
+            RTR_VERSION
+        };
+        self.encode_with_version(buf, version);
+    }
+
+    /// Encode this PDU with an explicit protocol version byte.
+    #[expect(clippy::too_many_lines)]
+    pub fn encode_with_version(&self, buf: &mut Vec<u8>, version: u8) {
         match self {
             RtrPdu::SerialNotify { session_id, serial } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_SERIAL_NOTIFY);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&12u32.to_be_bytes());
                 buf.extend_from_slice(&serial.to_be_bytes());
             }
             RtrPdu::SerialQuery { session_id, serial } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_SERIAL_QUERY);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&12u32.to_be_bytes());
                 buf.extend_from_slice(&serial.to_be_bytes());
             }
             RtrPdu::ResetQuery => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_RESET_QUERY);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&8u32.to_be_bytes());
             }
             RtrPdu::CacheResponse { session_id } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_CACHE_RESPONSE);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&8u32.to_be_bytes());
@@ -324,7 +386,7 @@ impl RtrPdu {
                 prefix,
                 asn,
             } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_IPV4_PREFIX);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&20u32.to_be_bytes());
@@ -342,7 +404,7 @@ impl RtrPdu {
                 prefix,
                 asn,
             } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_IPV6_PREFIX);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&32u32.to_be_bytes());
@@ -360,7 +422,7 @@ impl RtrPdu {
                 retry,
                 expire,
             } => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_END_OF_DATA);
                 buf.extend_from_slice(&session_id.to_be_bytes());
                 buf.extend_from_slice(&24u32.to_be_bytes());
@@ -370,16 +432,36 @@ impl RtrPdu {
                 buf.extend_from_slice(&expire.to_be_bytes());
             }
             RtrPdu::CacheReset => {
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_CACHE_RESET);
                 buf.extend_from_slice(&0u16.to_be_bytes());
                 buf.extend_from_slice(&8u32.to_be_bytes());
+            }
+            RtrPdu::Aspa {
+                flags,
+                customer_asn,
+                provider_asns,
+            } => {
+                // ASPA PDU per draft-ietf-sidrops-8210bis:
+                //   byte 2 = flags, byte 3 = zero, no provider_count field
+                //   length = 12 + 4 * num_providers
+                #[expect(clippy::cast_possible_truncation)]
+                let total_len = (12 + provider_asns.len() * 4) as u32;
+                buf.push(version);
+                buf.push(PDU_ASPA);
+                buf.push(*flags); // byte 2: flags
+                buf.push(0); // byte 3: zero
+                buf.extend_from_slice(&total_len.to_be_bytes());
+                buf.extend_from_slice(&customer_asn.to_be_bytes());
+                for asn in provider_asns {
+                    buf.extend_from_slice(&asn.to_be_bytes());
+                }
             }
             RtrPdu::ErrorReport { code, pdu, text } => {
                 let text_bytes = text.as_bytes();
                 #[expect(clippy::cast_possible_truncation)]
                 let total_len = (16 + pdu.len() + text_bytes.len()) as u32;
-                buf.push(RTR_VERSION);
+                buf.push(version);
                 buf.push(PDU_ERROR_REPORT);
                 buf.extend_from_slice(&code.to_be_bytes());
                 buf.extend_from_slice(&total_len.to_be_bytes());
@@ -625,5 +707,97 @@ mod tests {
         let (decoded2, consumed2) = RtrPdu::decode(&buf[consumed1..]).unwrap();
         assert_eq!(decoded2, pdu2);
         assert_eq!(consumed1 + consumed2, buf.len());
+    }
+
+    #[test]
+    fn aspa_roundtrip() {
+        let pdu = RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![65002, 65003, 65004],
+        };
+        assert_eq!(roundtrip(&pdu), pdu);
+    }
+
+    #[test]
+    fn aspa_withdraw_roundtrip() {
+        let pdu = RtrPdu::Aspa {
+            flags: 0,
+            customer_asn: 65001,
+            provider_asns: vec![65002],
+        };
+        assert_eq!(roundtrip(&pdu), pdu);
+    }
+
+    #[test]
+    fn aspa_no_providers_roundtrip() {
+        let pdu = RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![],
+        };
+        assert_eq!(roundtrip(&pdu), pdu);
+    }
+
+    #[test]
+    fn aspa_encoded_as_v2() {
+        let mut buf = Vec::new();
+        RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![65002],
+        }
+        .encode(&mut buf);
+        assert_eq!(buf[0], RTR_VERSION_2);
+        assert_eq!(buf[1], PDU_ASPA);
+    }
+
+    #[test]
+    fn aspa_rejected_on_v1() {
+        let mut buf = Vec::new();
+        RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![65002],
+        }
+        .encode(&mut buf);
+        // Overwrite version to 1 — should be rejected
+        buf[0] = RTR_VERSION;
+        assert_eq!(
+            RtrPdu::decode(&buf).unwrap_err(),
+            RtrDecodeError::InvalidType(PDU_ASPA)
+        );
+    }
+
+    #[test]
+    fn aspa_invalid_length() {
+        let mut buf = Vec::new();
+        RtrPdu::Aspa {
+            flags: 1,
+            customer_asn: 65001,
+            provider_asns: vec![65002],
+        }
+        .encode(&mut buf);
+        // Corrupt length to wrong value
+        let bad_len = 14u32.to_be_bytes();
+        buf[4..8].copy_from_slice(&bad_len);
+        assert_eq!(
+            RtrPdu::decode(&buf).unwrap_err(),
+            RtrDecodeError::InvalidLength
+        );
+    }
+
+    #[test]
+    fn v2_accepts_v1_pdus() {
+        // A v2-speaking server can still send v1-format PDUs like CacheResponse
+        // with version byte = 2
+        let mut buf = Vec::new();
+        buf.push(RTR_VERSION_2);
+        buf.push(PDU_CACHE_RESPONSE);
+        buf.extend_from_slice(&42u16.to_be_bytes());
+        buf.extend_from_slice(&8u32.to_be_bytes());
+        let (pdu, consumed) = RtrPdu::decode(&buf).unwrap();
+        assert_eq!(consumed, 8);
+        assert_eq!(pdu, RtrPdu::CacheResponse { session_id: 42 });
     }
 }

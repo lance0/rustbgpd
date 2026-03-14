@@ -180,6 +180,7 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
             path_id,
         }
     }

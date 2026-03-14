@@ -651,8 +651,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         let (vrp_update_tx, vrp_update_rx) = mpsc::channel(256);
         let (rpki_table_tx, mut rpki_table_rx) = mpsc::channel(16);
 
-        // Spawn VRP manager
-        let vrp_mgr = rustbgpd_rpki::VrpManager::new(vrp_update_rx, rpki_table_tx);
+        // ASPA table channel (VrpManager → RIB)
+        let (aspa_table_tx, mut aspa_table_rx) = mpsc::channel(16);
+
+        // Spawn VRP + ASPA manager
+        let vrp_mgr = rustbgpd_rpki::VrpManager::new(vrp_update_rx, rpki_table_tx)
+            .with_aspa_tx(aspa_table_tx);
         tokio::spawn(vrp_mgr.run());
 
         // Forward VRP table updates to RIB manager
@@ -661,6 +665,18 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             while let Some(update) = rpki_table_rx.recv().await {
                 let _ = rpki_rib_tx
                     .send(RibUpdate::RpkiCacheUpdate {
+                        table: update.table,
+                    })
+                    .await;
+            }
+        });
+
+        // Forward ASPA table updates to RIB manager
+        let aspa_rib_tx = rib_tx.clone();
+        tokio::spawn(async move {
+            while let Some(update) = aspa_table_rx.recv().await {
+                let _ = aspa_rib_tx
+                    .send(RibUpdate::AspaTableUpdate {
                         table: update.table,
                     })
                     .await;

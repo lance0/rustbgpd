@@ -17,6 +17,7 @@ fn evaluate_returns_modifications() {
             match_neighbor_set: None,
             match_route_type: None,
             match_rpki_validation: None,
+            match_aspa_validation: None,
             match_as_path_length_ge: None,
             match_as_path_length_le: None,
             match_local_pref_ge: None,

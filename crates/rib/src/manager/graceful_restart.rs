@@ -7,7 +7,7 @@ use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
 use tracing::info;
 
 use super::RibManager;
-use super::helpers::{LlgrPeerConfig, gauge_val, validate_route_rpki};
+use super::helpers::{LlgrPeerConfig, gauge_val, validate_route_aspa, validate_route_rpki};
 
 impl RibManager {
     #[expect(clippy::too_many_arguments)]
@@ -130,6 +130,38 @@ impl RibManager {
             info!(
                 changed = affected.len(),
                 "RPKI re-validation changed routes"
+            );
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+        }
+    }
+
+    pub(super) fn handle_aspa_cache_update(&mut self, table: Arc<rustbgpd_rpki::AspaTable>) {
+        info!(
+            records = table.len(),
+            "ASPA cache update — re-validating routes"
+        );
+        self.aspa_table = Some(table);
+        let Some(table) = self.aspa_table.as_ref() else {
+            return;
+        };
+        self.metrics.set_aspa_records_total(gauge_val(table.len()));
+
+        let mut affected = HashSet::new();
+        for rib in self.ribs.values_mut() {
+            for route in rib.iter_mut() {
+                let new_state = validate_route_aspa(route, table);
+                if route.aspa_state != new_state {
+                    route.aspa_state = new_state;
+                    affected.insert(route.prefix);
+                }
+            }
+        }
+
+        if !affected.is_empty() {
+            info!(
+                changed = affected.len(),
+                "ASPA re-validation changed routes"
             );
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
