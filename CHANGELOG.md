@@ -7,7 +7,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [Unreleased]
+## [0.6.0] — 2026-03-14
 
 ### Added
 
@@ -21,6 +21,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   limitation: validation runs post-ingress, so validation-state matches are
   now rejected in import policy config and remain export-only (same as
   `match_rpki_validation`). Downstream verification deferred. (ADR-0049)
+
+### rustbgpd-wire 0.6.0
+
+- Added `AspaValidation` enum (`Valid`, `Invalid`, `Unknown`) with `Display`,
+  `FromStr`, `Default`, `Hash`, and `Eq` implementations.
 
 ---
 
