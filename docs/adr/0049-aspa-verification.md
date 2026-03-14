@@ -74,12 +74,13 @@ Per draft-ietf-sidrops-aspa-verification:
 
 1. Compress AS_PATH: flatten segments, remove consecutive duplicates
 2. AS_SET present -> Invalid (path is unverifiable)
-3. Empty or single-hop -> Valid (nothing to verify)
-4. Walk from origin toward neighbor, checking each hop:
+3. Empty AS_PATH -> Invalid (per spec step 1)
+4. Single-hop -> Valid (no pairs to verify)
+5. Walk from origin toward neighbor, checking each hop:
    - ProviderPlus -> authorized, continue
    - NotProviderPlus -> Invalid (proven route leak)
    - NoAttestation -> mark incomplete, continue
-5. If any hop was NoAttestation -> Unknown; otherwise -> Valid
+6. If any hop was NoAttestation -> Unknown; otherwise -> Valid
 
 Invalid trumps Unknown: a single proven non-provider hop makes the entire
 path Invalid regardless of missing attestations elsewhere.
@@ -90,11 +91,19 @@ ASPA records are delivered via RTR v2 (draft-ietf-sidrops-8210bis), which
 adds the ASPA PDU (type 11). The codec now accepts both v1 and v2 PDUs
 based on the version byte in the header.
 
-ASPA PDU wire format:
+ASPA PDU wire format per draft-ietf-sidrops-8210bis:
 ```
-header(8) + flags(1) + zero(1) + provider_count(2) + customer_asn(4)
-          + provider_asns(4 * count)
+byte 0:     version (2)
+byte 1:     type (11)
+byte 2:     flags (bit 0 = announce/withdraw)
+byte 3:     zero
+bytes 4-7:  length (12 + 4 * num_providers)
+bytes 8-11: customer ASN
+bytes 12+:  provider ASNs (4 bytes each)
 ```
+
+Provider count is derived from the length field: `(length - 12) / 4`.
+There is no explicit provider count field in the PDU.
 
 Version negotiation: each fresh connection attempt starts with v2. If the
 server responds with ErrorReport code 4 (Unsupported Protocol Version), the
