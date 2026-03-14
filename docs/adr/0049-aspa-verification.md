@@ -129,9 +129,20 @@ Hard rejection uses policy: `match_aspa_validation = "invalid"` +
 
 Policy statements gain an optional `match_aspa_validation` field, following
 the exact `match_rpki_validation` pattern. Enables:
-- Rejecting ASPA-invalid routes
-- Tagging ASPA-valid routes with communities
-- Setting LOCAL_PREF based on ASPA state
+- Rejecting ASPA-invalid routes on export
+- Tagging ASPA-valid routes with communities on export
+- Setting LOCAL_PREF based on ASPA state on export
+
+**Import policy limitation:** `match_aspa_validation` only works in export
+policy. Import policy evaluates in the transport layer before the route
+reaches the RIB, where ASPA validation is applied. At import evaluation
+time, `aspa_state` is always `Unknown`. This is the same limitation as
+`match_rpki_validation` on import — both validation states are set
+post-ingress in the RIB manager. Moving validation earlier would require
+the transport crate to depend on rpki and hold table references, which is
+the wrong dependency direction. Operators should use best-path demotion
+(step 0.7) for ASPA-based route preference and export policy for hard
+rejection.
 
 ### RIB re-validation on ASPA table update
 
@@ -154,6 +165,9 @@ ingress and updated on ASPA table changes.
   updates are infrequent
 - The wire crate gains one new public enum (minor semver bump when
   published)
+- `match_aspa_validation` (and `match_rpki_validation`) only work in export
+  policy — import policy always sees `Unknown` / `NotFound` because
+  validation runs post-ingress in the RIB manager
 - Downstream verification is not supported — requires future per-peer
   relationship config
 - RTR v2 version negotiation is not implemented — ASPA records are only
