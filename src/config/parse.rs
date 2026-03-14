@@ -138,6 +138,18 @@ fn parse_policy_statements(
             None
         };
 
+        let match_aspa_validation = if let Some(ref s) = e.match_aspa_validation {
+            Some(s.parse::<rustbgpd_wire::AspaValidation>().map_err(|_| {
+                ConfigError::InvalidPolicyEntry {
+                    reason: format!(
+                        "invalid match_aspa_validation {s:?}: expected \"valid\", \"invalid\", or \"unknown\""
+                    ),
+                }
+            })?)
+        } else {
+            None
+        };
+
         let match_neighbor_set = if let Some(ref name) = e.match_neighbor_set {
             Some(resolve_neighbor_set(name, neighbor_sets, peer_groups)?)
         } else {
@@ -214,7 +226,7 @@ fn parse_policy_statements(
             match_neighbor_set,
             match_route_type,
             match_rpki_validation,
-            match_aspa_validation: None,
+            match_aspa_validation,
             match_as_path_length_ge: e.match_as_path_length_ge,
             match_as_path_length_le: e.match_as_path_length_le,
             match_local_pref_ge: e.match_local_pref_ge,

@@ -285,6 +285,7 @@ message PolicyStatement {
   optional uint32 match_med_ge = 20;
   optional uint32 match_med_le = 21;
   optional string match_next_hop = 22;
+  optional string match_aspa_validation = 23;
 }
 
 message AsPathPrepend {
@@ -564,6 +565,8 @@ message Route {
   uint32 path_id = 13;
   // RPKI validation state: "valid", "invalid", or "not_found".
   string validation_state = 14;
+  // ASPA path verification state: "valid", "invalid", or "unknown".
+  string aspa_state = 15;
 }
 
 message WatchRoutesRequest {

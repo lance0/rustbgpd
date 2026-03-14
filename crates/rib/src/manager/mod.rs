@@ -91,6 +91,8 @@ pub struct RibManager {
     peer_add_path_send_families: HashMap<IpAddr, Vec<(Afi, Safi)>>,
     /// Current RPKI VRP table for origin validation. `None` = no RPKI data.
     vrp_table: Option<Arc<VrpTable>>,
+    /// Current ASPA table for upstream path verification. `None` = no ASPA data.
+    aspa_table: Option<Arc<rustbgpd_rpki::AspaTable>>,
     route_events_tx: broadcast::Sender<RouteEvent>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
@@ -268,6 +270,7 @@ impl RibManager {
             peer_group: HashMap::new(),
             peer_bgp_id: HashMap::new(),
             vrp_table: None,
+            aspa_table: None,
             route_events_tx,
             metrics,
             rx,
@@ -445,6 +448,7 @@ impl RibManager {
                 llgr_stale_time,
             ),
             RibUpdate::RpkiCacheUpdate { table } => self.handle_rpki_cache_update(table),
+            RibUpdate::AspaTableUpdate { table } => self.handle_aspa_cache_update(table),
             RibUpdate::InjectFlowSpec { route, reply } => self.handle_inject_flowspec(route, reply),
             RibUpdate::WithdrawFlowSpec { rule, reply } => {
                 self.handle_withdraw_flowspec(rule, reply);

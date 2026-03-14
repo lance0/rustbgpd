@@ -422,6 +422,7 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         large_communities,
         path_id: route.path_id,
         validation_state: route.validation_state.to_string(),
+        aspa_state: route.aspa_state.to_string(),
     }
 }
 

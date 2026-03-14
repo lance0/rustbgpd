@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use super::helpers::{
     LOCAL_PEER, gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner,
-    validate_route_rpki,
+    validate_route_aspa, validate_route_rpki,
 };
 use super::{PendingRouteChunk, PendingRoutesReceived, RibManager};
 use crate::adj_rib_in::AdjRibIn;
@@ -405,6 +405,9 @@ impl RibManager {
             for mut route in announced {
                 if let Some(ref table) = vrp_table {
                     route.validation_state = validate_route_rpki(&route, table);
+                }
+                if let Some(ref table) = self.aspa_table {
+                    route.aspa_state = validate_route_aspa(&route, table);
                 }
                 debug!(%peer, prefix = %route.prefix, "announced");
                 affected.insert(route.prefix);

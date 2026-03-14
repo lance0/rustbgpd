@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_rpki::VrpTable;
+use rustbgpd_rpki::{AspaTable, VrpTable};
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -250,6 +250,11 @@ pub enum RibUpdate {
     RpkiCacheUpdate {
         /// The new VRP table snapshot.
         table: Arc<VrpTable>,
+    },
+    /// ASPA cache update — new ASPA table for upstream path verification.
+    AspaTableUpdate {
+        /// The new ASPA table snapshot.
+        table: Arc<AspaTable>,
     },
     /// Inject a locally-originated `FlowSpec` route.
     InjectFlowSpec {
