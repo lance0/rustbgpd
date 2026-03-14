@@ -73,6 +73,14 @@ pub use open::OpenMessage;
 pub use route_refresh::{RouteRefreshMessage, RouteRefreshSubtype};
 pub use update::{Ipv4UnicastMode, UpdateMessage};
 
+// ── Routing-domain result enums ──────────────────────────────────────
+//
+// `RpkiValidation` and `AspaValidation` are routing-domain concepts, not
+// wire-format types. They live here because the wire crate is the current
+// lowest common dependency shared by rib, policy, and transport — avoiding
+// a rib → rpki dependency edge. If more shared non-wire types accumulate,
+// extract them into a dedicated domain-types crate.
+
 /// RPKI origin validation state per RFC 6811.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RpkiValidation {
