@@ -36,6 +36,113 @@ fn stale_rank(route: &Route) -> u8 {
     }
 }
 
+/// The decisive step in a best-path comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BestPathReason {
+    /// Step 0: non-stale preferred over stale (RFC 4724 / RFC 9494).
+    StalePreference,
+    /// Step 0.5: RPKI validation preference (`Valid` > `NotFound` > `Invalid`).
+    RpkiPreference,
+    /// Step 0.7: ASPA path verification preference (Valid > Unknown > Invalid).
+    AspaPreference,
+    /// Step 1: higher `LOCAL_PREF` wins.
+    HigherLocalPref,
+    /// Step 2: shorter `AS_PATH` wins.
+    ShorterAsPath,
+    /// Step 3: lower ORIGIN type wins (IGP < EGP < Incomplete).
+    LowerOrigin,
+    /// Step 4: lower MED wins (deterministic / always-compare).
+    LowerMed,
+    /// Step 5: eBGP preferred over iBGP.
+    EbgpOverIbgp,
+    /// Step 5.5: shorter `CLUSTER_LIST` wins (RFC 4456).
+    ShorterClusterList,
+    /// Step 5.6: lower `ORIGINATOR_ID` wins (RFC 4456).
+    LowerOriginatorId,
+    /// Step 6: lower peer address (final tiebreaker).
+    LowerPeerAddress,
+}
+
+impl std::fmt::Display for BestPathReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StalePreference => write!(f, "stale_preference"),
+            Self::RpkiPreference => write!(f, "rpki_preference"),
+            Self::AspaPreference => write!(f, "aspa_preference"),
+            Self::HigherLocalPref => write!(f, "higher_local_pref"),
+            Self::ShorterAsPath => write!(f, "shorter_as_path"),
+            Self::LowerOrigin => write!(f, "lower_origin"),
+            Self::LowerMed => write!(f, "lower_med"),
+            Self::EbgpOverIbgp => write!(f, "ebgp_over_ibgp"),
+            Self::ShorterClusterList => write!(f, "shorter_cluster_list"),
+            Self::LowerOriginatorId => write!(f, "lower_originator_id"),
+            Self::LowerPeerAddress => write!(f, "lower_peer_address"),
+        }
+    }
+}
+
+/// Compare two routes and return the decisive reason.
+///
+/// Same logic as [`best_path_cmp`] but also returns which step broke the tie.
+#[must_use]
+pub fn best_path_cmp_with_reason(a: &Route, b: &Route) -> (Ordering, BestPathReason) {
+    let cmp = stale_rank(a).cmp(&stale_rank(b));
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::StalePreference);
+    }
+
+    let cmp = rpki_preference(b.validation_state).cmp(&rpki_preference(a.validation_state));
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::RpkiPreference);
+    }
+
+    let cmp = aspa_preference(b.aspa_state).cmp(&aspa_preference(a.aspa_state));
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::AspaPreference);
+    }
+
+    let cmp = b.local_pref().cmp(&a.local_pref());
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::HigherLocalPref);
+    }
+
+    let a_len = a.as_path().map_or(0, AsPath::len);
+    let b_len = b.as_path().map_or(0, AsPath::len);
+    let cmp = a_len.cmp(&b_len);
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::ShorterAsPath);
+    }
+
+    let cmp = a.origin().cmp(&b.origin());
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::LowerOrigin);
+    }
+
+    let cmp = a.med().cmp(&b.med());
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::LowerMed);
+    }
+
+    let cmp = b.is_ebgp().cmp(&a.is_ebgp());
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::EbgpOverIbgp);
+    }
+
+    let cmp = a.cluster_list().len().cmp(&b.cluster_list().len());
+    if cmp != Ordering::Equal {
+        return (cmp, BestPathReason::ShorterClusterList);
+    }
+
+    if let (Some(a_oid), Some(b_oid)) = (a.originator_id(), b.originator_id()) {
+        let cmp = a_oid.cmp(&b_oid);
+        if cmp != Ordering::Equal {
+            return (cmp, BestPathReason::LowerOriginatorId);
+        }
+    }
+
+    (a.peer.cmp(&b.peer), BestPathReason::LowerPeerAddress)
+}
+
 /// Compare two routes for best-path selection.
 ///
 /// The preferred route sorts `Less`. Decision steps (RFC 4271 §9.1.2):
