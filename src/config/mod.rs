@@ -53,12 +53,12 @@ impl Config {
         Ok(config)
     }
 
-    pub fn prometheus_addr(&self) -> SocketAddr {
+    pub fn prometheus_addr(&self) -> Option<SocketAddr> {
         self.global
             .telemetry
             .prometheus_addr
-            .parse()
-            .expect("validated in Config::load")
+            .as_ref()
+            .map(|s| s.parse().expect("validated in Config::load"))
     }
 
     pub fn listen_addr(&self) -> SocketAddr {

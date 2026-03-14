@@ -35,15 +35,14 @@ impl Config {
             });
         }
 
-        // Validate prometheus_addr is a valid SocketAddr
-        self.global
-            .telemetry
-            .prometheus_addr
-            .parse::<SocketAddr>()
-            .map_err(|e| ConfigError::InvalidPrometheusAddr {
-                value: self.global.telemetry.prometheus_addr.clone(),
-                reason: e.to_string(),
-            })?;
+        // Validate prometheus_addr is a valid SocketAddr (if configured)
+        if let Some(ref addr) = self.global.telemetry.prometheus_addr {
+            addr.parse::<SocketAddr>()
+                .map_err(|e| ConfigError::InvalidPrometheusAddr {
+                    value: addr.clone(),
+                    reason: e.to_string(),
+                })?;
+        }
 
         let telemetry = &self.global.telemetry;
         let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);

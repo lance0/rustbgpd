@@ -166,8 +166,23 @@ fn prometheus_addr_parsed() {
     let config = parse(valid_toml()).unwrap();
     assert_eq!(
         config.prometheus_addr(),
-        "0.0.0.0:9179".parse::<SocketAddr>().unwrap()
+        Some("0.0.0.0:9179".parse::<SocketAddr>().unwrap())
     );
+}
+
+#[test]
+fn prometheus_addr_optional() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+"#;
+    let config = parse(toml).unwrap();
+    assert_eq!(config.prometheus_addr(), None);
 }
 
 #[test]

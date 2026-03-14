@@ -375,7 +375,9 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
     }
 
     // Metrics
-    eprintln!("  |- metrics: http://{}/metrics", config.prometheus_addr(),);
+    if let Some(addr) = config.prometheus_addr() {
+        eprintln!("  |- metrics: http://{addr}/metrics");
+    }
 
     // Optional subsystems
     if let Some(ref rpki) = config.rpki {
@@ -603,7 +605,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     );
 
     let metrics = BgpMetrics::new();
-    let prometheus_addr = config.prometheus_addr();
     let grpc_listeners = resolve_grpc_listeners(&config).unwrap_or_else(|e| {
         error!(error = %e, "invalid gRPC listener configuration");
         process::exit(1);
@@ -617,11 +618,13 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .parse()
         .expect("validated in Config::load");
 
-    // Spawn metrics HTTP server
-    let metrics_clone = metrics.clone();
-    tokio::spawn(async move {
-        metrics_server::serve_metrics(prometheus_addr, metrics_clone).await;
-    });
+    // Spawn metrics HTTP server (if configured)
+    if let Some(prometheus_addr) = config.prometheus_addr() {
+        let metrics_clone = metrics.clone();
+        tokio::spawn(async move {
+            metrics_server::serve_metrics(prometheus_addr, metrics_clone).await;
+        });
+    }
 
     // Build global export policy chain for RIB manager fallback
     let export_policy = config.export_chain().unwrap_or_else(|e| {
@@ -1357,7 +1360,7 @@ mod tests {
                 cluster_id: None,
                 runtime_state_dir: "/tmp".to_string(),
                 telemetry: crate::config::TelemetryConfig {
-                    prometheus_addr: "127.0.0.1:9179".to_string(),
+                    prometheus_addr: Some("127.0.0.1:9179".to_string()),
                     log_format: "json".to_string(),
                     grpc_tcp: None,
                     grpc_uds: None,
