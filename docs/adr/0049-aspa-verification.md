@@ -10,10 +10,10 @@ security feature after RPKI origin validation. It validates AS_PATH topology
 by checking customer-provider relationships, addressing route leaks that
 RPKI ROV cannot detect. RIPE and ARIN support ASPA object publishing in
 production (January 2026), Cloudflare has deployed ASPA verification globally,
-and the IETF draft is nearing Working Group Last Call.
+and the IETF draft is targeted for IESG submission in March 2026.
 
-FRR, BIRD, and OpenBGPd all have ASPA implementations. Market research
-identified this as the highest-priority near-term feature for rustbgpd.
+BIRD and OpenBGPd have ASPA implementations. Market research identified
+this as the highest-priority near-term feature for rustbgpd.
 
 The existing RPKI ROV infrastructure (ADR-0034) provides a proven pattern:
 RTR client -> VrpManager -> Arc<Table> snapshot -> RIB revalidation ->

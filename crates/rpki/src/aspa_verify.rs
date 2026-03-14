@@ -47,8 +47,13 @@ pub fn verify_upstream(path: &AsPath, table: &AspaTable) -> AspaValidation {
         return AspaValidation::Invalid; // AS_SET present
     };
 
-    // Empty or single-hop paths are trivially valid (no hops to verify).
-    if compressed.len() <= 1 {
+    // Empty AS_PATH is Invalid per spec step 1.
+    if compressed.is_empty() {
+        return AspaValidation::Invalid;
+    }
+
+    // Single-hop path: only origin AS, no pairs to verify → Valid.
+    if compressed.len() == 1 {
         return AspaValidation::Valid;
     }
 
@@ -110,10 +115,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_path_is_valid() {
+    fn empty_path_is_invalid() {
         let table = make_table(vec![]);
         let path = AsPath { segments: vec![] };
-        assert_eq!(verify_upstream(&path, &table), AspaValidation::Valid);
+        assert_eq!(verify_upstream(&path, &table), AspaValidation::Invalid);
     }
 
     #[test]

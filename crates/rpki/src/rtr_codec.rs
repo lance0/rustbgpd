@@ -299,22 +299,25 @@ impl RtrPdu {
                 if version != RTR_VERSION_2 {
                     return Err(RtrDecodeError::InvalidType(pdu_type));
                 }
-                // ASPA PDU: header(8) + flags(1) + zero(1) + provider_count(2) + customer_asn(4)
-                //           + provider_asns(4 * count)
-                if length < 16 {
+                // ASPA PDU per draft-ietf-sidrops-8210bis:
+                //   byte 0: version (2)
+                //   byte 1: type (11)
+                //   byte 2: flags (bit 0 = announce/withdraw)
+                //   byte 3: zero
+                //   bytes 4-7: length
+                //   bytes 8-11: customer ASN
+                //   bytes 12+: provider ASNs (4 bytes each)
+                // Provider count derived from length: (length - 12) / 4
+                if length < 12 || !(length - 12).is_multiple_of(4) {
                     return Err(RtrDecodeError::InvalidLength);
                 }
-                let flags = buf[8];
-                // buf[9] = zero (AFI flags, reserved in current spec)
-                let provider_count = u16::from_be_bytes([buf[10], buf[11]]) as usize;
-                let customer_asn = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
-                let expected_len = 16 + provider_count * 4;
-                if length != expected_len {
-                    return Err(RtrDecodeError::InvalidLength);
-                }
+                // Flags are at byte 2 (reuses the session_id high byte)
+                let flags = buf[2];
+                let customer_asn = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                let provider_count = (length - 12) / 4;
                 let mut provider_asns = Vec::with_capacity(provider_count);
                 for i in 0..provider_count {
-                    let offset = 16 + i * 4;
+                    let offset = 12 + i * 4;
                     let asn = u32::from_be_bytes([
                         buf[offset],
                         buf[offset + 1],
@@ -439,17 +442,16 @@ impl RtrPdu {
                 customer_asn,
                 provider_asns,
             } => {
+                // ASPA PDU per draft-ietf-sidrops-8210bis:
+                //   byte 2 = flags, byte 3 = zero, no provider_count field
+                //   length = 12 + 4 * num_providers
                 #[expect(clippy::cast_possible_truncation)]
-                let total_len = (16 + provider_asns.len() * 4) as u32;
-                #[expect(clippy::cast_possible_truncation)]
-                let provider_count = provider_asns.len() as u16;
+                let total_len = (12 + provider_asns.len() * 4) as u32;
                 buf.push(version);
                 buf.push(PDU_ASPA);
-                buf.extend_from_slice(&0u16.to_be_bytes()); // session_id / zero
+                buf.push(*flags); // byte 2: flags
+                buf.push(0); // byte 3: zero
                 buf.extend_from_slice(&total_len.to_be_bytes());
-                buf.push(*flags);
-                buf.push(0); // AFI flags (zero / reserved)
-                buf.extend_from_slice(&provider_count.to_be_bytes());
                 buf.extend_from_slice(&customer_asn.to_be_bytes());
                 for asn in provider_asns {
                     buf.extend_from_slice(&asn.to_be_bytes());

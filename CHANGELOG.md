@@ -11,7 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **ASPA upstream path verification (RFC 9582).** Validates AS_PATH
+- **ASPA upstream path verification.** Validates AS_PATH
   customer-provider relationships to detect route leaks. RTR v2 support with
   automatic v1 fallback, ASPA PDU type 11 codec, `AspaTable` with multi-record
   merge, upstream verification algorithm per
