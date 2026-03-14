@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-03-12
+Last updated: 2026-03-14
 
 ## Overview
 
@@ -47,12 +47,12 @@ Last updated: 2026-03-12
 | Long-Lived GR (RFC 9494) | Yes | Partial | Yes | Yes | No |
 | Notification GR (RFC 8538) | Yes | No | No | Yes | Yes |
 | Add-Path (RFC 7911) | Yes | Yes | Yes | Yes | Yes |
-| Extended Messages (RFC 8654) | Yes | Yes | Yes | No | No |
-| Extended Nexthop (RFC 8950) | Yes | Yes | Yes | Yes | No |
+| Extended Messages (RFC 8654) | Yes | Yes | Yes | No | Yes |
+| Extended Nexthop (RFC 8950) | Yes | Yes | Yes | Yes | Yes |
 | Route Reflector (RFC 4456) | Yes | Yes | Yes | Yes | Yes |
 | Confederation (RFC 5065) | No | Yes | Yes | Yes | No |
-| Admin Shutdown (RFC 8203) | Yes | Yes | Yes | Yes | No |
-| BGP Roles (RFC 9234) | No | No | Yes | No | No |
+| Admin Shutdown (RFC 8203) | Yes | Yes | Yes | Yes | Yes |
+| BGP Roles (RFC 9234) | No | No | Yes | No | Yes |
 
 ## Policy Engine
 
@@ -172,5 +172,6 @@ AFI/SAFI coverage. Higher memory and CPU usage than C implementations at scale.
 Best as an SDN controller or route injector rather than a high-performance router.
 
 **OpenBGPd** is security-focused with privilege separation and OpenBSD heritage.
-Deployed at major IXPs (LINX, Netnod). Lean and reliable but limited AFI/SAFI
-support and no programmatic API beyond the CLI socket.
+Deployed at major IXPs (LINX, Netnod). Lean, reliable, and standards-compliant
+with strong RFC coverage including BGP Roles and Extended Messages. No
+programmatic API beyond the CLI socket.
