@@ -145,6 +145,7 @@ impl RibManager {
         let Some(table) = self.aspa_table.as_ref() else {
             return;
         };
+        self.metrics.set_aspa_records_total(gauge_val(table.len()));
 
         let mut affected = HashSet::new();
         for rib in self.ribs.values_mut() {

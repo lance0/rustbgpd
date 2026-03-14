@@ -1,6 +1,6 @@
 //! Prometheus metrics for session, RIB, policy, GR, and RPKI counters/gauges.
 
-use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry};
+use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 
 /// Prometheus metrics for the BGP daemon.
 ///
@@ -50,6 +50,9 @@ pub struct BgpMetrics {
 
     // ── RPKI ───────────────────────────────────────────────────
     rpki_vrp_count: IntGaugeVec,
+
+    // ── ASPA ───────────────────────────────────────────────────
+    aspa_records_total: IntGauge,
 }
 
 impl BgpMetrics {
@@ -231,6 +234,12 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let aspa_records_total = IntGauge::new(
+            "bgp_aspa_records_total",
+            "Number of ASPA customer records in the merged table",
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -285,6 +294,9 @@ impl BgpMetrics {
         registry
             .register(Box::new(rpki_vrp_count.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(aspa_records_total.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -306,6 +318,7 @@ impl BgpMetrics {
             gr_stale_routes,
             gr_timer_expired,
             rpki_vrp_count,
+            aspa_records_total,
         }
     }
 
@@ -425,6 +438,11 @@ impl BgpMetrics {
     /// Set RPKI VRP count by address family.
     pub fn set_rpki_vrp_count(&self, af: &str, count: i64) {
         self.rpki_vrp_count.with_label_values(&[af]).set(count);
+    }
+
+    /// Set ASPA record count.
+    pub fn set_aspa_records_total(&self, count: i64) {
+        self.aspa_records_total.set(count);
     }
 }
 
