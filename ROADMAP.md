@@ -345,7 +345,7 @@ with FRR, BIRD, GoBGP, and OpenBGPd.
 | **Real-time events** | Log parsing | BMP/MRT | gRPC streaming + BMP + MRT |
 | **Observability** | SNMP, CLI | Prometheus | Prometheus + structured logs |
 | **Wire codec reuse** | No | No | `rustbgpd-wire` on crates.io |
-| **ASPA** | Yes (FRR, BIRD, OpenBGPd) | No | Yes (upstream) |
+| **ASPA** | Yes (BIRD, OpenBGPd) | No | Yes (upstream) |
 
 ---
 
