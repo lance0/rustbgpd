@@ -96,12 +96,11 @@ header(8) + flags(1) + zero(1) + provider_count(2) + customer_asn(4)
           + provider_asns(4 * count)
 ```
 
-Version negotiation: the client initially connects with v2. If the server
-responds with ErrorReport code 4 (Unsupported Protocol Version), the client
-falls back to v1 and retries immediately. The negotiated version persists
-across reconnects for that server. When running at v1, ASPA PDUs are not
-received and all routes remain `Unknown`. The fallback is logged at info
-level.
+Version negotiation: each fresh connection attempt starts with v2. If the
+server responds with ErrorReport code 4 (Unsupported Protocol Version), the
+client falls back to v1 and retries immediately for that attempt. On later
+reconnects it probes v2 again. When running at v1, ASPA PDUs are not received
+and all routes remain `Unknown`. The fallback is logged at info level.
 
 ### Extend VrpManager (not separate AspaManager)
 
@@ -139,11 +138,10 @@ policy. Import policy evaluates in the transport layer before the route
 reaches the RIB, where ASPA validation is applied. At import evaluation
 time, `aspa_state` is always `Unknown`. This is the same limitation as
 `match_rpki_validation` on import — both validation states are set
-post-ingress in the RIB manager. Moving validation earlier would require
-the transport crate to depend on rpki and hold table references, which is
-the wrong dependency direction. Operators should use best-path demotion
-(step 0.7) for ASPA-based route preference and export policy for hard
-rejection.
+post-ingress in the RIB manager. rustbgpd rejects these validation-state
+matches in import policy config rather than accepting inert statements.
+Operators should use best-path demotion (step 0.7) for ASPA-based route
+preference and export policy for hard rejection.
 
 ### RIB re-validation on ASPA table update
 
@@ -167,8 +165,8 @@ ingress and updated on ASPA table changes.
 - The wire crate gains one new public enum (minor semver bump when
   published)
 - `match_aspa_validation` (and `match_rpki_validation`) only work in export
-  policy — import policy always sees `Unknown` / `NotFound` because
-  validation runs post-ingress in the RIB manager
+  policy — import policy use is rejected at config load because validation
+  runs post-ingress in the RIB manager
 - Downstream verification is not supported — requires future per-peer
   relationship config
 - RTR v2 version negotiation is implemented with automatic fallback to v1;

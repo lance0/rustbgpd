@@ -17,7 +17,10 @@ use rustbgpd_wire::{Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommuni
 
 pub use schema::*;
 
-use self::parse::{parse_families, parse_policy, resolve_chain};
+use self::parse::{
+    parse_families, parse_policy, reject_validation_state_matches_in_import_chain,
+    reject_validation_state_matches_in_import_policy, resolve_chain,
+};
 use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 
 #[cfg(test)]
@@ -166,19 +169,28 @@ impl Config {
     /// the inline `import` entries as a single-policy chain.
     pub fn import_chain(&self) -> Result<Option<PolicyChain>, ConfigError> {
         if self.policy.import_chain.is_empty() {
-            Ok(parse_policy(
+            let policy = parse_policy(
                 &self.policy.import,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
-            )?
-            .map(|p| PolicyChain::new(vec![p])))
+            )?;
+            reject_validation_state_matches_in_import_policy(
+                policy.as_ref(),
+                "global import policy",
+            )?;
+            Ok(policy.map(|p| PolicyChain::new(vec![p])))
         } else {
-            resolve_chain(
+            let chain = resolve_chain(
                 &self.policy.import_chain,
                 &self.policy.definitions,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
-            )
+            )?;
+            reject_validation_state_matches_in_import_chain(
+                chain.as_ref(),
+                "global import_policy_chain",
+            )?;
+            Ok(chain)
         }
     }
 
@@ -214,19 +226,28 @@ impl Config {
         let global_export = self.export_chain()?;
         let group_import = if let Some(group) = group {
             if group.import_policy_chain.is_empty() {
-                parse_policy(
+                let policy = parse_policy(
                     &group.import_policy,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
-                )?
-                .map(|p| PolicyChain::new(vec![p]))
+                )?;
+                reject_validation_state_matches_in_import_policy(
+                    policy.as_ref(),
+                    "peer_group import_policy",
+                )?;
+                policy.map(|p| PolicyChain::new(vec![p]))
             } else {
-                resolve_chain(
+                let chain = resolve_chain(
                     &group.import_policy_chain,
                     &self.policy.definitions,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
-                )?
+                )?;
+                reject_validation_state_matches_in_import_chain(
+                    chain.as_ref(),
+                    "peer_group import_policy_chain",
+                )?;
+                chain
             }
         } else {
             None
@@ -255,20 +276,29 @@ impl Config {
             if neighbor.import_policy.is_empty() {
                 group_import
             } else {
-                parse_policy(
+                let policy = parse_policy(
                     &neighbor.import_policy,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
-                )?
-                .map(|p| PolicyChain::new(vec![p]))
+                )?;
+                reject_validation_state_matches_in_import_policy(
+                    policy.as_ref(),
+                    &format!("neighbor {} import_policy", neighbor.address),
+                )?;
+                policy.map(|p| PolicyChain::new(vec![p]))
             }
         } else {
-            resolve_chain(
+            let chain = resolve_chain(
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
-            )?
+            )?;
+            reject_validation_state_matches_in_import_chain(
+                chain.as_ref(),
+                &format!("neighbor {} import_policy_chain", neighbor.address),
+            )?;
+            chain
         }
         .or_else(|| global_import.clone());
         let export = if neighbor.export_policy_chain.is_empty() {

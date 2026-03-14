@@ -18,9 +18,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   draft-ietf-sidrops-aspa-verification. Best-path step 0.7 (Valid > Unknown >
   Invalid) between RPKI and LOCAL_PREF. Export policy `match_aspa_validation`
   for filtering. `aspa_state` exposed in gRPC Route responses. Import policy
-  limitation: validation runs post-ingress so `match_aspa_validation` only
-  works in export policy (same as `match_rpki_validation`). Downstream
-  verification deferred. (ADR-0049)
+  limitation: validation runs post-ingress, so validation-state matches are
+  now rejected in import policy config and remain export-only (same as
+  `match_rpki_validation`). Downstream verification deferred. (ADR-0049)
 
 ---
 

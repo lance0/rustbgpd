@@ -527,12 +527,14 @@ Every route receives a validation state based on RPKI data:
 
 ### Policy integration
 
-Use `match_rpki_validation` in policy statements to filter routes by RPKI state.
+Use `match_rpki_validation` in export policy statements to filter routes by RPKI state.
+Import policy cannot use validation-state matches; rustbgpd rejects them at
+config load because validation runs post-ingress in the RIB manager.
 
 Drop RPKI-invalid routes (recommended):
 
 ```toml
-[[policy.import]]
+[[policy.export]]
 match_rpki_validation = "invalid"
 action = "deny"
 ```
@@ -540,12 +542,12 @@ action = "deny"
 Prefer valid routes with higher LOCAL_PREF:
 
 ```toml
-[[policy.import]]
+[[policy.export]]
 match_rpki_validation = "valid"
 action = "permit"
 set_local_pref = 200
 
-[[policy.import]]
+[[policy.export]]
 match_rpki_validation = "not_found"
 action = "permit"
 set_local_pref = 100
@@ -699,14 +701,15 @@ same entry are ANDed.
 | `match_med_ge`           | u32      | no*      | Minimum MED to match (inclusive)                      |
 | `match_med_le`           | u32      | no*      | Maximum MED to match (inclusive)                      |
 | `match_next_hop`         | string   | no*      | Exact next-hop IP address to match (unicast only)     |
-| `match_rpki_validation`  | string   | no*      | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` |
+| `match_rpki_validation`  | string   | no*      | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` (export-only) |
+| `match_aspa_validation`  | string   | no*      | ASPA state: `"valid"`, `"invalid"`, or `"unknown"` (export-only) |
 | `action`                 | string   | yes      | `"permit"` or `"deny"`                                |
 
 *At least one of `prefix`, `match_community`, `match_as_path`,
 `match_neighbor_set`, `match_route_type`, `match_as_path_length_ge`,
 `match_as_path_length_le`, `match_local_pref_ge`, `match_local_pref_le`,
 `match_med_ge`, `match_med_le`, `match_next_hop`, or
-`match_rpki_validation` is required.
+`match_rpki_validation` / `match_aspa_validation` is required.
 
 ### Route modifications (set actions)
 
@@ -1107,7 +1110,8 @@ starting:
 | `gr_restart_time` must be > 0 when `graceful_restart` is enabled | `gr_restart_time must be > 0` |
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
-| Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, or `match_rpki_validation`) | `must have at least one match condition` |
+| Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, `match_rpki_validation`, or `match_aspa_validation`) | `must have at least one match condition` |
+| Import policy cannot use `match_rpki_validation` or `match_aspa_validation` | `use export policy instead` |
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |

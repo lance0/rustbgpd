@@ -1,7 +1,8 @@
 //! Async RTR client — one tokio task per configured RPKI cache server.
 //!
-//! Connects via TCP, speaks RTR protocol version 1 (RFC 8210), and sends
-//! VRP updates to the [`VrpManager`](super::vrp_manager::VrpManager).
+//! Connects via TCP, prefers RTR protocol version 2 for ASPA support, falls
+//! back to version 1 on explicit server rejection, and sends VRP updates to
+//! the [`VrpManager`](super::vrp_manager::VrpManager).
 
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -84,7 +85,8 @@ pub struct RtrClient {
     expire_interval: Duration,
     last_end_of_data_at: Option<TokioInstant>,
     data_expires_at: Option<TokioInstant>,
-    /// Negotiated RTR protocol version (2 = ASPA capable, 1 = VRP only).
+    /// Protocol version used for the current connection attempt
+    /// (2 = ASPA capable, 1 = VRP only).
     negotiated_version: u8,
 }
 
@@ -110,66 +112,106 @@ impl RtrClient {
     /// on failure.
     pub async fn run(mut self) {
         loop {
-            match TcpStream::connect(self.config.server_addr).await {
-                Ok(stream) => {
-                    info!(
-                        server = %self.config.server_addr,
-                        rtr_version = self.negotiated_version,
-                        "RTR connected"
-                    );
-                    if let Err(e) = self.run_session(stream).await {
-                        // RTR error code 4 = Unsupported Protocol Version.
-                        // Fall back from v2 to v1 and retry immediately.
-                        if matches!(&e, RtrError::ServerError { code: 4, .. })
-                            && self.negotiated_version == crate::rtr_codec::RTR_VERSION_2
-                        {
-                            info!(
-                                server = %self.config.server_addr,
-                                "RTR server does not support v2, falling back to v1 (no ASPA)"
-                            );
-                            self.negotiated_version = crate::rtr_codec::RTR_VERSION;
-                            self.session_id = None;
-                            self.serial = None;
-                            continue; // retry immediately without sleep
-                        }
-                        warn!(
-                            server = %self.config.server_addr,
-                            error = %e,
-                            "RTR session ended"
-                        );
-                        let _ = self
-                            .vrp_tx
-                            .send(VrpUpdate::ServerDown {
-                                server: self.config.server_addr,
-                            })
-                            .await;
-                        self.last_end_of_data_at = None;
-                        self.data_expires_at = None;
-                        if matches!(e, RtrError::Expired) {
-                            self.session_id = None;
-                            self.serial = None;
-                        }
-                        tokio::time::sleep(self.retry_interval).await;
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        server = %self.config.server_addr,
-                        error = %e,
-                        "RTR connection failed"
-                    );
-                    let _ = self
-                        .vrp_tx
-                        .send(VrpUpdate::ServerDown {
-                            server: self.config.server_addr,
-                        })
-                        .await;
-                    self.last_end_of_data_at = None;
-                    self.data_expires_at = None;
-                    tokio::time::sleep(self.retry_interval).await;
-                }
+            self.prepare_fresh_connection_attempt();
+            if let Err(e) = self.connect_and_run().await {
+                warn!(
+                    server = %self.config.server_addr,
+                    error = %e,
+                    "RTR connection failed"
+                );
+                self.handle_disconnected_session(false).await;
             }
         }
+    }
+
+    fn prepare_fresh_connection_attempt(&mut self) {
+        self.negotiated_version = crate::rtr_codec::RTR_VERSION_2;
+    }
+
+    async fn connect_and_run(&mut self) -> Result<(), std::io::Error> {
+        let stream = TcpStream::connect(self.config.server_addr).await?;
+        info!(
+            server = %self.config.server_addr,
+            rtr_version = self.negotiated_version,
+            "RTR connected"
+        );
+
+        if let Err(error) = self.run_session(stream).await {
+            if self.should_fallback_to_v1(&error) {
+                self.run_v1_fallback_session().await;
+                return Ok(());
+            }
+
+            warn!(
+                server = %self.config.server_addr,
+                error = %error,
+                "RTR session ended"
+            );
+            self.handle_disconnected_session(matches!(error, RtrError::Expired))
+                .await;
+        }
+
+        Ok(())
+    }
+
+    fn should_fallback_to_v1(&self, error: &RtrError) -> bool {
+        self.negotiated_version == crate::rtr_codec::RTR_VERSION_2
+            && matches!(error, RtrError::ServerError { code: 4, .. })
+    }
+
+    async fn run_v1_fallback_session(&mut self) {
+        info!(
+            server = %self.config.server_addr,
+            "RTR server does not support v2, falling back to v1 (no ASPA)"
+        );
+        self.negotiated_version = crate::rtr_codec::RTR_VERSION;
+        self.session_id = None;
+        self.serial = None;
+        self.last_end_of_data_at = None;
+        self.data_expires_at = None;
+
+        match TcpStream::connect(self.config.server_addr).await {
+            Ok(stream) => {
+                info!(
+                    server = %self.config.server_addr,
+                    rtr_version = self.negotiated_version,
+                    "RTR reconnected with fallback version"
+                );
+                if let Err(error) = self.run_session(stream).await {
+                    warn!(
+                        server = %self.config.server_addr,
+                        error = %error,
+                        "RTR session ended after v1 fallback"
+                    );
+                    self.handle_disconnected_session(matches!(error, RtrError::Expired))
+                        .await;
+                }
+            }
+            Err(error) => {
+                warn!(
+                    server = %self.config.server_addr,
+                    error = %error,
+                    "RTR reconnection for v1 fallback failed"
+                );
+                self.handle_disconnected_session(false).await;
+            }
+        }
+    }
+
+    async fn handle_disconnected_session(&mut self, reset_session: bool) {
+        let _ = self
+            .vrp_tx
+            .send(VrpUpdate::ServerDown {
+                server: self.config.server_addr,
+            })
+            .await;
+        self.last_end_of_data_at = None;
+        self.data_expires_at = None;
+        if reset_session {
+            self.session_id = None;
+            self.serial = None;
+        }
+        tokio::time::sleep(self.retry_interval).await;
     }
 
     fn current_query_kind(&self) -> QueryKind {
@@ -609,6 +651,10 @@ mod tests {
     }
 
     async fn read_pdu(stream: &mut TcpStream) -> RtrPdu {
+        read_pdu_with_version(stream).await.1
+    }
+
+    async fn read_pdu_with_version(stream: &mut TcpStream) -> (u8, RtrPdu) {
         let mut header = [0u8; 8];
         stream.read_exact(&mut header).await.unwrap();
         let len = u32::from_be_bytes([header[4], header[5], header[6], header[7]]) as usize;
@@ -620,7 +666,7 @@ mod tests {
         }
         let (pdu, consumed) = RtrPdu::decode(&buf).unwrap();
         assert_eq!(consumed, len);
-        pdu
+        (header[0], pdu)
     }
 
     async fn write_pdu(stream: &mut TcpStream, pdu: RtrPdu) {
@@ -954,6 +1000,76 @@ mod tests {
             VrpUpdate::FullTable {
                 server: addr,
                 entries: vec![entry(Ipv4Addr::new(203, 0, 114, 0), 24, 24, 65002)],
+                aspa_records: vec![],
+            }
+        );
+
+        client_handle.abort();
+        let _ = client_handle.await;
+    }
+
+    #[tokio::test]
+    async fn unsupported_v2_falls_back_to_v1_immediately() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (vrp_tx, mut vrp_rx) = mpsc::channel(8);
+        let client = RtrClient::new(test_config(addr, 60, 5, 120), vrp_tx);
+        let client_handle = tokio::spawn(client.run());
+
+        let (mut stream_v2, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream_v2).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION_2);
+        assert_eq!(pdu, RtrPdu::ResetQuery);
+
+        write_pdu(
+            &mut stream_v2,
+            RtrPdu::ErrorReport {
+                code: 4,
+                pdu: vec![],
+                text: "Unsupported Protocol Version".to_string(),
+            },
+        )
+        .await;
+        drop(stream_v2);
+
+        let (mut stream_v1, _) = listener.accept().await.unwrap();
+        let (version, pdu) = read_pdu_with_version(&mut stream_v1).await;
+        assert_eq!(version, crate::rtr_codec::RTR_VERSION);
+        assert_eq!(pdu, RtrPdu::ResetQuery);
+
+        write_pdu(&mut stream_v1, RtrPdu::CacheResponse { session_id: 7 }).await;
+        write_pdu(
+            &mut stream_v1,
+            RtrPdu::Ipv4Prefix {
+                flags: 1,
+                prefix_len: 24,
+                max_len: 24,
+                prefix: Ipv4Addr::new(203, 0, 113, 0),
+                asn: 65001,
+            },
+        )
+        .await;
+        write_pdu(
+            &mut stream_v1,
+            RtrPdu::EndOfData {
+                session_id: 7,
+                serial: 100,
+                refresh: 60,
+                retry: 5,
+                expire: 120,
+            },
+        )
+        .await;
+
+        let update = timeout(Duration::from_secs(1), vrp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            update,
+            VrpUpdate::FullTable {
+                server: addr,
+                entries: vec![entry(Ipv4Addr::new(203, 0, 113, 0), 24, 24, 65001)],
                 aspa_records: vec![],
             }
         );

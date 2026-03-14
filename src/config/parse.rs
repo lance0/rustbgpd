@@ -207,6 +207,7 @@ fn parse_policy_statements(
             && e.match_med_le.is_none()
             && match_next_hop.is_none()
             && match_rpki_validation.is_none()
+            && match_aspa_validation.is_none()
         {
             return Err(ConfigError::InvalidPolicyEntry {
                 reason: "entry must have at least one match condition".to_string(),
@@ -254,6 +255,48 @@ pub(super) fn parse_policy(
         entries: parsed,
         default_action: PolicyAction::Permit,
     }))
+}
+
+fn policy_uses_validation_state_matches(policy: &Policy) -> bool {
+    policy
+        .entries
+        .iter()
+        .any(|entry| entry.match_rpki_validation.is_some() || entry.match_aspa_validation.is_some())
+}
+
+pub(super) fn reject_validation_state_matches_in_import_policy(
+    policy: Option<&Policy>,
+    context: &str,
+) -> Result<(), ConfigError> {
+    if policy.is_some_and(policy_uses_validation_state_matches) {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "{context} cannot use match_rpki_validation or match_aspa_validation: \
+                 validation runs post-ingress in the RIB manager; use export policy instead"
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub(super) fn reject_validation_state_matches_in_import_chain(
+    chain: Option<&PolicyChain>,
+    context: &str,
+) -> Result<(), ConfigError> {
+    if let Some(chain) = chain
+        && chain
+            .policies
+            .iter()
+            .any(policy_uses_validation_state_matches)
+    {
+        return Err(ConfigError::InvalidPolicyEntry {
+            reason: format!(
+                "{context} cannot use match_rpki_validation or match_aspa_validation: \
+                 validation runs post-ingress in the RIB manager; use export policy instead"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Parse a named policy definition with configurable default action.

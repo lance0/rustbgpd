@@ -826,6 +826,28 @@ remote_asn = 65001
     )
 }
 
+fn community_export_toml(policy_entries: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65000
+router_id = "1.2.3.4"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65001
+
+[[neighbors.export_policy]]
+{policy_entries}
+"#
+    )
+}
+
 #[test]
 fn community_only_entry_parses() {
     let toml = community_toml(
@@ -1405,46 +1427,46 @@ fn rpki_absent_means_none() {
 
 #[test]
 fn rpki_policy_match_rpki_validation_parses() {
-    let toml = community_toml(
+    let toml = community_export_toml(
         r#"action = "deny"
             match_rpki_validation = "invalid""#,
     );
     let config = parse(&toml).unwrap();
     let peers = config.to_peer_configs().unwrap();
-    let import = peers[0].2.as_ref().unwrap();
-    assert_eq!(import.policies[0].entries.len(), 1);
+    let export = peers[0].3.as_ref().unwrap();
+    assert_eq!(export.policies[0].entries.len(), 1);
     assert_eq!(
-        import.policies[0].entries[0].match_rpki_validation,
+        export.policies[0].entries[0].match_rpki_validation,
         Some(rustbgpd_wire::RpkiValidation::Invalid)
     );
 }
 
 #[test]
 fn rpki_policy_match_rpki_validation_valid() {
-    let toml = community_toml(
+    let toml = community_export_toml(
         r#"action = "permit"
             match_rpki_validation = "valid""#,
     );
     let config = parse(&toml).unwrap();
     let peers = config.to_peer_configs().unwrap();
-    let import = peers[0].2.as_ref().unwrap();
+    let export = peers[0].3.as_ref().unwrap();
     assert_eq!(
-        import.policies[0].entries[0].match_rpki_validation,
+        export.policies[0].entries[0].match_rpki_validation,
         Some(rustbgpd_wire::RpkiValidation::Valid)
     );
 }
 
 #[test]
 fn rpki_policy_match_rpki_validation_not_found() {
-    let toml = community_toml(
+    let toml = community_export_toml(
         r#"action = "permit"
             match_rpki_validation = "not_found""#,
     );
     let config = parse(&toml).unwrap();
     let peers = config.to_peer_configs().unwrap();
-    let import = peers[0].2.as_ref().unwrap();
+    let export = peers[0].3.as_ref().unwrap();
     assert_eq!(
-        import.policies[0].entries[0].match_rpki_validation,
+        export.policies[0].entries[0].match_rpki_validation,
         Some(rustbgpd_wire::RpkiValidation::NotFound)
     );
 }
@@ -1460,12 +1482,47 @@ fn rpki_policy_match_rpki_validation_bad_value_rejected() {
 
 #[test]
 fn rpki_policy_match_rpki_validation_standalone() {
-    // match_rpki_validation alone (without prefix/community/aspath) should be valid
-    let toml = community_toml(
+    // match_rpki_validation alone (without prefix/community/aspath) is valid in export policy
+    let toml = community_export_toml(
         r#"action = "deny"
             match_rpki_validation = "invalid""#,
     );
     assert!(parse(&toml).is_ok());
+}
+
+#[test]
+fn rpki_policy_match_rpki_validation_import_rejected() {
+    let toml = community_toml(
+        r#"action = "deny"
+            match_rpki_validation = "invalid""#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(format!("{err}").contains("use export policy instead"));
+}
+
+#[test]
+fn aspa_policy_match_aspa_validation_import_rejected() {
+    let toml = community_toml(
+        r#"action = "deny"
+            match_aspa_validation = "invalid""#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(format!("{err}").contains("use export policy instead"));
+}
+
+#[test]
+fn aspa_policy_match_aspa_validation_export_parses() {
+    let toml = community_export_toml(
+        r#"action = "deny"
+            match_aspa_validation = "invalid""#,
+    );
+    let config = parse(&toml).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    let export = peers[0].3.as_ref().unwrap();
+    assert_eq!(
+        export.policies[0].entries[0].match_aspa_validation,
+        Some(rustbgpd_wire::AspaValidation::Invalid)
+    );
 }
 
 fn rpki_toml(cache_fields: &str) -> String {
