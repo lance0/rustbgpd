@@ -125,7 +125,13 @@ impl RtrClient {
     }
 
     fn prepare_fresh_connection_attempt(&mut self) {
-        self.negotiated_version = crate::rtr_codec::RTR_VERSION_2;
+        // Only reset to v2 if we have had a successful session before.
+        // If we never completed a v2 handshake (session_id is None and
+        // version is still v2), the previous attempt was rejected — keep
+        // the downgraded version so the v1 fallback sticks across retries.
+        if self.session_id.is_some() {
+            self.negotiated_version = crate::rtr_codec::RTR_VERSION_2;
+        }
     }
 
     async fn connect_and_run(&mut self) -> Result<(), std::io::Error> {
@@ -155,8 +161,22 @@ impl RtrClient {
     }
 
     fn should_fallback_to_v1(&self, error: &RtrError) -> bool {
-        self.negotiated_version == crate::rtr_codec::RTR_VERSION_2
-            && matches!(error, RtrError::ServerError { code: 4, .. })
+        if self.negotiated_version != crate::rtr_codec::RTR_VERSION_2 {
+            return false;
+        }
+        // Explicit "Unsupported Protocol Version" error (code 4).
+        if matches!(error, RtrError::ServerError { code: 4, .. }) {
+            return true;
+        }
+        // Server closed the connection without completing the handshake
+        // (no session established). Real-world caches like GoRTR and
+        // StayRTR disconnect on unsupported versions instead of sending
+        // error code 4.
+        self.session_id.is_none()
+            && matches!(
+                error,
+                RtrError::Io(_) | RtrError::ConnectionClosed | RtrError::Decode(_)
+            )
     }
 
     async fn run_v1_fallback_session(&mut self) {

@@ -1,0 +1,59 @@
+# Containerlab topology: rustbgpd ↔ FRR + GoRTR RPKI cache
+#
+# Validates: RTR session establishment, VRP delivery, RPKI origin
+# validation affecting route attributes (Valid/Invalid/NotFound).
+#
+# FRR (AS 65002) advertises three prefixes:
+#   - 192.168.1.0/24 originated by AS 65002 → RPKI Valid (VRP covers it)
+#   - 192.168.2.0/24 originated by AS 65002 → RPKI Invalid (VRP says AS 65099)
+#   - 10.10.0.0/16   originated by AS 65002 → RPKI NotFound (no VRP)
+#
+# GoRTR serves a static VRP table with two entries:
+#   - 192.168.1.0/24 max 24, AS 65002 (valid origin)
+#   - 192.168.2.0/24 max 24, AS 65099 (wrong origin → invalid for AS 65002)
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m21-rpki-frr.clab.yml
+#   containerlab destroy -t tests/interop/m21-rpki-frr.clab.yml
+
+name: m21-rpki-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m21-rpki.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m21-rpki.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    gortr:
+      kind: linux
+      image: cloudflare/gortr:latest
+      binds:
+        - ./configs/rpki-vrps-m21.json:/data/vrps.json:ro
+      cmd: -cache /data/vrps.json -bind :3323 -checktime=false -refresh 30 -verify=false
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65001
+# FRR:      10.0.0.2, AS 65002
+# GoRTR:  management network only (RTR over TCP, no L2 link needed)
