@@ -1749,6 +1749,27 @@ address = "127.0.0.1:11019"
     assert_eq!(bmp.sys_descr, "production edge");
 }
 
+#[test]
+fn bmp_duplicate_collector_address_rejected() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[bmp]
+[[bmp.collectors]]
+address = "127.0.0.1:11019"
+[[bmp.collectors]]
+address = "127.0.0.1:11019"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidBmpCollector { .. }));
+}
+
 // -----------------------------------------------------------------------
 // Named policies + policy chaining
 // -----------------------------------------------------------------------

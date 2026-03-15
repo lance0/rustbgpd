@@ -440,6 +440,19 @@ impl Config {
                     });
                 }
             }
+
+            // Reject duplicate collector addresses
+            let mut seen_addrs = std::collections::HashSet::new();
+            for (i, collector) in bmp.collectors.iter().enumerate() {
+                if !seen_addrs.insert(&collector.address) {
+                    return Err(ConfigError::InvalidBmpCollector {
+                        reason: format!(
+                            "collectors[{i}]: duplicate address {:?}",
+                            collector.address
+                        ),
+                    });
+                }
+            }
         }
 
         Ok(())
