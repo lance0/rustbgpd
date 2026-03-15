@@ -266,6 +266,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
 | `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
 | `ExplainAdvertisedRoute` | Dry-run export decision for one prefix to one peer |
+| `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
@@ -309,8 +310,9 @@ This dry-runs the current export decision for a single prefix and peer. The
 response includes the final decision, decisive reasons, selected best-route
 identity, and any export modifications that would be applied.
 
-Current scope is export explain only. Best-path explain, import explain, and
-exact policy/statement attribution are deferred.
+Best-path explain is also available via `ExplainBestPath` RPC — it returns all
+candidates for a prefix with the decisive comparison reason for each. Import
+explain and exact policy/statement attribution are deferred.
 
 ### Address family filtering
 

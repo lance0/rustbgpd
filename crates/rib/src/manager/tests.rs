@@ -91,6 +91,20 @@ async fn query_flowspec_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<FlowSpecRout
     reply_rx.await.unwrap()
 }
 
+async fn query_explain_best_path(
+    tx: &mpsc::Sender<RibUpdate>,
+    prefix: Prefix,
+) -> crate::update::ExplainBestPath {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ExplainBestPath {
+        prefix,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx.await.unwrap()
+}
+
 fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
@@ -6920,6 +6934,80 @@ async fn mrt_peer_metadata_retained_during_gr() {
         .expect("peer metadata should remain available during GR");
     assert_eq!(meta.peer_asn, 65001);
     assert_eq!(meta.peer_bgp_id, Ipv4Addr::new(10, 0, 0, 1));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn explain_best_path_returns_candidates_without_winner() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let peer_a = Ipv4Addr::new(1, 0, 0, 1);
+    let peer_b = Ipv4Addr::new(1, 0, 0, 2);
+
+    // Route from peer_a has higher LOCAL_PREF → should be best.
+    let route_a = make_route_with_lp(prefix, peer_a, 200);
+    let route_b = make_route_with_lp(prefix, peer_b, 100);
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_a),
+        announced: vec![route_a],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_b),
+        announced: vec![route_b],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Give the RIB manager time to process.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path(&tx, Prefix::V4(prefix)).await;
+
+    // Best route should be from peer_a (higher LP).
+    assert!(explain.best.is_some());
+    let best = explain.best.unwrap();
+    assert_eq!(best.peer, IpAddr::V4(peer_a));
+
+    // Candidates should NOT include the winner.
+    assert_eq!(explain.candidates.len(), 1);
+    let loser = &explain.candidates[0];
+    assert_eq!(loser.route.peer, IpAddr::V4(peer_b));
+    assert_eq!(
+        loser.vs_best_reason,
+        crate::best_path::BestPathReason::HigherLocalPref
+    );
+    assert_eq!(loser.vs_best_ordering, std::cmp::Ordering::Greater);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn explain_best_path_no_candidates() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    let explain = query_explain_best_path(&tx, prefix).await;
+
+    assert!(explain.best.is_none());
+    assert!(explain.candidates.is_empty());
 
     drop(tx);
     handle.await.unwrap();

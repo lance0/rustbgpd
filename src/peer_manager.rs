@@ -109,6 +109,7 @@ impl PeerManager {
                         log_format: "json".to_string(),
                         grpc_tcp: None,
                         grpc_uds: None,
+                        looking_glass: None,
                     },
                 },
                 neighbors: Vec::new(),

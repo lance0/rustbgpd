@@ -136,6 +136,16 @@ pub struct TelemetryConfig {
     pub grpc_tcp: Option<GrpcTcpListenerConfig>,
     #[serde(default)]
     pub grpc_uds: Option<GrpcUdsListenerConfig>,
+    /// Optional birdwatcher-compatible looking glass HTTP server.
+    #[serde(default)]
+    pub looking_glass: Option<LookingGlassConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookingGlassConfig {
+    /// Listen address for the looking glass HTTP server (e.g., "0.0.0.0:8080").
+    pub addr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

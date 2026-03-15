@@ -6,6 +6,7 @@ use rustbgpd_rpki::{AspaTable, VrpTable};
 use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
+use crate::best_path::BestPathReason;
 use crate::event::RouteEvent;
 use crate::route::{FlowSpecRoute, Route};
 
@@ -67,6 +68,28 @@ pub enum ExplainDecision {
 pub struct ExplainReason {
     pub code: &'static str,
     pub message: String,
+}
+
+/// Structured explanation of why a particular route was or was not selected as best.
+#[derive(Debug, Clone)]
+pub struct ExplainBestPath {
+    /// Prefix being explained.
+    pub prefix: Prefix,
+    /// The best route for this prefix, if one exists.
+    pub best: Option<Route>,
+    /// All candidates with their comparison against the best route.
+    pub candidates: Vec<BestPathCandidate>,
+}
+
+/// A candidate route with its comparison result against the best route.
+#[derive(Debug, Clone)]
+pub struct BestPathCandidate {
+    /// The candidate route.
+    pub route: Route,
+    /// Which decision step determined the ordering vs. the best route.
+    pub vs_best_reason: BestPathReason,
+    /// How this candidate compares to the best route.
+    pub vs_best_ordering: std::cmp::Ordering,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -157,6 +180,13 @@ pub enum RibUpdate {
         peer: IpAddr,
         /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
+    },
+    /// Query: explain why a particular route was selected as best for a prefix.
+    ExplainBestPath {
+        /// Prefix to explain.
+        prefix: Prefix,
+        /// Response channel.
+        reply: oneshot::Sender<ExplainBestPath>,
     },
     /// Query: explain whether the current best route for a prefix would be advertised to a peer.
     ExplainAdvertisedRoute {

@@ -6,8 +6,8 @@ use crate::output::{
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddPathRequest, DeletePathRequest, ExplainAdvertisedRouteRequest, ExplainDecision,
-    ListRoutesRequest,
+    AddPathRequest, DeletePathRequest, ExplainAdvertisedRouteRequest, ExplainBestPathRequest,
+    ExplainDecision, ListRoutesRequest,
 };
 
 /// Parsed route filter options from CLI flags.
@@ -266,6 +266,82 @@ fn print_explain_advertised(explain: &crate::proto::ExplainAdvertisedRouteRespon
             println!("- as_path_prepend: {asn} x {count}");
         }
     }
+}
+
+fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: bool) {
+    if json {
+        let out = serde_json::json!({
+            "prefix": format!("{}/{}", resp.prefix, resp.prefix_length),
+            "best_route": resp.best_route.as_ref().map(route_to_json),
+            "candidates": resp.candidates.iter().map(|c| {
+                serde_json::json!({
+                    "route": c.route.as_ref().map(route_to_json),
+                    "vs_best_reason": c.vs_best_reason,
+                    "vs_best_ordering": c.vs_best_ordering,
+                })
+            }).collect::<Vec<_>>(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize best-path explain")
+        );
+        return;
+    }
+
+    println!(
+        "Best-path explanation for {}/{}",
+        resp.prefix, resp.prefix_length
+    );
+
+    if let Some(ref best) = resp.best_route {
+        println!(
+            "Best route: peer={}, next_hop={}, as_path={:?}",
+            best.peer_address, best.next_hop, best.as_path
+        );
+    } else {
+        println!("No best route");
+        return;
+    }
+
+    if resp.candidates.is_empty() {
+        println!("No candidates");
+        return;
+    }
+
+    println!();
+    println!(
+        "{:<18} {:<18} {:<22} {:<8}",
+        "Peer", "Next Hop", "Reason", "Result"
+    );
+    println!("{}", "-".repeat(70));
+
+    for c in &resp.candidates {
+        if let Some(ref r) = c.route {
+            println!(
+                "{:<18} {:<18} {:<22} {:<8}",
+                r.peer_address, r.next_hop, c.vs_best_reason, c.vs_best_ordering
+            );
+        }
+    }
+}
+
+pub async fn explain_best_path(
+    connection: Connection,
+    prefix: &str,
+    json: bool,
+) -> Result<(), CliError> {
+    let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .explain_best_path(ExplainBestPathRequest {
+            prefix: addr,
+            prefix_length: len,
+        })
+        .await?
+        .into_inner();
+    print_explain_best_path(&resp, json);
+    Ok(())
 }
 
 pub async fn best(

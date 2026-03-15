@@ -462,6 +462,7 @@ service RibService {
   rpc ListBestRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ExplainAdvertisedRoute(ExplainAdvertisedRouteRequest) returns (ExplainAdvertisedRouteResponse);
+  rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
 }
@@ -545,6 +546,24 @@ message ExplainAdvertisedRouteResponse {
   string route_type = 8;
   repeated ExplainReason reasons = 9;
   ExplainModifications modifications = 10;
+}
+
+message ExplainBestPathRequest {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+}
+
+message BestPathCandidate {
+  Route route = 1;
+  string vs_best_reason = 2;
+  string vs_best_ordering = 3;
+}
+
+message ExplainBestPathResponse {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  Route best_route = 3;
+  repeated BestPathCandidate candidates = 4;
 }
 
 message Route {

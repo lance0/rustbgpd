@@ -87,8 +87,8 @@ items to ship.
 
 - [x] **ASPA verification** — upstream path verification with RTR v2 support. AspaTable + verify_upstream() algorithm, RTR v2 codec (ASPA PDU type 11) with automatic v1 fallback, best-path step 0.7 (Valid > Unknown > Invalid), export policy `match_aspa_validation`, gRPC `aspa_state` exposure. Validation-state matches are export-only and rejected in import policy config because validation runs post-ingress. Downstream verification deferred (needs per-peer relationship config). (ADR-0049)
 - [x] **Config diff** — `rustbgpd --diff` previews what SIGHUP would change: neighbor add/remove/modify (reload-applied), global/rpki/bmp/mrt (restart-required), and peer-group/policy changes (informational). Human-readable colored output + `--json` for scripting. Exit code 1 = actionable changes.
-- [ ] **Alice-LG / looking glass API** — instead of a built-in web UI, expose an Alice-LG-compatible REST source backend or RFC 8522 `.well-known/looking-glass` endpoint. Alice-LG is the IXP standard (DE-CIX, LINX, Netnod). The gRPC API already has the data; this is a thin REST translation layer. More valuable than a custom web UI.
-- [ ] **Best-path explain** — `best_path_cmp` returns reason enum (ShorterAsPath, HigherLocalPref, LowerRouterId, etc.) instead of bare Ordering; gRPC `ExplainRoute` RPC shows all candidates with pairwise decision tree; `rustbgpctl explain <prefix>` CLI; answers "why did this route win?" without log correlation. Operators ask for this constantly.
+- [x] **Looking glass REST API** — optional birdwatcher-compatible HTTP server for looking glass frontends (Alice-LG, etc.). Endpoints: `/status`, `/protocols/bgp`, `/routes/protocol/{id}`, `/routes/peer/{peer}`. Response shapes match birdwatcher field names. Configured via `[global.telemetry.looking_glass]`. Not yet integration-tested against Alice-LG.
+- [x] **Best-path explain** — `BestPathReason` enum + `best_path_cmp_with_reason()` function; gRPC `ExplainBestPath` RPC shows all candidates with pairwise decision reasons; `rustbgpctl rib --prefix X --explain` CLI. Answers "why did this route win?" without log correlation.
 
 ### P0–P2.5 — Complete
 
@@ -215,7 +215,7 @@ get blog posts written and make operators switch.
 #### Advanced UX
 
 - [x] **Live TUI dashboard** — `rustbgpctl top`: a terminal UI (ratatui) showing sessions, prefix counts, message rates per peer, RPKI VRP counts, route events — all updating live via polling + WatchRoutes stream. Peer table with sort/navigate/detail, toggleable events panel, help overlay. Configurable poll interval (`-i`).
-- [ ] ~~**Built-in looking glass**~~ — replaced by Alice-LG / RFC 8522 API approach in "Next Up" section. Market research shows IXPs use external presentation layers (Alice-LG, IXP Manager); a built-in web UI is not a differentiator.
+- [x] ~~**Built-in looking glass**~~ — replaced by birdwatcher-compatible REST API in "Next Up" section. Market research shows IXPs use external presentation layers (Alice-LG, IXP Manager); a built-in web UI is not a differentiator.
 - [ ] **Config snippets / examples in error messages** — when a gRPC call fails validation, include a working example in the error detail: "invalid families value; try: `families: [\"ipv4_unicast\", \"ipv6_unicast\"]`"
 - [x] **Neighbor auto-discovery logging** — when an unknown peer connects, the warning includes a suggested `rustbgpctl neighbor <addr> add --asn <ASN>` command to help operators bootstrap new peers.
 

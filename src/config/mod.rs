@@ -61,6 +61,14 @@ impl Config {
             .map(|s| s.parse().expect("validated in Config::load"))
     }
 
+    pub fn looking_glass_addr(&self) -> Option<SocketAddr> {
+        self.global
+            .telemetry
+            .looking_glass
+            .as_ref()
+            .map(|lg| lg.addr.parse().expect("validated in Config::load"))
+    }
+
     pub fn listen_addr(&self) -> SocketAddr {
         SocketAddr::new(
             std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED),

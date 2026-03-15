@@ -79,6 +79,10 @@ enum Command {
         #[arg(short = 'l', long, requires = "prefix")]
         longer: bool,
 
+        /// Show why the best route was selected (requires --prefix)
+        #[arg(long, requires = "prefix")]
+        explain: bool,
+
         /// Filter by origin ASN (last ASN in AS_PATH)
         #[arg(long)]
         origin_asn: Option<u32>,
@@ -393,6 +397,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             family,
             prefix,
             longer,
+            explain,
             origin_asn,
             community,
             large_community,
@@ -411,21 +416,42 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 large_community,
             };
             match action {
-                None => commands::rib::best(connection, family_val, &filters, json).await,
+                None => {
+                    if explain {
+                        let Some(prefix) = filters.prefix.as_deref() else {
+                            return Err(CliError::Argument(
+                                "--explain requires --prefix with an exact CIDR".into(),
+                            ));
+                        };
+                        commands::rib::explain_best_path(connection, prefix, json).await
+                    } else {
+                        commands::rib::best(connection, family_val, &filters, json).await
+                    }
+                }
                 Some(RibAction::Received {
                     address,
                     family: fam,
                 }) => {
+                    if explain {
+                        return Err(CliError::Argument(
+                            "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
+                        ));
+                    }
                     let f = resolve_family(&fam.or(family))?;
                     commands::rib::received(connection, &address, f, &filters, json).await
                 }
                 Some(RibAction::Advertised {
                     address,
                     family: fam,
-                    explain,
+                    explain: explain_advertised,
                 }) => {
-                    let f = resolve_family(&fam.or(family))?;
                     if explain {
+                        return Err(CliError::Argument(
+                            "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
+                        ));
+                    }
+                    let f = resolve_family(&fam.or(family))?;
+                    if explain_advertised {
                         if filters.longer {
                             return Err(CliError::Argument(
                                 "--explain does not support --longer".into(),
@@ -461,6 +487,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     large_communities,
                     path_id,
                 }) => {
+                    if explain {
+                        return Err(CliError::Argument(
+                            "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
+                        ));
+                    }
                     let parsed_communities: Vec<u32> = communities
                         .iter()
                         .map(|s| parse_community_str(s))
@@ -484,6 +515,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     .await
                 }
                 Some(RibAction::Delete { prefix, path_id }) => {
+                    if explain {
+                        return Err(CliError::Argument(
+                            "--explain is only valid for the default best-routes view (rib --prefix X --explain)".into(),
+                        ));
+                    }
                     commands::rib::delete_route(connection, &prefix, path_id, json).await
                 }
             }

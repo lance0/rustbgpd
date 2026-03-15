@@ -19,6 +19,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod config;
 mod config_persister;
+mod looking_glass;
 mod metrics_server;
 mod peer_manager;
 mod policy_admin;
@@ -377,6 +378,11 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
     // Metrics
     if let Some(addr) = config.prometheus_addr() {
         eprintln!("  |- metrics: http://{addr}/metrics");
+    }
+
+    // Looking glass
+    if let Some(addr) = config.looking_glass_addr() {
+        eprintln!("  |- looking glass: http://{addr}/status");
     }
 
     // Optional subsystems
@@ -879,6 +885,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         }
     }
 
+    // Spawn birdwatcher-compatible looking glass HTTP server (if configured)
+    if let Some(lg_addr) = config.looking_glass_addr() {
+        let lg_state = std::sync::Arc::new(looking_glass::LookingGlassState::new(
+            rib_query_tx.clone(),
+            peer_mgr_tx.clone(),
+            config.global.asn,
+            config.global.router_id.clone(),
+        ));
+        tokio::spawn(looking_glass::serve(lg_addr, lg_state));
+    }
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1364,6 +1381,7 @@ mod tests {
                     log_format: "json".to_string(),
                     grpc_tcp: None,
                     grpc_uds: None,
+                    looking_glass: None,
                 },
             },
             neighbors: vec![

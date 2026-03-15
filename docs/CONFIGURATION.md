@@ -47,10 +47,28 @@ Required. Configures observability and management endpoints.
 
 | Field             | Type   | Required | Default | Description                        |
 |-------------------|--------|----------|---------|------------------------------------|
-| `prometheus_addr` | string | yes      | --      | `host:port` for Prometheus metrics |
+| `prometheus_addr` | string | no       | --      | `host:port` for Prometheus metrics (omit to disable) |
 | `log_format`      | string | yes      | --      | Log output format (`"json"`)       |
 
-`prometheus_addr` must be a valid `ip:port` socket address.
+`prometheus_addr`, when present, must be a valid `ip:port` socket address.
+
+### `[global.telemetry.looking_glass]`
+
+Optional birdwatcher-compatible HTTP server for looking glass frontends
+(Alice-LG, etc.).
+
+| Field  | Type   | Required | Description                              |
+|--------|--------|----------|------------------------------------------|
+| `addr` | string | yes      | `host:port` for the looking glass server |
+
+When configured, rustbgpd starts an HTTP server exposing birdwatcher-compatible
+endpoints (`/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
+`/routes/peer/{peer}`). Omit the section entirely to disable.
+
+```toml
+[global.telemetry.looking_glass]
+addr = "0.0.0.0:8080"
+```
 
 gRPC listeners are configured with optional subtables:
 

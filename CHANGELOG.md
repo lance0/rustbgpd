@@ -128,8 +128,9 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `rustbgpctl rib advertised <peer> --prefix <CIDR> --explain` explain
   whether the current best route for one prefix would be advertised to one peer,
   including decisive reasons and any export modifications. This v1 scope is
-  export-only and does not yet include best-path explain, import explain, or
-  named policy/statement attribution.
+  export-only. Best-path explain is now available via `ExplainBestPath` RPC
+  and `rustbgpctl rib --prefix X --explain`. Import explain and named
+  policy/statement attribution are not yet implemented.
 - **Per-peer log level filtering.** New `log_level` field on `[[neighbors]]`
   and `[peer_groups.<name>]` overrides the global `RUST_LOG` level for
   individual peers. Each peer session runs inside a tracing span with
