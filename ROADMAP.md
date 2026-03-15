@@ -143,6 +143,13 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
 - [ ] **Duplicate BMP collector address detection** — two collectors with the same address are accepted without warning, resulting in duplicate data streams
 - [x] **CLI gRPC integration tests** — mock gRPC server over both TCP+token and UDS, covering health, global, neighbor add, and soft-reset command-to-RPC paths
+- [ ] **RTR/RPKI cache interop** — real-system validation with Routinator/Fort/StayRTR: session establishment, VRP delivery, origin validation affecting route selection. Unit tests exist; no containerlab scenario yet. See [docs/INTEROP.md](docs/INTEROP.md) § Missing Interop Coverage.
+- [ ] **ASPA/RTR v2 cache interop** — real-cache scenario proving v2 query negotiation, v1 fallback, ASPA records affecting best-path. Highest-risk untested protocol surface.
+- [ ] **FlowSpec peer interop** — dedicated containerlab scenario for FlowSpec rule exchange with FRR or BIRD.
+- [ ] **GoBGP peer interop** — GoBGP as secondary interop target. Currently FRR-heavy, BIRD at M0 only.
+- [ ] **BMP collector interop** — scenario with a real BMP consumer (pmacct, OpenBMP).
+- [ ] **TCP MD5/GTSM interop** — platform-sensitive; one Linux-only real-peer validation.
+- [ ] **Cease subcode 8 compatibility** — verify FRR/BIRD/GoBGP acceptance (TBD in INTEROP.md table).
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
 - [ ] **SIGHUP policy/peer-group reconciliation** — `reload_config()` only reconciles `[[neighbors]]` changes today; peer-group and policy changes are detected but not applied. Should recompute effective neighbor configs from resolved peer-group inheritance and trigger soft resets for affected peers when policy or peer-group fields change.
 - [ ] **Effective neighbor diff via peer-group resolution** — `rustbgpd --diff` shows raw peer-group changes separately from neighbor changes; should resolve peer-group inheritance for old/new configs and surface which neighbors are effectively impacted, including whether changes are hot-applied or require reconnect.

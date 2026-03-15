@@ -1517,3 +1517,27 @@ Automated test: `bash tests/interop/scripts/test-m20-privateas-frr.sh` — **22 
   rustbgpd's port 179, but rustbgpd only connects outbound in M0 (no listener).
   This is normal — rustbgpd's outbound connect will establish the session.
   If it persists, check the connect-retry timer interval.
+
+---
+
+## Missing Interop Coverage
+
+Tracked gaps where code and unit tests exist but real-system interop validation
+is missing. Prioritized by risk.
+
+### P0 — High value, should validate before stable release
+
+| Gap | What exists today | What's missing |
+|-----|-------------------|----------------|
+| **RPKI/RTR cache** | RTR v1 client, VRP table, best-path integration, unit tests | No containerlab scenario with a real RPKI cache (e.g., Routinator, Fort, StayRTR). Need: session establishment, VRP delivery, origin validation affecting route selection. |
+| **ASPA/RTR v2 cache** | RTR v2 codec, ASPA PDU type 11, v1 fallback, AspaTable, unit tests | No scenario proving v2 query negotiation, v1 fallback behavior, ASPA records arriving and affecting best-path. |
+| **FlowSpec peer** | Full FlowSpec encode/decode, Loc-RIB, gRPC injection, route-server transparency | No dedicated containerlab scenario validating FlowSpec rule exchange with FRR or BIRD. |
+
+### P1 — Important for broader adoption
+
+| Gap | What exists today | What's missing |
+|-----|-------------------|----------------|
+| **GoBGP as peer** | Planned in test matrix (line 29) | No topology, no tests. GoBGP is the obvious next peer target after FRR/BIRD. |
+| **BMP collector** | BMP manager, per-collector clients, reconnect, Stats Report | No scenario with a real BMP consumer (e.g., pmacct, OpenBMP). |
+| **TCP MD5 / GTSM** | `md5_password` and `ttl_security` config, socket options | No dedicated interop coverage. Platform-sensitive — one Linux scenario worth having. |
+| **Cease subcode 8** | Sent for global route limit violations | FRR/BIRD/GoBGP acceptance TBD (see Cease Subcode Compatibility table above). |
