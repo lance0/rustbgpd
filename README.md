@@ -15,7 +15,7 @@ control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-1150+ workspace tests, fuzz targets, and 21 automated interop suites against
+1150+ workspace tests, fuzz targets, and 20 automated interop suites against
 FRR 10.3.1 and BIRD 2.0.12.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
@@ -273,7 +273,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN, VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1150+ workspace tests, fuzz targets, 21 automated interop suites (189 assertions) |
+| **Tests** | 1150+ workspace tests, fuzz targets, 20 automated interop suites (189 assertions) |
 
 ## Documentation
 
