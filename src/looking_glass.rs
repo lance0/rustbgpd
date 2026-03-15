@@ -138,7 +138,7 @@ async fn protocols_bgp(
         let state_str = format_bird_state(p);
 
         // Query advertised count for this peer to populate routes_exported
-        let exported = query_advertised_count(&state, p.address).await;
+        let exported = query_advertised_count(&state, p.address).await?;
 
         protocols.insert(
             protocol_id,
@@ -230,19 +230,22 @@ async fn query_peers(state: &LookingGlassState) -> Result<Vec<PeerInfo>, StatusC
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
-async fn query_advertised_count(state: &LookingGlassState, peer: IpAddr) -> usize {
+async fn query_advertised_count(
+    state: &LookingGlassState,
+    peer: IpAddr,
+) -> Result<usize, StatusCode> {
     let (reply_tx, reply_rx) = oneshot::channel();
-    let Ok(()) = state
+    state
         .rib_query_tx
         .send(RibUpdate::QueryAdvertisedCount {
             peer,
             reply: reply_tx,
         })
         .await
-    else {
-        return 0;
-    };
-    reply_rx.await.unwrap_or(0)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    reply_rx
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Format peer state as birdwatcher/BIRD protocol state string.
