@@ -193,8 +193,9 @@ restart it.
 
 ## Key metrics to watch
 
-All metrics are exposed on the Prometheus endpoint configured in
-`prometheus_addr`.
+Metrics are exposed on the Prometheus endpoint if `prometheus_addr` is
+configured. If omitted, metrics are still collected internally and available
+via gRPC `GetMetrics` and `GetHealth` RPCs.
 
 ### Health
 
@@ -359,3 +360,25 @@ rustbgpctl shutdown
 ```
 
 Sends NOTIFICATION to all peers, writes GR marker, exits cleanly.
+
+### Explain best-path selection
+
+```bash
+rustbgpctl rib --prefix 10.0.0.0/24 --explain
+```
+
+Shows all candidates for a prefix with the decisive comparison reason
+for each non-winner (e.g., `higher_local_pref`, `shorter_as_path`).
+
+### Looking glass (birdwatcher-compatible REST API)
+
+Optional HTTP server for external looking glass frontends (Alice-LG, etc.).
+Configure in TOML:
+
+```toml
+[global.telemetry.looking_glass]
+addr = "0.0.0.0:8080"
+```
+
+Endpoints: `/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
+`/routes/peer/{peer}`. Omit the section entirely to disable.

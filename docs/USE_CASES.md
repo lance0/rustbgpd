@@ -390,6 +390,10 @@ IX peer C  ──┘
   with bgpdump, BGPKIT parser, and RouteViews/RIPE RIS tooling)
 - **BMP export** — stream to OpenBMP or pmacct for long-term archival
 - **RPKI validation state** — each route annotated with Valid/Invalid/NotFound
+- **Birdwatcher-compatible REST API** — optional HTTP server for Alice-LG and
+  similar looking glass frontends (`[global.telemetry.looking_glass]`)
+- **Best-path explain** — `rustbgpctl rib --prefix X --explain` shows why a
+  route was selected over alternatives
 
 **Example config** ([`examples/route-collector/config.toml`](../examples/route-collector/config.toml)):
 
@@ -406,6 +410,10 @@ log_format = "json"
 [global.telemetry.grpc_tcp]
 enabled = true
 address = "0.0.0.0:50051"
+
+# Birdwatcher-compatible looking glass for Alice-LG
+[global.telemetry.looking_glass]
+addr = "0.0.0.0:8080"
 
 # RPKI — annotate every route with validation state
 [rpki]
@@ -459,6 +467,9 @@ rustbgpctl rib
 
 # List all routes received from a specific peer
 rustbgpctl rib received 10.0.0.1
+
+# Explain why a route was selected as best
+rustbgpctl rib --prefix 10.0.0.0/24 --explain
 
 # Trigger an on-demand MRT dump
 rustbgpctl mrt-dump

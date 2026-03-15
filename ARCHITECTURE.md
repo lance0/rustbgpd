@@ -198,6 +198,7 @@ gRPC request
 | CLI tool | `crates/cli/src/` |
 | Config loading + validation | `src/config/` |
 | Startup wiring | `src/main.rs` |
+| Looking glass (REST API) | `src/looking_glass.rs` |
 | Prometheus metrics | `crates/telemetry/src/lib.rs` |
 
 ---
@@ -211,7 +212,7 @@ gRPC request
 3. Spawns RibManager task (owns all routing state).
 4. Spawns PeerManager task (owns neighbor lifecycle).
 5. Spawns BgpListener (accepts inbound TCP on port 179).
-6. Spawns gRPC API server, Prometheus metrics server.
+6. Spawns gRPC API server. Optionally spawns Prometheus metrics server (if `prometheus_addr` configured) and looking glass HTTP server (if `[global.telemetry.looking_glass]` configured).
 7. Optionally spawns BMP manager + per-collector clients, MRT manager, RPKI VRP manager + RTR clients.
 8. For each configured neighbor, sends `AddPeer` to PeerManager → PeerManager spawns a PeerSession task.
 

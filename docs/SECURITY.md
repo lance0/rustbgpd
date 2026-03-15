@@ -100,6 +100,14 @@ does not expose secrets, but it does expose operational detail. Apply the same
 loopback-vs-management-network discipline to `prometheus_addr` that you apply
 to gRPC.
 
+## Looking glass endpoint
+
+The optional birdwatcher-compatible looking glass HTTP server
+(`[global.telemetry.looking_glass]`) is read-only and unauthenticated. It
+exposes neighbor state, received routes, and peer addresses. Apply the same
+network-level access controls as Prometheus. If not needed, omit the config
+section entirely — no HTTP server is started.
+
 ## TCP MD5 and GTSM
 
 Per-neighbor TCP MD5 authentication (RFC 2385) and GTSM / TTL security

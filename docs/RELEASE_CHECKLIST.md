@@ -130,6 +130,26 @@ bash tests/interop/scripts/test-m16-llgr-frr.sh
 containerlab destroy -t tests/interop/m16-llgr-frr.clab.yml
 ```
 
+If the release includes RPKI/RTR, FlowSpec, or best-path explain changes:
+
+```bash
+# RPKI/RTR cache interop (requires cloudflare/gortr:latest)
+containerlab deploy -t tests/interop/m21-rpki-frr.clab.yml
+bash tests/interop/scripts/test-m21-rpki-frr.sh
+containerlab destroy -t tests/interop/m21-rpki-frr.clab.yml
+
+# FlowSpec injection + distribution
+containerlab deploy -t tests/interop/m22-flowspec-frr.clab.yml
+bash tests/interop/scripts/test-m22-flowspec-frr.sh
+containerlab destroy -t tests/interop/m22-flowspec-frr.clab.yml
+
+# GoBGP peer (requires gobgp:interop image)
+docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop/
+containerlab deploy -t tests/interop/m23-gobgp.clab.yml
+bash tests/interop/scripts/test-m23-gobgp.sh
+containerlab destroy -t tests/interop/m23-gobgp.clab.yml
+```
+
 ### Docker smoke
 
 ```bash
