@@ -441,10 +441,11 @@ impl Config {
                 }
             }
 
-            // Reject duplicate collector addresses
+            // Reject duplicate collector addresses (canonicalize through SocketAddr)
             let mut seen_addrs = std::collections::HashSet::new();
             for (i, collector) in bmp.collectors.iter().enumerate() {
-                if !seen_addrs.insert(&collector.address) {
+                let canonical: SocketAddr = collector.address.parse().expect("validated above");
+                if !seen_addrs.insert(canonical) {
                     return Err(ConfigError::InvalidBmpCollector {
                         reason: format!(
                             "collectors[{i}]: duplicate address {:?}",
