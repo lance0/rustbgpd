@@ -250,38 +250,51 @@ test_withdraw_rule1() {
 test_frr_withdrawal_propagated() {
     log "Test 7: Withdrawal propagated to FRR, rule 2 survives"
 
+    # Wait for rule 1 to disappear from FRR
     for i in $(seq 1 15); do
         local frr_fs
         frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
         if ! echo "$frr_fs" | grep -qi "192.168.1.0"; then
             ok "Rule 1 withdrawn from FRR (attempt $i)"
+            break
+        fi
+        if [ "$i" -eq 15 ]; then
+            fail "FRR still has rule 1 after withdrawal (30s timeout)"
+            return 1
+        fi
+        sleep 2
+    done
 
-            if echo "$frr_fs" | grep -qi "10.0.0.0"; then
-                ok "Rule 2 still present on FRR after rule 1 withdrawal"
-            else
-                fail "Rule 2 unexpectedly removed from FRR"
-            fi
+    # Give FRR a moment to settle, then check rule 2 separately
+    sleep 2
+    for i in $(seq 1 10); do
+        local frr_fs
+        frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
+        if echo "$frr_fs" | grep -qi "10.0.0.0"; then
+            ok "Rule 2 still present on FRR after rule 1 withdrawal (attempt $i)"
+            break
+        fi
+        if [ "$i" -eq 10 ]; then
+            fail "Rule 2 not found on FRR after rule 1 withdrawal"
+        fi
+        sleep 2
+    done
 
-            # Also verify rule 2 in rustbgpd
-            local fs_routes
-            fs_routes=$(grpc_list_flowspec)
-            local count
-            count=$(echo "$fs_routes" | python3 -c "
+    # Verify rule 2 in rustbgpd
+    local fs_routes
+    fs_routes=$(grpc_list_flowspec)
+    local count
+    count=$(echo "$fs_routes" | python3 -c "
 import sys, json
 resp = json.load(sys.stdin)
 print(len(resp.get('routes', [])))
 " 2>/dev/null || echo 0)
 
-            if [ "$count" -eq 1 ]; then
-                ok "Exactly 1 FlowSpec rule remains in rustbgpd"
-            else
-                fail "Expected 1 FlowSpec rule in rustbgpd, got $count"
-            fi
-            return 0
-        fi
-        sleep 2
-    done
-    fail "FRR still has rule 1 after withdrawal (30s timeout)"
+    if [ "$count" -eq 1 ]; then
+        ok "Exactly 1 FlowSpec rule remains in rustbgpd"
+    else
+        fail "Expected 1 FlowSpec rule in rustbgpd, got $count"
+    fi
 }
 
 # ---------------------------------------------------------------------------
