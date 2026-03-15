@@ -1,0 +1,53 @@
+# Containerlab topology: rustbgpd ↔ FRR + BMP receiver
+#
+# Validates: BMP session establishment, Initiation message, PeerUp on
+# BGP session, RouteMonitoring when FRR sends UPDATEs.
+#
+# rustbgpd connects outbound to bmp-receiver on port 11019.
+# FRR provides a BGP peer to generate PeerUp/RouteMonitoring events.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m24-bmp-frr.clab.yml
+#   containerlab destroy -t tests/interop/m24-bmp-frr.clab.yml
+
+name: m24-bmp-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m24-bmp.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m24-bmp.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+    bmp-receiver:
+      kind: linux
+      image: python:3.12-slim
+      cmd: sleep infinity
+      binds:
+        - ./scripts/bmp-receiver.py:/usr/local/bin/bmp-receiver.py:ro
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 (BGP)
+# rustbgpd: 10.0.0.1, AS 65001
+# FRR:      10.0.0.2, AS 65002
+# BMP receiver: management network only (TCP 11019)

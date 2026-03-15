@@ -147,7 +147,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **ASPA/RTR v2 cache interop** — real-cache scenario proving v2 query negotiation, v1 fallback, ASPA records affecting best-path. Highest-risk untested protocol surface.
 - [x] **FlowSpec peer interop** — M22 containerlab scenario: FlowSpec injection via gRPC, distribution to FRR, withdrawal propagation. FRR 10.3.1 receives but cannot originate.
 - [x] **GoBGP peer interop** — M23 containerlab scenario: bidirectional route exchange, attributes, withdrawal against GoBGP 4.3.0.
-- [ ] **BMP collector interop** — scenario with a real BMP consumer (pmacct, OpenBMP).
+- [x] **BMP collector interop** — M24 containerlab scenario: Python BMP receiver validates Initiation, PeerUp, RouteMonitoring messages and ordering.
 - [ ] **TCP MD5/GTSM interop** — platform-sensitive; one Linux-only real-peer validation.
 - [ ] **Cease subcode 8 compatibility** — verify FRR/BIRD/GoBGP acceptance (TBD in INTEROP.md table).
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps

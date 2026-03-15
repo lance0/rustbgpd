@@ -1,0 +1,26 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# BMP collector — Python receiver on the containerlab management network.
+# The address is resolved at test time and patched into this config.
+[bmp]
+sys_name = "rustbgpd-m24"
+
+[[bmp.collectors]]
+address = "BMP_RECEIVER_ADDR:11019"
+reconnect_interval = 5
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m24-bmp"
+hold_time = 90
