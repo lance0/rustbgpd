@@ -126,12 +126,26 @@ fn default_runtime_state_dir() -> String {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
-    pub prometheus_addr: String,
+    /// Prometheus metrics HTTP listener address (e.g., "0.0.0.0:9179").
+    /// If absent, no metrics HTTP server is started. Metrics are still
+    /// collected for gRPC health and internal counters.
+    #[serde(default)]
+    pub prometheus_addr: Option<String>,
     pub log_format: String,
     #[serde(default)]
     pub grpc_tcp: Option<GrpcTcpListenerConfig>,
     #[serde(default)]
     pub grpc_uds: Option<GrpcUdsListenerConfig>,
+    /// Optional birdwatcher-compatible looking glass HTTP server.
+    #[serde(default)]
+    pub looking_glass: Option<LookingGlassConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookingGlassConfig {
+    /// Listen address for the looking glass HTTP server (e.g., "0.0.0.0:8080").
+    pub addr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

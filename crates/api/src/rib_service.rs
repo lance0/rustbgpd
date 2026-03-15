@@ -10,7 +10,8 @@ use tracing::debug;
 
 use crate::proto;
 use rustbgpd_rib::{
-    ExplainAdvertisedRoute, ExplainDecision, FlowSpecRoute, RibUpdate, Route, RouteEventType,
+    ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, FlowSpecRoute, RibUpdate, Route,
+    RouteEventType,
 };
 use rustbgpd_wire::{Afi, AsPath, AsPathSegment, PathAttribute, Prefix};
 
@@ -61,6 +62,21 @@ impl RibService {
         self.rib_tx
             .send(RibUpdate::ExplainAdvertisedRoute {
                 peer,
+                prefix,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))
+    }
+
+    async fn query_explain_best_path(&self, prefix: Prefix) -> Result<ExplainBestPath, Status> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::ExplainBestPath {
                 prefix,
                 reply: reply_tx,
             })
@@ -374,6 +390,30 @@ fn explain_to_proto(explain: ExplainAdvertisedRoute) -> proto::ExplainAdvertised
     }
 }
 
+fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPathResponse {
+    proto::ExplainBestPathResponse {
+        prefix: explain.prefix.addr_string(),
+        prefix_length: u32::from(explain.prefix.prefix_len()),
+        best_route: explain.best.as_ref().map(|r| route_to_proto(r, true)),
+        candidates: explain
+            .candidates
+            .into_iter()
+            .map(|c| {
+                // Candidates never include the winner (filtered in RIB manager).
+                proto::BestPathCandidate {
+                    route: Some(route_to_proto(&c.route, false)),
+                    vs_best_reason: c.vs_best_reason.to_string(),
+                    vs_best_ordering: match c.vs_best_ordering {
+                        std::cmp::Ordering::Less => "better".to_string(),
+                        std::cmp::Ordering::Equal => "equal".to_string(),
+                        std::cmp::Ordering::Greater => "worse".to_string(),
+                    },
+                }
+            })
+            .collect(),
+    }
+}
+
 fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     let mut origin = 0u32;
     let mut as_path = Vec::new();
@@ -539,6 +579,16 @@ impl proto::rib_service_server::RibService for RibService {
             ));
         };
         Ok(Response::new(explain_to_proto(explain)))
+    }
+
+    async fn explain_best_path(
+        &self,
+        request: Request<proto::ExplainBestPathRequest>,
+    ) -> Result<Response<proto::ExplainBestPathResponse>, Status> {
+        let req = request.into_inner();
+        let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
+        let explain = self.query_explain_best_path(prefix).await?;
+        Ok(Response::new(explain_best_path_to_proto(explain)))
     }
 
     async fn watch_routes(

@@ -35,15 +35,23 @@ impl Config {
             });
         }
 
-        // Validate prometheus_addr is a valid SocketAddr
-        self.global
-            .telemetry
-            .prometheus_addr
-            .parse::<SocketAddr>()
-            .map_err(|e| ConfigError::InvalidPrometheusAddr {
-                value: self.global.telemetry.prometheus_addr.clone(),
-                reason: e.to_string(),
-            })?;
+        // Validate prometheus_addr is a valid SocketAddr (if configured)
+        if let Some(ref addr) = self.global.telemetry.prometheus_addr {
+            addr.parse::<SocketAddr>()
+                .map_err(|e| ConfigError::InvalidPrometheusAddr {
+                    value: addr.clone(),
+                    reason: e.to_string(),
+                })?;
+        }
+
+        // Validate looking_glass addr if configured
+        if let Some(ref lg) = self.global.telemetry.looking_glass {
+            lg.addr
+                .parse::<SocketAddr>()
+                .map_err(|e| ConfigError::InvalidGrpcConfig {
+                    reason: format!("invalid looking_glass.addr {:?}: {e}", lg.addr),
+                })?;
+        }
 
         let telemetry = &self.global.telemetry;
         let tcp = telemetry.grpc_tcp.as_ref().filter(|cfg| cfg.enabled);

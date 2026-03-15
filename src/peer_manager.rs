@@ -105,10 +105,11 @@ impl PeerManager {
                     cluster_id: cluster_id.map(|id| id.to_string()),
                     runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
                     telemetry: crate::config::TelemetryConfig {
-                        prometheus_addr: "127.0.0.1:9179".to_string(),
+                        prometheus_addr: Some("127.0.0.1:9179".to_string()),
                         log_format: "json".to_string(),
                         grpc_tcp: None,
                         grpc_uds: None,
+                        looking_glass: None,
                     },
                 },
                 neighbors: Vec::new(),

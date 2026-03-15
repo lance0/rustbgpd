@@ -34,7 +34,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 
 ---
 
-## Completed (v0.2.0)
+## Completed
 
 - [x] MP-BGP (IPv6 unicast) — RFC 4760: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` decode/encode, `Ipv6Prefix` type, `Prefix` enum for AFI-agnostic RIB, AFI/SAFI capability negotiation, dual-stack route exchange, IPv6 route injection via gRPC, FRR dual-stack interop validated
 - [x] BGP wire codec — OPEN, UPDATE, NOTIFICATION, KEEPALIVE, NLRI, path attributes, communities, RFC-compliant flag validation, fuzz harness
@@ -66,7 +66,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
 - [x] Config persistence + SIGHUP reload — gRPC neighbor add/delete mutations persist to TOML via atomic write; SIGHUP triggers config reload with structured per-peer reconciliation
 - [x] LLGR (RFC 9494) — two-phase GR timer: GR-stale routes promote to LLGR-stale with LLGR_STALE community, configurable llgr_stale_time per peer, NO_LLGR routes purged at transition, effective stale time = min(local, peer)
-- [x] 1030+ tests — unit, integration, property, fuzz
+- [x] 1150+ tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -87,8 +87,8 @@ items to ship.
 
 - [x] **ASPA verification** — upstream path verification with RTR v2 support. AspaTable + verify_upstream() algorithm, RTR v2 codec (ASPA PDU type 11) with automatic v1 fallback, best-path step 0.7 (Valid > Unknown > Invalid), export policy `match_aspa_validation`, gRPC `aspa_state` exposure. Validation-state matches are export-only and rejected in import policy config because validation runs post-ingress. Downstream verification deferred (needs per-peer relationship config). (ADR-0049)
 - [x] **Config diff** — `rustbgpd --diff` previews what SIGHUP would change: neighbor add/remove/modify (reload-applied), global/rpki/bmp/mrt (restart-required), and peer-group/policy changes (informational). Human-readable colored output + `--json` for scripting. Exit code 1 = actionable changes.
-- [ ] **Alice-LG / looking glass API** — instead of a built-in web UI, expose an Alice-LG-compatible REST source backend or RFC 8522 `.well-known/looking-glass` endpoint. Alice-LG is the IXP standard (DE-CIX, LINX, Netnod). The gRPC API already has the data; this is a thin REST translation layer. More valuable than a custom web UI.
-- [ ] **Best-path explain** — `best_path_cmp` returns reason enum (ShorterAsPath, HigherLocalPref, LowerRouterId, etc.) instead of bare Ordering; gRPC `ExplainRoute` RPC shows all candidates with pairwise decision tree; `rustbgpctl explain <prefix>` CLI; answers "why did this route win?" without log correlation. Operators ask for this constantly.
+- [x] **Looking glass REST API** — optional birdwatcher-compatible HTTP server for looking glass frontends (Alice-LG, etc.). Endpoints: `/status`, `/protocols/bgp`, `/routes/protocol/{id}`, `/routes/peer/{peer}`. Response shapes match birdwatcher field names. Configured via `[global.telemetry.looking_glass]`. Not yet integration-tested against Alice-LG.
+- [x] **Best-path explain** — `BestPathReason` enum + `best_path_cmp_with_reason()` function; gRPC `ExplainBestPath` RPC shows all candidates with pairwise decision reasons; `rustbgpctl rib --prefix X --explain` CLI. Answers "why did this route win?" without log correlation.
 
 ### P0–P2.5 — Complete
 
@@ -143,12 +143,19 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
 - [ ] **Duplicate BMP collector address detection** — two collectors with the same address are accepted without warning, resulting in duplicate data streams
 - [x] **CLI gRPC integration tests** — mock gRPC server over both TCP+token and UDS, covering health, global, neighbor add, and soft-reset command-to-RPC paths
+- [ ] **RTR/RPKI cache interop** — real-system validation with Routinator/Fort/StayRTR: session establishment, VRP delivery, origin validation affecting route selection. Unit tests exist; no containerlab scenario yet. See [docs/INTEROP.md](docs/INTEROP.md) § Missing Interop Coverage.
+- [ ] **ASPA/RTR v2 cache interop** — real-cache scenario proving v2 query negotiation, v1 fallback, ASPA records affecting best-path. Highest-risk untested protocol surface.
+- [ ] **FlowSpec peer interop** — dedicated containerlab scenario for FlowSpec rule exchange with FRR or BIRD.
+- [ ] **GoBGP peer interop** — GoBGP as secondary interop target. Currently FRR-heavy, BIRD at M0 only.
+- [ ] **BMP collector interop** — scenario with a real BMP consumer (pmacct, OpenBMP).
+- [ ] **TCP MD5/GTSM interop** — platform-sensitive; one Linux-only real-peer validation.
+- [ ] **Cease subcode 8 compatibility** — verify FRR/BIRD/GoBGP acceptance (TBD in INTEROP.md table).
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
 - [ ] **SIGHUP policy/peer-group reconciliation** — `reload_config()` only reconciles `[[neighbors]]` changes today; peer-group and policy changes are detected but not applied. Should recompute effective neighbor configs from resolved peer-group inheritance and trigger soft resets for affected peers when policy or peer-group fields change.
 - [ ] **Effective neighbor diff via peer-group resolution** — `rustbgpd --diff` shows raw peer-group changes separately from neighbor changes; should resolve peer-group inheritance for old/new configs and surface which neighbors are effectively impacted, including whether changes are hot-applied or require reconnect.
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
 - [x] **gRPC listener split** — each configured gRPC listener can now run in `read_only` or `read_write` mode, allowing monitoring/query exposure without exposing mutating control-plane RPCs
-- [ ] **Optional Prometheus listener** — `prometheus_addr` is currently mandatory, which adds unnecessary config and an extra HTTP bind even for simple lab or local-only deployments; make metrics serving explicitly optional or give it a safe disabled/defaulted mode
+- [x] **Optional Prometheus listener** — `prometheus_addr` is now optional; omit it to skip the metrics HTTP server while still collecting metrics for gRPC health and internal counters
 - [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for operators who do not want an Envoy/nginx sidecar
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 - [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
@@ -215,7 +222,7 @@ get blog posts written and make operators switch.
 #### Advanced UX
 
 - [x] **Live TUI dashboard** — `rustbgpctl top`: a terminal UI (ratatui) showing sessions, prefix counts, message rates per peer, RPKI VRP counts, route events — all updating live via polling + WatchRoutes stream. Peer table with sort/navigate/detail, toggleable events panel, help overlay. Configurable poll interval (`-i`).
-- [ ] ~~**Built-in looking glass**~~ — replaced by Alice-LG / RFC 8522 API approach in "Next Up" section. Market research shows IXPs use external presentation layers (Alice-LG, IXP Manager); a built-in web UI is not a differentiator.
+- [x] ~~**Built-in looking glass**~~ — replaced by birdwatcher-compatible REST API in "Next Up" section. Market research shows IXPs use external presentation layers (Alice-LG, IXP Manager); a built-in web UI is not a differentiator.
 - [ ] **Config snippets / examples in error messages** — when a gRPC call fails validation, include a working example in the error detail: "invalid families value; try: `families: [\"ipv4_unicast\", \"ipv6_unicast\"]`"
 - [x] **Neighbor auto-discovery logging** — when an unknown peer connects, the warning includes a suggested `rustbgpctl neighbor <addr> add --asn <ASN>` command to help operators bootstrap new peers.
 
@@ -249,7 +256,7 @@ Prove it works under pressure before 1.0.
 - [ ] **Bulk initial load mode** — special-case initial table flood: accumulate larger affected-prefix sets before distribution, emit fewer/larger outbound updates; initial load tradeoffs differ from steady-state churn
 - [x] **AdjRibIn/AdjRibOut pre-sizing** — `AdjRibIn::with_capacity()` constructor; first `RoutesReceived` per peer uses batch size hints to pre-size routes, prefix_index, and intern table maps
 - [x] **Outbound attribute caching** — per-call prepared outbound attribute cache reuses identical attribute rewrites inside `send_route_update()`, covering unicast export without introducing long-lived invalidation state
-- [x] **AdjRibOut secondary prefix index** — `HashMap<Prefix, Vec<u32>>` index for O(1) `path_ids_for_prefix()` and `iter_prefix()`. Previous O(N) full-scan caused 560x cost blowup at 200k routes; 2p/100k convergence: 71s → 12s (5.9x). Memory tradeoff: 168 MB → 406 MB (still 1.4x less than GoBGP)
+- [x] **AdjRibOut secondary prefix index** — `HashMap<Prefix, SmallVec<[u32; 1]>>` index for O(1) `path_ids_for_prefix()` and `iter_prefix()`. Previous O(N) full-scan caused 560x cost blowup at 200k routes; 2p/100k convergence: 71s → 12s (5.9x)
 - [x] **AdjRibOut index memory compaction** — `SmallVec<[u32; 1]>` for single-best case; zero-alloc `&[u32]` return from `path_ids_for_prefix()`; marginal RSS impact (~9 MB) confirming memory is structural
 - [x] **dhat heap profiling** — feature-gated `dhat-heap` profiler with Docker/bgperf2 integration; SIGTERM handler for clean PID 1 shutdown; 284 MB live heap captured at 2p/100k
 - [x] **Skip unnecessary Arc deep clones in distribution** — `Arc::make_mut()` was called unconditionally on every route in `distribute_single_best_prefix()`, forcing deep clone of `Vec<PathAttribute>` even when no export policy modifications were needed (~85% of routes). Added `RouteModifications::is_empty()` guard; unmodified routes now share the same `Arc` across LocRib and AdjRibOut. 2p/100k memory: 415 MB → 257 MB (-38%)

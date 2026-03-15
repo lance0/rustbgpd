@@ -20,10 +20,12 @@ use tracing::{debug, warn};
 
 use crate::adj_rib_in::AdjRibIn;
 use crate::adj_rib_out::AdjRibOut;
+use crate::best_path::best_path_cmp_with_reason;
 use crate::event::RouteEvent;
 use crate::loc_rib::LocRib;
 use crate::update::{
-    ExplainAdvertisedRoute, MrtPeerEntry, MrtSnapshotData, OutboundRouteUpdate, RibUpdate,
+    BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, MrtPeerEntry, MrtSnapshotData,
+    OutboundRouteUpdate, RibUpdate,
 };
 
 use helpers::{DIRTY_RESYNC_INTERVAL, LlgrPeerConfig, prefix_family};
@@ -403,6 +405,9 @@ impl RibManager {
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
                 self.handle_query_advertised_routes(peer, reply);
             }
+            RibUpdate::ExplainBestPath { prefix, reply } => {
+                self.handle_explain_best_path(prefix, reply);
+            }
             RibUpdate::ExplainAdvertisedRoute {
                 peer,
                 prefix,
@@ -536,6 +541,54 @@ impl RibManager {
 
         if reply.send(Some(explanation)).is_err() {
             warn!("query caller dropped before receiving response");
+        }
+    }
+
+    fn handle_explain_best_path(
+        &mut self,
+        prefix: Prefix,
+        reply: tokio::sync::oneshot::Sender<ExplainBestPath>,
+    ) {
+        use crate::best_path::best_path_cmp;
+
+        // Collect all candidates from all Adj-RIB-In tables.
+        let mut all_candidates: Vec<crate::route::Route> = self
+            .ribs
+            .values()
+            .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
+            .collect();
+
+        // Find best using same logic as LocRib::recompute.
+        let best = all_candidates
+            .iter()
+            .min_by(|a, b| best_path_cmp(a, b))
+            .cloned();
+
+        let candidates = if let Some(ref best_route) = best {
+            all_candidates
+                .drain(..)
+                .filter(|c| !(c.peer == best_route.peer && c.path_id == best_route.path_id))
+                .map(|candidate| {
+                    let (ordering, reason) = best_path_cmp_with_reason(&candidate, best_route);
+                    BestPathCandidate {
+                        route: candidate,
+                        vs_best_reason: reason,
+                        vs_best_ordering: ordering,
+                    }
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        let explanation = ExplainBestPath {
+            prefix,
+            best,
+            candidates,
+        };
+
+        if reply.send(explanation).is_err() {
+            warn!("query caller dropped before receiving best-path explanation");
         }
     }
 

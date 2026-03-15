@@ -47,10 +47,28 @@ Required. Configures observability and management endpoints.
 
 | Field             | Type   | Required | Default | Description                        |
 |-------------------|--------|----------|---------|------------------------------------|
-| `prometheus_addr` | string | yes      | --      | `host:port` for Prometheus metrics |
+| `prometheus_addr` | string | no       | --      | `host:port` for Prometheus metrics (omit to disable) |
 | `log_format`      | string | yes      | --      | Log output format (`"json"`)       |
 
-`prometheus_addr` must be a valid `ip:port` socket address.
+`prometheus_addr`, when present, must be a valid `ip:port` socket address.
+
+### `[global.telemetry.looking_glass]`
+
+Optional birdwatcher-compatible HTTP server for looking glass frontends
+(Alice-LG, etc.).
+
+| Field  | Type   | Required | Description                              |
+|--------|--------|----------|------------------------------------------|
+| `addr` | string | yes      | `host:port` for the looking glass server |
+
+When configured, rustbgpd starts an HTTP server exposing birdwatcher-compatible
+endpoints (`/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
+`/routes/peer/{peer}`). Omit the section entirely to disable.
+
+```toml
+[global.telemetry.looking_glass]
+addr = "0.0.0.0:8080"
+```
 
 gRPC listeners are configured with optional subtables:
 
@@ -169,7 +187,6 @@ mutations persist back to TOML.
 
 ```toml
 [peer_groups.rs-clients]
-description = "IX route-server clients"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true
@@ -1142,7 +1159,7 @@ starting:
 | Field | Default value |
 |-------|---------------|
 | `hold_time` | 90 seconds |
-| `connect_retry_secs` | 30 seconds (not configurable) |
+| `connect_retry_secs` | 5 seconds (not configurable) |
 | gRPC listener | UDS at `<runtime_state_dir>/grpc.sock` with mode `0o600` |
 | `ttl_security` | `false` |
 | `families` | `["ipv4_unicast"]` for IPv4 peers; `["ipv4_unicast", "ipv6_unicast"]` for IPv6 peers |

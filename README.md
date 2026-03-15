@@ -15,7 +15,7 @@ control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-1090+ workspace tests, fuzz targets, and 16 automated interop suites against
+1150+ workspace tests, fuzz targets, and 15 automated interop suites against
 FRR 10.3.1 and BIRD 2.0.12.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
@@ -112,7 +112,7 @@ $EDITOR config.toml   # set your ASN, router ID, and peer address
 ```
 
 The minimal example sets `runtime_state_dir` to a user-writable path and
-includes the required `prometheus_addr`. For a route-server deployment, start
+includes `prometheus_addr` for metrics. For a route-server deployment, start
 from `examples/route-server/config.toml` instead. Full reference:
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
@@ -267,13 +267,13 @@ control-plane deployments where you are comfortable with an evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.5.x) |
+| **Maturity** | Public alpha (v0.6.x) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN, VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1090+ workspace tests, fuzz targets, 16 automated interop suites (189 assertions) |
+| **Tests** | 1150+ workspace tests, fuzz targets, 15 automated interop suites (189 assertions) |
 
 ## Documentation
 
@@ -289,7 +289,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Feature comparison with FRR, BIRD, GoBGP, OpenBGPd |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
-| [docs/adr/](docs/adr/) | Architecture decision records (49 ADRs) |
+| [docs/adr/](docs/adr/) | Architecture decision records (50 ADRs) |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
