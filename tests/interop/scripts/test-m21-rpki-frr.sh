@@ -10,7 +10,7 @@
 # Prerequisites:
 #   - containerlab deployed: containerlab deploy -t tests/interop/m21-rpki-frr.clab.yml
 #   - grpcurl installed on the host
-#   - rpki/stayrtr:latest pulled
+#   - cloudflare/gortr:latest pulled
 #
 # Usage:
 #   bash tests/interop/scripts/test-m21-rpki-frr.sh

@@ -26,7 +26,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m19-routeserver-frr.clab.yml` | Tested (M19) | Transparent Route Server | No ASN prepend, NH preservation | Needs per-neighbor `no enforce-first-as` |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
-| FRR + StayRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | StayRTR serves static VRP JSON | — |
+| FRR + GoRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | GoRTR serves static VRP JSON | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m22-flowspec-frr.clab.yml` | Tested (M22) | FlowSpec inject + distribute + withdraw | FRR receives only (cannot originate) | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
