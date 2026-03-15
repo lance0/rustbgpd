@@ -16,31 +16,12 @@
 # Usage:
 #   bash tests/interop/scripts/test-m22-flowspec-frr.sh
 
-set -euo pipefail
 
 TOPO="m22-flowspec-frr"
-RUSTBGPD="clab-${TOPO}-rustbgpd"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
-PROTO="proto/rustbgpd.proto"
-GRPC_ADDR=""
 
-pass=0
-fail=0
-
-log()  { printf "\033[1;34m[TEST]\033[0m %s\n" "$*"; }
-ok()   { pass=$((pass + 1)); printf "\033[1;32m  PASS\033[0m %s\n" "$*"; }
-fail() { fail=$((fail + 1)); printf "\033[1;31m  FAIL\033[0m %s\n" "$*"; }
-
-resolve_grpc_addr() {
-    local ip
-    ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$RUSTBGPD" 2>/dev/null || true)
-    if [ -z "$ip" ]; then
-        echo "ERROR: cannot resolve management IP for $RUSTBGPD" >&2
-        exit 1
-    fi
-    GRPC_ADDR="${ip}:50051"
-    log "gRPC endpoint: $GRPC_ADDR"
-}
 
 # ---------------------------------------------------------------------------
 # gRPC helpers
@@ -64,10 +45,6 @@ grpc_list_flowspec() {
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListFlowSpecRoutes 2>/dev/null
 }
 
-grpc_health() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
-        "$GRPC_ADDR" rustbgpd.v1.ControlService/GetHealth 2>/dev/null
-}
 
 # ---------------------------------------------------------------------------
 # FlowSpec rule payloads

@@ -14,42 +14,14 @@
 # Usage:
 #   bash tests/interop/scripts/test-m24-bmp-frr.sh
 
-set -euo pipefail
 
 TOPO="m24-bmp-frr"
-RUSTBGPD="clab-${TOPO}-rustbgpd"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
 BMP_RECEIVER="clab-${TOPO}-bmp-receiver"
-PROTO="proto/rustbgpd.proto"
-GRPC_ADDR=""
 BMP_MESSAGES="/tmp/bmp-messages.json"
 
-pass=0
-fail=0
-
-log()  { printf "\033[1;34m[TEST]\033[0m %s\n" "$*"; }
-ok()   { pass=$((pass + 1)); printf "\033[1;32m  PASS\033[0m %s\n" "$*"; }
-fail() { fail=$((fail + 1)); printf "\033[1;31m  FAIL\033[0m %s\n" "$*"; }
-
-resolve_ip() {
-    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1" 2>/dev/null
-}
-
-resolve_grpc_addr() {
-    local ip
-    ip=$(resolve_ip "$RUSTBGPD")
-    if [ -z "$ip" ]; then
-        echo "ERROR: cannot resolve management IP for $RUSTBGPD" >&2
-        exit 1
-    fi
-    GRPC_ADDR="${ip}:50051"
-    log "gRPC endpoint: $GRPC_ADDR"
-}
-
-grpc_health() {
-    grpcurl -plaintext -import-path . -proto "$PROTO" \
-        "$GRPC_ADDR" rustbgpd.v1.ControlService/GetHealth 2>/dev/null
-}
 
 # Patch BMP receiver address into rustbgpd config
 patch_bmp_config() {
