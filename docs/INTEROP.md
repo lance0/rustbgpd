@@ -31,6 +31,7 @@ not "someone tried it once."
 | GoBGP | 4.3.0 | `tests/interop/m23-gobgp.clab.yml` | Tested (M23) | Bidirectional route exchange | Custom image: `docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop/` | — |
 | FRR + BMP receiver | 10.3.1 | `tests/interop/m24-bmp-frr.clab.yml` | Tested (M24) | BMP Initiation, PeerUp, RouteMonitoring | Python TCP receiver validates message types and ordering | — |
 | FRR (2x) | 10.3.1 | `tests/interop/m25-md5-gtsm-frr.clab.yml` | Tested (M25) | TCP MD5 + GTSM / TTL security | Two peers: MD5 auth + GTSM separately | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m26-cease-frr.clab.yml` | Tested (M26) | Cease/Max-Prefixes subcode 1 | max_prefixes=2, FRR sends 3 | Cease/Maximum Number of Prefixes Reached |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
 | Cisco IOS-XE | — | — | Stretch | If available | — | — |
@@ -240,12 +241,13 @@ auto-reconnect injected `ManualStart` synchronously. Fixed by adding a
 
 ## Cease Subcode Compatibility
 
-Per RFC_NOTES.md, rustbgpd sends Cease subcode 8 (Out of Resources)
-for global route limit violations. Track peer behavior here:
+rustbgpd sends Cease/1 (Maximum Number of Prefixes Reached) when a
+per-peer `max_prefixes` limit is exceeded. `OUT_OF_RESOURCES` (subcode 8)
+is defined but not currently sent by any code path.
 
-| Peer | Accepts Subcode 8 | Fallback Needed | Notes |
-|------|--------------------|-----------------|-------|
-| FRR | TBD | TBD | — |
+| Peer | Accepts Cease/1 (Max Prefixes) | Clean Teardown | Notes |
+|------|-------------------------------|----------------|-------|
+| FRR 10.3.1 | Yes | Yes | Reports "Cease/Maximum Number of Prefixes Reached", session re-establishes (M26) |
 | BIRD | TBD | TBD | — |
 | GoBGP | TBD | TBD | — |
 
@@ -1544,4 +1546,4 @@ is missing. Prioritized by risk.
 | ~~**GoBGP as peer**~~ | ~~Done (M23)~~ | ~~GoBGP 4.3.0 interop validated: session, bidirectional route exchange, attributes, withdrawal.~~ |
 | ~~**BMP collector**~~ | ~~Done (M24)~~ | ~~Python BMP receiver validates Initiation, PeerUp, RouteMonitoring messages and ordering.~~ |
 | ~~**TCP MD5 / GTSM**~~ | ~~Done (M25)~~ | ~~Two-peer scenario: MD5-authenticated session + GTSM-secured session, routes exchanged over both.~~ |
-| **Cease subcode 8** | Sent for global route limit violations | FRR/BIRD/GoBGP acceptance TBD (see Cease Subcode Compatibility table above). |
+| ~~**Cease subcode compat**~~ | ~~Done (M26)~~ | ~~FRR accepts Cease/1 (Max Prefixes) cleanly. Table updated. BIRD/GoBGP still TBD.~~ |

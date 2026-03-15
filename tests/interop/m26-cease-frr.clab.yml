@@ -1,0 +1,44 @@
+# Containerlab topology: rustbgpd ↔ FRR (M26 — Cease subcode compatibility)
+#
+# Validates: Cease NOTIFICATION handling between rustbgpd and FRR.
+# - rustbgpd sends Cease/1 (Max Prefixes) when limit is exceeded
+# - FRR handles the NOTIFICATION and session tears down cleanly
+# - Session re-establishes after the limit condition is cleared
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m26-cease-frr.clab.yml
+#   containerlab destroy -t tests/interop/m26-cease-frr.clab.yml
+
+name: m26-cease-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m26-cease.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m26-cease.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65001 (max_prefixes = 2)
+# FRR:      10.0.0.2, AS 65002 (advertises 3 prefixes → triggers Cease)
