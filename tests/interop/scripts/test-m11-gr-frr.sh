@@ -222,18 +222,20 @@ test_eor_clears_stale() {
         return 1
     }
 
-    # Wait for EoR exchange — FRR sends EoR after initial table dump
-    log "Waiting for End-of-RIB exchange..."
-    sleep 10
-
-    # After EoR, stale routes should be cleared
-    local stale_count
-    stale_count=$(get_stale_route_count)
-    if [ "$stale_count" -eq 0 ]; then
-        ok "Stale routes cleared after EoR (stale_count=$stale_count)"
-    else
-        fail "Expected 0 stale routes after EoR, got $stale_count"
-    fi
+    # Wait for EoR exchange — poll stale route count instead of fixed sleep
+    log "Waiting for End-of-RIB to clear stale routes..."
+    for i in $(seq 1 15); do
+        local stale_count
+        stale_count=$(get_stale_route_count)
+        if [ "$stale_count" -eq 0 ]; then
+            ok "Stale routes cleared after EoR (attempt $i)"
+            break
+        fi
+        if [ "$i" -eq 15 ]; then
+            fail "Expected 0 stale routes after EoR, got $stale_count (30s timeout)"
+        fi
+        sleep 2
+    done
 
     # GR should no longer be active for this peer
     local gr_active

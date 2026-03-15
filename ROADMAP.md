@@ -312,7 +312,7 @@ post-M12.
 ### Interop Test Infrastructure
 
 - [ ] **`trap cleanup EXIT`** — auto-destroy topology on failure; guard with a `--deploy` flag so manual workflows aren't disrupted
-- [ ] **EoR detection by polling** — replace `sleep 10` in M11 test 3 with a `wait_eor()` loop that polls `bgp_gr_stale_routes` until 0
+- [x] **EoR detection by polling** — replaced `sleep 10` in M11 test 3 with a polling loop on `get_stale_route_count()` (15 attempts × 2s)
 - [x] **Timestamps in log output** — `date +%H:%M:%S` in `log()`/`ok()`/`fail()` via shared `test-lib.sh` across all 21 scripts
 - [x] **Pre-flight checks** — verify `grpcurl`, `docker`, and topology container exist on source via `test-lib.sh`
 - [x] **Shared test library** — `test-lib.sh` extracted from 20 scripts: pre-flight, timestamps, `resolve_ip`, `resolve_grpc_addr`, `start_rustbgpd`, `wait_frr_established`, `print_summary` (-250 lines of duplication)
