@@ -27,6 +27,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m19-routeserver-frr.clab.yml` | Tested (M19) | Transparent Route Server | No ASN prepend, NH preservation | Needs per-neighbor `no enforce-first-as` |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
 | FRR + StayRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | StayRTR serves static VRP JSON | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m22-flowspec-frr.clab.yml` | Tested (M22) | FlowSpec inject + distribute + withdraw | FRR receives only (cannot originate) | — |
 | GoBGP | 3.x | — | Planned | Secondary target | — | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
@@ -1532,7 +1533,7 @@ is missing. Prioritized by risk.
 |-----|-------------------|----------------|
 | ~~**RPKI/RTR cache**~~ | ~~Done (M21)~~ | ~~GoRTR interop validated: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed v2→v1 fallback bug.~~ |
 | **ASPA/RTR v2 cache** | RTR v2 codec, ASPA PDU type 11, v1 fallback, AspaTable, unit tests | No scenario proving v2 query negotiation, v1 fallback behavior, ASPA records arriving and affecting best-path. |
-| **FlowSpec peer** | Full FlowSpec encode/decode, Loc-RIB, gRPC injection, route-server transparency | No dedicated containerlab scenario validating FlowSpec rule exchange with FRR or BIRD. |
+| ~~**FlowSpec peer**~~ | ~~Done (M22)~~ | ~~FRR interop validated: gRPC injection, eBGP distribution, withdrawal propagation. FRR receives but cannot originate.~~ |
 
 ### P1 — Important for broader adoption
 

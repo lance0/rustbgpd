@@ -145,7 +145,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **CLI gRPC integration tests** — mock gRPC server over both TCP+token and UDS, covering health, global, neighbor add, and soft-reset command-to-RPC paths
 - [x] **RTR/RPKI cache interop** — M21 containerlab scenario with GoRTR: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed real v2→v1 version fallback bug against GoRTR/StayRTR.
 - [ ] **ASPA/RTR v2 cache interop** — real-cache scenario proving v2 query negotiation, v1 fallback, ASPA records affecting best-path. Highest-risk untested protocol surface.
-- [ ] **FlowSpec peer interop** — dedicated containerlab scenario for FlowSpec rule exchange with FRR or BIRD.
+- [x] **FlowSpec peer interop** — M22 containerlab scenario: FlowSpec injection via gRPC, distribution to FRR, withdrawal propagation. FRR 10.3.1 receives but cannot originate.
 - [ ] **GoBGP peer interop** — GoBGP as secondary interop target. Currently FRR-heavy, BIRD at M0 only.
 - [ ] **BMP collector interop** — scenario with a real BMP consumer (pmacct, OpenBMP).
 - [ ] **TCP MD5/GTSM interop** — platform-sensitive; one Linux-only real-peer validation.
