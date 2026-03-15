@@ -1,0 +1,27 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Peer A: TCP MD5 authentication
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-a-md5"
+hold_time = 90
+md5_password = "interop-secret-m25"
+
+# Peer B: GTSM / TTL security
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65003
+description = "frr-b-gtsm"
+hold_time = 90
+ttl_security = true

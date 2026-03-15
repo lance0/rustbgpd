@@ -148,7 +148,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **FlowSpec peer interop** — M22 containerlab scenario: FlowSpec injection via gRPC, distribution to FRR, withdrawal propagation. FRR 10.3.1 receives but cannot originate.
 - [x] **GoBGP peer interop** — M23 containerlab scenario: bidirectional route exchange, attributes, withdrawal against GoBGP 4.3.0.
 - [x] **BMP collector interop** — M24 containerlab scenario: Python BMP receiver validates Initiation, PeerUp, RouteMonitoring messages and ordering.
-- [ ] **TCP MD5/GTSM interop** — platform-sensitive; one Linux-only real-peer validation.
+- [x] **TCP MD5/GTSM interop** — M25 containerlab scenario: two FRR peers, one with MD5 auth, one with GTSM/TTL security. Both sessions establish and exchange routes.
 - [ ] **Cease subcode 8 compatibility** — verify FRR/BIRD/GoBGP acceptance (TBD in INTEROP.md table).
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
 - [ ] **SIGHUP policy/peer-group reconciliation** — `reload_config()` only reconciles `[[neighbors]]` changes today; peer-group and policy changes are detected but not applied. Should recompute effective neighbor configs from resolved peer-group inheritance and trigger soft resets for affected peers when policy or peer-group fields change.

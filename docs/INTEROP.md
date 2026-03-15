@@ -30,6 +30,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m22-flowspec-frr.clab.yml` | Tested (M22) | FlowSpec inject + distribute + withdraw | FRR receives only (cannot originate) | — |
 | GoBGP | 4.3.0 | `tests/interop/m23-gobgp.clab.yml` | Tested (M23) | Bidirectional route exchange | Custom image: `docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop/` | — |
 | FRR + BMP receiver | 10.3.1 | `tests/interop/m24-bmp-frr.clab.yml` | Tested (M24) | BMP Initiation, PeerUp, RouteMonitoring | Python TCP receiver validates message types and ordering | — |
+| FRR (2x) | 10.3.1 | `tests/interop/m25-md5-gtsm-frr.clab.yml` | Tested (M25) | TCP MD5 + GTSM / TTL security | Two peers: MD5 auth + GTSM separately | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
 | Cisco IOS-XE | — | — | Stretch | If available | — | — |
@@ -1542,5 +1543,5 @@ is missing. Prioritized by risk.
 |-----|-------------------|----------------|
 | ~~**GoBGP as peer**~~ | ~~Done (M23)~~ | ~~GoBGP 4.3.0 interop validated: session, bidirectional route exchange, attributes, withdrawal.~~ |
 | ~~**BMP collector**~~ | ~~Done (M24)~~ | ~~Python BMP receiver validates Initiation, PeerUp, RouteMonitoring messages and ordering.~~ |
-| **TCP MD5 / GTSM** | `md5_password` and `ttl_security` config, socket options | No dedicated interop coverage. Platform-sensitive — one Linux scenario worth having. |
+| ~~**TCP MD5 / GTSM**~~ | ~~Done (M25)~~ | ~~Two-peer scenario: MD5-authenticated session + GTSM-secured session, routes exchanged over both.~~ |
 | **Cease subcode 8** | Sent for global route limit violations | FRR/BIRD/GoBGP acceptance TBD (see Cease Subcode Compatibility table above). |
