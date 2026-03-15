@@ -418,6 +418,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             match action {
                 None => {
                     if explain {
+                        if filters.longer {
+                            return Err(CliError::Argument(
+                                "--explain does not support --longer".into(),
+                            ));
+                        }
+                        if filters.origin_asn.is_some()
+                            || !filters.community.is_empty()
+                            || !filters.large_community.is_empty()
+                        {
+                            return Err(CliError::Argument(
+                                "--explain does not support route filters other than --prefix"
+                                    .into(),
+                            ));
+                        }
                         let Some(prefix) = filters.prefix.as_deref() else {
                             return Err(CliError::Argument(
                                 "--explain requires --prefix with an exact CIDR".into(),

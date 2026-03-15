@@ -399,12 +399,9 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
             .candidates
             .into_iter()
             .map(|c| {
-                let is_best = explain
-                    .best
-                    .as_ref()
-                    .is_some_and(|b| b.peer == c.route.peer && b.path_id == c.route.path_id);
+                // Candidates never include the winner (filtered in RIB manager).
                 proto::BestPathCandidate {
-                    route: Some(route_to_proto(&c.route, is_best)),
+                    route: Some(route_to_proto(&c.route, false)),
                     vs_best_reason: c.vs_best_reason.to_string(),
                     vs_best_ordering: match c.vs_best_ordering {
                         std::cmp::Ordering::Less => "better".to_string(),
