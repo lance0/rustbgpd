@@ -28,7 +28,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
 | FRR + GoRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | GoRTR serves static VRP JSON | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m22-flowspec-frr.clab.yml` | Tested (M22) | FlowSpec inject + distribute + withdraw | FRR receives only (cannot originate) | — |
-| GoBGP | 3.x | — | Planned | Secondary target | — | — |
+| GoBGP | 4.3.0 | `tests/interop/m23-gobgp.clab.yml` | Tested (M23) | Bidirectional route exchange | Custom image: `docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop/` | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
 | Cisco IOS-XE | — | — | Stretch | If available | — | — |
@@ -1539,7 +1539,7 @@ is missing. Prioritized by risk.
 
 | Gap | What exists today | What's missing |
 |-----|-------------------|----------------|
-| **GoBGP as peer** | Planned in test matrix (line 29) | No topology, no tests. GoBGP is the obvious next peer target after FRR/BIRD. |
+| ~~**GoBGP as peer**~~ | ~~Done (M23)~~ | ~~GoBGP 4.3.0 interop validated: session, bidirectional route exchange, attributes, withdrawal.~~ |
 | **BMP collector** | BMP manager, per-collector clients, reconnect, Stats Report | No scenario with a real BMP consumer (e.g., pmacct, OpenBMP). |
 | **TCP MD5 / GTSM** | `md5_password` and `ttl_security` config, socket options | No dedicated interop coverage. Platform-sensitive — one Linux scenario worth having. |
 | **Cease subcode 8** | Sent for global route limit violations | FRR/BIRD/GoBGP acceptance TBD (see Cease Subcode Compatibility table above). |

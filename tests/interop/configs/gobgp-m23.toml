@@ -1,0 +1,13 @@
+[global.config]
+as = 65002
+router-id = "10.0.0.2"
+
+[[neighbors]]
+[neighbors.config]
+neighbor-address = "10.0.0.1"
+peer-as = 65001
+description = "rustbgpd-m23"
+
+[[neighbors.afi-safis]]
+[neighbors.afi-safis.config]
+afi-safi-name = "ipv4-unicast"

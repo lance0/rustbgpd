@@ -1,0 +1,48 @@
+# Containerlab topology: rustbgpd ↔ GoBGP (M23)
+#
+# Validates: session establishment, route exchange, route injection,
+# withdrawal, and attribute correctness against GoBGP as a secondary
+# interop target (beyond FRR/BIRD).
+#
+# GoBGP (AS 65002) advertises routes via gobgp CLI.
+# rustbgpd (AS 65001) injects routes via gRPC.
+# Both sides verify receipt.
+#
+# Usage:
+#   docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop/
+#   containerlab deploy -t tests/interop/m23-gobgp.clab.yml
+#   containerlab destroy -t tests/interop/m23-gobgp.clab.yml
+
+name: m23-gobgp
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m23-gobgp.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    gobgp:
+      kind: linux
+      image: gobgp:interop
+      cmd: sleep infinity
+      binds:
+        - ./configs/gobgp-m23.toml:/config/gobgp.toml:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "gobgp:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65001
+# GoBGP:    10.0.0.2, AS 65002

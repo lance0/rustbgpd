@@ -1,0 +1,15 @@
+FROM golang:1.23-bookworm AS builder
+
+RUN go install github.com/osrg/gobgp/v3/cmd/gobgpd@latest && \
+    go install github.com/osrg/gobgp/v3/cmd/gobgp@latest
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /go/bin/gobgpd /usr/local/bin/gobgpd
+COPY --from=builder /go/bin/gobgp /usr/local/bin/gobgp
+
+CMD ["sleep", "infinity"]
