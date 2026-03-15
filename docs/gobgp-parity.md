@@ -102,7 +102,7 @@ Last updated: 2026-03-12
 | BMP management | Yes | Partial | Config-file only; no runtime gRPC add/remove |
 | MRT control | Yes | Yes | `TriggerMrtDump` RPC |
 | Zebra/FRR integration | Yes | No | |
-| Runtime log level | Yes | No | |
+| Runtime log level | Yes | Partial | Per-peer log level via config; no global runtime gRPC toggle |
 | Global config get/set | Partial | Partial | Get only on both |
 | Soft reset (in/out) | Yes | Yes | SoftResetIn RPC |
 | Graceful shutdown RPC | Yes | Yes | |
@@ -229,10 +229,9 @@ No material protocol gaps remain. Remaining work is operator polish:
 1. **CLI integration tests** — operator-quality hardening, not protocol parity.
 2. **Policy UX polish** — bulk editing / richer ergonomics rather than missing
    route-server capability.
-3. **Built-in looking glass** — read-only HTTP/JSON for NOC dashboards; nice-to-have,
-   not blocking.
+3. ~~**Built-in looking glass**~~ — shipped as birdwatcher-compatible REST API.
 
-### General-Purpose BGP Speaker (~57% parity)
+### General-Purpose BGP Speaker (~73% parity)
 
 These close the biggest gaps for broader adoption but are out of scope for
 the current alpha:

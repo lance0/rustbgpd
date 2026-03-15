@@ -187,7 +187,6 @@ mutations persist back to TOML.
 
 ```toml
 [peer_groups.rs-clients]
-description = "IX route-server clients"
 hold_time = 90
 families = ["ipv4_unicast", "ipv6_unicast"]
 route_server_client = true
@@ -1160,7 +1159,7 @@ starting:
 | Field | Default value |
 |-------|---------------|
 | `hold_time` | 90 seconds |
-| `connect_retry_secs` | 30 seconds (not configurable) |
+| `connect_retry_secs` | 5 seconds (not configurable) |
 | gRPC listener | UDS at `<runtime_state_dir>/grpc.sock` with mode `0o600` |
 | `ttl_security` | `false` |
 | `families` | `["ipv4_unicast"]` for IPv4 peers; `["ipv4_unicast", "ipv6_unicast"]` for IPv6 peers |

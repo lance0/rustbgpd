@@ -98,15 +98,12 @@ service NeighborService {
 
 // RIB queries — paginated unary for point-in-time, streaming for live watch
 service RibService {
-  // Paginated point-in-time queries (snapshot at start of iteration)
   rpc ListReceivedRoutes(ListRoutesRequest)   returns (ListRoutesResponse);
   rpc ListBestRoutes(ListRoutesRequest)       returns (ListRoutesResponse);
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
-
-  // Live update streams (backpressure via bounded channel; slow consumers get dropped)
+  rpc ExplainAdvertisedRoute(ExplainAdvertisedRouteRequest) returns (ExplainAdvertisedRouteResponse);
+  rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
   rpc WatchRoutes(WatchRoutesRequest)         returns (stream RouteEvent);
-
-  // FlowSpec RIB query
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
 }
 
@@ -117,6 +114,12 @@ service InjectionService {
   rpc AddFlowSpec(AddFlowSpecRequest)       returns (AddFlowSpecResponse);
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
 }
+
+// Policy CRUD and chain assignment
+service PolicyService { /* 14 RPCs: List/Get/Set/Delete for policies, neighbor sets, chains */ }
+
+// Peer group CRUD
+service PeerGroupService { /* 6 RPCs: List/Get/Set/Delete groups, Set/Clear neighbor membership */ }
 
 // Daemon control and health
 service ControlService {
@@ -500,9 +503,9 @@ If the global limit is hit, it means either the limit is configured too low or t
 - gRPC listens on a configurable address (default: localhost only).
 - No built-in TLS in v1. For non-loopback exposure, front rustbgpd with an
   mTLS/TLS-authenticated proxy.
-- No built-in authentication/authorization in v1 — the service split (five
-  separate gRPC services) is designed to support per-service auth policies when
-  added.
+- Per-listener access mode (`read_only` / `read_write`) controls which RPCs
+  are available. The seven-service split supports per-service auth policies
+  when finer-grained authorization is added.
 
 ---
 
@@ -517,7 +520,7 @@ If the global limit is hit, it means either the limit is configured too low or t
 | Max prefixes per neighbor | 1,000,000 | NOTIFICATION on exceed |
 | Max total routes | 10,000,000 | Backpressure, not crash |
 | Bounded channel size | 4096 | Per-session and RIB channels |
-| Connect retry interval | 30s | RFC 4271 default |
+| Connect retry interval | 5s | Reduced from RFC 4271 default of 120s |
 | Hold time | 90s | Negotiated per-peer |
 
 All limits are configurable via TOML and overridable per-peer via gRPC.

@@ -91,7 +91,7 @@ Last updated: 2026-03-14
 
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
-| Prometheus metrics | Yes | Yes | No | No | No |
+| Prometheus metrics | Yes | Yes | No | Yes | No |
 | Structured logging (JSON) | Yes | No | No | No | No |
 | BMP (RFC 7854) | Yes | Yes | Yes | Yes | No |
 | MRT dump (RFC 6396) | Yes | Yes | Yes | Yes | Yes |
@@ -102,7 +102,7 @@ Last updated: 2026-03-14
 | Feature | rustbgpd | FRR | BIRD | GoBGP | OpenBGPd |
 |---|:---:|:---:|:---:|:---:|:---:|
 | gRPC API | Yes | Partial | No | Yes | No |
-| REST API | No | Partial | No | No | No |
+| REST API | Partial | Partial | No | No | No |
 | YANG model | No | Partial | No | No | No |
 | CLI tool | Yes | Yes | Yes | Yes | Yes |
 | CLI JSON output | Yes | Yes | No | Yes | Yes |
@@ -123,7 +123,7 @@ Last updated: 2026-03-14
 | FIB/kernel integration | No | Yes | Yes | Yes | Yes |
 | Route server mode | Yes | Yes | Yes | Yes | Yes |
 | Dynamic neighbors | No | Yes | Yes | Yes | No |
-| Looking glass | No | No | Yes | No | Yes |
+| Looking glass | Yes | No | Yes | No | Yes |
 | BFD integration | No | Yes | Yes | No | No |
 
 ## Best-Path Selection

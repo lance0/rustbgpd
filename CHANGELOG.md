@@ -7,6 +7,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **Best-path explain.** New `RibService.ExplainBestPath` RPC and
+  `rustbgpctl rib --prefix X --explain` show all candidates for a prefix with
+  the decisive comparison reason (`BestPathReason` enum) for each non-winner.
+  Winner is excluded from the candidate list and returned in a dedicated `best`
+  field. `--explain` is rejected with a clear error when used with rib
+  subcommands other than the default best-routes view.
+- **Birdwatcher-compatible looking glass API.** Optional axum HTTP server
+  exposing `/status`, `/protocols/bgp`, `/routes/protocol/{id}`, and
+  `/routes/peer/{peer}`. Response shapes match birdwatcher field names for
+  looking glass frontend consumption (Alice-LG, etc.). Configured via
+  `[global.telemetry.looking_glass]`. Not yet integration-tested against
+  Alice-LG.
+- **Optional Prometheus metrics listener.** `prometheus_addr` is now optional.
+  If absent, no metrics HTTP server is started; metrics are still collected for
+  gRPC health and internal counters.
+
+---
+
 ## [0.6.0] — 2026-03-14
 
 ### Added
@@ -51,7 +73,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   workspace. All internal crates are marked `publish = false`. Wire crate is only
   published when `crates/wire/` actually changes.
 - **Roadmap aligned with market research.** Added "Next Up" section with ASPA
-  verification, Alice-LG/RFC 8522 looking glass API, and best-path explain.
+  verification, birdwatcher-compatible looking glass API, and best-path explain.
   Built-in looking glass replaced by API-first approach. Deprioritized EVPN/VPN,
   YANG/NETCONF.
 
@@ -128,9 +150,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `rustbgpctl rib advertised <peer> --prefix <CIDR> --explain` explain
   whether the current best route for one prefix would be advertised to one peer,
   including decisive reasons and any export modifications. This v1 scope is
-  export-only. Best-path explain is now available via `ExplainBestPath` RPC
-  and `rustbgpctl rib --prefix X --explain`. Import explain and named
-  policy/statement attribution are not yet implemented.
+  export-only. Import explain and named policy/statement attribution are not
+  yet implemented.
 - **Per-peer log level filtering.** New `log_level` field on `[[neighbors]]`
   and `[peer_groups.<name>]` overrides the global `RUST_LOG` level for
   individual peers. Each peer session runs inside a tracing span with
@@ -157,13 +178,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   per-route allocation and repeated attribute rewrites during large outbound
   batches without changing wire behavior.
 - **AdjRibOut secondary prefix index.** `AdjRibOut` now maintains a
-  `HashMap<Prefix, Vec<u32>>` secondary index for O(1) per-prefix path ID
-  lookup. Previously, `path_ids_for_prefix()` and `iter_prefix()` scanned the
-  entire route HashMap — O(N) per call, called per-prefix during outbound
-  distribution. At 200k routes this caused a 560x cost blowup (1.4 µs/prefix
-  early → 780 µs/prefix late). With the index, 200k-prefix convergence dropped
-  from 71s to 12s (5.9x improvement). Memory increases from 168 MB to 406 MB
-  due to the secondary index, still 1.4x less than GoBGP (578 MB).
+  `HashMap<Prefix, SmallVec<[u32; 1]>>` secondary index for O(1) per-prefix
+  path ID lookup. Previously, `path_ids_for_prefix()` and `iter_prefix()`
+  scanned the entire route HashMap — O(N) per call, called per-prefix during
+  outbound distribution. At 200k routes this caused a 560x cost blowup
+  (1.4 µs/prefix early → 780 µs/prefix late). With the index, 200k-prefix
+  convergence dropped from 71s to 12s (5.9x improvement).
 
 ### Changed
 
