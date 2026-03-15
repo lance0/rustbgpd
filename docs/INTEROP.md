@@ -1526,6 +1526,125 @@ Automated test: `bash tests/interop/scripts/test-m20-privateas-frr.sh` — **22 
 
 ---
 
+## M21 Test Results (2026-03-15, FRR 10.3.1 + GoRTR v0.14.7)
+
+RPKI origin validation via RTR cache. Found and fixed RTR v2→v1 version
+fallback bug (GoRTR disconnects without Error Report on unsupported version).
+
+| Test | Result | Details |
+|------|--------|---------|
+| gRPC endpoint ready | PASS | First attempt |
+| BGP session established | PASS | First attempt |
+| RPKI validation states populated | PASS | First attempt |
+| GoRTR container running | PASS | Management network reachable |
+| RPKI metrics present | PASS | Prometheus output includes rpki counters |
+| 192.168.1.0/24 = Valid | PASS | VRP covers AS 65002, max /24 |
+| 192.168.2.0/24 = Invalid | PASS | VRP says AS 65099, origin is AS 65002 |
+| 10.10.0.0/16 = NotFound | PASS | No VRP covers this prefix |
+| Valid route in best routes | PASS | validation_state=valid in Loc-RIB |
+| Invalid route in best routes | PASS | validation_state=invalid (only candidate) |
+| Health shows 3 routes | PASS | totalRoutes >= 3 |
+| **Total** | **12/12** | |
+
+---
+
+## M22 Test Results (2026-03-15, FRR 10.3.1)
+
+FlowSpec injection via gRPC → distribution to FRR → withdrawal propagation.
+FRR receives FlowSpec but cannot originate.
+
+| Test | Result | Details |
+|------|--------|---------|
+| gRPC endpoint ready | PASS | First attempt |
+| BGP session established | PASS | First attempt |
+| FlowSpec capability negotiated | PASS | AFI 1 / SAFI 133 |
+| Rule 1 in rustbgpd RIB | PASS | dest=192.168.1.0/24, proto==6, dst-port==80, action=drop |
+| FRR received rule 1 | PASS | `show bgp ipv4 flowspec` shows 192.168.1.0 |
+| Both rules in rustbgpd RIB | PASS | count=2 after rule 2 injection |
+| FRR received both rules | PASS | Both prefixes visible |
+| Rule 1 withdrawn from rustbgpd | PASS | DeleteFlowSpec succeeds |
+| Rule 1 withdrawn from FRR | PASS | No longer in FRR flowspec table |
+| Rule 2 survives on FRR | PASS | 10.0.0.0 still present after rule 1 withdrawal |
+| Exactly 1 rule in rustbgpd | PASS | count=1 |
+| **Total** | **11/11** | |
+
+---
+
+## M23 Test Results (2026-03-15, GoBGP 4.3.0)
+
+Bidirectional route exchange with GoBGP. Custom Docker image with iproute2.
+
+| Test | Result | Details |
+|------|--------|---------|
+| gRPC endpoint ready | PASS | First attempt |
+| BGP session established | PASS | First attempt |
+| rustbgpd received 3 routes | PASS | 192.168.1.0, 192.168.2.0, 10.10.0.0 from GoBGP |
+| Prefix 192.168.1.0 present | PASS | |
+| Prefix 192.168.2.0 present | PASS | |
+| Prefix 10.10.0.0 present | PASS | |
+| AS_PATH contains 65002 | PASS | GoBGP's ASN in path |
+| NEXT_HOP = 10.0.0.2 | PASS | GoBGP's address |
+| GoBGP received 203.0.113.0/24 | PASS | rustbgpd → GoBGP via gRPC injection |
+| 192.168.2.0/24 withdrawn | PASS | GoBGP withdrawal propagated to rustbgpd |
+| 192.168.1.0/24 still present | PASS | Survived withdrawal of sibling |
+| GoBGP no longer has 203.0.113.0/24 | PASS | rustbgpd withdrawal propagated to GoBGP |
+| **Total** | **12/12** | |
+
+---
+
+## M24 Test Results (2026-03-15, FRR 10.3.1 + Python BMP receiver)
+
+BMP collector integration. Python TCP receiver validates RFC 7854 message
+types and ordering.
+
+| Test | Result | Details |
+|------|--------|---------|
+| gRPC endpoint ready | PASS | First attempt |
+| BGP session established | PASS | First attempt |
+| BMP Initiation received | PASS | First message from rustbgpd |
+| BMP PeerUp received | PASS | After FRR session establishes |
+| BMP RouteMonitoring received | PASS | count=2 (one per FRR prefix) |
+| Initiation before PeerUp | PASS | Correct RFC 7854 ordering |
+| Message summary | PASS | 4 total: 1 Initiation + 1 PeerUp + 2 RouteMonitoring |
+| **Total** | **7/7** | |
+
+---
+
+## M25 Test Results (2026-03-15, FRR 10.3.1)
+
+TCP MD5 authentication (RFC 2385) and GTSM / TTL security (RFC 5082)
+with two separate FRR peers.
+
+| Test | Result | Details |
+|------|--------|---------|
+| gRPC endpoint ready | PASS | First attempt |
+| MD5 session established | PASS | password "interop-secret-m25" on both sides |
+| Route received over MD5 session | PASS | 192.168.1.0/24 from FRR-A |
+| GTSM session established | PASS | ttl-security hops 1 on FRR-B |
+| Route received over GTSM session | PASS | 172.16.0.0/16 from FRR-B |
+| Both peers active | PASS | activePeers=2 |
+| Routes from both peers | PASS | totalRoutes=2 |
+| **Total** | **7/7** | |
+
+---
+
+## M26 Test Results (2026-03-15, FRR 10.3.1)
+
+Cease subcode compatibility. rustbgpd sends Cease/1 (Max Prefixes) when
+`max_prefixes=2` is exceeded by FRR's 3 prefixes.
+
+| Test | Result | Details |
+|------|--------|---------|
+| gRPC endpoint ready | PASS | First attempt |
+| Session established (then bounced) | PASS | Established before prefix limit triggers |
+| FRR received Cease NOTIFICATION | PASS | "Cease/Maximum Number of Prefixes Reached" |
+| max_prefix_exceeded metric | PASS | Prometheus counter present |
+| Session flapped | PASS | flapCount=1, cycle through Established |
+| FRR still operational | PASS | vtysh responds after Cease |
+| **Total** | **6/6** | |
+
+---
+
 ## Missing Interop Coverage
 
 Tracked gaps where code and unit tests exist but real-system interop validation
