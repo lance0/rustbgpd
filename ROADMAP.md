@@ -120,7 +120,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **IPv6 next-hop policy rewrite completeness** — export policy `set_next_hop = "<ipv6>"` is covered end-to-end for MP_REACH exports and route explain; classic IPv4 `NEXT_HOP` handling remains unchanged
 - [ ] **LOCAL_PREF/MED policy match implicit defaults** — `match_local_pref_ge/le` and `match_med_ge/le` currently return false when the attribute is absent; decide whether policy matching should use BGP implicit defaults (100 for `LOCAL_PREF`, 0 for `MED`) instead
 - [ ] **Typed error variants for API deletion handlers** — policy and peer-group deletion operations match error messages with `error.contains("still referenced")` instead of typed error variants; fragile coupling to internal error strings
-- [ ] **Deduplicate `validate_policy_action()` / `proto_statement_to_input()`** — duplicated between `policy_service.rs` and `peer_group_service.rs`; extract to a shared validation module
+- [x] **Deduplicate `validate_policy_action()` / `proto_statement_to_input()`** — extracted to `policy_helpers.rs`, shared by `policy_service.rs` and `peer_group_service.rs`
 
 #### Operational / Observability Hardening
 
@@ -141,7 +141,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **BMP transport integration tests** — session-to-BMP emission paths (PeerUp/PeerDown/RouteMonitoring) now covered by transport crate tests
 - [ ] **BMP periodic stats scalability** — `emit_periodic_bmp_stats` serializes `query_state().await` per peer; at hundreds of peers this could stall the PeerManager select! loop; consider concurrent queries or cached counts
 - [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
-- [ ] **Duplicate BMP collector address detection** — two collectors with the same address are accepted without warning, resulting in duplicate data streams
+- [x] **Duplicate BMP collector address detection** — config validation now rejects duplicate collector addresses
 - [x] **CLI gRPC integration tests** — mock gRPC server over both TCP+token and UDS, covering health, global, neighbor add, and soft-reset command-to-RPC paths
 - [x] **RTR/RPKI cache interop** — M21 containerlab scenario with GoRTR: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed real v2→v1 version fallback bug against GoRTR/StayRTR.
 - [ ] **ASPA/RTR v2 cache interop** — real-cache scenario proving v2 query negotiation, v1 fallback, ASPA records affecting best-path. Highest-risk untested protocol surface.

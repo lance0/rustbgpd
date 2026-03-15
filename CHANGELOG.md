@@ -29,6 +29,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **RTR/RPKI cache interop test (M21).** Containerlab scenario with GoRTR
   serving static VRPs. 12 assertions covering RTR session establishment, VRP
   delivery, and origin validation (Valid/Invalid/NotFound) visible via gRPC.
+- **FlowSpec interop test (M22).** Injection, distribution to FRR, withdrawal.
+- **GoBGP interop test (M23).** Bidirectional route exchange against GoBGP 4.3.0.
+- **BMP collector interop test (M24).** Python receiver validates message types.
+- **TCP MD5 + GTSM interop test (M25).** Two FRR peers with transport security.
+- **Cease subcode interop test (M26).** Max-prefix Cease/1 handling with FRR.
+- **Shared test library.** `test-lib.sh` with pre-flight checks, timestamps,
+  common helpers — deduplicated across all 20 interop scripts.
+- **Duplicate BMP collector detection.** Config validation rejects duplicate
+  collector addresses.
+- **Policy helper deduplication.** Extracted shared `policy_helpers.rs` from
+  `policy_service.rs` and `peer_group_service.rs`.
 
 ### Fixed
 
