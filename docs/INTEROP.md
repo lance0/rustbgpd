@@ -1530,7 +1530,7 @@ is missing. Prioritized by risk.
 
 | Gap | What exists today | What's missing |
 |-----|-------------------|----------------|
-| **RPKI/RTR cache** | RTR v1 client, VRP table, best-path integration, unit tests | No containerlab scenario with a real RPKI cache (e.g., Routinator, Fort, StayRTR). Need: session establishment, VRP delivery, origin validation affecting route selection. |
+| ~~**RPKI/RTR cache**~~ | ~~Done (M21)~~ | ~~GoRTR interop validated: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed v2→v1 fallback bug.~~ |
 | **ASPA/RTR v2 cache** | RTR v2 codec, ASPA PDU type 11, v1 fallback, AspaTable, unit tests | No scenario proving v2 query negotiation, v1 fallback behavior, ASPA records arriving and affecting best-path. |
 | **FlowSpec peer** | Full FlowSpec encode/decode, Loc-RIB, gRPC injection, route-server transparency | No dedicated containerlab scenario validating FlowSpec rule exchange with FRR or BIRD. |
 

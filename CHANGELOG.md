@@ -26,6 +26,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Optional Prometheus metrics listener.** `prometheus_addr` is now optional.
   If absent, no metrics HTTP server is started; metrics are still collected for
   gRPC health and internal counters.
+- **RTR/RPKI cache interop test (M21).** Containerlab scenario with GoRTR
+  serving static VRPs. 12 assertions covering RTR session establishment, VRP
+  delivery, and origin validation (Valid/Invalid/NotFound) visible via gRPC.
+
+### Fixed
+
+- **RTR v2→v1 version fallback against real caches.** GoRTR and StayRTR
+  disconnect on unsupported protocol versions instead of sending RFC 8210
+  error code 4. The RTR client now also falls back to v1 when the connection
+  is closed without completing a handshake, and preserves the v1 downgrade
+  across reconnection attempts.
 
 ---
 
