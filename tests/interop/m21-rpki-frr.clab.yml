@@ -1,4 +1,4 @@
-# Containerlab topology: rustbgpd ↔ FRR + GoRTR RPKI cache
+# Containerlab topology: rustbgpd ↔ FRR + StayRTR RPKI cache
 #
 # Validates: RTR session establishment, VRP delivery, RPKI origin
 # validation affecting route attributes (Valid/Invalid/NotFound).
@@ -8,7 +8,7 @@
 #   - 192.168.2.0/24 originated by AS 65002 → RPKI Invalid (VRP says AS 65099)
 #   - 10.10.0.0/16   originated by AS 65002 → RPKI NotFound (no VRP)
 #
-# GoRTR serves a static VRP table with two entries:
+# StayRTR serves a static VRP table with two entries:
 #   - 192.168.1.0/24 max 24, AS 65002 (valid origin)
 #   - 192.168.2.0/24 max 24, AS 65099 (wrong origin → invalid for AS 65002)
 #
@@ -43,12 +43,12 @@ topology:
         - ip addr add 10.0.0.2/24 dev eth1
         - ip link set eth1 up
 
-    gortr:
+    stayrtr:
       kind: linux
-      image: cloudflare/gortr:latest
+      image: rpki/stayrtr:latest
       binds:
         - ./configs/rpki-vrps-m21.json:/data/vrps.json:ro
-      cmd: -cache /data/vrps.json -bind :3323 -checktime=false -refresh 30 -verify=false
+      cmd: -cache /data/vrps.json -bind :3323 -checktime=false -protocol 1 -refresh 30 -log.verbose
 
   links:
     - endpoints: ["rustbgpd:eth1", "frr:eth1"]
@@ -56,4 +56,4 @@ topology:
 # Network: 10.0.0.0/24
 # rustbgpd: 10.0.0.1, AS 65001
 # FRR:      10.0.0.2, AS 65002
-# GoRTR:  management network only (RTR over TCP, no L2 link needed)
+# StayRTR:  management network only (RTR over TCP, no L2 link needed)

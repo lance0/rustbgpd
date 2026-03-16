@@ -26,7 +26,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Optional Prometheus metrics listener.** `prometheus_addr` is now optional.
   If absent, no metrics HTTP server is started; metrics are still collected for
   gRPC health and internal counters.
-- **RTR/RPKI cache interop test (M21).** Containerlab scenario with GoRTR
+- **RTR/RPKI cache interop test (M21).** Containerlab scenario with StayRTR
   serving static VRPs. 12 assertions covering RTR session establishment, VRP
   delivery, and origin validation (Valid/Invalid/NotFound) visible via gRPC.
 - **FlowSpec interop test (M22).** Injection, distribution to FRR, withdrawal.

@@ -133,7 +133,7 @@ containerlab destroy -t tests/interop/m16-llgr-frr.clab.yml
 If the release includes RPKI/RTR, FlowSpec, or best-path explain changes:
 
 ```bash
-# RPKI/RTR cache interop (requires cloudflare/gortr:latest)
+# RPKI/RTR cache interop (requires rpki/stayrtr:latest)
 containerlab deploy -t tests/interop/m21-rpki-frr.clab.yml
 bash tests/interop/scripts/test-m21-rpki-frr.sh
 containerlab destroy -t tests/interop/m21-rpki-frr.clab.yml

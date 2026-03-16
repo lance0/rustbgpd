@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# M21 interop test — rustbgpd ↔ FRR + GoRTR RPKI cache
+# M21 interop test — rustbgpd ↔ FRR + StayRTR RPKI cache
 #
 # Validates:
-#   1. RTR session establishment with GoRTR
+#   1. RTR session establishment with StayRTR
 #   2. VRP delivery and route origin validation
 #   3. Validation states visible via gRPC (valid/invalid/not_found)
 #   4. RPKI-Valid route preferred over RPKI-Invalid in best-path
@@ -10,7 +10,7 @@
 # Prerequisites:
 #   - containerlab deployed: containerlab deploy -t tests/interop/m21-rpki-frr.clab.yml
 #   - grpcurl installed on the host
-#   - cloudflare/gortr:latest pulled
+#   - rpki/stayrtr:latest pulled
 #
 # Usage:
 #   bash tests/interop/scripts/test-m21-rpki-frr.sh
@@ -20,10 +20,10 @@ TOPO="m21-rpki-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/test-lib.sh"
 FRR="clab-${TOPO}-frr"
-STAYRTR="clab-${TOPO}-gortr"
+STAYRTR="clab-${TOPO}-stayrtr"
 
 
-# Patch the GoRTR address into the rustbgpd config before starting.
+# Patch the StayRTR address into the rustbgpd config before starting.
 # containerlab nodes communicate over the management network.
 patch_rpki_config() {
     local stayrtr_ip
@@ -32,7 +32,7 @@ patch_rpki_config() {
         echo "ERROR: cannot resolve management IP for $STAYRTR" >&2
         exit 1
     fi
-    log "GoRTR address: ${stayrtr_ip}:3323"
+    log "StayRTR address: ${stayrtr_ip}:3323"
 
     # Rewrite the placeholder in the config
     docker exec "$RUSTBGPD" sh -c \
@@ -114,15 +114,15 @@ wait_rpki_validation() {
 # ---------------------------------------------------------------------------
 
 test_rtr_session() {
-    log "Test 1: RTR session establishment with GoRTR"
+    log "Test 1: RTR session establishment with StayRTR"
 
-    # Check GoRTR is running and listening
+    # Check StayRTR is running and listening
     local stayrtr_ip
     stayrtr_ip=$(resolve_ip "$STAYRTR")
     if [ -n "$stayrtr_ip" ]; then
-        ok "GoRTR container running at ${stayrtr_ip}"
+        ok "StayRTR container running at ${stayrtr_ip}"
     else
-        fail "GoRTR container not reachable"
+        fail "StayRTR container not reachable"
         return 1
     fi
 
@@ -305,7 +305,7 @@ start_rustbgpd() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    log "M21 interop test: rustbgpd ↔ FRR + GoRTR RPKI cache"
+    log "M21 interop test: rustbgpd ↔ FRR + StayRTR RPKI cache"
     log "Topology: $TOPO"
 
     resolve_grpc_addr

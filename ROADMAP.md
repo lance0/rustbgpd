@@ -143,7 +143,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
 - [x] **Duplicate BMP collector address detection** — config validation now rejects duplicate collector addresses
 - [x] **CLI gRPC integration tests** — mock gRPC server over both TCP+token and UDS, covering health, global, neighbor add, and soft-reset command-to-RPC paths
-- [x] **RTR/RPKI cache interop** — M21 containerlab scenario with GoRTR: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed real v2→v1 version fallback bug against GoRTR/StayRTR.
+- [x] **RTR/RPKI cache interop** — M21 containerlab scenario with StayRTR: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed real v2→v1 version fallback bug.
 - [ ] **ASPA/RTR v2 cache interop** — real-cache scenario proving v2 query negotiation, v1 fallback, ASPA records affecting best-path. Highest-risk untested protocol surface.
 - [x] **FlowSpec peer interop** — M22 containerlab scenario: FlowSpec injection via gRPC, distribution to FRR, withdrawal propagation. FRR 10.3.1 receives but cannot originate.
 - [x] **GoBGP peer interop** — M23 containerlab scenario: bidirectional route exchange, attributes, withdrawal against GoBGP 4.3.0.

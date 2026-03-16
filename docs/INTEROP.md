@@ -26,7 +26,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m18-extnexthop-frr.clab.yml` | Tested (M18) | Extended Next-Hop (RFC 8950) | Dual-stack, IPv6 NH for IPv4 | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m19-routeserver-frr.clab.yml` | Tested (M19) | Transparent Route Server | No ASN prepend, NH preservation | Needs per-neighbor `no enforce-first-as` |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m20-privateas-frr.clab.yml` | Tested (M20) | Private AS Removal | remove/all/replace modes | — |
-| FRR + GoRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | GoRTR serves static VRP JSON | — |
+| FRR + StayRTR | 10.3.1 + latest | `tests/interop/m21-rpki-frr.clab.yml` | Tested (M21) | RPKI origin validation via RTR | StayRTR serves static VRP JSON | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m22-flowspec-frr.clab.yml` | Tested (M22) | FlowSpec inject + distribute + withdraw | FRR receives only (cannot originate) | — |
 | GoBGP | 4.3.0 | `tests/interop/m23-gobgp.clab.yml` | Tested (M23) | Bidirectional route exchange | Custom image: `docker build -t gobgp:interop -f tests/interop/Dockerfile.gobgp tests/interop/` | — |
 | FRR + BMP receiver | 10.3.1 | `tests/interop/m24-bmp-frr.clab.yml` | Tested (M24) | BMP Initiation, PeerUp, RouteMonitoring | Python TCP receiver validates message types and ordering | — |
@@ -1526,17 +1526,17 @@ Automated test: `bash tests/interop/scripts/test-m20-privateas-frr.sh` — **22 
 
 ---
 
-## M21 Test Results (2026-03-15, FRR 10.3.1 + GoRTR v0.14.7)
+## M21 Test Results (2026-03-15, FRR 10.3.1 + StayRTR v0.6.2)
 
 RPKI origin validation via RTR cache. Found and fixed RTR v2→v1 version
-fallback bug (GoRTR disconnects without Error Report on unsupported version).
+fallback bug (StayRTR/GoRTR disconnect without Error Report on unsupported version).
 
 | Test | Result | Details |
 |------|--------|---------|
 | gRPC endpoint ready | PASS | First attempt |
 | BGP session established | PASS | First attempt |
 | RPKI validation states populated | PASS | First attempt |
-| GoRTR container running | PASS | Management network reachable |
+| StayRTR container running | PASS | Management network reachable |
 | RPKI metrics present | PASS | Prometheus output includes rpki counters |
 | 192.168.1.0/24 = Valid | PASS | VRP covers AS 65002, max /24 |
 | 192.168.2.0/24 = Invalid | PASS | VRP says AS 65099, origin is AS 65002 |
@@ -1654,7 +1654,7 @@ is missing. Prioritized by risk.
 
 | Gap | What exists today | What's missing |
 |-----|-------------------|----------------|
-| ~~**RPKI/RTR cache**~~ | ~~Done (M21)~~ | ~~GoRTR interop validated: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed v2→v1 fallback bug.~~ |
+| ~~**RPKI/RTR cache**~~ | ~~Done (M21)~~ | ~~StayRTR interop validated: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed v2→v1 fallback bug.~~ |
 | **ASPA/RTR v2 cache** | RTR v2 codec, ASPA PDU type 11, v1 fallback, AspaTable, unit tests | No scenario proving v2 query negotiation, v1 fallback behavior, ASPA records arriving and affecting best-path. |
 | ~~**FlowSpec peer**~~ | ~~Done (M22)~~ | ~~FRR interop validated: gRPC injection, eBGP distribution, withdrawal propagation. FRR receives but cannot originate.~~ |
 
