@@ -16,7 +16,7 @@ ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
 1150+ workspace tests, fuzz targets, and 20 automated interop suites against
-FRR 10.3.1 and BIRD 2.0.12.
+FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The daemon runs on
@@ -28,8 +28,8 @@ FRR 10.3.1 and BIRD 2.0.12.
 - **API-first control plane** -- full gRPC control surface across 7 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, route injection, policy CRUD, peer groups, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, FlowSpec, Route Reflector, large and extended communities.
-- **Operational visibility** -- Prometheus metrics, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, structured JSON logging, per-peer counters.
-- **Evidence-driven correctness** -- fuzz targets on the wire decoder, property tests on the FSM, automated containerlab interop against FRR and BIRD, extensive workspace tests, architecture decision records for every protocol and design choice.
+- **Operational visibility** -- Prometheus metrics, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
+- **Evidence-driven correctness** -- fuzz targets on the wire decoder, property tests on the FSM, automated containerlab interop against FRR, BIRD, GoBGP, and StayRTR, extensive workspace tests, architecture decision records for every protocol and design choice.
 - **Reusable wire codec** -- `rustbgpd-wire` has zero internal dependencies and is independently publishable. Anyone building BGP tooling in Rust can use it without the daemon.
 
 ## Good fit
@@ -38,7 +38,7 @@ FRR 10.3.1 and BIRD 2.0.12.
 - **Hosting provider prefix management** — API-driven customer prefix announcements
 - **Internet exchange route servers** — transparent mode, Add-Path, RPKI, per-member policy
 - **SDN / network automation controllers** — programmable BGP control plane
-- **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP
+- **Route collectors and looking glasses** — structured data via gRPC, MRT, BMP, birdwatcher-compatible REST API
 - **Lab and test environments** — clean API, structured logs, containerlab interop
 
 See [docs/USE_CASES.md](docs/USE_CASES.md) for detailed deployment scenarios with
@@ -150,6 +150,9 @@ In production with the systemd unit, the default UDS path
 # Add a peer at runtime (persisted to config file automatically)
 rustbgpctl neighbor 10.0.0.5 add --asn 65005
 
+# Explain why a route was selected as best
+rustbgpctl rib --prefix 10.0.0.0/24 --explain
+
 # Reload config after editing the file
 kill -HUP $(pidof rustbgpd)
 
@@ -187,7 +190,7 @@ Seven services cover the full operational surface:
 | `NeighborService` | `AddNeighbor`, `DeleteNeighbor`, `ListNeighbors`, `GetNeighborState`, `EnableNeighbor`, `DisableNeighbor`, `SoftResetIn` | Peer lifecycle + inbound soft reset |
 | `PolicyService` | `ListPolicies`, `GetPolicy`, `SetPolicy`, `DeletePolicy`, `List/Get/Set/DeleteNeighborSet`, `Get*Chain`, `Set*Chain`, `Clear*Chain` | Named policy CRUD, neighbor sets, and global/per-neighbor chain attachment |
 | `PeerGroupService` | `ListPeerGroups`, `GetPeerGroup`, `SetPeerGroup`, `DeletePeerGroup`, `SetNeighborPeerGroup`, `ClearNeighborPeerGroup` | Peer-group CRUD and neighbor membership assignment |
-| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ListFlowSpecRoutes`, `WatchRoutes` | RIB queries and streaming |
+| `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `WatchRoutes` | RIB queries, explain, and streaming |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec` | Programmatic route and FlowSpec injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
 
@@ -239,7 +242,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
-| Interop suites | Automated containerlab tests against FRR 10.3.1 and BIRD 2.0.12 |
+| Interop suites | 20 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR |
 | Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
@@ -267,13 +270,13 @@ control-plane deployments where you are comfortable with an evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.6.x) |
+| **Maturity** | Public alpha (v0.7.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN, VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1150+ workspace tests, fuzz targets, 20 automated interop suites (189 assertions) |
+| **Tests** | 1150+ workspace tests, fuzz targets, 20 automated interop suites against FRR, BIRD, GoBGP, StayRTR |
 
 ## Documentation
 
