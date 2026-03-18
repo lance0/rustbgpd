@@ -274,6 +274,7 @@ Valuable but not blocking production use or 1.0. Ordered by market signal.
 - [ ] **Real-time BGP observability** — unified event bus (`broadcast::Sender<BgpEvent>`) streaming route_learned, route_withdrawn, best_path_changed, policy_filtered, session_state_change events; in-memory ring buffer for recent event history; gRPC `EventService` with `WatchEvents` streaming RPC and peer/prefix/type filtering; `bgpctl events` CLI with `--since`, `--peer`, `--prefix`, `--type` flags; foundation for TUI live event view
 - [ ] **Route history** — per-prefix timeline of routing events (learned, withdrawn, best-path changes) queryable via gRPC and `bgpctl history <prefix>`; backed by ring buffer with configurable depth
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
+- [ ] **Scriptable policy engine** — user-defined attribute transformation functions (Lua, Starlark, or WASM plugins) beyond static match/action rules. Policy evaluation is already a pure function `(route, context) -> (action, modifications)` — sandboxing a scripting layer there would be clean. More expressive than FRR's route-maps, simpler than BIRD's filter DSL.
 
 ### Deprioritized
 
