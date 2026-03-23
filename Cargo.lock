@@ -2000,7 +2000,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rustbgpctl"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "axum",
  "bytes",
@@ -2054,7 +2054,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-api"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "prometheus",
@@ -2075,7 +2075,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bmp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
@@ -2085,7 +2085,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-fsm"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -2095,7 +2095,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-mrt"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2110,7 +2110,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-policy"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "regex",
  "rustbgpd-wire",
@@ -2119,7 +2119,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rib"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2136,7 +2136,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rpki"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.18",
@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-telemetry"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "prometheus",
  "thiserror 2.0.18",
@@ -2156,7 +2156,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-transport"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "libc",

@@ -7,6 +7,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.8.0] — 2026-03-23
+
+### Added
+
+- **Dynamic prefix-based neighbors.** Accept inbound sessions from any peer
+  matching a configured IP prefix, with automatic peer slot management and
+  config validation.
+- **RPKI/ASPA import policy validation.** Import policy can now apply
+  origin-validation and ASPA upstream-path-verification results to filter or
+  tag incoming routes.
+- **ASPA/RTR v2 cache interop test (M27).** Validates RTR v2 session setup
+  and ASPA data delivery against a live cache.
+
+### Fixed
+
+- **Peer slot leak on dynamic neighbor teardown.** Peer slots are now properly
+  reclaimed when a dynamically accepted session is removed.
+
+---
+
 ## [0.7.0] — 2026-03-14
 
 ### Added
