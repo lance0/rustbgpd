@@ -309,6 +309,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             notifications_sent: 0,
             flap_count: 0,
             last_error: String::new(),
+            is_dynamic: false,
         }))
     }
 
@@ -332,6 +333,27 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
     ) -> Result<Response<server_proto::SoftResetInResponse>, Status> {
         *self.state.last_softreset.lock().await = Some(request.into_inner());
         Ok(Response::new(server_proto::SoftResetInResponse {}))
+    }
+
+    async fn list_dynamic_neighbors(
+        &self,
+        _request: Request<server_proto::ListDynamicNeighborsRequest>,
+    ) -> Result<Response<server_proto::ListDynamicNeighborsResponse>, Status> {
+        Err(Status::unimplemented("not in mock"))
+    }
+
+    async fn add_dynamic_neighbor(
+        &self,
+        _request: Request<server_proto::AddDynamicNeighborRequest>,
+    ) -> Result<Response<server_proto::AddDynamicNeighborResponse>, Status> {
+        Err(Status::unimplemented("not in mock"))
+    }
+
+    async fn delete_dynamic_neighbor(
+        &self,
+        _request: Request<server_proto::DeleteDynamicNeighborRequest>,
+    ) -> Result<Response<server_proto::DeleteDynamicNeighborResponse>, Status> {
+        Err(Status::unimplemented("not in mock"))
     }
 }
 

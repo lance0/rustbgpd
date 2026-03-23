@@ -438,6 +438,56 @@ impl Config {
             }
         }
 
+        // Validate dynamic neighbor ranges
+        for (i, dn) in self.dynamic_neighbors.iter().enumerate() {
+            // Prefix must parse as addr/len
+            let parts: Vec<&str> = dn.prefix.split('/').collect();
+            if parts.len() != 2 {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}]: invalid prefix {:?}: expected addr/len",
+                        dn.prefix
+                    ),
+                });
+            }
+            let _addr: IpAddr =
+                parts[0]
+                    .parse()
+                    .map_err(|e| ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: invalid prefix {:?}: {e}",
+                            dn.prefix
+                        ),
+                    })?;
+            let _len: u8 = parts[1]
+                .parse()
+                .map_err(|e| ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}]: invalid prefix {:?}: {e}",
+                        dn.prefix
+                    ),
+                })?;
+
+            // Peer group must exist
+            if !self.peer_groups.contains_key(&dn.peer_group) {
+                return Err(ConfigError::InvalidDynamicNeighbor {
+                    reason: format!(
+                        "dynamic_neighbors[{i}]: peer_group {:?} not defined",
+                        dn.peer_group
+                    ),
+                });
+            }
+        }
+
+        // Validate dynamic_neighbor_limit range
+        if let Some(limit) = self.global.dynamic_neighbor_limit
+            && (limit == 0 || limit > 5000)
+        {
+            return Err(ConfigError::InvalidDynamicNeighbor {
+                reason: format!("dynamic_neighbor_limit must be 1..=5000, got {limit}"),
+            });
+        }
+
         Ok(())
     }
 }

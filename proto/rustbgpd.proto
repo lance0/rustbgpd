@@ -95,6 +95,9 @@ service NeighborService {
   rpc EnableNeighbor(EnableNeighborRequest) returns (EnableNeighborResponse);
   rpc DisableNeighbor(DisableNeighborRequest) returns (DisableNeighborResponse);
   rpc SoftResetIn(SoftResetInRequest) returns (SoftResetInResponse);
+  rpc ListDynamicNeighbors(ListDynamicNeighborsRequest) returns (ListDynamicNeighborsResponse);
+  rpc AddDynamicNeighbor(AddDynamicNeighborRequest) returns (AddDynamicNeighborResponse);
+  rpc DeleteDynamicNeighbor(DeleteDynamicNeighborRequest) returns (DeleteDynamicNeighborResponse);
 }
 
 message NeighborConfig {
@@ -133,7 +136,38 @@ message NeighborState {
   uint64 notifications_sent = 9;
   uint64 flap_count = 10;
   string last_error = 11;
+  // True for peers auto-created from a dynamic_neighbors prefix range.
+  bool is_dynamic = 12;
 }
+
+message DynamicNeighborRange {
+  // IP prefix range (e.g., "10.0.0.0/24").
+  string prefix = 1;
+  // Peer group whose config dynamic peers inherit.
+  string peer_group = 2;
+  // Expected remote ASN. 0 = accept any ASN from OPEN.
+  uint32 remote_asn = 3;
+  // Description applied to dynamic peers from this range.
+  string description = 4;
+}
+
+message ListDynamicNeighborsRequest {}
+
+message ListDynamicNeighborsResponse {
+  repeated DynamicNeighborRange ranges = 1;
+}
+
+message AddDynamicNeighborRequest {
+  DynamicNeighborRange range = 1;
+}
+
+message AddDynamicNeighborResponse {}
+
+message DeleteDynamicNeighborRequest {
+  string prefix = 1;
+}
+
+message DeleteDynamicNeighborResponse {}
 
 message AddNeighborRequest {
   NeighborConfig config = 1;

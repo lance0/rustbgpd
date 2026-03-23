@@ -359,6 +359,7 @@ mod tests {
             notifications_sent: 0,
             flap_count: 0,
             last_error: String::new(),
+            is_dynamic: false,
         }
     }
 

@@ -3,8 +3,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Instant;
 
 use rustbgpd_api::peer_types::{
-    ConfigEvent, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig, ReconcileFailure,
-    ReconcileFailureKind, ReconcileResult,
+    ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
+    ReconcileFailure, ReconcileFailureKind, ReconcileResult,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
@@ -47,6 +47,18 @@ struct ManagedPeer {
     export_policy: Option<PolicyChain>,
     /// Pending inbound TCP stream waiting for collision resolution.
     pending_inbound: Option<TcpStream>,
+    /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
+    /// Dynamic peers are ephemeral: removed when session falls to Idle.
+    is_dynamic: bool,
+}
+
+/// Resolved dynamic neighbor range used for prefix matching at connection time.
+struct DynamicRange {
+    addr: std::net::IpAddr,
+    prefix_len: u8,
+    peer_group: String,
+    remote_asn: u32,
+    description: Option<String>,
 }
 
 /// Manages the lifecycle of all peer sessions.
@@ -73,6 +85,12 @@ pub struct PeerManager {
     session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
     session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
     current_config: Config,
+    /// Resolved dynamic neighbor ranges for prefix-based auto-accept.
+    dynamic_ranges: Vec<DynamicRange>,
+    /// Current number of active dynamic peers (for limit enforcement).
+    dynamic_peer_count: usize,
+    /// Maximum dynamic peers allowed. Default 100.
+    dynamic_neighbor_limit: u32,
 }
 
 impl PeerManager {
@@ -114,6 +132,7 @@ impl PeerManager {
                         grpc_uds: None,
                         looking_glass: None,
                     },
+                    dynamic_neighbor_limit: None,
                 },
                 neighbors: Vec::new(),
                 peer_groups: HashMap::new(),
@@ -122,6 +141,7 @@ impl PeerManager {
                 bmp: None,
                 mrt: None,
                 file_path: None,
+                dynamic_neighbors: Vec::new(),
             },
         )
     }
@@ -155,8 +175,30 @@ impl PeerManager {
             validation_rx,
             session_notify_tx,
             session_notify_rx,
+            dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
+            dynamic_peer_count: 0,
+            dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
             current_config,
         }
+    }
+
+    fn parse_dynamic_ranges(config: &Config) -> Vec<DynamicRange> {
+        config
+            .dynamic_neighbors
+            .iter()
+            .filter_map(|dn| {
+                let parts: Vec<&str> = dn.prefix.split('/').collect();
+                let addr: std::net::IpAddr = parts.first()?.parse().ok()?;
+                let prefix_len: u8 = parts.get(1)?.parse().ok()?;
+                Some(DynamicRange {
+                    addr,
+                    prefix_len,
+                    peer_group: dn.peer_group.clone(),
+                    remote_asn: dn.remote_asn,
+                    description: dn.description.clone(),
+                })
+            })
+            .collect()
     }
 
     fn build_transport_config(&self, config: &PeerManagerNeighborConfig) -> TransportConfig {
@@ -339,6 +381,7 @@ impl PeerManager {
                 import_policy,
                 export_policy,
                 pending_inbound: None,
+                is_dynamic: false,
             },
         );
 
@@ -409,6 +452,7 @@ impl PeerManager {
             last_error: session_state
                 .as_ref()
                 .map_or_else(String::new, |s| s.last_error.clone()),
+            is_dynamic: managed.is_dynamic,
         })
     }
 
@@ -445,6 +489,7 @@ impl PeerManager {
                 last_error: session_state
                     .as_ref()
                     .map_or_else(String::new, |s| s.last_error.clone()),
+                is_dynamic: managed.is_dynamic,
             });
         }
         infos
@@ -644,8 +689,137 @@ impl PeerManager {
         Ok(())
     }
 
+    /// Check whether a peer IP falls within any configured dynamic neighbor range.
+    fn match_dynamic_range(&self, addr: IpAddr) -> Option<&DynamicRange> {
+        self.dynamic_ranges.iter().find(|r| {
+            match (addr, r.addr) {
+                (IpAddr::V4(peer), IpAddr::V4(net)) => {
+                    if r.prefix_len > 32 {
+                        return false;
+                    }
+                    let mask = if r.prefix_len == 0 {
+                        0u32
+                    } else {
+                        u32::MAX << (32 - r.prefix_len)
+                    };
+                    (u32::from(peer) & mask) == (u32::from(net) & mask)
+                }
+                (IpAddr::V6(peer), IpAddr::V6(net)) => {
+                    if r.prefix_len > 128 {
+                        return false;
+                    }
+                    let mask = if r.prefix_len == 0 {
+                        0u128
+                    } else {
+                        u128::MAX << (128 - r.prefix_len)
+                    };
+                    (u128::from(peer) & mask) == (u128::from(net) & mask)
+                }
+                _ => false, // IPv4/IPv6 mismatch
+            }
+        })
+    }
+
+    #[expect(clippy::too_many_lines)]
     async fn handle_inbound(&mut self, stream: TcpStream, peer_addr: IpAddr) {
-        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+        // If peer is not statically configured, try dynamic range matching.
+        if !self.peers.contains_key(&peer_addr) {
+            if let Some(range) = self.match_dynamic_range(peer_addr) {
+                // Check dynamic peer limit
+                if self.dynamic_peer_count >= self.dynamic_neighbor_limit as usize {
+                    warn!(
+                        %peer_addr,
+                        limit = self.dynamic_neighbor_limit,
+                        "dynamic neighbor limit reached, dropping inbound connection"
+                    );
+                    return;
+                }
+
+                // Look up the peer group to build the config
+                let Some(group) = self.current_config.peer_groups.get(&range.peer_group) else {
+                    warn!(
+                        %peer_addr,
+                        peer_group = %range.peer_group,
+                        "dynamic neighbor peer_group not found, dropping"
+                    );
+                    return;
+                };
+
+                let remote_asn = range.remote_asn;
+                let description = range
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| format!("dynamic:{}", range.peer_group));
+                let peer_group_name = range.peer_group.clone();
+
+                // Resolve the dynamic neighbor config from the peer group
+                let resolved = match self.current_config.resolve_dynamic_neighbor(
+                    peer_addr,
+                    remote_asn,
+                    &description,
+                    group,
+                    &peer_group_name,
+                ) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(
+                            %peer_addr,
+                            error = %e,
+                            "failed to resolve dynamic neighbor config, dropping"
+                        );
+                        return;
+                    }
+                };
+
+                let cfg = Self::peer_manager_config_from_resolved(resolved, false);
+                let transport = self.build_transport_config(&cfg);
+                let import_policy = cfg.import_policy.clone();
+                let export_policy = cfg.export_policy.clone();
+
+                let handle = PeerHandle::spawn_inbound(
+                    transport.clone(),
+                    self.metrics.clone(),
+                    self.rib_tx.clone(),
+                    import_policy.clone(),
+                    export_policy.clone(),
+                    stream,
+                    Some(self.session_notify_tx.clone()),
+                    self.bmp_tx.clone(),
+                    self.validation_rx.clone(),
+                );
+
+                let managed = ManagedPeer {
+                    handle,
+                    remote_asn,
+                    description,
+                    peer_group: Some(peer_group_name),
+                    enabled: true,
+                    hold_time: cfg.hold_time,
+                    max_prefixes: cfg.max_prefixes,
+                    transport_config: transport,
+                    import_policy,
+                    export_policy,
+                    pending_inbound: None,
+                    is_dynamic: true,
+                };
+                self.peers.insert(peer_addr, managed);
+                self.dynamic_peer_count += 1;
+
+                info!(
+                    %peer_addr,
+                    "accepted dynamic neighbor from configured range"
+                );
+
+                // Start the inbound session
+                if let Some(managed) = self.peers.get(&peer_addr)
+                    && let Err(e) = managed.handle.start().await
+                {
+                    warn!(%peer_addr, error = %e, "failed to start dynamic peer session");
+                }
+                return;
+            }
+
+            // No dynamic range match either — drop with hint
             warn!(
                 %peer_addr,
                 hint = %format_args!(
@@ -653,6 +827,10 @@ impl PeerManager {
                 ),
                 "inbound connection from unknown peer, dropping"
             );
+            return;
+        }
+
+        let Some(managed) = self.peers.get_mut(&peer_addr) else {
             return;
         };
 
@@ -712,19 +890,33 @@ impl PeerManager {
                 }
             }
             SessionNotification::BackToIdle { peer_addr } => {
-                let pending = self.peers.get_mut(&peer_addr).and_then(|m| {
-                    if m.enabled {
-                        m.pending_inbound.take()
-                    } else {
-                        // Peer is disabled — drop pending inbound
-                        m.pending_inbound = None;
-                        None
+                // Auto-remove dynamic peers when they go idle (no reconnect).
+                if self
+                    .peers
+                    .get(&peer_addr)
+                    .is_some_and(|m| m.is_dynamic && !m.enabled)
+                {
+                    // Operator explicitly disabled — don't remove, just let it stay idle.
+                } else if self.peers.get(&peer_addr).is_some_and(|m| m.is_dynamic) {
+                    info!(%peer_addr, "dynamic peer session went idle, removing");
+                    self.peers.remove(&peer_addr);
+                    self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
+                    // Skip pending inbound logic for removed dynamic peers
+                } else {
+                    let pending = self.peers.get_mut(&peer_addr).and_then(|m| {
+                        if m.enabled {
+                            m.pending_inbound.take()
+                        } else {
+                            // Peer is disabled — drop pending inbound
+                            m.pending_inbound = None;
+                            None
+                        }
+                    });
+                    if let Some(stream) = pending {
+                        // Existing session failed — accept pending inbound
+                        info!(%peer_addr, "existing session went idle, accepting pending inbound");
+                        self.replace_with_inbound(peer_addr, stream).await;
                     }
-                });
-                if let Some(stream) = pending {
-                    // Existing session failed — accept pending inbound
-                    info!(%peer_addr, "existing session went idle, accepting pending inbound");
-                    self.replace_with_inbound(peer_addr, stream).await;
                 }
             }
         }
@@ -1124,6 +1316,17 @@ impl PeerManager {
                                 vec![address],
                             ).await;
                             let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::ListDynamicRanges { reply } => {
+                            let ranges = self.dynamic_ranges.iter().map(|r| {
+                                DynamicNeighborInfo {
+                                    prefix: format!("{}/{}", r.addr, r.prefix_len),
+                                    peer_group: r.peer_group.clone(),
+                                    remote_asn: r.remote_asn,
+                                    description: r.description.clone().unwrap_or_default(),
+                                }
+                            }).collect();
+                            let _ = reply.send(ranges);
                         }
                         PeerManagerCommand::Shutdown => {
                             info!("peer manager shutting down {} peers", self.peers.len());

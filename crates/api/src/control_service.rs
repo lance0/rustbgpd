@@ -301,6 +301,7 @@ mod tests {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        is_dynamic: false,
                     },
                     PeerInfo {
                         address: "10.0.0.2".parse().unwrap(),
@@ -325,6 +326,7 @@ mod tests {
                         flap_count: 0,
                         uptime_secs: 0,
                         last_error: String::new(),
+                        is_dynamic: false,
                     },
                 ];
                 let _ = reply.send(peers);

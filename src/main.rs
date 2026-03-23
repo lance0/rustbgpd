@@ -1383,6 +1383,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines)]
     fn max_gr_restart_time_uses_largest_enabled_peer() {
         let config = crate::config::Config {
             global: crate::config::Global {
@@ -1398,6 +1399,7 @@ mod tests {
                     grpc_uds: None,
                     looking_glass: None,
                 },
+                dynamic_neighbor_limit: None,
             },
             neighbors: vec![
                 crate::config::Neighbor {
@@ -1482,6 +1484,7 @@ mod tests {
             bmp: None,
             mrt: None,
             file_path: None,
+            dynamic_neighbors: Vec::new(),
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));

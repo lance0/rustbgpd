@@ -18,6 +18,8 @@ pub struct Config {
     #[serde(default)]
     pub policy: PolicyConfig,
     #[serde(default)]
+    pub dynamic_neighbors: Vec<DynamicNeighborConfig>,
+    #[serde(default)]
     pub rpki: Option<RpkiConfig>,
     #[serde(default)]
     pub bmp: Option<BmpConfig>,
@@ -26,6 +28,24 @@ pub struct Config {
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
+}
+
+/// Prefix-based dynamic neighbor range. Inbound connections from IPs
+/// within `prefix` are automatically accepted and inherit configuration
+/// from the referenced `peer_group`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DynamicNeighborConfig {
+    /// IP prefix range (e.g., `10.0.0.0/24` or `2001:db8::/32`).
+    pub prefix: String,
+    /// Peer group whose config the dynamic peer inherits.
+    pub peer_group: String,
+    /// Expected remote ASN. 0 = accept any ASN from OPEN message.
+    #[serde(default)]
+    pub remote_asn: u32,
+    /// Description applied to dynamic peers from this range.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -113,6 +133,9 @@ pub struct Global {
     /// Cluster ID for route reflection (RFC 4456). Defaults to `router_id`
     /// when any neighbor is configured as a route reflector client.
     pub cluster_id: Option<String>,
+    /// Maximum number of dynamic (prefix-based) neighbors. Default 100.
+    #[serde(default)]
+    pub dynamic_neighbor_limit: Option<u32>,
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,
@@ -445,4 +468,6 @@ pub enum ConfigError {
     InvalidRemovePrivateAs { reason: String },
     #[error("invalid log_level {value:?}: expected error, warn, info, debug, or trace")]
     InvalidLogLevel { value: String },
+    #[error("invalid dynamic neighbor config: {reason}")]
+    InvalidDynamicNeighbor { reason: String },
 }

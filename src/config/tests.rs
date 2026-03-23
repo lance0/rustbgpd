@@ -2523,3 +2523,127 @@ default_action = "deny"
     assert!(diff.has_informational_changes());
     assert!(!diff.has_actionable_changes());
 }
+
+// ── Dynamic neighbor config tests ───────────────────────────────
+
+#[test]
+fn dynamic_neighbor_parses() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+remote_asn = 0
+description = "IXP auto-accept"
+"#;
+    let config = parse(toml).unwrap();
+    assert_eq!(config.dynamic_neighbors.len(), 1);
+    assert_eq!(config.dynamic_neighbors[0].prefix, "10.0.0.0/24");
+    assert_eq!(config.dynamic_neighbors[0].peer_group, "ix-members");
+    assert_eq!(config.dynamic_neighbors[0].remote_asn, 0);
+}
+
+#[test]
+fn dynamic_neighbor_invalid_prefix_rejected() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "not-a-prefix"
+peer_group = "ix-members"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("invalid prefix"));
+}
+
+#[test]
+fn dynamic_neighbor_missing_peer_group_rejected() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "nonexistent"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("not defined"));
+}
+
+#[test]
+fn dynamic_neighbor_limit_zero_rejected() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+dynamic_neighbor_limit = 0
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("dynamic_neighbor_limit"));
+}
+
+#[test]
+fn dynamic_neighbor_limit_valid_accepted() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+dynamic_neighbor_limit = 500
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+"#;
+    let config = parse(toml).unwrap();
+    assert_eq!(config.global.dynamic_neighbor_limit, Some(500));
+}
+
+#[test]
+fn dynamic_neighbor_ipv6_prefix_parses() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-v6]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "2001:db8::/32"
+peer_group = "ix-v6"
+"#;
+    let config = parse(toml).unwrap();
+    assert_eq!(config.dynamic_neighbors[0].prefix, "2001:db8::/32");
+}

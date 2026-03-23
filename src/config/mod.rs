@@ -463,6 +463,46 @@ impl Config {
         })
     }
 
+    /// Resolve a dynamic neighbor config from a peer group.
+    /// Builds a synthetic `Neighbor` inheriting all settings from the group.
+    pub(crate) fn resolve_dynamic_neighbor(
+        &self,
+        addr: IpAddr,
+        remote_asn: u32,
+        description: &str,
+        _group: &PeerGroupConfig,
+        peer_group_name: &str,
+    ) -> Result<ResolvedNeighbor, ConfigError> {
+        // Build a synthetic Neighbor that references the peer group.
+        // All fields come from the group via the normal resolution path.
+        let neighbor = Neighbor {
+            address: addr.to_string(),
+            remote_asn,
+            description: Some(description.to_string()),
+            peer_group: Some(peer_group_name.to_string()),
+            hold_time: None,
+            max_prefixes: None,
+            md5_password: None,
+            ttl_security: None,
+            families: Vec::new(),
+            graceful_restart: None,
+            gr_restart_time: None,
+            gr_stale_routes_time: None,
+            llgr_stale_time: None,
+            local_ipv6_nexthop: None,
+            route_reflector_client: None,
+            route_server_client: None,
+            remove_private_as: None,
+            add_path: None,
+            log_level: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
+            import_policy_chain: Vec::new(),
+            export_policy_chain: Vec::new(),
+        };
+        self.resolve_neighbor(&neighbor)
+    }
+
     pub fn resolved_neighbors(&self) -> Result<Vec<ResolvedNeighbor>, ConfigError> {
         self.neighbors
             .iter()

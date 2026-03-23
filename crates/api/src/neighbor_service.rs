@@ -176,6 +176,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         notifications_sent: info.notifications_sent,
         flap_count: info.flap_count,
         last_error: info.last_error.clone(),
+        is_dynamic: info.is_dynamic,
     }
 }
 
@@ -495,6 +496,55 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
 
         Ok(Response::new(proto::DisableNeighborResponse {}))
     }
+
+    async fn list_dynamic_neighbors(
+        &self,
+        _request: Request<proto::ListDynamicNeighborsRequest>,
+    ) -> Result<Response<proto::ListDynamicNeighborsResponse>, Status> {
+        // Query the current dynamic neighbor ranges from PeerManager.
+        // For now, return the ranges configured in the running config.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::ListDynamicRanges { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+        let ranges = reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?;
+
+        let proto_ranges = ranges
+            .into_iter()
+            .map(|r| proto::DynamicNeighborRange {
+                prefix: r.prefix,
+                peer_group: r.peer_group,
+                remote_asn: r.remote_asn,
+                description: r.description,
+            })
+            .collect();
+
+        Ok(Response::new(proto::ListDynamicNeighborsResponse {
+            ranges: proto_ranges,
+        }))
+    }
+
+    async fn add_dynamic_neighbor(
+        &self,
+        _request: Request<proto::AddDynamicNeighborRequest>,
+    ) -> Result<Response<proto::AddDynamicNeighborResponse>, Status> {
+        Err(Status::unimplemented(
+            "runtime dynamic neighbor CRUD not yet implemented; configure via TOML [[dynamic_neighbors]]",
+        ))
+    }
+
+    async fn delete_dynamic_neighbor(
+        &self,
+        _request: Request<proto::DeleteDynamicNeighborRequest>,
+    ) -> Result<Response<proto::DeleteDynamicNeighborResponse>, Status> {
+        Err(Status::unimplemented(
+            "runtime dynamic neighbor CRUD not yet implemented; configure via TOML [[dynamic_neighbors]]",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -657,6 +707,7 @@ mod tests {
                     flap_count: 0,
                     uptime_secs: 0,
                     last_error: String::new(),
+                    is_dynamic: false,
                 }));
             }
         });
@@ -703,6 +754,7 @@ mod tests {
             flap_count: 0,
             uptime_secs: 0,
             last_error: String::new(),
+            is_dynamic: false,
         };
         let state = peer_info_to_proto(&info);
         let config = state.config.unwrap();

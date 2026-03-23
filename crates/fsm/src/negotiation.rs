@@ -64,8 +64,9 @@ pub fn validate_open(
     // Determine peer's true ASN: prefer 4-octet capability, fall back to my_as
     let peer_asn = open.four_byte_as();
 
-    // Verify peer ASN matches our configuration
-    if peer_asn != config.remote_asn {
+    // Verify peer ASN matches our configuration.
+    // remote_asn == 0 is the dynamic-neighbor sentinel: accept any ASN from OPEN.
+    if config.remote_asn != 0 && peer_asn != config.remote_asn {
         return Err(NotificationMessage::new(
             NotificationCode::OpenMessage,
             open_subcode::BAD_PEER_AS,
@@ -435,6 +436,17 @@ mod tests {
         open.capabilities = vec![Capability::FourOctetAs { asn: 65099 }];
         let err = validate_open(&open, &cfg).unwrap_err();
         assert_eq!(err.subcode, open_subcode::BAD_PEER_AS);
+    }
+
+    #[test]
+    fn remote_asn_zero_accepts_any_peer_asn() {
+        let mut cfg = test_config();
+        cfg.remote_asn = 0; // dynamic-neighbor sentinel
+        let mut open = peer_open();
+        open.my_as = 65099;
+        open.capabilities = vec![Capability::FourOctetAs { asn: 65099 }];
+        let neg = validate_open(&open, &cfg).unwrap();
+        assert_eq!(neg.peer_asn, 65099);
     }
 
     #[test]

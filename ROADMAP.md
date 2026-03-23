@@ -160,6 +160,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 - [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
 - [x] **Validation snapshot delivery to transport sessions** — `match_rpki_validation` and `match_aspa_validation` now work in import policy. `ValidationSnapshot` (VRP + ASPA tables) delivered to transport sessions via `tokio::sync::watch` channel. Each session borrows the latest immutable snapshot and evaluates import policy against it. RIB-side revalidation remains the correctness backstop. Config rejection for import validation matches removed.
+- [ ] **Convergent import validation on cache update** — import `match_rpki_validation` / `match_aspa_validation` is currently best-effort at ingress time; later VRP/ASPA cache updates do not re-run import policy or trigger route refresh for affected peers. Fix: on cache update, trigger `SoftResetIn` for peers whose resolved import policy uses validation-state matches. Infrastructure exists (route refresh, per-peer policy tracking). Not urgent — current semantics match FRR/BIRD behavior and are documented in KNOWN_ISSUES.
 
 ### P1 — Core Protocol Gaps
 
@@ -269,7 +270,7 @@ Prove it works under pressure before 1.0.
 Valuable but not blocking production use or 1.0. Ordered by market signal.
 
 - [ ] **Confederation** (RFC 5065) — required for service provider deployments but SPs are not the initial target market
-- [ ] **Dynamic neighbors** (prefix-based) — auto-accept peers from a prefix range; valuable for large IXPs
+- [x] **Dynamic neighbors** (prefix-based) — `[[dynamic_neighbors]]` TOML section with prefix range, peer group inheritance, `remote_asn = 0` (accept any ASN from OPEN). Auto-accept inbound connections, auto-remove on disconnect. Configurable limit (`dynamic_neighbor_limit`, default 100). FSM `remote_asn = 0` sentinel skips ASN check. gRPC `ListDynamicNeighbors` query, `is_dynamic` flag in peer info. Runtime Add/Delete deferred (TOML is primary config surface).
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5; BIRD 3 just added it (April 2025); neither GoBGP nor rustbgpd has it
 - [ ] **Real-time BGP observability** — unified event bus (`broadcast::Sender<BgpEvent>`) streaming route_learned, route_withdrawn, best_path_changed, policy_filtered, session_state_change events; in-memory ring buffer for recent event history; gRPC `EventService` with `WatchEvents` streaming RPC and peer/prefix/type filtering; `bgpctl events` CLI with `--since`, `--peer`, `--prefix`, `--type` flags; foundation for TUI live event view
 - [ ] **Route history** — per-prefix timeline of routing events (learned, withdrawn, best-path changes) queryable via gRPC and `bgpctl history <prefix>`; backed by ring buffer with configurable depth

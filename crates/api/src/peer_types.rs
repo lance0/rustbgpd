@@ -294,6 +294,19 @@ pub enum PeerManagerCommand {
     },
     /// Shut down all peers and exit the peer manager task.
     Shutdown,
+    /// List configured dynamic neighbor ranges.
+    ListDynamicRanges {
+        reply: oneshot::Sender<Vec<DynamicNeighborInfo>>,
+    },
+}
+
+/// Information about a configured dynamic neighbor range.
+#[derive(Debug, Clone)]
+pub struct DynamicNeighborInfo {
+    pub prefix: String,
+    pub peer_group: String,
+    pub remote_asn: u32,
+    pub description: String,
 }
 
 /// `AS_PATH` prepend configuration for policy modifications.
@@ -662,4 +675,6 @@ pub struct PeerInfo {
     pub uptime_secs: u64,
     /// Human-readable last error description.
     pub last_error: String,
+    /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
+    pub is_dynamic: bool,
 }
