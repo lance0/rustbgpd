@@ -1,0 +1,53 @@
+# Containerlab topology: rustbgpd dynamic neighbors ↔ FRR
+#
+# Validates: dynamic neighbor auto-accept, route exchange, peer-group
+# inheritance, and auto-removal on disconnect.
+#
+# FRR (AS 65002) initiates the connection to rustbgpd (AS 65001).
+# rustbgpd has NO static neighbor entry — only a dynamic_neighbors
+# prefix range covering 10.0.0.0/24.
+#
+# FRR advertises two prefixes:
+#   - 192.168.1.0/24
+#   - 192.168.2.0/24
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m28-dynamic-frr.clab.yml
+#   containerlab destroy -t tests/interop/m28-dynamic-frr.clab.yml
+
+name: m28-dynamic-frr
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m28-dynamic.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m28-dynamic.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65001 (dynamic neighbors only)
+# FRR:      10.0.0.2, AS 65002 (initiates connection)

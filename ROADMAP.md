@@ -310,7 +310,7 @@ post-M12.
 
 **Should-test (follow-up):**
 
-- [ ] **M28: Dynamic neighbors** — FRR peer connecting from within a configured `[[dynamic_neighbors]]` prefix range; verify auto-accept, peer group inheritance, route exchange, auto-removal on disconnect. Needs FRR to initiate the connection (rustbgpd passive-only for dynamic peers).
+- [x] **M28: Dynamic neighbors** — FRR peer connecting into a `[[dynamic_neighbors]]` prefix range; auto-accept, peer group inheritance, route exchange, `is_dynamic` flag, `ListDynamicNeighbors`, auto-removal on disconnect (11/11).
 
 **Deferred (hard to interop-test or low wire-level risk):**
 

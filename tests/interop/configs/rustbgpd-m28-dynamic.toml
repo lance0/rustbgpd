@@ -1,0 +1,20 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+remote_asn = 0
+description = "dynamic from 10.0.0.0/24"

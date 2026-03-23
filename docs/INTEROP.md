@@ -33,6 +33,7 @@ not "someone tried it once."
 | FRR (2x) | 10.3.1 | `tests/interop/m25-md5-gtsm-frr.clab.yml` | Tested (M25) | TCP MD5 + GTSM / TTL security | Two peers: MD5 auth + GTSM separately | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m26-cease-frr.clab.yml` | Tested (M26) | Cease/Max-Prefixes subcode 1 | max_prefixes=2, FRR sends 3 | Cease/Maximum Number of Prefixes Reached |
 | FRR (2x) + RTR v2 | 10.3.1 | `tests/interop/m27-aspa-rtr2.clab.yml` | Tested (M27) | ASPA/RTR v2: validation states, best-path preference | Python RTR v2 mock server (StayRTR lacks ASPA); 2 FRR peers for best-path tiebreak | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m28-dynamic-frr.clab.yml` | Tested (M28) | Dynamic prefix-based neighbors | No static neighbor — FRR auto-accepted via `[[dynamic_neighbors]]`; auto-removed on disconnect | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
 | Cisco IOS-XE | — | — | Stretch | If available | — | — |
