@@ -173,6 +173,14 @@ impl Config {
         }
 
         for neighbor in &self.neighbors {
+            if neighbor.remote_asn == 0 {
+                return Err(ConfigError::InvalidNeighborConfig {
+                    address: neighbor.address.clone(),
+                    field: "remote_asn".to_string(),
+                    reason: "must be > 0 for static neighbors".to_string(),
+                });
+            }
+
             let group = neighbor
                 .peer_group
                 .as_deref()
@@ -450,7 +458,7 @@ impl Config {
                     ),
                 });
             }
-            let _addr: IpAddr =
+            let addr: IpAddr =
                 parts[0]
                     .parse()
                     .map_err(|e| ConfigError::InvalidDynamicNeighbor {
@@ -459,7 +467,7 @@ impl Config {
                             dn.prefix
                         ),
                     })?;
-            let _len: u8 = parts[1]
+            let len: u8 = parts[1]
                 .parse()
                 .map_err(|e| ConfigError::InvalidDynamicNeighbor {
                     reason: format!(
@@ -467,6 +475,25 @@ impl Config {
                         dn.prefix
                     ),
                 })?;
+            match addr {
+                IpAddr::V4(_) if len > 32 => {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: invalid prefix {:?}: IPv4 prefix length must be 0..=32",
+                            dn.prefix
+                        ),
+                    });
+                }
+                IpAddr::V6(_) if len > 128 => {
+                    return Err(ConfigError::InvalidDynamicNeighbor {
+                        reason: format!(
+                            "dynamic_neighbors[{i}]: invalid prefix {:?}: IPv6 prefix length must be 0..=128",
+                            dn.prefix
+                        ),
+                    });
+                }
+                _ => {}
+            }
 
             // Peer group must exist
             if !self.peer_groups.contains_key(&dn.peer_group) {

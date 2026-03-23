@@ -434,6 +434,12 @@ pub enum ConfigError {
     InvalidRouterId { value: String, reason: String },
     #[error("invalid neighbor address {value:?}: {reason}")]
     InvalidNeighborAddress { value: String, reason: String },
+    #[error("invalid neighbor config for {address}: {field}: {reason}")]
+    InvalidNeighborConfig {
+        address: String,
+        field: String,
+        reason: String,
+    },
     #[error("invalid prometheus_addr {value:?}: {reason}")]
     InvalidPrometheusAddr { value: String, reason: String },
     #[error("invalid gRPC config: {reason}")]

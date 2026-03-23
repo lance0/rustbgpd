@@ -24,6 +24,7 @@ Required. Defines the local BGP speaker identity.
 | `asn`               | u32    | yes      | --                   | Local autonomous system number     |
 | `router_id`         | string | yes      | --                   | BGP router ID (must be valid IPv4) |
 | `listen_port`       | u16    | yes      | --                   | TCP port to listen on (typically 179) |
+| `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (1--5000) |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker today) |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 
@@ -38,6 +39,10 @@ runtime_state_dir = "/var/lib/rustbgpd"
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
 non-root deployments, override the default to a mounted writable path (for
 example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
+
+`dynamic_neighbor_limit` caps the number of active peers auto-created from
+`[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
+peers at a time.
 
 ---
 
@@ -235,6 +240,68 @@ routes may be exchanged via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` using an
 IPv6 next hop. For eBGP exports, `local_ipv6_nexthop` (if configured) is
 used as the IPv6 self next-hop; otherwise the local IPv6 socket address is
 used when available.
+
+---
+
+## `[[dynamic_neighbors]]`
+
+Optional, repeatable. Defines prefix ranges for auto-accepting inbound BGP
+connections. When an inbound TCP connection arrives from an address inside the
+configured prefix, rustbgpd creates an ephemeral peer using the referenced peer
+group.
+
+Dynamic peers:
+
+- inherit transport and policy defaults from the referenced peer group
+- never initiate outbound TCP connections
+- are not persisted back to the config file
+- are removed automatically when the session returns to Idle
+- count against `global.dynamic_neighbor_limit`
+
+| Field         | Type   | Required | Default | Description |
+|---------------|--------|----------|---------|-------------|
+| `prefix`      | string | yes      | --      | IPv4 or IPv6 prefix range in CIDR notation |
+| `peer_group`  | string | yes      | --      | Peer group whose settings dynamic peers inherit |
+| `remote_asn`  | u32    | no       | `0`     | Expected remote ASN. `0` means accept any ASN from the peer's OPEN |
+| `description` | string | no       | --      | Optional description applied to accepted dynamic peers |
+
+```toml
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+dynamic_neighbor_limit = 500
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+hold_time = 90
+families = ["ipv4_unicast", "ipv6_unicast"]
+route_server_client = true
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/24"
+peer_group = "ix-members"
+remote_asn = 0
+description = "IXP auto-accept"
+
+[[dynamic_neighbors]]
+prefix = "2001:db8::/32"
+peer_group = "ix-members"
+```
+
+Validation rules:
+
+- `peer_group` must reference an existing `[peer_groups.<name>]`
+- `prefix` must be valid CIDR with a family-appropriate prefix length
+- static `[[neighbors]]` cannot use `remote_asn = 0`; that sentinel is reserved for `[[dynamic_neighbors]]`
+
+Operational note:
+
+- disabling a dynamic peer keeps the peer entry in memory but prevents reconnect
+- runtime gRPC CRUD for dynamic ranges is not implemented yet; TOML is the source of truth
 
 ### Graceful Restart (RFC 4724)
 

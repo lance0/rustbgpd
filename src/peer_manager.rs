@@ -788,6 +788,11 @@ impl PeerManager {
                     self.validation_rx.clone(),
                 );
 
+                if let Err(e) = handle.start().await {
+                    warn!(%peer_addr, error = %e, "failed to start dynamic peer session");
+                    return;
+                }
+
                 let managed = ManagedPeer {
                     handle,
                     remote_asn,
@@ -809,13 +814,6 @@ impl PeerManager {
                     %peer_addr,
                     "accepted dynamic neighbor from configured range"
                 );
-
-                // Start the inbound session
-                if let Some(managed) = self.peers.get(&peer_addr)
-                    && let Err(e) = managed.handle.start().await
-                {
-                    warn!(%peer_addr, error = %e, "failed to start dynamic peer session");
-                }
                 return;
             }
 

@@ -37,6 +37,11 @@ fn error_span_and_label(source: &str, error: &ConfigError) -> Option<(Range<usiz
         ConfigError::InvalidNeighborAddress { value, reason } => {
             find_neighbor_field_span(source, value, "address", reason)
         }
+        ConfigError::InvalidNeighborConfig {
+            address,
+            field,
+            reason,
+        } => find_neighbor_field_span(source, address, field, reason),
         ConfigError::InvalidPrometheusAddr { .. } => lookup_value_span(
             source,
             &["global", "telemetry", "prometheus_addr"],

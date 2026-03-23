@@ -2576,6 +2576,50 @@ peer_group = "ix-members"
 }
 
 #[test]
+fn dynamic_neighbor_ipv4_prefix_too_long_rejected() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-members]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "10.0.0.0/40"
+peer_group = "ix-members"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("IPv4 prefix length"));
+}
+
+#[test]
+fn dynamic_neighbor_ipv6_prefix_too_long_rejected() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[peer_groups.ix-v6]
+hold_time = 90
+
+[[dynamic_neighbors]]
+prefix = "2001:db8::/129"
+peer_group = "ix-v6"
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("IPv6 prefix length"));
+}
+
+#[test]
 fn dynamic_neighbor_missing_peer_group_rejected() {
     let toml = r#"
 [global]
@@ -2592,6 +2636,25 @@ peer_group = "nonexistent"
 "#;
     let err = parse(toml).unwrap_err();
     assert!(err.to_string().contains("not defined"));
+}
+
+#[test]
+fn static_neighbor_remote_asn_zero_rejected() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 0
+"#;
+    let err = parse(toml).unwrap_err();
+    assert!(err.to_string().contains("remote_asn"));
 }
 
 #[test]
