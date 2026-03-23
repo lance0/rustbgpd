@@ -25,7 +25,7 @@ use rustbgpd_wire::{
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Sleep;
 use tracing::{debug, error, info, warn};
@@ -89,6 +89,9 @@ pub(crate) struct PeerSession {
     session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+    /// RPKI/ASPA validation snapshot for import policy evaluation.
+    /// `None` when RPKI not configured or in tests.
+    validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     /// Cached local OPEN PDU bytes for BMP Peer Up.
     local_open_pdu: Option<Bytes>,
     /// Cached remote OPEN PDU bytes for BMP Peer Up.
@@ -182,6 +185,7 @@ impl PeerSession {
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -209,6 +213,7 @@ impl PeerSession {
             export_policy,
             session_notify_tx,
             bmp_tx,
+            validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
             last_down_reason: None,
@@ -238,6 +243,7 @@ impl PeerSession {
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -265,6 +271,7 @@ impl PeerSession {
             export_policy,
             session_notify_tx,
             bmp_tx,
+            validation_rx,
             local_open_pdu: None,
             remote_open_pdu: None,
             last_down_reason: None,

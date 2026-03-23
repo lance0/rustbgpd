@@ -1551,23 +1551,33 @@ fn rpki_policy_match_rpki_validation_standalone() {
 }
 
 #[test]
-fn rpki_policy_match_rpki_validation_import_rejected() {
+fn rpki_policy_match_rpki_validation_import_accepted() {
     let toml = community_toml(
         r#"action = "deny"
             match_rpki_validation = "invalid""#,
     );
-    let err = parse(&toml).unwrap_err();
-    assert!(format!("{err}").contains("use export policy instead"));
+    let config = parse(&toml).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    let import = peers[0].2.as_ref().unwrap();
+    assert_eq!(
+        import.policies[0].entries[0].match_rpki_validation,
+        Some(rustbgpd_wire::RpkiValidation::Invalid)
+    );
 }
 
 #[test]
-fn aspa_policy_match_aspa_validation_import_rejected() {
+fn aspa_policy_match_aspa_validation_import_accepted() {
     let toml = community_toml(
         r#"action = "deny"
             match_aspa_validation = "invalid""#,
     );
-    let err = parse(&toml).unwrap_err();
-    assert!(format!("{err}").contains("use export policy instead"));
+    let config = parse(&toml).unwrap();
+    let peers = config.to_peer_configs().unwrap();
+    let import = peers[0].2.as_ref().unwrap();
+    assert_eq!(
+        import.policies[0].entries[0].match_aspa_validation,
+        Some(rustbgpd_wire::AspaValidation::Invalid)
+    );
 }
 
 #[test]

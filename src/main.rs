@@ -653,6 +653,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .run(),
     );
 
+    // Validation snapshot channel: broadcast VRP + ASPA tables to transport
+    // sessions for import-time route validation.  Starts empty — sessions fall
+    // back to NotFound/Unknown until the first cache update arrives.
+    let (validation_watch_tx, validation_watch_rx) =
+        tokio::sync::watch::channel(rustbgpd_rpki::ValidationSnapshot::default());
+
     // Spawn RPKI subsystem (VRP manager + per-cache RTR clients)
     if let Some(ref rpki_config) = config.rpki
         && !rpki_config.cache_servers.is_empty()
@@ -668,10 +674,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             .with_aspa_tx(aspa_table_tx);
         tokio::spawn(vrp_mgr.run());
 
-        // Forward VRP table updates to RIB manager
+        // Forward VRP table updates to RIB manager + validation watch
         let rpki_rib_tx = rib_tx.clone();
+        let validation_tx_vrp = validation_watch_tx.clone();
         tokio::spawn(async move {
             while let Some(update) = rpki_table_rx.recv().await {
+                validation_tx_vrp.send_modify(|snapshot| {
+                    snapshot.vrp_table = Some(std::sync::Arc::clone(&update.table));
+                });
                 let _ = rpki_rib_tx
                     .send(RibUpdate::RpkiCacheUpdate {
                         table: update.table,
@@ -680,10 +690,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             }
         });
 
-        // Forward ASPA table updates to RIB manager
+        // Forward ASPA table updates to RIB manager + validation watch
         let aspa_rib_tx = rib_tx.clone();
+        let validation_tx_aspa = validation_watch_tx.clone();
         tokio::spawn(async move {
             while let Some(update) = aspa_table_rx.recv().await {
+                validation_tx_aspa.send_modify(|snapshot| {
+                    snapshot.aspa_table = Some(std::sync::Arc::clone(&update.table));
+                });
                 let _ = aspa_rib_tx
                     .send(RibUpdate::AspaTableUpdate {
                         table: update.table,
@@ -812,6 +826,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         metrics.clone(),
         rib_tx.clone(),
         bmp_tx,
+        Some(validation_watch_rx),
         config.clone(),
     );
     let peer_mgr_handle = tokio::spawn(peer_mgr.run());

@@ -17,10 +17,7 @@ use rustbgpd_wire::{Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommuni
 
 pub use schema::*;
 
-use self::parse::{
-    parse_families, parse_policy, reject_validation_state_matches_in_import_chain,
-    reject_validation_state_matches_in_import_policy, resolve_chain,
-};
+use self::parse::{parse_families, parse_policy, resolve_chain};
 use self::schema::{BGP_PORT, DEFAULT_CONNECT_RETRY_SECS, DEFAULT_HOLD_TIME};
 
 #[cfg(test)]
@@ -182,10 +179,7 @@ impl Config {
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?;
-            reject_validation_state_matches_in_import_policy(
-                policy.as_ref(),
-                "global import policy",
-            )?;
+
             Ok(policy.map(|p| PolicyChain::new(vec![p])))
         } else {
             let chain = resolve_chain(
@@ -194,10 +188,7 @@ impl Config {
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
             )?;
-            reject_validation_state_matches_in_import_chain(
-                chain.as_ref(),
-                "global import_policy_chain",
-            )?;
+
             Ok(chain)
         }
     }
@@ -239,23 +230,15 @@ impl Config {
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
                 )?;
-                reject_validation_state_matches_in_import_policy(
-                    policy.as_ref(),
-                    "peer_group import_policy",
-                )?;
+
                 policy.map(|p| PolicyChain::new(vec![p]))
             } else {
-                let chain = resolve_chain(
+                resolve_chain(
                     &group.import_policy_chain,
                     &self.policy.definitions,
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
-                )?;
-                reject_validation_state_matches_in_import_chain(
-                    chain.as_ref(),
-                    "peer_group import_policy_chain",
-                )?;
-                chain
+                )?
             }
         } else {
             None
@@ -289,24 +272,15 @@ impl Config {
                     &self.policy.neighbor_sets,
                     &self.peer_groups,
                 )?;
-                reject_validation_state_matches_in_import_policy(
-                    policy.as_ref(),
-                    &format!("neighbor {} import_policy", neighbor.address),
-                )?;
                 policy.map(|p| PolicyChain::new(vec![p]))
             }
         } else {
-            let chain = resolve_chain(
+            resolve_chain(
                 &neighbor.import_policy_chain,
                 &self.policy.definitions,
                 &self.policy.neighbor_sets,
                 &self.peer_groups,
-            )?;
-            reject_validation_state_matches_in_import_chain(
-                chain.as_ref(),
-                &format!("neighbor {} import_policy_chain", neighbor.address),
-            )?;
-            chain
+            )?
         }
         .or_else(|| global_import.clone());
         let export = if neighbor.export_policy_chain.is_empty() {

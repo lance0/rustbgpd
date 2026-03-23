@@ -116,6 +116,7 @@ async fn full_handshake_reaches_established() {
         None,
         None,
         None,
+        None,
     );
     handle.start().await.unwrap();
 
@@ -159,7 +160,7 @@ async fn open_sets_gr_restart_state_during_restart_window() {
     let mut cfg = transport_config(addr);
     cfg.peer.graceful_restart = true;
     cfg.gr_restart_until = Some(Instant::now() + Duration::from_secs(30));
-    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None);
+    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None, None);
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -190,7 +191,7 @@ async fn open_clears_gr_restart_state_after_restart_window_expires() {
     let mut cfg = transport_config(addr);
     cfg.peer.graceful_restart = true;
     cfg.gr_restart_until = Some(Instant::now() - Duration::from_secs(1));
-    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None);
+    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None, None);
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -222,6 +223,7 @@ async fn peer_disconnect_triggers_retry() {
         transport_config(addr),
         metrics.clone(),
         rib_tx,
+        None,
         None,
         None,
         None,
@@ -265,6 +267,7 @@ async fn notification_from_peer_tears_down() {
         transport_config(addr),
         metrics.clone(),
         rib_tx,
+        None,
         None,
         None,
         None,
@@ -314,7 +317,16 @@ async fn keepalive_exchange_in_established() {
     config.peer.hold_time = 9; // keepalive interval = 3s
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(config, metrics.clone(), rib_tx, None, None, None, None);
+    let handle = PeerHandle::spawn(
+        config,
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -359,6 +371,7 @@ async fn stop_command_sends_cease() {
         transport_config(addr),
         metrics.clone(),
         rib_tx,
+        None,
         None,
         None,
         None,
@@ -415,7 +428,16 @@ async fn connect_failure_retries() {
     config.peer.connect_retry_secs = 1;
 
     let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
-    let handle = PeerHandle::spawn(config, metrics.clone(), rib_tx, None, None, None, None);
+    let handle = PeerHandle::spawn(
+        config,
+        metrics.clone(),
+        rib_tx,
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
     handle.start().await.unwrap();
 
     // Let it fail and retry a couple times
@@ -452,6 +474,7 @@ async fn open_confirm_sends_session_notification() {
         None,
         None,
         Some(notify_tx),
+        None,
         None,
     );
     handle.start().await.unwrap();
@@ -511,6 +534,7 @@ async fn query_state_returns_router_id_at_open_confirm() {
         None,
         None,
         Some(notify_tx),
+        None,
         None,
     );
     handle.start().await.unwrap();

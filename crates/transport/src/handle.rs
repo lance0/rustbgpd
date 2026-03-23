@@ -10,7 +10,7 @@ use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use tracing::Instrument;
@@ -131,6 +131,7 @@ impl PeerHandle {
     /// The session starts in Idle. Send [`PeerCommand::Start`] to initiate
     /// the BGP handshake.
     #[must_use]
+    #[expect(clippy::too_many_arguments)]
     pub fn spawn(
         config: TransportConfig,
         metrics: BgpMetrics,
@@ -139,6 +140,7 @@ impl PeerHandle {
         export_policy: Option<PolicyChain>,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
@@ -156,6 +158,7 @@ impl PeerHandle {
                     export_policy,
                     session_notify_tx,
                     bmp_tx,
+                    validation_rx,
                 );
                 session.run().await
             }
@@ -179,6 +182,7 @@ impl PeerHandle {
         stream: TcpStream,
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
@@ -197,6 +201,7 @@ impl PeerHandle {
                     stream,
                     session_notify_tx,
                     bmp_tx,
+                    validation_rx,
                 );
                 session.run().await
             }

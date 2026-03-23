@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{
-    Afi, Event, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NotificationCode,
+    Afi, AsPath, Event, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NotificationCode,
     NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode,
     debug, info, resolve_import_nexthop, warn,
 };
@@ -371,12 +371,36 @@ impl PeerSession {
         let policy_local_pref = explicit_local_pref(&route_attrs);
         let policy_med = explicit_med(&route_attrs);
 
+        // Borrow the current RPKI/ASPA validation snapshot for import policy.
+        // Cloning is cheap (two Arc::clone). Falls back to NotFound/Unknown
+        // when no RPKI is configured.
+        let validation = self.validation_rx.as_ref().map(|rx| rx.borrow().clone());
+
+        // Extract AS_PATH for validation (shared across all NLRI in this UPDATE).
+        let parsed_as_path: Option<&AsPath> = route_attrs.iter().find_map(|a| match a {
+            PathAttribute::AsPath(p) => Some(p),
+            _ => None,
+        });
+        let origin_asn = parsed_as_path.and_then(AsPath::origin_asn);
+
+        // Compute ASPA state once per UPDATE (same AS_PATH for all NLRI).
+        let aspa_state = validation
+            .as_ref()
+            .map_or(rustbgpd_wire::AspaValidation::Unknown, |v| {
+                v.validate_aspa(parsed_as_path)
+            });
+
         // Body NLRI routes (IPv4)
         let mut announced: Vec<Route> = parsed
             .announced
             .iter()
             .filter_map(|entry| {
                 let prefix = Prefix::V4(entry.prefix);
+                let rpki_state = validation
+                    .as_ref()
+                    .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
+                        v.validate_rpki(&prefix, origin_asn)
+                    });
                 let ctx = RouteContext {
                     prefix,
                     next_hop: Some(body_next_hop),
@@ -385,8 +409,8 @@ impl PeerSession {
                     large_communities: update_large_communities,
                     as_path_str: &aspath_str,
                     as_path_len: aspath_len,
-                    validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                    aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                    validation_state: rpki_state,
+                    aspa_state,
                     peer_address: Some(self.peer_ip),
                     peer_asn: policy_peer_asn,
                     peer_group: self.config.peer_group.as_deref(),
@@ -421,8 +445,8 @@ impl PeerSession {
                     is_stale: false,
                     is_llgr_stale: false,
                     path_id: entry.path_id,
-                    validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                    aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                    validation_state: rpki_state,
+                    aspa_state,
                 })
             })
             .collect();
@@ -474,18 +498,23 @@ impl PeerSession {
                             // Apply import policy using the destination prefix
                             // component (if present) for prefix matching
                             let dest_prefix = rule.destination_prefix();
+                            let fs_prefix = dest_prefix.unwrap_or(Prefix::V4(
+                                rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
+                            ));
                             let ctx = RouteContext {
-                                prefix: dest_prefix.unwrap_or(Prefix::V4(
-                                    rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0),
-                                )),
+                                prefix: fs_prefix,
                                 next_hop: None,
                                 extended_communities: update_ecs,
                                 communities: update_communities,
                                 large_communities: update_large_communities,
                                 as_path_str: &aspath_str,
                                 as_path_len: aspath_len,
-                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                                validation_state: validation
+                                    .as_ref()
+                                    .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
+                                        v.validate_rpki(&fs_prefix, origin_asn)
+                                    }),
+                                aspa_state,
                                 peer_address: Some(self.peer_ip),
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
@@ -523,6 +552,11 @@ impl PeerSession {
 
                     // Unicast routes
                     for entry in &mp.announced {
+                        let mp_rpki_state = validation
+                            .as_ref()
+                            .map_or(rustbgpd_wire::RpkiValidation::NotFound, |v| {
+                                v.validate_rpki(&entry.prefix, origin_asn)
+                            });
                         let ctx = RouteContext {
                             prefix: entry.prefix,
                             next_hop: Some(mp.next_hop),
@@ -531,8 +565,8 @@ impl PeerSession {
                             large_communities: update_large_communities,
                             as_path_str: &aspath_str,
                             as_path_len: aspath_len,
-                            validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                            aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                            validation_state: mp_rpki_state,
+                            aspa_state,
                             peer_address: Some(self.peer_ip),
                             peer_asn: policy_peer_asn,
                             peer_group: self.config.peer_group.as_deref(),
@@ -568,8 +602,8 @@ impl PeerSession {
                                 is_stale: false,
                                 is_llgr_stale: false,
                                 path_id: entry.path_id,
-                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
-                                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                                validation_state: mp_rpki_state,
+                                aspa_state,
                             });
                         }
                     }

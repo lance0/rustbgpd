@@ -14,7 +14,7 @@ use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_transport::{PeerHandle, SessionNotification, TransportConfig};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
@@ -68,6 +68,8 @@ pub struct PeerManager {
     rib_tx: mpsc::Sender<RibUpdate>,
     /// Optional BMP event sender (None when BMP not configured).
     bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+    /// RPKI/ASPA validation snapshot receiver, cloned to each peer session.
+    validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
     session_notify_tx: mpsc::UnboundedSender<SessionNotification>,
     session_notify_rx: mpsc::UnboundedReceiver<SessionNotification>,
     current_config: Config,
@@ -97,6 +99,7 @@ impl PeerManager {
             metrics,
             rib_tx,
             bmp_tx,
+            None, // no RPKI validation in tests
             Config {
                 global: crate::config::Global {
                     asn: local_asn,
@@ -134,6 +137,7 @@ impl PeerManager {
         metrics: BgpMetrics,
         rib_tx: mpsc::Sender<RibUpdate>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
+        validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
         current_config: Config,
     ) -> Self {
         let (session_notify_tx, session_notify_rx) = mpsc::unbounded_channel();
@@ -148,6 +152,7 @@ impl PeerManager {
             metrics,
             rib_tx,
             bmp_tx,
+            validation_rx,
             session_notify_tx,
             session_notify_rx,
             current_config,
@@ -311,6 +316,7 @@ impl PeerManager {
             export_policy.clone(),
             Some(self.session_notify_tx.clone()),
             self.bmp_tx.clone(),
+            self.validation_rx.clone(),
         );
 
         if let Err(e) = handle.start().await {
@@ -785,6 +791,7 @@ impl PeerManager {
                 stream,
                 Some(self.session_notify_tx.clone()),
                 self.bmp_tx.clone(),
+                self.validation_rx.clone(),
             ),
         );
 

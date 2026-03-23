@@ -2165,6 +2165,7 @@ dependencies = [
  "rustbgpd-fsm",
  "rustbgpd-policy",
  "rustbgpd-rib",
+ "rustbgpd-rpki",
  "rustbgpd-telemetry",
  "rustbgpd-wire",
  "socket2 0.5.10",

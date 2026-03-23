@@ -15,6 +15,7 @@ readme = "README.md"
 rustbgpd-wire.workspace = true
 rustbgpd-fsm.workspace = true
 rustbgpd-rib.workspace = true
+rustbgpd-rpki.workspace = true
 rustbgpd-policy.workspace = true
 rustbgpd-telemetry.workspace = true
 rustbgpd-bmp.workspace = true

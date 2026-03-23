@@ -36,7 +36,9 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, _rib_rx) = mpsc::channel(64);
 
-    PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None, None)
+    PeerSession::new(
+        config, metrics, cmd_rx, rib_tx, None, None, None, None, None,
+    )
 }
 
 fn make_test_session_with_rib(
@@ -63,7 +65,9 @@ fn make_test_session_with_rib(
     let (rib_tx, rib_rx) = mpsc::channel(64);
 
     (
-        PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None, None),
+        PeerSession::new(
+            config, metrics, cmd_rx, rib_tx, None, None, None, None, None,
+        ),
         rib_rx,
     )
 }
@@ -106,6 +110,7 @@ fn make_test_session_with_rib_and_bmp(
             None,
             None,
             Some(bmp_tx),
+            None,
         ),
         rib_rx,
         bmp_rx,
@@ -1136,6 +1141,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         None,
         None,
         None,
+        None,
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
@@ -1303,6 +1309,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         None,
         None,
         None,
+        None,
     );
     session.negotiated = Some(negotiated_session(65002, false));
 
@@ -1356,7 +1363,9 @@ async fn update_import_policy_applies_to_future_updates() {
     let (_cmd_tx, cmd_rx) = mpsc::channel(8);
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
 
-    let mut session = PeerSession::new(config, metrics, cmd_rx, rib_tx, None, None, None, None);
+    let mut session = PeerSession::new(
+        config, metrics, cmd_rx, rib_tx, None, None, None, None, None,
+    );
     session.negotiated = Some(negotiated_session(65002, false));
 
     let prefix = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
@@ -1528,6 +1537,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         None,
         None,
         None,
+        None,
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
@@ -1644,6 +1654,7 @@ async fn import_policy_match_next_hop_filters_route() {
         cmd_rx,
         rib_tx,
         Some(deny_policy),
+        None,
         None,
         None,
         None,
