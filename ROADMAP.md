@@ -143,6 +143,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
 - [x] **Duplicate BMP collector address detection** — config validation now rejects duplicate collector addresses
 - [x] **CLI gRPC integration tests** — mock gRPC server over both TCP+token and UDS, covering health, global, neighbor add, and soft-reset command-to-RPC paths
+- [ ] **Dynamic neighbor `handle_inbound` refactor** — `handle_inbound()` grew to ~130 lines with the dynamic branch; split into `handle_inbound_static` and `handle_inbound_dynamic` for readability (behind `#[expect(clippy::too_many_lines)]` for now)
 - [x] **RTR/RPKI cache interop** — M21 containerlab scenario with StayRTR: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed real v2→v1 version fallback bug.
 - [x] **ASPA/RTR v2 cache interop** — M27 containerlab scenario with Python RTR v2 mock server (StayRTR lacks ASPA support): RTR v2 negotiation, ASPA record delivery, validation states (valid/invalid/unknown), best-path preference at step 0.7 with two FRR peers, ROA+ASPA coexistence over single session.
 - [x] **FlowSpec peer interop** — M22 containerlab scenario: FlowSpec injection via gRPC, distribution to FRR, withdrawal propagation. FRR 10.3.1 receives but cannot originate.
@@ -306,6 +307,10 @@ post-M12.
 - [x] **M18: Extended next-hop** (RFC 8950) — IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI`, capability negotiation (9/9)
 - [x] **M19: Transparent route server** — skip ASN prepend, preserve original NEXT_HOP on eBGP re-advertisement; FRR 10.x requires per-neighbor `no enforce-first-as` (13/13)
 - [x] **M20: Private AS removal** — all three modes (`remove`, `all`, `replace`) validated against FRR with all-private and mixed AS_PATHs (22/22)
+
+**Should-test (follow-up):**
+
+- [ ] **M28: Dynamic neighbors** — FRR peer connecting from within a configured `[[dynamic_neighbors]]` prefix range; verify auto-accept, peer group inheritance, route exchange, auto-removal on disconnect. Needs FRR to initiate the connection (rustbgpd passive-only for dynamic peers).
 
 **Deferred (hard to interop-test or low wire-level risk):**
 
