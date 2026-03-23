@@ -1368,6 +1368,7 @@ impl PeerManager {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::net::TcpListener;
     use tokio::sync::oneshot;
 
     fn make_config(addr: IpAddr, asn: u32) -> PeerManagerNeighborConfig {
@@ -1395,6 +1396,48 @@ mod tests {
             add_path_send_max: 0,
             import_policy: None,
             export_policy: None,
+        }
+    }
+
+    fn make_dynamic_manager_config() -> Config {
+        let mut peer_groups = HashMap::new();
+        peer_groups.insert(
+            "ix-members".to_string(),
+            crate::config::PeerGroupConfig {
+                families: vec!["ipv4_unicast".to_string()],
+                ..Default::default()
+            },
+        );
+
+        Config {
+            global: crate::config::Global {
+                asn: 65001,
+                router_id: "10.0.0.1".to_string(),
+                listen_port: BGP_PORT,
+                cluster_id: None,
+                runtime_state_dir: "/tmp/rustbgpd-tests".to_string(),
+                telemetry: crate::config::TelemetryConfig {
+                    prometheus_addr: Some("127.0.0.1:9179".to_string()),
+                    log_format: "json".to_string(),
+                    grpc_tcp: None,
+                    grpc_uds: None,
+                    looking_glass: None,
+                },
+                dynamic_neighbor_limit: Some(100),
+            },
+            neighbors: Vec::new(),
+            peer_groups,
+            policy: crate::config::PolicyConfig::default(),
+            dynamic_neighbors: vec![crate::config::DynamicNeighborConfig {
+                prefix: "127.0.0.0/8".to_string(),
+                peer_group: "ix-members".to_string(),
+                remote_asn: 0,
+                description: Some("ix-auto".to_string()),
+            }],
+            rpki: None,
+            bmp: None,
+            mrt: None,
+            file_path: None,
         }
     }
 
@@ -1879,6 +1922,63 @@ mod tests {
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dynamic_inbound_peer_is_created_and_removed_on_back_to_idle() {
+        let (_tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new_with_config(
+            rx,
+            mpsc::unbounded_channel().1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+            None,
+            make_dynamic_manager_config(),
+        );
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+        let (server_stream, remote_addr) = listener.accept().await.unwrap();
+        let client_stream = client.await.unwrap();
+        let peer_addr = remote_addr.ip();
+
+        mgr.handle_inbound(server_stream, peer_addr).await;
+
+        assert_eq!(
+            mgr.dynamic_peer_count, 1,
+            "dynamic peer count should increment"
+        );
+        let info = mgr.get_peer_info(peer_addr).await.unwrap();
+        assert!(info.is_dynamic, "peer should be marked dynamic");
+        assert_eq!(info.peer_group.as_deref(), Some("ix-members"));
+        assert_eq!(info.description, "ix-auto");
+
+        let peers = mgr.list_peers().await;
+        assert_eq!(peers.len(), 1);
+        assert!(peers[0].is_dynamic);
+
+        mgr.handle_session_notification(SessionNotification::BackToIdle { peer_addr })
+            .await;
+
+        assert_eq!(
+            mgr.dynamic_peer_count, 0,
+            "dynamic peer count should decrement"
+        );
+        assert!(
+            mgr.get_peer_info(peer_addr).await.is_none(),
+            "dynamic peer should be removed when it goes idle"
+        );
+        assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
+
+        drop(client_stream);
     }
 
     #[test]
