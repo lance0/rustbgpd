@@ -15,6 +15,10 @@ crates/wire/fuzz/Cargo.lock
 # Profiling artifacts
 dhat-heap*.json
 
+# Python
+__pycache__/
+*.pyc
+
 # Containerlab generated
 *.bak
 clab-*/
