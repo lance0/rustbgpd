@@ -128,9 +128,12 @@ resolved.
   per wire semantics (the AFI comes from the MP_REACH attribute, not the
   rule itself) but worth noting — the AFI is always set correctly from
   the MP_REACH/MP_UNREACH framing.
-- **`match_rpki_validation` and `match_aspa_validation` are export-only.**
-  Import policy evaluates in the transport layer before the route reaches
-  the RIB, where RPKI and ASPA validation states are assigned. rustbgpd now
-  rejects these matches in import policy config rather than accepting inert
-  statements. Use best-path demotion and export policy for validation-based
-  filtering instead.
+- **Import `match_rpki_validation` / `match_aspa_validation` is best-effort.**
+  Transport sessions evaluate import policy against the current validation
+  snapshot (delivered via `tokio::sync::watch`). Routes arriving before the
+  first VRP/ASPA table loads see `not_found`/`unknown`. Later cache updates
+  revalidate routes in the RIB and recompute best-path, but do not
+  retroactively re-run import policy or trigger route refresh. For
+  convergent filtering, prefer best-path demotion (steps 0.5/0.7) and
+  export policy. Use import validation matches as an early discard
+  optimization, not as a sole defense.

@@ -60,11 +60,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   automatic v1 fallback, ASPA PDU type 11 codec, `AspaTable` with multi-record
   merge, upstream verification algorithm per
   draft-ietf-sidrops-aspa-verification. Best-path step 0.7 (Valid > Unknown >
-  Invalid) between RPKI and LOCAL_PREF. Export policy `match_aspa_validation`
-  for filtering. `aspa_state` exposed in gRPC Route responses. Import policy
-  limitation: validation runs post-ingress, so validation-state matches are
-  now rejected in import policy config and remain export-only (same as
-  `match_rpki_validation`). Downstream verification deferred. (ADR-0049)
+  Invalid) between RPKI and LOCAL_PREF. `match_aspa_validation` in import and
+  export policy. `aspa_state` exposed in gRPC Route responses. Import
+  validation is best-effort against the current snapshot — see validation
+  snapshot delivery. Downstream verification deferred. (ADR-0049)
 
 ### rustbgpd-wire 0.6.0
 

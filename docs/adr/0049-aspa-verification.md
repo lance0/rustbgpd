@@ -142,15 +142,17 @@ the exact `match_rpki_validation` pattern. Enables:
 - Tagging ASPA-valid routes with communities on export
 - Setting LOCAL_PREF based on ASPA state on export
 
-**Import policy limitation:** `match_aspa_validation` only works in export
-policy. Import policy evaluates in the transport layer before the route
-reaches the RIB, where ASPA validation is applied. At import evaluation
-time, `aspa_state` is always `Unknown`. This is the same limitation as
-`match_rpki_validation` on import — both validation states are set
-post-ingress in the RIB manager. rustbgpd rejects these validation-state
-matches in import policy config rather than accepting inert statements.
-Operators should use best-path demotion (step 0.7) for ASPA-based route
-preference and export policy for hard rejection.
+**Import policy note:** `match_aspa_validation` (and `match_rpki_validation`)
+work in both import and export policy. Transport sessions receive the
+current validation snapshot via `tokio::sync::watch` and evaluate import
+policy against real validation states. However, import validation is
+**best-effort against the current snapshot**: routes arriving before the
+first ASPA table loads will have `aspa_state = Unknown`, and later cache
+updates do not retroactively re-filter already-admitted routes — the RIB
+revalidates and recomputes best-path but does not re-run import policy.
+For convergent behavior, prefer best-path demotion (step 0.7) over import
+policy filtering. Use `match_aspa_validation = "invalid"` + `action =
+"deny"` on import as an early discard optimization, not as a sole defense.
 
 ### RIB re-validation on ASPA table update
 
@@ -173,9 +175,9 @@ ingress and updated on ASPA table changes.
   updates are infrequent
 - The wire crate gains one new public enum (minor semver bump when
   published)
-- `match_aspa_validation` (and `match_rpki_validation`) only work in export
-  policy — import policy use is rejected at config load because validation
-  runs post-ingress in the RIB manager
+- `match_aspa_validation` (and `match_rpki_validation`) work in both import
+  and export policy — import evaluation uses the current validation snapshot
+  (best-effort, see KNOWN_ISSUES.md)
 - Downstream verification is not supported — requires future per-peer
   relationship config
 - RTR v2 version negotiation is implemented with automatic fallback to v1;

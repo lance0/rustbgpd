@@ -2047,3 +2047,308 @@ fn ebgp_remove_private_as_all_prepends_after_removal() {
         vec![AsPathSegment::AsSequence(vec![100, 65535])]
     );
 }
+
+/// Verify that import policy `match_rpki_validation = "invalid"` + `action = "deny"`
+/// actually drops RPKI-invalid routes when a `ValidationSnapshot` with a VRP table
+/// is provided to the session.
+#[tokio::test]
+#[expect(clippy::too_many_lines)]
+async fn import_policy_filters_rpki_invalid_with_snapshot() {
+    use rustbgpd_rpki::{ValidationSnapshot, VrpEntry, VrpTable};
+    use tokio::sync::watch;
+
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+
+    // Build a VRP table: only 192.0.2.0/24 from AS 65002 is valid.
+    // 198.51.100.0/24 from AS 65002 is invalid (VRP says AS 65099).
+    let vrp_table = VrpTable::new(vec![
+        VrpEntry {
+            prefix: IpAddr::V4(Ipv4Addr::new(192, 0, 2, 0)),
+            prefix_len: 24,
+            max_len: 24,
+            origin_asn: 65002,
+        },
+        VrpEntry {
+            prefix: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 0)),
+            prefix_len: 24,
+            max_len: 24,
+            origin_asn: 65099, // Wrong origin → invalid for AS 65002
+        },
+    ]);
+    let snapshot = ValidationSnapshot {
+        vrp_table: Some(Arc::new(vrp_table)),
+        aspa_table: None,
+    };
+    let (_watch_tx, watch_rx) = watch::channel(snapshot);
+
+    // Import policy: deny RPKI-invalid routes
+    let deny_invalid = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_rpki_validation: Some(rustbgpd_wire::RpkiValidation::Invalid),
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(deny_invalid),
+        None,
+        None,
+        None,
+        Some(watch_rx),
+    );
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    // UPDATE with two prefixes from AS 65002:
+    //   192.0.2.0/24   → RPKI Valid  (VRP: AS 65002 covers it)   → permitted
+    //   198.51.100.0/24 → RPKI Invalid (VRP says AS 65099)        → denied
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let update = UpdateMessage::build(
+        &[
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+            },
+            Ipv4NlriEntry {
+                path_id: 0,
+                prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+            },
+        ],
+        &[],
+        &attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(update).await;
+
+    // Check what reached the RIB: only the valid prefix should be present
+    let msg = rib_rx.try_recv().expect("expected RoutesReceived");
+    match msg {
+        RibUpdate::RoutesReceived { announced, .. } => {
+            assert_eq!(
+                announced.len(),
+                1,
+                "only RPKI-valid route should pass import policy"
+            );
+            assert_eq!(
+                announced[0].prefix,
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24))
+            );
+        }
+        _ => panic!("expected RoutesReceived"),
+    }
+}
+
+/// Verify that import policy `match_aspa_validation = "invalid"` + `action = "deny"`
+/// drops ASPA-invalid routes when a `ValidationSnapshot` with an ASPA table is provided.
+#[tokio::test]
+#[expect(clippy::too_many_lines)]
+async fn import_policy_filters_aspa_invalid_with_snapshot() {
+    use rustbgpd_rpki::{AspaRecord, AspaTable, ValidationSnapshot};
+    use tokio::sync::watch;
+
+    let peer_config = PeerConfig {
+        local_asn: 65001,
+        remote_asn: 65002,
+        local_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        hold_time: 90,
+        connect_retry_secs: 30,
+        families: vec![(Afi::Ipv4, Safi::Unicast)],
+        graceful_restart: false,
+        gr_restart_time: 120,
+        llgr_stale_time: 0,
+        add_path_receive: false,
+        add_path_send: false,
+        add_path_send_max: 0,
+    };
+    let config = TransportConfig::new(peer_config, "10.0.0.2:179".parse().unwrap());
+    let metrics = BgpMetrics::new();
+    let (_cmd_tx, cmd_rx) = mpsc::channel(8);
+    let (rib_tx, mut rib_rx) = mpsc::channel(64);
+
+    // ASPA table: AS 65003 authorizes AS 65002 as a provider.
+    // AS 65004 authorizes only AS 65099 — not AS 65002.
+    let aspa_table = AspaTable::new(vec![
+        AspaRecord {
+            customer_asn: 65003,
+            provider_asns: vec![65002],
+        },
+        AspaRecord {
+            customer_asn: 65004,
+            provider_asns: vec![65099],
+        },
+    ]);
+    let snapshot = ValidationSnapshot {
+        vrp_table: None,
+        aspa_table: Some(Arc::new(aspa_table)),
+    };
+    let (_watch_tx, watch_rx) = watch::channel(snapshot);
+
+    // Import policy: deny ASPA-invalid routes
+    let deny_invalid = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Deny,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: Some(rustbgpd_wire::AspaValidation::Invalid),
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: RouteModifications::default(),
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let mut session = PeerSession::new(
+        config,
+        metrics,
+        cmd_rx,
+        rib_tx,
+        Some(deny_invalid),
+        None,
+        None,
+        None,
+        Some(watch_rx),
+    );
+    let negotiated = negotiated_session(65002, false);
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    // UPDATE with AS_PATH [65002, 65003] — ASPA Valid (65003 authorizes 65002).
+    // Two prefixes: both should be permitted (same AS_PATH, same ASPA state).
+    let valid_attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65003])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let valid_update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+        }],
+        &[],
+        &valid_attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(valid_update).await;
+
+    // UPDATE with AS_PATH [65002, 65004] — ASPA Invalid (65004 does NOT authorize 65002).
+    let invalid_attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65004])],
+        }),
+        PathAttribute::NextHop(Ipv4Addr::new(10, 0, 0, 2)),
+    ];
+    let invalid_update = UpdateMessage::build(
+        &[Ipv4NlriEntry {
+            path_id: 0,
+            prefix: Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24),
+        }],
+        &[],
+        &invalid_attrs,
+        true,
+        false,
+        Ipv4UnicastMode::Body,
+    );
+    session.process_update(invalid_update).await;
+
+    // First UPDATE (valid path) should produce a RoutesReceived with 1 route
+    let msg = rib_rx
+        .try_recv()
+        .expect("expected RoutesReceived for valid route");
+    match msg {
+        RibUpdate::RoutesReceived { announced, .. } => {
+            assert_eq!(
+                announced.len(),
+                1,
+                "ASPA-valid route should pass import policy"
+            );
+            assert_eq!(
+                announced[0].prefix,
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24))
+            );
+        }
+        _ => panic!("expected RoutesReceived"),
+    }
+
+    // Second UPDATE (invalid path) should produce RoutesReceived with 0 announced
+    // (the route was denied by import policy, but withdrawn list may still be sent)
+    match rib_rx.try_recv() {
+        Ok(RibUpdate::RoutesReceived { announced, .. }) => {
+            assert_eq!(
+                announced.len(),
+                0,
+                "ASPA-invalid route should be dropped by import policy"
+            );
+        }
+        Err(_) => {
+            // No message at all — also acceptable (route was fully filtered)
+        }
+        _ => panic!("unexpected RibUpdate variant"),
+    }
+}

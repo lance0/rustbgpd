@@ -544,9 +544,9 @@ Every route receives a validation state based on RPKI data:
 
 ### Policy integration
 
-Use `match_rpki_validation` in export policy statements to filter routes by RPKI state.
-Import policy cannot use validation-state matches; rustbgpd rejects them at
-config load because validation runs post-ingress in the RIB manager.
+Use `match_rpki_validation` in import or export policy statements to filter
+routes by RPKI state. Import validation evaluates against the current VRP
+snapshot at ingress time — see KNOWN_ISSUES.md for best-effort semantics.
 
 Drop RPKI-invalid routes (recommended):
 
@@ -718,8 +718,8 @@ same entry are ANDed.
 | `match_med_ge`           | u32      | no*      | Minimum MED to match (inclusive)                      |
 | `match_med_le`           | u32      | no*      | Maximum MED to match (inclusive)                      |
 | `match_next_hop`         | string   | no*      | Exact next-hop IP address to match (unicast only)     |
-| `match_rpki_validation`  | string   | no*      | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` (export-only) |
-| `match_aspa_validation`  | string   | no*      | ASPA state: `"valid"`, `"invalid"`, or `"unknown"` (export-only) |
+| `match_rpki_validation`  | string   | no*      | RPKI state: `"valid"`, `"invalid"`, or `"not_found"` |
+| `match_aspa_validation`  | string   | no*      | ASPA state: `"valid"`, `"invalid"`, or `"unknown"` |
 | `action`                 | string   | yes      | `"permit"` or `"deny"`                                |
 
 *At least one of `prefix`, `match_community`, `match_as_path`,
@@ -1128,7 +1128,7 @@ starting:
 | `gr_stale_routes_time` must be > 0 and <= 3600 | `invalid gr_stale_routes_time` |
 | Policy prefix length must not exceed AFI max (32 for IPv4, 128 for IPv6) | `invalid prefix length` |
 | Policy entry must have at least one match condition (`prefix`, `match_community`, `match_as_path`, `match_as_path_length_ge`, `match_as_path_length_le`, `match_rpki_validation`, or `match_aspa_validation`) | `must have at least one match condition` |
-| Import policy cannot use `match_rpki_validation` or `match_aspa_validation` | `use export policy instead` |
+| Import `match_rpki_validation`/`match_aspa_validation` evaluates against the current snapshot — routes arriving before the first VRP/ASPA table loads see `not_found`/`unknown`; later cache updates do not retroactively re-filter admitted routes (use best-path demotion for convergent behavior) | *(informational — no error)* |
 | `match_as_path_length_ge` must not exceed `match_as_path_length_le` | `match_as_path_length_ge (...) exceeds match_as_path_length_le (...)` |
 | `set_*` fields cannot be used with `action = "deny"` | `set_* fields cannot be used with action = "deny"` |
 | `set_as_path_prepend.count` must be 1--10 | `count must be 1-10` |
