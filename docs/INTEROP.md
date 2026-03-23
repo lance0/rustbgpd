@@ -32,6 +32,7 @@ not "someone tried it once."
 | FRR + BMP receiver | 10.3.1 | `tests/interop/m24-bmp-frr.clab.yml` | Tested (M24) | BMP Initiation, PeerUp, RouteMonitoring | Python TCP receiver validates message types and ordering | — |
 | FRR (2x) | 10.3.1 | `tests/interop/m25-md5-gtsm-frr.clab.yml` | Tested (M25) | TCP MD5 + GTSM / TTL security | Two peers: MD5 auth + GTSM separately | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m26-cease-frr.clab.yml` | Tested (M26) | Cease/Max-Prefixes subcode 1 | max_prefixes=2, FRR sends 3 | Cease/Maximum Number of Prefixes Reached |
+| FRR (2x) + RTR v2 | 10.3.1 | `tests/interop/m27-aspa-rtr2.clab.yml` | Tested (M27) | ASPA/RTR v2: validation states, best-path preference | Python RTR v2 mock server (StayRTR lacks ASPA); 2 FRR peers for best-path tiebreak | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
 | Cisco IOS-XE | — | — | Stretch | If available | — | — |
@@ -1655,7 +1656,7 @@ is missing. Prioritized by risk.
 | Gap | What exists today | What's missing |
 |-----|-------------------|----------------|
 | ~~**RPKI/RTR cache**~~ | ~~Done (M21)~~ | ~~StayRTR interop validated: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed v2→v1 fallback bug.~~ |
-| **ASPA/RTR v2 cache** | RTR v2 codec, ASPA PDU type 11, v1 fallback, AspaTable, unit tests | No scenario proving v2 query negotiation, v1 fallback behavior, ASPA records arriving and affecting best-path. |
+| ~~**ASPA/RTR v2 cache**~~ | ~~Done (M27)~~ | ~~Python RTR v2 mock server interop validated: v2 negotiation, ASPA record delivery, validation states (valid/invalid/unknown), best-path preference (step 0.7), ROA+ASPA coexistence.~~ |
 | ~~**FlowSpec peer**~~ | ~~Done (M22)~~ | ~~FRR interop validated: gRPC injection, eBGP distribution, withdrawal propagation. FRR receives but cannot originate.~~ |
 
 ### P1 — Important for broader adoption

@@ -1,0 +1,31 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[rpki]
+
+[[rpki.cache_servers]]
+address = "STAYRTR_ADDR:3323"
+refresh_interval = 30
+retry_interval = 5
+expire_interval = 120
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-a-m27"
+hold_time = 90
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65006
+description = "frr-b-m27"
+hold_time = 90
