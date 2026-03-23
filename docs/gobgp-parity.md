@@ -202,7 +202,7 @@ Competing head-to-head with GoBGP for all use cases:
 
 - Missing address families hurt badly (EVPN, VPN, labeled unicast)
 - No confederation support limits SP deployments
-- gRPC API covers ~84% of GoBGP's RPC surface (no VRF/dynamic-neighbor CRUD)
+- gRPC API covers ~86% of GoBGP's RPC surface (no VRF; dynamic-neighbor query via `ListDynamicNeighbors`, runtime Add/Delete deferred)
 - No Zebra/FIB integration — cannot install routes into the kernel
 
 ## Advantages Over GoBGP
@@ -239,7 +239,7 @@ the current alpha:
 1. **Confederation (RFC 5065)** — required for service provider deployments
 2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
 3. **VPNv4/v6 (RFC 4364)** — enterprise/SP VPN deployments
-4. **Dynamic neighbors (prefix-based)** — auto-accept peers from a prefix range
+4. ~~**Dynamic neighbors (prefix-based)**~~ — shipped: `[[dynamic_neighbors]]` with peer group inheritance, `remote_asn=0`, auto-accept/remove
 5. **Zebra/FIB integration** — kernel route installation
 
 ## Pre-1.0 Tech Debt

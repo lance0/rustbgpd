@@ -15,7 +15,7 @@ control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-1150+ workspace tests, fuzz targets, and 20 automated interop suites against
+1160+ workspace tests, fuzz targets, and 21 automated interop suites against
 FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.

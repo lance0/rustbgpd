@@ -82,8 +82,11 @@ to the recompute set and best-path re-runs for affected prefixes.
 ### Policy `match_rpki_validation`
 
 Policy statements gain an optional `match_rpki_validation` field that
-matches routes by their RPKI validation state. This enables:
-- Rejecting invalid routes
+matches routes by their RPKI validation state in both import and export
+policy. Transport sessions receive the current VRP table snapshot via
+`tokio::sync::watch` for import-time evaluation (best-effort — see
+KNOWN_ISSUES.md). This enables:
+- Rejecting invalid routes on import (early discard) or export
 - Tagging valid routes with communities
 - Setting LOCAL_PREF based on validation state
 
