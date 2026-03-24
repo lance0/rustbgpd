@@ -296,7 +296,7 @@ establishment.
 
 ### Results
 
-Benchmarks run at v0.4.2; no RIB performance changes in v0.5.0–v0.7.0.
+Benchmarks run at v0.4.2; no RIB performance changes in v0.5.0–v0.8.0.
 
 #### 10 peers x 1,000 prefixes (10k total)
 

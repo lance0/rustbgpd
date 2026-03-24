@@ -12,18 +12,42 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - **Dynamic prefix-based neighbors.** Accept inbound sessions from any peer
-  matching a configured IP prefix, with automatic peer slot management and
-  config validation.
+  matching a configured IP prefix range (`[[dynamic_neighbors]]`), with peer
+  group inheritance, `remote_asn = 0` (accept any ASN from OPEN), automatic
+  peer slot management, and config validation. `ListDynamicNeighbors` gRPC RPC
+  and `is_dynamic` flag in peer state.
 - **RPKI/ASPA import policy validation.** Import policy can now apply
   origin-validation and ASPA upstream-path-verification results to filter or
-  tag incoming routes.
+  tag incoming routes. Transport sessions receive the current VRP + ASPA
+  tables via `tokio::sync::watch` channel.
+- **FlowSpec interop test (M22).** Injection, distribution to FRR, withdrawal.
+- **GoBGP interop test (M23).** Bidirectional route exchange against GoBGP 4.3.0.
+- **BMP collector interop test (M24).** Python receiver validates message types.
+- **TCP MD5 + GTSM interop test (M25).** Two FRR peers with transport security.
+- **Cease subcode interop test (M26).** Max-prefix Cease/1 handling with FRR.
 - **ASPA/RTR v2 cache interop test (M27).** Validates RTR v2 session setup
-  and ASPA data delivery against a live cache.
+  and ASPA data delivery against a Python RTR v2 mock server.
+- **Dynamic neighbor interop test (M28).** FRR auto-accepted via
+  `[[dynamic_neighbors]]` prefix range, auto-removed on disconnect.
+- **Shared test library.** `test-lib.sh` with pre-flight checks, timestamps,
+  common helpers — deduplicated across all interop scripts.
+- **Duplicate BMP collector detection.** Config validation rejects duplicate
+  collector addresses.
+- **Policy helper deduplication.** Extracted shared `policy_helpers.rs` from
+  `policy_service.rs` and `peer_group_service.rs`.
 
 ### Fixed
 
-- **Peer slot leak on dynamic neighbor teardown.** Peer slots are now properly
-  reclaimed when a dynamically accepted session is removed.
+- **Peer slot leak on dynamic neighbor start failure.** Dynamic peers are only
+  inserted and counted after `handle.start()` succeeds, preventing slot leaks
+  on failed inbound starts.
+- **Config validation hardening.** `remote_asn = 0` rejected for static
+  neighbors; impossible prefix lengths rejected for dynamic ranges.
+- **BMP duplicate detection canonicalized through `SocketAddr`.** Previously
+  used string comparison, which could miss equivalent addresses.
+- **M11 GR test flake.** Replaced `sleep 10` with EoR polling loop.
+- **M22 FlowSpec test race.** Fixed race condition in withdrawal rule 2 check.
+- **M21 RPKI interop switched from GoRTR to StayRTR.**
 
 ---
 
@@ -49,17 +73,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **RTR/RPKI cache interop test (M21).** Containerlab scenario with StayRTR
   serving static VRPs. 12 assertions covering RTR session establishment, VRP
   delivery, and origin validation (Valid/Invalid/NotFound) visible via gRPC.
-- **FlowSpec interop test (M22).** Injection, distribution to FRR, withdrawal.
-- **GoBGP interop test (M23).** Bidirectional route exchange against GoBGP 4.3.0.
-- **BMP collector interop test (M24).** Python receiver validates message types.
-- **TCP MD5 + GTSM interop test (M25).** Two FRR peers with transport security.
-- **Cease subcode interop test (M26).** Max-prefix Cease/1 handling with FRR.
-- **Shared test library.** `test-lib.sh` with pre-flight checks, timestamps,
-  common helpers — deduplicated across all 20 interop scripts.
-- **Duplicate BMP collector detection.** Config validation rejects duplicate
-  collector addresses.
-- **Policy helper deduplication.** Extracted shared `policy_helpers.rs` from
-  `policy_service.rs` and `peer_group_service.rs`.
 
 ### Fixed
 

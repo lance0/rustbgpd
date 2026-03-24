@@ -168,13 +168,21 @@ docker run --rm --entrypoint rustbgpctl rustbgpd:dev --help
 ### Daemon release
 
 1. Update `CHANGELOG.md` with the new version section
-2. Bump version in root `Cargo.toml` (`[workspace.package] version`)
-3. Run the full checklist above
-4. Commit: `Bump version to vX.Y.Z`
-5. Tag: `git tag vX.Y.Z`
-6. Push: `git push origin main && git push origin vX.Y.Z`
-7. Verify CI passes on the tag
-8. Verify container image published to GHCR (tagged builds)
+2. **Verify changelog completeness**: run `git log <prev-tag>..HEAD --oneline`
+   and confirm every user-visible change (features, fixes, interop suites) is
+   listed under the new version — not misattributed to a prior release. Check
+   that stale counts (test totals, interop suite counts, script counts) are
+   updated in CHANGELOG.md, README.md, and ROADMAP.md.
+3. Bump version in root `Cargo.toml` (`[workspace.package] version`)
+4. Run the full checklist above
+5. Commit: `Bump version to vX.Y.Z`
+6. Tag: `git tag vX.Y.Z`
+7. Push: `git push origin main && git push origin vX.Y.Z`
+8. Verify CI passes on the tag
+9. Verify container image published to GHCR (tagged builds)
+10. **Verify GitHub release notes**: check that the release created by CI has
+    accurate notes. If the workflow only generates a changelog link, edit the
+    release to include a human-written summary matching CHANGELOG.md.
 
 ### rustbgpd-wire crate release
 

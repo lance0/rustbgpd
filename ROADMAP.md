@@ -66,7 +66,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
 - [x] Config persistence + SIGHUP reload — gRPC neighbor add/delete mutations persist to TOML via atomic write; SIGHUP triggers config reload with structured per-peer reconciliation
 - [x] LLGR (RFC 9494) — two-phase GR timer: GR-stale routes promote to LLGR-stale with LLGR_STALE community, configurable llgr_stale_time per peer, NO_LLGR routes purged at transition, effective stale time = min(local, peer)
-- [x] 1150+ tests — unit, integration, property, fuzz
+- [x] 1166 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -289,10 +289,9 @@ Features that market research indicates are lower value than originally planned.
 
 ### Interop Test Coverage
 
-Existing tests (M1, M3, M4, M10, M11, M12) cover IPv4/IPv6 unicast, route
-injection, dynamic peers, GR helper mode, and extended communities. The
-following tests close the remaining coverage gaps for features shipped
-post-M12.
+22 automated interop scripts cover M1, M3, M4, M10–M28 against FRR 10.3.1,
+BIRD 2.0.12, GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual smoke
+tests.
 
 **Must-test (high signal, high risk):**
 
@@ -314,15 +313,15 @@ post-M12.
 
 **Deferred (hard to interop-test or low wire-level risk):**
 
-- RPKI (needs running validator), FlowSpec (limited FRR support), BMP (needs collector), MRT (offline format), config persistence/SIGHUP (daemon-internal), Notification GR, Admin Shutdown, Extended Messages (capability negotiation only), gRPC security (not wire protocol)
+- MRT (offline format), config persistence/SIGHUP (daemon-internal), Notification GR, Admin Shutdown, Extended Messages (capability negotiation only), gRPC security (not wire protocol)
 
 ### Interop Test Infrastructure
 
 - [ ] **`trap cleanup EXIT`** — auto-destroy topology on failure; guard with a `--deploy` flag so manual workflows aren't disrupted
 - [x] **EoR detection by polling** — replaced `sleep 10` in M11 test 3 with a polling loop on `get_stale_route_count()` (15 attempts × 2s)
-- [x] **Timestamps in log output** — `date +%H:%M:%S` in `log()`/`ok()`/`fail()` via shared `test-lib.sh` across all 21 scripts
+- [x] **Timestamps in log output** — `date +%H:%M:%S` in `log()`/`ok()`/`fail()` via shared `test-lib.sh` across all 22 scripts
 - [x] **Pre-flight checks** — verify `grpcurl`, `docker`, and topology container exist on source via `test-lib.sh`
-- [x] **Shared test library** — `test-lib.sh` extracted from 20 scripts: pre-flight, timestamps, `resolve_ip`, `resolve_grpc_addr`, `start_rustbgpd`, `wait_frr_established`, `print_summary` (-250 lines of duplication)
+- [x] **Shared test library** — `test-lib.sh` extracted from 22 scripts: pre-flight, timestamps, `resolve_ip`, `resolve_grpc_addr`, `start_rustbgpd`, `wait_frr_established`, `print_summary` (-250 lines of duplication)
 
 ---
 
