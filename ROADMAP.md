@@ -277,6 +277,7 @@ Valuable but not blocking production use or 1.0. Ordered by market signal.
 - [ ] **Route history** — per-prefix timeline of routing events (learned, withdrawn, best-path changes) queryable via gRPC and `bgpctl history <prefix>`; backed by ring buffer with configurable depth
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
 - [ ] **Scriptable policy engine** — user-defined attribute transformation functions (Lua, Starlark, or WASM plugins) beyond static match/action rules. Policy evaluation is already a pure function `(route, context) -> (action, modifications)` — sandboxing a scripting layer there would be clean. More expressive than FRR's route-maps, simpler than BIRD's filter DSL.
+- [ ] **Evaluate buffa for protobuf codegen** — Anthropic's [buffa](https://github.com/anthropics/buffa) is a pure-Rust protobuf implementation with editions-first design, zero-copy views, and `no_std` support. Benchmark against prost/tonic for gRPC message encode/decode performance; evaluate generated type ergonomics (e.g. `MessageField<T>` vs prost `Option<T>`, `EnumValue<T>` vs raw `i32`). Requires tonic integration story (buffa has no gRPC transport layer — would need a tonic codec adapter or wait for upstream support).
 
 ### Deprioritized
 
