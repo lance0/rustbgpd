@@ -205,8 +205,8 @@ impl PeerSession {
                             .config
                             .local_ipv6_nexthop
                             .or(local_ipv6)
-                            .filter(rustbgpd_wire::is_valid_ipv6_nexthop)
-                            .is_some();
+                            .as_ref()
+                            .is_some_and(rustbgpd_wire::is_valid_ipv6_nexthop);
                         neg.negotiated_families
                             .iter()
                             .filter(|f| {

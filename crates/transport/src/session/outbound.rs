@@ -745,38 +745,34 @@ impl PeerSession {
 
         for attr in route.attributes.iter() {
             match attr {
-                PathAttribute::AsPath(as_path) => {
-                    if is_ebgp && !route_server_client {
-                        // Apply private AS removal before prepending our ASN
-                        let cleaned = remove_private_asns(
-                            as_path,
-                            self.config.remove_private_as,
-                            self.config.peer.local_asn,
-                        );
-                        // Prepend our ASN
-                        let mut new_segments =
-                            vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                        for seg in &cleaned.segments {
-                            match seg {
-                                AsPathSegment::AsSequence(asns) => {
-                                    // Merge into first sequence if possible
-                                    if let Some(AsPathSegment::AsSequence(first)) =
-                                        new_segments.first_mut()
-                                    {
-                                        first.extend(asns);
-                                    }
-                                }
-                                AsPathSegment::AsSet(asns) => {
-                                    new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                PathAttribute::AsPath(as_path) if is_ebgp && !route_server_client => {
+                    // Apply private AS removal before prepending our ASN
+                    let cleaned = remove_private_asns(
+                        as_path,
+                        self.config.remove_private_as,
+                        self.config.peer.local_asn,
+                    );
+                    // Prepend our ASN
+                    let mut new_segments =
+                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                    for seg in &cleaned.segments {
+                        match seg {
+                            AsPathSegment::AsSequence(asns) => {
+                                // Merge into first sequence if possible
+                                if let Some(AsPathSegment::AsSequence(first)) =
+                                    new_segments.first_mut()
+                                {
+                                    first.extend(asns);
                                 }
                             }
+                            AsPathSegment::AsSet(asns) => {
+                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                            }
                         }
-                        attrs.push(PathAttribute::AsPath(AsPath {
-                            segments: new_segments,
-                        }));
-                    } else {
-                        attrs.push(attr.clone());
                     }
+                    attrs.push(PathAttribute::AsPath(AsPath {
+                        segments: new_segments,
+                    }));
                 }
                 PathAttribute::NextHop(_) => {
                     if policy_set_specific {
@@ -917,36 +913,32 @@ impl PeerSession {
 
         for attr in &route.attributes {
             match attr {
-                PathAttribute::AsPath(as_path) => {
-                    if is_ebgp && !self.config.route_server_client {
-                        // Apply private AS removal before prepending our ASN
-                        let cleaned = remove_private_asns(
-                            as_path,
-                            self.config.remove_private_as,
-                            self.config.peer.local_asn,
-                        );
-                        let mut new_segments =
-                            vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
-                        for seg in &cleaned.segments {
-                            match seg {
-                                AsPathSegment::AsSequence(asns) => {
-                                    if let Some(AsPathSegment::AsSequence(first)) =
-                                        new_segments.first_mut()
-                                    {
-                                        first.extend(asns);
-                                    }
-                                }
-                                AsPathSegment::AsSet(asns) => {
-                                    new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
+                    // Apply private AS removal before prepending our ASN
+                    let cleaned = remove_private_asns(
+                        as_path,
+                        self.config.remove_private_as,
+                        self.config.peer.local_asn,
+                    );
+                    let mut new_segments =
+                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                    for seg in &cleaned.segments {
+                        match seg {
+                            AsPathSegment::AsSequence(asns) => {
+                                if let Some(AsPathSegment::AsSequence(first)) =
+                                    new_segments.first_mut()
+                                {
+                                    first.extend(asns);
                                 }
                             }
+                            AsPathSegment::AsSet(asns) => {
+                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                            }
                         }
-                        attrs.push(PathAttribute::AsPath(AsPath {
-                            segments: new_segments,
-                        }));
-                    } else {
-                        attrs.push(attr.clone());
                     }
+                    attrs.push(PathAttribute::AsPath(AsPath {
+                        segments: new_segments,
+                    }));
                 }
                 // No NEXT_HOP for FlowSpec — skip; also skip MP framing attrs
                 PathAttribute::NextHop(_)
