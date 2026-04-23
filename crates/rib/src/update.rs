@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::best_path::BestPathReason;
 use crate::event::RouteEvent;
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
@@ -29,6 +29,10 @@ pub struct OutboundRouteUpdate {
     pub flowspec_announce: Vec<FlowSpecRoute>,
     /// `FlowSpec` rules to withdraw.
     pub flowspec_withdraw: Vec<FlowSpecRule>,
+    /// EVPN routes to announce (RFC 7432).
+    pub evpn_announce: Vec<EvpnRibRoute>,
+    /// EVPN route keys to withdraw.
+    pub evpn_withdraw: Vec<EvpnRouteKey>,
 }
 
 /// Structured explanation for whether a route would be advertised to a peer.
@@ -107,6 +111,10 @@ pub enum RibUpdate {
         flowspec_announced: Vec<FlowSpecRoute>,
         /// `FlowSpec` rules withdrawn.
         flowspec_withdrawn: Vec<FlowSpecRule>,
+        /// EVPN routes announced (RFC 7432).
+        evpn_announced: Vec<EvpnRibRoute>,
+        /// EVPN route keys withdrawn.
+        evpn_withdrawn: Vec<EvpnRouteKey>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown {

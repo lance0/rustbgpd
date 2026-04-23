@@ -249,6 +249,8 @@ impl PeerSession {
                     withdrawn: loop_withdrawn,
                     flowspec_announced: vec![],
                     flowspec_withdrawn: loop_fs_withdrawn,
+                    evpn_announced: vec![],
+                    evpn_withdrawn: vec![],
                 });
             }
             self.drive_fsm(Event::UpdateReceived).await;
@@ -310,6 +312,8 @@ impl PeerSession {
                     withdrawn: loop_withdrawn,
                     flowspec_announced: vec![],
                     flowspec_withdrawn: loop_fs_withdrawn,
+                    evpn_announced: vec![],
+                    evpn_withdrawn: vec![],
                 });
             }
             self.drive_fsm(Event::UpdateReceived).await;
@@ -666,6 +670,8 @@ impl PeerSession {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
+                evpn_announced: vec![],
+                evpn_withdrawn: vec![],
             });
         }
 

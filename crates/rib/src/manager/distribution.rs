@@ -257,6 +257,8 @@ impl RibManager {
             next_hop_override,
             flowspec_announce,
             flowspec_withdraw,
+            evpn_announce: vec![],
+            evpn_withdraw: vec![],
         });
         true
     }

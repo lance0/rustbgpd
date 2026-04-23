@@ -358,13 +358,25 @@ impl RibManager {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
-            } => self.enqueue_routes_received(
-                peer,
-                announced,
-                withdrawn,
-                flowspec_announced,
-                flowspec_withdrawn,
-            ),
+                evpn_announced,
+                evpn_withdrawn,
+            } => {
+                // Phase 1D.1: EVPN routes are received through the transport
+                // UPDATE path, but the RIB ingestion pipeline (AdjRibIn insert,
+                // LocRib recompute, AdjRibOut staging) is wired in a follow-up
+                // commit. For now the ingestion path ignores EVPN routes; the
+                // transport side is still inert as the capability is not yet
+                // negotiated on any production session. Reflection happens via
+                // the forthcoming distribute_evpn() call path.
+                let _ = (evpn_announced, evpn_withdrawn);
+                self.enqueue_routes_received(
+                    peer,
+                    announced,
+                    withdrawn,
+                    flowspec_announced,
+                    flowspec_withdrawn,
+                );
+            }
             RibUpdate::PeerDown { peer } => self.handle_peer_down(peer),
             RibUpdate::PeerUp {
                 peer,

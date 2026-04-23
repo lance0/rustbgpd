@@ -554,6 +554,8 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
             next_hop_override: vec![None, None],
             flowspec_announce: vec![],
             flowspec_withdraw: vec![],
+            evpn_announce: vec![],
+            evpn_withdraw: vec![],
         })
         .await;
 
@@ -613,6 +615,8 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
             next_hop_override: vec![None, None],
             flowspec_announce: vec![],
             flowspec_withdraw: vec![],
+            evpn_announce: vec![],
+            evpn_withdraw: vec![],
         })
         .await;
 
@@ -672,6 +676,8 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
             next_hop_override: vec![Some(override_nh)],
             flowspec_announce: vec![],
             flowspec_withdraw: vec![],
+            evpn_announce: vec![],
+            evpn_withdraw: vec![],
         })
         .await;
 
@@ -998,6 +1004,8 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         next_hop_override: vec![None],
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
     };
 
     session.send_route_update(update).await;
@@ -1061,6 +1069,8 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         next_hop_override: vec![None],
         flowspec_announce: vec![],
         flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
     };
 
     session.send_route_update(update).await;
@@ -1473,6 +1483,8 @@ async fn err_denied_replacement_is_swept_at_eorr() {
             withdrawn: vec![],
             flowspec_announced: vec![],
             flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
         })
         .await
         .unwrap();
