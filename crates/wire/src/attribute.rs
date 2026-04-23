@@ -188,6 +188,8 @@ pub struct MpReachNlri {
     pub announced: Vec<NlriEntry>,
     /// `FlowSpec` NLRI rules (RFC 8955). Populated only when `safi == FlowSpec`.
     pub flowspec_announced: Vec<crate::flowspec::FlowSpecRule>,
+    /// EVPN NLRI routes (RFC 7432). Populated only when `safi == Evpn`.
+    pub evpn_announced: Vec<crate::evpn::EvpnRoute>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
@@ -204,6 +206,8 @@ pub struct MpUnreachNlri {
     pub withdrawn: Vec<NlriEntry>,
     /// `FlowSpec` NLRI rules withdrawn (RFC 8955). Populated only when `safi == FlowSpec`.
     pub flowspec_withdrawn: Vec<crate::flowspec::FlowSpecRule>,
+    /// EVPN NLRI routes withdrawn (RFC 7432). Populated only when `safi == Evpn`.
+    pub evpn_withdrawn: Vec<crate::evpn::EvpnRoute>,
 }
 
 /// RFC 4360 Extended Community — 8-byte value stored as `u64`.
@@ -844,6 +848,20 @@ fn decode_mp_reach_nlri(
             next_hop,
             announced: vec![],
             flowspec_announced: flowspec_rules,
+            evpn_announced: vec![],
+        }));
+    }
+
+    // EVPN (AFI 25 / SAFI 70): NLRI is typed EVPN routes, not prefixes
+    if afi == Afi::L2Vpn && safi == Safi::Evpn {
+        let routes = crate::evpn::decode_evpn_nlri(nlri_bytes)?;
+        return Ok(PathAttribute::MpReachNlri(MpReachNlri {
+            afi,
+            safi,
+            next_hop,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: routes,
         }));
     }
 
@@ -874,7 +892,10 @@ fn decode_mp_reach_nlri(
         (Afi::L2Vpn, _) => {
             return Err(DecodeError::MalformedField {
                 message_type: "UPDATE",
-                detail: "MP_REACH_NLRI L2VPN decode not yet wired".into(),
+                detail: format!(
+                    "MP_REACH_NLRI L2VPN with unsupported SAFI {} (only EVPN supported)",
+                    safi as u8
+                ),
             });
         }
     };
@@ -885,6 +906,7 @@ fn decode_mp_reach_nlri(
         next_hop,
         announced,
         flowspec_announced: vec![],
+        evpn_announced: vec![],
     }))
 }
 
@@ -925,6 +947,19 @@ fn decode_mp_unreach_nlri(
             safi,
             withdrawn: vec![],
             flowspec_withdrawn: flowspec_rules,
+            evpn_withdrawn: vec![],
+        }));
+    }
+
+    // EVPN (AFI 25 / SAFI 70): withdrawn is typed EVPN routes, not prefixes
+    if afi == Afi::L2Vpn && safi == Safi::Evpn {
+        let routes = crate::evpn::decode_evpn_nlri(withdrawn_bytes)?;
+        return Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: routes,
         }));
     }
 
@@ -955,7 +990,10 @@ fn decode_mp_unreach_nlri(
         (Afi::L2Vpn, _) => {
             return Err(DecodeError::MalformedField {
                 message_type: "UPDATE",
-                detail: "MP_UNREACH_NLRI L2VPN decode not yet wired".into(),
+                detail: format!(
+                    "MP_UNREACH_NLRI L2VPN with unsupported SAFI {} (only EVPN supported)",
+                    safi as u8
+                ),
             });
         }
     };
@@ -965,6 +1003,7 @@ fn decode_mp_unreach_nlri(
         safi,
         withdrawn,
         flowspec_withdrawn: vec![],
+        evpn_withdrawn: vec![],
     }))
 }
 
@@ -1208,6 +1247,23 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>, add_path: bool) {
         return;
     }
 
+    // EVPN: next-hop is the VTEP loopback IP (4 or 16 bytes), then EVPN NLRI
+    if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn {
+        match mp.next_hop {
+            IpAddr::V4(addr) => {
+                buf.push(4);
+                buf.extend_from_slice(&addr.octets());
+            }
+            IpAddr::V6(addr) => {
+                buf.push(16);
+                buf.extend_from_slice(&addr.octets());
+            }
+        }
+        buf.push(0); // Reserved
+        crate::evpn::encode_evpn_nlri(&mp.evpn_announced, buf);
+        return;
+    }
+
     match mp.next_hop {
         IpAddr::V4(addr) => {
             buf.push(4); // NH-Len
@@ -1243,6 +1299,12 @@ fn encode_mp_unreach_nlri(mp: &MpUnreachNlri, buf: &mut Vec<u8>, add_path: bool)
     // FlowSpec: encode FlowSpec NLRI rules
     if mp.safi == Safi::FlowSpec {
         crate::flowspec::encode_flowspec_nlri(&mp.flowspec_withdrawn, buf, mp.afi);
+        return;
+    }
+
+    // EVPN: encode EVPN NLRI routes
+    if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn {
+        crate::evpn::encode_evpn_nlri(&mp.evpn_withdrawn, buf);
         return;
     }
 
@@ -1286,6 +1348,62 @@ fn encode_as_path(as_path: &AsPath, buf: &mut Vec<u8>, four_octet_as: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mp_reach_evpn_attribute_roundtrip() {
+        use crate::evpn::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+
+        let mp = MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![EvpnRoute::Imet(EvpnImet {
+                rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 0x64]),
+                ethernet_tag: EthernetTagId(100),
+                originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+            })],
+        };
+        let attr = PathAttribute::MpReachNlri(mp);
+
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(attr, decoded[0]);
+
+        let PathAttribute::MpReachNlri(dec) = &decoded[0] else {
+            panic!("not MP_REACH after decode");
+        };
+        assert_eq!(dec.afi, Afi::L2Vpn);
+        assert_eq!(dec.safi, Safi::Evpn);
+        assert_eq!(dec.evpn_announced.len(), 1);
+        assert!(matches!(dec.evpn_announced[0], EvpnRoute::Imet(_)));
+    }
+
+    #[test]
+    fn mp_unreach_evpn_attribute_roundtrip() {
+        use crate::evpn::{EthernetSegmentIdentifier, EvpnEs, EvpnRoute, RouteDistinguisher};
+
+        let mp = MpUnreachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![EvpnRoute::Es(EvpnEs {
+                rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 0x64]),
+                esi: EthernetSegmentIdentifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+                originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            })],
+        };
+        let attr = PathAttribute::MpUnreachNlri(mp);
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(attr, decoded[0]);
+    }
 
     #[test]
     fn origin_from_u8_roundtrip() {
@@ -1978,6 +2096,7 @@ mod tests {
                 ))),
             ],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2001,6 +2120,7 @@ mod tests {
                 48,
             )))],
             flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
         };
         let attrs = vec![PathAttribute::MpUnreachNlri(mp.clone())];
 
@@ -2025,6 +2145,7 @@ mod tests {
                 16,
             )))],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2048,6 +2169,7 @@ mod tests {
                 16,
             )))],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2067,6 +2189,7 @@ mod tests {
             next_hop: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             announced: vec![],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         });
         assert_eq!(attr.type_code(), 14);
         // RFC 4760 §3: MP_REACH_NLRI is optional non-transitive
@@ -2082,6 +2205,7 @@ mod tests {
             safi: Safi::Unicast,
             withdrawn: vec![],
             flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
         });
         assert_eq!(attr.type_code(), 15);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL);
@@ -2097,6 +2221,7 @@ mod tests {
             next_hop: IpAddr::V6("fe80::1".parse().unwrap()),
             announced: vec![],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2260,6 +2385,7 @@ mod tests {
                 prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
             }],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 

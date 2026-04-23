@@ -904,6 +904,7 @@ async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             }],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -936,6 +937,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             }],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         }),
     ];
     let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
@@ -1709,6 +1711,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             }],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         }),
     ];
     // Build with Add-Path enabled and MP encoding

@@ -248,6 +248,7 @@ impl PeerSession {
                         })
                         .collect(),
                     flowspec_withdrawn: vec![],
+                    evpn_withdrawn: vec![],
                 })];
                 UpdateMessage::build(
                     &[],
@@ -283,6 +284,7 @@ impl PeerSession {
                 safi: Safi::Unicast,
                 withdrawn: v6_withdraw,
                 flowspec_withdrawn: vec![],
+                evpn_withdrawn: vec![],
             })];
             let msg = UpdateMessage::build(
                 &[],
@@ -384,6 +386,7 @@ impl PeerSession {
                     next_hop: group.next_hop,
                     announced: group.prefixes,
                     flowspec_announced: vec![],
+                    evpn_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -544,6 +547,7 @@ impl PeerSession {
                 next_hop: group.next_hop,
                 announced: group.prefixes,
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }));
             let msg = UpdateMessage::build(
                 &[],
@@ -594,6 +598,7 @@ impl PeerSession {
                     safi: Safi::FlowSpec,
                     withdrawn: vec![],
                     flowspec_withdrawn: rules,
+                    evpn_withdrawn: vec![],
                 })];
                 let msg = UpdateMessage::build(
                     &[],
@@ -634,6 +639,7 @@ impl PeerSession {
                     next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED), // NH len = 0 for FlowSpec
                     announced: vec![],
                     flowspec_announced: rules,
+                    evpn_announced: vec![],
                 }));
                 let msg = UpdateMessage::build(
                     &[],
@@ -703,6 +709,7 @@ impl PeerSession {
                     safi: *safi,
                     withdrawn: vec![],
                     flowspec_withdrawn: vec![],
+                    evpn_withdrawn: vec![],
                 })];
                 UpdateMessage::build(
                     &[],

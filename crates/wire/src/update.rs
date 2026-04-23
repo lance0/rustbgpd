@@ -417,6 +417,7 @@ mod tests {
                     prefix: Prefix::V4(announced[0].prefix),
                 }],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }),
         ];
 

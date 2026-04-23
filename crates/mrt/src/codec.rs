@@ -163,6 +163,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                         next_hop: route.next_hop,
                         announced: vec![],
                         flowspec_announced: vec![],
+                        evpn_announced: vec![],
                     }));
                 }
             }
@@ -177,6 +178,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                 next_hop: route.next_hop,
                 announced: vec![],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             });
             attrs.push(mp_reach);
         }
