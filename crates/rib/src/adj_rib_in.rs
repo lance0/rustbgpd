@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use rustbgpd_wire::{Afi, FlowSpecRule, PathAttribute, Prefix, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, PathAttribute, Prefix, Safi};
 
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-In: stores the routes received from a single peer.
 ///
@@ -30,6 +30,8 @@ pub struct AdjRibIn {
     flowspec_routes: HashMap<(FlowSpecRule, u32), FlowSpecRoute>,
     /// `FlowSpec` route keys where `LLGR_STALE` was injected locally.
     flowspec_llgr_stale_local_tags: HashSet<(FlowSpecRule, u32)>,
+    /// EVPN routes keyed by RFC 7432 route identity.
+    evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
     /// Intern table: deduplicates identical attribute sets across routes.
     /// Lookup by content returns the shared `Arc`.  Entries with
     /// `strong_count == 1` (only the intern table itself) are garbage-
@@ -56,6 +58,7 @@ impl AdjRibIn {
             llgr_stale_local_tags: HashSet::new(),
             flowspec_routes: HashMap::with_capacity(flowspec_capacity),
             flowspec_llgr_stale_local_tags: HashSet::new(),
+            evpn_routes: HashMap::new(),
             attr_intern: HashSet::with_capacity(route_capacity.clamp(16, 64)),
         }
     }
@@ -355,6 +358,39 @@ impl AdjRibIn {
     /// Iterate over all `FlowSpec` routes.
     pub fn iter_flowspec(&self) -> impl Iterator<Item = &FlowSpecRoute> {
         self.flowspec_routes.values()
+    }
+
+    // --- EVPN methods (RFC 7432) ---
+    //
+    // Phase 1 scope: happy-path insert/withdraw/iter for route-reflector
+    // distribution. Stale/GR/LLGR handling is not yet wired for EVPN; the
+    // RR reflects active routes only. Adding LLGR coverage is a follow-up.
+
+    /// Insert or replace an EVPN route, keyed by its RFC 7432 identity.
+    pub fn insert_evpn(&mut self, mut route: EvpnRibRoute) {
+        // Intern attributes so identical attribute sets share one Arc.
+        if let Some(existing) = self.attr_intern.get(&route.attributes) {
+            route.attributes = existing.clone();
+        } else {
+            self.attr_intern.insert(route.attributes.clone());
+        }
+        self.evpn_routes.insert(route.key, route);
+    }
+
+    /// Withdraw an EVPN route. Returns `true` if it existed.
+    pub fn withdraw_evpn(&mut self, key: &EvpnRouteKey) -> bool {
+        self.evpn_routes.remove(key).is_some()
+    }
+
+    /// Iterate over all EVPN routes in this Adj-RIB-In.
+    pub fn iter_evpn(&self) -> impl Iterator<Item = &EvpnRibRoute> {
+        self.evpn_routes.values()
+    }
+
+    /// Return the number of EVPN routes stored.
+    #[must_use]
+    pub fn evpn_len(&self) -> usize {
+        self.evpn_routes.len()
     }
 
     /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
@@ -1025,5 +1061,50 @@ mod tests {
 
         rib.gc_intern_table();
         assert_eq!(rib.intern_len(), 1); // orphan cleaned up
+    }
+
+    #[test]
+    fn evpn_insert_and_withdraw() {
+        use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, EvpnRouteKey, RouteDistinguisher};
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+
+        let rd = RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]);
+        let tag = EthernetTagId(100);
+        let originator = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let imet = EvpnRoute::Imet(EvpnImet {
+            rd,
+            ethernet_tag: tag,
+            originator_ip: originator,
+        });
+        let key = imet.key();
+        let route = EvpnRibRoute {
+            route: imet,
+            key,
+            next_hop: peer_ip,
+            peer: peer_ip,
+            attributes: Arc::new(vec![]),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+            is_stale: false,
+            is_llgr_stale: false,
+        };
+
+        rib.insert_evpn(route);
+        assert_eq!(rib.evpn_len(), 1);
+        assert_eq!(rib.iter_evpn().count(), 1);
+
+        let expected_key = EvpnRouteKey::Imet {
+            rd,
+            ethernet_tag: tag,
+            originator_ip: originator,
+        };
+        assert!(rib.withdraw_evpn(&expected_key));
+        assert_eq!(rib.evpn_len(), 0);
+        assert!(
+            !rib.withdraw_evpn(&expected_key),
+            "second withdraw is no-op"
+        );
     }
 }

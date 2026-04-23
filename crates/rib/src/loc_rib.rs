@@ -6,16 +6,18 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{AsPath, FlowSpecRule, Prefix};
+use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Prefix};
 
 use crate::best_path::best_path_cmp;
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
     routes: HashMap<Prefix, Route>,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
+    /// EVPN Loc-RIB: best route per RFC 7432 route identity.
+    evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
 }
 
 impl LocRib {
@@ -31,6 +33,7 @@ impl LocRib {
         Self {
             routes: HashMap::with_capacity(capacity),
             flowspec_routes: HashMap::new(),
+            evpn_routes: HashMap::new(),
         }
     }
 
@@ -130,6 +133,95 @@ impl LocRib {
     pub fn remove_flowspec(&mut self, rule: &FlowSpecRule) -> bool {
         self.flowspec_routes.remove(rule).is_some()
     }
+
+    // --- EVPN methods (RFC 7432) ---
+
+    /// Recompute the best EVPN route for a key from the given candidates.
+    ///
+    /// Phase 1 tie-break: BGP preference chain (`LocalPref`, `AS_PATH`, MED,
+    /// eBGP>iBGP, `ClusterList`, `OriginatorId`, peer). MAC-mobility-aware
+    /// best-path for Type 2 is wired in a follow-up; for now, sequence
+    /// number isn't consulted — a simple BGP preference chain suffices
+    /// for the happy-path reflection flow.
+    ///
+    /// Returns `true` if the selection changed.
+    pub fn recompute_evpn<'a>(
+        &mut self,
+        key: EvpnRouteKey,
+        candidates: impl Iterator<Item = &'a EvpnRibRoute>,
+    ) -> bool {
+        let best = candidates
+            .min_by(|a, b| evpn_tiebreak_simple(a, b))
+            .cloned();
+        match best {
+            Some(new_best) => {
+                let changed = self
+                    .evpn_routes
+                    .get(&key)
+                    .is_none_or(|old| old.peer != new_best.peer);
+                if changed {
+                    self.evpn_routes.insert(key, new_best);
+                }
+                changed
+            }
+            None => self.evpn_routes.remove(&key).is_some(),
+        }
+    }
+
+    /// Look up the best EVPN route for a key.
+    #[must_use]
+    pub fn get_evpn(&self, key: &EvpnRouteKey) -> Option<&EvpnRibRoute> {
+        self.evpn_routes.get(key)
+    }
+
+    /// Iterate over all best EVPN routes.
+    pub fn iter_evpn(&self) -> impl Iterator<Item = &EvpnRibRoute> {
+        self.evpn_routes.values()
+    }
+
+    /// Return the number of best EVPN routes.
+    #[must_use]
+    pub fn evpn_len(&self) -> usize {
+        self.evpn_routes.len()
+    }
+
+    /// Remove the best EVPN route for a key. Returns `true` if it existed.
+    pub fn remove_evpn(&mut self, key: &EvpnRouteKey) -> bool {
+        self.evpn_routes.remove(key).is_some()
+    }
+}
+
+/// Simple BGP-preference tie-break for EVPN routes (Phase 1).
+///
+/// Full RFC 7432 best-path (MAC mobility sequence for Type 2, DF election
+/// hints for Type 1/4) lands in a follow-up. This function selects on
+/// `LocalPref` → `AS_PATH` length → MED → eBGP > iBGP → peer address.
+fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
+    // Higher LocalPref is better — reverse for `min_by`.
+    match b.local_pref().cmp(&a.local_pref()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // Shorter AS_PATH is better.
+    let a_len = a.as_path().map_or(0, AsPath::len);
+    let b_len = b.as_path().map_or(0, AsPath::len);
+    match a_len.cmp(&b_len) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // Lower MED is better.
+    match a.med().cmp(&b.med()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // eBGP preferred over iBGP.
+    match (a.is_ebgp(), b.is_ebgp()) {
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        _ => {}
+    }
+    // Final tiebreak: lower peer address wins (deterministic).
+    a.peer.cmp(&b.peer)
 }
 
 /// Full BGP best-path comparison for `FlowSpec` routes.
