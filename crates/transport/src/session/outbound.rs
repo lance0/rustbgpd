@@ -579,6 +579,10 @@ impl PeerSession {
                 match afi {
                     Afi::Ipv4 => v4_fs_withdraw.push(rule.clone()),
                     Afi::Ipv6 => v6_fs_withdraw.push(rule.clone()),
+                    Afi::L2Vpn => unreachable!(
+                        "FlowSpec rule determined IPv4/IPv6 AFI from its destination_prefix \
+                         just above; L2VPN is not reachable here"
+                    ),
                 }
             }
             for (afi, rules) in [(Afi::Ipv4, v4_fs_withdraw), (Afi::Ipv6, v6_fs_withdraw)] {

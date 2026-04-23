@@ -554,6 +554,10 @@ fn decode_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecComponent, usize), 
 /// Decode a prefix component (types 1 and 2).
 fn decode_prefix_component(buf: &[u8], afi: Afi) -> Result<(FlowSpecPrefix, usize), DecodeError> {
     match afi {
+        Afi::L2Vpn => Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "FlowSpec prefix component not valid for L2VPN family".to_string(),
+        }),
         Afi::Ipv4 => {
             // IPv4: prefix-length (1 byte) + prefix bytes (ceil(len/8))
             if buf.is_empty() {

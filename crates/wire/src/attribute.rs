@@ -807,6 +807,27 @@ fn decode_mp_reach_nlri(
                 octets.copy_from_slice(&nh_bytes[..16]);
                 IpAddr::V6(Ipv6Addr::from(octets))
             }
+            Afi::L2Vpn => match nh_len {
+                4 => IpAddr::V4(Ipv4Addr::new(
+                    nh_bytes[0],
+                    nh_bytes[1],
+                    nh_bytes[2],
+                    nh_bytes[3],
+                )),
+                16 => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&nh_bytes[..16]);
+                    IpAddr::V6(Ipv6Addr::from(octets))
+                }
+                _ => {
+                    return Err(DecodeError::MalformedField {
+                        message_type: "UPDATE",
+                        detail: format!(
+                            "MP_REACH_NLRI L2VPN next-hop length {nh_len} (expected 4 or 16)"
+                        ),
+                    });
+                }
+            },
         }
     };
 
@@ -850,6 +871,12 @@ fn decode_mp_reach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(nlri_bytes)?,
+        (Afi::L2Vpn, _) => {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "MP_REACH_NLRI L2VPN decode not yet wired".into(),
+            });
+        }
     };
 
     Ok(PathAttribute::MpReachNlri(MpReachNlri {
@@ -925,6 +952,12 @@ fn decode_mp_unreach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(withdrawn_bytes)?,
+        (Afi::L2Vpn, _) => {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: "MP_UNREACH_NLRI L2VPN decode not yet wired".into(),
+            });
+        }
     };
 
     Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {

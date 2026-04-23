@@ -873,6 +873,7 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
     let afi_safi = match route.afi {
         Afi::Ipv4 => proto::AddressFamily::Ipv4Flowspec,
         Afi::Ipv6 => proto::AddressFamily::Ipv6Flowspec,
+        Afi::L2Vpn => unreachable!("FlowSpec route cannot carry L2VPN AFI"),
     };
 
     proto::FlowSpecRouteEntry {
