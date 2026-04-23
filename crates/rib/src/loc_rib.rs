@@ -138,11 +138,11 @@ impl LocRib {
 
     /// Recompute the best EVPN route for a key from the given candidates.
     ///
-    /// Phase 1 tie-break: BGP preference chain (`LocalPref`, `AS_PATH`, MED,
-    /// eBGP>iBGP, `ClusterList`, `OriginatorId`, peer). MAC-mobility-aware
-    /// best-path for Type 2 is wired in a follow-up; for now, sequence
-    /// number isn't consulted — a simple BGP preference chain suffices
-    /// for the happy-path reflection flow.
+    /// Tie-break: Type 2 routes first run the MAC Mobility head (sticky
+    /// flag + sequence number per RFC 7432 §15.1); all types then fall
+    /// through to the standard BGP chain (`LocalPref` → `AS_PATH` → MED
+    /// → eBGP>iBGP → peer address). DF-election hints for Type 1/4 are
+    /// left to downstream VTEPs; the RR just reflects.
     ///
     /// Returns `true` if the selection changed.
     pub fn recompute_evpn<'a>(
@@ -191,12 +191,35 @@ impl LocRib {
     }
 }
 
-/// Simple BGP-preference tie-break for EVPN routes (Phase 1).
+/// BGP-preference + EVPN-aware tie-break for EVPN routes (RFC 7432 §15).
 ///
-/// Full RFC 7432 best-path (MAC mobility sequence for Type 2, DF election
-/// hints for Type 1/4) lands in a follow-up. This function selects on
+/// For Type 2 (MAC/IP Advertisement) routes, runs a MAC Mobility head
+/// first: higher sequence number wins, with sticky-MAC preservation —
+/// a sticky MAC is not displaced by a non-sticky advertisement even at
+/// a higher sequence number. Absence of the MAC Mobility community is
+/// treated as sequence=0, sticky=false per RFC 7432 §7.7.
+///
+/// All route types fall through to the standard BGP chain:
 /// `LocalPref` → `AS_PATH` length → MED → eBGP > iBGP → peer address.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
+    // Type-specific head for Type 2 (MAC/IP): MAC Mobility sequence + sticky.
+    if a.route_type() == 2 && b.route_type() == 2 {
+        let (a_sticky, a_seq) = extract_mac_mobility(a);
+        let (b_sticky, b_seq) = extract_mac_mobility(b);
+        // Sticky protects against displacement by non-sticky. If one is
+        // sticky and the other isn't, the sticky wins regardless of seq.
+        match (a_sticky, b_sticky) {
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            _ => {}
+        }
+        // Higher sequence wins — reverse for `min_by`.
+        match b_seq.cmp(&a_seq) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
     // Higher LocalPref is better — reverse for `min_by`.
     match b.local_pref().cmp(&a.local_pref()) {
         Ordering::Equal => {}
@@ -222,6 +245,17 @@ fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
     }
     // Final tiebreak: lower peer address wins (deterministic).
     a.peer.cmp(&b.peer)
+}
+
+/// Extract `(sticky, sequence_number)` from the MAC Mobility extended
+/// community, if present. Absent community → `(false, 0)` per RFC 7432 §7.7.
+fn extract_mac_mobility(route: &EvpnRibRoute) -> (bool, u32) {
+    for ec in route.extended_communities() {
+        if let Some((sticky, seq)) = ec.as_mac_mobility() {
+            return (sticky, seq);
+        }
+    }
+    (false, 0)
 }
 
 /// Full BGP best-path comparison for `FlowSpec` routes.
@@ -557,5 +591,80 @@ mod tests {
         let best = loc.get_flowspec(&rule).unwrap();
         // Lowest peer IP wins
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    // ---- EVPN MAC mobility tie-break tests (RFC 7432 §15.1) ------------
+
+    fn make_evpn_type2(peer_oct: u8, extra_attrs: Vec<PathAttribute>) -> EvpnRibRoute {
+        use rustbgpd_wire::{
+            EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel, RouteDistinguisher,
+        };
+        let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
+        let mac_ip = EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(100),
+            mac: MacAddress([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            ip: None,
+            label1: MplsLabel::new(10_000),
+            label2: None,
+        });
+        let key = mac_ip.key();
+        let mut attrs: Vec<PathAttribute> = vec![PathAttribute::LocalPref(100)];
+        attrs.extend(extra_attrs);
+        EvpnRibRoute {
+            route: mac_ip,
+            key,
+            next_hop: IpAddr::V4(peer),
+            peer: IpAddr::V4(peer),
+            attributes: Arc::new(attrs),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: peer,
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    #[test]
+    fn evpn_mac_mobility_higher_sequence_wins() {
+        let mm_low = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 1),
+        ]);
+        let mm_high = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 10),
+        ]);
+        let r_low = make_evpn_type2(2, vec![mm_low]);
+        let r_high = make_evpn_type2(3, vec![mm_high]);
+        assert_eq!(evpn_tiebreak_simple(&r_high, &r_low), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&r_low, &r_high), Ordering::Greater);
+    }
+
+    #[test]
+    fn evpn_mac_mobility_sticky_preserved_against_higher_non_sticky() {
+        let sticky = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(true, 1),
+        ]);
+        let non_sticky_high = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 99),
+        ]);
+        let r_sticky = make_evpn_type2(2, vec![sticky]);
+        let r_non_sticky = make_evpn_type2(3, vec![non_sticky_high]);
+        // Sticky wins even with a lower sequence.
+        assert_eq!(
+            evpn_tiebreak_simple(&r_sticky, &r_non_sticky),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn evpn_mac_mobility_missing_treated_as_seq_zero() {
+        // No MAC Mobility community = implicit (false, 0).
+        let r_no = make_evpn_type2(2, vec![]);
+        let mm = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 5),
+        ]);
+        let r_mm = make_evpn_type2(3, vec![mm]);
+        assert_eq!(evpn_tiebreak_simple(&r_mm, &r_no), Ordering::Less);
     }
 }

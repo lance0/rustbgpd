@@ -61,6 +61,9 @@ pub enum BestPathReason {
     LowerOriginatorId,
     /// Step 6: lower peer address (final tiebreaker).
     LowerPeerAddress,
+    /// EVPN Type 2 only: higher MAC Mobility sequence number wins, with
+    /// sticky-MAC preservation (RFC 7432 §15.1).
+    EvpnMacMobility,
 }
 
 impl std::fmt::Display for BestPathReason {
@@ -77,6 +80,7 @@ impl std::fmt::Display for BestPathReason {
             Self::ShorterClusterList => write!(f, "shorter_cluster_list"),
             Self::LowerOriginatorId => write!(f, "lower_originator_id"),
             Self::LowerPeerAddress => write!(f, "lower_peer_address"),
+            Self::EvpnMacMobility => write!(f, "evpn_mac_mobility"),
         }
     }
 }
