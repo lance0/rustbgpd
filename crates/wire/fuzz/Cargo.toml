@@ -32,4 +32,10 @@ path = "fuzz_targets/decode_flowspec.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "decode_evpn"
+path = "fuzz_targets/decode_evpn.rs"
+test = false
+doc = false
+
 [workspace]
