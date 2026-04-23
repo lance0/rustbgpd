@@ -185,6 +185,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [x] **CLI tool** — `rustbgpctl` wrapping gRPC with human-readable and JSON output; covers all supported RPCs
 - [x] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; threaded from gRPC DisableNeighbor through transport
 - [x] **Enhanced Route Refresh** (RFC 7313) — BoRR/EoRR demarcation and inbound family replacement semantics for `SoftResetIn`
+- [ ] **EVPN Route Reflector** (RFC 7432) — L2VPN/EVPN (AFI 25 / SAFI 70) with all 5 route types, MAC mobility best-path per §15.1, RFC 4456 reflection, BGP Encapsulation extended community for VXLAN (RFC 8365). Phase 1 is control-plane only (RR role); later phases add VTEP mode with local EVI state, controller-injection gRPC, symmetric IRB (RFC 9135), DF election (RFC 8584). Follows the market toward multi-tenant DC fabrics where EVPN is the de-facto control plane. Phase 1 landed in feat/evpn-rr.
 
 ### P2.5 — Operational Polish
 
@@ -283,14 +284,13 @@ Valuable but not blocking production use or 1.0. Ordered by market signal.
 
 Features that market research indicates are lower value than originally planned.
 
-- **EVPN / VPN address families** — not needed for IX route server or SDN controller use cases; defer until general-purpose router positioning
 - **YANG model / NETCONF** — FRR can't finish their BGP YANG model; gRPC is the modern interface; low ROI
 - **Built-in web UI** — IXPs use Alice-LG / IXP Manager; replaced by API-first looking glass approach
 - **Kubernetes operator** — adjacent opportunity but premature; nail the IX/SDN use case first
 
 ### Interop Test Coverage
 
-22 automated interop scripts cover M1, M3, M4, M10–M28 against FRR 10.3.1,
+23 automated interop scripts cover M1, M3, M4, M10–M29 against FRR 10.3.1,
 BIRD 2.0.12, GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual smoke
 tests.
 
