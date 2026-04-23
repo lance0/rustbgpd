@@ -289,6 +289,8 @@ impl RibManager {
                 ],
                 fs_announce,
                 fs_withdraw,
+                vec![],
+                vec![],
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());

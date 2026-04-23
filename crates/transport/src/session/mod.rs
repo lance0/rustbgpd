@@ -14,14 +14,14 @@ use bytes::Bytes;
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType, PeerDownReason};
 use rustbgpd_fsm::{Action, Event, NegotiatedSession, Session, SessionState};
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_rib::{FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
+use rustbgpd_rib::{EvpnRibRoute, FlowSpecRoute, OutboundRouteUpdate, RibUpdate, Route};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
 use rustbgpd_wire::{
-    AddPathMode, Afi, AsPath, AsPathSegment, Capability, FlowSpecRule, Ipv4NlriEntry,
-    Ipv4UnicastMode, Message, MpReachNlri, MpUnreachNlri, NlriEntry, NotificationMessage,
-    PathAttribute, Prefix, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage,
-    is_private_asn,
+    AddPathMode, Afi, AsPath, AsPathSegment, Capability, EvpnRoute, EvpnRouteKey, FlowSpecRule,
+    Ipv4NlriEntry, Ipv4UnicastMode, Message, MpReachNlri, MpUnreachNlri, NlriEntry,
+    NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, RouteRefreshSubtype, Safi,
+    UpdateMessage, is_private_asn,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;

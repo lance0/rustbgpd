@@ -207,6 +207,8 @@ impl RibManager {
         refresh_markers: Vec<(Afi, Safi, RouteRefreshSubtype)>,
         flowspec_announce: Vec<crate::route::FlowSpecRoute>,
         flowspec_withdraw: Vec<FlowSpecRule>,
+        evpn_announce: Vec<crate::route::EvpnRibRoute>,
+        evpn_withdraw: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) -> bool {
         let Some(tx) = self.outbound_peers.get(&peer).cloned() else {
             return false;
@@ -219,6 +221,8 @@ impl RibManager {
             || !withdraw.is_empty()
             || !flowspec_announce.is_empty()
             || !flowspec_withdraw.is_empty()
+            || !evpn_announce.is_empty()
+            || !evpn_withdraw.is_empty()
         {
             let loc_rib_len = self.loc_rib.len();
             let rib_out = self
@@ -237,6 +241,12 @@ impl RibManager {
             for rule in &flowspec_withdraw {
                 rib_out.remove_flowspec(rule);
             }
+            for route in &evpn_announce {
+                rib_out.insert_evpn(route.clone());
+            }
+            for key in &evpn_withdraw {
+                rib_out.remove_evpn(key);
+            }
             self.metrics.set_adj_rib_out_prefixes(
                 &peer.to_string(),
                 "all",
@@ -246,6 +256,11 @@ impl RibManager {
                 &peer.to_string(),
                 "flowspec",
                 gauge_val(rib_out.flowspec_len()),
+            );
+            self.metrics.set_adj_rib_out_prefixes(
+                &peer.to_string(),
+                "evpn",
+                gauge_val(rib_out.evpn_len()),
             );
         }
 
@@ -257,8 +272,8 @@ impl RibManager {
             next_hop_override,
             flowspec_announce,
             flowspec_withdraw,
-            evpn_announce: vec![],
-            evpn_withdraw: vec![],
+            evpn_announce,
+            evpn_withdraw,
         });
         true
     }
@@ -282,6 +297,7 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn enqueue_routes_received(
         &mut self,
         peer: IpAddr,
@@ -289,6 +305,8 @@ impl RibManager {
         withdrawn: Vec<(Prefix, u32)>,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
         flowspec_withdrawn: Vec<FlowSpecRule>,
+        evpn_announced: Vec<crate::route::EvpnRibRoute>,
+        evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.ribs.entry(peer) {
             let pending = PendingRoutesReceived::new(
@@ -297,6 +315,8 @@ impl RibManager {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
             );
             entry.insert(AdjRibIn::with_capacity(
                 peer,
@@ -314,6 +334,8 @@ impl RibManager {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
             ));
     }
 
@@ -339,6 +361,12 @@ impl RibManager {
             }
             PendingRouteChunk::FlowSpecAnnounced(flowspec_announced) => {
                 self.process_flowspec_announce_chunk(peer, flowspec_announced);
+            }
+            PendingRouteChunk::EvpnWithdrawn(evpn_withdrawn) => {
+                self.process_evpn_withdraw_chunk(peer, evpn_withdrawn);
+            }
+            PendingRouteChunk::EvpnAnnounced(evpn_announced) => {
+                self.process_evpn_announce_chunk(peer, evpn_announced);
             }
         }
 
@@ -482,6 +510,57 @@ impl RibManager {
             .set_rib_prefixes(&peer_label, "flowspec", gauge_val(flowspec_len));
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+    }
+
+    fn process_evpn_withdraw_chunk(
+        &mut self,
+        peer: IpAddr,
+        evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        let evpn_len = {
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("peer rib must exist before chunk processing");
+            for key in evpn_withdrawn {
+                if rib.withdraw_evpn(&key) {
+                    debug!(%peer, route_type = key.route_type(), "evpn withdrawn");
+                    affected.insert(key);
+                }
+            }
+            rib.evpn_len()
+        };
+        self.metrics
+            .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(evpn_len));
+        if !affected.is_empty() {
+            self.recompute_and_distribute_evpn(&affected);
+        }
+    }
+
+    fn process_evpn_announce_chunk(
+        &mut self,
+        peer: IpAddr,
+        evpn_announced: Vec<crate::route::EvpnRibRoute>,
+    ) {
+        let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        let evpn_len = {
+            let rib = self
+                .ribs
+                .get_mut(&peer)
+                .expect("peer rib must exist before chunk processing");
+            for route in evpn_announced {
+                debug!(%peer, route_type = route.route_type(), "evpn announced");
+                affected.insert(route.key);
+                rib.insert_evpn(route);
+            }
+            rib.evpn_len()
+        };
+        self.metrics
+            .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(evpn_len));
+        if !affected.is_empty() {
+            self.recompute_and_distribute_evpn(&affected);
         }
     }
 
@@ -1036,6 +1115,113 @@ impl RibManager {
         }
     }
 
+    /// Stage EVPN announces and withdrawals for a set of affected keys.
+    ///
+    /// Selection semantics match `stage_flowspec_rules`: for each key, if the
+    /// `LocRib` has a best route, decide whether to advertise it to this peer
+    /// based on RFC 4456 iBGP split-horizon and export policy. Reflection
+    /// uses the same `should_suppress_ibgp_inner` helper with a synthetic
+    /// placeholder `Route` carrying the EVPN route's peer metadata.
+    ///
+    /// Phase 1: policy uses a placeholder `0.0.0.0/0` prefix; RT / community
+    /// matching works through the existing `RouteContext` fields.
+    #[expect(clippy::too_many_arguments)]
+    pub(super) fn stage_evpn_routes(
+        loc_rib: &LocRib,
+        rib_out: &AdjRibOut,
+        peer_is_rr_client: &HashMap<IpAddr, bool>,
+        keys: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+        target_peer: IpAddr,
+        target_peer_asn: Option<u32>,
+        target_peer_group: Option<&str>,
+        target_is_ebgp: bool,
+        target_is_rr_client: bool,
+        cluster_id: Option<Ipv4Addr>,
+        sendable: Option<&Vec<(Afi, Safi)>>,
+        export_pol: Option<&PolicyChain>,
+        evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
+        evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        let evpn_family = (Afi::L2Vpn, Safi::Evpn);
+        let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
+
+        for key in keys {
+            if !peer_supports_evpn {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
+            }
+
+            let Some(best) = loc_rib.get_evpn(key) else {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
+            };
+
+            // Split-horizon / RR suppression check via a synthetic Route that
+            // carries only the fields should_suppress_ibgp_inner reads.
+            let probe = crate::route::Route {
+                prefix: Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+                next_hop: best.next_hop,
+                peer: best.peer,
+                attributes: std::sync::Arc::new(vec![]),
+                received_at: best.received_at,
+                origin_type: best.origin_type,
+                peer_router_id: best.peer_router_id,
+                is_stale: false,
+                is_llgr_stale: false,
+                path_id: 0,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+            };
+            if should_suppress_ibgp_inner(
+                &probe,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                peer_is_rr_client,
+            ) {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
+            }
+
+            // Export policy evaluation with placeholder prefix (FlowSpec pattern)
+            let placeholder_prefix =
+                Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+            let aspath_str = best
+                .as_path()
+                .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+            let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+            let ctx = RouteContext {
+                prefix: placeholder_prefix,
+                next_hop: Some(best.next_hop),
+                extended_communities: best.extended_communities(),
+                communities: best.communities(),
+                large_communities: best.large_communities(),
+                as_path_str: &aspath_str,
+                as_path_len: aspath_len,
+                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+                peer_address: Some(target_peer),
+                peer_asn: target_peer_asn,
+                peer_group: target_peer_group,
+                route_type: Some(route_type(best.origin_type)),
+                local_pref: best.local_pref_attr(),
+                med: best.med_attr(),
+            };
+            let result = rustbgpd_policy::evaluate_chain(export_pol, &ctx);
+            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                evpn_announce.push(best.clone());
+            } else if rib_out.get_evpn(key).is_some() {
+                evpn_withdraw.push(*key);
+            }
+        }
+    }
+
     /// Distribute Loc-RIB changes to all registered outbound peers.
     ///
     /// For clean peers, only `changed_prefixes` are evaluated. Dirty peers
@@ -1228,6 +1414,8 @@ impl RibManager {
                     vec![],
                     fs_announce,
                     fs_withdraw,
+                    vec![],
+                    vec![],
                 ) {
                     if is_dirty {
                         info!(
@@ -1348,9 +1536,102 @@ impl RibManager {
                     vec![],
                     fs_announce,
                     fs_withdraw,
+                    vec![],
+                    vec![],
                 )
             {
                 warn!(%peer, "outbound channel full — FlowSpec update deferred");
+                self.dirty_peers.insert(peer);
+            }
+        }
+    }
+
+    /// Recompute Loc-RIB best path and distribute changes for EVPN routes.
+    ///
+    /// Mirrors `recompute_and_distribute_flowspec`. For each affected key,
+    /// gather candidates from all peer Adj-RIB-Ins, run best-path, and if
+    /// the selection changed, stage announces/withdraws for each outbound
+    /// peer that negotiated the L2VPN/EVPN family.
+    pub(super) fn recompute_and_distribute_evpn(
+        &mut self,
+        affected: &HashSet<rustbgpd_wire::EvpnRouteKey>,
+    ) {
+        use crate::route::EvpnRibRoute;
+
+        let mut changed_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
+        for key in affected {
+            let candidates: Vec<&EvpnRibRoute> = self
+                .ribs
+                .values()
+                .flat_map(|rib| rib.iter_evpn().filter(|r| r.key == *key))
+                .collect();
+            if self.loc_rib.recompute_evpn(*key, candidates.into_iter()) {
+                changed_keys.insert(*key);
+            }
+        }
+
+        if changed_keys.is_empty() {
+            return;
+        }
+
+        self.metrics
+            .set_loc_rib_prefixes("evpn", gauge_val(self.loc_rib.evpn_len()));
+
+        let peers: Vec<IpAddr> = self.outbound_peers.keys().copied().collect();
+        for peer in peers {
+            let sendable = self.peer_sendable_families.get(&peer).cloned();
+            if !sendable.as_ref().is_some_and(|f| {
+                f.contains(&(rustbgpd_wire::Afi::L2Vpn, rustbgpd_wire::Safi::Evpn))
+            }) {
+                continue;
+            }
+
+            let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
+            let target_is_rr_client = self.peer_is_rr_client.get(&peer).copied().unwrap_or(false);
+            let target_peer_asn = self.peer_asn.get(&peer).copied();
+            let target_peer_group = self.peer_group.get(&peer).map(String::as_str);
+            let export_pol = self.export_policy_for(peer).cloned();
+
+            let loc_rib_len = self.loc_rib.len();
+            let rib_out = self
+                .adj_ribs_out
+                .entry(peer)
+                .or_insert_with(|| crate::adj_rib_out::AdjRibOut::with_capacity(peer, loc_rib_len));
+
+            let mut evpn_announce = Vec::new();
+            let mut evpn_withdraw = Vec::new();
+            Self::stage_evpn_routes(
+                &self.loc_rib,
+                rib_out,
+                &self.peer_is_rr_client,
+                &changed_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                self.cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &mut evpn_announce,
+                &mut evpn_withdraw,
+            );
+
+            if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())
+                && !self.try_send_and_commit_outbound_update(
+                    peer,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![],
+                    evpn_announce,
+                    evpn_withdraw,
+                )
+            {
+                warn!(%peer, "outbound channel full — EVPN update deferred");
                 self.dirty_peers.insert(peer);
             }
         }

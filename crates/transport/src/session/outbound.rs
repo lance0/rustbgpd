@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{
-    Afi, AsPath, AsPathSegment, FlowSpecRoute, FlowSpecRule, IpAddr, Ipv4Addr, Ipv4NlriEntry,
-    Ipv4UnicastMode, Ipv6Addr, Message, MpReachNlri, MpUnreachNlri, NlriEntry, OutboundRouteUpdate,
-    PathAttribute, PeerSession, Prefix, RemovePrivateAs, Route, RouteRefreshMessage,
-    RouteRefreshSubtype, Safi, UpdateMessage, info, is_private_asn, warn,
+    Afi, AsPath, AsPathSegment, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule,
+    IpAddr, Ipv4Addr, Ipv4NlriEntry, Ipv4UnicastMode, Ipv6Addr, Message, MpReachNlri,
+    MpUnreachNlri, NlriEntry, OutboundRouteUpdate, PathAttribute, PeerSession, Prefix,
+    RemovePrivateAs, Route, RouteRefreshMessage, RouteRefreshSubtype, Safi, UpdateMessage, info,
+    is_private_asn, warn,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -618,6 +619,83 @@ impl PeerSession {
             }
         }
 
+        // Send EVPN withdrawals via MP_UNREACH_NLRI
+        if !update.evpn_withdraw.is_empty() {
+            let routes: Vec<EvpnRoute> = update
+                .evpn_withdraw
+                .iter()
+                .map(|key| evpn_route_from_key(*key))
+                .collect();
+            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi: Afi::L2Vpn,
+                safi: Safi::Evpn,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: routes,
+            })];
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                false,
+                Ipv4UnicastMode::Body,
+            );
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
+                return;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+        }
+
+        // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
+        if !update.evpn_announce.is_empty() {
+            #[allow(clippy::type_complexity)]
+            let mut evpn_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<EvpnRoute>)> = Vec::new();
+            for evpn_route in &update.evpn_announce {
+                let attrs = self.prepare_outbound_attributes_evpn(evpn_route, is_ebgp);
+                // Determine the next-hop for the reflected route. In RR mode
+                // we preserve the originating VTEP's loopback as next-hop so
+                // downstream VTEPs can build the VXLAN tunnel correctly.
+                let nh = evpn_route.next_hop;
+                if let Some(group) = evpn_groups
+                    .iter_mut()
+                    .find(|(g_nh, g_attrs, _)| *g_nh == nh && *g_attrs == attrs)
+                {
+                    group.2.push(evpn_route.route.clone());
+                } else {
+                    evpn_groups.push((nh, attrs, vec![evpn_route.route.clone()]));
+                }
+            }
+            for (next_hop, mut attrs, routes) in evpn_groups {
+                attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                    afi: Afi::L2Vpn,
+                    safi: Safi::Evpn,
+                    next_hop,
+                    announced: vec![],
+                    flowspec_announced: vec![],
+                    evpn_announced: routes,
+                }));
+                let msg = UpdateMessage::build(
+                    &[],
+                    &[],
+                    &attrs,
+                    four_octet_as,
+                    false,
+                    Ipv4UnicastMode::Body,
+                );
+                let wire_msg = Message::Update(msg);
+                if let Err(e) = self.send_message(&wire_msg).await {
+                    warn!(peer = %self.peer_label, error = %e, "failed to send EVPN announce UPDATE");
+                    return;
+                }
+                self.updates_sent += 1;
+                self.metrics.record_message_sent(&self.peer_label, "update");
+            }
+        }
+
         // Send FlowSpec announcements via MP_REACH_NLRI, grouped by (AFI, attributes)
         if !update.flowspec_announce.is_empty() {
             let mut fs_groups: Vec<(Afi, Vec<PathAttribute>, Vec<FlowSpecRule>)> = Vec::new();
@@ -1011,6 +1089,192 @@ impl PeerSession {
         self.strip_llgr_stale_if_needed(&mut attrs, (route.afi, Safi::FlowSpec));
 
         attrs
+    }
+
+    /// Prepare outbound attributes for a reflected EVPN route. Mirrors
+    /// [`Self::prepare_outbound_attributes_flowspec`] — route reflectors
+    /// don't rewrite the `NEXT_HOP` (that's what preserves the VTEP loopback
+    /// for VXLAN tunnel construction), don't strip `LOCAL_PREF` across iBGP,
+    /// and add `ORIGINATOR_ID` / `CLUSTER_LIST` per RFC 4456 when reflecting.
+    pub(super) fn prepare_outbound_attributes_evpn(
+        &self,
+        route: &EvpnRibRoute,
+        is_ebgp: bool,
+    ) -> Vec<PathAttribute> {
+        let mut attrs = Vec::new();
+
+        for attr in route.attributes.iter() {
+            match attr {
+                PathAttribute::AsPath(as_path) if is_ebgp && !self.config.route_server_client => {
+                    let cleaned = remove_private_asns(
+                        as_path,
+                        self.config.remove_private_as,
+                        self.config.peer.local_asn,
+                    );
+                    let mut new_segments =
+                        vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])];
+                    for seg in &cleaned.segments {
+                        match seg {
+                            AsPathSegment::AsSequence(asns) => {
+                                if let Some(AsPathSegment::AsSequence(first)) =
+                                    new_segments.first_mut()
+                                {
+                                    first.extend(asns);
+                                }
+                            }
+                            AsPathSegment::AsSet(asns) => {
+                                new_segments.push(AsPathSegment::AsSet(asns.clone()));
+                            }
+                        }
+                    }
+                    attrs.push(PathAttribute::AsPath(AsPath {
+                        segments: new_segments,
+                    }));
+                }
+                // NEXT_HOP is carried in MP_REACH_NLRI for EVPN; strip the
+                // legacy NEXT_HOP attribute if present. Strip MP framing too.
+                PathAttribute::NextHop(_)
+                | PathAttribute::MpReachNlri(_)
+                | PathAttribute::MpUnreachNlri(_) => {}
+                PathAttribute::LocalPref(_) => {
+                    if !is_ebgp {
+                        attrs.push(attr.clone());
+                    }
+                }
+                PathAttribute::OriginatorId(_) | PathAttribute::ClusterList(_) if is_ebgp => {}
+                _ => {
+                    attrs.push(attr.clone());
+                }
+            }
+        }
+
+        if !is_ebgp
+            && !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::LocalPref(_)))
+        {
+            attrs.push(PathAttribute::LocalPref(100));
+        }
+
+        if is_ebgp
+            && !self.config.route_server_client
+            && !attrs.iter().any(|a| matches!(a, PathAttribute::AsPath(_)))
+        {
+            attrs.push(PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![self.config.peer.local_asn])],
+            }));
+        }
+
+        // RFC 4456 RR attribute manipulation — ORIGINATOR_ID + CLUSTER_LIST
+        // when reflecting iBGP routes.
+        if !is_ebgp
+            && route.origin_type == rustbgpd_rib::RouteOrigin::Ibgp
+            && let Some(cluster_id) = self.config.cluster_id
+        {
+            if !attrs
+                .iter()
+                .any(|a| matches!(a, PathAttribute::OriginatorId(_)))
+            {
+                attrs.push(PathAttribute::OriginatorId(route.peer_router_id));
+            }
+            let mut found = false;
+            for attr in &mut attrs {
+                if let PathAttribute::ClusterList(ids) = attr {
+                    ids.insert(0, cluster_id);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                attrs.push(PathAttribute::ClusterList(vec![cluster_id]));
+            }
+        }
+
+        self.strip_llgr_stale_if_needed(&mut attrs, (Afi::L2Vpn, Safi::Evpn));
+
+        attrs
+    }
+}
+
+/// Build a minimal `EvpnRoute` from a key, used when emitting `MP_UNREACH_NLRI`
+/// withdrawals. The receiver identifies the route by its key fields; any
+/// labels / optional fields the key doesn't capture are zeroed.
+fn evpn_route_from_key(key: EvpnRouteKey) -> EvpnRoute {
+    use rustbgpd_wire::{
+        EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet, EvpnIpPrefixRoute, EvpnMacIp, MplsLabel,
+    };
+    let zero_label = MplsLabel::new(0);
+    match key {
+        EvpnRouteKey::EadPerEs {
+            rd,
+            esi,
+            ethernet_tag,
+        } => EvpnRoute::EadPerEs(EvpnEadPerEs {
+            rd,
+            esi,
+            ethernet_tag,
+            label: zero_label,
+        }),
+        EvpnRouteKey::EadPerEvi {
+            rd,
+            esi,
+            ethernet_tag,
+        } => EvpnRoute::EadPerEvi(EvpnEadPerEvi {
+            rd,
+            esi,
+            ethernet_tag,
+            label: zero_label,
+        }),
+        EvpnRouteKey::MacIp {
+            rd,
+            ethernet_tag,
+            mac,
+            ip,
+        } => EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+            ethernet_tag,
+            mac,
+            ip,
+            label1: zero_label,
+            label2: None,
+        }),
+        EvpnRouteKey::Imet {
+            rd,
+            ethernet_tag,
+            originator_ip,
+        } => EvpnRoute::Imet(EvpnImet {
+            rd,
+            ethernet_tag,
+            originator_ip,
+        }),
+        EvpnRouteKey::Es {
+            rd,
+            esi,
+            originator_ip,
+        } => EvpnRoute::Es(EvpnEs {
+            rd,
+            esi,
+            originator_ip,
+        }),
+        EvpnRouteKey::IpPrefix {
+            rd,
+            ethernet_tag,
+            prefix,
+        } => {
+            let gateway = match prefix {
+                rustbgpd_wire::EvpnIpPrefixValue::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                rustbgpd_wire::EvpnIpPrefixValue::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            };
+            EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+                rd,
+                esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+                ethernet_tag,
+                prefix,
+                gateway,
+                label: zero_label,
+            })
+        }
     }
 }
 

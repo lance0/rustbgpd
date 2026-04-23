@@ -258,6 +258,8 @@ impl RibManager {
                 vec![],
                 fs_announce,
                 fs_withdraw,
+                vec![],
+                vec![],
             )
         {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");

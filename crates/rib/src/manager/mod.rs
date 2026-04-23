@@ -112,6 +112,8 @@ enum PendingRouteChunk {
     Announced(Vec<crate::route::Route>),
     FlowSpecWithdrawn(Vec<FlowSpecRule>),
     FlowSpecAnnounced(Vec<crate::route::FlowSpecRoute>),
+    EvpnWithdrawn(Vec<rustbgpd_wire::EvpnRouteKey>),
+    EvpnAnnounced(Vec<crate::route::EvpnRibRoute>),
 }
 
 enum PendingRoutePhase {
@@ -119,6 +121,8 @@ enum PendingRoutePhase {
     Announced,
     FlowSpecWithdrawn,
     FlowSpecAnnounced,
+    EvpnWithdrawn,
+    EvpnAnnounced,
     Done,
 }
 
@@ -130,6 +134,8 @@ struct PendingRoutesReceived {
     announced: std::vec::IntoIter<crate::route::Route>,
     flowspec_withdrawn: std::vec::IntoIter<FlowSpecRule>,
     flowspec_announced: std::vec::IntoIter<crate::route::FlowSpecRoute>,
+    evpn_withdrawn: std::vec::IntoIter<rustbgpd_wire::EvpnRouteKey>,
+    evpn_announced: std::vec::IntoIter<crate::route::EvpnRibRoute>,
     phase: PendingRoutePhase,
 }
 
@@ -140,6 +146,8 @@ impl PendingRoutesReceived {
         withdrawn: Vec<(Prefix, u32)>,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
         flowspec_withdrawn: Vec<FlowSpecRule>,
+        evpn_announced: Vec<crate::route::EvpnRibRoute>,
+        evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) -> Self {
         let route_capacity_hint = (announced.len() + withdrawn.len()).max(16);
         let flowspec_capacity_hint = (flowspec_announced.len() + flowspec_withdrawn.len()).max(4);
@@ -151,6 +159,8 @@ impl PendingRoutesReceived {
             announced: announced.into_iter(),
             flowspec_withdrawn: flowspec_withdrawn.into_iter(),
             flowspec_announced: flowspec_announced.into_iter(),
+            evpn_withdrawn: evpn_withdrawn.into_iter(),
+            evpn_announced: evpn_announced.into_iter(),
             phase: PendingRoutePhase::Withdrawn,
         }
     }
@@ -213,10 +223,34 @@ impl PendingRoutesReceived {
                         .take(ROUTES_RECEIVED_CHUNK_SIZE)
                         .collect();
                     if chunk.is_empty() {
-                        self.phase = PendingRoutePhase::Done;
+                        self.phase = PendingRoutePhase::EvpnWithdrawn;
                         continue;
                     }
                     return Some(PendingRouteChunk::FlowSpecAnnounced(chunk));
+                }
+                PendingRoutePhase::EvpnWithdrawn => {
+                    let chunk: Vec<_> = self
+                        .evpn_withdrawn
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::EvpnAnnounced;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::EvpnWithdrawn(chunk));
+                }
+                PendingRoutePhase::EvpnAnnounced => {
+                    let chunk: Vec<_> = self
+                        .evpn_announced
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::Done;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::EvpnAnnounced(chunk));
                 }
                 PendingRoutePhase::Done => return None,
             }
@@ -360,23 +394,15 @@ impl RibManager {
                 flowspec_withdrawn,
                 evpn_announced,
                 evpn_withdrawn,
-            } => {
-                // Phase 1D.1: EVPN routes are received through the transport
-                // UPDATE path, but the RIB ingestion pipeline (AdjRibIn insert,
-                // LocRib recompute, AdjRibOut staging) is wired in a follow-up
-                // commit. For now the ingestion path ignores EVPN routes; the
-                // transport side is still inert as the capability is not yet
-                // negotiated on any production session. Reflection happens via
-                // the forthcoming distribute_evpn() call path.
-                let _ = (evpn_announced, evpn_withdrawn);
-                self.enqueue_routes_received(
-                    peer,
-                    announced,
-                    withdrawn,
-                    flowspec_announced,
-                    flowspec_withdrawn,
-                );
-            }
+            } => self.enqueue_routes_received(
+                peer,
+                announced,
+                withdrawn,
+                flowspec_announced,
+                flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
+            ),
             RibUpdate::PeerDown { peer } => self.handle_peer_down(peer),
             RibUpdate::PeerUp {
                 peer,

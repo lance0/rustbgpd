@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use super::{
-    Afi, AsPath, Event, FlowSpecRoute, FlowSpecRule, Instant, IpAddr, Ipv4Addr, NotificationCode,
-    NotificationMessage, PathAttribute, PeerSession, Prefix, RibUpdate, Route, Safi, cease_subcode,
-    debug, info, resolve_import_nexthop, warn,
+    Afi, AsPath, Event, EvpnRibRoute, EvpnRoute, EvpnRouteKey, FlowSpecRoute, FlowSpecRule,
+    Instant, IpAddr, Ipv4Addr, NotificationCode, NotificationMessage, PathAttribute, PeerSession,
+    Prefix, RibUpdate, Route, Safi, cease_subcode, debug, info, resolve_import_nexthop, warn,
 };
 use rustbgpd_policy::{RouteContext, RouteType};
 
@@ -144,6 +144,7 @@ impl PeerSession {
                 && let Some(PathAttribute::MpUnreachNlri(mp)) = parsed.attributes.first()
                 && mp.withdrawn.is_empty()
                 && mp.flowspec_withdrawn.is_empty()
+                && mp.evpn_withdrawn.is_empty()
             {
                 info!(
                     peer = %self.peer_label,
@@ -473,6 +474,8 @@ impl PeerSession {
 
         let mut flowspec_announced: Vec<FlowSpecRoute> = Vec::new();
         let mut flowspec_withdrawn: Vec<FlowSpecRule> = Vec::new();
+        let mut evpn_announced: Vec<EvpnRibRoute> = Vec::new();
+        let mut evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
 
         for attr in &parsed.attributes {
             match attr {
@@ -554,6 +557,61 @@ impl PeerSession {
                         continue;
                     }
 
+                    if mp.safi == Safi::Evpn {
+                        // EVPN announced routes — typed TLVs, not prefixes.
+                        // Policy context uses a placeholder 0.0.0.0/0 prefix
+                        // so RT / ext-community / AS_PATH match clauses work;
+                        // match_prefix against the placeholder is effectively
+                        // a no-op. RT-based filtering is the expected model.
+                        let placeholder_prefix =
+                            Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+                        for route in &mp.evpn_announced {
+                            let ctx = RouteContext {
+                                prefix: placeholder_prefix,
+                                next_hop: Some(mp.next_hop),
+                                extended_communities: update_ecs,
+                                communities: update_communities,
+                                large_communities: update_large_communities,
+                                as_path_str: &aspath_str,
+                                as_path_len: aspath_len,
+                                validation_state: rustbgpd_wire::RpkiValidation::NotFound,
+                                aspa_state,
+                                peer_address: Some(self.peer_ip),
+                                peer_asn: policy_peer_asn,
+                                peer_group: self.config.peer_group.as_deref(),
+                                route_type: policy_route_type,
+                                local_pref: policy_local_pref,
+                                med: policy_med,
+                            };
+                            let result =
+                                rustbgpd_policy::evaluate_chain(self.import_policy.as_ref(), &ctx);
+                            if result.action == rustbgpd_policy::PolicyAction::Permit {
+                                let mut attrs = mp_route_attrs.clone();
+                                let _nh_action = rustbgpd_policy::apply_modifications(
+                                    &mut attrs,
+                                    &result.modifications,
+                                );
+                                let key = route.key();
+                                evpn_announced.push(EvpnRibRoute {
+                                    route: route.clone(),
+                                    key,
+                                    next_hop: mp.next_hop,
+                                    peer: self.peer_ip,
+                                    attributes: Arc::new(attrs),
+                                    received_at: now,
+                                    origin_type: route_origin,
+                                    peer_router_id: self
+                                        .negotiated
+                                        .as_ref()
+                                        .map_or(Ipv4Addr::UNSPECIFIED, |n| n.peer_router_id),
+                                    is_stale: false,
+                                    is_llgr_stale: false,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+
                     // Unicast routes
                     for entry in &mp.announced {
                         let mp_rpki_state = validation
@@ -626,6 +684,7 @@ impl PeerSession {
                     }
                     withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                     flowspec_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
+                    evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                 }
                 _ => {}
             }
@@ -663,6 +722,8 @@ impl PeerSession {
             || !withdrawn.is_empty()
             || !flowspec_announced.is_empty()
             || !flowspec_withdrawn.is_empty()
+            || !evpn_announced.is_empty()
+            || !evpn_withdrawn.is_empty()
         {
             let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
                 peer: self.peer_ip,
@@ -670,8 +731,8 @@ impl PeerSession {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
-                evpn_announced: vec![],
-                evpn_withdrawn: vec![],
+                evpn_announced,
+                evpn_withdrawn,
             });
         }
 
