@@ -287,6 +287,152 @@ impl ExtendedCommunity {
         self.decode_two_part()
     }
 
+    // -------------------------------------------------------------------
+    // EVPN-specific typed accessors (RFC 7432 / RFC 8365 / RFC 9135)
+    // -------------------------------------------------------------------
+
+    /// Decode as BGP Encapsulation Extended Community (RFC 9012 §4.1, encoded
+    /// per the widely-deployed RFC 5512 layout: 4-byte reserved + 2-byte
+    /// Tunnel Type). Type 0x03, subtype 0x0C.
+    ///
+    /// Returns the Tunnel Type code. For VXLAN-EVPN (RFC 8365), the value is
+    /// 8. Other common values: 7 = NVGRE, 11 = MPLS-over-GRE.
+    #[must_use]
+    pub fn as_bgp_encapsulation(self) -> Option<u16> {
+        if self.type_byte() & 0x3F != 0x03 || self.subtype() != 0x0C {
+            return None;
+        }
+        let v = self.value_bytes();
+        Some(u16::from_be_bytes([v[4], v[5]]))
+    }
+
+    /// Construct a BGP Encapsulation Extended Community (RFC 9012 §4.1).
+    ///
+    /// Writes 4 bytes of reserved zero followed by the 16-bit tunnel type.
+    #[must_use]
+    pub fn bgp_encapsulation(tunnel_type: u16) -> Self {
+        let tt = tunnel_type.to_be_bytes();
+        let raw = u64::from_be_bytes([0x03, 0x0C, 0, 0, 0, 0, tt[0], tt[1]]);
+        Self(raw)
+    }
+
+    /// Decode as MAC Mobility Extended Community (RFC 7432 §7.7).
+    /// Type 0x06, subtype 0x00.
+    ///
+    /// Returns `(sticky, sequence_number)`. The sticky bit (bit 0 of the
+    /// flags byte) marks the MAC as non-movable; receivers must not displace
+    /// a sticky MAC with a higher-sequence non-sticky advertisement.
+    #[must_use]
+    pub fn as_mac_mobility(self) -> Option<(bool, u32)> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x00 {
+            return None;
+        }
+        let v = self.value_bytes();
+        let sticky = (v[0] & 0x01) != 0;
+        let seq = u32::from_be_bytes([v[2], v[3], v[4], v[5]]);
+        Some((sticky, seq))
+    }
+
+    /// Construct a MAC Mobility Extended Community (RFC 7432 §7.7).
+    #[must_use]
+    pub fn mac_mobility(sticky: bool, sequence: u32) -> Self {
+        let flags = u8::from(sticky);
+        let s = sequence.to_be_bytes();
+        let raw = u64::from_be_bytes([0x06, 0x00, flags, 0, s[0], s[1], s[2], s[3]]);
+        Self(raw)
+    }
+
+    /// Decode as ESI Label Extended Community (RFC 7432 §7.5).
+    /// Type 0x06, subtype 0x01.
+    ///
+    /// Returns `(single_active, label)`. The single-active flag (bit 0 of
+    /// the flags byte) signals single-active multi-homing mode.
+    #[must_use]
+    pub fn as_esi_label(self) -> Option<(bool, u32)> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x01 {
+            return None;
+        }
+        let v = self.value_bytes();
+        let single_active = (v[0] & 0x01) != 0;
+        let label = (u32::from(v[3]) << 16) | (u32::from(v[4]) << 8) | u32::from(v[5]);
+        Some((single_active, label))
+    }
+
+    /// Construct an ESI Label Extended Community (RFC 7432 §7.5).
+    ///
+    /// `label` is a 24-bit MPLS label or VXLAN VNI; high 8 bits are masked.
+    #[must_use]
+    pub fn esi_label(single_active: bool, label: u32) -> Self {
+        let flags = u8::from(single_active);
+        let l = label & 0x00FF_FFFF;
+        #[expect(clippy::cast_possible_truncation)]
+        let raw = u64::from_be_bytes([
+            0x06,
+            0x01,
+            flags,
+            0,
+            0,
+            (l >> 16) as u8,
+            (l >> 8) as u8,
+            l as u8,
+        ]);
+        Self(raw)
+    }
+
+    /// Decode as ES-Import Route Target Extended Community (RFC 7432 §7.6).
+    /// Type 0x06, subtype 0x02.
+    ///
+    /// Returns the 6-byte MAC address that serves as the import target for
+    /// Type 4 ES routes.
+    #[must_use]
+    pub fn as_es_import_rt(self) -> Option<[u8; 6]> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x02 {
+            return None;
+        }
+        Some(self.value_bytes())
+    }
+
+    /// Construct an ES-Import Route Target Extended Community.
+    #[must_use]
+    pub fn es_import_rt(mac: [u8; 6]) -> Self {
+        let raw = u64::from_be_bytes([0x06, 0x02, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
+        Self(raw)
+    }
+
+    /// Decode as Router MAC Extended Community (RFC 9135 §4.1).
+    /// Type 0x06, subtype 0x03.
+    ///
+    /// Returns the 6-byte router MAC used for symmetric IRB.
+    #[must_use]
+    pub fn as_router_mac(self) -> Option<[u8; 6]> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x03 {
+            return None;
+        }
+        Some(self.value_bytes())
+    }
+
+    /// Construct a Router MAC Extended Community (RFC 9135 §4.1).
+    #[must_use]
+    pub fn router_mac(mac: [u8; 6]) -> Self {
+        let raw = u64::from_be_bytes([0x06, 0x03, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
+        Self(raw)
+    }
+
+    /// Decode as Default Gateway Extended Community (RFC 4761 §3.2.5 /
+    /// RFC 7432). Type 0x03, subtype 0x0D. This is a flag-only community —
+    /// presence is the signal; the value field is all zeros.
+    #[must_use]
+    pub fn as_default_gateway(self) -> bool {
+        self.type_byte() & 0x3F == 0x03 && self.subtype() == 0x0D
+    }
+
+    /// Construct a Default Gateway Extended Community.
+    #[must_use]
+    pub fn default_gateway() -> Self {
+        let raw = u64::from_be_bytes([0x03, 0x0D, 0, 0, 0, 0, 0, 0]);
+        Self(raw)
+    }
+
     /// Decode the 6-byte value field as `(global_admin, local_admin)`.
     ///
     /// Handles all three RFC 4360 two-part layouts (2-octet AS, IPv4, 4-octet
@@ -1403,6 +1549,77 @@ mod tests {
         let decoded = decode_path_attributes(&buf, true, &[]).expect("decode");
         assert_eq!(decoded.len(), 1);
         assert_eq!(attr, decoded[0]);
+    }
+
+    // ---- EVPN extended community typed accessors (RFC 7432 / 8365 / 9135) ---
+
+    #[test]
+    fn ext_comm_bgp_encapsulation_vxlan() {
+        let c = ExtendedCommunity::bgp_encapsulation(8); // VXLAN
+        assert_eq!(c.type_byte(), 0x03);
+        assert_eq!(c.subtype(), 0x0C);
+        assert_eq!(c.as_bgp_encapsulation(), Some(8));
+        // Wire layout: 4 bytes reserved + 2-byte tunnel type
+        let b = c.as_u64().to_be_bytes();
+        assert_eq!(b[2..6], [0, 0, 0, 0]);
+        assert_eq!(&b[6..8], &[0, 8]);
+        // Negative: other subtypes return None
+        assert_eq!(ExtendedCommunity::new(0).as_bgp_encapsulation(), None);
+    }
+
+    #[test]
+    fn ext_comm_mac_mobility_sticky_and_sequence() {
+        let m1 = ExtendedCommunity::mac_mobility(false, 42);
+        assert_eq!(m1.as_mac_mobility(), Some((false, 42)));
+        let m2 = ExtendedCommunity::mac_mobility(true, 12345);
+        assert_eq!(m2.as_mac_mobility(), Some((true, 12345)));
+        // Round-trip max sequence
+        let m3 = ExtendedCommunity::mac_mobility(true, u32::MAX);
+        assert_eq!(m3.as_mac_mobility(), Some((true, u32::MAX)));
+        assert_eq!(ExtendedCommunity::new(0).as_mac_mobility(), None);
+    }
+
+    #[test]
+    fn ext_comm_esi_label_flags_and_label() {
+        let e1 = ExtendedCommunity::esi_label(false, 10_000);
+        assert_eq!(e1.as_esi_label(), Some((false, 10_000)));
+        let e2 = ExtendedCommunity::esi_label(true, 0x00FF_FFFF);
+        assert_eq!(e2.as_esi_label(), Some((true, 0x00FF_FFFF)));
+    }
+
+    #[test]
+    fn ext_comm_es_import_rt_mac() {
+        let mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let e = ExtendedCommunity::es_import_rt(mac);
+        assert_eq!(e.as_es_import_rt(), Some(mac));
+        assert_eq!(e.type_byte(), 0x06);
+        assert_eq!(e.subtype(), 0x02);
+    }
+
+    #[test]
+    fn ext_comm_router_mac() {
+        let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let e = ExtendedCommunity::router_mac(mac);
+        assert_eq!(e.as_router_mac(), Some(mac));
+    }
+
+    #[test]
+    fn ext_comm_default_gateway_flag_only() {
+        let d = ExtendedCommunity::default_gateway();
+        assert!(d.as_default_gateway());
+        // Not a default gateway
+        assert!(!ExtendedCommunity::bgp_encapsulation(8).as_default_gateway());
+    }
+
+    #[test]
+    fn ext_comm_accessors_return_none_on_unrelated_communities() {
+        let rt = ExtendedCommunity::new(u64::from_be_bytes([0x00, 0x02, 0xFD, 0xE8, 0, 0, 0, 100])); // RT:65000:100
+        assert_eq!(rt.as_bgp_encapsulation(), None);
+        assert_eq!(rt.as_mac_mobility(), None);
+        assert_eq!(rt.as_esi_label(), None);
+        assert_eq!(rt.as_es_import_rt(), None);
+        assert_eq!(rt.as_router_mac(), None);
+        assert!(!rt.as_default_gateway());
     }
 
     #[test]
