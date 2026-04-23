@@ -106,6 +106,21 @@ enum Command {
         family: Option<String>,
     },
 
+    /// List EVPN routes in the local RIB (RFC 7432)
+    Evpn {
+        /// Route type filter (1..=5)
+        #[arg(long)]
+        route_type: Option<u32>,
+
+        /// Peer IP address filter
+        #[arg(long)]
+        peer: Option<String>,
+
+        /// Route Distinguisher filter (display format, e.g. "65000:100")
+        #[arg(long)]
+        rd: Option<String>,
+    },
+
     /// Watch route updates (streaming)
     Watch {
         /// Neighbor address filter
@@ -543,6 +558,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             let family_val = resolve_family(&family)?;
             commands::watch::run(connection, address, family_val, json).await
         }
+
+        Command::Evpn {
+            route_type,
+            peer,
+            rd,
+        } => commands::evpn::list(connection, route_type, peer, rd, json).await,
 
         Command::Flowspec { action, family } => {
             let family_val = resolve_family(&family)?;

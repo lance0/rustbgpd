@@ -10,10 +10,10 @@ use tracing::debug;
 
 use crate::proto;
 use rustbgpd_rib::{
-    ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, FlowSpecRoute, RibUpdate, Route,
-    RouteEventType,
+    EvpnRibRoute, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, FlowSpecRoute,
+    RibUpdate, Route, RouteEventType,
 };
-use rustbgpd_wire::{Afi, AsPath, AsPathSegment, PathAttribute, Prefix};
+use rustbgpd_wire::{Afi, AsPath, AsPathSegment, EvpnRoute, PathAttribute, Prefix};
 
 /// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
@@ -713,6 +713,56 @@ impl proto::rib_service_server::RibService for RibService {
 
         Ok(Response::new(proto::ListFlowSpecResponse { routes }))
     }
+
+    async fn list_evpn_routes(
+        &self,
+        request: Request<proto::ListEvpnRequest>,
+    ) -> Result<Response<proto::ListEvpnResponse>, Status> {
+        let req = request.into_inner();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let all_routes = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+
+        let type_filter = req.route_type_filter;
+        let peer_filter = req.peer_filter;
+        let rd_filter = req.rd_filter;
+
+        let routes: Vec<proto::EvpnRouteEntry> = all_routes
+            .iter()
+            .filter(|r| {
+                if type_filter != 0 && u32::from(r.route_type()) != type_filter {
+                    return false;
+                }
+                if !peer_filter.is_empty() && r.peer.to_string() != peer_filter {
+                    return false;
+                }
+                if !rd_filter.is_empty() {
+                    let entry_rd = match &r.route {
+                        EvpnRoute::EadPerEs(e) => e.rd.to_string(),
+                        EvpnRoute::EadPerEvi(e) => e.rd.to_string(),
+                        EvpnRoute::MacIp(e) => e.rd.to_string(),
+                        EvpnRoute::Imet(e) => e.rd.to_string(),
+                        EvpnRoute::Es(e) => e.rd.to_string(),
+                        EvpnRoute::IpPrefix(e) => e.rd.to_string(),
+                    };
+                    if entry_rd != rd_filter {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(evpn_route_to_proto)
+            .collect();
+
+        Ok(Response::new(proto::ListEvpnResponse { routes }))
+    }
 }
 
 #[expect(clippy::too_many_lines)]
@@ -884,6 +934,127 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         as_path,
         communities,
         extended_communities,
+    }
+}
+
+#[expect(clippy::too_many_lines)]
+fn evpn_route_to_proto(route: &EvpnRibRoute) -> proto::EvpnRouteEntry {
+    let mut as_path = Vec::new();
+    let mut communities = Vec::new();
+    let mut extended_communities = Vec::new();
+    let mut tunnel_type = 0u32;
+
+    for attr in route.attributes.iter() {
+        match attr {
+            PathAttribute::AsPath(path) => {
+                for segment in &path.segments {
+                    let asns = match segment {
+                        AsPathSegment::AsSequence(a) | AsPathSegment::AsSet(a) => a,
+                    };
+                    as_path.extend(asns);
+                }
+            }
+            PathAttribute::Communities(c) => {
+                communities.extend(c);
+            }
+            PathAttribute::ExtendedCommunities(ecs) => {
+                for ec in ecs {
+                    extended_communities.push(ec.as_u64());
+                    if let Some(tt) = ec.as_bgp_encapsulation() {
+                        tunnel_type = u32::from(tt);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (rd, esi, ethernet_tag, mac, ip, prefix, gateway, label, label2) = match &route.route {
+        EvpnRoute::EadPerEs(e) => (
+            e.rd.to_string(),
+            e.esi.to_string(),
+            e.ethernet_tag.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            e.label.value(),
+            0,
+        ),
+        EvpnRoute::EadPerEvi(e) => (
+            e.rd.to_string(),
+            e.esi.to_string(),
+            e.ethernet_tag.to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            e.label.value(),
+            0,
+        ),
+        EvpnRoute::MacIp(e) => (
+            e.rd.to_string(),
+            e.esi.to_string(),
+            e.ethernet_tag.to_string(),
+            e.mac.to_string(),
+            e.ip.map(|ip| ip.to_string()).unwrap_or_default(),
+            String::new(),
+            String::new(),
+            e.label1.value(),
+            e.label2.map_or(0, |l| l.value()),
+        ),
+        EvpnRoute::Imet(e) => (
+            e.rd.to_string(),
+            String::new(),
+            e.ethernet_tag.to_string(),
+            String::new(),
+            e.originator_ip.to_string(),
+            String::new(),
+            String::new(),
+            0,
+            0,
+        ),
+        EvpnRoute::Es(e) => (
+            e.rd.to_string(),
+            e.esi.to_string(),
+            String::new(),
+            String::new(),
+            e.originator_ip.to_string(),
+            String::new(),
+            String::new(),
+            0,
+            0,
+        ),
+        EvpnRoute::IpPrefix(e) => (
+            e.rd.to_string(),
+            e.esi.to_string(),
+            e.ethernet_tag.to_string(),
+            String::new(),
+            String::new(),
+            e.prefix.to_string(),
+            e.gateway.to_string(),
+            e.label.value(),
+            0,
+        ),
+    };
+
+    proto::EvpnRouteEntry {
+        route_type: u32::from(route.route_type()),
+        rd,
+        esi,
+        ethernet_tag,
+        mac,
+        ip,
+        prefix,
+        gateway,
+        label,
+        label2,
+        next_hop: route.next_hop.to_string(),
+        peer_address: route.peer.to_string(),
+        as_path,
+        communities,
+        extended_communities,
+        tunnel_type,
     }
 }
 

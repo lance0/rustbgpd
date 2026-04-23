@@ -499,6 +499,11 @@ impl RibManager {
             RibUpdate::QueryFlowSpecRoutes { reply } => {
                 self.handle_query_flowspec_routes(reply);
             }
+            RibUpdate::QueryEvpnRoutes { reply } => {
+                let routes: Vec<crate::route::EvpnRibRoute> =
+                    self.loc_rib.iter_evpn().cloned().collect();
+                let _ = reply.send(routes);
+            }
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
         }
     }

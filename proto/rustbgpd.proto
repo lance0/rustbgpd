@@ -15,6 +15,7 @@ enum AddressFamily {
   ADDRESS_FAMILY_IPV6_UNICAST = 2;
   ADDRESS_FAMILY_IPV4_FLOWSPEC = 3;
   ADDRESS_FAMILY_IPV6_FLOWSPEC = 4;
+  ADDRESS_FAMILY_L2VPN_EVPN = 5;
 }
 
 enum SessionState {
@@ -499,6 +500,7 @@ service RibService {
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
+  rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
 }
 
 message ListRoutesRequest {
@@ -764,6 +766,66 @@ message ListFlowSpecRequest {
 
 message ListFlowSpecResponse {
   repeated FlowSpecRouteEntry routes = 1;
+}
+
+// ---------------------------------------------------------------------------
+// EVPN (RFC 7432) — typed route entries for route-reflector observability.
+// Full RFC 7432 encoding surface is complex; this gRPC surface exposes the
+// identifying fields of each route type as strings + small scalars, rather
+// than re-encoding the entire wire payload. Wire round-trip fidelity is
+// preserved by the RIB; this gRPC view is for human-readable inspection.
+// ---------------------------------------------------------------------------
+
+// EVPN route entry in the RIB (any of 5 RFC 7432 route types).
+message EvpnRouteEntry {
+  // RFC 7432 route type (1..=5).
+  uint32 route_type = 1;
+  // Route Distinguisher (RFC 4364) in "asn:value" / "ip:value" display format.
+  string rd = 2;
+  // Ethernet Segment Identifier (hex-coded 10 bytes separated by ':') —
+  // empty for Type 3 IMET, which has no ESI.
+  string esi = 3;
+  // Ethernet Tag ID ("MAX_ET" or a 32-bit decimal value) — empty for Type 4.
+  string ethernet_tag = 4;
+  // MAC address (Type 2 only), "aa:bb:cc:dd:ee:ff".
+  string mac = 5;
+  // Host IP (Type 2 and Type 3 and Type 4 and Type 5), may be empty.
+  string ip = 6;
+  // IP prefix (Type 5 only), "<addr>/<len>".
+  string prefix = 7;
+  // Gateway IP (Type 5 only), may be empty.
+  string gateway = 8;
+  // Primary label / VNI (Type 1/2/5).
+  uint32 label = 9;
+  // Secondary label (Type 2 symmetric IRB), 0 when absent.
+  uint32 label2 = 10;
+  // VTEP loopback IP (next-hop from MP_REACH_NLRI).
+  string next_hop = 11;
+  // Peer that advertised this route.
+  string peer_address = 12;
+  // AS_PATH (4-octet ASNs, flattened across AS_SEQUENCE segments).
+  repeated uint32 as_path = 13;
+  // Standard communities (RFC 1997).
+  repeated uint32 communities = 14;
+  // Extended communities (RFC 4360) as raw u64.
+  repeated uint64 extended_communities = 15;
+  // Decoded tunnel type from the BGP Encapsulation ext community, 0 if absent.
+  // (VXLAN = 8 per RFC 8365.)
+  uint32 tunnel_type = 16;
+}
+
+// Filter EVPN route listings. All filters are optional.
+message ListEvpnRequest {
+  // Only routes matching this route type (1..=5). 0 = no filter.
+  uint32 route_type_filter = 1;
+  // Only routes from this peer, empty = any.
+  string peer_filter = 2;
+  // Only routes with this Route Distinguisher (display format). Empty = any.
+  string rd_filter = 3;
+}
+
+message ListEvpnResponse {
+  repeated EvpnRouteEntry routes = 1;
 }
 
 // ---------------------------------------------------------------------------

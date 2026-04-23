@@ -313,6 +313,11 @@ pub enum RibUpdate {
         /// Response channel.
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
     },
+    /// Query EVPN routes from the Loc-RIB (RFC 7432).
+    QueryEvpnRoutes {
+        /// Response channel.
+        reply: oneshot::Sender<Vec<EvpnRibRoute>>,
+    },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {
         /// Response channel.
