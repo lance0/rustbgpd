@@ -2084,6 +2084,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustbgpd-evpn-load"
+version = "0.8.0"
+dependencies = [
+ "bytes",
+ "clap",
+ "rustbgpd-wire",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rustbgpd-fsm"
 version = "0.8.0"
 dependencies = [

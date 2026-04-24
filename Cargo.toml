@@ -11,6 +11,7 @@ members = [
     "crates/cli",
     "crates/bmp",
     "crates/mrt",
+    "bench/evpn-load",
 ]
 resolver = "2"
 
