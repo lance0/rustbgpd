@@ -53,6 +53,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ListEvpnRoutes` gRPC, and withdrawal propagation via
   `bridge fdb del`. New `start-frr-vtep.sh` shim sets up `br100` +
   `vxlan100` with `nolearning` so EVPN controls the FDB.
+- **EVPN MAC mobility + sticky-MAC preservation interop (Gate 3, M31).**
+  Four-node topology (rustbgpd RR + 3× FRR VTEPs) extending the M30
+  harness. Exercises RFC 7432 §15.1 MAC Mobility semantics against
+  real FRR 10.3.1: (a) MAC M1 injected on VTEP-A reflects to VTEP-B
+  via the RR; (b) M1 moved to VTEP-C (`bridge fdb add` on C + `del`
+  on A), VTEP-B's best path flips to VTEP-C and the MAC Mobility
+  sequence number on the reflected Type 2 increments strictly; (c)
+  sticky MAC M2 on VTEP-A (`bridge fdb add … sticky`) is not
+  displaced by a non-sticky advertisement from VTEP-C — VTEP-B's
+  best path stays on VTEP-A per §7.7. VTEP-B is a pure observer
+  with no local MACs, so its Loc-RIB state is driven entirely by
+  what rustbgpd reflects.
 
 ---
 

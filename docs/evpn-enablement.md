@@ -16,11 +16,11 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 
 ## TL;DR
 
-- **Gates 0, 1, 2**: done on `feat/evpn-rr`. Capability negotiation,
-  real Type 2 MAC reflection against FRR 10.3.1, and EVPN GR/LLGR
-  stale handling all landed.
-- **Gates 3-4** remain for "production-ready RR for a SONiC/FRR fabric".
-  Both extend the M30 harness (MAC mobility, multi-homing).
+- **Gates 0, 1, 2, 3**: done on `feat/evpn-rr`. Capability, real Type 2
+  MAC reflection (M30), EVPN GR/LLGR, and MAC mobility / sticky
+  preservation (M31) all validated against FRR 10.3.1.
+- **Gate 4** (multi-homing Type 1 + Type 4 reflection) is the last
+  remaining item for "production-ready RR for a SONiC/FRR fabric".
 - **Gate 5** validates scale. Once green, the RR claim is full.
 - **Gate 6** unlocks controller-driven deployments; cheap relative to payoff.
 - **Gates 7-9** expand into VTEP / active-active multi-homing / IRB. Big
@@ -29,18 +29,19 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 ## Current Position
 
 Phase 1 RR role — control-plane only, all 5 RFC 7432 route types, MAC Mobility
-best-path, RFC 4456 reflection, VXLAN encap community (RFC 8365), gRPC +
-CLI. Real-peer interop via M29 (capability) and M30 (Type 2 MAC
-reflection against FRR 10.3.1). EVPN GR/LLGR stale handling shipped.
-Peer-down and dirty-resync correctness gaps closed.
+best-path (validated against real FRR), RFC 4456 reflection, VXLAN encap
+community (RFC 8365), gRPC + CLI. Real-peer interop via M29 (capability),
+M30 (Type 2 reflection), and M31 (MAC mobility / sticky). EVPN GR/LLGR
+stale handling shipped. Peer-down and dirty-resync correctness gaps
+closed.
 
 **Honest completeness estimates:**
 
 | Scope | Completeness |
 |-------|-------------|
-| RFC 7432 RR role | ~60-65% |
-| Production-ready RR for a SONiC/FRR fabric | ~70-75% |
-| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~18-22% |
+| RFC 7432 RR role | ~70-75% |
+| Production-ready RR for a SONiC/FRR fabric | ~78-82% |
+| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~22-26% |
 
 ## Gate Ladder
 
@@ -119,24 +120,40 @@ Evidence: +13 tests, 1214 workspace total; clippy clean on Rust 1.95.
 
 ---
 
-### Gate 3 — MAC mobility end-to-end interop
+### Gate 3 — MAC mobility end-to-end interop ✅
 
-Status: after Gate 1 · Estimate: ~2-3 days · Blockers: Gate 1
+Status: **done** (feat/evpn-rr, M31 harness, 2026-04-24)
 
-Unlocks: VM / container migration claim. 3-VTEP topology: MAC M on VTEP-A
-first, then the same MAC on VTEP-C. Sequence number increments (visible in
-tcpdump), VTEP-B's loc-RIB tracks the winner, sticky-MAC preservation
-validated against real FRR behavior rather than only unit tests.
+Unlocks: VM / container migration claim. 4-node topology (rustbgpd RR
++ 3 VTEPs) exercising the RFC 7432 §15.1 MAC Mobility semantics
+against real FRR 10.3.1.
 
-Mostly extends the Gate 1 harness — 80% of the infrastructure is already
-there.
+Delivered:
 
 | Task | File / location |
 |------|----------------|
-| Add third VTEP to Gate 1 topology | `tests/interop/m31-evpn-mac-mobility-frr.clab.yml` (new) |
-| FRR config for the third VTEP | `tests/interop/configs/frr-bgpd-m31-*.conf` (new) |
-| Test: move MAC via `bridge fdb del` / `add`, verify sequence | `tests/interop/scripts/test-m31-evpn-mac-mobility-frr.sh` |
-| Test: sticky MAC not displaced by higher-sequence non-sticky | (same script) |
+| 4-node topology (RR + 3 VTEPs) | `tests/interop/m31-evpn-mac-mobility-frr.clab.yml` |
+| Per-VTEP FRR configs (a, b, c) | `tests/interop/configs/frr-bgpd-m31-vtep-{a,b,c}.conf` |
+| rustbgpd RR config with 3 RR clients | `tests/interop/configs/rustbgpd-m31-rr.toml` |
+| MAC mobility + sticky test script (10 assertions across 3 phases) | `tests/interop/scripts/test-m31-evpn-mac-mobility-frr.sh` |
+
+Validated:
+
+- **Baseline**: all 3 VTEPs Established, VTEP-B sees Type 3 IMET from
+  both A and C through the reflector.
+- **Plain MAC reflection**: MAC injected on VTEP-A appears on VTEP-B
+  with remote VTEP = VTEP-A.
+- **Move**: `bridge fdb add` on VTEP-C + `bridge fdb del` on VTEP-A;
+  VTEP-B's best path flips to VTEP-C within 30 s; MAC Mobility
+  sequence number on the reflected Type 2 is strictly greater than
+  pre-move.
+- **Sticky preservation**: sticky MAC on VTEP-A (`bridge fdb add …
+  sticky`) is not displaced by a non-sticky advertisement from
+  VTEP-C, matching the unit-test semantics in `evpn_tiebreak_simple`.
+
+Reuses the `start-frr-vtep.sh` shim from M30 — no new kernel setup
+code. No rustbgpd code changes — the harness validates existing
+behavior.
 
 ---
 
@@ -262,26 +279,26 @@ Further out on this track:
 ## Priority Ordering
 
 ```
-Gate 1 (Type 2 interop)      ── ✅ done (M30)
-Gate 2 (GR/LLGR)              ── ✅ done
-Gate 3 (MAC mobility interop) ──┐
-Gate 4 (multi-homing)         ──┘── ships "production-ready RR for SONiC/FRR fabric"
-Gate 5 (scale)                 ── ships "production-ready at 10k+ MAC scale"
-Gate 6 (controller inject)     ── ships "SDN-integratable"
+Gate 1 (Type 2 interop, M30)    ── ✅ done
+Gate 2 (GR/LLGR)                ── ✅ done
+Gate 3 (MAC mobility, M31)      ── ✅ done
+Gate 4 (multi-homing)            ── ships "production-ready RR for SONiC/FRR fabric"
+Gate 5 (scale)                   ── ships "production-ready at 10k+ MAC scale"
+Gate 6 (controller inject)       ── ships "SDN-integratable"
 ───────────── decision point ─────────────
-Gate 7 (VTEP mode)             ── big strategic expansion
-Gate 8 (multi-homing execution)── depends on Gate 7
-Gate 9 (IRB, MVPN, PBB, MPLS)  ── furthest horizon
+Gate 7 (VTEP mode)               ── big strategic expansion
+Gate 8 (multi-homing execution)  ── depends on Gate 7
+Gate 9 (IRB, MVPN, PBB, MPLS)    ── furthest horizon
 ```
 
-### Why Gates 2 and 1 landed first
+### Harness reuse
 
-Gate 2 (EVPN GR/LLGR) was pure-code work with the bigger correctness
-jump — no containerlab surgery — so it went first. Gate 1 (Type 2
-interop, M30) followed immediately, proving the whole control-plane
-pipeline reflects routes correctly against a real FRR peer. Together
-they unblock Gates 3 and 4, which extend the M30 harness rather than
-building new infrastructure.
+Gates 1 and 3 build on the same containerlab + VXLAN setup: M30 is the
+2-VTEP baseline, M31 adds a third VTEP so MAC mobility and sticky-MAC
+preservation can be exercised. Gate 4 (multi-homing) extends M31 again
+— two VTEPs sharing an ESI, third VTEP observes DF election inputs. No
+new kernel infrastructure per gate after M30; the shim script
+(`start-frr-vtep.sh`) is reused by every subsequent VTEP.
 
 ### Why Gate 6 before Gate 7
 

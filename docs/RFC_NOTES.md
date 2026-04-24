@@ -597,6 +597,13 @@ implemented per ADR-0040.
   + `CLUSTER_LIST`, next-hop preservation (VTEP loopback, not RR),
   VXLAN encap community surfaced through gRPC, and withdrawal
   propagation on FDB delete.
+- **MAC Mobility + sticky-MAC preservation interop** (RFC 7432 §15.1,
+  §7.7): validated via the M31 4-node harness
+  (`tests/interop/m31-evpn-mac-mobility-frr.clab.yml`). MAC moved
+  between two originating VTEPs through the RR increments the
+  Mobility sequence on the reflected Type 2 and flips the observing
+  VTEP's best path. Sticky MAC on the first VTEP is not displaced by
+  a non-sticky advertisement from the second VTEP.
 - See ADR-0050.
 
 ---
