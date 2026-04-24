@@ -8082,3 +8082,104 @@ async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Gate 6: controller-driven EVPN injection. `InjectEvpn` places a
+/// `RouteOrigin::Local` EVPN route into the RR's Loc-RIB and reflects
+/// it to peers negotiating L2VPN/EVPN — same shape as `InjectFlowSpec`.
+#[tokio::test]
+async fn inject_evpn_reflects_to_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Construct an EVPN Type 3 IMET anchored on a synthetic local
+    // originator (0.0.0.0, matches LOCAL_PEER in the manager).
+    let mut imet = make_evpn_imet(Ipv4Addr::UNSPECIFIED, 100);
+    imet.origin_type = crate::route::RouteOrigin::Local;
+    let injected_key = imet.key;
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::InjectEvpn {
+        route: imet,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx
+        .await
+        .expect("inject reply")
+        .expect("inject must succeed");
+
+    // Peer must see the reflected local route as an announce.
+    let msg = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("peer should receive the injected route within 2s")
+        .expect("outbound channel open");
+    assert_eq!(msg.evpn_announce.len(), 1);
+    assert_eq!(msg.evpn_announce[0].key, injected_key);
+
+    // Withdraw through the same channel; peer must see the retraction.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawEvpn {
+        key: injected_key,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx
+        .await
+        .expect("withdraw reply")
+        .expect("withdraw must succeed");
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("peer should receive withdraw within 2s")
+        .expect("outbound channel open");
+    assert!(msg.evpn_announce.is_empty());
+    assert_eq!(msg.evpn_withdraw, vec![injected_key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Withdrawing an unknown EVPN key surfaces a user-visible error
+/// (controller got a bad route identifier).
+#[tokio::test]
+async fn withdraw_evpn_unknown_key_returns_error() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let fake_key = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 999).key;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawEvpn {
+        key: fake_key,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    let result = reply_rx.await.expect("withdraw reply");
+    assert!(result.is_err(), "unknown key must return an error");
+
+    drop(tx);
+    handle.await.unwrap();
+}

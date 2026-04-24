@@ -308,6 +308,26 @@ pub enum RibUpdate {
         /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Inject a locally-originated EVPN route (RFC 7432).
+    ///
+    /// Entry point for controller-driven injection — an SDN controller
+    /// calls `InjectionService::AddEvpnRoute` which synthesizes an
+    /// `EvpnRibRoute` with `origin_type = RouteOrigin::Local` and pushes
+    /// it here. The RR then reflects the route to all iBGP peers
+    /// negotiating L2VPN/EVPN.
+    InjectEvpn {
+        /// The EVPN route to inject.
+        route: EvpnRibRoute,
+        /// Completion reply.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Withdraw a locally-injected EVPN route.
+    WithdrawEvpn {
+        /// The EVPN route key to withdraw.
+        key: EvpnRouteKey,
+        /// Completion reply.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query `FlowSpec` routes from the Loc-RIB.
     QueryFlowSpecRoutes {
         /// Response channel.

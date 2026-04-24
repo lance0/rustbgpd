@@ -752,6 +752,44 @@ impl RibManager {
         }
     }
 
+    pub(super) fn handle_inject_evpn(
+        &mut self,
+        route: crate::route::EvpnRibRoute,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let key = route.key;
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        rib.insert_evpn(route);
+        debug!(?key, "injected local EVPN route");
+        let mut evpn_affected = HashSet::new();
+        evpn_affected.insert(key);
+        self.recompute_and_distribute_evpn(&evpn_affected);
+        let _ = reply.send(Ok(()));
+    }
+
+    pub(super) fn handle_withdraw_evpn(
+        &mut self,
+        key: rustbgpd_wire::EvpnRouteKey,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        let rib = self
+            .ribs
+            .entry(LOCAL_PEER)
+            .or_insert_with(|| AdjRibIn::new(LOCAL_PEER));
+        if rib.withdraw_evpn(&key) {
+            debug!(?key, "withdrawn injected EVPN route");
+            let mut evpn_affected = HashSet::new();
+            evpn_affected.insert(key);
+            self.recompute_and_distribute_evpn(&evpn_affected);
+            let _ = reply.send(Ok(()));
+        } else {
+            let _ = reply.send(Err(format!("EVPN route key {key:?} not found")));
+        }
+    }
+
     /// Multi-path distribution for a single prefix to a single peer.
     ///
     /// Collects all candidates from all Adj-RIB-In entries, filters by

@@ -500,6 +500,8 @@ impl RibManager {
             RibUpdate::WithdrawFlowSpec { rule, reply } => {
                 self.handle_withdraw_flowspec(rule, reply);
             }
+            RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
+            RibUpdate::WithdrawEvpn { key, reply } => self.handle_withdraw_evpn(key, reply),
             RibUpdate::QueryFlowSpecRoutes { reply } => {
                 self.handle_query_flowspec_routes(reply);
             }
