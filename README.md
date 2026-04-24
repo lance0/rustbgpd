@@ -47,7 +47,9 @@ architecture diagrams, example configs, and API workflows.
 ## Not the best fit today
 
 - Full general-purpose router deployments requiring FIB integration
-- EVPN / VPN datacenter fabric overlays
+- EVPN **VTEP** role — rustbgpd is a Phase 1 EVPN Route Reflector only;
+  it does not yet do local MAC learning, DF election, or VXLAN data-plane
+- VPNv4 / VPNv6 overlays
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
 
@@ -257,7 +259,8 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 ## Current limitations
 
 - No kernel FIB integration -- rustbgpd is a control-plane daemon, not a forwarding engine
-- No EVPN, VPNv4/v6, or Confederation support
+- EVPN (RFC 7432) is supported in **Route Reflector role only** for VXLAN-EVPN DC fabrics — VTEP mode (local MAC learning, DF election, kernel FDB), controller-injection gRPC, and IRB semantics (RFC 9135) are follow-up phases
+- No VPNv4 / VPNv6 or Confederation support
 - No native gRPC TLS termination yet (prefer local UDS access or an mTLS proxy)
 - No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported
 - Published bgperf2 benchmarks currently cover 10 peers × 1k prefixes, 2 peers × 10k prefixes, and 2 peers × 100k prefixes; churn and long-duration benchmark automation remain future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
@@ -275,8 +278,8 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | Kernel FIB integration, EVPN, VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1166 workspace tests, fuzz targets, 22 automated interop suites against FRR, BIRD, GoBGP, StayRTR |
+| **Not yet supported** | Kernel FIB integration, EVPN VTEP role (RR role works), VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
+| **Tests** | 1199 workspace tests, fuzz targets, 23 automated interop suites against FRR, BIRD, GoBGP, StayRTR |
 
 ## Documentation
 

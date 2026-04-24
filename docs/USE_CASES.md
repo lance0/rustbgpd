@@ -519,6 +519,86 @@ See [`tests/interop/`](../tests/interop/) for complete working topologies.
 
 ---
 
+## 7. VXLAN-EVPN DC Fabric Route Reflector
+
+**The problem:** You're operating a VXLAN-EVPN leaf/spine fabric — GPU
+cluster, multi-tenant DC, container overlay — and you need an iBGP route
+reflector that distributes EVPN routes (MAC advertisements, multicast
+memberships, IP prefixes) between VTEPs. The VTEPs themselves (SONiC or
+FRR leaves) handle local MAC learning, DF election, and VXLAN encap. You
+want a control plane that's API-first (no vtysh scraping), scales to
+thousands of VTEPs, and gives you structured observability.
+
+**What rustbgpd does for you (Phase 1, ADR-0050):**
+
+- **RFC 7432 route reflection for all 5 route types** — EAD per-ES,
+  EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix (RFC 9136) —
+  reflected between VTEPs per RFC 4456.
+- **MAC Mobility handling** — Type 2 best-path honors the MAC Mobility
+  sequence number and the sticky flag per RFC 7432 §15.1, so a MAC
+  move converges deterministically and sticky MACs aren't displaced.
+- **VXLAN encapsulation via RFC 8365** — the BGP Encapsulation extended
+  community is decoded and preserved across reflection; `bgpctl evpn`
+  surfaces `encap=vxlan` for operator visibility.
+- **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
+  filtered EVPN RIB queries; Prometheus metrics per peer include
+  `adj_rib_out_prefixes{family="evpn"}`.
+- **RT-based policy** — existing `match_community` against Route Target
+  extended communities filters EVPN routes the same way unicast RT
+  matching works elsewhere.
+
+**What rustbgpd doesn't do yet (and which VTEPs handle for you):**
+
+- **Local MAC learning** — VTEPs read from the kernel FDB and originate
+  Type 2 routes. rustbgpd never originates an EVPN route in Phase 1.
+- **DF election** — with a shared ESI multi-homed to two VTEPs, the
+  VTEPs run the election themselves. rustbgpd reflects Type 1 + Type 4
+  unchanged so the election still works.
+- **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
+  VTEP's job.
+- **IRB semantics** — rustbgpd preserves Type 2 `label2` and the Router
+  MAC ext community across reflection, but doesn't interpret them.
+
+**Why the API-first shape matters for DC fabric:**
+
+- Spin up a VTEP with a templated FRR config + a gRPC call to register
+  the new peer — no config-file write dance.
+- Pipe EVPN route events into your SDN controller, BMP collector, or
+  fabric-observability tool via `WatchRoutes` and `rustbgpd-bmp`.
+- Validate policy changes with `bgpctl rib explain-best-path` before
+  pushing — routable-surface diffs, not CLI scraping.
+
+**Example config:** `examples/rr-evpn-fabric/config.toml` — three VTEP
+peers in AS 65000 with `families = ["l2vpn_evpn"]` and
+`route_reflector_client = true`.
+
+```toml
+[global]
+asn = 65000
+router_id = "10.0.0.100"
+cluster_id = "10.0.0.100"
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65000
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+```
+
+**Scale targets (Phase 1):** thousands of VTEPs, Type 2 MAC routes in
+the tens of thousands. Churn / stability testing at scale is Phase 1.5
+— see `docs/INTEROP.md` for the open validation list.
+
+**Known gaps:**
+
+- EVPN routes aren't yet in the GR/LLGR stale-route pipeline; a VTEP
+  flap drops reflected routes during the restart window.
+- Full Type 2 MAC-exchange interop (real FRR + VXLAN interfaces) is
+  Phase 1.5 — M29 covers capability negotiation only.
+- No VTEP / controller-injection role — follow-up phases per ADR-0050.
+
+---
+
 ## Deployment Patterns
 
 ### Pattern A: Sidecar route injector
@@ -578,8 +658,13 @@ Be honest about where rustbgpd isn't the right tool:
 
 - **Full router** — No FIB integration. Can't install routes into the Linux
   kernel. Use FRR or BIRD if you need a forwarding-plane router.
-- **EVPN / VPLS fabrics** — No L2VPN address families. Use FRR for datacenter
-  fabric overlays.
+- **EVPN VTEP role** — rustbgpd supports EVPN (RFC 7432) in **route-reflector
+  mode only** (Phase 1, ADR-0050). It does not yet act as a VTEP: no local
+  EVI / VRF / VNI state, no kernel FDB MAC learning, no DF election, no
+  symmetric IRB (RFC 9135). For VXLAN-EVPN fabrics where VTEPs are SONiC
+  or FRR leaves and rustbgpd is the RR, it's a fit today. For the VTEP
+  role itself, use FRR.
+- **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.
 - **CLI-first operations** — The CLI is a thin gRPC wrapper, not a full

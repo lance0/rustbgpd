@@ -7,6 +7,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **EVPN Route Reflector (Phase 1, RFC 7432).** L2VPN/EVPN address family
+  (AFI 25 / SAFI 70) with wire codec for all 5 RFC 7432 route types
+  (EAD per-ES, EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix),
+  MAC mobility best-path with sticky-flag preservation per §15.1, RFC 4456
+  reflection, and 7 typed extended-community accessors (BGP Encapsulation
+  per RFC 8365/9012, MAC Mobility, ESI Label, ES-Import RT, Router MAC
+  per RFC 9135, Default Gateway). `l2vpn_evpn` family string in TOML
+  config, `ListEvpnRoutes` gRPC RPC on `RibService`, `bgpctl evpn`
+  CLI subcommand with `--route-type` / `--peer` / `--rd` filters,
+  `ADDRESS_FAMILY_L2VPN_EVPN` proto enum. Example config
+  `examples/rr-evpn-fabric/config.toml` demonstrates a 3-VTEP fabric RR.
+  FRR interop sanity test M29 validates capability negotiation against
+  FRR 10.3.1. See [ADR-0050](docs/adr/0050-evpn-route-reflector.md).
+  Phase 1 is RR role only — VTEP mode with local EVI/VRF/VNI state,
+  controller-injection gRPC, DF election (RFC 7432 §8 / RFC 8584),
+  symmetric IRB semantics (RFC 9135), PBB-EVPN (RFC 7623), and EVPN-
+  MVPN integration (RFC 9251) are future-phase work.
+
+---
+
 ## [0.8.0] — 2026-03-23
 
 ### Added

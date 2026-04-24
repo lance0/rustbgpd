@@ -14,7 +14,7 @@ Last updated: 2026-03-12
 | IPv6 Labeled Unicast | Yes | No | |
 | VPNv4 / VPNv6 (RFC 4364) | Yes | No | |
 | L2VPN VPLS (RFC 4761) | Yes | No | |
-| L2VPN EVPN (RFC 7432) | Yes | No | Route types 1-5, 9 |
+| L2VPN EVPN (RFC 7432) | Yes | Partial (RR) | Route types 1-5 in RR mode; VTEP local state and Route Types 6-9 not yet implemented (ADR-0050) |
 | IPv4/IPv6 FlowSpec (RFC 8955) | Yes | Yes | SAFI 133, all 13 component types |
 | VPN FlowSpec | Yes | No | |
 | BGP-LS (RFC 7752) | Yes | No | |
@@ -196,11 +196,12 @@ The primary target deployment. Weighted toward what matters:
 
 **Remaining gaps for IX RS parity:** no material control-plane gaps remain for the target deployment. Remaining work is operator polish: CLI integration tests, listener authorization split, and other non-protocol hardening.
 
-### General-Purpose BGP Speaker (~73% parity)
+### General-Purpose BGP Speaker (~75% parity)
 
 Competing head-to-head with GoBGP for all use cases:
 
-- Missing address families hurt badly (EVPN, VPN, labeled unicast)
+- EVPN RR role present (Phase 1, ADR-0050); VTEP mode + Route Types 6-9 still missing
+- VPNv4/v6 and labeled unicast missing
 - No confederation support limits SP deployments
 - gRPC API covers ~86% of GoBGP's RPC surface (no VRF; dynamic-neighbor query via `ListDynamicNeighbors`, runtime Add/Delete deferred)
 - No Zebra/FIB integration — cannot install routes into the kernel
@@ -219,10 +220,20 @@ Competing head-to-head with GoBGP for all use cases:
 - **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP
 - **Rustc-style config diagnostics** — validation errors show TOML source lines with column markers; GoBGP prints plain-text errors
 - **Live TUI dashboard** — `rustbgpctl top` with session table, prefix counts, message rates, and route events; GoBGP has no built-in TUI
+- **EVPN RR via API-first model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, and gRPC `ListEvpnRoutes` without requiring a CLI detour; GoBGP has deeper EVPN coverage but a more CLI-oriented operational model
 
 ## Top Gaps by Use Case
 
 ### IX Route Server (current target, ~100% parity)
+
+### VXLAN-EVPN DC Fabric RR (~85% parity, added 2026-04)
+
+Minimum viable for a SONiC/FRR fabric where VTEPs handle local state:
+
+1. **EVPN GR/LLGR stale handling** — unicast has it; EVPN not yet wired
+2. **Real Type 2 MAC-exchange interop** — M29 covers capability only; follow-up test needs VXLAN interfaces
+3. **Scale validation** — 50k Type 2 routes at 1000/sec churn
+4. **Hierarchical RR (cluster-of-clusters)** — nested reflection untested
 
 No material protocol gaps remain. Remaining work is operator polish:
 
@@ -231,13 +242,13 @@ No material protocol gaps remain. Remaining work is operator polish:
    route-server capability.
 3. ~~**Built-in looking glass**~~ — shipped as birdwatcher-compatible REST API.
 
-### General-Purpose BGP Speaker (~73% parity)
+### General-Purpose BGP Speaker (~75% parity)
 
 These close the biggest gaps for broader adoption but are out of scope for
 the current alpha:
 
 1. **Confederation (RFC 5065)** — required for service provider deployments
-2. **EVPN (RFC 7432)** — most-requested address family after unicast + FlowSpec
+2. ~~**EVPN RR (RFC 7432)**~~ — Phase 1 RR role shipped; VTEP mode, IRB (RFC 9135), DF election (RFC 8584) are later phases
 3. **VPNv4/v6 (RFC 4364)** — enterprise/SP VPN deployments
 4. ~~**Dynamic neighbors (prefix-based)**~~ — shipped: `[[dynamic_neighbors]]` with peer group inheritance, `remote_asn=0`, auto-accept/remove
 5. **Zebra/FIB integration** — kernel route installation

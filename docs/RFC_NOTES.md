@@ -544,3 +544,77 @@ implemented per ADR-0040.
   UTF-8 reason string.
 - Reason threaded from gRPC `DisableNeighbor` through transport to the
   NOTIFICATION data field.
+
+---
+
+## RFC 7432 — EVPN (Phase 1: Route Reflector)
+
+- AFI 25 (L2VPN) / SAFI 70 (EVPN). Enum variants added to `Afi` and
+  `Safi`; capability negotiation works automatically.
+- Wire codec for all 5 RFC 7432 route types:
+  - **Type 1 EAD** (per-ES when `ethernet_tag == MAX_ET (0xFFFFFFFF)`,
+    per-EVI otherwise). Distinct `EvpnRouteKey` variants prevent
+    semantic collapse.
+  - **Type 2 MAC/IP Advertisement.** IP Addr Length is in **bits**
+    (0 / 32 / 128). Label2 is optional — either 0 or 3 trailing bytes
+    after the primary label.
+  - **Type 3 IMET.** IP length is in bits (32 / 128).
+  - **Type 4 ES.** IP length in bits.
+  - **Type 5 IP Prefix (RFC 9136).** Fixed total length disambiguates
+    IPv4 (34 bytes) from IPv6 (58 bytes) — prefix-length byte alone
+    cannot distinguish since 32 is valid for both.
+- Route Distinguisher (RFC 4364) displays as `<asn16>:<u32>` (Type 0),
+  `<ipv4>:<u16>` (Type 1), `<asn32>:<u16>` (Type 2). Unknown RD types
+  fall back to hex.
+- `EvpnRoute` carries full wire payload (for reflection); `EvpnRouteKey`
+  is the hashable identity used as RIB key.
+- **Best-path §15.1:** Type 2 routes run a MAC Mobility head (sticky
+  preserved against displacement by non-sticky; higher sequence wins)
+  before the standard BGP preference chain. Absence of the MAC Mobility
+  community → `(sticky=false, seq=0)` per §7.7.
+- **Route reflection:** RFC 4456 rules (`ORIGINATOR_ID`, `CLUSTER_LIST`,
+  split-horizon) reuse the existing unicast `should_suppress_ibgp_inner`
+  via a synthetic `Route` probe — no EVPN-specific reflection logic.
+- See ADR-0050.
+
+---
+
+## RFC 9012 / RFC 8365 — BGP Encapsulation Ext Community + VXLAN-EVPN
+
+- The BGP Encapsulation extended community (Type 0x03, Subtype 0x0C)
+  uses the widely-deployed **RFC 5512 layout** (4 bytes reserved +
+  2-byte Tunnel Type). RFC 9012 §4.1 specifies a different layout
+  (1-byte Tunnel Type + 5-byte Flags) but FRR, BIRD, Juniper, and
+  Cisco all emit the RFC 5512 form, so interop compatibility wins.
+- Tunnel Type values: 7 = NVGRE, 8 = VXLAN, 11 = MPLS-over-GRE.
+  `as_bgp_encapsulation()` returns the u16 tunnel type.
+- rustbgpd does not yet **negotiate** a preferred encap. VXLAN is
+  assumed; non-VXLAN values are passed through untouched.
+
+---
+
+## RFC 9135 — Symmetric IRB (wire support, semantics deferred)
+
+- Type 2 MAC/IP routes with a second MPLS label (Label2) and the
+  Router MAC ext community (Type 0x06, Subtype 0x03) are decoded and
+  reflected unchanged. rustbgpd does not yet interpret IRB pairings.
+- The Router MAC ext community accessor returns the 6-byte MAC.
+
+---
+
+## EVPN Extended Communities — typed accessors (RFC 7432 §7.5-§7.8)
+
+Subtypes with typed accessors on `ExtendedCommunity` (others pass
+through as opaque u64):
+
+| Type/Subtype | Name | Payload |
+|---|---|---|
+| 0x03 / 0x0C | BGP Encapsulation | u16 tunnel type |
+| 0x03 / 0x0D | Default Gateway | flag-only (value = 0) |
+| 0x06 / 0x00 | MAC Mobility | (sticky: bool, sequence: u32) |
+| 0x06 / 0x01 | ESI Label | (single_active: bool, label: u32) |
+| 0x06 / 0x02 | ES-Import RT | 6-byte MAC target |
+| 0x06 / 0x03 | Router MAC | 6-byte MAC |
+
+- RFC 8214 Layer 2 Attributes (Type 0x06 / Subtype 0x04) deferred —
+  encoding is complex and not needed for Phase 1 RR flow.

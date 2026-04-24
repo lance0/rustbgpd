@@ -34,6 +34,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m26-cease-frr.clab.yml` | Tested (M26) | Cease/Max-Prefixes subcode 1 | max_prefixes=2, FRR sends 3 | Cease/Maximum Number of Prefixes Reached |
 | FRR (2x) + RTR v2 | 10.3.1 | `tests/interop/m27-aspa-rtr2.clab.yml` | Tested (M27) | ASPA/RTR v2: validation states, best-path preference | Python RTR v2 mock server (StayRTR lacks ASPA); 2 FRR peers for best-path tiebreak | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m28-dynamic-frr.clab.yml` | Tested (M28) | Dynamic prefix-based neighbors | No static neighbor — FRR auto-accepted via `[[dynamic_neighbors]]`; auto-removed on disconnect | — |
+| FRR (bgpd) | 10.3.1 | `tests/interop/m29-evpn-rr-frr.clab.yml` | Tested (M29) | EVPN Route Reflector capability sanity (RFC 7432) | L2VPN/EVPN capability + session + gRPC `ListEvpnRoutes`. Real Type 2 MAC-exchange validation requires VXLAN data-plane in containers and is Phase 1.5 | — |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
 | Arista cEOS | — | — | Stretch | Lab only, not CI | — | — |
 | Cisco IOS-XE | — | — | Stretch | If available | — | — |
@@ -1668,3 +1669,14 @@ is missing. Prioritized by risk.
 | ~~**BMP collector**~~ | ~~Done (M24)~~ | ~~Python BMP receiver validates Initiation, PeerUp, RouteMonitoring messages and ordering.~~ |
 | ~~**TCP MD5 / GTSM**~~ | ~~Done (M25)~~ | ~~Two-peer scenario: MD5-authenticated session + GTSM-secured session, routes exchanged over both.~~ |
 | ~~**Cease subcode compat**~~ | ~~Done (M26)~~ | ~~FRR accepts Cease/1 (Max Prefixes) cleanly. Table updated. BIRD/GoBGP still TBD.~~ |
+
+### P1.5 — EVPN Route Reflector validation depth
+
+| Gap | What exists today | What's missing |
+|-----|-------------------|----------------|
+| **EVPN capability + session** | Done (M29) — L2VPN/EVPN capability negotiated with FRR 10.3.1, session Established, `ListEvpnRoutes` RPC well-formed. | — |
+| **EVPN Type 2 MAC reflection** | Unit tests cover encode/decode round-trip, MAC Mobility sequence + sticky tiebreak, RR reflection path. | Real FRR VTEP advertising a MAC, RR reflects it to a second VTEP, tcpdump confirms `ORIGINATOR_ID` + `CLUSTER_LIST` on reflected UPDATE, VNI preserved in label field. Requires VXLAN interface + bridge setup in containerlab. |
+| **EVPN Type 1 + Type 4 multi-homing** | Wire codec supports both types; RR reflects them unchanged for downstream DF election. | Three-VTEP topology with shared ESI on two VTEPs, third VTEP computes DF locally. Validates that the RR does not interfere with downstream election. |
+| **EVPN MAC mobility end-to-end** | Best-path `evpn_tiebreak_simple` unit-tested for sequence + sticky. | MAC move between two VTEPs through the RR: sequence increments, third-VTEP table reflects the winner, sticky MAC on VTEP-A is not displaced by non-sticky higher-seq at VTEP-C. |
+| **EVPN GR / LLGR stale** | Unicast and FlowSpec do GR/LLGR; EVPN is not yet wired into the stale-route pipeline. | VTEP flaps; reflected EVPN routes retained as stale through restart window, swept on EoR. |
+| **EVPN scale** | — | 10k VNI × 5 MACs = 50k Type 2 routes, 1000/sec churn for 5 minutes, CPU < 50% on one core, memory bounded. |
