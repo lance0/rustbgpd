@@ -297,6 +297,13 @@ impl ExtendedCommunity {
     ///
     /// Returns the Tunnel Type code. For VXLAN-EVPN (RFC 8365), the value is
     /// 8. Other common values: 7 = NVGRE, 11 = MPLS-over-GRE.
+    ///
+    /// The reserved bytes are intentionally not validated here: RFC 5512
+    /// specifies MUST-zero on send, ignored on receive. FRR, `GoBGP`, Cisco,
+    /// and Juniper all emit zeros in practice; rejecting non-zero reserves
+    /// would break interop in the rare case an unknown implementation
+    /// re-purposes those bytes. Consumers should treat the returned
+    /// `tunnel_type` as the semantic signal.
     #[must_use]
     pub fn as_bgp_encapsulation(self) -> Option<u16> {
         if self.type_byte() & 0x3F != 0x03 || self.subtype() != 0x0C {
@@ -419,11 +426,14 @@ impl ExtendedCommunity {
     }
 
     /// Decode as Default Gateway Extended Community (RFC 4761 §3.2.5 /
-    /// RFC 7432). Type 0x03, subtype 0x0D. This is a flag-only community —
-    /// presence is the signal; the value field is all zeros.
+    /// RFC 7432). Type 0x03, subtype 0x0D. This is a flag-only community:
+    /// presence is the signal and the 6-byte value field must be all zeros.
+    /// Malformed advertisements with non-zero value bytes are treated as
+    /// non-matches rather than silently accepted — downstream policy and
+    /// validation consumers treat this accessor as semantic truth.
     #[must_use]
     pub fn as_default_gateway(self) -> bool {
-        self.type_byte() & 0x3F == 0x03 && self.subtype() == 0x0D
+        self.type_byte() & 0x3F == 0x03 && self.subtype() == 0x0D && self.value_bytes() == [0u8; 6]
     }
 
     /// Construct a Default Gateway Extended Community.
@@ -1609,6 +1619,22 @@ mod tests {
         assert!(d.as_default_gateway());
         // Not a default gateway
         assert!(!ExtendedCommunity::bgp_encapsulation(8).as_default_gateway());
+    }
+
+    /// Regression: Default Gateway is a flag-only community (RFC 7432).
+    /// Malformed advertisements that set non-zero bytes in the value
+    /// field must NOT be treated as default-gateway matches.
+    #[test]
+    fn ext_comm_default_gateway_rejects_nonzero_value() {
+        // Correct type/subtype (0x03/0x0D) but bogus value.
+        let malformed =
+            ExtendedCommunity::new(u64::from_be_bytes([0x03, 0x0D, 0, 0, 0, 0, 0, 0x01]));
+        assert!(
+            !malformed.as_default_gateway(),
+            "default-gateway accessor must require all-zero value bytes"
+        );
+        // Sanity: the clean form still passes.
+        assert!(ExtendedCommunity::default_gateway().as_default_gateway());
     }
 
     #[test]
