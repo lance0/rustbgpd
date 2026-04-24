@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
 use super::RibManager;
@@ -10,6 +10,10 @@ use crate::adj_rib_out::AdjRibOut;
 use crate::update::OutboundRouteUpdate;
 
 impl RibManager {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "End-of-RIB handler covers GR and LLGR branches for all three families (unicast, FlowSpec, EVPN)"
+    )]
     pub(super) fn handle_end_of_rib(&mut self, peer: IpAddr, afi: Afi, safi: Safi) {
         info!(%peer, ?afi, ?safi, "received End-of-RIB");
         let is_gr_peer = self.gr_peers.contains_key(&peer);
@@ -33,9 +37,19 @@ impl RibManager {
                 })
                 .unwrap_or_default();
 
+            let evpn_affected: HashSet<EvpnRouteKey> = if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
+                self.ribs
+                    .get(&peer)
+                    .map(|rib| rib.iter_evpn().map(|r| r.key).collect())
+                    .unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
+
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.clear_stale((afi, safi));
                 rib.clear_stale_flowspec((afi, safi));
+                rib.clear_stale_evpn((afi, safi));
             }
 
             let affected: HashSet<Prefix> = self
@@ -48,12 +62,16 @@ impl RibManager {
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
             }
+            if !evpn_affected.is_empty() {
+                self.recompute_and_distribute_evpn(&evpn_affected);
+            }
 
             let peer_label = peer.to_string();
-            let stale_count = self
-                .ribs
-                .get(&peer)
-                .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
+            let stale_count = self.ribs.get(&peer).map_or(0, |rib| {
+                rib.iter().filter(|r| r.is_stale).count()
+                    + rib.iter_flowspec().filter(|r| r.is_stale).count()
+                    + rib.iter_evpn().filter(|r| r.is_stale).count()
+            });
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
 
@@ -83,9 +101,19 @@ impl RibManager {
                 })
                 .unwrap_or_default();
 
+            let evpn_affected: HashSet<EvpnRouteKey> = if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
+                self.ribs
+                    .get(&peer)
+                    .map(|rib| rib.iter_evpn().map(|r| r.key).collect())
+                    .unwrap_or_default()
+            } else {
+                HashSet::new()
+            };
+
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 rib.clear_llgr_stale((afi, safi));
                 rib.clear_llgr_stale_flowspec((afi, safi));
+                rib.clear_llgr_stale_evpn((afi, safi));
             }
 
             let affected: HashSet<Prefix> = self
@@ -98,12 +126,16 @@ impl RibManager {
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
             }
+            if !evpn_affected.is_empty() {
+                self.recompute_and_distribute_evpn(&evpn_affected);
+            }
 
             let peer_label = peer.to_string();
-            let llgr_stale_count = self
-                .ribs
-                .get(&peer)
-                .map_or(0, |rib| rib.iter().filter(|r| r.is_llgr_stale).count());
+            let llgr_stale_count = self.ribs.get(&peer).map_or(0, |rib| {
+                rib.iter().filter(|r| r.is_llgr_stale).count()
+                    + rib.iter_flowspec().filter(|r| r.is_llgr_stale).count()
+                    + rib.iter_evpn().filter(|r| r.is_llgr_stale).count()
+            });
             self.metrics
                 .set_gr_stale_routes(&peer_label, gauge_val(llgr_stale_count));
 
@@ -140,6 +172,12 @@ impl RibManager {
                 for route in rib.iter_flowspec().filter(|route| route.afi == afi) {
                     stale.insert((route.afi, route.rule.clone(), route.path_id));
                 }
+            } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
+                let stale = self.refresh_stale_evpn.entry(peer).or_default();
+                stale.clear();
+                for route in rib.iter_evpn() {
+                    stale.insert(route.key);
+                }
             } else {
                 let stale = self.refresh_stale_routes.entry(peer).or_default();
                 stale.retain(|(prefix, _)| prefix_family(prefix) != (afi, safi));
@@ -167,6 +205,8 @@ impl RibManager {
         let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
+        let mut evpn_announce = Vec::new();
+        let mut evpn_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -224,6 +264,27 @@ impl RibManager {
                     export_pol.as_ref(),
                     &mut fs_announce,
                     &mut fs_withdraw,
+                );
+            }
+        } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
+            let evpn_keys: HashSet<EvpnRouteKey> =
+                self.loc_rib.iter_evpn().map(|r| r.key).collect();
+            if !evpn_keys.is_empty() {
+                Self::stage_evpn_routes(
+                    loc_rib,
+                    &refresh_view,
+                    &self.peer_is_rr_client,
+                    &evpn_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    &mut evpn_announce,
+                    &mut evpn_withdraw,
                 );
             }
         } else {
@@ -289,8 +350,8 @@ impl RibManager {
                 ],
                 fs_announce,
                 fs_withdraw,
-                vec![],
-                vec![],
+                evpn_announce,
+                evpn_withdraw,
             ) {
                 warn!(%peer, ?family, "outbound channel full during route refresh response");
                 self.metrics.record_outbound_route_drop(&peer.to_string());
@@ -351,6 +412,10 @@ impl RibManager {
     ///
     /// When `timed_out` is true, treats the timeout as an implicit end-of-
     /// refresh sweep and logs a warning before cleaning up unreplaced state.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "refresh finisher sweeps unreplaced unicast, FlowSpec, and EVPN routes and clears per-family tracking state"
+    )]
     pub(super) fn finish_route_refresh(
         &mut self,
         peer: IpAddr,
@@ -401,9 +466,18 @@ impl RibManager {
                     .collect()
             })
             .unwrap_or_default();
+        let stale_evpn_keys: Vec<EvpnRouteKey> = if family == (Afi::L2Vpn, Safi::Evpn) {
+            self.refresh_stale_evpn
+                .get(&peer)
+                .map(|stale| stale.iter().copied().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
+        let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
         if let Some(rib) = self.ribs.get_mut(&peer) {
             for (prefix, path_id) in &stale_route_keys {
                 if rib.withdraw(prefix, *path_id) {
@@ -415,6 +489,11 @@ impl RibManager {
                     fs_affected.insert(rule.clone());
                 }
             }
+            for key in &stale_evpn_keys {
+                if rib.withdraw_evpn(key) {
+                    evpn_affected.insert(*key);
+                }
+            }
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
             self.metrics.set_rib_prefixes(
@@ -422,6 +501,8 @@ impl RibManager {
                 "flowspec",
                 gauge_val(rib.flowspec_len()),
             );
+            self.metrics
+                .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(rib.evpn_len()));
         }
 
         let clear_route_stale_entry = if let Some(stale) = self.refresh_stale_routes.get_mut(&peer)
@@ -446,6 +527,10 @@ impl RibManager {
             self.refresh_stale_flowspec.remove(&peer);
         }
 
+        if family == (Afi::L2Vpn, Safi::Evpn) {
+            self.refresh_stale_evpn.remove(&peer);
+        }
+
         let clear_refresh_entry = if let Some(families) = self.refresh_in_progress.get_mut(&peer) {
             families.remove(&family);
             families.is_empty()
@@ -460,6 +545,9 @@ impl RibManager {
         self.distribute_changes(&changed, &affected);
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+        if !evpn_affected.is_empty() {
+            self.recompute_and_distribute_evpn(&evpn_affected);
         }
     }
 }
