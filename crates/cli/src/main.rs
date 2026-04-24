@@ -106,17 +106,20 @@ enum Command {
         family: Option<String>,
     },
 
-    /// List EVPN routes in the local RIB (RFC 7432)
+    /// Manage EVPN routes (list, add, delete — RFC 7432)
     Evpn {
-        /// Route type filter (1..=5)
+        #[command(subcommand)]
+        action: Option<EvpnAction>,
+
+        /// Route type filter (1..=5) — applies when no subcommand is given.
         #[arg(long)]
         route_type: Option<u32>,
 
-        /// Peer IP address filter
+        /// Peer IP address filter (list mode only)
         #[arg(long)]
         peer: Option<String>,
 
-        /// Route Distinguisher filter (display format, e.g. "65000:100")
+        /// Route Distinguisher filter (list mode only), e.g. "65000:100"
         #[arg(long)]
         rd: Option<String>,
     },
@@ -293,6 +296,86 @@ enum FlowspecAction {
         /// Match components identifying the rule
         #[arg(long = "match", value_delimiter = ' ')]
         components: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EvpnAction {
+    /// List EVPN routes (default action — same as omitting the subcommand).
+    List {
+        #[arg(long)]
+        route_type: Option<u32>,
+        #[arg(long)]
+        peer: Option<String>,
+        #[arg(long)]
+        rd: Option<String>,
+    },
+    /// Inject a Type 2 MAC/IP route.
+    AddMacIp {
+        /// Route Distinguisher, "asn:value" / "ip:value".
+        #[arg(long)]
+        rd: String,
+        /// Ethernet-tag identifying the EVI (default 0).
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        /// MAC address "aa:bb:cc:dd:ee:ff".
+        #[arg(long)]
+        mac: String,
+        /// Host IP (optional — MAC-only route if omitted).
+        #[arg(long)]
+        ip: Option<String>,
+        /// VNI for this EVI (required).
+        #[arg(long)]
+        label: u32,
+        /// Optional second label for RFC 9135 symmetric IRB.
+        #[arg(long)]
+        label2: Option<u32>,
+        /// VTEP loopback IP (next-hop).
+        #[arg(long)]
+        next_hop: String,
+        /// Optional route targets, each "asn:value".
+        #[arg(long, value_delimiter = ',')]
+        rt: Vec<String>,
+        /// Disable the RFC 8365 VXLAN encapsulation ext community.
+        #[arg(long)]
+        no_vxlan_encap: bool,
+    },
+    /// Inject a Type 3 IMET route.
+    AddImet {
+        #[arg(long)]
+        rd: String,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        /// Originator IP (required for Type 3).
+        #[arg(long)]
+        ip: String,
+        /// VTEP loopback IP (next-hop).
+        #[arg(long)]
+        next_hop: String,
+        #[arg(long, value_delimiter = ',')]
+        rt: Vec<String>,
+        #[arg(long)]
+        no_vxlan_encap: bool,
+    },
+    /// Withdraw a Type 2 MAC/IP route by its key fields.
+    DeleteMacIp {
+        #[arg(long)]
+        rd: String,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        #[arg(long)]
+        mac: String,
+        #[arg(long)]
+        ip: Option<String>,
+    },
+    /// Withdraw a Type 3 IMET route by its key fields.
+    DeleteImet {
+        #[arg(long)]
+        rd: String,
+        #[arg(long, default_value_t = 0)]
+        ethernet_tag: u32,
+        #[arg(long)]
+        ip: String,
     },
 }
 
@@ -560,10 +643,85 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         }
 
         Command::Evpn {
+            action,
             route_type,
             peer,
             rd,
-        } => commands::evpn::list(connection, route_type, peer, rd, json).await,
+        } => match action {
+            None => commands::evpn::list(connection, route_type, peer, rd, json).await,
+            Some(EvpnAction::List {
+                route_type,
+                peer,
+                rd,
+            }) => commands::evpn::list(connection, route_type, peer, rd, json).await,
+            Some(EvpnAction::AddMacIp {
+                rd,
+                ethernet_tag,
+                mac,
+                ip,
+                label,
+                label2,
+                next_hop,
+                rt,
+                no_vxlan_encap,
+            }) => {
+                commands::evpn::add_mac_ip(
+                    connection,
+                    rd,
+                    ethernet_tag,
+                    mac,
+                    ip.unwrap_or_default(),
+                    label,
+                    label2.unwrap_or(0),
+                    next_hop,
+                    rt,
+                    !no_vxlan_encap,
+                    json,
+                )
+                .await
+            }
+            Some(EvpnAction::AddImet {
+                rd,
+                ethernet_tag,
+                ip,
+                next_hop,
+                rt,
+                no_vxlan_encap,
+            }) => {
+                commands::evpn::add_imet(
+                    connection,
+                    rd,
+                    ethernet_tag,
+                    ip,
+                    next_hop,
+                    rt,
+                    !no_vxlan_encap,
+                    json,
+                )
+                .await
+            }
+            Some(EvpnAction::DeleteMacIp {
+                rd,
+                ethernet_tag,
+                mac,
+                ip,
+            }) => {
+                commands::evpn::delete_mac_ip(
+                    connection,
+                    rd,
+                    ethernet_tag,
+                    mac,
+                    ip.unwrap_or_default(),
+                    json,
+                )
+                .await
+            }
+            Some(EvpnAction::DeleteImet {
+                rd,
+                ethernet_tag,
+                ip,
+            }) => commands::evpn::delete_imet(connection, rd, ethernet_tag, ip, json).await,
+        },
 
         Command::Flowspec { action, family } => {
             let family_val = resolve_family(&family)?;

@@ -1,7 +1,9 @@
 use crate::connection::Connection;
 use crate::error::CliError;
-use crate::proto::ListEvpnRequest;
+use crate::output;
+use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
+use crate::proto::{AddEvpnRouteRequest, DeleteEvpnRouteRequest, ListEvpnRequest};
 
 fn route_type_label(t: u32) -> &'static str {
     match t {
@@ -105,5 +107,115 @@ pub async fn list(
             );
         }
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn add_mac_ip(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    mac: String,
+    ip: String,
+    label: u32,
+    label2: u32,
+    next_hop: String,
+    route_targets: Vec<String>,
+    vxlan_encap: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .add_evpn_route(AddEvpnRouteRequest {
+            route_type: 2,
+            rd,
+            ethernet_tag,
+            mac,
+            ip,
+            label,
+            label2,
+            next_hop,
+            route_targets,
+            vxlan_encap,
+        })
+        .await?;
+    output::print_result(json, "add_evpn", "", "EVPN Type 2 route added");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn add_imet(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    ip: String,
+    next_hop: String,
+    route_targets: Vec<String>,
+    vxlan_encap: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .add_evpn_route(AddEvpnRouteRequest {
+            route_type: 3,
+            rd,
+            ethernet_tag,
+            mac: String::new(),
+            ip,
+            label: 0,
+            label2: 0,
+            next_hop,
+            route_targets,
+            vxlan_encap,
+        })
+        .await?;
+    output::print_result(json, "add_evpn", "", "EVPN Type 3 route added");
+    Ok(())
+}
+
+pub async fn delete_mac_ip(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    mac: String,
+    ip: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .delete_evpn_route(DeleteEvpnRouteRequest {
+            route_type: 2,
+            rd,
+            ethernet_tag,
+            mac,
+            ip,
+        })
+        .await?;
+    output::print_result(json, "delete_evpn", "", "EVPN Type 2 route deleted");
+    Ok(())
+}
+
+pub async fn delete_imet(
+    connection: Connection,
+    rd: String,
+    ethernet_tag: u32,
+    ip: String,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        InjectionServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    client
+        .delete_evpn_route(DeleteEvpnRouteRequest {
+            route_type: 3,
+            rd,
+            ethernet_tag,
+            mac: String::new(),
+            ip,
+        })
+        .await?;
+    output::print_result(json, "delete_evpn", "", "EVPN Type 3 route deleted");
     Ok(())
 }
