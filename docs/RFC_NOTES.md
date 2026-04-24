@@ -604,6 +604,18 @@ implemented per ADR-0040.
   Mobility sequence on the reflected Type 2 and flips the observing
   VTEP's best path. Sticky MAC on the first VTEP is not displaced by
   a non-sticky advertisement from the second VTEP.
+- **Multi-homing reflection interop** (RFC 7432 §8): validated via
+  the M32 4-node harness
+  (`tests/interop/m32-evpn-multihome-frr.clab.yml`). Two FRR VTEPs
+  share an Ethernet Segment (same `es-id` + `es-sys-mac` →
+  identical 10-byte ESI); both originate Type 1 EAD-per-ES and
+  Type 4 ES routes that the rustbgpd RR reflects to a third
+  observing VTEP. Assertions cover that both ESI-sharing peers'
+  Type 1 + Type 4 routes reach the observer with correct
+  `ORIGINATOR_ID` + `CLUSTER_LIST`, that gRPC `ListEvpnRoutes`
+  surfaces both Route Type 1 and Route Type 4 entries, and that
+  the observing VTEP receives the inputs DF election needs. DF
+  election itself runs on the VTEPs; the RR is path-transparent.
 - See ADR-0050.
 
 ---

@@ -226,14 +226,14 @@ Competing head-to-head with GoBGP for all use cases:
 
 ### IX Route Server (current target, ~100% parity)
 
-### VXLAN-EVPN DC Fabric RR (~94% parity, added 2026-04)
+### VXLAN-EVPN DC Fabric RR (~96% parity, added 2026-04)
 
 Minimum viable for a SONiC/FRR fabric where VTEPs handle local state:
 
 1. ~~**EVPN GR/LLGR stale handling**~~ — shipped (Gate 2, 2026-04-23). EVPN participates in the stale-route pipeline alongside unicast and FlowSpec; LLGR promotion injects `LLGR_STALE`, `NO_LLGR` is honored, EoR and ERR clear stale state.
 2. ~~**Real Type 2 MAC-exchange interop**~~ — shipped (Gate 1, M30, 2026-04-24). 3-node containerlab topology with kernel VXLAN + bridge per VTEP validates Type 2 reflection against FRR 10.3.1 end-to-end.
 3. ~~**MAC mobility / sticky preservation interop**~~ — shipped (Gate 3, M31, 2026-04-24). 4-node topology validates the RFC 7432 §15.1 sequence increment on move and §7.7 sticky semantics against real FRR.
-4. **Multi-homing (Type 1 EAD + Type 4 ES)** — wire codec done; interop pending (Gate 4)
+4. ~~**Multi-homing (Type 1 EAD + Type 4 ES) reflection**~~ — shipped (Gate 4, M32, 2026-04-24). 4-node topology with two FRR VTEPs sharing an Ethernet Segment validates Type 1 EAD + Type 4 ES reflection through the rustbgpd RR; DF election input completeness verified end-to-end.
 5. **Scale validation** — 50k Type 2 routes at 1000/sec churn (Gate 5)
 6. **Hierarchical RR (cluster-of-clusters)** — nested reflection untested
 
