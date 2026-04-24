@@ -155,10 +155,14 @@ impl LocRib {
             .cloned();
         match best {
             Some(new_best) => {
-                let changed = self
-                    .evpn_routes
-                    .get(&key)
-                    .is_none_or(|old| old.peer != new_best.peer);
+                // Detect peer switches AND is_stale/is_llgr_stale flips —
+                // the latter matter for GR/LLGR even when the best peer is
+                // unchanged (e.g. single-peer stale transitions).
+                let changed = self.evpn_routes.get(&key).is_none_or(|old| {
+                    old.peer != new_best.peer
+                        || old.is_stale != new_best.is_stale
+                        || old.is_llgr_stale != new_best.is_llgr_stale
+                });
                 if changed {
                     self.evpn_routes.insert(key, new_best);
                 }
