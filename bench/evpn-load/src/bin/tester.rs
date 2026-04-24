@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     // Build shared attribute set — identical across all routes except for
     // the NLRI payload itself. That keeps per-route CPU to a minimum on
     // the generator side so the RR's scale is what we measure.
-    let rd = make_rd(args.local_as);
+    let rd = make_rd(args.router_id);
 
     inject_phase(
         &handle.tx,
@@ -159,10 +159,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn make_rd(asn: u32) -> RouteDistinguisher {
-    // RD type 2: 4-byte admin ASN + 2-byte assigned. Assigned = 1.
-    let asn = asn.to_be_bytes();
-    RouteDistinguisher::new([0x00, 0x02, asn[0], asn[1], asn[2], asn[3], 0x00, 0x01])
+fn make_rd(router_id: Ipv4Addr) -> RouteDistinguisher {
+    // RD type 1: 4-byte admin IPv4 + 2-byte assigned. Anchored on the
+    // local router-id so each tester's routes have distinct RDs and
+    // don't collide at the RR's keyspace. Using type 2 + ASN would
+    // collapse all testers to the same RD.
+    let ip = router_id.octets();
+    RouteDistinguisher::new([0x00, 0x01, ip[0], ip[1], ip[2], ip[3], 0x00, 0x01])
 }
 
 fn build_type2(index: u32, rd: RouteDistinguisher, ethernet_tag: u32, vni: u32) -> EvpnRoute {

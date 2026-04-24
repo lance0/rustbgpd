@@ -11,6 +11,7 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::too_many_lines)]
 
+use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,7 @@ use clap::Parser;
 use rustbgpd_evpn_load::{PeerConfig, establish};
 use rustbgpd_wire::attribute::PathAttribute;
 use rustbgpd_wire::capability::{Afi, Safi};
-use rustbgpd_wire::evpn::EvpnRoute;
+use rustbgpd_wire::evpn::{EvpnRoute, EvpnRouteKey};
 use rustbgpd_wire::message::Message;
 use rustbgpd_wire::update::UpdateMessage;
 use serde::Serialize;
@@ -64,8 +65,23 @@ struct Args {
 struct Report {
     converged: bool,
     expected: u32,
+    /// Number of distinct EVPN Type 2 keys currently live in the
+    /// monitor's view. Incremented on announces that introduce a new
+    /// key; decremented on withdraws that remove one. Re-advertisements
+    /// of an already-present key are idempotent.
     final_count: i64,
-    convergence_sec: f64,
+    /// Seconds from session-Established to the FIRST moment the live
+    /// key set reached `expect`. This is the real convergence number
+    /// — how fast the RR flooded the set through to the observer.
+    initial_convergence_sec: f64,
+    /// Seconds from session-Established to when the live key set
+    /// stabilized at `expect` for at least `stable_sec` continuous
+    /// seconds. This is later than `initial_convergence_sec` if
+    /// churn was running (each withdraw+readd resets the timer).
+    stable_convergence_sec: f64,
+    /// Every announce message counted, including idempotent
+    /// re-advertisements (so churn shows up here but not in
+    /// `final_count`).
     total_announcements: u64,
     total_withdrawals: u64,
     updates_received: u64,
@@ -103,12 +119,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("session established, observing");
 
     let session_start = Instant::now();
-    let mut count: i64 = 0;
+    let mut live_keys: HashSet<EvpnRouteKey> = HashSet::new();
     let mut announcements: u64 = 0;
     let mut withdrawals: u64 = 0;
     let mut updates: u64 = 0;
     let mut last_change = Instant::now();
 
+    let mut initial_convergence_at: Option<Instant> = None;
     let mut converged_at: Option<Instant> = None;
     let timeout = Duration::from_secs(args.timeout_sec);
     let stable = Duration::from_secs(args.stable_sec);
@@ -129,12 +146,15 @@ async fn main() -> anyhow::Result<()> {
         match recv.await {
             Ok(Some(Message::Update(u))) => {
                 updates += 1;
-                let (added, removed) = count_evpn_type2(&u);
-                count += i64::from(added) - i64::from(removed);
-                announcements += u64::from(added);
-                withdrawals += u64::from(removed);
-                if added > 0 || removed > 0 {
+                let before = live_keys.len();
+                let (anns, withs) = apply_evpn_type2(&u, &mut live_keys);
+                announcements += anns;
+                withdrawals += withs;
+                if live_keys.len() != before {
                     last_change = Instant::now();
+                    if initial_convergence_at.is_none() && live_keys.len() == args.expect as usize {
+                        initial_convergence_at = Some(Instant::now());
+                    }
                 }
             }
             Ok(Some(_)) | Err(_) => {
@@ -147,7 +167,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         if converged_at.is_none()
-            && count == i64::from(args.expect)
+            && live_keys.len() == args.expect as usize
             && last_change.elapsed() >= stable
         {
             converged_at = Some(Instant::now());
@@ -172,13 +192,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let elapsed = session_start.elapsed().as_secs_f64();
-    let convergence_sec =
+    let initial_convergence_sec =
+        initial_convergence_at.map_or(f64::NAN, |t| t.duration_since(session_start).as_secs_f64());
+    let stable_convergence_sec =
         converged_at.map_or(f64::NAN, |t| t.duration_since(session_start).as_secs_f64());
     let report = Report {
         converged: converged_at.is_some(),
         expected: args.expect,
-        final_count: count,
-        convergence_sec,
+        final_count: i64::try_from(live_keys.len()).unwrap_or(i64::MAX),
+        initial_convergence_sec,
+        stable_convergence_sec,
         total_announcements: announcements,
         total_withdrawals: withdrawals,
         updates_received: updates,
@@ -193,34 +216,34 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Count Type 2 announcements and withdrawals in this UPDATE. All other
-/// EVPN route types are ignored — the monitor is scoped to Type 2
-/// scale.
-fn count_evpn_type2(u: &UpdateMessage) -> (u32, u32) {
+/// Apply Type 2 announces (insert keys) and withdraws (remove keys)
+/// from this UPDATE to `live_keys`. Returns `(announcement_events,
+/// withdrawal_events)` — raw event counts including idempotent
+/// re-advertisements, useful for churn accounting. Other EVPN route
+/// types are ignored; the monitor is scoped to Type 2 scale.
+fn apply_evpn_type2(u: &UpdateMessage, live_keys: &mut HashSet<EvpnRouteKey>) -> (u64, u64) {
     let Ok(parsed) = u.parse(true, false, &[]) else {
         return (0, 0);
     };
-    let mut a = 0u32;
-    let mut w = 0u32;
+    let mut a: u64 = 0;
+    let mut w: u64 = 0;
     for attr in &parsed.attributes {
         match attr {
             PathAttribute::MpReachNlri(mp) if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn => {
-                a += u32::try_from(
-                    mp.evpn_announced
-                        .iter()
-                        .filter(|r| matches!(r, EvpnRoute::MacIp(_)))
-                        .count(),
-                )
-                .unwrap_or(u32::MAX);
+                for r in &mp.evpn_announced {
+                    if matches!(r, EvpnRoute::MacIp(_)) {
+                        live_keys.insert(r.key());
+                        a += 1;
+                    }
+                }
             }
             PathAttribute::MpUnreachNlri(mp) if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn => {
-                w += u32::try_from(
-                    mp.evpn_withdrawn
-                        .iter()
-                        .filter(|r| matches!(r, EvpnRoute::MacIp(_)))
-                        .count(),
-                )
-                .unwrap_or(u32::MAX);
+                for r in &mp.evpn_withdrawn {
+                    if matches!(r, EvpnRoute::MacIp(_)) {
+                        live_keys.remove(&r.key());
+                        w += 1;
+                    }
+                }
             }
             _ => {}
         }

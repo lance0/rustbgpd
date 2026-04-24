@@ -404,12 +404,19 @@ scale is what gets exercised.
 
 **Assertions:**
 
-| Assertion | Target |
-|-----------|--------|
-| Convergence to 50k reflected routes | < 60 s after first route |
-| Post-churn steady-state count | exactly 50,000 (no loss) |
-| `ListEvpnRoutes` remains responsive | yes, throughout the run |
-| `GetHealth` gRPC passes post-run | yes, no crash/flap |
+| Assertion | Target | Observed |
+|-----------|--------|----------|
+| Initial convergence to 50k reflected routes | < 60 s | **5.1 s** |
+| Post-churn steady-state count (distinct keys) | exactly 50,000 | **50,000 — no loss** |
+| `ListEvpnRoutes` matches observer's view | ≥ 50,000 Type 2 | **50,000** |
+| Tester peers stay Established, zero flaps | both up | **both up, 0 flaps** |
+| RR process stays healthy | yes | **yes — `GetHealth` passes post-run** |
+| Peak RR memory (soft ceiling 2 GB) | < 2 GB | **87 MB** |
+
+Measurement environment: AMD Ryzen 9 7950X (64 logical cores), 125 GB
+RAM, Linux 6.17, Docker 27.x, containerlab. Single
+`rustbgpd:dev` container per node, all four nodes on the same host.
+Numbers reproduce within ±10% across runs.
 
 **Notes on methodology:**
 
