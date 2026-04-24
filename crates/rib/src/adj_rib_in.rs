@@ -32,6 +32,11 @@ pub struct AdjRibIn {
     flowspec_llgr_stale_local_tags: HashSet<(FlowSpecRule, u32)>,
     /// EVPN routes keyed by RFC 7432 route identity.
     evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
+    /// EVPN route keys where `LLGR_STALE` was injected locally by this daemon
+    /// during promotion from GR-stale → LLGR-stale. Used to distinguish
+    /// locally-injected communities (which we strip on clear) from
+    /// peer-originated ones (which must be preserved).
+    evpn_llgr_stale_local_tags: HashSet<EvpnRouteKey>,
     /// Intern table: deduplicates identical attribute sets across routes.
     /// Lookup by content returns the shared `Arc`.  Entries with
     /// `strong_count == 1` (only the intern table itself) are garbage-
@@ -59,6 +64,7 @@ impl AdjRibIn {
             flowspec_routes: HashMap::with_capacity(flowspec_capacity),
             flowspec_llgr_stale_local_tags: HashSet::new(),
             evpn_routes: HashMap::new(),
+            evpn_llgr_stale_local_tags: HashSet::new(),
             attr_intern: HashSet::with_capacity(route_capacity.clamp(16, 64)),
         }
     }
@@ -109,6 +115,7 @@ impl AdjRibIn {
         self.prefix_index.clear();
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
+        self.evpn_llgr_stale_local_tags.clear();
         self.attr_intern.clear();
     }
 
@@ -393,6 +400,155 @@ impl AdjRibIn {
         self.evpn_routes.len()
     }
 
+    /// Iterate mutably over all EVPN routes.
+    pub fn iter_evpn_mut(&mut self) -> impl Iterator<Item = &mut EvpnRibRoute> {
+        self.evpn_routes.values_mut()
+    }
+
+    // --- EVPN GR/LLGR stale handling (RFC 4724 + RFC 9494) ---
+    //
+    // Follows the unicast pattern (not FlowSpec): EvpnRibRoute attributes
+    // are Arc<Vec<PathAttribute>>, so community injection goes through
+    // Arc::make_mut to preserve the intern-table sharing invariant.
+    //
+    // EVPN has a single family tuple (Afi::L2Vpn, Safi::Evpn), so family
+    // match checks reduce to direct equality.
+
+    /// Mark all EVPN routes as stale if `family == (L2Vpn, Evpn)`.
+    pub fn mark_stale_evpn(&mut self, family: (Afi, Safi)) {
+        if family != (Afi::L2Vpn, Safi::Evpn) {
+            return;
+        }
+        for route in self.evpn_routes.values_mut() {
+            route.is_stale = true;
+        }
+    }
+
+    /// Clear the stale flag on EVPN routes (both `is_stale` and
+    /// `is_llgr_stale`), stripping any locally-injected `LLGR_STALE`
+    /// community. Peer-originated `LLGR_STALE` communities are preserved.
+    pub fn clear_stale_evpn(&mut self, family: (Afi, Safi)) {
+        if family != (Afi::L2Vpn, Safi::Evpn) {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.evpn_routes {
+            route.is_stale = false;
+            route.is_llgr_stale = false;
+            if self.evpn_llgr_stale_local_tags.contains(key) {
+                clear_local_llgr.push(*key);
+            }
+        }
+        self.clear_local_llgr_stale_evpn_community(&clear_local_llgr);
+    }
+
+    /// Remove all stale EVPN routes, returning their keys.
+    pub fn sweep_stale_evpn(&mut self) -> Vec<EvpnRouteKey> {
+        let stale: Vec<EvpnRouteKey> = self
+            .evpn_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &stale {
+            self.evpn_llgr_stale_local_tags.remove(key);
+            self.evpn_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Remove stale EVPN routes if `family == (L2Vpn, Evpn)`. Used when a
+    /// family was in GR but not in the peer's LLGR capability.
+    pub fn sweep_stale_family_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
+        if family != (Afi::L2Vpn, Safi::Evpn) {
+            return Vec::new();
+        }
+        self.sweep_stale_evpn()
+    }
+
+    /// Promote GR-stale EVPN routes to LLGR-stale (RFC 9494).
+    ///
+    /// - Routes with `NO_LLGR` community are removed (must not enter LLGR).
+    /// - Remaining stale routes: `is_stale=false`, `is_llgr_stale=true`,
+    ///   `LLGR_STALE` community added via `Arc::make_mut`.
+    ///
+    /// Returns keys affected (for best-path recalc).
+    pub fn promote_to_llgr_stale_evpn(&mut self, family: (Afi, Safi)) -> Vec<EvpnRouteKey> {
+        use rustbgpd_wire::{COMMUNITY_LLGR_STALE, COMMUNITY_NO_LLGR};
+
+        if family != (Afi::L2Vpn, Safi::Evpn) {
+            return Vec::new();
+        }
+
+        // First pass: remove routes carrying NO_LLGR
+        let no_llgr_keys: Vec<EvpnRouteKey> = self
+            .evpn_routes
+            .iter()
+            .filter(|(_, r)| r.is_stale && r.communities().contains(&COMMUNITY_NO_LLGR))
+            .map(|(k, _)| *k)
+            .collect();
+        let mut affected: Vec<EvpnRouteKey> = no_llgr_keys.clone();
+        for key in &no_llgr_keys {
+            self.evpn_llgr_stale_local_tags.remove(key);
+            self.evpn_routes.remove(key);
+        }
+
+        // Second pass: promote remaining stale routes to LLGR-stale
+        for route in self.evpn_routes.values_mut() {
+            if route.is_stale {
+                route.is_stale = false;
+                route.is_llgr_stale = true;
+                let attrs = Arc::make_mut(&mut route.attributes);
+                if let Some(PathAttribute::Communities(comms)) = attrs
+                    .iter_mut()
+                    .find(|a| matches!(a, PathAttribute::Communities(_)))
+                {
+                    if !comms.contains(&COMMUNITY_LLGR_STALE) {
+                        comms.push(COMMUNITY_LLGR_STALE);
+                        self.evpn_llgr_stale_local_tags.insert(route.key);
+                    }
+                } else {
+                    attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
+                    self.evpn_llgr_stale_local_tags.insert(route.key);
+                }
+                affected.push(route.key);
+            }
+        }
+
+        affected
+    }
+
+    /// Remove all LLGR-stale EVPN routes, returning their keys.
+    pub fn sweep_llgr_stale_evpn(&mut self) -> Vec<EvpnRouteKey> {
+        let stale: Vec<EvpnRouteKey> = self
+            .evpn_routes
+            .iter()
+            .filter(|(_, r)| r.is_llgr_stale)
+            .map(|(k, _)| *k)
+            .collect();
+        for key in &stale {
+            self.evpn_llgr_stale_local_tags.remove(key);
+            self.evpn_routes.remove(key);
+        }
+        stale
+    }
+
+    /// Clear the LLGR-stale flag on EVPN routes. Called when `EoR` is
+    /// received during LLGR phase.
+    pub fn clear_llgr_stale_evpn(&mut self, family: (Afi, Safi)) {
+        if family != (Afi::L2Vpn, Safi::Evpn) {
+            return;
+        }
+        let mut clear_local_llgr = Vec::new();
+        for (key, route) in &mut self.evpn_routes {
+            route.is_llgr_stale = false;
+            if self.evpn_llgr_stale_local_tags.contains(key) {
+                clear_local_llgr.push(*key);
+            }
+        }
+        self.clear_local_llgr_stale_evpn_community(&clear_local_llgr);
+    }
+
     /// Iterate all `FlowSpec` routes matching a given rule (all path IDs).
     pub fn iter_flowspec_rule(&self, rule: &FlowSpecRule) -> impl Iterator<Item = &FlowSpecRoute> {
         let target = rule.clone();
@@ -595,6 +751,15 @@ impl AdjRibIn {
                 remove_llgr_stale_community_attrs(&mut route.attributes);
             }
             self.flowspec_llgr_stale_local_tags.remove(key);
+        }
+    }
+
+    fn clear_local_llgr_stale_evpn_community(&mut self, keys: &[EvpnRouteKey]) {
+        for key in keys {
+            if let Some(route) = self.evpn_routes.get_mut(key) {
+                remove_llgr_stale_community_attrs(Arc::make_mut(&mut route.attributes));
+            }
+            self.evpn_llgr_stale_local_tags.remove(key);
         }
     }
 }
@@ -1106,5 +1271,190 @@ mod tests {
             !rib.withdraw_evpn(&expected_key),
             "second withdraw is no-op"
         );
+    }
+
+    // --- EVPN GR/LLGR stale handling tests (Gate 2) ---
+
+    fn insert_evpn_imet(
+        rib: &mut AdjRibIn,
+        peer: Ipv4Addr,
+        ethernet_tag: u32,
+        attrs: Vec<PathAttribute>,
+    ) -> rustbgpd_wire::EvpnRouteKey {
+        use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+        let route = EvpnRoute::Imet(EvpnImet {
+            rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            ethernet_tag: EthernetTagId(ethernet_tag),
+            originator_ip: IpAddr::V4(peer),
+        });
+        let key = route.key();
+        rib.insert_evpn(EvpnRibRoute {
+            route,
+            key,
+            next_hop: IpAddr::V4(peer),
+            peer: IpAddr::V4(peer),
+            attributes: Arc::new(attrs),
+            received_at: Instant::now(),
+            origin_type: crate::route::RouteOrigin::Ibgp,
+            peer_router_id: peer,
+            is_stale: false,
+            is_llgr_stale: false,
+        });
+        key
+    }
+
+    #[test]
+    fn mark_stale_evpn_tags_l2vpn_evpn_only() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+
+        // Mix of unicast + EVPN routes
+        rib.insert(make_route(
+            Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24),
+            Ipv4Addr::new(10, 0, 0, 1),
+        ));
+        let evpn_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+
+        // Non-EVPN family: EVPN routes stay non-stale
+        rib.mark_stale_evpn((Afi::Ipv4, Safi::Unicast));
+        assert!(!rib.iter_evpn().any(|r| r.is_stale));
+
+        // EVPN family: EVPN routes become stale
+        rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        assert!(rib.iter_evpn().all(|r| r.is_stale));
+
+        // And unicast routes are untouched by mark_stale_evpn
+        assert!(!rib.iter().any(|r| r.is_stale));
+
+        // Sanity: the EVPN key is still present
+        assert_eq!(rib.evpn_len(), 1);
+        let _ = evpn_key;
+    }
+
+    #[test]
+    fn clear_stale_evpn_strips_local_llgr_community() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+
+        // Stale → promote → LLGR_STALE community locally injected
+        rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        let promoted = &rib.evpn_routes[&key];
+        assert!(promoted.is_llgr_stale);
+        assert!(promoted.communities().contains(&COMMUNITY_LLGR_STALE));
+
+        // clear_stale strips both flags and the locally-injected community
+        rib.clear_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        let route = &rib.evpn_routes[&key];
+        assert!(!route.is_stale);
+        assert!(!route.is_llgr_stale);
+        assert!(!route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn clear_stale_evpn_preserves_peer_originated_llgr_community() {
+        // Route arrives *already* carrying LLGR_STALE (peer injected it, e.g.
+        // during its own LLGR window). Our clear_stale_evpn must not strip it.
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        let peer_attrs = vec![PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE])];
+        let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, peer_attrs);
+
+        // Mark stale without going through promotion — no local tag inserted.
+        rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        assert!(rib.evpn_routes[&key].is_stale);
+
+        rib.clear_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        let route = &rib.evpn_routes[&key];
+        assert!(!route.is_stale);
+        // Peer-originated LLGR_STALE community preserved.
+        assert!(route.communities().contains(&COMMUNITY_LLGR_STALE));
+    }
+
+    #[test]
+    fn promote_to_llgr_stale_evpn_drops_no_llgr_routes() {
+        use rustbgpd_wire::COMMUNITY_NO_LLGR;
+
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        let keep_key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+        let no_llgr_key = insert_evpn_imet(
+            &mut rib,
+            Ipv4Addr::new(10, 0, 0, 1),
+            200,
+            vec![PathAttribute::Communities(vec![COMMUNITY_NO_LLGR])],
+        );
+
+        rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+        let affected = rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+
+        // NO_LLGR route removed entirely
+        assert!(!rib.evpn_routes.contains_key(&no_llgr_key));
+        // Other route promoted to LLGR-stale
+        assert!(rib.evpn_routes[&keep_key].is_llgr_stale);
+        assert!(
+            rib.evpn_routes[&keep_key]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        // Both keys should appear in affected (NO_LLGR drop + promotion)
+        assert!(affected.contains(&keep_key));
+        assert!(affected.contains(&no_llgr_key));
+    }
+
+    #[test]
+    fn promote_to_llgr_stale_evpn_arc_make_mut_preserves_other_routes() {
+        // Two routes share an Arc<Vec<PathAttribute>> via the intern table.
+        // Promoting one must only mutate that route's copy, not the shared
+        // Arc — otherwise both routes would gain LLGR_STALE when only one
+        // is being promoted.
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        // Both routes get identical attrs → interned to the same Arc
+        let key_a = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+        let key_b = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 200, vec![]);
+
+        // Confirm they actually share the Arc pre-promotion
+        let before_a = Arc::as_ptr(&rib.evpn_routes[&key_a].attributes);
+        let before_b = Arc::as_ptr(&rib.evpn_routes[&key_b].attributes);
+        assert_eq!(
+            before_a, before_b,
+            "intern table should have shared the Arc"
+        );
+
+        // Mark only route A stale, promote — route B must NOT gain LLGR_STALE
+        rib.evpn_routes.get_mut(&key_a).unwrap().is_stale = true;
+        rib.promote_to_llgr_stale_evpn((Afi::L2Vpn, Safi::Evpn));
+
+        assert!(
+            rib.evpn_routes[&key_a]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE)
+        );
+        assert!(
+            !rib.evpn_routes[&key_b]
+                .communities()
+                .contains(&COMMUNITY_LLGR_STALE),
+            "route B was not stale — must not be mutated"
+        );
+    }
+
+    #[test]
+    fn sweep_stale_family_evpn_ignores_non_evpn_family() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let mut rib = AdjRibIn::new(peer_ip);
+        let key = insert_evpn_imet(&mut rib, Ipv4Addr::new(10, 0, 0, 1), 100, vec![]);
+        rib.evpn_routes.get_mut(&key).unwrap().is_stale = true;
+
+        // Non-EVPN family: no-op
+        let swept = rib.sweep_stale_family_evpn((Afi::Ipv4, Safi::Unicast));
+        assert!(swept.is_empty());
+        assert_eq!(rib.evpn_len(), 1);
+
+        // EVPN family: sweeps the stale route
+        let swept = rib.sweep_stale_family_evpn((Afi::L2Vpn, Safi::Evpn));
+        assert_eq!(swept, vec![key]);
+        assert_eq!(rib.evpn_len(), 0);
     }
 }
