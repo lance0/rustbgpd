@@ -89,33 +89,29 @@ attribute mutation), fix them as they appear — the harness is the product.
 
 ---
 
-### Gate 2 — EVPN GR/LLGR stale handling
+### Gate 2 — EVPN GR/LLGR stale handling ✅
 
-Status: **next (parallel with Gate 1)** · Estimate: ~1-1.5 weeks · Blockers: none
+Status: **done** (feat/evpn-rr, 2026-04-23)
 
 Unlocks: VTEP restart without total EVPN route flap in the rest of the
 fabric. Reflected EVPN routes get marked stale during the restart window,
 swept on EoR, promoted to LLGR-stale after GR timeout per RFC 9494.
 
-Why critical: without this, *any* VTEP restart in production drops EVPN
-routes from every other peer mid-flap. Unicast and FlowSpec have this
-coverage; EVPN was scoped out of Phase 1 and is documented in ADR-0050 as
-a known gap.
-
-Work breakdown:
+Delivered:
 
 | Task | File / location |
 |------|----------------|
-| Add `iter_evpn_mut()` to `AdjRibIn` | `crates/rib/src/adj_rib_in.rs` |
-| `mark_stale_evpn(family)` mirroring `mark_stale_flowspec` | `crates/rib/src/adj_rib_in.rs:~375` |
-| `clear_stale_evpn(family)` with llgr tag handling | `crates/rib/src/adj_rib_in.rs` |
-| `promote_to_llgr_stale_evpn(family)` | `crates/rib/src/adj_rib_in.rs` |
-| `clear_llgr_stale_evpn(family)` | `crates/rib/src/adj_rib_in.rs` |
-| `evpn_llgr_stale_local_tags: HashSet<EvpnRouteKey>` field | `crates/rib/src/adj_rib_in.rs:~32` |
-| Drive from graceful_restart / llgr / peer_lifecycle | `crates/rib/src/manager/graceful_restart.rs` |
-| EVPN EoR detection in route refresh | `crates/rib/src/manager/route_refresh.rs` |
-| Wire BoRR/EoRR for L2VPN/EVPN family | existing refresh_markers list in `distribution.rs` |
-| 3 regression tests (GR stale, LLGR promotion, EoR clears stale) | `crates/rib/src/manager/tests.rs` |
+| `iter_evpn_mut()` on `AdjRibIn` | `crates/rib/src/adj_rib_in.rs` |
+| `mark_stale_evpn`, `clear_stale_evpn`, `sweep_stale_evpn`, `sweep_stale_family_evpn`, `promote_to_llgr_stale_evpn`, `sweep_llgr_stale_evpn`, `clear_llgr_stale_evpn` | `crates/rib/src/adj_rib_in.rs` |
+| `evpn_llgr_stale_local_tags: HashSet<EvpnRouteKey>` field | `crates/rib/src/adj_rib_in.rs` |
+| `clear_local_llgr_stale_evpn_community` helper using `Arc::make_mut` | `crates/rib/src/adj_rib_in.rs` |
+| GR entry, LLGR promotion, non-LLGR sweep, and LLGR timer sweep wired | `crates/rib/src/manager/graceful_restart.rs` |
+| EVPN `clear_stale` on EoR (GR + LLGR paths) | `crates/rib/src/manager/route_refresh.rs` |
+| `refresh_stale_evpn` tracking for enhanced route refresh; EVPN BoRR/EoRR emission | `crates/rib/src/manager/route_refresh.rs` + `mod.rs` |
+| `LocRib::recompute_evpn` fix: detect `is_stale` / `is_llgr_stale` flips so single-peer stale transitions propagate into Loc-RIB | `crates/rib/src/loc_rib.rs` |
+| 6 AdjRibIn stale unit tests + 7 RibManager GR/LLGR regression tests | `crates/rib/src/adj_rib_in.rs`, `crates/rib/src/manager/tests.rs` |
+
+Evidence: +13 tests, 1214 workspace total; clippy clean on Rust 1.95.
 
 ---
 
@@ -262,9 +258,9 @@ Further out on this track:
 ## Priority Ordering
 
 ```
+Gate 2 (GR/LLGR)              ── ✅ done
 Gate 1 (Type 2 interop)      ──┐
-Gate 2 (GR/LLGR)              ──┤── ships "production-ready RR for SONiC/FRR fabric"
-Gate 3 (MAC mobility interop) ──┤
+Gate 3 (MAC mobility interop) ──┤── ships "production-ready RR for SONiC/FRR fabric"
 Gate 4 (multi-homing)         ──┘
 Gate 5 (scale)                 ── ships "production-ready at 10k+ MAC scale"
 Gate 6 (controller inject)     ── ships "SDN-integratable"
@@ -274,12 +270,12 @@ Gate 8 (multi-homing execution)── depends on Gate 7
 Gate 9 (IRB, MVPN, PBB, MPLS)  ── furthest horizon
 ```
 
-### Why Gate 2 goes first if you're picking one
+### Why Gate 2 landed first
 
-Even though Gate 1 (Type 2 interop) produces the most visible validation,
-**Gate 2 (EVPN GR/LLGR) is the bigger correctness jump** and is pure-code
-work — no containerlab surgery. Doing Gate 2 first means the Gate 1
-harness validates production-shaped behavior from the start rather than a
+Gate 1 (Type 2 interop) is the more visible validation, but Gate 2
+(EVPN GR/LLGR) was the bigger correctness jump and pure-code work — no
+containerlab surgery. Landing Gate 2 first means the Gate 1 harness
+validates production-shaped behavior from the start rather than a
 partially-handled family.
 
 ### Why Gate 6 before Gate 7

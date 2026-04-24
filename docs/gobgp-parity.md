@@ -226,13 +226,13 @@ Competing head-to-head with GoBGP for all use cases:
 
 ### IX Route Server (current target, ~100% parity)
 
-### VXLAN-EVPN DC Fabric RR (~85% parity, added 2026-04)
+### VXLAN-EVPN DC Fabric RR (~88% parity, added 2026-04)
 
 Minimum viable for a SONiC/FRR fabric where VTEPs handle local state:
 
-1. **EVPN GR/LLGR stale handling** — unicast has it; EVPN not yet wired
-2. **Real Type 2 MAC-exchange interop** — M29 covers capability only; follow-up test needs VXLAN interfaces
-3. **Scale validation** — 50k Type 2 routes at 1000/sec churn
+1. ~~**EVPN GR/LLGR stale handling**~~ — shipped (Gate 2, 2026-04-23). EVPN participates in the stale-route pipeline alongside unicast and FlowSpec; LLGR promotion injects `LLGR_STALE`, `NO_LLGR` is honored, EoR and ERR clear stale state.
+2. **Real Type 2 MAC-exchange interop** — M29 covers capability only; follow-up test needs VXLAN interfaces (Gate 1)
+3. **Scale validation** — 50k Type 2 routes at 1000/sec churn (Gate 5)
 4. **Hierarchical RR (cluster-of-clusters)** — nested reflection untested
 
 No material protocol gaps remain. Remaining work is operator polish:

@@ -575,6 +575,19 @@ implemented per ADR-0040.
 - **Route reflection:** RFC 4456 rules (`ORIGINATOR_ID`, `CLUSTER_LIST`,
   split-horizon) reuse the existing unicast `should_suppress_ibgp_inner`
   via a synthetic `Route` probe — no EVPN-specific reflection logic.
+- **GR / LLGR stale handling** (RFC 4724 + RFC 9494, Gate 2): EVPN
+  routes participate in the stale-route pipeline alongside unicast
+  and FlowSpec. On `PeerGracefulRestart`, `mark_stale_evpn((L2Vpn,
+  Evpn))` flags routes; on GR timer expiry with LLGR-negotiated,
+  `promote_to_llgr_stale_evpn` injects `COMMUNITY_LLGR_STALE` via
+  `Arc::make_mut` and records the route key in
+  `evpn_llgr_stale_local_tags` so `clear_stale_evpn` /
+  `clear_llgr_stale_evpn` on EoR later strip only the
+  locally-injected communities (peer-originated ones are preserved).
+  Routes carrying `COMMUNITY_NO_LLGR` are dropped on GR expiry rather
+  than promoted, per RFC 9494 §4.7. Enhanced Route Refresh (RFC 7313)
+  tracks unreplaced EVPN keys in `refresh_stale_evpn` and withdraws
+  them on BoRR/EoRR completion.
 - See ADR-0050.
 
 ---

@@ -28,6 +28,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   controller-injection gRPC, DF election (RFC 7432 §8 / RFC 8584),
   symmetric IRB semantics (RFC 9135), PBB-EVPN (RFC 7623), and EVPN-
   MVPN integration (RFC 9251) are future-phase work.
+- **EVPN GR / LLGR stale handling (Gate 2, RFC 4724 + RFC 9494).**
+  Reflected EVPN routes now participate in the stale-route pipeline:
+  `mark_stale_evpn` on `PeerGracefulRestart`, promotion to LLGR-stale
+  with `LLGR_STALE` community injection via `Arc::make_mut`, and sweep
+  on GR / LLGR timer expiry. End-of-RIB and Enhanced Route Refresh
+  (BoRR / EoRR per RFC 7313) clear stale state per-family, preserving
+  peer-originated `LLGR_STALE` communities and stripping only locally-
+  injected ones. `NO_LLGR` community per RFC 9494 §4.7 is honored —
+  routes carrying it are dropped on GR timer rather than promoted.
+  Without this, a VTEP restart would have dropped reflected EVPN routes
+  from every other peer mid-flap — the biggest correctness gap on the
+  production-ready RR checklist. 13 new unit + integration tests.
 
 ---
 

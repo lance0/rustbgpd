@@ -228,10 +228,14 @@ easy operator identification.
   SemVer bump for `rustbgpd-wire` on next release.
 - `RibUpdate::RoutesReceived` and `OutboundRouteUpdate` have new fields
   — all 156 existing struct-literal call sites were updated.
-- EVPN routes are NOT covered by GR/LLGR stale handling yet. If a VTEP
-  restarts, reflected EVPN routes disappear from peers during the
-  restart window. This is a known gap closing in a follow-up (planned
-  alongside a real MAC-exchange interop test).
+- EVPN routes are covered by GR/LLGR stale handling per RFC 9494
+  (Gate 2, 2026-04-23): `mark_stale_evpn` / `clear_stale_evpn` /
+  `promote_to_llgr_stale_evpn` / `sweep_{stale,llgr_stale}_evpn` on
+  `AdjRibIn`, wired through `graceful_restart.rs` and
+  `route_refresh.rs` at every unicast + FlowSpec call site. LLGR
+  promotion injects `LLGR_STALE` via `Arc::make_mut` and tracks
+  locally-injected communities in `evpn_llgr_stale_local_tags` so
+  peer-originated communities are preserved across EoR.
 - Policy match clauses don't yet recognize route-type / VNI / ESI —
   operators get RT-based filtering via extended communities. A
   `match_evpn_route_type` clause is Phase 1.5.
