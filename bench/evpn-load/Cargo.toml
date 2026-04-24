@@ -18,4 +18,14 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+anyhow = "1.0.102"
+
+[[bin]]
+name = "evpn-tester"
+path = "src/bin/tester.rs"
+
+[[bin]]
+name = "evpn-monitor"
+path = "src/bin/monitor.rs"
+
 

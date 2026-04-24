@@ -2087,6 +2087,7 @@ dependencies = [
 name = "rustbgpd-evpn-load"
 version = "0.8.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "clap",
  "rustbgpd-wire",
