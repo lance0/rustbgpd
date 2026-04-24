@@ -196,7 +196,7 @@ The primary target deployment. Weighted toward what matters:
 
 **Remaining gaps for IX RS parity:** no material control-plane gaps remain for the target deployment. Remaining work is operator polish: CLI integration tests, listener authorization split, and other non-protocol hardening.
 
-### General-Purpose BGP Speaker (~75% parity)
+### General-Purpose BGP Speaker (~76% parity)
 
 Competing head-to-head with GoBGP for all use cases:
 
@@ -226,7 +226,7 @@ Competing head-to-head with GoBGP for all use cases:
 
 ### IX Route Server (current target, ~100% parity)
 
-### VXLAN-EVPN DC Fabric RR (~98% parity, added 2026-04)
+### VXLAN-EVPN DC Fabric RR (~99% parity, added 2026-04)
 
 Minimum viable for a SONiC/FRR fabric where VTEPs handle local state:
 
@@ -244,7 +244,7 @@ No material protocol gaps remain. Remaining work is operator polish:
    route-server capability.
 3. ~~**Built-in looking glass**~~ — shipped as birdwatcher-compatible REST API.
 
-### General-Purpose BGP Speaker (~75% parity)
+### General-Purpose BGP Speaker (~76% parity)
 
 These close the biggest gaps for broader adoption but are out of scope for
 the current alpha:

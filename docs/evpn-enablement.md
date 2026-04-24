@@ -16,15 +16,16 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 
 ## TL;DR
 
-- **Gates 0, 1, 2, 3, 4, 5**: done on `feat/evpn-rr`. Capability,
+- **Gates 0, 1, 2, 3, 4, 5, 6**: done on `feat/evpn-rr`. Capability,
   Type 2 reflection (M30), EVPN GR/LLGR, MAC mobility / sticky
-  (M31), multi-homing Type 1 + Type 4 reflection (M32), and 50k-route
-  scale validation with churn (M33). Gates 0-4 validated against
-  FRR 10.3.1; Gate 5 uses an in-tree iBGP load generator (the
-  `bench/evpn-load` crate) so rustbgpd's scale is what gets
-  exercised, not a third-party daemon's. The "production-ready RR
-  at 10k+ MAC scale" bundle is now complete.
-- **Gate 6** unlocks controller-driven deployments; cheap relative to payoff.
+  (M31), multi-homing Type 1 + Type 4 reflection (M32), 50k-route
+  scale validation with churn (M33), and controller-driven
+  injection via gRPC (`AddEvpnRoute` / `DeleteEvpnRoute`). Gates 0-4
+  validated against FRR 10.3.1; Gate 5 uses an in-tree iBGP load
+  generator (the `bench/evpn-load` crate) so rustbgpd's scale is
+  what gets exercised, not a third-party daemon's. The
+  "production-ready RR at 10k+ MAC scale, SDN-integratable" bundle
+  is now complete.
 - **Gates 7-9** expand into VTEP / active-active multi-homing
   execution / IRB. Big investments gated by market demand, not
   technical readiness.
@@ -42,9 +43,9 @@ closed.
 
 | Scope | Completeness |
 |-------|-------------|
-| RFC 7432 RR role | ~85-90% |
-| Production-ready RR for a SONiC/FRR fabric | ~92-95% |
-| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~28-32% |
+| RFC 7432 RR role | ~90-92% |
+| Production-ready RR for a SONiC/FRR fabric | ~95-97% |
+| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~32-36% |
 
 ## Gate Ladder
 
@@ -255,23 +256,48 @@ Notes on methodology:
 
 ---
 
-### Gate 6 — Controller-injection gRPC
+### Gate 6 — Controller-injection gRPC ✅
 
-Status: optional after Gate 5 · Estimate: ~1-2 weeks · Blockers: none
+Status: **done** (feat/evpn-rr, 2026-04-24)
 
 Unlocks: SDN controllers / orchestration systems pushing EVPN routes
 directly into the RR via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC.
-Relatively cheap once the RR plumbing is solid.
+Phase 1 supports Type 2 (MAC/IP) and Type 3 (IMET); Type 5 IP-Prefix
+and Type 1/4 multi-homing origination are deferred pending use-case
+signal.
+
+Delivered:
 
 | Task | File / location |
 |------|----------------|
-| Replace `InjectEvpn` `unimplemented!()` stub in RibUpdate | `crates/rib/src/update.rs` |
-| `handle_inject_evpn` / `handle_withdraw_evpn` in RibManager | `crates/rib/src/manager/mod.rs` |
-| `RouteOrigin::Local` support for EVPN (mirrors FlowSpec injection) | `crates/rib/src/route.rs` |
-| Proto: `AddEvpnRouteRequest` / `DeleteEvpnRouteRequest` + RPCs | `proto/rustbgpd.proto` |
-| `InjectionService` methods + validation | `crates/api/src/injection_service.rs` |
-| `bgpctl evpn add`/`delete` subcommands | `crates/cli/src/commands/evpn.rs` |
-| End-to-end test: inject via gRPC, observe reflection | `crates/rib/src/manager/tests.rs` |
+| `InjectEvpn` / `WithdrawEvpn` `RibUpdate` variants | `crates/rib/src/update.rs` |
+| `handle_inject_evpn` / `handle_withdraw_evpn` handlers | `crates/rib/src/manager/distribution.rs` |
+| `RouteOrigin::Local` path for EVPN (mirrors FlowSpec) | `crates/api/src/injection_service.rs` |
+| Proto: `AddEvpnRoute` / `DeleteEvpnRoute` RPCs | `proto/rustbgpd.proto` |
+| `InjectionService` methods + RD / MAC / IP validation | `crates/api/src/injection_service.rs` |
+| `bgpctl evpn add-mac-ip/add-imet/delete-*` subcommands | `crates/cli/src/commands/evpn.rs` |
+| Unit + integration tests | `crates/rib/src/manager/tests.rs`, `crates/api/src/injection_service.rs` |
+
+End-to-end flow:
+
+1. Controller calls `AddEvpnRoute` (Type 2) via gRPC.
+2. `InjectionService` parses RD, MAC, IP, label; synthesizes an
+   `EvpnRibRoute` with `RouteOrigin::Local`; sends `RibUpdate::InjectEvpn`.
+3. `handle_inject_evpn` places the route in the local Adj-RIB-In and
+   recomputes/distributes — identical path to FlowSpec injection.
+4. All iBGP peers negotiating L2VPN/EVPN receive the reflection.
+
+Validation coverage:
+
+- `inject_evpn_reflects_to_peer` — round-trip through the manager,
+  including withdraw.
+- `add_evpn_type2_reaches_rib_channel` — gRPC service parses the
+  request and forwards an `InjectEvpn` with the expected key.
+- `add_evpn_type2_rejects_zero_vni`, `add_evpn_rejects_unsupported_route_type`,
+  `add_evpn_rejected_on_read_only_listener`.
+- `parse_rd_type0_ibgp`, `parse_rd_type1_ipv4`, `parse_rd_type2_asn32`,
+  `parse_rd_rejects_malformed`, `parse_mac_roundtrip`,
+  `parse_mac_rejects_malformed`.
 
 ---
 
@@ -338,8 +364,8 @@ Gate 1 (Type 2 interop, M30)    ── ✅ done
 Gate 2 (GR/LLGR)                ── ✅ done
 Gate 3 (MAC mobility, M31)      ── ✅ done
 Gate 4 (multi-homing, M32)      ── ✅ done
-Gate 5 (scale, M33)             ── ✅ done   << production-ready at 10k+ MAC scale
-Gate 6 (controller inject)       ── ships "SDN-integratable"
+Gate 5 (scale, M33)             ── ✅ done
+Gate 6 (controller inject)      ── ✅ done   << full Phase 1 RR bundle complete
 ───────────── decision point ─────────────
 Gate 7 (VTEP mode)               ── big strategic expansion
 Gate 8 (multi-homing execution)  ── depends on Gate 7

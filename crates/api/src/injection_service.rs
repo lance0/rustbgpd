@@ -1089,4 +1089,102 @@ mod tests {
         assert!(parse_mac("aa:bb:cc").is_err());
         assert!(parse_mac("aa:bb:cc:dd:ee:gg").is_err());
     }
+
+    #[tokio::test]
+    async fn add_evpn_type2_reaches_rib_channel() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        // Drive the reply side: accept one InjectEvpn, reply Ok(()).
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    assert_eq!(route.route.route_type(), 2);
+                    reply.send(Ok(())).ok();
+                    Some(route.key)
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec!["65000:200".into()],
+            vxlan_encap: true,
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let key = reply_task.await.unwrap().unwrap();
+        // Round-trip the key's wire form to confirm field propagation.
+        let EvpnRouteKey::MacIp { mac, .. } = key else {
+            panic!("expected MacIp key");
+        };
+        assert_eq!(mac.0, [0x02, 0x00, 0x00, 0xAA, 0xBB, 0xCC]);
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type2_rejects_zero_vni() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: String::new(),
+            label: 0,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            vxlan_encap: true,
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("VNI"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_rejects_unsupported_route_type() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 0,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            vxlan_encap: true,
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn add_evpn_rejected_on_read_only_listener() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            vxlan_encap: true,
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+    }
 }

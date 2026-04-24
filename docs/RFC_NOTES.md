@@ -612,6 +612,17 @@ implemented per ADR-0040.
   directly on `rustbgpd-wire` — no third-party daemon sits in the
   measurement path. See `tests/interop/m33-evpn-scale.clab.yml`
   and `docs/BENCHMARKS.md` § "EVPN RR Scale (M33)".
+- **Controller-driven injection** (Gate 6, 2026-04-24): Type 2
+  MAC/IP and Type 3 IMET routes can be injected via gRPC
+  (`InjectionService::AddEvpnRoute`) and withdrawn via
+  `DeleteEvpnRoute`. The service accepts display-form RDs
+  (`65000:100`, `10.0.0.1:100`, `4200000000:100`), parses MAC
+  addresses and host IPs, and assembles an `EvpnRibRoute` with
+  `RouteOrigin::Local` that flows through the same reflection
+  pipeline as iBGP-learned routes. `bgpctl evpn add-mac-ip /
+  add-imet / delete-mac-ip / delete-imet` CLI subcommands cover
+  the operator-facing surface. Type 5 IP-Prefix and Type 1/4
+  multi-homing origination are deferred pending use-case signal.
 - **Multi-homing reflection interop** (RFC 7432 §8): validated via
   the M32 4-node harness
   (`tests/interop/m32-evpn-multihome-frr.clab.yml`). Two FRR VTEPs

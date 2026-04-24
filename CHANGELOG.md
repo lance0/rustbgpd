@@ -86,6 +86,34 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that rustbgpd's gRPC stays healthy throughout. Binaries ride
   the `rustbgpd:dev` image so a single `docker build` + `containerlab
   deploy` reproduces the harness.
+- **Controller-driven EVPN injection (Gate 6).** Two new RPCs on
+  `InjectionService`: `AddEvpnRoute` and `DeleteEvpnRoute`. Phase 1
+  supports Type 2 MAC/IP and Type 3 IMET origination; the
+  controller supplies RD, ethernet-tag, MAC, host IP, VNI, next-hop,
+  and optional route targets, and the RR synthesizes an
+  `EvpnRibRoute` with `RouteOrigin::Local` that flows through the
+  same reflection pipeline that serves iBGP-learned routes. New
+  `bgpctl evpn add-mac-ip / add-imet / delete-mac-ip / delete-imet`
+  subcommands. Includes 10 new unit tests covering RD parsing
+  (types 0/1/2), MAC parsing, VNI validation, unsupported route
+  types, read-only access-mode rejection, and end-to-end RIB
+  channel round-trip.
+- **Four correctness fixes in the EVPN RR pipeline** (commit
+  7d09108, in response to adversarial review):
+  (1) source-peer split-horizon for EVPN — the RR no longer reflects
+      a route back to its originator;
+  (2) `LocRib::recompute_evpn` detects same-peer attribute / payload
+      churn (MAC Mobility sequence, sticky flip, label/VNI, Router
+      MAC, ESI Label) — previously only peer + stale flags triggered
+      redistribution;
+  (3) `evpn_tiebreak_simple` gets stale, ORIGIN, `CLUSTER_LIST`
+      length, and `ORIGINATOR_ID` comparators — matches the
+      `flowspec_tiebreak` chain and stops GR-stale routes from beating
+      fresh alternatives on LocalPref/AS_PATH;
+  (4) RFC 4456 loop-detection inbound path now propagates EVPN
+      withdrawals alongside unicast + FlowSpec — no more silent drops
+      on reflected-loop UPDATEs.
+  Seven new regression tests land with the fixes.
 
 ---
 
