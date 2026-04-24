@@ -275,7 +275,7 @@ Delivered:
 | `RouteOrigin::Local` path for EVPN (mirrors FlowSpec) | `crates/api/src/injection_service.rs` |
 | Proto: `AddEvpnRoute` / `DeleteEvpnRoute` RPCs | `proto/rustbgpd.proto` |
 | `InjectionService` methods + RD / MAC / IP validation | `crates/api/src/injection_service.rs` |
-| `bgpctl evpn add-mac-ip/add-imet/delete-*` subcommands | `crates/cli/src/commands/evpn.rs` |
+| `rustbgpctl evpn add-mac-ip/add-imet/delete-*` subcommands | `crates/cli/src/commands/evpn.rs` |
 | Unit + integration tests | `crates/rib/src/manager/tests.rs`, `crates/api/src/injection_service.rs` |
 
 End-to-end flow:

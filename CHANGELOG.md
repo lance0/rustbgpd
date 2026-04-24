@@ -18,7 +18,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reflection, and 7 typed extended-community accessors (BGP Encapsulation
   per RFC 8365/9012, MAC Mobility, ESI Label, ES-Import RT, Router MAC
   per RFC 9135, Default Gateway). `l2vpn_evpn` family string in TOML
-  config, `ListEvpnRoutes` gRPC RPC on `RibService`, `bgpctl evpn`
+  config, `ListEvpnRoutes` gRPC RPC on `RibService`, `rustbgpctl evpn`
   CLI subcommand with `--route-type` / `--peer` / `--rd` filters,
   `ADDRESS_FAMILY_L2VPN_EVPN` proto enum. Example config
   `examples/rr-evpn-fabric/config.toml` demonstrates a 3-VTEP fabric RR.
@@ -93,7 +93,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and optional route targets, and the RR synthesizes an
   `EvpnRibRoute` with `RouteOrigin::Local` that flows through the
   same reflection pipeline that serves iBGP-learned routes. New
-  `bgpctl evpn add-mac-ip / add-imet / delete-mac-ip / delete-imet`
+  `rustbgpctl evpn add-mac-ip / add-imet / delete-mac-ip / delete-imet`
   subcommands. Includes 10 new unit tests covering RD parsing
   (types 0/1/2), MAC parsing, VNI validation, unsupported route
   types, read-only access-mode rejection, and end-to-end RIB

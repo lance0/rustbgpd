@@ -619,7 +619,7 @@ implemented per ADR-0040.
   (`65000:100`, `10.0.0.1:100`, `4200000000:100`), parses MAC
   addresses and host IPs, and assembles an `EvpnRibRoute` with
   `RouteOrigin::Local` that flows through the same reflection
-  pipeline as iBGP-learned routes. `bgpctl evpn add-mac-ip /
+  pipeline as iBGP-learned routes. `rustbgpctl evpn add-mac-ip /
   add-imet / delete-mac-ip / delete-imet` CLI subcommands cover
   the operator-facing surface. Type 5 IP-Prefix and Type 1/4
   multi-homing origination are deferred pending use-case signal.

@@ -538,7 +538,7 @@ thousands of VTEPs, and gives you structured observability.
   sequence number and the sticky flag per RFC 7432 §15.1, so a MAC
   move converges deterministically and sticky MACs aren't displaced.
 - **VXLAN encapsulation via RFC 8365** — the BGP Encapsulation extended
-  community is decoded and preserved across reflection; `bgpctl evpn`
+  community is decoded and preserved across reflection; `rustbgpctl evpn`
   surfaces `encap=vxlan` for operator visibility.
 - **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
   filtered EVPN RIB queries; Prometheus metrics per peer include
@@ -550,7 +550,12 @@ thousands of VTEPs, and gives you structured observability.
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
 - **Local MAC learning** — VTEPs read from the kernel FDB and originate
-  Type 2 routes. rustbgpd never originates an EVPN route in Phase 1.
+  Type 2 routes from locally-learned MAC addresses. rustbgpd does not
+  monitor a kernel FDB. (SDN controllers can inject Type 2 and Type 3
+  routes directly via `InjectionService::AddEvpnRoute` — see Gate 6 in
+  [docs/evpn-enablement.md](evpn-enablement.md) — but the typical
+  fabric operating model still has the VTEP originate from its local
+  MAC table.)
 - **DF election** — with a shared ESI multi-homed to two VTEPs, the
   VTEPs run the election themselves. rustbgpd reflects Type 1 + Type 4
   unchanged so the election still works.
@@ -565,7 +570,7 @@ thousands of VTEPs, and gives you structured observability.
   the new peer — no config-file write dance.
 - Pipe EVPN route events into your SDN controller, BMP collector, or
   fabric-observability tool via `WatchRoutes` and `rustbgpd-bmp`.
-- Validate policy changes with `bgpctl rib explain-best-path` before
+- Validate policy changes with `rustbgpctl rib explain-best-path` before
   pushing — routable-surface diffs, not CLI scraping.
 
 **Example config:** `examples/rr-evpn-fabric/config.toml` — three VTEP

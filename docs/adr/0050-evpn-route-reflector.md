@@ -213,7 +213,7 @@ in Phase 1.
 
 ### CLI
 
-`bgpctl evpn [--route-type N] [--peer IP] [--rd STR]` — JSON output
+`rustbgpctl evpn [--route-type N] [--peer IP] [--rd STR]` — JSON output
 via `--json`. Human output groups fields conditionally per route type
 (MAC/IP routes show MAC + IP but not prefix; Type 5 shows prefix +
 gateway but not MAC). VXLAN encap is surfaced as `encap=vxlan` for
