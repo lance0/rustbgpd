@@ -76,6 +76,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   execute DF election itself — VTEPs run the election independently
   over the reflected inputs. New `start-frr-vtep-mh.sh` shim extends
   M30's VXLAN setup with the dummy ES access interface.
+- **EVPN RR scale validation (Gate 5, M33).** In-tree iBGP load
+  generator (`bench/evpn-load` crate — tester + monitor binaries
+  built directly on `rustbgpd-wire`, no third-party daemon in the
+  measurement path). Three-peer topology: 2 testers originate 25k
+  Type 2 MAC/IP routes each (50k total) at 5,000/sec; 60 s of
+  1,000/sec churn (withdraw + re-advertise) layered on top; monitor
+  asserts convergence, post-churn count fidelity (no loss), and
+  that rustbgpd's gRPC stays healthy throughout. Binaries ride
+  the `rustbgpd:dev` image so a single `docker build` + `containerlab
+  deploy` reproduces the harness.
 
 ---
 

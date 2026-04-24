@@ -604,6 +604,14 @@ implemented per ADR-0040.
   Mobility sequence on the reflected Type 2 and flips the observing
   VTEP's best path. Sticky MAC on the first VTEP is not displaced by
   a non-sticky advertisement from the second VTEP.
+- **Scale validation** (Gate 5, M33, 2026-04-24): the RR sustains
+  50,000 Type 2 MAC/IP routes reflected from two originating peers
+  to a third observer, followed by 60 s of 1,000 rps withdraw +
+  re-advertise churn, with no route loss and no session flap. The
+  load generator is the in-tree `bench/evpn-load` crate, built
+  directly on `rustbgpd-wire` — no third-party daemon sits in the
+  measurement path. See `tests/interop/m33-evpn-scale.clab.yml`
+  and `docs/BENCHMARKS.md` § "EVPN RR Scale (M33)".
 - **Multi-homing reflection interop** (RFC 7432 §8): validated via
   the M32 4-node harness
   (`tests/interop/m32-evpn-multihome-frr.clab.yml`). Two FRR VTEPs

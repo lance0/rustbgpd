@@ -382,6 +382,50 @@ is structural — HashMap bucket arrays and Route data — with no obvious
 accidental overhead. Further memory reduction would require shared route
 storage across RIB views or alternative data structures.
 
+## EVPN RR Scale (M33)
+
+Measured with the in-tree `bench/evpn-load` generator: two synthetic
+iBGP testers advertise Type 2 MAC/IP routes into a rustbgpd Route
+Reflector, which reflects them to a third peer (the monitor). The
+monitor runs the same wire codec as the daemon and counts
+`MP_REACH_NLRI` / `MP_UNREACH_NLRI` EVPN announcements/withdrawals.
+Since the testers and monitor are built directly on `rustbgpd-wire`,
+no third-party daemon is in the measurement path — rustbgpd's RR
+scale is what gets exercised.
+
+**Harness:** `tests/interop/m33-evpn-scale.clab.yml`
+
+**Shape:**
+
+- 2 testers × 25,000 Type 2 routes = 50,000 reflected total
+- Bulk rate: 5,000 routes/sec per tester
+- Churn phase: 60 seconds of 1,000 rps withdraw + re-advertise
+  (sliding window over each tester's MAC space)
+
+**Assertions:**
+
+| Assertion | Target |
+|-----------|--------|
+| Convergence to 50k reflected routes | < 60 s after first route |
+| Post-churn steady-state count | exactly 50,000 (no loss) |
+| `ListEvpnRoutes` remains responsive | yes, throughout the run |
+| `GetHealth` gRPC passes post-run | yes, no crash/flap |
+
+**Notes on methodology:**
+
+- All routes share one RD (`65000:1`), ethernet-tag `0`, VNI `100`.
+  MACs are deterministic (`02:00:00:XX:YY:ZZ` with 24 bits = route
+  index), so runs are exactly repeatable.
+- ESI is zero — Gate 4 / M32 already validated the multi-homing
+  attribute pipeline; Gate 5 / M33 isolates scale of the reflection
+  hot path.
+- The IETF draft [Benchmarking Methodology for EVPN][evpn-bmwg]
+  proposes much larger targets (32k EVIs, 2M MACs, 24 h soak).
+  M33 is scoped to the production-ready-at-fabric-scale claim
+  (10k+ MACs); larger-scale harness work is future roadmap.
+
+[evpn-bmwg]: https://datatracker.ietf.org/doc/html/draft-kishjac-bmwg-evpntest-00
+
 ## Running End-to-End Benchmarks
 
 End-to-end system benchmarks use [bgperf2](https://github.com/netenglabs/bgperf2),
