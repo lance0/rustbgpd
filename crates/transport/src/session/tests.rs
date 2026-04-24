@@ -2478,3 +2478,192 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
         _ => panic!("expected RoutesReceived from the loop-detect path"),
     }
 }
+
+/// Regression: max-prefix enforcement must count EVPN keys (and `FlowSpec`
+/// rules) alongside unicast prefixes. Prior to the fix, `known_prefix_count`
+/// only counted unique unicast prefixes, so a peer could flood arbitrary
+/// EVPN routes without tripping the configured cap.
+#[tokio::test]
+async fn evpn_routes_counted_toward_max_prefix() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
+        MplsLabel, RouteDistinguisher,
+    };
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65001);
+    session.config.max_prefixes = Some(2);
+    let negotiated = NegotiatedSession {
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        hold_time: 90,
+        keepalive_interval: 30,
+        peer_capabilities: vec![],
+        four_octet_as: true,
+        negotiated_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_gr_capable: false,
+        peer_restart_state: false,
+        peer_restart_time: 0,
+        peer_gr_families: vec![],
+        peer_notification_gr: false,
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        peer_route_refresh: false,
+        peer_enhanced_route_refresh: false,
+        peer_extended_message: false,
+        extended_nexthop_families: HashMap::new(),
+        add_path_families: HashMap::new(),
+    };
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let make_route = |mac_lo: u8| -> EvpnRoute {
+        EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(100),
+            mac: MacAddress([0x02, 0x00, 0x00, 0xAA, 0xBB, mac_lo]),
+            ip: None,
+            label1: MplsLabel::new(10_000),
+            label2: None,
+        })
+    };
+
+    let send_announces = |routes: Vec<EvpnRoute>| {
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::L2Vpn,
+                safi: Safi::Evpn,
+                next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: routes,
+            }),
+        ];
+        UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach)
+    };
+
+    // Push 2 EVPN routes — at the limit, should not trip.
+    session
+        .process_update(send_announces(vec![make_route(0x01), make_route(0x02)]))
+        .await;
+    assert_eq!(
+        session.known_prefix_count(),
+        2,
+        "EVPN routes must contribute to the prefix count"
+    );
+
+    // Push a 3rd — must exceed max_prefixes = 2.
+    session
+        .process_update(send_announces(vec![make_route(0x03)]))
+        .await;
+    assert!(
+        session.known_prefix_count() > 2,
+        "EVPN floods must visibly exceed the cap so enforcement fires"
+    );
+}
+
+/// Regression: the AS_PATH-loop branch and the RR-loop branch share the
+/// same withdrawal-recovery shape — both must propagate EVPN withdrawals.
+/// The RR-loop fix landed earlier; this test covers the parallel
+/// `AS_PATH contains local ASN` branch which was still hardcoding
+/// `evpn_withdrawn: vec![]`.
+#[tokio::test]
+async fn as_path_loop_update_still_applies_evpn_withdrawals() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
+        MpUnreachNlri, MplsLabel, RouteDistinguisher,
+    };
+
+    // eBGP session — AS_PATH loop only triggers when the peer's UPDATE
+    // contains our local ASN, which only happens across an eBGP boundary.
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65002);
+    let negotiated = NegotiatedSession {
+        peer_asn: 65002,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        hold_time: 90,
+        keepalive_interval: 30,
+        peer_capabilities: vec![],
+        four_octet_as: true,
+        negotiated_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_gr_capable: false,
+        peer_restart_state: false,
+        peer_restart_time: 0,
+        peer_gr_families: vec![],
+        peer_notification_gr: false,
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        peer_route_refresh: false,
+        peer_enhanced_route_refresh: false,
+        peer_extended_message: false,
+        extended_nexthop_families: HashMap::new(),
+        add_path_families: HashMap::new(),
+    };
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    let withdrawn_route = EvpnRoute::MacIp(EvpnMacIp {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+        esi: EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: EthernetTagId(100),
+        mac: MacAddress([0x02, 0x00, 0x00, 0xAA, 0xBB, 0xCC]),
+        ip: None,
+        label1: MplsLabel::new(10_000),
+        label2: None,
+    });
+    let expected_key = withdrawn_route.key();
+
+    // AS_PATH that contains our local ASN (65001) → loop trigger.
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002, 65001, 65003])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![withdrawn_route.clone()],
+        }),
+        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![withdrawn_route],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+    session.process_update(update).await;
+
+    let msg = rib_rx
+        .try_recv()
+        .expect("AS_PATH-loop branch must still dispatch withdrawals");
+    match msg {
+        RibUpdate::RoutesReceived {
+            announced,
+            evpn_announced,
+            evpn_withdrawn,
+            ..
+        } => {
+            assert!(
+                announced.is_empty() && evpn_announced.is_empty(),
+                "announces in an AS_PATH-loop UPDATE must be discarded"
+            );
+            assert_eq!(
+                evpn_withdrawn,
+                vec![expected_key],
+                "EVPN withdrawals must survive AS_PATH-loop discard"
+            );
+        }
+        _ => panic!("expected RoutesReceived from the AS_PATH-loop path"),
+    }
+}

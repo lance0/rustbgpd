@@ -224,26 +224,40 @@ impl PeerSession {
             self.metrics
                 .record_as_path_loop_detected(&self.peer_label, rejected_count as u64);
 
-            // Still process withdrawals (body + MP_UNREACH with negotiated-family check)
+            // Still process withdrawals (body + MP_UNREACH with negotiated-family check).
+            // Covers unicast, FlowSpec, AND EVPN — the AS_PATH-loop branch must
+            // not silently drop withdrawals for any family, or stale EVPN state
+            // accumulates downstream until the next session reset / refresh.
             let mut loop_withdrawn: Vec<(Prefix, u32)> = parsed
                 .withdrawn
                 .iter()
                 .map(|e| (Prefix::V4(e.prefix), e.path_id))
                 .collect();
             let mut loop_fs_withdrawn: Vec<FlowSpecRule> = Vec::new();
+            let mut loop_evpn_withdrawn: Vec<EvpnRouteKey> = Vec::new();
             for attr in &parsed.attributes {
                 if let PathAttribute::MpUnreachNlri(mp) = attr {
                     let family = (mp.afi, mp.safi);
                     if self.negotiated_families.contains(&family) {
                         loop_withdrawn.extend(mp.withdrawn.iter().map(|e| (e.prefix, e.path_id)));
                         loop_fs_withdrawn.extend(mp.flowspec_withdrawn.iter().cloned());
+                        loop_evpn_withdrawn.extend(mp.evpn_withdrawn.iter().map(EvpnRoute::key));
                     }
                 }
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.known_paths.remove(&(prefix, path_id));
             }
-            if !loop_withdrawn.is_empty() || !loop_fs_withdrawn.is_empty() {
+            for rule in &loop_fs_withdrawn {
+                self.known_flowspec.remove(rule);
+            }
+            for key in &loop_evpn_withdrawn {
+                self.known_evpn.remove(key);
+            }
+            if !loop_withdrawn.is_empty()
+                || !loop_fs_withdrawn.is_empty()
+                || !loop_evpn_withdrawn.is_empty()
+            {
                 let _ = self.rib_tx.try_send(RibUpdate::RoutesReceived {
                     peer: self.peer_ip,
                     announced: vec![],
@@ -251,7 +265,7 @@ impl PeerSession {
                     flowspec_announced: vec![],
                     flowspec_withdrawn: loop_fs_withdrawn,
                     evpn_announced: vec![],
-                    evpn_withdrawn: vec![],
+                    evpn_withdrawn: loop_evpn_withdrawn,
                 });
             }
             self.drive_fsm(Event::UpdateReceived).await;
@@ -310,6 +324,12 @@ impl PeerSession {
             }
             for &(prefix, path_id) in &loop_withdrawn {
                 self.known_paths.remove(&(prefix, path_id));
+            }
+            for rule in &loop_fs_withdrawn {
+                self.known_flowspec.remove(rule);
+            }
+            for key in &loop_evpn_withdrawn {
+                self.known_evpn.remove(key);
             }
             if !loop_withdrawn.is_empty()
                 || !loop_fs_withdrawn.is_empty()
@@ -698,12 +718,27 @@ impl PeerSession {
             }
         }
 
-        // 4. Max-prefix enforcement — track via HashSet for accuracy
+        // 4. Max-prefix enforcement — track via HashSet for accuracy.
+        //    Counts unicast unique prefixes + FlowSpec rules + EVPN keys
+        //    so a peer can't bypass the cap by flooding a non-unicast
+        //    family.
         for &(prefix, path_id) in &withdrawn {
             self.known_paths.remove(&(prefix, path_id));
         }
         for route in &announced {
             self.known_paths.insert((route.prefix, route.path_id));
+        }
+        for rule in &flowspec_withdrawn {
+            self.known_flowspec.remove(rule);
+        }
+        for route in &flowspec_announced {
+            self.known_flowspec.insert(route.rule.clone());
+        }
+        for key in &evpn_withdrawn {
+            self.known_evpn.remove(key);
+        }
+        for route in &evpn_announced {
+            self.known_evpn.insert(route.key);
         }
 
         let prefix_count = self.known_prefix_count();
