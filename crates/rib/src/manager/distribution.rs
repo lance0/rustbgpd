@@ -1160,6 +1160,19 @@ impl RibManager {
                 continue;
             };
 
+            // Split horizon: don't send an EVPN route back to its source peer.
+            // Parallel to the unicast guard earlier in this module. Without
+            // this, an RR client could receive its own Type 2/3/4/etc. route
+            // back with ORIGINATOR_ID set to its own router-id — FRR and
+            // others drop such reflections, but RFC 4456 hygiene says we
+            // shouldn't emit them in the first place.
+            if best.peer == target_peer {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
+            }
+
             // Split-horizon / RR suppression check via a synthetic Route that
             // carries only the fields should_suppress_ibgp_inner reads.
             let probe = crate::route::Route {

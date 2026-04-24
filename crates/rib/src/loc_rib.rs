@@ -155,13 +155,20 @@ impl LocRib {
             .cloned();
         match best {
             Some(new_best) => {
-                // Detect peer switches AND is_stale/is_llgr_stale flips —
-                // the latter matter for GR/LLGR even when the best peer is
-                // unchanged (e.g. single-peer stale transitions).
+                // Detect peer switches, GR/LLGR stale flips, AND same-peer
+                // payload / attribute churn. A single originator updating a
+                // Type 2 route with a new MAC Mobility sequence, sticky
+                // flag flip, label/VNI change, Router MAC, ESI Label, or
+                // any other attribute change must trigger redistribution —
+                // `peer` alone would miss all of these cases.
                 let changed = self.evpn_routes.get(&key).is_none_or(|old| {
                     old.peer != new_best.peer
                         || old.is_stale != new_best.is_stale
                         || old.is_llgr_stale != new_best.is_llgr_stale
+                        || old.next_hop != new_best.next_hop
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.route != new_best.route
+                        || old.attributes != new_best.attributes
                 });
                 if changed {
                     self.evpn_routes.insert(key, new_best);
@@ -203,8 +210,10 @@ impl LocRib {
 /// a higher sequence number. Absence of the MAC Mobility community is
 /// treated as sequence=0, sticky=false per RFC 7432 §7.7.
 ///
-/// All route types fall through to the standard BGP chain:
-/// `LocalPref` → `AS_PATH` length → MED → eBGP > iBGP → peer address.
+/// All route types then fall through to the standard BGP chain, matching
+/// unicast `best_path_cmp` and `flowspec_tiebreak`:
+/// stale → `LocalPref` → `AS_PATH` length → ORIGIN → MED →
+/// eBGP > iBGP → `CLUSTER_LIST` length → `ORIGINATOR_ID` → peer address.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
     // Type-specific head for Type 2 (MAC/IP): MAC Mobility sequence + sticky.
     if a.route_type() == 2 && b.route_type() == 2 {
@@ -224,30 +233,58 @@ fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
         }
     }
 
-    // Higher LocalPref is better — reverse for `min_by`.
+    // 0. Non-stale preferred over stale (RFC 4724 §4.2 / RFC 9494 §4.7).
+    //    GR-stale must never beat fresh; LLGR-stale is ranked below GR-stale.
+    match a.is_stale.cmp(&b.is_stale) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    match a.is_llgr_stale.cmp(&b.is_llgr_stale) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // 1. Higher LocalPref is better — reverse for `min_by`.
     match b.local_pref().cmp(&a.local_pref()) {
         Ordering::Equal => {}
         other => return other,
     }
-    // Shorter AS_PATH is better.
+    // 2. Shorter AS_PATH is better.
     let a_len = a.as_path().map_or(0, AsPath::len);
     let b_len = b.as_path().map_or(0, AsPath::len);
     match a_len.cmp(&b_len) {
         Ordering::Equal => {}
         other => return other,
     }
-    // Lower MED is better.
+    // 3. Lowest ORIGIN (IGP=0 < EGP=1 < Incomplete=2).
+    match a.origin().cmp(&b.origin()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 4. Lower MED is better.
     match a.med().cmp(&b.med()) {
         Ordering::Equal => {}
         other => return other,
     }
-    // eBGP preferred over iBGP.
+    // 5. eBGP preferred over iBGP.
     match (a.is_ebgp(), b.is_ebgp()) {
         (true, false) => return Ordering::Less,
         (false, true) => return Ordering::Greater,
         _ => {}
     }
-    // Final tiebreak: lower peer address wins (deterministic).
+    // 6. Shorter CLUSTER_LIST wins (RFC 4456 §9).
+    match a.cluster_list().len().cmp(&b.cluster_list().len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 7. Lower ORIGINATOR_ID wins (falls back to peer router-id, RFC 4456 §9).
+    let a_oid = a.originator_id().unwrap_or(a.peer_router_id);
+    let b_oid = b.originator_id().unwrap_or(b.peer_router_id);
+    match a_oid.cmp(&b_oid) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 8. Final tiebreak: lower peer address wins (deterministic).
     a.peer.cmp(&b.peer)
 }
 
@@ -670,5 +707,141 @@ mod tests {
         ]);
         let r_mm = make_evpn_type2(3, vec![mm]);
         assert_eq!(evpn_tiebreak_simple(&r_mm, &r_no), Ordering::Less);
+    }
+
+    /// Regression: `recompute_evpn` must report change when the same
+    /// originating peer re-advertises the same key with a different
+    /// MAC Mobility sequence. Previously only `peer` and stale flags were
+    /// compared, so same-peer attribute churn was silently swallowed at
+    /// the Loc-RIB layer and never redistributed.
+    #[test]
+    fn evpn_same_peer_mac_mobility_bump_triggers_change() {
+        let mm1 = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 1),
+        ]);
+        let mm2 = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 2),
+        ]);
+        let r1 = make_evpn_type2(2, vec![mm1]);
+        let r2 = make_evpn_type2(2, vec![mm2]);
+        let key = r1.key;
+
+        let mut loc = LocRib::new();
+        // First install — that's always a change.
+        assert!(loc.recompute_evpn(key, [&r1].into_iter()));
+        // Same peer, bumped sequence — must also report a change.
+        assert!(
+            loc.recompute_evpn(key, [&r2].into_iter()),
+            "same-peer MAC Mobility sequence bump must be detected"
+        );
+        // Same input again — no change.
+        assert!(!loc.recompute_evpn(key, [&r2].into_iter()));
+    }
+
+    /// Regression: a GR-stale EVPN route must NOT beat a fresh alternative
+    /// on local-pref or `AS_PATH`. Prior to the fix the EVPN tie-break ran
+    /// `LocalPref` first without consulting `is_stale`, so a stale route
+    /// with pref=200 would displace a fresh pref=100 — exactly backwards
+    /// from the RFC 4724 intent.
+    #[test]
+    fn evpn_fresh_beats_stale_even_with_lower_localpref() {
+        let mut fresh = make_evpn_type2(2, vec![PathAttribute::LocalPref(100)]);
+        let mut stale = make_evpn_type2(3, vec![PathAttribute::LocalPref(200)]);
+        fresh.is_stale = false;
+        stale.is_stale = true;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &stale), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&stale, &fresh), Ordering::Greater);
+    }
+
+    /// Regression: GR-stale outranks LLGR-stale (RFC 9494 §4.7).
+    #[test]
+    fn evpn_gr_stale_beats_llgr_stale() {
+        let mut gr = make_evpn_type2(2, vec![PathAttribute::LocalPref(100)]);
+        let mut llgr = make_evpn_type2(3, vec![PathAttribute::LocalPref(100)]);
+        gr.is_stale = true;
+        llgr.is_stale = true;
+        llgr.is_llgr_stale = true;
+        assert_eq!(evpn_tiebreak_simple(&gr, &llgr), Ordering::Less);
+    }
+
+    /// Regression: among otherwise-equal candidates, shorter `CLUSTER_LIST`
+    /// wins (RFC 4456 §9). Previously the chain stopped at eBGP-vs-iBGP
+    /// and went straight to peer-address.
+    #[test]
+    fn evpn_shorter_cluster_list_wins() {
+        let short = make_evpn_type2(
+            2,
+            vec![PathAttribute::ClusterList(vec![Ipv4Addr::new(
+                10, 0, 0, 100,
+            )])],
+        );
+        let long = make_evpn_type2(
+            3,
+            vec![PathAttribute::ClusterList(vec![
+                Ipv4Addr::new(10, 0, 0, 100),
+                Ipv4Addr::new(10, 0, 0, 200),
+            ])],
+        );
+        assert_eq!(evpn_tiebreak_simple(&short, &long), Ordering::Less);
+    }
+
+    /// Regression: lower `ORIGINATOR_ID` breaks ties before peer address.
+    #[test]
+    fn evpn_lower_originator_id_wins() {
+        let a = make_evpn_type2(
+            2,
+            vec![PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 50))],
+        );
+        let b = make_evpn_type2(
+            3,
+            vec![PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 150))],
+        );
+        assert_eq!(evpn_tiebreak_simple(&a, &b), Ordering::Less);
+    }
+
+    /// Regression: same-peer payload change (e.g. VNI / `label1` update)
+    /// must trigger redistribution. Previously only peer + stale flags
+    /// were compared at the Loc-RIB layer.
+    #[test]
+    fn evpn_same_peer_label_change_triggers_change() {
+        use rustbgpd_wire::{
+            EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel, RouteDistinguisher,
+        };
+
+        fn make_with_label(vni: u32) -> EvpnRibRoute {
+            let peer = Ipv4Addr::new(10, 0, 0, 2);
+            let mac_ip = EvpnRoute::MacIp(EvpnMacIp {
+                rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+                esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(100),
+                mac: MacAddress([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                ip: None,
+                label1: MplsLabel::new(vni),
+                label2: None,
+            });
+            let key = mac_ip.key();
+            EvpnRibRoute {
+                route: mac_ip,
+                key,
+                next_hop: IpAddr::V4(peer),
+                peer: IpAddr::V4(peer),
+                attributes: Arc::new(vec![PathAttribute::LocalPref(100)]),
+                received_at: Instant::now(),
+                origin_type: RouteOrigin::Ibgp,
+                peer_router_id: peer,
+                is_stale: false,
+                is_llgr_stale: false,
+            }
+        }
+
+        let r1 = make_with_label(10_000);
+        let r2 = make_with_label(20_000);
+        let key = r1.key;
+        let mut loc = LocRib::new();
+        assert!(loc.recompute_evpn(key, [&r1].into_iter()));
+        assert!(
+            loc.recompute_evpn(key, [&r2].into_iter()),
+            "same-peer VNI change must be detected"
+        );
     }
 }

@@ -2367,3 +2367,114 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         _ => panic!("unexpected RibUpdate variant"),
     }
 }
+
+/// Regression: when an inbound UPDATE is discarded due to RFC 4456
+/// loop detection (our cluster-id present in `CLUSTER_LIST`), any EVPN
+/// withdrawals carried on that same UPDATE must still be applied.
+/// Prior to the fix, unicast + `FlowSpec` withdrawals were propagated
+/// in the loop-detect branch but `evpn_withdrawn` was hard-coded to
+/// `vec![]`, so reflected-loop withdrawals could leave stale EVPN state
+/// downstream.
+#[tokio::test]
+async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MpReachNlri,
+        MpUnreachNlri, MplsLabel, RouteDistinguisher,
+    };
+
+    let (mut session, mut rib_rx) = make_test_session_with_rib(65001, 65001);
+    let local_cluster_id = Ipv4Addr::new(10, 0, 0, 9);
+    session.config.cluster_id = Some(local_cluster_id);
+
+    // Negotiate L2VPN/EVPN so the withdrawal isn't family-filtered.
+    let negotiated = NegotiatedSession {
+        peer_asn: 65001,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        hold_time: 90,
+        keepalive_interval: 30,
+        peer_capabilities: vec![],
+        four_octet_as: true,
+        negotiated_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_gr_capable: false,
+        peer_restart_state: false,
+        peer_restart_time: 0,
+        peer_gr_families: vec![],
+        peer_notification_gr: false,
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        peer_route_refresh: false,
+        peer_enhanced_route_refresh: false,
+        peer_extended_message: false,
+        extended_nexthop_families: HashMap::new(),
+        add_path_families: HashMap::new(),
+    };
+    session
+        .negotiated_families
+        .clone_from(&negotiated.negotiated_families);
+    session.negotiated = Some(negotiated);
+
+    // Build the withdrawn EVPN Type 2 key.
+    let withdrawn_route = EvpnRoute::MacIp(EvpnMacIp {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+        esi: EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: EthernetTagId(100),
+        mac: MacAddress([0x02, 0x00, 0x00, 0xAA, 0xBB, 0xCC]),
+        ip: None,
+        label1: MplsLabel::new(10_000),
+        label2: None,
+    });
+    let expected_key = withdrawn_route.key();
+
+    // Craft the UPDATE: loop-triggering CLUSTER_LIST + MP_UNREACH with
+    // the EVPN withdrawal. Also include an MP_REACH with a bogus announce
+    // so the loop-detect branch has something to discard.
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        // Triggers the loop — local cluster-id present in the advertised list.
+        PathAttribute::ClusterList(vec![local_cluster_id]),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![withdrawn_route.clone()],
+        }),
+        PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![withdrawn_route],
+        }),
+    ];
+    let update = UpdateMessage::build(&[], &[], &attrs, true, false, Ipv4UnicastMode::MpReach);
+
+    session.process_update(update).await;
+
+    // The session must still emit a RoutesReceived carrying the EVPN
+    // withdrawal, even though the announce side was discarded.
+    let msg = rib_rx
+        .try_recv()
+        .expect("loop-path must still dispatch withdrawals");
+    match msg {
+        RibUpdate::RoutesReceived {
+            announced,
+            evpn_announced,
+            evpn_withdrawn,
+            ..
+        } => {
+            assert!(
+                announced.is_empty() && evpn_announced.is_empty(),
+                "announces in a loop-detected UPDATE must be discarded"
+            );
+            assert_eq!(
+                evpn_withdrawn,
+                vec![expected_key],
+                "EVPN withdrawals must survive loop detection"
+            );
+        }
+        _ => panic!("expected RoutesReceived from the loop-detect path"),
+    }
+}

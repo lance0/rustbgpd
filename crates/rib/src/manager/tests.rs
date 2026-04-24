@@ -7425,6 +7425,102 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
     handle.await.unwrap();
 }
 
+/// Regression: an RR must not reflect an EVPN route back to the peer
+/// that originated it (source-peer split horizon). Prior to the fix the
+/// distribution path went `loc_rib.get_evpn()` → RR suppression check →
+/// stage for all peers including the source. FRR dropped the
+/// self-reflection via `ORIGINATOR_ID`, but RFC 4456 hygiene says we
+/// shouldn't emit it in the first place.
+#[tokio::test]
+async fn evpn_is_not_reflected_back_to_source_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Source is an RR client.
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    // A second RR client so reflection has somewhere to go.
+    let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: other,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: other_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut other_out_rx).await;
+
+    // Source advertises a Type 3 IMET.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // The "other" client must receive a reflected announce.
+    let other_announce = tokio::time::timeout(Duration::from_secs(2), other_out_rx.recv())
+        .await
+        .expect("other peer should receive reflection within 2s")
+        .expect("outbound channel still open");
+    assert_eq!(other_announce.evpn_announce.len(), 1);
+    assert_eq!(other_announce.evpn_announce[0].key, imet_key);
+
+    // The source must NOT receive its own route back. A short wait is
+    // enough — if the bug exists, the bad announce fires on the same
+    // distribute_changes as the reflection to "other".
+    match tokio::time::timeout(Duration::from_millis(300), source_out_rx.recv()).await {
+        Err(_) => {
+            // Timeout — correct behavior. Source saw nothing.
+        }
+        Ok(Some(msg)) => {
+            assert!(
+                msg.evpn_announce.is_empty(),
+                "source peer must not receive its own EVPN route back (got {:?})",
+                msg.evpn_announce,
+            );
+        }
+        Ok(None) => panic!("source outbound channel closed unexpectedly"),
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Regression: when an EVPN update fails to send (outbound channel full),
 /// the peer is marked dirty; a later `distribute_changes` must resync EVPN
 /// routes, not only unicast / `FlowSpec`. Before this fix, dirty resync
