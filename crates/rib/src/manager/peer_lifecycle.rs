@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_wire::{FlowSpecRule, Prefix};
+use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -36,18 +36,25 @@ impl RibManager {
             let count = rib.len();
             let fs_affected: HashSet<FlowSpecRule> =
                 rib.iter_flowspec().map(|r| r.rule.clone()).collect();
+            let evpn_affected: HashSet<EvpnRouteKey> = rib.iter_evpn().map(|r| r.key).collect();
             debug!(%peer, cleared = count, "peer down — rib cleared");
             self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
+            self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
+            }
+            if !evpn_affected.is_empty() {
+                self.recompute_and_distribute_evpn(&evpn_affected);
             }
         }
 
         self.adj_ribs_out.remove(&peer);
         self.metrics
             .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
+        self.metrics
+            .set_adj_rib_out_prefixes(&peer.to_string(), "evpn", 0);
         self.outbound_peers.remove(&peer);
         self.peer_export_policies.remove(&peer);
         self.peer_sendable_families.remove(&peer);

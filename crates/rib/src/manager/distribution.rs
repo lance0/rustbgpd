@@ -1284,7 +1284,21 @@ impl RibManager {
                 HashSet::new()
             };
 
-            if effective_prefixes.is_empty() && effective_flowspec_rules.is_empty() {
+            let effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if is_dirty {
+                let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> =
+                    self.loc_rib.iter_evpn().map(|route| route.key).collect();
+                if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
+                    all.extend(rib_out.iter_evpn().map(|route| route.key));
+                }
+                all
+            } else {
+                HashSet::new()
+            };
+
+            if effective_prefixes.is_empty()
+                && effective_flowspec_rules.is_empty()
+                && effective_evpn_keys.is_empty()
+            {
                 continue;
             }
 
@@ -1293,6 +1307,8 @@ impl RibManager {
             let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
             let mut fs_announce = Vec::new();
             let mut fs_withdraw = Vec::new();
+            let mut evpn_announce = Vec::new();
+            let mut evpn_withdraw = Vec::new();
 
             // Resolve export policy, sendable families, and RR state before
             // borrowing rib_out (which holds a &mut to self.adj_ribs_out).
@@ -1387,10 +1403,31 @@ impl RibManager {
                 );
             }
 
+            if is_dirty && !effective_evpn_keys.is_empty() {
+                Self::stage_evpn_routes(
+                    loc_rib,
+                    rib_out,
+                    &self.peer_is_rr_client,
+                    &effective_evpn_keys,
+                    peer,
+                    target_peer_asn,
+                    target_peer_group,
+                    target_is_ebgp,
+                    target_is_rr_client,
+                    cluster_id,
+                    sendable.as_ref(),
+                    export_pol.as_ref(),
+                    &mut evpn_announce,
+                    &mut evpn_withdraw,
+                );
+            }
+
             if !announce.is_empty()
                 || !withdraw.is_empty()
                 || !fs_announce.is_empty()
                 || !fs_withdraw.is_empty()
+                || !evpn_announce.is_empty()
+                || !evpn_withdraw.is_empty()
             {
                 // If a prior initial dump / route-refresh EoR was deferred,
                 // piggyback it on the successful dirty resync update so it
@@ -1414,8 +1451,8 @@ impl RibManager {
                     vec![],
                     fs_announce,
                     fs_withdraw,
-                    vec![],
-                    vec![],
+                    evpn_announce,
+                    evpn_withdraw,
                 ) {
                     if is_dirty {
                         info!(
@@ -1437,12 +1474,7 @@ impl RibManager {
                     self.metrics.record_outbound_route_drop(&peer.to_string());
                     self.dirty_peers.insert(peer);
                 }
-            } else if is_dirty
-                && announce.is_empty()
-                && withdraw.is_empty()
-                && fs_announce.is_empty()
-                && fs_withdraw.is_empty()
-            {
+            } else if is_dirty {
                 // Dirty peer with no diff — already in sync
                 debug!(%peer, "outbound routes unchanged after policy change");
                 self.dirty_peers.remove(&peer);

@@ -3,14 +3,40 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
-    Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
+    Afi, AsPath, AsPathSegment, EthernetTagId, EvpnImet, EvpnRoute, FlowSpecComponent,
+    FlowSpecPrefix, FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix,
+    RouteDistinguisher, RpkiValidation, Safi,
 };
 use tokio::sync::oneshot;
 
 use super::*;
 use crate::event::RouteEventType;
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
+
+fn evpn_sendable() -> Vec<(Afi, Safi)> {
+    vec![(Afi::L2Vpn, Safi::Evpn)]
+}
+
+fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
+    let route = EvpnRoute::Imet(EvpnImet {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+        ethernet_tag: EthernetTagId(ethernet_tag),
+        originator_ip: IpAddr::V4(peer),
+    });
+    let key = route.key();
+    EvpnRibRoute {
+        route,
+        key,
+        next_hop: IpAddr::V4(peer),
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+    }
+}
 
 /// Create a dummy (unused) query channel receiver for tests.
 fn dummy_query_rx() -> mpsc::Receiver<RibUpdate> {
@@ -7282,6 +7308,231 @@ async fn explain_best_path_no_candidates() {
 
     assert!(explain.best.is_none());
     assert!(explain.candidates.is_empty());
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: EVPN routes learned from a peer that goes down must be
+/// withdrawn from remaining peers. Before this fix, `handle_peer_down` removed
+/// the dead peer's Adj-RIB-In but never called `recompute_and_distribute_evpn`,
+/// leaving the Loc-RIB advertising stale MAC/IP reachability.
+#[tokio::test]
+async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
+    let (tx, rx) = mpsc::channel(64);
+    // Cluster-ID is required for iBGP→iBGP reflection (RFC 4456); without it,
+    // should_suppress_ibgp_inner falls back to standard split-horizon.
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Register target as RR client for L2VPN/EVPN (iBGP, same AS).
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Register source as an RR client too — the RibManager needs an outbound
+    // entry for the source or it skips reflection evaluation entirely; the
+    // source's own announces will round-trip to itself but split-horizon
+    // suppresses them at the stage step.
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    // Source advertises a Type 3 IMET route.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Target receives the reflected EVPN announce.
+    let announce = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("target should receive EVPN announce within 2s")
+        .expect("outbound channel open");
+    assert_eq!(announce.evpn_announce.len(), 1);
+    assert_eq!(announce.evpn_announce[0].key, imet_key);
+    assert!(
+        announce.evpn_withdraw.is_empty(),
+        "announce phase should have no withdrawals"
+    );
+
+    // Source goes down.
+    tx.send(RibUpdate::PeerDown { peer: source }).await.unwrap();
+
+    // Target should receive a withdrawal for that EVPN key.
+    let withdraw = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("target should receive EVPN withdrawal within 2s")
+        .expect("outbound channel still open");
+    assert!(
+        withdraw.evpn_announce.is_empty(),
+        "peer-down should not produce announces"
+    );
+    assert_eq!(
+        withdraw.evpn_withdraw,
+        vec![imet_key],
+        "target must see the withdrawal for the dead peer's EVPN route"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: when an EVPN update fails to send (outbound channel full),
+/// the peer is marked dirty; a later `distribute_changes` must resync EVPN
+/// routes, not only unicast / `FlowSpec`. Before this fix, dirty resync
+/// rebuilt unicast prefixes + `FlowSpec` rules but never gathered EVPN keys
+/// or staged EVPN routes, so EVPN deltas could be silently dropped.
+#[tokio::test]
+async fn dirty_resync_includes_evpn_routes_after_channel_full() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Target's outbound channel is size 1 — after the EoR, one more slot.
+    // We'll fill it, then the EVPN announce will fail and mark target dirty.
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Source as RR client so reflection isn't suppressed.
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    // Fill the target's outbound channel by NOT draining — send two EVPN
+    // announces in a row. The first lands in the channel (queue size 1);
+    // the second fails `try_send` and marks target dirty.
+    let imet1 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet1_key = imet1.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet1],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Give the RibManager a tick to process and fill the channel.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Second EVPN route arrives; target's channel is full → target goes dirty.
+    let imet2 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 200);
+    let imet2_key = imet2.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet2],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Drain the first queued update to make room, then drain anything the
+    // resync timer delivers.
+    let first = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("first EVPN announce must arrive")
+        .expect("channel open");
+    assert_eq!(first.evpn_announce.len(), 1);
+    assert_eq!(first.evpn_announce[0].key, imet1_key);
+
+    // Collect EVPN announces until we see imet2_key — the dirty-resync path
+    // must eventually deliver it. Time out after 10s (resync timer is faster).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_imet2 = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
+            Ok(Some(update)) => {
+                if update.evpn_announce.iter().any(|r| r.key == imet2_key) {
+                    saw_imet2 = true;
+                    break;
+                }
+            }
+            Ok(None) => panic!("outbound channel closed unexpectedly"),
+            Err(_) => {}
+        }
+    }
+    assert!(
+        saw_imet2,
+        "dirty resync must eventually deliver the second EVPN announce (imet2) to the target peer"
+    );
 
     drop(tx);
     handle.await.unwrap();
