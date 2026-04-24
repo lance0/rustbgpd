@@ -658,6 +658,11 @@ service InjectionService {
   rpc DeletePath(DeletePathRequest) returns (DeletePathResponse);
   rpc AddFlowSpec(AddFlowSpecRequest) returns (AddFlowSpecResponse);
   rpc DeleteFlowSpec(DeleteFlowSpecRequest) returns (DeleteFlowSpecResponse);
+  // Inject a locally-originated EVPN route (RFC 7432). SDN controllers
+  // push Type 2 / Type 5 / etc. routes to the RR's Loc-RIB, and the RR
+  // reflects them to iBGP peers negotiating L2VPN/EVPN.
+  rpc AddEvpnRoute(AddEvpnRouteRequest) returns (AddEvpnRouteResponse);
+  rpc DeleteEvpnRoute(DeleteEvpnRouteRequest) returns (DeleteEvpnRouteResponse);
 }
 
 message AddPathRequest {
@@ -827,6 +832,49 @@ message ListEvpnRequest {
 message ListEvpnResponse {
   repeated EvpnRouteEntry routes = 1;
 }
+
+// Controller-injected EVPN route. Phase 1 supports Type 2 (MAC/IP)
+// and Type 3 (IMET); later phases extend to Type 5 IP-Prefix.
+message AddEvpnRouteRequest {
+  // RFC 7432 route type. Only 2 and 3 are accepted in Phase 1; other
+  // values return INVALID_ARGUMENT.
+  uint32 route_type = 1;
+  // Route Distinguisher, "asn:value" / "ip:value". Required.
+  string rd = 2;
+  // Ethernet Tag ID (decimal). Default 0.
+  uint32 ethernet_tag = 3;
+  // MAC address "aa:bb:cc:dd:ee:ff" (Type 2 only). Required for Type 2.
+  string mac = 4;
+  // Host IP (Type 2 optional, Type 3 required as originator_ip). Empty
+  // for Type 2 means MAC-only (no IP advertised).
+  string ip = 5;
+  // Primary label / VNI (Type 2). Required for Type 2.
+  uint32 label = 6;
+  // Secondary label for symmetric IRB (RFC 9135). 0 = absent.
+  uint32 label2 = 7;
+  // Next-hop (VTEP loopback). Required.
+  string next_hop = 8;
+  // Optional route targets as "asn:value" — encoded as extended
+  // communities on the advertised route.
+  repeated string route_targets = 9;
+  // Optional: VXLAN encapsulation ext community (RFC 8365). Defaults
+  // to true — set false if the caller wants MPLS-over-GRE semantics.
+  bool vxlan_encap = 10;
+}
+
+message AddEvpnRouteResponse {}
+
+message DeleteEvpnRouteRequest {
+  // Identify the route to withdraw by its RFC 7432 key: route_type + RD
+  // + ethernet_tag + MAC (Type 2) or originator IP (Type 3).
+  uint32 route_type = 1;
+  string rd = 2;
+  uint32 ethernet_tag = 3;
+  string mac = 4;
+  string ip = 5;
+}
+
+message DeleteEvpnRouteResponse {}
 
 // ---------------------------------------------------------------------------
 // ControlService — Daemon lifecycle and health
