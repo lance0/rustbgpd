@@ -246,3 +246,7 @@ easy operator identification.
 - MPLS encapsulation is not wired — the BGP Encapsulation ext community
   decoder handles any tunnel type value losslessly but rustbgpd does
   not negotiate an encap preference. VXLAN is the deployed case.
+
+See [docs/evpn-enablement.md](../evpn-enablement.md) for the gate-by-gate
+plan to close the remaining correctness and scale gaps (Gates 1-5) and
+the strategic decision point around VTEP mode (Gates 7-9).
