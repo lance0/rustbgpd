@@ -588,6 +588,15 @@ implemented per ADR-0040.
   than promoted, per RFC 9494 §4.7. Enhanced Route Refresh (RFC 7313)
   tracks unreplaced EVPN keys in `refresh_stale_evpn` and withdraws
   them on BoRR/EoRR completion.
+- **Type 2 MAC/IP Advertisement interop**: validated end-to-end
+  against FRR 10.3.1 via the M30 containerlab suite
+  (`tests/interop/m30-evpn-type2-frr.clab.yml`). Real kernel VXLAN +
+  bridge per VTEP; MAC injection on one VTEP via `bridge fdb add`
+  propagates through the rustbgpd RR to the second VTEP and appears
+  in its EVPN MAC table. Assertions cover RFC 4456 `ORIGINATOR_ID`
+  + `CLUSTER_LIST`, next-hop preservation (VTEP loopback, not RR),
+  VXLAN encap community surfaced through gRPC, and withdrawal
+  propagation on FDB delete.
 - See ADR-0050.
 
 ---

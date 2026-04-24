@@ -279,7 +279,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN VTEP role (RR role works), VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1199 workspace tests, fuzz targets, 23 automated interop suites against FRR, BIRD, GoBGP, StayRTR |
+| **Tests** | 1214 workspace tests, fuzz targets, 24 automated interop suites against FRR, BIRD, GoBGP, StayRTR |
 
 ## Documentation
 

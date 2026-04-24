@@ -294,7 +294,7 @@ Features that market research indicates are lower value than originally planned.
 
 ### Interop Test Coverage
 
-23 automated interop scripts cover M1, M3, M4, M10–M29 against FRR 10.3.1,
+24 automated interop scripts cover M1, M3, M4, M10–M30 against FRR 10.3.1,
 BIRD 2.0.12, GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual smoke
 tests.
 

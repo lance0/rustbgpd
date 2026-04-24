@@ -40,6 +40,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Without this, a VTEP restart would have dropped reflected EVPN routes
   from every other peer mid-flap — the biggest correctness gap on the
   production-ready RR checklist. 13 new unit + integration tests.
+- **EVPN Type 2 MAC reflection interop (Gate 1, M30).** Three-node
+  containerlab topology (rustbgpd RR + 2× FRR VTEPs running kernel
+  VXLAN + bridge) validating Type 2 MAC/IP Advertisement reflection
+  end-to-end. MAC injected on VTEP-A via `bridge fdb add` propagates
+  through rustbgpd and appears on VTEP-B's `show evpn mac vni 100`
+  within 30 seconds. Assertions cover: session Established on both
+  VTEPs with L2VPN/EVPN negotiated, Type 3 IMET reflection (baseline),
+  Type 2 MAC learning end-to-end, RFC 4456 `ORIGINATOR_ID` + `CLUSTER_LIST`
+  on the reflected UPDATE, next-hop preservation (VTEP loopback, not RR),
+  VXLAN encap community (`tunnel_type=8`) surfaced through the
+  `ListEvpnRoutes` gRPC, and withdrawal propagation via
+  `bridge fdb del`. New `start-frr-vtep.sh` shim sets up `br100` +
+  `vxlan100` with `nolearning` so EVPN controls the FDB.
 
 ---
 

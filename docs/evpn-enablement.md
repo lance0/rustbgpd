@@ -16,9 +16,11 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 
 ## TL;DR
 
-- **Gate 0** (capability negotiation): **done** on `feat/evpn-rr`.
-- **Gates 1-4** gate "production-ready RR for a SONiC/FRR fabric". These
-  close all correctness gaps for operating the RR role.
+- **Gates 0, 1, 2**: done on `feat/evpn-rr`. Capability negotiation,
+  real Type 2 MAC reflection against FRR 10.3.1, and EVPN GR/LLGR
+  stale handling all landed.
+- **Gates 3-4** remain for "production-ready RR for a SONiC/FRR fabric".
+  Both extend the M30 harness (MAC mobility, multi-homing).
 - **Gate 5** validates scale. Once green, the RR claim is full.
 - **Gate 6** unlocks controller-driven deployments; cheap relative to payoff.
 - **Gates 7-9** expand into VTEP / active-active multi-homing / IRB. Big
@@ -28,17 +30,17 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 
 Phase 1 RR role — control-plane only, all 5 RFC 7432 route types, MAC Mobility
 best-path, RFC 4456 reflection, VXLAN encap community (RFC 8365), gRPC +
-CLI. One capability-negotiation interop test against FRR 10.3.1 (M29).
-Peer-down and dirty-resync correctness gaps closed after the 2026-04-23
-Codex adversarial review.
+CLI. Real-peer interop via M29 (capability) and M30 (Type 2 MAC
+reflection against FRR 10.3.1). EVPN GR/LLGR stale handling shipped.
+Peer-down and dirty-resync correctness gaps closed.
 
 **Honest completeness estimates:**
 
 | Scope | Completeness |
 |-------|-------------|
-| RFC 7432 RR role | ~45-50% |
-| Production-ready RR for a SONiC/FRR fabric | ~55-65% |
-| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~12-15% |
+| RFC 7432 RR role | ~60-65% |
+| Production-ready RR for a SONiC/FRR fabric | ~70-75% |
+| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~18-22% |
 
 ## Gate Ladder
 
@@ -60,32 +62,34 @@ RR onto the wire and back into a peer's EVPN RIB.
 
 ---
 
-### Gate 1 — Real Type 2 MAC reflection end-to-end
+### Gate 1 — Real Type 2 MAC reflection end-to-end ✅
 
-Status: **next** · Estimate: ~1 week · Blockers: containerlab VXLAN setup
+Status: **done** (feat/evpn-rr, M30 harness, 2026-04-24)
 
 Unlocks: the minimum credible "this actually works" claim. Two FRR VTEPs
 with kernel VXLAN interfaces + bridge domain; rustbgpd between them as RR;
 MAC learned on VTEP-A appears on VTEP-B's `show evpn mac vni N`.
 
-Validates: next-hop preservation (VTEP loopback, not RR's address), VNI
-propagation in the Type 2 label field, RFC 4456 `ORIGINATOR_ID` +
-`CLUSTER_LIST` on the reflected UPDATE (tcpdump diff), attribute
-pass-through without mutation.
-
-Work breakdown:
+Delivered:
 
 | Task | File / location |
 |------|----------------|
-| Containerlab topology with 2x FRR VTEPs | `tests/interop/m30-evpn-type2-frr.clab.yml` (new) |
-| Kernel VXLAN + bridge config per VTEP | `tests/interop/configs/frr-bgpd-m30-*.conf` (new, 2 files) |
-| FRR VTEP startup shim (`ip link add vxlan`, bridge attach) | `tests/interop/scripts/start-frr-vtep.sh` (new) |
-| rustbgpd RR config with cluster-id + both VTEPs as RR clients | `tests/interop/configs/rustbgpd-m30-rr.toml` (new) |
-| Test script: inject MAC on VTEP-A, poll VTEP-B, tcpdump diff | `tests/interop/scripts/test-m30-evpn-type2-frr.sh` (new) |
-| Assert VNI preserved, ORIGINATOR_ID + CLUSTER_LIST set | — (in test script) |
+| 3-node containerlab topology (rustbgpd RR + 2 VTEPs) | `tests/interop/m30-evpn-type2-frr.clab.yml` |
+| Kernel VXLAN + bridge config per VTEP | `tests/interop/configs/frr-bgpd-m30-vtep-{a,b}.conf` |
+| FRR VTEP startup shim (`ip link add vxlan`, bridge attach, nolearning) | `tests/interop/scripts/start-frr-vtep.sh` |
+| rustbgpd RR config (cluster-id, both VTEPs as RR clients) | `tests/interop/configs/rustbgpd-m30-rr.toml` |
+| Test script (7 assertions) | `tests/interop/scripts/test-m30-evpn-type2-frr.sh` |
 
-No rustbgpd code changes expected. If bugs surface (wire edge cases,
-attribute mutation), fix them as they appear — the harness is the product.
+Validated: next-hop preservation (VTEP loopback, not RR's address), VNI
+propagation in the Type 2 label field (or `tunnel_type = 8` via BGP
+Encap ext community), RFC 4456 `ORIGINATOR_ID` + `CLUSTER_LIST` on the
+reflected UPDATE, attribute pass-through without mutation, clean
+withdrawal propagation. MAC injection via `bridge fdb add` → netlink →
+FRR zebra → Type 2 origination; data-plane VXLAN packets do not need
+to traverse the fabric for this test.
+
+No rustbgpd code changes were needed — the harness exercises the Gate 0
+control plane against a real FRR 10.3.1 peer.
 
 ---
 
@@ -258,10 +262,10 @@ Further out on this track:
 ## Priority Ordering
 
 ```
+Gate 1 (Type 2 interop)      ── ✅ done (M30)
 Gate 2 (GR/LLGR)              ── ✅ done
-Gate 1 (Type 2 interop)      ──┐
-Gate 3 (MAC mobility interop) ──┤── ships "production-ready RR for SONiC/FRR fabric"
-Gate 4 (multi-homing)         ──┘
+Gate 3 (MAC mobility interop) ──┐
+Gate 4 (multi-homing)         ──┘── ships "production-ready RR for SONiC/FRR fabric"
 Gate 5 (scale)                 ── ships "production-ready at 10k+ MAC scale"
 Gate 6 (controller inject)     ── ships "SDN-integratable"
 ───────────── decision point ─────────────
@@ -270,13 +274,14 @@ Gate 8 (multi-homing execution)── depends on Gate 7
 Gate 9 (IRB, MVPN, PBB, MPLS)  ── furthest horizon
 ```
 
-### Why Gate 2 landed first
+### Why Gates 2 and 1 landed first
 
-Gate 1 (Type 2 interop) is the more visible validation, but Gate 2
-(EVPN GR/LLGR) was the bigger correctness jump and pure-code work — no
-containerlab surgery. Landing Gate 2 first means the Gate 1 harness
-validates production-shaped behavior from the start rather than a
-partially-handled family.
+Gate 2 (EVPN GR/LLGR) was pure-code work with the bigger correctness
+jump — no containerlab surgery — so it went first. Gate 1 (Type 2
+interop, M30) followed immediately, proving the whole control-plane
+pipeline reflects routes correctly against a real FRR peer. Together
+they unblock Gates 3 and 4, which extend the M30 harness rather than
+building new infrastructure.
 
 ### Why Gate 6 before Gate 7
 
