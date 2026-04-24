@@ -24,7 +24,7 @@ use rustbgpd_wire::message::{Message, decode_message, encode_message};
 use rustbgpd_wire::open::OpenMessage;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep};
 
@@ -50,8 +50,8 @@ pub enum PeerError {
 /// Peer session configuration.
 #[derive(Debug, Clone)]
 pub struct PeerConfig {
-    /// Target address (RR) to dial.
-    pub target: SocketAddr,
+    /// Local listen address — the RR will dial us here. BGP uses 179.
+    pub listen: SocketAddr,
     /// Our AS number (4-octet).
     pub local_as: u32,
     /// Our BGP router-id.
@@ -65,9 +65,9 @@ pub struct PeerConfig {
 impl PeerConfig {
     /// A [`PeerConfig`] preloaded for L2VPN/EVPN only (single family).
     #[must_use]
-    pub fn evpn_only(target: SocketAddr, local_as: u32, router_id: Ipv4Addr) -> Self {
+    pub fn evpn_only(listen: SocketAddr, local_as: u32, router_id: Ipv4Addr) -> Self {
         Self {
-            target,
+            listen,
             local_as,
             router_id,
             hold_time: 90,
@@ -87,16 +87,27 @@ pub struct PeerHandle {
     pub established_at: Instant,
 }
 
-/// Dial, exchange OPEN, send initial KEEPALIVE, wait for Established,
-/// then return a handle. The session continues in background tasks
-/// (reader, writer, keepalive sender) until tx is dropped or rx drains.
+/// Listen on `cfg.listen`, accept the first inbound TCP, exchange OPEN,
+/// send KEEPALIVE, and return a handle. The session continues in
+/// background tasks (reader, writer, keepalive sender) until tx is
+/// dropped or rx drains.
+///
+/// Listen-rather-than-dial is deliberate: rustbgpd's neighbor model
+/// always actively dials its configured peers. If both sides dial,
+/// the collision-resolution window holds the inbound TCP pending
+/// while the outbound retries indefinitely (when the other side
+/// isn't listening). Accepting inbound avoids the deadlock.
 ///
 /// # Errors
 ///
-/// Returns a [`PeerError`] if the TCP connect, OPEN exchange, or initial
+/// Returns a [`PeerError`] if bind/accept, OPEN exchange, or initial
 /// KEEPALIVE fails.
 pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
-    let mut stream = TcpStream::connect(cfg.target).await?;
+    let listener = TcpListener::bind(cfg.listen).await?;
+    tracing::info!(listen = %cfg.listen, "evpn-load peer listening for BGP session");
+    let (mut stream, remote) = listener.accept().await?;
+    tracing::info!(%remote, "evpn-load peer accepted inbound BGP connection");
+    drop(listener);
 
     // Send our OPEN first — simplifies the handshake; the peer will
     // respond in kind.
@@ -301,7 +312,7 @@ mod tests {
 
     #[test]
     fn peer_config_evpn_only_defaults() {
-        let addr: SocketAddr = "127.0.0.1:179".parse().unwrap();
+        let addr: SocketAddr = "0.0.0.0:179".parse().unwrap();
         let cfg = PeerConfig::evpn_only(addr, 65000, Ipv4Addr::new(10, 0, 0, 2));
         assert_eq!(cfg.hold_time, 90);
         assert_eq!(cfg.families, vec![(Afi::L2Vpn, Safi::Evpn)]);

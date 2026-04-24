@@ -28,10 +28,6 @@ TESTER_A="clab-${TOPO}-tester-a"
 TESTER_B="clab-${TOPO}-tester-b"
 MONITOR="clab-${TOPO}-monitor"
 
-RR_ADDR_A="10.1.1.1"
-RR_ADDR_B="10.1.2.1"
-RR_ADDR_MON="10.1.3.1"
-
 COUNT_PER_TESTER=25000
 TOTAL_COUNT=50000
 ADVERTISE_RATE=5000
@@ -61,7 +57,7 @@ log "[stage 1] launch monitor in background — expects ${TOTAL_COUNT} Type 2 ro
 MON_LOG=$(mktemp)
 MON_JSON=$(mktemp)
 docker exec -d "$MONITOR" sh -c "evpn-monitor \
-    --target ${RR_ADDR_MON}:179 \
+    --listen 0.0.0.0:179 \
     --local-as 65000 \
     --router-id 10.0.0.20 \
     --expect ${TOTAL_COUNT} \
@@ -77,7 +73,7 @@ sleep 2
 
 log "[stage 2] launch tester-a (${COUNT_PER_TESTER} routes @ ${ADVERTISE_RATE}/s)"
 docker exec -d "$TESTER_A" sh -c "evpn-tester \
-    --target ${RR_ADDR_A}:179 \
+    --listen 0.0.0.0:179 \
     --local-as 65000 \
     --router-id 10.0.0.11 \
     --count ${COUNT_PER_TESTER} \
@@ -91,7 +87,7 @@ docker exec -d "$TESTER_A" sh -c "evpn-tester \
 
 log "[stage 2] launch tester-b (${COUNT_PER_TESTER} routes @ ${ADVERTISE_RATE}/s)"
 docker exec -d "$TESTER_B" sh -c "evpn-tester \
-    --target ${RR_ADDR_B}:179 \
+    --listen 0.0.0.0:179 \
     --local-as 65000 \
     --router-id 10.0.0.12 \
     --count ${COUNT_PER_TESTER} \

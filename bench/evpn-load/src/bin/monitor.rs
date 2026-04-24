@@ -27,9 +27,9 @@ use serde::Serialize;
 #[command(name = "evpn-monitor")]
 #[command(about = "observe reflected EVPN Type 2 routes and measure convergence")]
 struct Args {
-    /// Target RR address (host:port).
-    #[arg(long)]
-    target: SocketAddr,
+    /// Local listen address (RR dials us here). BGP = port 179.
+    #[arg(long, default_value = "0.0.0.0:179")]
+    listen: SocketAddr,
 
     /// Local AS number.
     #[arg(long, default_value_t = 65000)]
@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     tracing::info!(
-        target = %args.target,
+        listen = %args.listen,
         local_as = args.local_as,
         router_id = %args.router_id,
         expect = args.expect,
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let cfg = PeerConfig {
-        target: args.target,
+        listen: args.listen,
         local_as: args.local_as,
         router_id: args.router_id,
         hold_time: args.hold_time,

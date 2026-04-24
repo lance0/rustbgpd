@@ -30,9 +30,9 @@ use rustbgpd_wire::update::UpdateMessage;
 #[command(name = "evpn-tester")]
 #[command(about = "bulk Type 2 EVPN route generator for rustbgpd RR scale validation")]
 struct Args {
-    /// Target RR address (host:port).
-    #[arg(long)]
-    target: SocketAddr,
+    /// Local listen address (RR dials us here). BGP = port 179.
+    #[arg(long, default_value = "0.0.0.0:179")]
+    listen: SocketAddr,
 
     /// Local AS number.
     #[arg(long, default_value_t = 65000)]
@@ -93,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
 
     let args = Args::parse();
     tracing::info!(
-        target = %args.target,
+        listen = %args.listen,
         local_as = args.local_as,
         router_id = %args.router_id,
         count = args.count,
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let cfg = PeerConfig {
-        target: args.target,
+        listen: args.listen,
         local_as: args.local_as,
         router_id: args.router_id,
         hold_time: args.hold_time,
