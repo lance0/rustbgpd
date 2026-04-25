@@ -796,7 +796,7 @@ message EvpnRouteEntry {
   string mac = 5;
   // Host IP (Type 2 and Type 3 and Type 4 and Type 5), may be empty.
   string ip = 6;
-  // IP prefix (Type 5 only), "<addr>/<len>".
+  // IP prefix (Type 5 only), formatted as "ADDR/LEN" (e.g. "10.0.0.0/24").
   string prefix = 7;
   // Gateway IP (Type 5 only), may be empty.
   string gateway = 8;
