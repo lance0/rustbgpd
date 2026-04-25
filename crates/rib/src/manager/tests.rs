@@ -8183,3 +8183,170 @@ async fn withdraw_evpn_unknown_key_returns_error() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Regression: a peer that joins AFTER the EVPN Loc-RIB has been
+/// populated must receive the existing routes in its initial dump.
+/// Prior to the fix, `send_initial_table` never called
+/// `stage_evpn_routes` and hardcoded `evpn_announce: vec![]`, so a
+/// late-joining VTEP saw an EVPN End-of-RIB with zero routes and
+/// cleared any stale state — operating with no EVPN reachability for
+/// the existing fabric until unrelated RIB churn forced redistribution.
+/// The M30-M33 harnesses miss this because they bring up peers before
+/// any EVPN advertisements; production VTEPs reconnect into a
+/// converged fabric all the time.
+#[tokio::test]
+async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let early = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let (early_out_tx, mut early_out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: early,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: early_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut early_out_rx).await;
+
+    // Early peer advertises a Type 3 IMET — this populates the RR's
+    // EVPN Loc-RIB before the late peer connects.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: early,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Drain side-effects so the early peer's reflection (if any) is
+    // processed before we register the late peer.
+    let _ = query_evpn_routes(&tx).await;
+
+    // Now a late-joining peer connects to the same RR.
+    let late = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (late_out_tx, mut late_out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: late,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: late_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+
+    // First message to the late peer must be the initial dump carrying
+    // the existing EVPN route. Without the fix this is just an empty
+    // EoR and the route is silently absent.
+    let msg = tokio::time::timeout(Duration::from_secs(2), late_out_rx.recv())
+        .await
+        .expect("late peer should receive an outbound update within 2s")
+        .expect("outbound channel open");
+
+    assert_eq!(
+        msg.evpn_announce.len(),
+        1,
+        "late-joining peer must see the existing EVPN route in initial dump"
+    );
+    assert_eq!(msg.evpn_announce[0].key, imet_key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: RFC 7313 Enhanced Route Refresh on the L2VPN/EVPN family
+/// must remove re-advertised keys from the per-peer stale set, otherwise
+/// `EoRR` sweeps every reflected EVPN route off the RIB. The unicast and
+/// `FlowSpec` chunks already do this; the EVPN chunks were missing the
+/// hook entirely.
+#[tokio::test]
+async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    // Stage 1: peer advertises one EVPN Type 3 IMET route.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet.clone()],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Stage 2: peer initiates ERR for L2VPN/EVPN. The manager snapshots
+    // imet_key into refresh_stale_evpn[peer] at this point.
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer,
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+
+    // Quiesce the manager so the BoRR snapshot lands before the
+    // re-advertisement races it.
+    let _drain = query_evpn_routes(&tx).await;
+
+    // Stage 3: peer re-advertises the same key — must remove it from
+    // the stale set. Without the fix this is a no-op on the stale set.
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Stage 4: peer ends the refresh window. EoRR sweeps anything left
+    // in the stale set; with the fix that set is empty, so the route
+    // survives. Without the fix, the route gets withdrawn here.
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer,
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1, "refreshed EVPN route must survive EoRR");
+    assert_eq!(best[0].key, imet_key);
+
+    drop(tx);
+    handle.await.unwrap();
+}

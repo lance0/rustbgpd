@@ -149,6 +149,8 @@ impl RibManager {
         let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
+        let mut evpn_announce = Vec::new();
+        let mut evpn_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -245,6 +247,31 @@ impl RibManager {
             );
         }
 
+        // EVPN initial dump — without this, peers that join after the
+        // fabric has converged see an EoR with zero EVPN routes and
+        // operate with no EVPN reachability until unrelated RIB churn
+        // forces redistribution. Mirrors the FlowSpec staging block.
+        let all_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> =
+            self.loc_rib.iter_evpn().map(|route| route.key).collect();
+        if !all_evpn_keys.is_empty() {
+            Self::stage_evpn_routes(
+                loc_rib,
+                &initial_view,
+                &self.peer_is_rr_client,
+                &all_evpn_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &mut evpn_announce,
+                &mut evpn_withdraw,
+            );
+        }
+
         // Determine EoR families from this peer's sendable families
         let eor_families = self
             .peer_sendable_families
@@ -255,7 +282,9 @@ impl RibManager {
         if (!announce.is_empty()
             || !withdraw.is_empty()
             || !fs_announce.is_empty()
-            || !fs_withdraw.is_empty())
+            || !fs_withdraw.is_empty()
+            || !evpn_announce.is_empty()
+            || !evpn_withdraw.is_empty())
             && !self.try_send_and_commit_outbound_update(
                 peer,
                 nh_override_flags,
@@ -265,8 +294,8 @@ impl RibManager {
                 vec![],
                 fs_announce,
                 fs_withdraw,
-                vec![],
-                vec![],
+                evpn_announce,
+                evpn_withdraw,
             )
         {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");

@@ -518,6 +518,12 @@ impl RibManager {
         peer: IpAddr,
         evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+        let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
         let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
         let evpn_len = {
             let rib = self
@@ -528,6 +534,11 @@ impl RibManager {
                 if rib.withdraw_evpn(&key) {
                     debug!(%peer, route_type = key.route_type(), "evpn withdrawn");
                     affected.insert(key);
+                    if evpn_refresh_active
+                        && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer)
+                    {
+                        stale.remove(&key);
+                    }
                 }
             }
             rib.evpn_len()
@@ -544,6 +555,12 @@ impl RibManager {
         peer: IpAddr,
         evpn_announced: Vec<crate::route::EvpnRibRoute>,
     ) {
+        let active_refresh = self
+            .refresh_in_progress
+            .get(&peer)
+            .cloned()
+            .unwrap_or_default();
+        let evpn_refresh_active = active_refresh.contains(&(Afi::L2Vpn, Safi::Evpn));
         let mut affected: HashSet<rustbgpd_wire::EvpnRouteKey> = HashSet::new();
         let evpn_len = {
             let rib = self
@@ -552,8 +569,14 @@ impl RibManager {
                 .expect("peer rib must exist before chunk processing");
             for route in evpn_announced {
                 debug!(%peer, route_type = route.route_type(), "evpn announced");
-                affected.insert(route.key);
+                let key = route.key;
+                affected.insert(key);
                 rib.insert_evpn(route);
+                // Enhanced Route Refresh: re-advertised key removes from
+                // the stale set so EoRR's sweep doesn't withdraw it.
+                if evpn_refresh_active && let Some(stale) = self.refresh_stale_evpn.get_mut(&peer) {
+                    stale.remove(&key);
+                }
             }
             rib.evpn_len()
         };

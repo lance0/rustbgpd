@@ -675,7 +675,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     label2.unwrap_or(0),
                     next_hop,
                     rt,
-                    !no_vxlan_encap,
+                    no_vxlan_encap,
                     json,
                 )
                 .await
@@ -695,7 +695,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     ip,
                     next_hop,
                     rt,
-                    !no_vxlan_encap,
+                    no_vxlan_encap,
                     json,
                 )
                 .await

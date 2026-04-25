@@ -869,7 +869,10 @@ fn build_common_attrs(req: &proto::AddEvpnRouteRequest) -> Result<Vec<PathAttrib
     for rt in &req.route_targets {
         ecs.push(parse_route_target(rt)?);
     }
-    if req.vxlan_encap {
+    // Default-false (proto3) → encap community attached, matching the
+    // VXLAN-EVPN deployment target. The field is inverted so SDN
+    // controllers that omit it still get the right behavior.
+    if !req.disable_vxlan_encap {
         ecs.push(ExtendedCommunity::bgp_encapsulation(8));
     }
     if !ecs.is_empty() {
@@ -1118,7 +1121,7 @@ mod tests {
             label2: 0,
             next_hop: "10.0.0.2".into(),
             route_targets: vec!["65000:200".into()],
-            vxlan_encap: true,
+            disable_vxlan_encap: false,
         });
         svc.add_evpn_route(req).await.unwrap();
         let key = reply_task.await.unwrap().unwrap();
@@ -1127,6 +1130,107 @@ mod tests {
             panic!("expected MacIp key");
         };
         assert_eq!(mac.0, [0x02, 0x00, 0x00, 0xAA, 0xBB, 0xCC]);
+    }
+
+    /// Regression: a controller that omits `disable_vxlan_encap` (proto3
+    /// default-false) MUST get the RFC 8365 §5.1.2 VXLAN Encapsulation
+    /// ext community attached. The earlier field name (`vxlan_encap`)
+    /// inverted the semantics — proto3 default-false meant "no encap"
+    /// for clients that didn't know to set it, silently breaking VXLAN
+    /// fabrics. The rename to `disable_vxlan_encap` aligns proto3
+    /// default-false with the operationally-correct behavior.
+    #[tokio::test]
+    async fn add_evpn_default_request_attaches_vxlan_encap_community() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    reply.send(Ok(())).ok();
+                    route
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        // disable_vxlan_encap left at its proto3 default (false) — same
+        // shape any non-CLI gRPC client would produce by omitting the
+        // field. The fix means the default attaches the encap community.
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let route = reply_task.await.unwrap();
+
+        let has_vxlan_encap = route.attributes.iter().any(|a| {
+            if let PathAttribute::ExtendedCommunities(ecs) = a {
+                ecs.iter().any(|ec| ec.as_bgp_encapsulation() == Some(8))
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_vxlan_encap,
+            "default-constructed AddEvpnRouteRequest must yield a route \
+             carrying the RFC 8365 VXLAN encap ext community"
+        );
+    }
+
+    /// Regression: setting `disable_vxlan_encap = true` actually
+    /// suppresses the community.
+    #[tokio::test]
+    async fn add_evpn_disable_vxlan_encap_suppresses_community() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    reply.send(Ok(())).ok();
+                    route
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: true,
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let route = reply_task.await.unwrap();
+
+        let has_vxlan_encap = route.attributes.iter().any(|a| {
+            if let PathAttribute::ExtendedCommunities(ecs) = a {
+                ecs.iter().any(|ec| ec.as_bgp_encapsulation() == Some(8))
+            } else {
+                false
+            }
+        });
+        assert!(
+            !has_vxlan_encap,
+            "disable_vxlan_encap=true must suppress the encap community"
+        );
     }
 
     #[tokio::test]
@@ -1142,7 +1246,7 @@ mod tests {
             label2: 0,
             next_hop: "10.0.0.2".into(),
             route_targets: vec![],
-            vxlan_encap: true,
+            disable_vxlan_encap: false,
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1162,7 +1266,7 @@ mod tests {
             label2: 0,
             next_hop: "10.0.0.2".into(),
             route_targets: vec![],
-            vxlan_encap: true,
+            disable_vxlan_encap: false,
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1182,7 +1286,7 @@ mod tests {
             label2: 0,
             next_hop: "10.0.0.2".into(),
             route_targets: vec![],
-            vxlan_encap: true,
+            disable_vxlan_encap: false,
         });
         let err = svc.add_evpn_route(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::PermissionDenied);

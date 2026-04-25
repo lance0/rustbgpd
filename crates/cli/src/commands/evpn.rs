@@ -121,7 +121,7 @@ pub async fn add_mac_ip(
     label2: u32,
     next_hop: String,
     route_targets: Vec<String>,
-    vxlan_encap: bool,
+    disable_vxlan_encap: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
@@ -137,7 +137,7 @@ pub async fn add_mac_ip(
             label2,
             next_hop,
             route_targets,
-            vxlan_encap,
+            disable_vxlan_encap,
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 2 route added");
@@ -152,7 +152,7 @@ pub async fn add_imet(
     ip: String,
     next_hop: String,
     route_targets: Vec<String>,
-    vxlan_encap: bool,
+    disable_vxlan_encap: bool,
     json: bool,
 ) -> Result<(), CliError> {
     let mut client =
@@ -168,7 +168,7 @@ pub async fn add_imet(
             label2: 0,
             next_hop,
             route_targets,
-            vxlan_encap,
+            disable_vxlan_encap,
         })
         .await?;
     output::print_result(json, "add_evpn", "", "EVPN Type 3 route added");

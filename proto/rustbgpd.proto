@@ -857,9 +857,14 @@ message AddEvpnRouteRequest {
   // Optional route targets as "asn:value" — encoded as extended
   // communities on the advertised route.
   repeated string route_targets = 9;
-  // Optional: VXLAN encapsulation ext community (RFC 8365). Defaults
-  // to true — set false if the caller wants MPLS-over-GRE semantics.
-  bool vxlan_encap = 10;
+  // Optional: when true, suppress the RFC 8365 §5.1.2 VXLAN
+  // Encapsulation extended community (tunnel-type=8) on the
+  // originated route. Default (proto3 false) attaches the community,
+  // matching the VXLAN-EVPN deployment target. Set true only if the
+  // caller wants MPLS-over-GRE / non-VXLAN semantics. The field name
+  // is inverted (vs. "vxlan_encap") so proto3's default-false yields
+  // the operationally correct behavior for clients that omit it.
+  bool disable_vxlan_encap = 10;
 }
 
 message AddEvpnRouteResponse {}

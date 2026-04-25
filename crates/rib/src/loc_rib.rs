@@ -215,6 +215,20 @@ impl LocRib {
 /// stale → `LocalPref` → `AS_PATH` length → ORIGIN → MED →
 /// eBGP > iBGP → `CLUSTER_LIST` length → `ORIGINATOR_ID` → peer address.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
+    // 0. Non-stale preferred over stale (RFC 4724 §4.2 / RFC 9494 §4.7).
+    //    GR-stale must never beat fresh; LLGR-stale is ranked below GR-stale.
+    //    Runs BEFORE the Type 2 MAC Mobility head — otherwise a stale route
+    //    with a higher MAC Mobility sequence (or sticky bit) would beat a
+    //    fresh alternative inside the head and skip this check entirely.
+    match a.is_stale.cmp(&b.is_stale) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    match a.is_llgr_stale.cmp(&b.is_llgr_stale) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
     // Type-specific head for Type 2 (MAC/IP): MAC Mobility sequence + sticky.
     if a.route_type() == 2 && b.route_type() == 2 {
         let (a_sticky, a_seq) = extract_mac_mobility(a);
@@ -231,17 +245,6 @@ fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
             Ordering::Equal => {}
             other => return other,
         }
-    }
-
-    // 0. Non-stale preferred over stale (RFC 4724 §4.2 / RFC 9494 §4.7).
-    //    GR-stale must never beat fresh; LLGR-stale is ranked below GR-stale.
-    match a.is_stale.cmp(&b.is_stale) {
-        Ordering::Equal => {}
-        other => return other,
-    }
-    match a.is_llgr_stale.cmp(&b.is_llgr_stale) {
-        Ordering::Equal => {}
-        other => return other,
     }
 
     // 1. Higher LocalPref is better — reverse for `min_by`.
@@ -762,6 +765,47 @@ mod tests {
         llgr.is_stale = true;
         llgr.is_llgr_stale = true;
         assert_eq!(evpn_tiebreak_simple(&gr, &llgr), Ordering::Less);
+    }
+
+    /// Regression: a GR-stale Type 2 route with a HIGHER MAC Mobility
+    /// sequence must still lose to a fresh non-stale alternative. Prior
+    /// to the fix the Type 2 head returned on the sequence comparison
+    /// before the stale check fired, so any MAC that had ever moved
+    /// (i.e. carried a MAC Mobility ext-community) would let staleness
+    /// win during the GR window — exactly opposite to RFC 4724 §4.2.
+    #[test]
+    fn evpn_fresh_beats_stale_with_higher_mac_mobility_sequence() {
+        let stale_high = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 100),
+        ]);
+        let fresh_low = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 5),
+        ]);
+        let mut stale = make_evpn_type2(2, vec![stale_high]);
+        let mut fresh = make_evpn_type2(3, vec![fresh_low]);
+        stale.is_stale = true;
+        fresh.is_stale = false;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &stale), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&stale, &fresh), Ordering::Greater);
+    }
+
+    /// Regression: a stale sticky Type 2 route must still lose to a
+    /// fresh non-sticky alternative. Same root cause as the sequence
+    /// case — the sticky branch in the Type 2 head was returning
+    /// before the stale check ran.
+    #[test]
+    fn evpn_fresh_non_sticky_beats_stale_sticky() {
+        let stale_sticky = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(true, 1),
+        ]);
+        let fresh_non_sticky = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 1),
+        ]);
+        let mut stale = make_evpn_type2(2, vec![stale_sticky]);
+        let mut fresh = make_evpn_type2(3, vec![fresh_non_sticky]);
+        stale.is_stale = true;
+        fresh.is_stale = false;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &stale), Ordering::Less);
     }
 
     /// Regression: among otherwise-equal candidates, shorter `CLUSTER_LIST`
