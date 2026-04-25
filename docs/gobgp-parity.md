@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-03-12
+Last updated: 2026-04-24
 
 ## Address Families
 
@@ -14,7 +14,7 @@ Last updated: 2026-03-12
 | IPv6 Labeled Unicast | Yes | No | |
 | VPNv4 / VPNv6 (RFC 4364) | Yes | No | |
 | L2VPN VPLS (RFC 4761) | Yes | No | |
-| L2VPN EVPN (RFC 7432) | Yes | Partial (RR) | Route types 1-5 in RR mode; VTEP local state and Route Types 6-9 not yet implemented (ADR-0050) |
+| L2VPN EVPN (RFC 7432) | Yes | Partial (RR) | Route types 1-5 in RR mode with controller-injection gRPC for Type 2/3 (Gate 6); VTEP local state and Route Types 6-9 not yet implemented (ADR-0050) |
 | IPv4/IPv6 FlowSpec (RFC 8955) | Yes | Yes | SAFI 133, all 13 component types |
 | VPN FlowSpec | Yes | No | |
 | BGP-LS (RFC 7752) | Yes | No | |
@@ -220,13 +220,13 @@ Competing head-to-head with GoBGP for all use cases:
 - **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP
 - **Rustc-style config diagnostics** — validation errors show TOML source lines with column markers; GoBGP prints plain-text errors
 - **Live TUI dashboard** — `rustbgpctl top` with session table, prefix counts, message rates, and route events; GoBGP has no built-in TUI
-- **EVPN RR via API-first model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, and gRPC `ListEvpnRoutes` without requiring a CLI detour; GoBGP has deeper EVPN coverage but a more CLI-oriented operational model
+- **EVPN RR via API-first model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, gRPC `ListEvpnRoutes`, and controller-driven `AddEvpnRoute` / `DeleteEvpnRoute` injection (Type 2/3) without requiring a CLI detour; validated end-to-end against FRR 10.3.1 and at 50k-route scale with churn (M30-M33); GoBGP has deeper EVPN coverage (VTEP, IRB, multi-homing execution) but a more CLI-oriented operational model
 
 ## Top Gaps by Use Case
 
 ### IX Route Server (current target, ~100% parity)
 
-### VXLAN-EVPN DC Fabric RR (~99% parity, added 2026-04)
+### VXLAN-EVPN DC Fabric RR (~100% parity, updated 2026-04-24)
 
 Minimum viable for a SONiC/FRR fabric where VTEPs handle local state:
 
@@ -234,8 +234,9 @@ Minimum viable for a SONiC/FRR fabric where VTEPs handle local state:
 2. ~~**Real Type 2 MAC-exchange interop**~~ — shipped (Gate 1, M30, 2026-04-24). 3-node containerlab topology with kernel VXLAN + bridge per VTEP validates Type 2 reflection against FRR 10.3.1 end-to-end.
 3. ~~**MAC mobility / sticky preservation interop**~~ — shipped (Gate 3, M31, 2026-04-24). 4-node topology validates the RFC 7432 §15.1 sequence increment on move and §7.7 sticky semantics against real FRR.
 4. ~~**Multi-homing (Type 1 EAD + Type 4 ES) reflection**~~ — shipped (Gate 4, M32, 2026-04-24). 4-node topology with two FRR VTEPs sharing an Ethernet Segment validates Type 1 EAD + Type 4 ES reflection through the rustbgpd RR; DF election input completeness verified end-to-end.
-5. ~~**Scale validation**~~ — shipped (Gate 5, M33, 2026-04-24). In-tree `bench/evpn-load` generator drives 50k Type 2 routes + 60 s of 1000/sec churn through the RR to a third observer; convergence measured, post-churn route count fidelity asserted.
-6. **Hierarchical RR (cluster-of-clusters)** — nested reflection untested
+5. ~~**Scale validation**~~ — shipped (Gate 5, M33, 2026-04-24). In-tree `bench/evpn-load` generator drives 50k Type 2 routes + 60 s of 1000/sec churn through the RR to a third observer; initial convergence 5.1 s, post-churn count exactly 50,000 with zero flaps, peak RR memory 87 MB.
+6. ~~**Controller-driven EVPN injection**~~ — shipped (Gate 6, 2026-04-24). `AddEvpnRoute` / `DeleteEvpnRoute` gRPC RPCs (Type 2 MAC/IP and Type 3 IMET) plus `rustbgpctl evpn add-mac-ip / add-imet / delete-*` CLI; reflects on the same path as FlowSpec injection.
+7. **Hierarchical RR (cluster-of-clusters)** — nested reflection untested
 
 No material protocol gaps remain. Remaining work is operator polish:
 

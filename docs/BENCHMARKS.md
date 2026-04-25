@@ -386,12 +386,19 @@ storage across RIB views or alternative data structures.
 
 Measured with the in-tree `bench/evpn-load` generator: two synthetic
 iBGP testers advertise Type 2 MAC/IP routes into a rustbgpd Route
-Reflector, which reflects them to a third peer (the monitor). The
-monitor runs the same wire codec as the daemon and counts
-`MP_REACH_NLRI` / `MP_UNREACH_NLRI` EVPN announcements/withdrawals.
-Since the testers and monitor are built directly on `rustbgpd-wire`,
-no third-party daemon is in the measurement path — rustbgpd's RR
-scale is what gets exercised.
+Reflector, which reflects them to a third peer (the monitor). Tester
+and monitor both listen on port 179 and let the rustbgpd RR dial in
+(rustbgpd's neighbor model always actively dials configured peers, so
+listen-and-accept avoids a TCP collision deadlock). The monitor runs
+the same wire codec as the daemon, tracks live EVPN Type 2 keys in a
+`HashSet<EvpnRouteKey>`, and reports both `initial_convergence_sec`
+(first time the live set reaches the expected count) and
+`stable_convergence_sec` (first time the live set stays at the
+expected count for `stable_sec` continuous seconds — later than
+initial when churn is running, since each withdraw+re-advertise resets
+the stable window). Since the testers and monitor are built directly
+on `rustbgpd-wire`, no third-party daemon is in the measurement path
+— rustbgpd's RR scale is what gets exercised.
 
 **Harness:** `tests/interop/m33-evpn-scale.clab.yml`
 
@@ -407,11 +414,24 @@ scale is what gets exercised.
 | Assertion | Target | Observed |
 |-----------|--------|----------|
 | Initial convergence to 50k reflected routes | < 60 s | **5.1 s** |
+| Stable convergence (count steady ≥ 5 s after churn ends) | logged | **~70 s** |
 | Post-churn steady-state count (distinct keys) | exactly 50,000 | **50,000 — no loss** |
 | `ListEvpnRoutes` matches observer's view | ≥ 50,000 Type 2 | **50,000** |
 | Tester peers stay Established, zero flaps | both up | **both up, 0 flaps** |
 | RR process stays healthy | yes | **yes — `GetHealth` passes post-run** |
 | Peak RR memory (soft ceiling 2 GB) | < 2 GB | **87 MB** |
+
+Observed wire-level traffic (bulk + churn phases combined):
+
+| Counter | Observed |
+|---------|----------|
+| Total announce events (incl. churn re-advertises) | ~166,000 |
+| Total withdraw events (incl. churn) | ~117,000 |
+| UPDATE messages received by monitor | ~7,088 |
+
+Note: the announce/withdraw counters include idempotent re-advertises
+during churn, so they are larger than the steady-state route count.
+`final_count` (50,000) is the distinct-key cardinality.
 
 Measurement environment: AMD Ryzen 9 7950X (64 logical cores), 125 GB
 RAM, Linux 6.17, Docker 27.x, containerlab. Single
