@@ -15,7 +15,7 @@ control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-1166 workspace tests, fuzz targets, and 22 automated interop suites against
+1245 workspace tests, fuzz targets, and 27 automated interop suites against
 FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
@@ -244,7 +244,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
-| Interop suites | 22 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR |
+| Interop suites | 27 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR |
 | Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
@@ -279,7 +279,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN VTEP role (RR role works), VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1216 workspace tests, fuzz targets, 27 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator |
+| **Tests** | 1245 workspace tests, fuzz targets, 27 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator |
 
 ## Documentation
 

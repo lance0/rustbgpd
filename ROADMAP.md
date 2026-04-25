@@ -66,7 +66,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
 - [x] Config persistence + SIGHUP reload — gRPC neighbor add/delete mutations persist to TOML via atomic write; SIGHUP triggers config reload with structured per-peer reconciliation
 - [x] LLGR (RFC 9494) — two-phase GR timer: GR-stale routes promote to LLGR-stale with LLGR_STALE community, configurable llgr_stale_time per peer, NO_LLGR routes purged at transition, effective stale time = min(local, peer)
-- [x] 1166 tests — unit, integration, property, fuzz
+- [x] 1245 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -400,7 +400,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
-- [x] Automated interop test scripts (M1, M3, M4, M10–M20)
+- [x] Automated interop test scripts (M1, M3, M4, M10–M33)
 - [x] Binary releases (GitHub Releases with cross-compiled linux-amd64/arm64 binaries)
 - [ ] Homebrew formula
 - [x] crates.io publishing (`rustbgpd-wire` published; other crates remain internal)

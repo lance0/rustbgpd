@@ -28,18 +28,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   controller-injection gRPC, DF election (RFC 7432 §8 / RFC 8584),
   symmetric IRB semantics (RFC 9135), PBB-EVPN (RFC 7623), and EVPN-
   MVPN integration (RFC 9251) are future-phase work.
-- **EVPN GR / LLGR stale handling (Gate 2, RFC 4724 + RFC 9494).**
-  Reflected EVPN routes now participate in the stale-route pipeline:
-  `mark_stale_evpn` on `PeerGracefulRestart`, promotion to LLGR-stale
-  with `LLGR_STALE` community injection via `Arc::make_mut`, and sweep
-  on GR / LLGR timer expiry. End-of-RIB and Enhanced Route Refresh
-  (BoRR / EoRR per RFC 7313) clear stale state per-family, preserving
-  peer-originated `LLGR_STALE` communities and stripping only locally-
-  injected ones. `NO_LLGR` community per RFC 9494 §4.7 is honored —
-  routes carrying it are dropped on GR timer rather than promoted.
-  Without this, a VTEP restart would have dropped reflected EVPN routes
-  from every other peer mid-flap — the biggest correctness gap on the
-  production-ready RR checklist. 13 new unit + integration tests.
 - **EVPN Type 2 MAC reflection interop (Gate 1, M30).** Three-node
   containerlab topology (rustbgpd RR + 2× FRR VTEPs running kernel
   VXLAN + bridge) validating Type 2 MAC/IP Advertisement reflection
@@ -53,6 +41,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `ListEvpnRoutes` gRPC, and withdrawal propagation via
   `bridge fdb del`. New `start-frr-vtep.sh` shim sets up `br100` +
   `vxlan100` with `nolearning` so EVPN controls the FDB.
+- **EVPN GR / LLGR stale handling (Gate 2, RFC 4724 + RFC 9494).**
+  Reflected EVPN routes now participate in the stale-route pipeline:
+  `mark_stale_evpn` on `PeerGracefulRestart`, promotion to LLGR-stale
+  with `LLGR_STALE` community injection via `Arc::make_mut`, and sweep
+  on GR / LLGR timer expiry. End-of-RIB and Enhanced Route Refresh
+  (BoRR / EoRR per RFC 7313) clear stale state per-family, preserving
+  peer-originated `LLGR_STALE` communities and stripping only locally-
+  injected ones. `NO_LLGR` community per RFC 9494 §4.7 is honored —
+  routes carrying it are dropped on GR timer rather than promoted.
+  Without this, a VTEP restart would have dropped reflected EVPN routes
+  from every other peer mid-flap — the biggest correctness gap on the
+  production-ready RR checklist. 13 new unit + integration tests.
 - **EVPN MAC mobility + sticky-MAC preservation interop (Gate 3, M31).**
   Four-node topology (rustbgpd RR + 3× FRR VTEPs) extending the M30
   harness. Exercises RFC 7432 §15.1 MAC Mobility semantics against
