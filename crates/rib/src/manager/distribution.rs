@@ -1263,15 +1263,26 @@ impl RibManager {
                 continue;
             }
 
-            // Export policy evaluation with placeholder prefix (FlowSpec pattern)
-            let placeholder_prefix =
-                Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0));
+            // Export policy evaluation. Type 5 EVPN (IP Prefix per RFC 9136)
+            // carries a real IP prefix in its NLRI, so prefix-based policy
+            // clauses can match against it directly. Types 1-4 don't carry
+            // a prefix in any meaningful sense (they identify Ethernet
+            // Segments, MAC addresses, or multicast tags), so we substitute
+            // 0.0.0.0/0 — operators who need to filter Types 1-4 should use
+            // RT- or community-based clauses, not prefix matches.
+            let policy_prefix = match &best.route {
+                rustbgpd_wire::EvpnRoute::IpPrefix(t5) => match t5.prefix {
+                    rustbgpd_wire::EvpnIpPrefixValue::V4(p) => Prefix::V4(p),
+                    rustbgpd_wire::EvpnIpPrefixValue::V6(p) => Prefix::V6(p),
+                },
+                _ => Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
+            };
             let aspath_str = best
                 .as_path()
                 .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
             let aspath_len = best.as_path().map_or(0, rustbgpd_wire::AsPath::len);
             let ctx = RouteContext {
-                prefix: placeholder_prefix,
+                prefix: policy_prefix,
                 next_hop: Some(best.next_hop),
                 extended_communities: best.extended_communities(),
                 communities: best.communities(),

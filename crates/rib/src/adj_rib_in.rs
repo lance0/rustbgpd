@@ -369,9 +369,11 @@ impl AdjRibIn {
 
     // --- EVPN methods (RFC 7432) ---
     //
-    // Phase 1 scope: happy-path insert/withdraw/iter for route-reflector
-    // distribution. Stale/GR/LLGR handling is not yet wired for EVPN; the
-    // RR reflects active routes only. Adding LLGR coverage is a follow-up.
+    // Insert / withdraw / iter for route-reflector distribution, plus full
+    // GR + LLGR stale handling parallel to unicast and FlowSpec: see
+    // mark_stale_evpn / clear_stale_evpn / sweep_stale_evpn /
+    // promote_to_llgr_stale_evpn / sweep_llgr_stale_evpn /
+    // clear_llgr_stale_evpn below.
 
     /// Insert or replace an EVPN route, keyed by its RFC 7432 identity.
     pub fn insert_evpn(&mut self, mut route: EvpnRibRoute) {
