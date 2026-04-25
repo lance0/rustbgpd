@@ -529,23 +529,45 @@ FRR leaves) handle local MAC learning, DF election, and VXLAN encap. You
 want a control plane that's API-first (no vtysh scraping), scales to
 thousands of VTEPs, and gives you structured observability.
 
-**What rustbgpd does for you (Phase 1, ADR-0050):**
+**What rustbgpd does for you (Phase 1 RR bundle, Gates 0-6 of
+[docs/evpn-enablement.md](evpn-enablement.md), ADR-0050):**
 
 - **RFC 7432 route reflection for all 5 route types** — EAD per-ES,
   EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix (RFC 9136) —
-  reflected between VTEPs per RFC 4456.
+  reflected between VTEPs per RFC 4456 with full tie-break ordering
+  (stale → ORIGIN → CLUSTER_LIST length → ORIGINATOR_ID) and
+  source-peer split horizon.
 - **MAC Mobility handling** — Type 2 best-path honors the MAC Mobility
   sequence number and the sticky flag per RFC 7432 §15.1, so a MAC
   move converges deterministically and sticky MACs aren't displaced.
+  Validated end-to-end against FRR via M30 (basic Type 2) and M31
+  (mobility + sticky).
+- **Multi-homing reflection (Type 1 EAD + Type 4 ES)** — reflected
+  unchanged so downstream VTEPs run DF election independently.
+  Validated via M32 (two FRR VTEPs sharing an ESI + observer).
+- **GR / LLGR for EVPN** — VTEP restart no longer flaps the rest of
+  the fabric: routes are marked stale on `PeerGracefulRestart`,
+  promoted to `LLGR_STALE` on GR timer expiry per RFC 9494, and
+  swept on EoR. Enhanced Route Refresh tracks unreplaced EVPN keys
+  in `refresh_stale_evpn` and withdraws them on BoRR/EoRR.
 - **VXLAN encapsulation via RFC 8365** — the BGP Encapsulation extended
   community is decoded and preserved across reflection; `rustbgpctl evpn`
   surfaces `encap=vxlan` for operator visibility.
+- **Controller injection** — `InjectionService::AddEvpnRoute` /
+  `DeleteEvpnRoute` cover Type 2 MAC/IP and Type 3 IMET, with display-
+  form RDs (`65000:100`, `10.0.0.1:100`, `4200000000:100`); injected
+  routes flow through the same reflection pipeline as iBGP-learned
+  ones. CLI: `rustbgpctl evpn add-mac-ip / add-imet / delete-mac-ip /
+  delete-imet`.
 - **gRPC observability** — `ListEvpnRoutes(route_type, peer, rd)` for
   filtered EVPN RIB queries; Prometheus metrics per peer include
-  `adj_rib_out_prefixes{family="evpn"}`.
+  `adj_rib_out_prefixes{family="evpn"}`. Max-prefix accounting counts
+  EVPN keys alongside unicast prefixes.
 - **RT-based policy** — existing `match_community` against Route Target
   extended communities filters EVPN routes the same way unicast RT
-  matching works elsewhere.
+  matching works elsewhere. Type 5 IP-Prefix routes surface their
+  prefix in the policy `RouteContext` so prefix-based clauses work
+  on Type 5 too.
 
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
@@ -590,17 +612,27 @@ families = ["l2vpn_evpn"]
 route_reflector_client = true
 ```
 
-**Scale targets (Phase 1):** thousands of VTEPs, Type 2 MAC routes in
-the tens of thousands. Churn / stability testing at scale is Phase 1.5
-— see `docs/INTEROP.md` for the open validation list.
+**Scale validated (M33):** 50,000 Type 2 routes reflected from two
+originating peers to a third observer, plus 60 s of 1000/sec
+withdraw+re-advertise churn, with no route loss and no session flap.
+The load generator is the in-tree `bench/evpn-load` crate built
+directly on `rustbgpd-wire` — no third-party daemon in the
+measurement path.
 
 **Known gaps:**
 
-- EVPN routes aren't yet in the GR/LLGR stale-route pipeline; a VTEP
-  flap drops reflected routes during the restart window.
-- Full Type 2 MAC-exchange interop (real FRR + VXLAN interfaces) is
-  Phase 1.5 — M29 covers capability negotiation only.
-- No VTEP / controller-injection role — follow-up phases per ADR-0050.
+- No VTEP role yet — rustbgpd does not own kernel FDB learning, EVI /
+  L2VNI / L3VNI state, DF election execution, or symmetric IRB. VTEPs
+  (SONiC / FRR leaves) handle those today. See Gates 7-9 in
+  [docs/evpn-enablement.md](evpn-enablement.md) for the strategic
+  decision point.
+- Controller injection (Gate 6) covers Type 2 MAC/IP and Type 3 IMET
+  via `InjectionService::AddEvpnRoute`; Type 5 IP-Prefix and Type 1/4
+  multi-homing origination are deferred pending use-case signal.
+- Live FRR VTEP flap with tcpdump validation of the reflected
+  `LLGR_STALE` community on the wire is the one piece of GR/LLGR
+  coverage still tracked as a follow-up — the unit + integration
+  pipeline is wired (Gate 2), but the lab capture isn't part of CI yet.
 
 ---
 

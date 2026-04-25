@@ -575,6 +575,36 @@ implemented per ADR-0040.
 - **Route reflection:** RFC 4456 rules (`ORIGINATOR_ID`, `CLUSTER_LIST`,
   split-horizon) reuse the existing unicast `should_suppress_ibgp_inner`
   via a synthetic `Route` probe — no EVPN-specific reflection logic.
+  Split horizon is keyed on the **source peer**, not the route's
+  next-hop, so a reflector with one client behind a NAT or a different
+  loopback still suppresses correctly. AS_PATH and RR cluster-loop
+  branches emit a proper EVPN withdrawal toward the looping peer
+  (rather than silently dropping the route in the Adj-RIB-Out), so a
+  client that previously received the route observes a clean retract.
+- **Best-path tie-break:** the EVPN best-path chain runs the full
+  RFC 4456 ordering after the BGP body — stale flag → ORIGIN →
+  shortest CLUSTER_LIST → lowest ORIGINATOR_ID — matching the unicast
+  decision process so a reflector with multiple equal-AS paths
+  converges deterministically.
+- **Initial dump on session up:** when an iBGP EVPN session reaches
+  Established, the existing Adj-RIB-In is replayed to the new peer
+  through the same Adj-RIB-Out path that handles steady-state
+  reflection — no separate "fast-path" code that could skip RFC 4456
+  attribute attachment. EoR is emitted per family after the dump.
+- **Enhanced Route Refresh tracking** (RFC 7313): `refresh_stale_evpn`
+  records EVPN keys present in Adj-RIB-In at BoRR time; any key not
+  re-advertised before EoRR is withdrawn at sweep, mirroring the
+  unicast `refresh_stale` path.
+- **Max-prefix accounting** counts EVPN keys alongside unicast
+  prefixes in the per-peer prefix counter, so `max_prefixes` triggers
+  Cease/1 (Maximum Number of Prefixes Reached) when a misbehaving
+  VTEP floods Type 2 routes.
+- **Policy context:** EVPN routes pass through the policy engine with
+  attribute / community / RT visibility (placeholder `0.0.0.0/0`
+  prefix matches FlowSpec's pattern); Type 5 IP-Prefix routes
+  additionally surface their actual prefix in `RouteContext`, so a
+  prefix-based clause filters Type 5 routes by the IP prefix carried
+  in the NLRI.
 - **GR / LLGR stale handling** (RFC 4724 + RFC 9494, Gate 2): EVPN
   routes participate in the stale-route pipeline alongside unicast
   and FlowSpec. On `PeerGracefulRestart`, `mark_stale_evpn((L2Vpn,

@@ -19,9 +19,10 @@ Phase 1 scope is deliberately narrowed to **route reflector role**:
 - VXLAN encapsulation only (RFC 8365)
 - All VTEPs handle their own DF election, IRB semantics, and kernel FDB
 
-VTEP mode, controller-injection gRPC, IRB semantics (RFC 9135), DF
-election (RFC 8584), PBB-EVPN (RFC 7623), and EVPN-MVPN (RFC 9251) are
-explicit future-phase work.
+VTEP mode, IRB semantics (RFC 9135), DF election (RFC 8584), PBB-EVPN
+(RFC 7623), and EVPN-MVPN (RFC 9251) are explicit future-phase work.
+Controller-injection gRPC was originally listed here as future work but
+shipped inside the Phase 1 RR bundle (Gate 6, 2026-04-24).
 
 The existing FlowSpec implementation (ADR-0035) established the pattern
 for non-prefix NLRI: parallel tables in Adj-RIB-In / Loc-RIB /
@@ -208,8 +209,13 @@ intentionally exposes fields as display-formatted strings rather than
 re-encoding the wire payload — gRPC is the operator-facing surface, not
 a wire round-trip path, and display strings are easier to work with.
 
-`AddEvpnRoute` / `DeleteEvpnRoute` controller-injection RPCs are **not**
-in Phase 1.
+`AddEvpnRoute` / `DeleteEvpnRoute` controller-injection RPCs shipped
+inside Phase 1 (Gate 6, 2026-04-24). The service accepts display-form
+RDs (`65000:100`, `10.0.0.1:100`, `4200000000:100`), parses MAC + IP +
+label, and assembles an `EvpnRibRoute` with `RouteOrigin::Local` that
+flows through the same reflection pipeline as iBGP-learned routes.
+Phase 1 covers Type 2 MAC/IP and Type 3 IMET; Type 5 IP-Prefix and
+Type 1/4 multi-homing origination are deferred pending use-case signal.
 
 ### CLI
 
@@ -239,18 +245,24 @@ easy operator identification.
 - Policy match clauses don't yet recognize route-type / VNI / ESI —
   operators get RT-based filtering via extended communities. A
   `match_evpn_route_type` clause is Phase 1.5.
-- The EVPN interop surface is a single capability-negotiation sanity
-  test (M29) against FRR 10.3.1. Real Type 2 MAC reflection, multi-
-  homing (Type 1 + Type 4 + DF election), MAC mobility, and scale
-  testing are follow-up work tracked in INTEROP.md.
-- Controller-injection (`AddEvpnRoute`) is deliberately not exposed. The
-  RR reflects what VTEPs advertise; if a controller wants to inject
-  EVPN routes via gRPC, that becomes a separate phase once the basic
-  RR is production-tested.
+- The EVPN interop surface now spans M29 (capability + session sanity)
+  through M33 (50k-route scale + churn): M30 covers real Type 2 MAC
+  reflection through kernel VXLAN against FRR 10.3.1; M31 covers MAC
+  mobility + sticky preservation; M32 covers Type 1 EAD + Type 4 ES
+  reflection for multi-homing; M33 dogfoods `rustbgpd-wire` from the
+  in-tree `bench/evpn-load` crate. See INTEROP.md § P1.5 for the full
+  matrix.
+- Controller-injection (`AddEvpnRoute` / `DeleteEvpnRoute`) is exposed
+  for Type 2 MAC/IP and Type 3 IMET (Gate 6). Type 5 IP-Prefix and
+  Type 1/4 multi-homing origination are deferred pending use-case
+  signal — the wire codec already handles those types, only the
+  injection-service surface is gated.
 - MPLS encapsulation is not wired — the BGP Encapsulation ext community
   decoder handles any tunnel type value losslessly but rustbgpd does
   not negotiate an encap preference. VXLAN is the deployed case.
 
 See [docs/evpn-enablement.md](../evpn-enablement.md) for the gate-by-gate
-plan to close the remaining correctness and scale gaps (Gates 1-5) and
-the strategic decision point around VTEP mode (Gates 7-9).
+plan. Gates 0-6 (capability, Type 2 reflection, GR/LLGR, MAC mobility,
+multi-homing reflection, scale validation, controller injection) shipped
+on `feat/evpn-rr`; Gates 7-9 (VTEP mode, multi-homing execution / DF
+election, IRB / MVPN / PBB / MPLS) remain a strategic decision point.

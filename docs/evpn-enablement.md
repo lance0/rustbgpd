@@ -303,7 +303,7 @@ Validation coverage:
 
 ### Gate 7 — VTEP mode (Phase 2)
 
-Status: strategic decision · Estimate: ~4-6 weeks · Blockers: Gates 1-5
+Status: strategic decision · Estimate: ~4-6 weeks · Blockers: Gates 1-6
 
 Unlocks: rustbgpd running on a leaf itself — local EVI/VRF/VNI config,
 MAC learning from the kernel FDB (netlink monitor), local route
@@ -387,7 +387,7 @@ Gate 6 is ~1-2 weeks and opens a whole category of deployments (SDN
 controllers injecting EVPN). Gate 7 is 4-6 weeks and enters FRR
 competition territory. The ROI curve strongly favors Gate 6 first.
 
-## Out of Scope (explicit non-goals for Gates 1-5)
+## Out of Scope (explicit non-goals for Gates 1-6)
 
 Following ADR-0050's guardrail list. These are only reconsidered after
 Gate 7 becomes a real commitment:
