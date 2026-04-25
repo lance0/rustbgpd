@@ -259,7 +259,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 ## Current limitations
 
 - No kernel FIB integration -- rustbgpd is a control-plane daemon, not a forwarding engine
-- EVPN (RFC 7432) is supported in **Route Reflector role only** for VXLAN-EVPN DC fabrics — VTEP mode (local MAC learning, DF election, kernel FDB), controller-injection gRPC, and IRB semantics (RFC 9135) are follow-up phases
+- EVPN (RFC 7432) is supported in **Route Reflector role only** for VXLAN-EVPN DC fabrics — VTEP mode (local MAC learning, DF election, kernel FDB integration), IRB semantics (RFC 9135), and controller injection beyond Type 2 / Type 3 (Type 5 IP-Prefix, Type 1 / Type 4 multi-homing origination) are follow-up phases
 - No VPNv4 / VPNv6 or Confederation support
 - No native gRPC TLS termination yet (prefer local UDS access or an mTLS proxy)
 - No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported

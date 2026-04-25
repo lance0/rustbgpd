@@ -226,19 +226,35 @@ else
 fi
 
 log "[info] peak RR resource usage (recorded, not a hard gate)"
-mem_mb=$(docker stats --no-stream --format '{{.MemUsage}}' "$RUSTBGPD" 2>/dev/null \
-    | awk -F'[ /]+' '{print $1}' | sed 's/[A-Za-z]//g')
+# docker stats prints memory like "85.3MiB / 125GiB", "3.0GiB / 125GiB",
+# or occasionally "512KiB / ...". Take the first token (the used side)
+# and normalize the unit explicitly — naive unit-stripping would treat
+# "3.0GiB" as 3 MB and silently miss a real leak.
+mem_raw=$(docker stats --no-stream --format '{{.MemUsage}}' "$RUSTBGPD" 2>/dev/null \
+    | awk -F'[ /]+' '{print $1}')
+mem_mb=$(awk -v raw="$mem_raw" 'BEGIN {
+    if (raw == "") { print ""; exit }
+    n = raw + 0
+    unit = raw; sub(/^[0-9.]+/, "", unit)
+    if      (unit == "B"   || unit == "")    { mb = n / 1048576.0 }
+    else if (unit == "KiB" || unit == "KB"  || unit == "kB") { mb = n / 1024.0 }
+    else if (unit == "MiB" || unit == "MB"  || unit == "mB") { mb = n }
+    else if (unit == "GiB" || unit == "GB"  || unit == "gB") { mb = n * 1024.0 }
+    else if (unit == "TiB" || unit == "TB")  { mb = n * 1024.0 * 1024.0 }
+    else                                     { mb = n }
+    printf "%.1f", mb
+}')
 cpu_pct=$(docker stats --no-stream --format '{{.CPUPerc}}' "$RUSTBGPD" 2>/dev/null \
     | tr -d '%')
-log "RR final snapshot — memory=${mem_mb:-?}MB cpu=${cpu_pct:-?}%"
+log "RR final snapshot — memory=${mem_mb:-?}MB cpu=${cpu_pct:-?}% (raw=${mem_raw:-?})"
 # Soft gate: fail only at an absurd memory ceiling (indicates a leak),
 # not the steady-state number, which is dominated by route tables.
 if [ -n "$mem_mb" ]; then
     mem_int=${mem_mb%.*}
     if [ "${mem_int:-0}" -gt 2048 ]; then
-        fail "RR memory exceeded 2 GB soft ceiling (${mem_mb}MB) — possible leak"
+        fail "RR memory exceeded 2 GB soft ceiling (${mem_mb}MB, raw=${mem_raw}) — possible leak"
     else
-        ok "RR memory within soft ceiling (${mem_mb}MB)"
+        ok "RR memory within soft ceiling (${mem_mb}MB, raw=${mem_raw})"
     fi
 fi
 

@@ -436,12 +436,25 @@ Added 2026-04 per ADR-0050. Extends the RIB / transport / gRPC stack with a para
 
 ### What's deferred to future phases
 
-- **VTEP mode:** local EVI / VRF / VNI state, kernel FDB MAC learning, local route origination (Phase 2).
-- **Controller-injection gRPC:** `AddEvpnRoute` / `DeleteEvpnRoute` for SDN controllers (Phase 3).
-- **Multi-homing execution:** DF election (RFC 7432 §8 + RFC 8584), aliasing / backup-path via Type 1 EAD (Phase 4).
-- **Symmetric IRB semantics:** wire-level round-trip only — `label2` + Router MAC ext community preserved but not interpreted (Phase 4).
-- **EVPN GR/LLGR stale handling:** unicast has it; EVPN not yet wired into the stale-route pipeline (Phase 1.5).
-- **RFC 9251 Route Types 6-8** (IGMP multicast), **RFC 7623 PBB-EVPN**, **MPLS encap** (Phase 5).
+Phase 1 hardening (Gates 0-6 in [evpn-enablement.md](evpn-enablement.md))
+covers reflection of all five RFC 7432 route types, GR + LLGR + Enhanced
+Route Refresh, MAC mobility / sticky preservation, multi-homing Type 1 +
+Type 4 reflection, scale validation (50k Type 2 + churn), and
+controller-driven injection for Type 2 / Type 3. What remains:
+
+- **VTEP mode:** local EVI / VRF / VNI state, kernel FDB MAC learning, local
+  route origination (Phase 2).
+- **Multi-homing execution:** the RR already reflects Type 1 EAD + Type 4 ES
+  unchanged (Gate 4); this is rustbgpd-as-VTEP DF election (RFC 7432 §8 +
+  RFC 8584) and aliasing / backup-path resolution against locally-learned
+  state (Phase 4).
+- **Symmetric IRB semantics:** wire-level round-trip only — `label2` + Router
+  MAC ext community preserved but not interpreted (Phase 4 / RFC 9135).
+- **Controller injection beyond Type 2 / Type 3:** Type 5 IP-Prefix and
+  Type 1 / Type 4 multi-homing origination are not yet exposed in the
+  injection RPCs.
+- **RFC 9251 Route Types 6-8** (IGMP multicast), **RFC 7623 PBB-EVPN**,
+  **MPLS encap**, **Add-Path for EVPN (RFC 9252)** (Phase 5).
 
 ---
 
