@@ -299,7 +299,15 @@ async fn run_churn(
     total: Duration,
 ) -> anyhow::Result<()> {
     let deadline = Instant::now() + total;
-    let tick = Duration::from_millis(1000 / u64::from(rate.max(1) / batch.max(1)).max(1));
+    // `rate` is route-events per second. Each tick of this loop emits
+    // 2 * batch events (one withdraw + one re-advertise of the same chunk),
+    // so the per-tick budget is `rate / (2 * batch)` ticks per second.
+    // Without the factor of 2 the effective churn rate is doubled — the
+    // RR sees 2x what the operator configured, which is fine for the
+    // M33 reflection-throughput shape but misleading in the report.
+    let ops_per_tick = u64::from(batch.max(1)) * 2;
+    let ticks_per_sec = u64::from(rate.max(1)) / ops_per_tick;
+    let tick = Duration::from_millis(1000 / ticks_per_sec.max(1));
     let mut idx = 0u32;
 
     while Instant::now() < deadline {
