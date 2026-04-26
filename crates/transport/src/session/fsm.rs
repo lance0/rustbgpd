@@ -357,6 +357,8 @@ impl PeerSession {
                     self.negotiated = None;
                     self.negotiated_families.clear();
                     self.known_paths.clear();
+                    self.known_flowspec.clear();
+                    self.known_evpn.clear();
                     self.local_open_pdu = None;
                     self.remote_open_pdu = None;
                     self.last_down_reason = None;

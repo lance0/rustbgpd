@@ -619,38 +619,28 @@ impl PeerSession {
             }
         }
 
-        // Send EVPN withdrawals via MP_UNREACH_NLRI
+        // Send EVPN withdrawals via MP_UNREACH_NLRI, chunked so each UPDATE
+        // fits the negotiated maximum message length (4096 / 65535 with
+        // RFC 8654 Extended Messages). A bulk withdrawal of an entire fabric
+        // can otherwise exceed the limit and `send_message` returns
+        // `MessageTooLong`, dropping the rest of the update.
         if !update.evpn_withdraw.is_empty() {
             let routes: Vec<EvpnRoute> = update
                 .evpn_withdraw
                 .iter()
                 .map(|key| evpn_route_from_key(*key))
                 .collect();
-            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
-                afi: Afi::L2Vpn,
-                safi: Safi::Evpn,
-                withdrawn: vec![],
-                flowspec_withdrawn: vec![],
-                evpn_withdrawn: routes,
-            })];
-            let msg = UpdateMessage::build(
-                &[],
-                &[],
-                &attrs,
-                four_octet_as,
-                false,
-                Ipv4UnicastMode::Body,
-            );
-            let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
-                warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
+            let max_len = usize::from(self.max_message_len());
+            if !self
+                .send_evpn_unreach_chunked(routes, four_octet_as, max_len)
+                .await
+            {
                 return;
             }
-            self.updates_sent += 1;
-            self.metrics.record_message_sent(&self.peer_label, "update");
         }
 
         // Send EVPN announcements via MP_REACH_NLRI, grouped by (next-hop, attributes)
+        // and chunked so each UPDATE fits the negotiated maximum message length.
         if !update.evpn_announce.is_empty() {
             #[allow(clippy::type_complexity)]
             let mut evpn_groups: Vec<(IpAddr, Vec<PathAttribute>, Vec<EvpnRoute>)> = Vec::new();
@@ -669,30 +659,14 @@ impl PeerSession {
                     evpn_groups.push((nh, attrs, vec![evpn_route.route.clone()]));
                 }
             }
-            for (next_hop, mut attrs, routes) in evpn_groups {
-                attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
-                    afi: Afi::L2Vpn,
-                    safi: Safi::Evpn,
-                    next_hop,
-                    announced: vec![],
-                    flowspec_announced: vec![],
-                    evpn_announced: routes,
-                }));
-                let msg = UpdateMessage::build(
-                    &[],
-                    &[],
-                    &attrs,
-                    four_octet_as,
-                    false,
-                    Ipv4UnicastMode::Body,
-                );
-                let wire_msg = Message::Update(msg);
-                if let Err(e) = self.send_message(&wire_msg).await {
-                    warn!(peer = %self.peer_label, error = %e, "failed to send EVPN announce UPDATE");
+            let max_len = usize::from(self.max_message_len());
+            for (next_hop, attrs, routes) in evpn_groups {
+                if !self
+                    .send_evpn_reach_chunked(next_hop, &attrs, routes, four_octet_as, max_len)
+                    .await
+                {
                     return;
                 }
-                self.updates_sent += 1;
-                self.metrics.record_message_sent(&self.peer_label, "update");
             }
         }
 
@@ -807,6 +781,124 @@ impl PeerSession {
             self.updates_sent += 1;
             self.metrics.record_message_sent(&self.peer_label, "update");
         }
+    }
+
+    /// Send a batch of EVPN announcements as one or more `MP_REACH_NLRI`
+    /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
+    /// Starts with a generous chunk size and halves on `MessageTooLong`,
+    /// down to a single route. Returns `false` on send error so the caller
+    /// can abort the whole route batch the same way the unicast path does.
+    async fn send_evpn_reach_chunked(
+        &mut self,
+        next_hop: IpAddr,
+        base_attrs: &[PathAttribute],
+        routes: Vec<EvpnRoute>,
+        four_octet_as: bool,
+        max_len: usize,
+    ) -> bool {
+        // Initial chunk size: 1000 fits comfortably under the 65535-byte
+        // Extended Messages limit even for Type 5/IPv6 routes (~60 B each)
+        // and shrinks on overflow for the standard 4096-byte limit.
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let mut attrs = base_attrs.to_vec();
+            attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::L2Vpn,
+                safi: Safi::Evpn,
+                next_hop,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: routes[idx..end].to_vec(),
+            }));
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                false,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single EVPN route exceeds maximum message length; skipping"
+                    );
+                    idx = end;
+                    chunk_size = 1000;
+                    continue;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send EVPN announce UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
+    }
+
+    /// Send a batch of EVPN withdrawals as one or more `MP_UNREACH_NLRI`
+    /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
+    async fn send_evpn_unreach_chunked(
+        &mut self,
+        routes: Vec<EvpnRoute>,
+        four_octet_as: bool,
+        max_len: usize,
+    ) -> bool {
+        let mut chunk_size: usize = 1000;
+        let mut idx: usize = 0;
+        while idx < routes.len() {
+            let end = (idx + chunk_size).min(routes.len());
+            let attrs = vec![PathAttribute::MpUnreachNlri(MpUnreachNlri {
+                afi: Afi::L2Vpn,
+                safi: Safi::Evpn,
+                withdrawn: vec![],
+                flowspec_withdrawn: vec![],
+                evpn_withdrawn: routes[idx..end].to_vec(),
+            })];
+            let msg = UpdateMessage::build(
+                &[],
+                &[],
+                &attrs,
+                four_octet_as,
+                false,
+                Ipv4UnicastMode::Body,
+            );
+            if msg.encoded_len() > max_len {
+                if chunk_size <= 1 {
+                    warn!(
+                        peer = %self.peer_label,
+                        size = msg.encoded_len(),
+                        max = max_len,
+                        "single EVPN withdrawal exceeds maximum message length; skipping"
+                    );
+                    idx = end;
+                    chunk_size = 1000;
+                    continue;
+                }
+                chunk_size = (chunk_size / 2).max(1);
+                continue;
+            }
+            let wire_msg = Message::Update(msg);
+            if let Err(e) = self.send_message(&wire_msg).await {
+                warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
+                return false;
+            }
+            self.updates_sent += 1;
+            self.metrics.record_message_sent(&self.peer_label, "update");
+            idx = end;
+        }
+        true
     }
 
     /// Prepare path attributes for outbound advertisement.

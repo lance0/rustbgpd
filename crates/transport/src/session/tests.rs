@@ -418,6 +418,44 @@ fn known_prefix_count_deduplicates_multiple_paths() {
     assert_eq!(session.known_prefix_count(), 1);
 }
 
+/// Regression: `Action::SessionDown` must clear `known_flowspec` and
+/// `known_evpn` alongside `known_paths`. Reconnects previously inherited
+/// stale accounting, which could trip false max-prefix violations on the
+/// next session because `known_prefix_count` sums all three sets.
+#[tokio::test]
+async fn session_down_clears_all_known_sets() {
+    let mut session = make_test_session(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.established_at = Some(Instant::now());
+
+    let prefix = Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    session.known_paths.insert((prefix, 1));
+    let fs_prefix =
+        rustbgpd_wire::FlowSpecPrefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24));
+    session.known_flowspec.insert(rustbgpd_wire::FlowSpecRule {
+        components: vec![rustbgpd_wire::FlowSpecComponent::DestinationPrefix(
+            fs_prefix,
+        )],
+    });
+    let evpn_key = rustbgpd_wire::EvpnRouteKey::Imet {
+        rd: rustbgpd_wire::RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 1]),
+        ethernet_tag: rustbgpd_wire::EthernetTagId(100),
+        originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+    };
+    session.known_evpn.insert(evpn_key);
+    assert!(session.known_prefix_count() >= 3);
+
+    session.execute_actions(vec![Action::SessionDown]).await;
+
+    assert!(session.known_paths.is_empty(), "known_paths must clear");
+    assert!(
+        session.known_flowspec.is_empty(),
+        "known_flowspec must clear"
+    );
+    assert!(session.known_evpn.is_empty(), "known_evpn must clear");
+    assert_eq!(session.known_prefix_count(), 0);
+}
+
 #[test]
 fn ebgp_strips_local_pref() {
     let session = make_test_session(65001, 65002);
