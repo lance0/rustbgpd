@@ -1,9 +1,11 @@
 //! Minimal iBGP peer for EVPN scale-load generation.
 //!
 //! Not a full BGP implementation — no FSM transitions beyond `OpenSent` →
-//! `OpenConfirm` → `Established`, no timer enforcement, no graceful error
-//! recovery. The scope is one-shot scale harnesses that open a session,
-//! flood routes, and measure convergence.
+//! `OpenConfirm` → `Established`, hold-timer enforcement is the only
+//! timer wired (it tears the session if no inbound traffic arrives
+//! within the negotiated hold window so a stuck RR is detected), no
+//! graceful error recovery. The scope is one-shot scale harnesses that
+//! open a session, flood routes, and measure convergence.
 //!
 //! Built directly on top of `rustbgpd-wire` + tokio. Keeps rate control
 //! and message shape fully in this crate's control so Gate 5 does not
@@ -102,6 +104,7 @@ pub struct PeerHandle {
 ///
 /// Returns a [`PeerError`] if bind/accept, OPEN exchange, or initial
 /// KEEPALIVE fails.
+#[expect(clippy::too_many_lines, reason = "reader task body is the bulk")]
 pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
     let listener = TcpListener::bind(cfg.listen).await?;
     tracing::info!(listen = %cfg.listen, "evpn-load peer listening for BGP session");
@@ -120,8 +123,10 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
     let _peer_open = read_expected_open(&mut stream, &mut buf).await?;
 
     // Send KEEPALIVE to confirm. At this point we treat the session as
-    // Established (we skip hold-timer enforcement — this is a benchmark
-    // tool, not a production peer).
+    // Established. Hold-timer enforcement is wired in the reader task
+    // (RFC 4271 §4.4 / §6.5): if no inbound traffic arrives within the
+    // negotiated hold window the session is torn down so a stuck RR
+    // gets detected rather than masked as "in progress".
     let ka = encode_message(&Message::Keepalive)?;
     stream.write_all(&ka).await?;
 
@@ -166,15 +171,47 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
         }
     });
 
-    // Reader task: framed decode, push to rx_tx.
+    // Reader task: framed decode, push to rx_tx, enforce hold timer.
+    //
+    // Hold-timer enforcement (RFC 4271 §4.4 / §6.5): if no inbound
+    // message arrives within `hold` seconds the session is torn down.
+    // For a synthetic peer this is the only way to detect a stuck RR
+    // (TCP open, no traffic) — without the timer the tester would
+    // sit forever and the harness would mistake silence for "in
+    // progress." We implement it by selecting between socket read
+    // and a deadline timer that gets reset on every byte received.
+    let hold_secs = u64::from(hold);
     tokio::spawn(async move {
         let mut frame_buf = BytesMut::with_capacity(65536);
         let mut tmp = [0u8; 8192];
+        let hold_dur = Duration::from_secs(hold_secs);
+        // hold=0 means "no hold timer" per RFC 4271 §4.2 — disable enforcement.
+        let timer_enabled = hold_secs > 0;
+        let mut deadline = if timer_enabled {
+            tokio::time::Instant::now() + hold_dur
+        } else {
+            // Far-future placeholder — never fires.
+            tokio::time::Instant::now() + Duration::from_secs(86_400 * 365)
+        };
         loop {
-            match reader.read(&mut tmp).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => frame_buf.extend_from_slice(&tmp[..n]),
+            let n = tokio::select! {
+                read_res = reader.read(&mut tmp) => match read_res {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                },
+                () = tokio::time::sleep_until(deadline), if timer_enabled => {
+                    tracing::warn!(
+                        hold_secs,
+                        "hold timer expired — no inbound traffic from RR; closing session"
+                    );
+                    return;
+                }
+            };
+            // Any received bytes reset the hold deadline (RFC 4271 §6.5).
+            if timer_enabled {
+                deadline = tokio::time::Instant::now() + hold_dur;
             }
+            frame_buf.extend_from_slice(&tmp[..n]);
             loop {
                 let have = frame_buf.len();
                 if have < HEADER_LEN {
@@ -288,6 +325,20 @@ pub fn synth_mac(index: u32) -> [u8; 6] {
         ((i >> 16) & 0xFF) as u8,
         ((i >> 8) & 0xFF) as u8,
         (i & 0xFF) as u8,
+    ]
+}
+
+/// 10-byte EVPN Ethernet Segment Identifier generator keyed by index.
+/// Produces a deterministic, **non-zero** ESI (RFC 7432 §7.1 / §7.4
+/// require ESI != 0 for Type 1/4): leading byte `0x03` (ESI Type 3 —
+/// "MAC-based" per RFC 7432 §5), then a fixed 5-byte synthetic
+/// es-sys-mac, then a 4-byte big-endian es-id derived from `index + 1`
+/// so index=0 still yields a valid non-zero ESI.
+#[must_use]
+pub fn synth_esi(index: u32) -> [u8; 10] {
+    let id = index.saturating_add(1).to_be_bytes();
+    [
+        0x03, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, id[0], id[1], id[2], id[3],
     ]
 }
 

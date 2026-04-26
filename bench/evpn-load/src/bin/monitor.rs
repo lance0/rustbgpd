@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use rustbgpd_evpn_load::{PeerConfig, establish};
 use rustbgpd_wire::attribute::PathAttribute;
 use rustbgpd_wire::capability::{Afi, Safi};
@@ -23,6 +23,15 @@ use rustbgpd_wire::evpn::{EvpnRoute, EvpnRouteKey};
 use rustbgpd_wire::message::Message;
 use rustbgpd_wire::update::UpdateMessage;
 use serde::Serialize;
+
+/// Which route type the monitor counts toward `expect`. Mirrors the
+/// tester's `--route-type` flag so M32b can gate on Type 1 EAD-per-EVI
+/// reflection while M33 stays on Type 2.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum RouteType {
+    MacIp,
+    EadPerEvi,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "evpn-monitor")]
@@ -59,6 +68,11 @@ struct Args {
     /// Hold time advertised in OPEN.
     #[arg(long, default_value_t = 180)]
     hold_time: u16,
+
+    /// Route type to count toward `expect`. Defaults to `mac-ip` so M33's
+    /// existing invocation is unchanged; set `ead-per-evi` for M32b.
+    #[arg(long, value_enum, default_value_t = RouteType::MacIp)]
+    route_type: RouteType,
 }
 
 #[derive(Serialize, Debug)]
@@ -147,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(Some(Message::Update(u))) => {
                 updates += 1;
                 let before = live_keys.len();
-                let (anns, withs) = apply_evpn_type2(&u, &mut live_keys);
+                let (anns, withs) = apply_evpn(&u, &mut live_keys, args.route_type);
                 announcements += anns;
                 withdrawals += withs;
                 if live_keys.len() != before {
@@ -216,14 +230,24 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Apply Type 2 announces (insert keys) and withdraws (remove keys)
-/// from this UPDATE to `live_keys`. Returns `(announcement_events,
-/// withdrawal_events)` — raw event counts including idempotent
-/// re-advertisements, useful for churn accounting. Other EVPN route
-/// types are ignored; the monitor is scoped to Type 2 scale.
-fn apply_evpn_type2(u: &UpdateMessage, live_keys: &mut HashSet<EvpnRouteKey>) -> (u64, u64) {
+/// Apply EVPN announces (insert keys) and withdraws (remove keys)
+/// from this UPDATE to `live_keys`. Counts only routes matching
+/// `route_type`; other types are ignored (a single monitor is scoped
+/// to one route type at a time so the count semantics stay clean).
+/// Returns `(announcement_events, withdrawal_events)` — raw event
+/// counts including idempotent re-advertisements, useful for churn
+/// accounting.
+fn apply_evpn(
+    u: &UpdateMessage,
+    live_keys: &mut HashSet<EvpnRouteKey>,
+    route_type: RouteType,
+) -> (u64, u64) {
     let Ok(parsed) = u.parse(true, false, &[]) else {
         return (0, 0);
+    };
+    let matches_type = |r: &EvpnRoute| match route_type {
+        RouteType::MacIp => matches!(r, EvpnRoute::MacIp(_)),
+        RouteType::EadPerEvi => matches!(r, EvpnRoute::EadPerEvi(_)),
     };
     let mut a: u64 = 0;
     let mut w: u64 = 0;
@@ -231,7 +255,7 @@ fn apply_evpn_type2(u: &UpdateMessage, live_keys: &mut HashSet<EvpnRouteKey>) ->
         match attr {
             PathAttribute::MpReachNlri(mp) if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn => {
                 for r in &mp.evpn_announced {
-                    if matches!(r, EvpnRoute::MacIp(_)) {
+                    if matches_type(r) {
                         live_keys.insert(r.key());
                         a += 1;
                     }
@@ -239,7 +263,7 @@ fn apply_evpn_type2(u: &UpdateMessage, live_keys: &mut HashSet<EvpnRouteKey>) ->
             }
             PathAttribute::MpUnreachNlri(mp) if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn => {
                 for r in &mp.evpn_withdrawn {
-                    if matches!(r, EvpnRoute::MacIp(_)) {
+                    if matches_type(r) {
                         live_keys.remove(&r.key());
                         w += 1;
                     }

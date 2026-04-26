@@ -15,16 +15,29 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use clap::Parser;
-use rustbgpd_evpn_load::{PeerConfig, establish, synth_mac, v4_next_hop};
+use clap::{Parser, ValueEnum};
+use rustbgpd_evpn_load::{PeerConfig, establish, synth_esi, synth_mac, v4_next_hop};
 use rustbgpd_wire::attribute::{AsPath, MpReachNlri, Origin, PathAttribute};
 use rustbgpd_wire::capability::{Afi, Safi};
 use rustbgpd_wire::evpn::{
-    EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
-    RouteDistinguisher,
+    EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEvi, EvpnMacIp, EvpnRoute, MacAddress,
+    MplsLabel, RouteDistinguisher,
 };
 use rustbgpd_wire::message::Message;
 use rustbgpd_wire::update::UpdateMessage;
+
+/// Which RFC 7432 route type the tester originates.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum RouteType {
+    /// Type 2 — MAC/IP advertisement. The historical M33 default.
+    MacIp,
+    /// Type 1 — EAD-per-EVI. Each route carries a synthetic non-zero ESI
+    /// derived from index, a non-MAX_ET ethernet-tag, and the configured
+    /// VNI. Used by the M32b harness to gate end-to-end Type 1 EAD
+    /// reflection through the RR without needing FRR's VLAN-aware
+    /// bridge + SVI setup.
+    EadPerEvi,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "evpn-tester")]
@@ -80,6 +93,10 @@ struct Args {
     /// Hold time advertised in OPEN.
     #[arg(long, default_value_t = 180)]
     hold_time: u16,
+
+    /// Route type to originate.
+    #[arg(long, value_enum, default_value_t = RouteType::MacIp)]
+    route_type: RouteType,
 }
 
 #[tokio::main]
@@ -127,11 +144,16 @@ async fn main() -> anyhow::Result<()> {
         args.router_id,
         args.local_as,
         rd,
+        args.route_type,
         false,
     )
     .await?;
 
-    tracing::info!("inject phase complete: {} routes advertised", args.count);
+    tracing::info!(
+        "inject phase complete: {} routes advertised ({:?})",
+        args.count,
+        args.route_type
+    );
 
     if args.churn_duration_sec > 0 {
         tracing::info!(
@@ -149,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
             args.router_id,
             args.local_as,
             rd,
+            args.route_type,
             Duration::from_secs(args.churn_duration_sec),
         )
         .await?;
@@ -177,6 +200,29 @@ fn build_type2(index: u32, rd: RouteDistinguisher, ethernet_tag: u32, vni: u32) 
         ip: None,
         label1: MplsLabel::new(vni),
         label2: None,
+    })
+}
+
+/// Build a Type 1 EAD-per-EVI route. Distinct ESIs per index so the RR's
+/// keyspace doesn't collapse, and a non-MAX_ET ethernet-tag (the per-ES
+/// discriminator) so the route survives encode → decode as `EadPerEvi`.
+fn build_ead_per_evi(
+    index: u32,
+    rd: RouteDistinguisher,
+    base_ethernet_tag: u32,
+    vni: u32,
+) -> EvpnRoute {
+    // Force a non-MAX_ET tag — MAX_ET (0xFFFF_FFFF) would flip the route
+    // identity into EadPerEs at the wire boundary.
+    let mut tag = base_ethernet_tag.wrapping_add(index).wrapping_add(1);
+    if tag == EthernetTagId::MAX_ET.0 {
+        tag = tag.wrapping_sub(1);
+    }
+    EvpnRoute::EadPerEvi(EvpnEadPerEvi {
+        rd,
+        esi: EthernetSegmentIdentifier(synth_esi(index)),
+        ethernet_tag: EthernetTagId(tag),
+        label: MplsLabel::new(vni),
     })
 }
 
@@ -236,6 +282,7 @@ async fn inject_phase(
     router_id: Ipv4Addr,
     local_as: u32,
     rd: RouteDistinguisher,
+    route_type: RouteType,
     is_withdraw: bool,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
@@ -256,7 +303,10 @@ async fn inject_phase(
     while idx < count {
         let end = (idx + batch).min(count);
         let chunk: Vec<EvpnRoute> = (idx..end)
-            .map(|i| build_type2(i, rd, ethernet_tag, vni))
+            .map(|i| match route_type {
+                RouteType::MacIp => build_type2(i, rd, ethernet_tag, vni),
+                RouteType::EadPerEvi => build_ead_per_evi(i, rd, ethernet_tag, vni),
+            })
             .collect();
         let msg = if is_withdraw {
             build_update(vec![], chunk, router_id, local_as)
@@ -296,6 +346,7 @@ async fn run_churn(
     router_id: Ipv4Addr,
     local_as: u32,
     rd: RouteDistinguisher,
+    route_type: RouteType,
     total: Duration,
 ) -> anyhow::Result<()> {
     let deadline = Instant::now() + total;
@@ -314,7 +365,10 @@ async fn run_churn(
         let start = idx % count;
         let end = (start + batch).min(count);
         let chunk: Vec<EvpnRoute> = (start..end)
-            .map(|i| build_type2(i, rd, ethernet_tag, vni))
+            .map(|i| match route_type {
+                RouteType::MacIp => build_type2(i, rd, ethernet_tag, vni),
+                RouteType::EadPerEvi => build_ead_per_evi(i, rd, ethernet_tag, vni),
+            })
             .collect();
         // Withdraw + re-advertise as two UPDATEs back-to-back.
         let withdraw = build_update(vec![], chunk.clone(), router_id, local_as);
