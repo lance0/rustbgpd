@@ -289,6 +289,13 @@ impl RibManager {
                 }
                 rib_len = rib.len();
                 evpn_len = rib.evpn_len();
+                // GC the attribute intern table once per pass: LLGR
+                // promotion adds the LLGR_STALE community (so the route's
+                // attribute Arc is replaced) and non-LLGR sweeps drop
+                // routes outright. Both leave the prior interned vectors
+                // with strong_count==1, which sticks until some later
+                // unicast withdraw happens to call gc_intern_table.
+                rib.gc_intern_table();
             }
             if !non_llgr_families.is_empty() {
                 info!(%peer, families = ?non_llgr_families, "swept stale routes for non-LLGR families");
@@ -329,6 +336,7 @@ impl RibManager {
                 let swept = rib.sweep_stale();
                 let fs_swept = rib.sweep_stale_flowspec();
                 let evpn_swept = rib.sweep_stale_evpn();
+                rib.gc_intern_table();
                 (swept, fs_swept, evpn_swept, rib.len(), rib.evpn_len())
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), 0, 0)
@@ -367,6 +375,7 @@ impl RibManager {
                 let swept = rib.sweep_llgr_stale();
                 let fs_swept = rib.sweep_llgr_stale_flowspec();
                 let evpn_swept = rib.sweep_llgr_stale_evpn();
+                rib.gc_intern_table();
                 (swept, fs_swept, evpn_swept, rib.len(), rib.evpn_len())
             } else {
                 (Vec::new(), Vec::new(), Vec::new(), 0, 0)

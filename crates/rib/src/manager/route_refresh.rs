@@ -494,6 +494,13 @@ impl RibManager {
                     evpn_affected.insert(*key);
                 }
             }
+            // Reclaim attribute interns dropped by the bulk withdraw —
+            // each withdraw above can leave a `strong_count==1` Arc in
+            // the intern table that wouldn't otherwise be GC'd until
+            // some unrelated future withdraw on this peer.
+            if !affected.is_empty() || !fs_affected.is_empty() || !evpn_affected.is_empty() {
+                rib.gc_intern_table();
+            }
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
             self.metrics.set_rib_prefixes(
