@@ -1021,6 +1021,19 @@ fn decode_mp_reach_nlri(
         }));
     }
 
+    // SAFI 70 (EVPN) is only defined for AFI 25 (L2VPN). Reject any other
+    // AFI explicitly so the unicast NLRI fallthrough below cannot
+    // misinterpret the typed EVPN payload as a prefix list.
+    if safi == Safi::Evpn {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!(
+                "MP_REACH_NLRI SAFI EVPN with non-L2VPN AFI {} (only AFI L2VPN supported)",
+                afi as u16
+            ),
+        });
+    }
+
     let add_path = add_path_families.contains(&(afi, safi));
     let announced = match (afi, add_path) {
         (Afi::Ipv4, false) => crate::nlri::decode_nlri(nlri_bytes)?
@@ -1117,6 +1130,19 @@ fn decode_mp_unreach_nlri(
             flowspec_withdrawn: vec![],
             evpn_withdrawn: routes,
         }));
+    }
+
+    // SAFI 70 (EVPN) is only defined for AFI 25 (L2VPN). Reject any other
+    // AFI explicitly so the unicast NLRI fallthrough below cannot
+    // misinterpret the typed EVPN payload as a prefix list.
+    if safi == Safi::Evpn {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!(
+                "MP_UNREACH_NLRI SAFI EVPN with non-L2VPN AFI {} (only AFI L2VPN supported)",
+                afi as u16
+            ),
+        });
     }
 
     let add_path = add_path_families.contains(&(afi, safi));
@@ -2874,5 +2900,45 @@ mod tests {
     fn aspath_string_empty() {
         let p = AsPath { segments: vec![] };
         assert_eq!(p.to_aspath_string(), "");
+    }
+
+    /// Regression: SAFI 70 (EVPN) is only valid under AFI 25 (L2VPN).
+    /// Other AFIs with SAFI=Evpn must be rejected explicitly so the
+    /// unicast NLRI fallthrough never tries to parse the typed EVPN
+    /// payload as a prefix list.
+    #[test]
+    fn mp_reach_nlri_rejects_evpn_safi_with_non_l2vpn_afi() {
+        // AFI=Ipv4 (1), SAFI=Evpn (70), NH-len=4, NH=192.0.2.1, reserved=0,
+        // followed by an arbitrary EVPN-shaped byte (route type 3, len 0).
+        let bytes = vec![
+            0x00, 0x01, // AFI = Ipv4
+            70,   // SAFI = Evpn
+            4, 192, 0, 2, 1, // NH len + NH
+            0, // reserved
+            3, 0, // EVPN-style NLRI (route type 3, length 0)
+        ];
+        let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(detail.contains("SAFI EVPN"), "unexpected detail: {detail}");
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mp_unreach_nlri_rejects_evpn_safi_with_non_l2vpn_afi() {
+        let bytes = vec![
+            0x00, 0x02, // AFI = Ipv6
+            70,   // SAFI = Evpn
+            3, 0, // EVPN-style withdrawal (route type 3, length 0)
+        ];
+        let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(detail.contains("SAFI EVPN"), "unexpected detail: {detail}");
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
     }
 }

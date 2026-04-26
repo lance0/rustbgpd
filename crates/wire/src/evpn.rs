@@ -802,6 +802,12 @@ fn decode_type5(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
     //   IP Prefix (4 or 16) | GW IP (4 or 16, same family) | MPLS Label (3)
     // IPv4 total = 8+10+4+1+4+4+3 = 34
     // IPv6 total = 8+10+4+1+16+16+3 = 58
+    //
+    // Family discrimination is by NLRI total length only — RFC 9136 does
+    // not carry an explicit AFI inside the Type 5 body. Receivers must
+    // therefore reject any other length as malformed. Non-canonical IP
+    // prefix bytes (host bits set beyond `prefix_len`) are silently
+    // canonicalized by `Ipv4Prefix::new` / `Ipv6Prefix::new`.
     let total = payload.len();
     if total != 34 && total != 58 {
         return Err(DecodeError::MalformedField {
@@ -992,6 +998,18 @@ fn encode_type4_body(r: &EvpnEs, out: &mut Vec<u8>) {
 }
 
 fn encode_type5_body(r: &EvpnIpPrefixRoute, out: &mut Vec<u8>) {
+    // RFC 9136 §3 requires the GW IP to be the same family as the IP
+    // prefix. A debug assertion catches programmer bugs immediately;
+    // release builds fall back to UNSPECIFIED in the prefix family
+    // rather than silently truncating/scrambling the wrong-family
+    // address bytes.
+    debug_assert!(
+        matches!(
+            (&r.prefix, &r.gateway),
+            (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
+        ),
+        "EVPN Type 5: gateway family must match prefix family"
+    );
     out.extend_from_slice(&r.rd.0);
     out.extend_from_slice(&r.esi.0);
     out.extend_from_slice(&r.ethernet_tag.0.to_be_bytes());
@@ -999,7 +1017,6 @@ fn encode_type5_body(r: &EvpnIpPrefixRoute, out: &mut Vec<u8>) {
         EvpnIpPrefixValue::V4(p) => {
             out.push(p.len);
             out.extend_from_slice(&p.addr.octets());
-            // GW IP must be same family as prefix
             if let IpAddr::V4(gw) = r.gateway {
                 out.extend_from_slice(&gw.octets());
             } else {
@@ -1029,9 +1046,22 @@ pub fn encode_evpn_nlri(routes: &[EvpnRoute], buf: &mut Vec<u8>) {
         let body_start = buf.len();
         match route {
             EvpnRoute::EadPerEs(r) => {
-                encode_type1_body(r.rd, r.esi, r.ethernet_tag, r.label, buf);
+                // RFC 7432 §7.1: EAD-per-ES carries MAX_ET in the Ethernet
+                // Tag field; the decoder uses that to discriminate from
+                // EAD-per-EVI. Force MAX_ET on the wire regardless of the
+                // struct field so a buggy upstream cannot silently flip
+                // the route's identity.
+                debug_assert!(
+                    r.ethernet_tag.is_max_et(),
+                    "EVPN EAD-per-ES must carry MAX_ET ethernet tag"
+                );
+                encode_type1_body(r.rd, r.esi, EthernetTagId::MAX_ET, r.label, buf);
             }
             EvpnRoute::EadPerEvi(r) => {
+                debug_assert!(
+                    !r.ethernet_tag.is_max_et(),
+                    "EVPN EAD-per-EVI must not carry MAX_ET ethernet tag"
+                );
                 encode_type1_body(r.rd, r.esi, r.ethernet_tag, r.label, buf);
             }
             EvpnRoute::MacIp(r) => encode_type2_body(r, buf),
@@ -1289,5 +1319,43 @@ mod tests {
             label: MplsLabel::new(500),
         });
         assert_ne!(per_es.key(), per_evi.key());
+    }
+
+    /// Regression: an EAD-per-ES route round-trips encode → decode back
+    /// to `EadPerEs`, never silently becoming `EadPerEvi`. The encoder
+    /// pins the ethernet tag to `MAX_ET` (the per-ES discriminator
+    /// per RFC 7432 §7.1) regardless of what the struct field holds.
+    #[test]
+    fn ead_per_es_encode_round_trips_to_per_es() {
+        let r = EvpnRoute::EadPerEs(EvpnEadPerEs {
+            rd: sample_rd(),
+            esi: sample_esi(),
+            ethernet_tag: EthernetTagId::MAX_ET,
+            label: MplsLabel::new(7),
+        });
+        let mut buf = Vec::new();
+        encode_evpn_nlri(std::slice::from_ref(&r), &mut buf);
+        let decoded = decode_evpn_nlri(&buf).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(matches!(decoded[0], EvpnRoute::EadPerEs(_)));
+    }
+
+    /// Regression: gateway-family mismatch on Type 5 trips the
+    /// `debug_assert!` so encoder bugs surface in tests/CI rather than
+    /// silently corrupting the wire payload. Cargo runs unit tests with
+    /// debug assertions on, so this test is `#[should_panic]`.
+    #[test]
+    #[should_panic(expected = "gateway family must match prefix family")]
+    fn type5_encode_panics_on_family_mismatch_in_debug() {
+        let r = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+            rd: sample_rd(),
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            prefix: EvpnIpPrefixValue::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 8)),
+            gateway: IpAddr::V6(Ipv6Addr::LOCALHOST),
+            label: MplsLabel::new(100),
+        });
+        let mut buf = Vec::new();
+        encode_evpn_nlri(&[r], &mut buf);
     }
 }
