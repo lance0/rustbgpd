@@ -18,6 +18,11 @@ rustbgpctl neighbor disable <addr>     # disable peer with reason
 rustbgpctl neighbor soft-reset <addr>  # trigger soft reset
 rustbgpctl rib <received|best|advertised> <addr>  # query routes
 rustbgpctl flowspec list               # list FlowSpec rules
+rustbgpctl evpn                        # list EVPN routes (RFC 7432)
+rustbgpctl evpn add-mac-ip ...         # inject EVPN Type 2 MAC/IP route
+rustbgpctl evpn add-imet ...           # inject EVPN Type 3 IMET route
+rustbgpctl evpn delete-mac-ip ...      # withdraw EVPN Type 2 route
+rustbgpctl evpn delete-imet ...        # withdraw EVPN Type 3 route
 rustbgpctl watch                       # stream route events
 rustbgpctl health                      # daemon health check
 rustbgpctl shutdown                    # coordinated shutdown

@@ -268,6 +268,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ExplainAdvertisedRoute` | Dry-run export decision for one prefix to one peer |
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
+| `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
 ### List received routes (Adj-RIB-In)
@@ -369,6 +370,28 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListFlowSpecRoutes
 ```
 
+### List EVPN routes
+
+```bash
+# All EVPN routes in Loc-RIB
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListEvpnRoutes
+
+# Only Type 2 (MAC/IP) routes
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"route_type_filter": 2}' \
+  localhost:50051 rustbgpd.v1.RibService/ListEvpnRoutes
+
+# Filter by Route Distinguisher
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"rd_filter": "65000:100"}' \
+  localhost:50051 rustbgpd.v1.RibService/ListEvpnRoutes
+```
+
+`route_type_filter` accepts 0 (no filter) or `1..=5` matching the RFC 7432
+route type numbers. `peer_filter` and `rd_filter` are optional substring
+matches.
+
 ---
 
 ## InjectionService
@@ -383,6 +406,8 @@ export policy).
 | `DeletePath` | Withdraw a previously injected route |
 | `AddFlowSpec` | Inject a FlowSpec rule with actions |
 | `DeleteFlowSpec` | Withdraw a previously injected FlowSpec rule |
+| `AddEvpnRoute` | Inject an EVPN Type 2 (MAC/IP) or Type 3 (IMET) route |
+| `DeleteEvpnRoute` | Withdraw a previously injected EVPN route by its RFC 7432 key |
 
 ### Inject an IPv4 route
 
@@ -462,6 +487,64 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   }' \
   localhost:50051 rustbgpd.v1.InjectionService/DeleteFlowSpec
 ```
+
+### Inject an EVPN Type 2 (MAC/IP) route
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "route_type": 2,
+    "rd": "65000:100",
+    "ethernet_tag": 0,
+    "mac": "02:00:00:aa:bb:cc",
+    "ip": "10.0.0.5",
+    "label": 100,
+    "next_hop": "10.0.0.2",
+    "route_targets": ["65000:100"]
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddEvpnRoute
+```
+
+`disable_vxlan_encap` defaults to `false` — the RFC 8365 §5.1.2 VXLAN
+Encapsulation extended community (tunnel-type=8) is attached
+automatically. Set `disable_vxlan_encap: true` for MPLS-over-GRE
+deployments. Phase 1 supports `route_type` 2 (MAC/IP) and 3 (IMET);
+Type 5 IP-Prefix and Type 1/4 multi-homing origination are not yet
+exposed via injection (the RR still reflects them when received from
+peers).
+
+### Inject an EVPN Type 3 (IMET) route
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "route_type": 3,
+    "rd": "65000:100",
+    "ethernet_tag": 0,
+    "ip": "10.0.0.2",
+    "next_hop": "10.0.0.2"
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/AddEvpnRoute
+```
+
+### Withdraw an EVPN route
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{
+    "route_type": 2,
+    "rd": "65000:100",
+    "ethernet_tag": 0,
+    "mac": "02:00:00:aa:bb:cc",
+    "ip": "10.0.0.5"
+  }' \
+  localhost:50051 rustbgpd.v1.InjectionService/DeleteEvpnRoute
+```
+
+The withdrawal key (route type + RD + ethernet tag + MAC + IP for
+Type 2; route type + RD + ethernet tag + originator IP for Type 3)
+matches the RFC 7432 route identity. Returns `NOT_FOUND` if no such
+route was previously injected.
 
 ---
 

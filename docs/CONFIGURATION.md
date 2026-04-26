@@ -175,6 +175,14 @@ the peer via MP-BGP capabilities. Supported values:
 - `"ipv6_unicast"` — IPv6 Unicast (AFI 2, SAFI 1)
 - `"ipv4_flowspec"` — IPv4 FlowSpec (AFI 1, SAFI 133, RFC 8955)
 - `"ipv6_flowspec"` — IPv6 FlowSpec (AFI 2, SAFI 133, RFC 8956)
+- `"l2vpn_evpn"` — L2VPN EVPN (AFI 25, SAFI 70, RFC 7432). Phase 1
+  Route Reflector role only — no local EVI / VRF / VNI state, no MAC
+  learning, no DF election. The RR reflects all five RFC 7432 route
+  types between iBGP-speaking VTEPs that are configured as
+  `route_reflector_client = true`. See [docs/USE_CASES.md](USE_CASES.md)
+  § "VXLAN-EVPN DC Fabric" for a worked example and
+  `examples/rr-evpn-fabric/config.toml` for a copy-paste-ready
+  starting point.
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:

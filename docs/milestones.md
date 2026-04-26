@@ -523,3 +523,97 @@ Security, resilience, operational safety, and core protocol compliance
 - TCP collision detection per RFC 4271 §6.8
 - gRPC lifecycle supervised
 - 367 tests pass (+20 new), clippy clean, fmt clean
+
+---
+
+## M29-M33 — "EVPN Route Reflector (Phase 1)"
+
+Single feature shipped across five interop milestones plus correctness
+hardening. See [docs/evpn-enablement.md](evpn-enablement.md) for the
+gate ladder and [docs/adr/0050-evpn-route-reflector.md](adr/0050-evpn-route-reflector.md)
+for the architectural record.
+
+### Milestones
+
+| ID | Scope |
+|----|-------|
+| **M29** | Capability sanity — L2VPN/EVPN negotiated with FRR 10.3.1, gRPC `ListEvpnRoutes` returns a well-formed response. |
+| **M30** | Real Type 2 MAC/IP reflection end-to-end through a kernel VXLAN data plane (3-node containerlab + FRR VTEPs). |
+| **M31** | MAC mobility (RFC 7432 §15.1) + sticky-MAC preservation (§7.7) across three VTEPs. |
+| **M32** | Multi-homing reflection — Type 1 EAD-per-ES + Type 4 ES routes from two VTEPs sharing an Ethernet Segment, reflected unchanged through the RR. |
+| **M33** | Scale validation — 50,000 Type 2 routes + 60 s of 1,000 rps churn through the RR. In-tree iBGP load generator (`bench/evpn-load`), no third-party daemon in the measurement path. |
+
+### Build Order
+
+1. **AFI 25 / SAFI 70 + wire codec** (`crates/wire/src/evpn.rs`) — five
+   route types (Type 1 EAD per-ES + EAD per-EVI, Type 2 MAC/IP, Type 3
+   IMET, Type 4 ES, Type 5 IP-Prefix per RFC 9136), `EvpnRoute` /
+   `EvpnRouteKey` split, RouteDistinguisher / EthernetSegmentIdentifier /
+   MplsLabel / MacAddress primitives, fuzz target.
+2. **7 typed extended-community accessors** (`crates/wire/src/attribute.rs`) —
+   BGP Encapsulation (RFC 8365 / 9012), MAC Mobility (RFC 7432 §7.7),
+   ESI Label (§7.5), ES-Import RT (§7.6), Router MAC (RFC 9135 §4.1),
+   Default Gateway (RFC 4761 §3.2.5).
+3. **Parallel RIB tables** (`crates/rib/src/`) — `HashMap<EvpnRouteKey,
+   EvpnRibRoute>` in AdjRibIn / Loc-RIB / AdjRibOut, mirroring the
+   FlowSpec pattern from M22.
+4. **Best-path with MAC Mobility head** (`crates/rib/src/loc_rib.rs`) —
+   stale → MAC Mobility (sticky + sequence) → standard BGP chain
+   (LocalPref → AS_PATH → ORIGIN → MED → eBGP/iBGP → CLUSTER_LIST →
+   ORIGINATOR_ID → peer address).
+5. **Reflection pipeline** (`crates/rib/src/manager/distribution.rs`) —
+   source-peer split horizon, RFC 4456 ORIGINATOR_ID + CLUSTER_LIST,
+   same-peer attribute-change detection, EVPN initial dump for late-
+   joining peers.
+6. **GR + LLGR + Enhanced Route Refresh for EVPN** (graceful_restart.rs,
+   route_refresh.rs) — `mark_stale_evpn`, `promote_to_llgr_stale_evpn`,
+   `sweep_stale_evpn`, `sweep_llgr_stale_evpn`, `clear_stale_evpn`,
+   `clear_llgr_stale_evpn`; `refresh_stale_evpn` BoRR/EoRR tracking.
+7. **Inbound/outbound transport** (`crates/transport/src/session/`) —
+   EVPN MP_REACH/MP_UNREACH parsing, EVPN withdrawals propagated through
+   AS_PATH-loop and CLUSTER_LIST-loop branches, max-prefix counting EVPN
+   keys + FlowSpec rules.
+8. **gRPC + CLI** — `ListEvpnRoutes` RPC on RibService with `route_type`
+   / `peer` / `rd` filters; `AddEvpnRoute` / `DeleteEvpnRoute` on
+   InjectionService for Type 2 (MAC/IP) and Type 3 (IMET) origination
+   with proto3-default-correct `disable_vxlan_encap`. `rustbgpctl evpn`
+   list + `add-mac-ip` / `add-imet` / `delete-mac-ip` / `delete-imet`
+   subcommands.
+9. **Five interop harnesses** — M29 capability sanity, M30 Type 2
+   reflection with kernel VXLAN, M31 MAC mobility + sticky, M32 multi-
+   homing Type 1/4 reflection, M33 50k-route scale + churn against the
+   in-tree `bench/evpn-load` generator.
+10. **Correctness hardening** — 12 fixes from three adversarial review
+    rounds, each with regression tests: source-peer suppression,
+    same-peer redistribution, full RFC 4456 tie-break, EVPN withdrawals
+    through both loop branches, max-prefix counting, EVPN initial dump,
+    ERR refresh tracking, Type 5 prefix in policy context, proto3
+    `disable_vxlan_encap` rename, Default Gateway value-byte validation.
+
+### Exit Criteria
+
+- All five route types decode/encode with fuzz coverage and round-trip
+  identity tests.
+- Reflection preserves next-hop, ORIGINATOR_ID, CLUSTER_LIST, and all
+  unrecognized attributes per RFC 4456.
+- M30 validates real Type 2 MAC reflection through a kernel VXLAN data
+  plane against FRR 10.3.1.
+- M33 validates 50k Type 2 routes reflected to a third observer with
+  exactly zero loss across 60 s of 1,000 rps churn (initial convergence
+  5.1 s, peak RR memory 87 MB on the reference hardware).
+- Controller can inject Type 2 / Type 3 routes via gRPC; the RR
+  reflects them through the same pipeline as iBGP-learned routes.
+- All correctness gaps surfaced by review are fixed with regression
+  tests; no known unfixed bugs at merge time.
+
+### Deferred to Phase 2+
+
+- VTEP mode (local EVI / VRF / VNI state, MAC learning from kernel
+  FDB, local route origination beyond what the controller pushes).
+- DF election execution (RFC 7432 §8 + RFC 8584) — Phase 1 reflects
+  the inputs unchanged so VTEPs run the election themselves.
+- Symmetric IRB semantics (RFC 9135) — `label2` and Router MAC are
+  preserved across reflection but not interpreted.
+- Type 5 / Type 1 / Type 4 origination via gRPC.
+- RFC 9251 Route Types 6-8 (multicast EVPN), RFC 7623 PBB-EVPN, MPLS
+  encapsulation, RFC 9252 Add-Path for EVPN.

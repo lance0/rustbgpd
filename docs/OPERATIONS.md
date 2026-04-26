@@ -382,3 +382,77 @@ addr = "0.0.0.0:8080"
 
 Endpoints: `/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
 `/routes/peer/{peer}`. Omit the section entirely to disable.
+
+### EVPN Route Reflector (Phase 1)
+
+rustbgpd's Phase 1 EVPN role is **Route Reflector only** — it reflects
+RFC 7432 routes between iBGP-speaking VTEPs but does not own any local
+EVI / VRF / VNI state, does not learn MACs from a kernel FDB, and does
+not run DF election. VTEPs (typically FRR on SONiC, or commercial NOS)
+handle local origination and forwarding; rustbgpd handles fan-out and
+attribute integrity in the middle.
+
+#### Per-neighbor knob
+
+```toml
+[[neighbors]]
+address = "10.0.1.1"
+remote_asn = 65000
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+```
+
+Set `route_reflector_client = true` on every VTEP peer; the daemon's
+own `cluster_id` (under `[global]`) drives the RFC 4456 ORIGINATOR_ID
++ CLUSTER_LIST stamping.
+
+#### Inspect the EVPN RIB
+
+```bash
+rustbgpctl evpn                             # all EVPN routes
+rustbgpctl evpn --route-type 2              # MAC/IP only
+rustbgpctl evpn --rd 65000:100              # filter by RD
+rustbgpctl evpn --peer 10.0.1.1             # filter by source peer
+```
+
+`tunnel_type=8` in the output indicates the RFC 8365 VXLAN
+encapsulation extended community is present.
+
+#### Inject a route from a controller
+
+```bash
+rustbgpctl evpn add-mac-ip --rd 65000:100 \
+  --mac 02:00:00:aa:bb:cc --ip 10.0.0.5 \
+  --label 100 --next-hop 10.0.0.2 \
+  --rt 65000:100
+
+rustbgpctl evpn delete-mac-ip --rd 65000:100 \
+  --mac 02:00:00:aa:bb:cc --ip 10.0.0.5
+```
+
+Phase 1 supports Type 2 (MAC/IP) and Type 3 (IMET) injection.
+Type 5 IP-Prefix and Type 1/4 multi-homing origination are not
+exposed via the injection RPCs in Phase 1 (the RR still reflects them
+when a VTEP advertises them).
+
+#### Common operational signals
+
+- **EVPN routes counted toward `max_prefixes`.** A peer flooding EVPN
+  Type 2 routes will trip the same Cease/MAX_PREFIXES that a peer
+  flooding unicast prefixes would. The cap is the union of unicast
+  unique prefixes + FlowSpec rules + EVPN keys.
+- **GR / LLGR works for EVPN.** When a VTEP restarts, its reflected
+  EVPN routes are marked stale and ranked below fresh alternatives
+  (RFC 4724 §4.2 / RFC 9494 §4.7) — no fabric-wide flap.
+- **Late-joining peer.** A VTEP that connects to a converged RR
+  receives the existing EVPN routes in its initial dump before the
+  EoR marker. (This was not always the case — see commit history for
+  the regression test.)
+- **MAC mobility correctness.** A MAC that moves between VTEPs
+  produces a strictly-increasing MAC Mobility sequence number; the
+  RR forwards the highest-sequence advertisement and downstream
+  VTEPs flip their best path accordingly. Sticky MACs (RFC 7432
+  §7.7) are not displaced by non-sticky ones.
+
+For the full enablement story, gate ladder, and known limitations,
+see [docs/evpn-enablement.md](evpn-enablement.md).
