@@ -35,6 +35,8 @@ pub mod capability;
 pub mod constants;
 /// Decode and encode error types.
 pub mod error;
+/// EVPN NLRI types and codec (RFC 7432 + RFC 9136).
+pub mod evpn;
 /// FlowSpec NLRI types and codec (RFC 8955 / RFC 8956).
 pub mod flowspec;
 /// BGP message header codec (RFC 4271 §4.1).
@@ -168,6 +170,13 @@ pub use validate::{UpdateError, is_valid_ipv6_nexthop};
 pub use flowspec::{
     BitmaskMatch, FlowSpecAction, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule,
     Ipv6PrefixOffset, NumericMatch,
+};
+
+// Re-export EVPN types
+pub use evpn::{
+    EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet,
+    EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, EvpnRouteKey, MacAddress,
+    MplsLabel, RouteDistinguisher, decode_evpn_nlri, encode_evpn_nlri,
 };
 
 // Well-known communities (RFC 1997 + RFC 9494)

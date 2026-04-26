@@ -1,0 +1,53 @@
+# Containerlab topology: rustbgpd EVPN Route Reflector ↔ FRR VTEP
+#
+# Validates that rustbgpd negotiates L2VPN/EVPN capability with a real
+# FRR 10.x VTEP and reaches Established. Full EVPN route exchange with
+# MAC learning + VXLAN data-plane is out of scope for Phase 1 (requires
+# actual kernel VXLAN interfaces and bridge setup inside the containers);
+# this test proves the control-plane plumbing — wire codec, capability
+# negotiation, session state machine, and gRPC EVPN RPC — all integrate.
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65000, cluster-id 10.0.0.100) — RR
+#     └── iBGP L2VPN/EVPN ────── FRR (10.0.0.2, AS 65000) — VTEP client
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m29-evpn-rr-frr.clab.yml
+#   containerlab destroy -t tests/interop/m29-evpn-rr-frr.clab.yml
+
+name: m29-evpn-rr-frr
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m29-evpn.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m29-evpn.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24
+# rustbgpd: 10.0.0.1, AS 65000, EVPN Route Reflector
+# FRR:      10.0.0.2, AS 65000, VTEP acting as iBGP RR client

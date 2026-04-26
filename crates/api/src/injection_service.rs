@@ -1,17 +1,18 @@
 //! gRPC injection service — `AddPath` / `DeletePath` / `AddFlowSpec` / `DeleteFlowSpec`.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
 use crate::server::{AccessMode, read_only_rejection};
-use rustbgpd_rib::{FlowSpecRoute, RibUpdate, Route, RouteOrigin};
+use rustbgpd_rib::{EvpnRibRoute, FlowSpecRoute, RibUpdate, Route, RouteOrigin};
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, BitmaskMatch, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix,
-    FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LargeCommunity, NumericMatch, Origin,
-    PathAttribute, Prefix,
+    Afi, AsPath, AsPathSegment, BitmaskMatch, EthernetSegmentIdentifier, EthernetTagId, EvpnImet,
+    EvpnMacIp, EvpnRoute, EvpnRouteKey, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix,
+    FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Ipv6PrefixOffset, LargeCommunity, MacAddress, MplsLabel,
+    NumericMatch, Origin, PathAttribute, Prefix, RouteDistinguisher,
 };
 
 /// gRPC service for injecting and withdrawing locally-originated routes.
@@ -43,39 +44,63 @@ fn parse_prefix_and_nexthop(
     let addr: IpAddr = prefix_str
         .parse()
         .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
+    let nh = parse_unicast_nexthop(next_hop_str)?;
     match addr {
         IpAddr::V4(v4) => {
             let len = u8::try_from(prefix_length)
                 .ok()
                 .filter(|&l| l <= 32)
                 .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
-            let nh: Ipv4Addr = next_hop_str
-                .parse()
-                .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
-            if nh.is_unspecified() {
-                return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
-            }
-            if nh.is_multicast() {
-                return Err(Status::invalid_argument("next_hop must not be multicast"));
-            }
-            Ok((Prefix::V4(Ipv4Prefix::new(v4, len)), IpAddr::V4(nh)))
+            Ok((Prefix::V4(Ipv4Prefix::new(v4, len)), nh))
         }
         IpAddr::V6(v6) => {
             let len = u8::try_from(prefix_length)
                 .ok()
                 .filter(|&l| l <= 128)
                 .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
-            let nh: Ipv6Addr = next_hop_str
-                .parse()
-                .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
-            if nh.is_unspecified() {
-                return Err(Status::invalid_argument("next_hop must not be ::"));
+            Ok((Prefix::V6(Ipv6Prefix::new(v6, len)), nh))
+        }
+    }
+}
+
+/// Parse a unicast next-hop string and reject unspecified / multicast values.
+/// Shared by `AddPath`, `AddFlowSpec`, and `AddEvpnRoute` so all injection
+/// surfaces apply the same guardrails.
+#[expect(clippy::result_large_err)]
+fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
+    let nh: IpAddr = s
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+    match nh {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() {
+                return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
             }
-            if nh.is_multicast() {
+            if v4.is_multicast() {
                 return Err(Status::invalid_argument("next_hop must not be multicast"));
             }
-            Ok((Prefix::V6(Ipv6Prefix::new(v6, len)), IpAddr::V6(nh)))
         }
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified() {
+                return Err(Status::invalid_argument("next_hop must not be ::"));
+            }
+            if v6.is_multicast() {
+                return Err(Status::invalid_argument("next_hop must not be multicast"));
+            }
+        }
+    }
+    Ok(nh)
+}
+
+/// Map a RIB-side withdraw error string into the right gRPC status code.
+/// "not found" maps to `NotFound`; everything else stays `Internal`.
+/// Shared by `DeletePath`, `DeleteFlowSpec`, and `DeleteEvpnRoute` so
+/// the surface is consistent.
+fn map_withdraw_error(e: &str) -> Status {
+    if e.contains("not found") {
+        Status::not_found(e.to_string())
+    } else {
+        Status::internal(format!("withdraw failed: {e}"))
     }
 }
 
@@ -236,7 +261,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("withdraw failed: {e}")))?;
+            .map_err(|e| map_withdraw_error(&e))?;
 
         Ok(Response::new(proto::DeletePathResponse {}))
     }
@@ -336,9 +361,118 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("withdraw failed: {e}")))?;
+            .map_err(|e| map_withdraw_error(&e))?;
 
         Ok(Response::new(proto::DeleteFlowSpecResponse {}))
+    }
+
+    async fn add_evpn_route(
+        &self,
+        request: Request<proto::AddEvpnRouteRequest>,
+    ) -> Result<Response<proto::AddEvpnRouteResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+
+        let rd = parse_rd(&req.rd)?;
+        let next_hop = parse_unicast_nexthop(&req.next_hop)?;
+
+        let (evpn_route, attributes) = match req.route_type {
+            2 => build_type2(&req, rd)?,
+            3 => build_type3(&req, rd)?,
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "route_type {other} not supported for injection (Phase 1: 2, 3)"
+                )));
+            }
+        };
+
+        let key = evpn_route.key();
+        let router_id = match next_hop {
+            IpAddr::V4(v4) => v4,
+            IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
+        };
+        let rib_route = EvpnRibRoute {
+            route: evpn_route,
+            key,
+            next_hop,
+            peer: LOCAL_PEER,
+            attributes: std::sync::Arc::new(attributes),
+            received_at: std::time::Instant::now(),
+            origin_type: RouteOrigin::Local,
+            peer_router_id: router_id,
+            is_stale: false,
+            is_llgr_stale: false,
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::InjectEvpn {
+                route: rib_route,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|e| Status::internal(format!("inject failed: {e}")))?;
+
+        Ok(Response::new(proto::AddEvpnRouteResponse {}))
+    }
+
+    async fn delete_evpn_route(
+        &self,
+        request: Request<proto::DeleteEvpnRouteRequest>,
+    ) -> Result<Response<proto::DeleteEvpnRouteResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+        let rd = parse_rd(&req.rd)?;
+
+        let key = match req.route_type {
+            2 => {
+                let mac = parse_mac(&req.mac)?;
+                EvpnRouteKey::MacIp {
+                    rd,
+                    ethernet_tag: EthernetTagId(req.ethernet_tag),
+                    mac: MacAddress(mac),
+                    ip: parse_optional_ip(&req.ip)?,
+                }
+            }
+            3 => {
+                let ip = parse_ip_required(&req.ip, "ip (originator_ip)")?;
+                EvpnRouteKey::Imet {
+                    rd,
+                    ethernet_tag: EthernetTagId(req.ethernet_tag),
+                    originator_ip: ip,
+                }
+            }
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "route_type {other} not supported for withdrawal (Phase 1: 2, 3)"
+                )));
+            }
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::WithdrawEvpn {
+                key,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?
+            .map_err(|e| map_withdraw_error(&e))?;
+
+        Ok(Response::new(proto::DeleteEvpnRouteResponse {}))
     }
 }
 
@@ -615,6 +749,239 @@ fn flowspec_action_to_ec(
     Ok(Some(ExtendedCommunity::from_flowspec_action(&wire_action)))
 }
 
+/// Parse an RFC 4364 Route Distinguisher from its display form:
+///   Type 0: "<asn-u16>:<assigned-u32>" — e.g. "65000:100"
+///   Type 1: "<ipv4>:<assigned-u16>"    — e.g. "10.0.0.1:100"
+///   Type 2: "<asn-u32>:<assigned-u16>" — e.g. "4200000000:100"
+/// Heuristic: IPv4 form has 4 dot-separated octets before the colon;
+/// numeric > 65535 signals type 2; otherwise type 0.
+#[expect(clippy::result_large_err)]
+fn parse_rd(s: &str) -> Result<RouteDistinguisher, Status> {
+    let (admin, assigned) = s.split_once(':').ok_or_else(|| {
+        Status::invalid_argument(format!("RD must be \"admin:assigned\"; got {s:?}"))
+    })?;
+    if admin.matches('.').count() == 3 {
+        let ip: Ipv4Addr = admin
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("RD ipv4 admin: {e}")))?;
+        let val: u16 = assigned
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("RD type 1 assigned: {e}")))?;
+        let o = ip.octets();
+        let v = val.to_be_bytes();
+        return Ok(RouteDistinguisher::new([
+            0x00, 0x01, o[0], o[1], o[2], o[3], v[0], v[1],
+        ]));
+    }
+    let admin_num: u64 = admin
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("RD admin: {e}")))?;
+    if let Ok(admin16) = u16::try_from(admin_num) {
+        let val: u32 = assigned
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("RD type 0 assigned: {e}")))?;
+        let a = admin16.to_be_bytes();
+        let v = val.to_be_bytes();
+        Ok(RouteDistinguisher::new([
+            0x00, 0x00, a[0], a[1], v[0], v[1], v[2], v[3],
+        ]))
+    } else {
+        let admin32 = u32::try_from(admin_num)
+            .map_err(|_| Status::invalid_argument("RD type 2 admin ASN exceeds 32 bits"))?;
+        let val: u16 = assigned
+            .parse()
+            .map_err(|e| Status::invalid_argument(format!("RD type 2 assigned: {e}")))?;
+        let a = admin32.to_be_bytes();
+        let v = val.to_be_bytes();
+        Ok(RouteDistinguisher::new([
+            0x00, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+        ]))
+    }
+}
+
+#[expect(clippy::result_large_err)]
+fn parse_mac(s: &str) -> Result<[u8; 6], Status> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() != 6 {
+        return Err(Status::invalid_argument(format!(
+            "MAC must be six colon-separated hex octets; got {s:?}"
+        )));
+    }
+    let mut out = [0u8; 6];
+    for (i, p) in parts.iter().enumerate() {
+        out[i] = u8::from_str_radix(p, 16)
+            .map_err(|_| Status::invalid_argument(format!("MAC octet {i} not valid hex: {p:?}")))?;
+    }
+    Ok(out)
+}
+
+#[expect(clippy::result_large_err)]
+fn parse_optional_ip(s: &str) -> Result<Option<IpAddr>, Status> {
+    if s.is_empty() {
+        return Ok(None);
+    }
+    s.parse()
+        .map(Some)
+        .map_err(|e| Status::invalid_argument(format!("invalid IP: {e}")))
+}
+
+#[expect(clippy::result_large_err)]
+fn parse_ip_required(s: &str, field: &str) -> Result<IpAddr, Status> {
+    if s.is_empty() {
+        return Err(Status::invalid_argument(format!("{field} is required")));
+    }
+    s.parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid {field}: {e}")))
+}
+
+/// Assemble a Type 2 MAC/IP route + its path attributes from the request.
+#[expect(clippy::result_large_err)]
+fn build_type2(
+    req: &proto::AddEvpnRouteRequest,
+    rd: RouteDistinguisher,
+) -> Result<(EvpnRoute, Vec<PathAttribute>), Status> {
+    let mac = parse_mac(&req.mac)?;
+    let ip = parse_optional_ip(&req.ip)?;
+    if req.label == 0 {
+        return Err(Status::invalid_argument(
+            "label (VNI) is required for Type 2",
+        ));
+    }
+    // The wire format reserves 24 bits for label / VNI per RFC 7432 §7.2;
+    // `MplsLabel::new` masks silently, so reject out-of-range inputs at
+    // the API boundary instead of letting the controller-supplied value
+    // round-trip differently than it sent.
+    if req.label > 0x00FF_FFFF {
+        return Err(Status::invalid_argument(
+            "label must fit in 24 bits (0..=16777215)",
+        ));
+    }
+    if req.label2 > 0x00FF_FFFF {
+        return Err(Status::invalid_argument(
+            "label2 must fit in 24 bits (0..=16777215)",
+        ));
+    }
+    let label2 = (req.label2 != 0).then(|| MplsLabel::new(req.label2));
+    let route = EvpnRoute::MacIp(EvpnMacIp {
+        rd,
+        esi: EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: EthernetTagId(req.ethernet_tag),
+        mac: MacAddress(mac),
+        ip,
+        label1: MplsLabel::new(req.label),
+        label2,
+    });
+    Ok((route, build_common_attrs(req)?))
+}
+
+/// Assemble a Type 3 IMET route + attributes. IMET carries no MAC/label —
+/// just RD, ethernet-tag, and originator-IP (taken from `ip`).
+#[expect(clippy::result_large_err)]
+fn build_type3(
+    req: &proto::AddEvpnRouteRequest,
+    rd: RouteDistinguisher,
+) -> Result<(EvpnRoute, Vec<PathAttribute>), Status> {
+    // Reject Type-2-only fields explicitly — silently ignoring them
+    // makes controller mistakes look like successful injects.
+    if !req.mac.is_empty() {
+        return Err(Status::invalid_argument(
+            "mac is Type 2 only; must be empty for Type 3 IMET",
+        ));
+    }
+    if req.label != 0 {
+        return Err(Status::invalid_argument(
+            "label is Type 2 only; must be 0 for Type 3 IMET",
+        ));
+    }
+    if req.label2 != 0 {
+        return Err(Status::invalid_argument(
+            "label2 is Type 2 only; must be 0 for Type 3 IMET",
+        ));
+    }
+    let originator_ip = parse_ip_required(&req.ip, "ip (originator_ip for Type 3)")?;
+    let route = EvpnRoute::Imet(EvpnImet {
+        rd,
+        ethernet_tag: EthernetTagId(req.ethernet_tag),
+        originator_ip,
+    });
+    Ok((route, build_common_attrs(req)?))
+}
+
+/// Build the per-route attribute vector shared by Type 2 and Type 3:
+/// Origin=IGP, empty `AS_PATH`, LocalPref=100, and optional RTs +
+/// VXLAN Encapsulation ext communities.
+#[expect(clippy::result_large_err)]
+fn build_common_attrs(req: &proto::AddEvpnRouteRequest) -> Result<Vec<PathAttribute>, Status> {
+    let mut attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::LocalPref(100),
+    ];
+    let mut ecs: Vec<ExtendedCommunity> = Vec::new();
+    for rt in &req.route_targets {
+        ecs.push(parse_route_target(rt)?);
+    }
+    // Default-false (proto3) → encap community attached, matching the
+    // VXLAN-EVPN deployment target. The field is inverted so SDN
+    // controllers that omit it still get the right behavior.
+    if !req.disable_vxlan_encap {
+        ecs.push(ExtendedCommunity::bgp_encapsulation(8));
+    }
+    if !ecs.is_empty() {
+        attrs.push(PathAttribute::ExtendedCommunities(ecs));
+    }
+    Ok(attrs)
+}
+
+#[expect(clippy::result_large_err)]
+fn parse_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
+    let (admin, val) = s.split_once(':').ok_or_else(|| {
+        Status::invalid_argument(format!("route_target must be \"admin:value\"; got {s:?}"))
+    })?;
+    let value: u32 = val
+        .parse()
+        .map_err(|_| Status::invalid_argument("route_target value must be u32"))?;
+
+    // RFC 4360 Type 0x01: IPv4-admin RT — `dotted.quad.ipv4:u16`.
+    // Recognized when the admin part parses as an IPv4 address and the
+    // value fits in 16 bits. EVPN deployments commonly use this form for
+    // RTs whose admin ID is a router-id (loopback) rather than an ASN.
+    if let Ok(ipv4) = admin.parse::<std::net::Ipv4Addr>() {
+        let v16 = u16::try_from(value).map_err(|_| {
+            Status::invalid_argument("IPv4-admin route_target value must fit in u16")
+        })?;
+        let a = ipv4.octets();
+        let v = v16.to_be_bytes();
+        // Type=0x01 (transitive IPv4-admin), Subtype=0x02 (RT).
+        return Ok(ExtendedCommunity::new(u64::from_be_bytes([
+            0x01, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+        ])));
+    }
+
+    let admin_num: u64 = admin.parse().map_err(|_| {
+        Status::invalid_argument("route_target admin must be numeric ASN or dotted IPv4 address")
+    })?;
+    if let Ok(admin16) = u16::try_from(admin_num) {
+        // Type=0x00 (transitive 2-octet AS), Subtype=0x02 (RT).
+        let a = admin16.to_be_bytes();
+        let v = value.to_be_bytes();
+        Ok(ExtendedCommunity::new(u64::from_be_bytes([
+            0x00, 0x02, a[0], a[1], v[0], v[1], v[2], v[3],
+        ])))
+    } else {
+        // Type=0x02 (transitive 4-octet AS), Subtype=0x02 (RT).
+        let admin32 =
+            u32::try_from(admin_num).map_err(|_| Status::invalid_argument("RT ASN > 32 bits"))?;
+        let v16 = u16::try_from(value)
+            .map_err(|_| Status::invalid_argument("RT 4-octet ASN takes u16 value"))?;
+        let a = admin32.to_be_bytes();
+        let v = v16.to_be_bytes();
+        Ok(ExtendedCommunity::new(u64::from_be_bytes([
+            0x02, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+        ])))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,5 +1116,248 @@ mod tests {
             parse_flowspec_prefix("192.0.2.0/24", Afi::Ipv4, "destination prefix", 4).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
         assert!(err.message().contains("IPv6 FlowSpec"));
+    }
+
+    #[test]
+    fn parse_rd_type0_ibgp() {
+        let rd = parse_rd("65000:100").unwrap();
+        assert_eq!(rd.rd_type(), 0);
+        assert_eq!(rd.octets()[2..4], [0xFD, 0xE8]); // 65000 big-endian
+        assert_eq!(rd.octets()[4..8], [0, 0, 0, 100]);
+    }
+
+    #[test]
+    fn parse_rd_type1_ipv4() {
+        let rd = parse_rd("10.0.0.1:100").unwrap();
+        assert_eq!(rd.rd_type(), 1);
+        assert_eq!(rd.octets()[2..6], [10, 0, 0, 1]);
+        assert_eq!(rd.octets()[6..8], [0, 100]);
+    }
+
+    #[test]
+    fn parse_rd_type2_asn32() {
+        let rd = parse_rd("4200000000:100").unwrap();
+        assert_eq!(rd.rd_type(), 2);
+        // 4_200_000_000 = 0xFA56_EA00
+        assert_eq!(rd.octets()[2..6], [0xFA, 0x56, 0xEA, 0x00]);
+        assert_eq!(rd.octets()[6..8], [0, 100]);
+    }
+
+    #[test]
+    fn parse_rd_rejects_malformed() {
+        assert!(parse_rd("not-an-rd").is_err());
+        assert!(parse_rd("65000").is_err());
+        assert!(parse_rd("99999999999999:1").is_err()); // ASN > 32 bits
+    }
+
+    #[test]
+    fn parse_mac_roundtrip() {
+        let bytes = parse_mac("aa:bb:cc:dd:ee:ff").unwrap();
+        assert_eq!(bytes, [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+    }
+
+    #[test]
+    fn parse_mac_rejects_malformed() {
+        assert!(parse_mac("aa:bb:cc").is_err());
+        assert!(parse_mac("aa:bb:cc:dd:ee:gg").is_err());
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type2_reaches_rib_channel() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        // Drive the reply side: accept one InjectEvpn, reply Ok(()).
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    assert_eq!(route.route.route_type(), 2);
+                    reply.send(Ok(())).ok();
+                    Some(route.key)
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec!["65000:200".into()],
+            disable_vxlan_encap: false,
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let key = reply_task.await.unwrap().unwrap();
+        // Round-trip the key's wire form to confirm field propagation.
+        let EvpnRouteKey::MacIp { mac, .. } = key else {
+            panic!("expected MacIp key");
+        };
+        assert_eq!(mac.0, [0x02, 0x00, 0x00, 0xAA, 0xBB, 0xCC]);
+    }
+
+    /// Regression: a controller that omits `disable_vxlan_encap` (proto3
+    /// default-false) MUST get the RFC 8365 §5.1.2 VXLAN Encapsulation
+    /// ext community attached. The earlier field name (`vxlan_encap`)
+    /// inverted the semantics — proto3 default-false meant "no encap"
+    /// for clients that didn't know to set it, silently breaking VXLAN
+    /// fabrics. The rename to `disable_vxlan_encap` aligns proto3
+    /// default-false with the operationally-correct behavior.
+    #[tokio::test]
+    async fn add_evpn_default_request_attaches_vxlan_encap_community() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    reply.send(Ok(())).ok();
+                    route
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        // disable_vxlan_encap left at its proto3 default (false) — same
+        // shape any non-CLI gRPC client would produce by omitting the
+        // field. The fix means the default attaches the encap community.
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let route = reply_task.await.unwrap();
+
+        let has_vxlan_encap = route.attributes.iter().any(|a| {
+            if let PathAttribute::ExtendedCommunities(ecs) = a {
+                ecs.iter().any(|ec| ec.as_bgp_encapsulation() == Some(8))
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_vxlan_encap,
+            "default-constructed AddEvpnRouteRequest must yield a route \
+             carrying the RFC 8365 VXLAN encap ext community"
+        );
+    }
+
+    /// Regression: setting `disable_vxlan_encap = true` actually
+    /// suppresses the community.
+    #[tokio::test]
+    async fn add_evpn_disable_vxlan_encap_suppresses_community() {
+        let (tx, mut rx) = mpsc::channel::<RibUpdate>(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadWrite);
+
+        let reply_task = tokio::spawn(async move {
+            let update = rx.recv().await.expect("service should send one RibUpdate");
+            match update {
+                RibUpdate::InjectEvpn { route, reply } => {
+                    reply.send(Ok(())).ok();
+                    route
+                }
+                _ => panic!("expected InjectEvpn"),
+            }
+        });
+
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "02:00:00:aa:bb:cc".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: true,
+        });
+        svc.add_evpn_route(req).await.unwrap();
+        let route = reply_task.await.unwrap();
+
+        let has_vxlan_encap = route.attributes.iter().any(|a| {
+            if let PathAttribute::ExtendedCommunities(ecs) = a {
+                ecs.iter().any(|ec| ec.as_bgp_encapsulation() == Some(8))
+            } else {
+                false
+            }
+        });
+        assert!(
+            !has_vxlan_encap,
+            "disable_vxlan_encap=true must suppress the encap community"
+        );
+    }
+
+    #[tokio::test]
+    async fn add_evpn_type2_rejects_zero_vni() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: String::new(),
+            label: 0,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("VNI"));
+    }
+
+    #[tokio::test]
+    async fn add_evpn_rejects_unsupported_route_type() {
+        let svc = make_service();
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 5,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: String::new(),
+            ip: String::new(),
+            label: 0,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn add_evpn_rejected_on_read_only_listener() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = InjectionService::new(tx, AccessMode::ReadOnly);
+        let req = Request::new(proto::AddEvpnRouteRequest {
+            route_type: 2,
+            rd: "65000:100".into(),
+            ethernet_tag: 0,
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: String::new(),
+            label: 100,
+            label2: 0,
+            next_hop: "10.0.0.2".into(),
+            route_targets: vec![],
+            disable_vxlan_encap: false,
+        });
+        let err = svc.add_evpn_route(req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 }

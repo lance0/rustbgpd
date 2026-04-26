@@ -382,6 +382,7 @@ mod tests {
                     prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
                 }],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }),
         ];
         // has_nlri=true, has_body_nlri=false (only MP NLRI), is_ebgp=true
@@ -409,6 +410,7 @@ mod tests {
                     prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
                 }],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }),
         ];
         // has_nlri=true, has_body_nlri=true (body IPv4 NLRI present), is_ebgp=true
@@ -434,6 +436,7 @@ mod tests {
                 next_hop: std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
                 announced: vec![],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -456,6 +459,7 @@ mod tests {
                 next_hop: std::net::IpAddr::V6("fe80::1".parse().unwrap()),
                 announced: vec![],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -478,6 +482,7 @@ mod tests {
                 next_hop: std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
                 announced: vec![],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
@@ -532,6 +537,7 @@ mod tests {
                 next_hop: std::net::IpAddr::V6("ff02::1".parse().unwrap()),
                 announced: vec![],
                 flowspec_announced: vec![],
+                evpn_announced: vec![],
             }),
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();

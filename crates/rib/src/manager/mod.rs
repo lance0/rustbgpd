@@ -66,6 +66,8 @@ pub struct RibManager {
     refresh_stale_routes: HashMap<IpAddr, HashSet<(Prefix, u32)>>,
     /// `FlowSpec` routes still awaiting replacement during an inbound refresh.
     refresh_stale_flowspec: HashMap<IpAddr, HashSet<(Afi, FlowSpecRule, u32)>>,
+    /// EVPN routes still awaiting replacement during an inbound refresh.
+    refresh_stale_evpn: HashMap<IpAddr, HashSet<rustbgpd_wire::EvpnRouteKey>>,
     /// Peers currently undergoing graceful restart, keyed by peer address.
     /// Value is the set of (AFI, SAFI) families still awaiting End-of-RIB.
     gr_peers: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
@@ -112,6 +114,8 @@ enum PendingRouteChunk {
     Announced(Vec<crate::route::Route>),
     FlowSpecWithdrawn(Vec<FlowSpecRule>),
     FlowSpecAnnounced(Vec<crate::route::FlowSpecRoute>),
+    EvpnWithdrawn(Vec<rustbgpd_wire::EvpnRouteKey>),
+    EvpnAnnounced(Vec<crate::route::EvpnRibRoute>),
 }
 
 enum PendingRoutePhase {
@@ -119,6 +123,8 @@ enum PendingRoutePhase {
     Announced,
     FlowSpecWithdrawn,
     FlowSpecAnnounced,
+    EvpnWithdrawn,
+    EvpnAnnounced,
     Done,
 }
 
@@ -130,6 +136,8 @@ struct PendingRoutesReceived {
     announced: std::vec::IntoIter<crate::route::Route>,
     flowspec_withdrawn: std::vec::IntoIter<FlowSpecRule>,
     flowspec_announced: std::vec::IntoIter<crate::route::FlowSpecRoute>,
+    evpn_withdrawn: std::vec::IntoIter<rustbgpd_wire::EvpnRouteKey>,
+    evpn_announced: std::vec::IntoIter<crate::route::EvpnRibRoute>,
     phase: PendingRoutePhase,
 }
 
@@ -140,6 +148,8 @@ impl PendingRoutesReceived {
         withdrawn: Vec<(Prefix, u32)>,
         flowspec_announced: Vec<crate::route::FlowSpecRoute>,
         flowspec_withdrawn: Vec<FlowSpecRule>,
+        evpn_announced: Vec<crate::route::EvpnRibRoute>,
+        evpn_withdrawn: Vec<rustbgpd_wire::EvpnRouteKey>,
     ) -> Self {
         let route_capacity_hint = (announced.len() + withdrawn.len()).max(16);
         let flowspec_capacity_hint = (flowspec_announced.len() + flowspec_withdrawn.len()).max(4);
@@ -151,6 +161,8 @@ impl PendingRoutesReceived {
             announced: announced.into_iter(),
             flowspec_withdrawn: flowspec_withdrawn.into_iter(),
             flowspec_announced: flowspec_announced.into_iter(),
+            evpn_withdrawn: evpn_withdrawn.into_iter(),
+            evpn_announced: evpn_announced.into_iter(),
             phase: PendingRoutePhase::Withdrawn,
         }
     }
@@ -213,10 +225,34 @@ impl PendingRoutesReceived {
                         .take(ROUTES_RECEIVED_CHUNK_SIZE)
                         .collect();
                     if chunk.is_empty() {
-                        self.phase = PendingRoutePhase::Done;
+                        self.phase = PendingRoutePhase::EvpnWithdrawn;
                         continue;
                     }
                     return Some(PendingRouteChunk::FlowSpecAnnounced(chunk));
+                }
+                PendingRoutePhase::EvpnWithdrawn => {
+                    let chunk: Vec<_> = self
+                        .evpn_withdrawn
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::EvpnAnnounced;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::EvpnWithdrawn(chunk));
+                }
+                PendingRoutePhase::EvpnAnnounced => {
+                    let chunk: Vec<_> = self
+                        .evpn_announced
+                        .by_ref()
+                        .take(ROUTES_RECEIVED_CHUNK_SIZE)
+                        .collect();
+                    if chunk.is_empty() {
+                        self.phase = PendingRoutePhase::Done;
+                        continue;
+                    }
+                    return Some(PendingRouteChunk::EvpnAnnounced(chunk));
                 }
                 PendingRoutePhase::Done => return None,
             }
@@ -228,6 +264,8 @@ impl PendingRoutesReceived {
             || !self.announced.as_slice().is_empty()
             || !self.flowspec_withdrawn.as_slice().is_empty()
             || !self.flowspec_announced.as_slice().is_empty()
+            || !self.evpn_withdrawn.as_slice().is_empty()
+            || !self.evpn_announced.as_slice().is_empty()
     }
 }
 
@@ -260,6 +298,7 @@ impl RibManager {
             refresh_deadlines: HashMap::new(),
             refresh_stale_routes: HashMap::new(),
             refresh_stale_flowspec: HashMap::new(),
+            refresh_stale_evpn: HashMap::new(),
             gr_peers: HashMap::new(),
             gr_stale_deadlines: HashMap::new(),
             gr_stale_routes_time: HashMap::new(),
@@ -322,6 +361,7 @@ impl RibManager {
         self.refresh_in_progress.remove(&peer);
         self.refresh_stale_routes.remove(&peer);
         self.refresh_stale_flowspec.remove(&peer);
+        self.refresh_stale_evpn.remove(&peer);
         self.refresh_deadlines
             .retain(|(stale_peer, _, _), _| *stale_peer != peer);
     }
@@ -358,12 +398,16 @@ impl RibManager {
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
             } => self.enqueue_routes_received(
                 peer,
                 announced,
                 withdrawn,
                 flowspec_announced,
                 flowspec_withdrawn,
+                evpn_announced,
+                evpn_withdrawn,
             ),
             RibUpdate::PeerDown { peer } => self.handle_peer_down(peer),
             RibUpdate::PeerUp {
@@ -458,8 +502,15 @@ impl RibManager {
             RibUpdate::WithdrawFlowSpec { rule, reply } => {
                 self.handle_withdraw_flowspec(rule, reply);
             }
+            RibUpdate::InjectEvpn { route, reply } => self.handle_inject_evpn(route, reply),
+            RibUpdate::WithdrawEvpn { key, reply } => self.handle_withdraw_evpn(key, reply),
             RibUpdate::QueryFlowSpecRoutes { reply } => {
                 self.handle_query_flowspec_routes(reply);
+            }
+            RibUpdate::QueryEvpnRoutes { reply } => {
+                let routes: Vec<crate::route::EvpnRibRoute> =
+                    self.loc_rib.iter_evpn().cloned().collect();
+                let _ = reply.send(routes);
             }
             RibUpdate::QueryMrtSnapshot { reply } => self.handle_query_mrt_snapshot(reply),
         }

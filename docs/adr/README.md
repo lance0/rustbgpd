@@ -56,6 +56,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0046](0046-notification-gr.md) | Notification GR (RFC 8538) | Accepted | 2026-03-05 |
 | [0047](0047-grpc-security-hardening.md) | gRPC Security Hardening | Accepted | 2026-03-06 |
 | [0048](0048-rib-memory-optimizations.md) | RIB Memory Optimizations | Accepted | 2026-03-08 |
+| [0049](0049-aspa-verification.md) | ASPA Upstream Path Verification | Accepted | 2026-03-13 |
+| [0050](0050-evpn-route-reflector.md) | EVPN Route Reflector (RFC 7432 Phase 1) | Accepted | 2026-04-23 |
 
 ## Template
 

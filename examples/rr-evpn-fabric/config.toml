@@ -1,0 +1,51 @@
+# EVPN Route Reflector for a VXLAN-EVPN DC fabric
+#
+# rustbgpd as an iBGP route reflector for EVPN (RFC 7432) VTEP peers. All
+# VTEPs are clients; the RR reflects EVPN routes between them per RFC 4456.
+# This is the common control-plane shape for a leaf/spine fabric: the RR
+# sits on the spine (or as a dedicated route-reflector appliance), and the
+# VTEPs (leaves) peer with it to exchange MAC, multicast, and prefix routes.
+#
+# The RR is control-plane only: it does not originate EVPN routes, does not
+# learn MAC addresses, and does not do data-plane forwarding. VTEPs handle
+# their own DF election, ARP/ND suppression, and VXLAN encapsulation; the
+# RR just distributes the RFC 7432 routes they advertise.
+#
+# Add more [[neighbors]] blocks for each VTEP, or use [[dynamic_neighbors]]
+# with a prefix range covering the fabric's VTEP loopback subnet.
+
+[global]
+asn = 65000
+router_id = "10.0.0.100"
+listen_port = 179
+cluster_id = "10.0.0.100"         # route-reflector cluster identifier
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# --- VTEP peers (all RR clients, all iBGP in AS 65000) ---
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65000
+description = "vtep-leaf-01"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "vtep-leaf-02"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.0.0.3"
+remote_asn = 65000
+description = "vtep-leaf-03"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true

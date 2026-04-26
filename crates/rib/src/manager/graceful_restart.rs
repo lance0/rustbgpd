@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use rustbgpd_rpki::VrpTable;
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, Safi};
 use tracing::info;
 
 use super::RibManager;
@@ -25,11 +25,19 @@ impl RibManager {
 
         let mut affected = HashSet::new();
         let mut fs_affected = HashSet::new();
+        let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
+            // EVPN has a single family tuple, so the inner mark_stale_evpn
+            // call is identical for every entry in `gr_families`. Hoist
+            // it out of the loop and call once when (L2Vpn, Evpn) is
+            // among the GR-preserved families.
             for &family in &gr_families {
                 rib.mark_stale(family);
                 rib.mark_stale_flowspec(family);
+            }
+            if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
             }
             let withdrawn = rib.withdraw_families_except(&gr_families);
             if !withdrawn.is_empty() {
@@ -37,6 +45,22 @@ impl RibManager {
             }
             for prefix in withdrawn {
                 affected.insert(prefix);
+            }
+            // EVPN has a single family tuple; sweep all EVPN routes if
+            // the peer didn't advertise GR for (L2Vpn, Evpn).
+            if !gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                let withdrawn_evpn = rib.sweep_stale_evpn();
+                // Also gather any non-stale EVPN routes that must be
+                // dropped entirely; sweep_stale_evpn only removes stale
+                // ones, so collect remaining keys here.
+                let remaining: Vec<EvpnRouteKey> = rib.iter_evpn().map(|r| r.key).collect();
+                for key in remaining {
+                    rib.withdraw_evpn(&key);
+                    evpn_affected.insert(key);
+                }
+                for key in withdrawn_evpn {
+                    evpn_affected.insert(key);
+                }
             }
         }
 
@@ -49,14 +73,24 @@ impl RibManager {
                     fs_affected.insert(route.rule.clone());
                 }
             }
+            if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                for route in rib.iter_evpn() {
+                    evpn_affected.insert(route.key);
+                }
+            }
             self.metrics
                 .set_rib_prefixes(&peer.to_string(), "all", gauge_val(rib.len()));
+            self.metrics
+                .set_rib_prefixes(&peer.to_string(), "evpn", gauge_val(rib.evpn_len()));
         }
 
         let changed = self.recompute_best(&affected);
         self.distribute_changes(&changed, &affected);
         if !fs_affected.is_empty() {
             self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+        if !evpn_affected.is_empty() {
+            self.recompute_and_distribute_evpn(&evpn_affected);
         }
 
         self.outbound_peers.remove(&peer);
@@ -93,10 +127,11 @@ impl RibManager {
 
         let peer_label = peer.to_string();
         self.metrics.set_gr_active(&peer_label, true);
-        let stale_count = self
-            .ribs
-            .get(&peer)
-            .map_or(0, |rib| rib.iter().filter(|r| r.is_stale).count());
+        let stale_count = self.ribs.get(&peer).map_or(0, |rib| {
+            rib.iter().filter(|r| r.is_stale).count()
+                + rib.iter_flowspec().filter(|r| r.is_stale).count()
+                + rib.iter_evpn().filter(|r| r.is_stale).count()
+        });
         self.metrics
             .set_gr_stale_routes(&peer_label, gauge_val(stale_count));
     }
@@ -224,7 +259,9 @@ impl RibManager {
 
             let mut affected = HashSet::new();
             let mut fs_affected = HashSet::new();
+            let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
             let mut rib_len = 0;
+            let mut evpn_len = 0;
             if let Some(rib) = self.ribs.get_mut(&peer) {
                 // Promote LLGR-negotiated families to LLGR-stale
                 for &family in &llgr_families {
@@ -235,6 +272,10 @@ impl RibManager {
                     let fs_promoted = rib.promote_to_llgr_stale_flowspec(family);
                     for r in fs_promoted {
                         fs_affected.insert(r);
+                    }
+                    let evpn_promoted = rib.promote_to_llgr_stale_evpn(family);
+                    for k in evpn_promoted {
+                        evpn_affected.insert(k);
                     }
                 }
                 // Sweep families NOT in LLGR — these cannot be preserved
@@ -247,8 +288,20 @@ impl RibManager {
                     for r in fs_swept {
                         fs_affected.insert(r);
                     }
+                    let evpn_swept = rib.sweep_stale_family_evpn(family);
+                    for k in evpn_swept {
+                        evpn_affected.insert(k);
+                    }
                 }
                 rib_len = rib.len();
+                evpn_len = rib.evpn_len();
+                // GC the attribute intern table once per pass: LLGR
+                // promotion adds the LLGR_STALE community (so the route's
+                // attribute Arc is replaced) and non-LLGR sweeps drop
+                // routes outright. Both leave the prior interned vectors
+                // with strong_count==1, which sticks until some later
+                // unicast withdraw happens to call gc_intern_table.
+                rib.gc_intern_table();
             }
             if !non_llgr_families.is_empty() {
                 info!(%peer, families = ?non_llgr_families, "swept stale routes for non-LLGR families");
@@ -261,8 +314,13 @@ impl RibManager {
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
             }
+            if !evpn_affected.is_empty() {
+                self.recompute_and_distribute_evpn(&evpn_affected);
+            }
             self.metrics
                 .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+            self.metrics
+                .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
 
             // Set LLGR timer
             let deadline = tokio::time::Instant::now()
@@ -279,21 +337,33 @@ impl RibManager {
         self.metrics.set_gr_active(&peer_label, false);
         self.metrics.set_gr_stale_routes(&peer_label, 0);
 
-        if let Some(rib) = self.ribs.get_mut(&peer) {
-            let swept = rib.sweep_stale();
-            let fs_swept = rib.sweep_stale_flowspec();
-            if !swept.is_empty() {
-                info!(%peer, count = swept.len(), "swept stale routes");
-                let affected: HashSet<Prefix> = swept.into_iter().collect();
-                self.metrics
-                    .set_rib_prefixes(&peer_label, "all", gauge_val(rib.len()));
-                let changed = self.recompute_best(&affected);
-                self.distribute_changes(&changed, &affected);
-            }
-            if !fs_swept.is_empty() {
-                let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
-                self.recompute_and_distribute_flowspec(&fs_affected);
-            }
+        let (swept, fs_swept, evpn_swept, rib_len, evpn_len) =
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                let swept = rib.sweep_stale();
+                let fs_swept = rib.sweep_stale_flowspec();
+                let evpn_swept = rib.sweep_stale_evpn();
+                rib.gc_intern_table();
+                (swept, fs_swept, evpn_swept, rib.len(), rib.evpn_len())
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), 0, 0)
+            };
+        if !swept.is_empty() {
+            info!(%peer, count = swept.len(), "swept stale routes");
+            let affected: HashSet<Prefix> = swept.into_iter().collect();
+            self.metrics
+                .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+        }
+        if !fs_swept.is_empty() {
+            let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+        if !evpn_swept.is_empty() {
+            let evpn_affected: HashSet<EvpnRouteKey> = evpn_swept.into_iter().collect();
+            self.metrics
+                .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
+            self.recompute_and_distribute_evpn(&evpn_affected);
         }
     }
 
@@ -306,21 +376,33 @@ impl RibManager {
         self.metrics.set_gr_active(&peer_label, false);
         self.metrics.set_gr_stale_routes(&peer_label, 0);
 
-        if let Some(rib) = self.ribs.get_mut(&peer) {
-            let swept = rib.sweep_llgr_stale();
-            let fs_swept = rib.sweep_llgr_stale_flowspec();
-            if !swept.is_empty() {
-                info!(%peer, count = swept.len(), "swept LLGR-stale routes");
-                let affected: HashSet<Prefix> = swept.into_iter().collect();
-                self.metrics
-                    .set_rib_prefixes(&peer_label, "all", gauge_val(rib.len()));
-                let changed = self.recompute_best(&affected);
-                self.distribute_changes(&changed, &affected);
-            }
-            if !fs_swept.is_empty() {
-                let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
-                self.recompute_and_distribute_flowspec(&fs_affected);
-            }
+        let (swept, fs_swept, evpn_swept, rib_len, evpn_len) =
+            if let Some(rib) = self.ribs.get_mut(&peer) {
+                let swept = rib.sweep_llgr_stale();
+                let fs_swept = rib.sweep_llgr_stale_flowspec();
+                let evpn_swept = rib.sweep_llgr_stale_evpn();
+                rib.gc_intern_table();
+                (swept, fs_swept, evpn_swept, rib.len(), rib.evpn_len())
+            } else {
+                (Vec::new(), Vec::new(), Vec::new(), 0, 0)
+            };
+        if !swept.is_empty() {
+            info!(%peer, count = swept.len(), "swept LLGR-stale routes");
+            let affected: HashSet<Prefix> = swept.into_iter().collect();
+            self.metrics
+                .set_rib_prefixes(&peer_label, "all", gauge_val(rib_len));
+            let changed = self.recompute_best(&affected);
+            self.distribute_changes(&changed, &affected);
+        }
+        if !fs_swept.is_empty() {
+            let fs_affected: HashSet<FlowSpecRule> = fs_swept.into_iter().collect();
+            self.recompute_and_distribute_flowspec(&fs_affected);
+        }
+        if !evpn_swept.is_empty() {
+            let evpn_affected: HashSet<EvpnRouteKey> = evpn_swept.into_iter().collect();
+            self.metrics
+                .set_rib_prefixes(&peer_label, "evpn", gauge_val(evpn_len));
+            self.recompute_and_distribute_evpn(&evpn_affected);
         }
     }
 

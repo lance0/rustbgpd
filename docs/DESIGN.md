@@ -20,7 +20,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 ## Non-Goals (v1)
 
-This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, full VRF support, EVPN, or a complete policy language in v1. It will not attempt every BGP extension at once (Confederation, EVPN, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
+This is not a full routing suite replacement. rustbgpd will not implement OSPF, IS-IS, LDP, full VRF support, or a complete policy language in v1. It will not attempt every BGP extension at once (Confederation, VPNv4/v6, MPLS-EVPN encap, etc.). The goal is a reliable, API-driven BGP speaker — not a kitchen sink.
 
 ## Target v1 Use Cases
 
@@ -28,7 +28,9 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **Programmable edge speaker.** Inject and withdraw prefixes programmatically. Minimal, reliable session handling.
 
-**Later:** VPNv4/VPNv6, EVPN (post-v1 address families).
+**EVPN Route Reflector (VXLAN-EVPN DC fabric).** iBGP route reflector for Type 1-5 RFC 7432 routes between VTEPs; control plane only, VTEPs handle their own DF election and data-plane encapsulation. See ADR-0050.
+
+**Later:** EVPN VTEP mode (local MAC learning, DF election, IRB semantics), VPNv4/v6, MPLS-EVPN encap.
 
 ---
 
@@ -409,6 +411,52 @@ Dynamic peer management, per-peer policy, typed communities, real-time route eve
 - WatchRoutes streams real-time route events to multiple subscribers.
 - 10-peer interop validated against FRR 10.3.1 (17/17 automated tests pass).
 - 306 tests pass (M4), clippy clean, fmt clean.
+
+---
+
+## EVPN Route Reflector Architecture (Phase 1)
+
+Added 2026-04 per ADR-0050. Extends the RIB / transport / gRPC stack with a parallel typed-NLRI family for RFC 7432 routes, following the FlowSpec pattern (ADR-0035). Scope is **RR role only**: reflect all 5 route types between VTEP peers per RFC 4456 without local EVI state or data-plane integration.
+
+### Key architectural decisions
+
+**Parallel tables, not `Prefix` extension.** `Prefix` is `Copy` and participates in longest-prefix-match semantics — neither fits EVPN routes, which are variable-length typed TLVs. `AdjRibIn`, `AdjRibOut`, and `LocRib` each gain `HashMap<EvpnRouteKey, EvpnRibRoute>` tables alongside `flowspec_routes`. The compiler enforces parallel method coverage; FlowSpec already proved the pattern scales.
+
+**Split payload from identity.** `EvpnRoute` carries the full RFC 7432 wire payload (labels, optional IPs, gateway) — needed to round-trip through reflection. `EvpnRouteKey` carries only the identifying fields per route type and is `Copy + Eq + Hash` — suitable as the RIB HashMap key. EAD per-ES and EAD per-EVI share wire format but get distinct key variants so the RIB never collapses them.
+
+**Reflection reuses existing RFC 4456 helper.** `stage_evpn_routes` builds a synthetic `Route` probe carrying only peer / router-id / origin-type metadata and passes it to the existing `should_suppress_ibgp_inner`. Same pattern FlowSpec uses — no EVPN-specific reflection logic.
+
+**Best-path: type-specific head + shared BGP body.** `evpn_tiebreak_simple` runs a Type-2-specific MAC Mobility head (sticky flag + sequence per RFC 7432 §15.1), then falls through to the standard BGP chain (LocalPref → AS_PATH → MED → eBGP>iBGP → peer). Type 1/4 DF-election tiebreaks are not implemented — the RR reflects, downstream VTEPs elect. Types 3/5 have no type-specific head.
+
+**Policy uses placeholder prefix.** EVPN `RouteContext` carries a synthesized `0.0.0.0/0` prefix — the existing context fields (extended communities, communities, AS_PATH, peer metadata) are what operators actually filter on. RT-based filtering works through the existing `match_community` clause. A dedicated `match_evpn_route_type` clause is a Phase 1.5 item if operators need it.
+
+**Next-hop preserved across reflection.** Outbound EVPN MP_REACH_NLRI carries the originating VTEP's loopback IP as next-hop, not the RR's address. This is what lets downstream VTEPs build VXLAN tunnels correctly — the RR is a control-plane waypoint, not a data-plane middlebox.
+
+**Withdrawal wire framing from keys.** Outbound EVPN withdrawals emit MP_UNREACH_NLRI with routes reconstructed from `EvpnRouteKey` via `evpn_route_from_key`. Unknown label / optional fields are zeroed; receivers identify by key only, so round-trip fidelity is unnecessary on the withdrawal path.
+
+### What's deferred to future phases
+
+Phase 1 hardening (Gates 0-6 in [evpn-enablement.md](evpn-enablement.md))
+covers reflection of all five RFC 7432 route types, GR + LLGR + Enhanced
+Route Refresh, MAC mobility / sticky preservation, multi-homing Type 4
+ES reflection (Type 1 EAD-per-EVI is wire-codec-tested but not gated
+end-to-end — FRR origination requires VLAN-aware bridge + SVI which is
+Phase 3 scope), scale validation (50k Type 2 + churn), and
+controller-driven injection for Type 2 / Type 3. What remains:
+
+- **VTEP mode:** local EVI / VRF / VNI state, kernel FDB MAC learning, local
+  route origination (Phase 2).
+- **Multi-homing execution:** the RR already reflects Type 1 EAD + Type 4 ES
+  unchanged (Gate 4); this is rustbgpd-as-VTEP DF election (RFC 7432 §8 +
+  RFC 8584) and aliasing / backup-path resolution against locally-learned
+  state (Phase 4).
+- **Symmetric IRB semantics:** wire-level round-trip only — `label2` + Router
+  MAC ext community preserved but not interpreted (Phase 4 / RFC 9135).
+- **Controller injection beyond Type 2 / Type 3:** Type 5 IP-Prefix and
+  Type 1 / Type 4 multi-homing origination are not yet exposed in the
+  injection RPCs.
+- **RFC 9251 Route Types 6-8** (IGMP multicast), **RFC 7623 PBB-EVPN**,
+  **MPLS encap**, **Add-Path for EVPN (RFC 9252)** (Phase 5).
 
 ---
 

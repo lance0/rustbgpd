@@ -11,6 +11,8 @@ pub enum Afi {
     Ipv4 = 1,
     /// IPv6 (AFI 2).
     Ipv6 = 2,
+    /// Layer-2 VPN (AFI 25) — carrier family for EVPN (RFC 7432).
+    L2Vpn = 25,
 }
 
 impl Afi {
@@ -20,6 +22,7 @@ impl Afi {
         match value {
             1 => Some(Self::Ipv4),
             2 => Some(Self::Ipv6),
+            25 => Some(Self::L2Vpn),
             _ => None,
         }
     }
@@ -33,6 +36,8 @@ pub enum Safi {
     Unicast = 1,
     /// Multicast forwarding (SAFI 2).
     Multicast = 2,
+    /// RFC 7432 EVPN — only valid with [`Afi::L2Vpn`].
+    Evpn = 70,
     /// RFC 8955 `FlowSpec`.
     FlowSpec = 133,
 }
@@ -44,6 +49,7 @@ impl Safi {
         match value {
             1 => Some(Self::Unicast),
             2 => Some(Self::Multicast),
+            70 => Some(Self::Evpn),
             133 => Some(Self::FlowSpec),
             _ => None,
         }

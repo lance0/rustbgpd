@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rpki::{AspaTable, VrpTable};
-use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
+use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::best_path::BestPathReason;
 use crate::event::RouteEvent;
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Routes to be sent outbound to a peer.
 pub struct OutboundRouteUpdate {
@@ -29,6 +29,10 @@ pub struct OutboundRouteUpdate {
     pub flowspec_announce: Vec<FlowSpecRoute>,
     /// `FlowSpec` rules to withdraw.
     pub flowspec_withdraw: Vec<FlowSpecRule>,
+    /// EVPN routes to announce (RFC 7432).
+    pub evpn_announce: Vec<EvpnRibRoute>,
+    /// EVPN route keys to withdraw.
+    pub evpn_withdraw: Vec<EvpnRouteKey>,
 }
 
 /// Structured explanation for whether a route would be advertised to a peer.
@@ -107,6 +111,10 @@ pub enum RibUpdate {
         flowspec_announced: Vec<FlowSpecRoute>,
         /// `FlowSpec` rules withdrawn.
         flowspec_withdrawn: Vec<FlowSpecRule>,
+        /// EVPN routes announced (RFC 7432).
+        evpn_announced: Vec<EvpnRibRoute>,
+        /// EVPN route keys withdrawn.
+        evpn_withdrawn: Vec<EvpnRouteKey>,
     },
     /// Peer session went down — clear all routes from this peer.
     PeerDown {
@@ -300,10 +308,35 @@ pub enum RibUpdate {
         /// Completion reply.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Inject a locally-originated EVPN route (RFC 7432).
+    ///
+    /// Entry point for controller-driven injection — an SDN controller
+    /// calls `InjectionService::AddEvpnRoute` which synthesizes an
+    /// `EvpnRibRoute` with `origin_type = RouteOrigin::Local` and pushes
+    /// it here. The RR then reflects the route to all iBGP peers
+    /// negotiating L2VPN/EVPN.
+    InjectEvpn {
+        /// The EVPN route to inject.
+        route: EvpnRibRoute,
+        /// Completion reply.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// Withdraw a locally-injected EVPN route.
+    WithdrawEvpn {
+        /// The EVPN route key to withdraw.
+        key: EvpnRouteKey,
+        /// Completion reply.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query `FlowSpec` routes from the Loc-RIB.
     QueryFlowSpecRoutes {
         /// Response channel.
         reply: oneshot::Sender<Vec<FlowSpecRoute>>,
+    },
+    /// Query EVPN routes from the Loc-RIB (RFC 7432).
+    QueryEvpnRoutes {
+        /// Response channel.
+        reply: oneshot::Sender<Vec<EvpnRibRoute>>,
     },
     /// Query a full RIB snapshot for MRT `TABLE_DUMP_V2` export.
     QueryMrtSnapshot {

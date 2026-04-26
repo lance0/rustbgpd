@@ -462,4 +462,13 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             routes: vec![],
         }))
     }
+
+    async fn list_evpn_routes(
+        &self,
+        _request: Request<server_proto::ListEvpnRequest>,
+    ) -> Result<Response<server_proto::ListEvpnResponse>, Status> {
+        Ok(Response::new(server_proto::ListEvpnResponse {
+            routes: vec![],
+        }))
+    }
 }

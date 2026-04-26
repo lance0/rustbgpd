@@ -1,0 +1,83 @@
+# Containerlab topology: rustbgpd EVPN Route Reflector ↔ 2× FRR VTEPs
+# (M30 — Type 2 MAC reflection with kernel VXLAN + bridge data plane)
+#
+# Validates: RFC 7432 Type 2 MAC/IP Advertisement reflection end-to-end.
+# MAC learned on VTEP-A's bridge FDB is reflected through rustbgpd to
+# VTEP-B. Proves next-hop preservation (VTEP-A loopback), VNI propagation
+# in the Type 2 label field, and RFC 4456 RR attributes (ORIGINATOR_ID +
+# CLUSTER_LIST) on the reflected UPDATE.
+#
+# Note: the VXLAN tunnel between VTEPs does NOT need to forward real data
+# plane traffic for this test — MACs are injected via `bridge fdb add`
+# which triggers FRR zebra to originate the Type 2 route over BGP. Only
+# the control plane is exercised.
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65000, RR with cluster_id 10.0.0.100)
+#     ├── iBGP L2VPN/EVPN ── FRR VTEP-A (10.0.0.2, AS 65000)
+#     └── iBGP L2VPN/EVPN ── FRR VTEP-B (10.0.1.2, AS 65000)
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m30-evpn-type2-frr.clab.yml
+#   bash tests/interop/scripts/test-m30-evpn-type2-frr.sh
+#   containerlab destroy -t tests/interop/m30-evpn-type2-frr.clab.yml
+
+name: m30-evpn-type2-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m30-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    vtep-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m30-vtep-a.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.0.2 100
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+
+    vtep-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m30-vtep-b.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.1.2 100
+      env:
+        VTEP_LOOPBACK: 10.0.1.2
+        VTEP_VNI: "100"
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "vtep-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "vtep-b:eth1"]
+
+# Network A: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ VTEP-A (10.0.0.2)
+# Network B: 10.0.1.0/24 — rustbgpd (10.0.1.1) ↔ VTEP-B (10.0.1.2)
+#
+# VXLAN tunnel is nominally VTEP-A loopback ↔ VTEP-B loopback (10.0.0.2
+# ↔ 10.0.1.2). Data-plane packets are not tested — MAC injection is
+# via bridge fdb which exercises the EVPN control plane only.

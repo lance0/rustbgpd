@@ -130,6 +130,43 @@ bash tests/interop/scripts/test-m16-llgr-frr.sh
 containerlab destroy -t tests/interop/m16-llgr-frr.clab.yml
 ```
 
+If the release includes EVPN changes (any commit touching `crates/wire/src/evpn.rs`,
+EVPN paths in `crates/rib/src/`, or the EVPN gRPC surface), run at least
+one of M29 (capability sanity) or M30 (real Type 2 reflection). Run M33
+(scale) before any release that claims new performance numbers:
+
+```bash
+# Capability sanity — fastest EVPN smoke
+containerlab deploy -t tests/interop/m29-evpn-rr-frr.clab.yml
+bash tests/interop/scripts/test-m29-evpn-rr-frr.sh
+containerlab destroy -t tests/interop/m29-evpn-rr-frr.clab.yml
+
+# Real Type 2 MAC reflection through kernel VXLAN — full RR confidence
+containerlab deploy -t tests/interop/m30-evpn-type2-frr.clab.yml
+bash tests/interop/scripts/test-m30-evpn-type2-frr.sh
+containerlab destroy -t tests/interop/m30-evpn-type2-frr.clab.yml
+
+# Scale + churn (50k Type 2 routes, in-tree load generator)
+containerlab deploy -t tests/interop/m33-evpn-scale.clab.yml
+bash tests/interop/scripts/test-m33-evpn-scale.sh
+containerlab destroy -t tests/interop/m33-evpn-scale.clab.yml --cleanup
+```
+
+Also smoke the controller-injection path against a live RR (M30
+container is fine):
+
+```bash
+# Inject a Type 2 route via gRPC, list it back, withdraw it
+RR_ADDR=$(docker inspect clab-m30-evpn-type2-frr-rustbgpd \
+  --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'):50051
+./target/release/rustbgpctl -s "$RR_ADDR" evpn add-mac-ip \
+  --rd 65000:100 --mac 02:00:00:aa:bb:cc \
+  --label 100 --next-hop 10.0.0.1
+./target/release/rustbgpctl -s "$RR_ADDR" evpn --route-type 2
+./target/release/rustbgpctl -s "$RR_ADDR" evpn delete-mac-ip \
+  --rd 65000:100 --mac 02:00:00:aa:bb:cc
+```
+
 If the release includes RPKI/RTR, FlowSpec, or best-path explain changes:
 
 ```bash

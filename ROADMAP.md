@@ -66,7 +66,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
 - [x] Config persistence + SIGHUP reload — gRPC neighbor add/delete mutations persist to TOML via atomic write; SIGHUP triggers config reload with structured per-peer reconciliation
 - [x] LLGR (RFC 9494) — two-phase GR timer: GR-stale routes promote to LLGR-stale with LLGR_STALE community, configurable llgr_stale_time per peer, NO_LLGR routes purged at transition, effective stale time = min(local, peer)
-- [x] 1166 tests — unit, integration, property, fuzz
+- [x] 1245 tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -185,6 +185,18 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [x] **CLI tool** — `rustbgpctl` wrapping gRPC with human-readable and JSON output; covers all supported RPCs
 - [x] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; threaded from gRPC DisableNeighbor through transport
 - [x] **Enhanced Route Refresh** (RFC 7313) — BoRR/EoRR demarcation and inbound family replacement semantics for `SoftResetIn`
+- [x] **EVPN Route Reflector — Phase 1** (RFC 7432) — L2VPN/EVPN (AFI 25 / SAFI 70) RR role for VXLAN-EVPN DC fabrics. All 5 RFC 7432 route types (EAD per-ES, EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix per RFC 9136), MAC mobility best-path per §15.1 with sticky-flag preservation, RFC 4456 reflection applied to EVPN routes, 6 typed extended-community accessors (BGP Encapsulation for VXLAN per RFC 8365/9012, MAC Mobility, ESI Label, ES-Import RT, Router MAC per RFC 9135, Default Gateway). `ListEvpnRoutes` gRPC RPC + `rustbgpctl evpn` CLI. Gates 0-6 closed on `feat/evpn-rr`: capability sanity (M29), real Type 2 MAC reflection with kernel VXLAN (M30), GR/LLGR stale handling, MAC mobility / sticky preservation interop (M31), multi-homing Type 1 EAD-per-EVI + Type 4 ES reflection (M32 — FRR ES on a bond interface), 50k-route scale validation with churn (M33), and controller-driven injection via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC. Includes review correctness fixes: source-peer split horizon, same-peer attribute-change detection, full RFC 4456 tie-break chain (stale → ORIGIN → CLUSTER_LIST → ORIGINATOR_ID), max-prefix counting EVPN keys + FlowSpec rules, EVPN withdrawals propagated through both AS_PATH and CLUSTER_LIST loop branches, EVPN initial dump for late-joining peers, EVPN ERR refresh tracking, Type 5 prefix in policy context, proto3 default-correct `disable_vxlan_encap` field. See ADR-0050 and [docs/evpn-enablement.md](docs/evpn-enablement.md) for the Gate 0-9 ladder.
+- [ ] **EVPN Phase 2 — VTEP mode** — local EVI/VRF/VNI state, MAC learning from kernel FDB, local route origination. Required for general-purpose routing; not required for RR-only deployments. Blocked by need for kernel integration design.
+- [ ] **EVPN Phase 3 — Multi-homing execution + IRB** — DF election (RFC 7432 §8 + RFC 8584), symmetric IRB semantics (RFC 9135), auto-derived Route Targets (RFC 8365 §5.1.2.1), aliasing / backup-path via Type 1 EAD. Needed for active-active ToR deployments. (Phase 1 already validates that the RR reflects multi-homing Type 1 EAD-per-EVI + Type 4 ES routes correctly so VTEPs can run DF election independently; Phase 3 is rustbgpd-as-VTEP execution.)
+- [ ] **EVPN Phase 4 — Adjacent standards** — PBB-EVPN (RFC 7623), EVPN-MVPN integration (RFC 9251, Route Types 6/7/8), MPLS encapsulation, Add-Path for EVPN (RFC 9252). Service-provider EVPN use cases.
+- [ ] **EVPN polish + observability gaps** (low-priority, Phase 1 known limitations):
+  - Type 5 (IP Prefix) interop test against FRR — wire codec is complete and unit-tested but no end-to-end harness yet.
+  - `match_evpn_route_type` policy clause — operators currently filter via RT or community matches; a route-type-keyed predicate would be ergonomic.
+  - EVPN BMP export and MRT dump integration — unicast/FlowSpec already export; EVPN routes are not yet emitted on those channels.
+  - GR / LLGR interop harness (kill / restart / measure) — unit tests cover the EVPN GR pipeline; FRR-vs-rustbgpd kill-and-recover interop is not in the M29-M33 set.
+  - **24-hour soak harness for M33** — current scale validation runs for ~3 minutes (50k routes + 60s churn). A leak in the intern table or AdjRibOut prefix index wouldn't surface in that window. Wrap M33 in a loop, sample memory every minute, fail if growth is non-zero post-convergence. Highest-leverage perf assurance gap left from v0.9.0.
+  - **`EvpnRibRoute` payload + key redundancy** — the struct stores both the full `EvpnRoute` payload and a cached `EvpnRouteKey` derived from it. Identity is recomputed independently in API delete, outbound withdrawal reconstruction, and display/filtering paths. Refactor before v1.0 so adding RFC 9251 Route Types 6-8 doesn't multiply the inconsistency surface. Pre-1.0 design debt; not load-bearing for v0.9.0 RR functionality.
+  - **CI wiring for M29-M33** — five interop scripts run cleanly on a developer box but aren't tied into the GitHub Actions matrix. M29 (~10 s, no kernel data plane) is the cheapest entry point. Promotes the harness from "manual gate" to "regression net." Tracked separately from the soak harness because the latter needs a long-running runner; M29 could land in the existing CI today.
 
 ### P2.5 — Operational Polish
 
@@ -273,8 +285,8 @@ Valuable but not blocking production use or 1.0. Ordered by market signal.
 - [ ] **Confederation** (RFC 5065) — required for service provider deployments but SPs are not the initial target market
 - [x] **Dynamic neighbors** (prefix-based) — `[[dynamic_neighbors]]` TOML section with prefix range, peer group inheritance, `remote_asn = 0` (accept any ASN from OPEN). Auto-accept inbound connections, auto-remove on disconnect. Configurable limit (`dynamic_neighbor_limit`, default 100). FSM `remote_asn = 0` sentinel skips ASN check. gRPC `ListDynamicNeighbors` query, `is_dynamic` flag in peer info. Runtime Add/Delete deferred (TOML is primary config surface).
 - [ ] **TCP-AO authentication** (RFC 5925) — modern replacement for TCP MD5; BIRD 3 just added it (April 2025); neither GoBGP nor rustbgpd has it
-- [ ] **Real-time BGP observability** — unified event bus (`broadcast::Sender<BgpEvent>`) streaming route_learned, route_withdrawn, best_path_changed, policy_filtered, session_state_change events; in-memory ring buffer for recent event history; gRPC `EventService` with `WatchEvents` streaming RPC and peer/prefix/type filtering; `bgpctl events` CLI with `--since`, `--peer`, `--prefix`, `--type` flags; foundation for TUI live event view
-- [ ] **Route history** — per-prefix timeline of routing events (learned, withdrawn, best-path changes) queryable via gRPC and `bgpctl history <prefix>`; backed by ring buffer with configurable depth
+- [ ] **Real-time BGP observability** — unified event bus (`broadcast::Sender<BgpEvent>`) streaming route_learned, route_withdrawn, best_path_changed, policy_filtered, session_state_change events; in-memory ring buffer for recent event history; gRPC `EventService` with `WatchEvents` streaming RPC and peer/prefix/type filtering; `rustbgpctl events` CLI with `--since`, `--peer`, `--prefix`, `--type` flags; foundation for TUI live event view
+- [ ] **Route history** — per-prefix timeline of routing events (learned, withdrawn, best-path changes) queryable via gRPC and `rustbgpctl history <prefix>`; backed by ring buffer with configurable depth
 - [ ] **Route dampening** (RFC 2439) — suppress flapping routes with penalty/decay
 - [ ] **Scriptable policy engine** — user-defined attribute transformation functions (Lua, Starlark, or WASM plugins) beyond static match/action rules. Policy evaluation is already a pure function `(route, context) -> (action, modifications)` — sandboxing a scripting layer there would be clean. More expressive than FRR's route-maps, simpler than BIRD's filter DSL.
 - [ ] **Evaluate buffa for protobuf codegen** — Anthropic's [buffa](https://github.com/anthropics/buffa) is a pure-Rust protobuf implementation with editions-first design, zero-copy views, and `no_std` support. Benchmark against prost/tonic for gRPC message encode/decode performance; evaluate generated type ergonomics (e.g. `MessageField<T>` vs prost `Option<T>`, `EnumValue<T>` vs raw `i32`). Requires tonic integration story (buffa has no gRPC transport layer — would need a tonic codec adapter or wait for upstream support).
@@ -283,14 +295,13 @@ Valuable but not blocking production use or 1.0. Ordered by market signal.
 
 Features that market research indicates are lower value than originally planned.
 
-- **EVPN / VPN address families** — not needed for IX route server or SDN controller use cases; defer until general-purpose router positioning
 - **YANG model / NETCONF** — FRR can't finish their BGP YANG model; gRPC is the modern interface; low ROI
 - **Built-in web UI** — IXPs use Alice-LG / IXP Manager; replaced by API-first looking glass approach
 - **Kubernetes operator** — adjacent opportunity but premature; nail the IX/SDN use case first
 
 ### Interop Test Coverage
 
-22 automated interop scripts cover M1, M3, M4, M10–M28 against FRR 10.3.1,
+27 automated interop scripts cover M1, M3, M4, M10–M33 against FRR 10.3.1,
 BIRD 2.0.12, GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual smoke
 tests.
 
@@ -391,7 +402,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
-- [x] Automated interop test scripts (M1, M3, M4, M10–M20)
+- [x] Automated interop test scripts (M1, M3, M4, M10–M33)
 - [x] Binary releases (GitHub Releases with cross-compiled linux-amd64/arm64 binaries)
 - [ ] Homebrew formula
 - [x] crates.io publishing (`rustbgpd-wire` published; other crates remain internal)

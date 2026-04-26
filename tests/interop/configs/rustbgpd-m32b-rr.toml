@@ -1,0 +1,32 @@
+# M32b interop: rustbgpd as EVPN RR for synthetic Type 1 EAD-per-EVI
+# reflection — closes the Phase 1 coverage gap that M32-against-FRR
+# can't (FRR origination needs VLAN-aware bridge + SVI deferred to
+# Phase 3).
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.100"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.1.1.2"
+remote_asn = 65000
+description = "tester-ead"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.1.3.2"
+remote_asn = 65000
+description = "monitor"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true

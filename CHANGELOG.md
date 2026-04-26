@@ -7,6 +7,127 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- **EVPN Route Reflector (Phase 1, RFC 7432).** L2VPN/EVPN address family
+  (AFI 25 / SAFI 70) with wire codec for all 5 RFC 7432 route types
+  (EAD per-ES, EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix),
+  MAC mobility best-path with sticky-flag preservation per §15.1, RFC 4456
+  reflection, and 6 typed extended-community accessors (BGP Encapsulation
+  per RFC 8365/9012, MAC Mobility, ESI Label, ES-Import RT, Router MAC
+  per RFC 9135, Default Gateway). `l2vpn_evpn` family string in TOML
+  config, `ListEvpnRoutes` gRPC RPC on `RibService`, `rustbgpctl evpn`
+  CLI subcommand with `--route-type` / `--peer` / `--rd` filters,
+  `ADDRESS_FAMILY_L2VPN_EVPN` proto enum. Example config
+  `examples/rr-evpn-fabric/config.toml` demonstrates a 3-VTEP fabric RR.
+  FRR interop sanity test M29 validates capability negotiation against
+  FRR 10.3.1. See [ADR-0050](docs/adr/0050-evpn-route-reflector.md).
+  Phase 1 is RR role only — VTEP mode with local EVI/VRF/VNI state
+  (kernel FDB MAC learning + local origination), controller injection
+  beyond Type 2 / Type 3 (Type 5 IP-Prefix, Type 1 / Type 4
+  multi-homing origination), DF election (RFC 7432 §8 / RFC 8584),
+  symmetric IRB semantics (RFC 9135), PBB-EVPN (RFC 7623), and EVPN-
+  MVPN integration (RFC 9251) are future-phase work. Gate 6 ships
+  controller-driven Type 2 / Type 3 injection via
+  `AddEvpnRoute` / `DeleteEvpnRoute`.
+- **EVPN Type 2 MAC reflection interop (Gate 1, M30).** Three-node
+  containerlab topology (rustbgpd RR + 2× FRR VTEPs running kernel
+  VXLAN + bridge) validating Type 2 MAC/IP Advertisement reflection
+  end-to-end. MAC injected on VTEP-A via `bridge fdb add` propagates
+  through rustbgpd and appears on VTEP-B's `show evpn mac vni 100`
+  within 30 seconds. Assertions cover: session Established on both
+  VTEPs with L2VPN/EVPN negotiated, Type 3 IMET reflection (baseline),
+  Type 2 MAC learning end-to-end, RFC 4456 `ORIGINATOR_ID` + `CLUSTER_LIST`
+  on the reflected UPDATE, next-hop preservation (VTEP loopback, not RR),
+  VXLAN encap community (`tunnel_type=8`) surfaced through the
+  `ListEvpnRoutes` gRPC, and withdrawal propagation via
+  `bridge fdb del`. New `start-frr-vtep.sh` shim sets up `br100` +
+  `vxlan100` with `nolearning` so EVPN controls the FDB.
+- **EVPN GR / LLGR stale handling (Gate 2, RFC 4724 + RFC 9494).**
+  Reflected EVPN routes now participate in the stale-route pipeline:
+  `mark_stale_evpn` on `PeerGracefulRestart`, promotion to LLGR-stale
+  with `LLGR_STALE` community injection via `Arc::make_mut`, and sweep
+  on GR / LLGR timer expiry. End-of-RIB and Enhanced Route Refresh
+  (BoRR / EoRR per RFC 7313) clear stale state per-family, preserving
+  peer-originated `LLGR_STALE` communities and stripping only locally-
+  injected ones. `NO_LLGR` community per RFC 9494 §4.7 is honored —
+  routes carrying it are dropped on GR timer rather than promoted.
+  Without this, a VTEP restart would have dropped reflected EVPN routes
+  from every other peer mid-flap — the biggest correctness gap on the
+  production-ready RR checklist. 13 new unit + integration tests.
+- **EVPN MAC mobility + sticky-MAC preservation interop (Gate 3, M31).**
+  Four-node topology (rustbgpd RR + 3× FRR VTEPs) extending the M30
+  harness. Exercises RFC 7432 §15.1 MAC Mobility semantics against
+  real FRR 10.3.1: (a) MAC M1 injected on VTEP-A reflects to VTEP-B
+  via the RR; (b) M1 moved to VTEP-C (`bridge fdb add` on C + `del`
+  on A), VTEP-B's best path flips to VTEP-C and the MAC Mobility
+  sequence number on the reflected Type 2 increments strictly; (c)
+  sticky MAC M2 on VTEP-A (`bridge fdb add … sticky`) is not
+  displaced by a non-sticky advertisement from VTEP-C — VTEP-B's
+  best path stays on VTEP-A per §7.7. VTEP-B is a pure observer
+  with no local MACs, so its Loc-RIB state is driven entirely by
+  what rustbgpd reflects.
+- **EVPN multi-homing Type 1 EAD + Type 4 ES reflection interop
+  (Gate 4, M32).** Four-node topology where VTEP-A and VTEP-C share
+  an Ethernet Segment via identical `evpn mh es-id` + `evpn mh
+  es-sys-mac` on an LACP bond ES interface (single dummy slave —
+  the minimal shape FRR EVPN-MH recognizes as a local ES). rustbgpd
+  reflects both Type 4 ES and Type 1 EAD-per-EVI routes unchanged;
+  VTEP-B (observer) receives both peers' copies with correct RFC 4456
+  `ORIGINATOR_ID` + `CLUSTER_LIST`. rustbgpd's `ListEvpnRoutes` gRPC
+  surfaces both Type 4 + both Type 1 routes (one of each per sharing
+  peer). The RR does not execute DF election itself — VTEPs run the
+  election independently over the reflected inputs. The
+  `start-frr-vtep-mh.sh` shim extends M30's VXLAN setup with the
+  bond ES access interface and a vtysh-based EVPN-MH config apply
+  loop that handles FRR's startup-delay timer and per-interface
+  config race.
+- **EVPN RR scale validation (Gate 5, M33).** In-tree iBGP load
+  generator (`bench/evpn-load` crate — tester + monitor binaries
+  built directly on `rustbgpd-wire`, no third-party daemon in the
+  measurement path). Three-peer topology: 2 testers originate 25k
+  Type 2 MAC/IP routes each (50k total) at 5,000/sec; 60 s of
+  1,000/sec churn (withdraw + re-advertise) layered on top; monitor
+  asserts initial convergence (< 60 s ceiling), post-churn count
+  within ±tester batch (40 routes) of 50,000, observed withdrawal
+  events ≥ ½·`CHURN_RATE`·`CHURN_DURATION` (proves churn fired and
+  withdrawals propagated), tester peers stay Established without
+  flaps, and rustbgpd's gRPC stays healthy throughout. Binaries ride
+  the `rustbgpd:dev` image so a single `docker build` + `containerlab
+  deploy` reproduces the harness.
+- **Controller-driven EVPN injection (Gate 6).** Two new RPCs on
+  `InjectionService`: `AddEvpnRoute` and `DeleteEvpnRoute`. Phase 1
+  supports Type 2 MAC/IP and Type 3 IMET origination; the
+  controller supplies RD, ethernet-tag, MAC, host IP, VNI, next-hop,
+  and optional route targets, and the RR synthesizes an
+  `EvpnRibRoute` with `RouteOrigin::Local` that flows through the
+  same reflection pipeline that serves iBGP-learned routes. New
+  `rustbgpctl evpn add-mac-ip / add-imet / delete-mac-ip / delete-imet`
+  subcommands. Includes 10 new unit tests covering RD parsing
+  (types 0/1/2), MAC parsing, VNI validation, unsupported route
+  types, read-only access-mode rejection, and end-to-end RIB
+  channel round-trip.
+- **Four correctness fixes in the EVPN RR pipeline** (commit
+  7d09108, surfaced during code review):
+  (1) source-peer split-horizon for EVPN — the RR no longer reflects
+      a route back to its originator;
+  (2) `LocRib::recompute_evpn` detects same-peer attribute / payload
+      churn (MAC Mobility sequence, sticky flip, label/VNI, Router
+      MAC, ESI Label) — previously only peer + stale flags triggered
+      redistribution;
+  (3) `evpn_tiebreak_simple` gets stale, ORIGIN, `CLUSTER_LIST`
+      length, and `ORIGINATOR_ID` comparators — matches the
+      `flowspec_tiebreak` chain and stops GR-stale routes from beating
+      fresh alternatives on LocalPref/AS_PATH;
+  (4) RFC 4456 loop-detection inbound path now propagates EVPN
+      withdrawals alongside unicast + FlowSpec — no more silent drops
+      on reflected-loop UPDATEs.
+  Seven new regression tests land with the fixes.
+
+---
+
 ## [0.8.0] — 2026-03-23
 
 ### Added

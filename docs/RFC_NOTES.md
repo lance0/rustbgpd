@@ -544,3 +544,167 @@ implemented per ADR-0040.
   UTF-8 reason string.
 - Reason threaded from gRPC `DisableNeighbor` through transport to the
   NOTIFICATION data field.
+
+---
+
+## RFC 7432 — EVPN (Phase 1: Route Reflector)
+
+- AFI 25 (L2VPN) / SAFI 70 (EVPN). Enum variants added to `Afi` and
+  `Safi`; capability negotiation works automatically.
+- Wire codec for all 5 RFC 7432 route types:
+  - **Type 1 EAD** (per-ES when `ethernet_tag == MAX_ET (0xFFFFFFFF)`,
+    per-EVI otherwise). Distinct `EvpnRouteKey` variants prevent
+    semantic collapse.
+  - **Type 2 MAC/IP Advertisement.** IP Addr Length is in **bits**
+    (0 / 32 / 128). Label2 is optional — either 0 or 3 trailing bytes
+    after the primary label.
+  - **Type 3 IMET.** IP length is in bits (32 / 128).
+  - **Type 4 ES.** IP length in bits.
+  - **Type 5 IP Prefix (RFC 9136).** Fixed total length disambiguates
+    IPv4 (34 bytes) from IPv6 (58 bytes) — prefix-length byte alone
+    cannot distinguish since 32 is valid for both.
+- Route Distinguisher (RFC 4364) displays as `<asn16>:<u32>` (Type 0),
+  `<ipv4>:<u16>` (Type 1), `<asn32>:<u16>` (Type 2). Unknown RD types
+  fall back to hex.
+- `EvpnRoute` carries full wire payload (for reflection); `EvpnRouteKey`
+  is the hashable identity used as RIB key.
+- **Best-path §15.1:** Type 2 routes run a MAC Mobility head (sticky
+  preserved against displacement by non-sticky; higher sequence wins)
+  before the standard BGP preference chain. Absence of the MAC Mobility
+  community → `(sticky=false, seq=0)` per §7.7.
+- **Route reflection:** RFC 4456 rules (`ORIGINATOR_ID`, `CLUSTER_LIST`,
+  split-horizon) reuse the existing unicast `should_suppress_ibgp_inner`
+  via a synthetic `Route` probe — no EVPN-specific reflection logic.
+  Split horizon is keyed on the **source peer**, not the route's
+  next-hop, so a reflector with one client behind a NAT or a different
+  loopback still suppresses correctly. AS_PATH and RR cluster-loop
+  branches emit a proper EVPN withdrawal toward the looping peer
+  (rather than silently dropping the route in the Adj-RIB-Out), so a
+  client that previously received the route observes a clean retract.
+- **Best-path tie-break:** the EVPN best-path chain runs the full
+  RFC 4456 ordering after the BGP body — stale flag → ORIGIN →
+  shortest CLUSTER_LIST → lowest ORIGINATOR_ID — matching the unicast
+  decision process so a reflector with multiple equal-AS paths
+  converges deterministically.
+- **Initial dump on session up:** when an iBGP EVPN session reaches
+  Established, the existing Adj-RIB-In is replayed to the new peer
+  through the same Adj-RIB-Out path that handles steady-state
+  reflection — no separate "fast-path" code that could skip RFC 4456
+  attribute attachment. EoR is emitted per family after the dump.
+- **Enhanced Route Refresh tracking** (RFC 7313): `refresh_stale_evpn`
+  records EVPN keys present in Adj-RIB-In at BoRR time; any key not
+  re-advertised before EoRR is withdrawn at sweep, mirroring the
+  unicast `refresh_stale` path.
+- **Max-prefix accounting** counts EVPN keys alongside unicast
+  prefixes in the per-peer prefix counter, so `max_prefixes` triggers
+  Cease/1 (Maximum Number of Prefixes Reached) when a misbehaving
+  VTEP floods Type 2 routes.
+- **Policy context:** EVPN routes pass through the policy engine with
+  attribute / community / RT visibility (placeholder `0.0.0.0/0`
+  prefix matches FlowSpec's pattern); Type 5 IP-Prefix routes
+  additionally surface their actual prefix in `RouteContext`, so a
+  prefix-based clause filters Type 5 routes by the IP prefix carried
+  in the NLRI.
+- **GR / LLGR stale handling** (RFC 4724 + RFC 9494, Gate 2): EVPN
+  routes participate in the stale-route pipeline alongside unicast
+  and FlowSpec. On `PeerGracefulRestart`, `mark_stale_evpn((L2Vpn,
+  Evpn))` flags routes; on GR timer expiry with LLGR-negotiated,
+  `promote_to_llgr_stale_evpn` injects `COMMUNITY_LLGR_STALE` via
+  `Arc::make_mut` and records the route key in
+  `evpn_llgr_stale_local_tags` so `clear_stale_evpn` /
+  `clear_llgr_stale_evpn` on EoR later strip only the
+  locally-injected communities (peer-originated ones are preserved).
+  Routes carrying `COMMUNITY_NO_LLGR` are dropped on GR expiry rather
+  than promoted, per RFC 9494 §4.7. Enhanced Route Refresh (RFC 7313)
+  tracks unreplaced EVPN keys in `refresh_stale_evpn` and withdraws
+  them on BoRR/EoRR completion.
+- **Type 2 MAC/IP Advertisement interop**: validated end-to-end
+  against FRR 10.3.1 via the M30 containerlab suite
+  (`tests/interop/m30-evpn-type2-frr.clab.yml`). Real kernel VXLAN +
+  bridge per VTEP; MAC injection on one VTEP via `bridge fdb add`
+  propagates through the rustbgpd RR to the second VTEP and appears
+  in its EVPN MAC table. Assertions cover RFC 4456 `ORIGINATOR_ID`
+  + `CLUSTER_LIST`, next-hop preservation (VTEP loopback, not RR),
+  VXLAN encap community surfaced through gRPC, and withdrawal
+  propagation on FDB delete.
+- **MAC Mobility + sticky-MAC preservation interop** (RFC 7432 §15.1,
+  §7.7): validated via the M31 4-node harness
+  (`tests/interop/m31-evpn-mac-mobility-frr.clab.yml`). MAC moved
+  between two originating VTEPs through the RR increments the
+  Mobility sequence on the reflected Type 2 and flips the observing
+  VTEP's best path. Sticky MAC on the first VTEP is not displaced by
+  a non-sticky advertisement from the second VTEP.
+- **Scale validation** (Gate 5, M33, 2026-04-24): the RR sustains
+  50,000 Type 2 MAC/IP routes reflected from two originating peers
+  to a third observer, followed by 60 s of 1,000 rps withdraw +
+  re-advertise churn, with no route loss and no session flap. The
+  load generator is the in-tree `bench/evpn-load` crate, built
+  directly on `rustbgpd-wire` — no third-party daemon sits in the
+  measurement path. See `tests/interop/m33-evpn-scale.clab.yml`
+  and `docs/BENCHMARKS.md` § "EVPN RR Scale (M33)".
+- **Controller-driven injection** (Gate 6, 2026-04-24): Type 2
+  MAC/IP and Type 3 IMET routes can be injected via gRPC
+  (`InjectionService::AddEvpnRoute`) and withdrawn via
+  `DeleteEvpnRoute`. The service accepts display-form RDs
+  (`65000:100`, `10.0.0.1:100`, `4200000000:100`), parses MAC
+  addresses and host IPs, and assembles an `EvpnRibRoute` with
+  `RouteOrigin::Local` that flows through the same reflection
+  pipeline as iBGP-learned routes. `rustbgpctl evpn add-mac-ip /
+  add-imet / delete-mac-ip / delete-imet` CLI subcommands cover
+  the operator-facing surface. Type 5 IP-Prefix and Type 1/4
+  multi-homing origination are deferred pending use-case signal.
+- **Multi-homing Type 1 EAD + Type 4 ES reflection interop** (RFC 7432 §8):
+  validated via the M32 4-node harness
+  (`tests/interop/m32-evpn-multihome-frr.clab.yml`). Two FRR VTEPs
+  share an Ethernet Segment on a bond ES interface (same `es-id` +
+  `es-sys-mac` → identical 10-byte ESI); both originate Type 4 ES
+  + Type 1 EAD-per-EVI routes that the rustbgpd RR reflects to a
+  third observing VTEP. Gated assertions cover that both ESI-sharing
+  peers' Type 1 EAD + Type 4 ES routes reach the observer with
+  correct `ORIGINATOR_ID` + `CLUSTER_LIST` and that gRPC
+  `ListEvpnRoutes` surfaces both Route Type 1 and Route Type 4
+  entries. DF election itself runs on the VTEPs; the RR is
+  path-transparent.
+- See ADR-0050.
+
+---
+
+## RFC 9012 / RFC 8365 — BGP Encapsulation Ext Community + VXLAN-EVPN
+
+- The BGP Encapsulation extended community (Type 0x03, Subtype 0x0C)
+  uses the widely-deployed **RFC 5512 layout** (4 bytes reserved +
+  2-byte Tunnel Type). RFC 9012 §4.1 specifies a different layout
+  (1-byte Tunnel Type + 5-byte Flags) but FRR, BIRD, Juniper, and
+  Cisco all emit the RFC 5512 form, so interop compatibility wins.
+- Tunnel Type values: 7 = NVGRE, 8 = VXLAN, 11 = MPLS-over-GRE.
+  `as_bgp_encapsulation()` returns the u16 tunnel type.
+- rustbgpd does not yet **negotiate** a preferred encap. VXLAN is
+  assumed; non-VXLAN values are passed through untouched.
+
+---
+
+## RFC 9135 — Symmetric IRB (wire support, semantics deferred)
+
+- Type 2 MAC/IP routes with a second MPLS label (Label2) and the
+  Router MAC ext community (Type 0x06, Subtype 0x03) are decoded and
+  reflected unchanged. rustbgpd does not yet interpret IRB pairings.
+- The Router MAC ext community accessor returns the 6-byte MAC.
+
+---
+
+## EVPN Extended Communities — typed accessors (RFC 7432 §7.5-§7.8)
+
+Subtypes with typed accessors on `ExtendedCommunity` (others pass
+through as opaque u64):
+
+| Type/Subtype | Name | Payload |
+|---|---|---|
+| 0x03 / 0x0C | BGP Encapsulation | u16 tunnel type |
+| 0x03 / 0x0D | Default Gateway | flag-only (value = 0) |
+| 0x06 / 0x00 | MAC Mobility | (sticky: bool, sequence: u32) |
+| 0x06 / 0x01 | ESI Label | (single_active: bool, label: u32) |
+| 0x06 / 0x02 | ES-Import RT | 6-byte MAC target |
+| 0x06 / 0x03 | Router MAC | 6-byte MAC |
+
+- RFC 8214 Layer 2 Attributes (Type 0x06 / Subtype 0x04) deferred —
+  encoding is complex and not needed for Phase 1 RR flow.

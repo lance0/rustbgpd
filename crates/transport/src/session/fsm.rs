@@ -205,8 +205,8 @@ impl PeerSession {
                             .config
                             .local_ipv6_nexthop
                             .or(local_ipv6)
-                            .filter(rustbgpd_wire::is_valid_ipv6_nexthop)
-                            .is_some();
+                            .as_ref()
+                            .is_some_and(rustbgpd_wire::is_valid_ipv6_nexthop);
                         neg.negotiated_families
                             .iter()
                             .filter(|f| {
@@ -357,6 +357,8 @@ impl PeerSession {
                     self.negotiated = None;
                     self.negotiated_families.clear();
                     self.known_paths.clear();
+                    self.known_flowspec.clear();
+                    self.known_evpn.clear();
                     self.local_open_pdu = None;
                     self.remote_open_pdu = None;
                     self.last_down_reason = None;

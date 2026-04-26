@@ -15,7 +15,7 @@ control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-1166 workspace tests, fuzz targets, and 22 automated interop suites against
+1245 workspace tests, fuzz targets, and 27 automated interop suites against
 FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
@@ -47,7 +47,9 @@ architecture diagrams, example configs, and API workflows.
 ## Not the best fit today
 
 - Full general-purpose router deployments requiring FIB integration
-- EVPN / VPN datacenter fabric overlays
+- EVPN **VTEP** role — rustbgpd is a Phase 1 EVPN Route Reflector only;
+  it does not yet do local MAC learning, DF election, or VXLAN data-plane
+- VPNv4 / VPNv6 overlays
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
 
@@ -242,7 +244,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
-| Interop suites | 22 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR |
+| Interop suites | 27 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR |
 | Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
@@ -257,7 +259,8 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 ## Current limitations
 
 - No kernel FIB integration -- rustbgpd is a control-plane daemon, not a forwarding engine
-- No EVPN, VPNv4/v6, or Confederation support
+- EVPN (RFC 7432) is supported in **Route Reflector role only** for VXLAN-EVPN DC fabrics — VTEP mode (local MAC learning, DF election, kernel FDB integration), IRB semantics (RFC 9135), and controller injection beyond Type 2 / Type 3 (Type 5 IP-Prefix, Type 1 / Type 4 multi-homing origination) are follow-up phases
+- No VPNv4 / VPNv6 or Confederation support
 - No native gRPC TLS termination yet (prefer local UDS access or an mTLS proxy)
 - No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported
 - Published bgperf2 benchmarks currently cover 10 peers × 1k prefixes, 2 peers × 10k prefixes, and 2 peers × 100k prefixes; churn and long-duration benchmark automation remain future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
@@ -275,8 +278,8 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | Kernel FIB integration, EVPN, VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
-| **Tests** | 1166 workspace tests, fuzz targets, 22 automated interop suites against FRR, BIRD, GoBGP, StayRTR |
+| **Not yet supported** | Kernel FIB integration, EVPN VTEP role (RR role works), VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
+| **Tests** | 1245 workspace tests, fuzz targets, 27 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator |
 
 ## Documentation
 
@@ -292,6 +295,8 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Wire codec and RIB performance numbers, scaling analysis |
 | [docs/COMPARISON.md](docs/COMPARISON.md) | Feature comparison with FRR, BIRD, GoBGP, OpenBGPd |
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
+| [docs/evpn-enablement.md](docs/evpn-enablement.md) | EVPN Phase 1-9 gate ladder: what each gate unlocks, work per gate, priority |
+| [docs/gobgp-parity.md](docs/gobgp-parity.md) | rustbgpd vs GoBGP feature parity by use case |
 | [docs/adr/](docs/adr/) | Architecture decision records (50 ADRs) |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |

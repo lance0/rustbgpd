@@ -6,16 +6,18 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{AsPath, FlowSpecRule, Prefix};
+use rustbgpd_wire::{AsPath, EvpnRouteKey, FlowSpecRule, Prefix};
 
 use crate::best_path::best_path_cmp;
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// The local RIB storing the best route per prefix.
 pub struct LocRib {
     routes: HashMap<Prefix, Route>,
     /// `FlowSpec` Loc-RIB: best route per `FlowSpec` rule.
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
+    /// EVPN Loc-RIB: best route per RFC 7432 route identity.
+    evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
 }
 
 impl LocRib {
@@ -31,6 +33,7 @@ impl LocRib {
         Self {
             routes: HashMap::with_capacity(capacity),
             flowspec_routes: HashMap::new(),
+            evpn_routes: HashMap::new(),
         }
     }
 
@@ -130,6 +133,195 @@ impl LocRib {
     pub fn remove_flowspec(&mut self, rule: &FlowSpecRule) -> bool {
         self.flowspec_routes.remove(rule).is_some()
     }
+
+    // --- EVPN methods (RFC 7432) ---
+
+    /// Recompute the best EVPN route for a key from the given candidates.
+    ///
+    /// Tie-break: Type 2 routes first run the MAC Mobility head (sticky
+    /// flag + sequence number per RFC 7432 §15.1); all types then fall
+    /// through to the standard BGP chain (`LocalPref` → `AS_PATH` → MED
+    /// → eBGP>iBGP → peer address). DF-election hints for Type 1/4 are
+    /// left to downstream VTEPs; the RR just reflects.
+    ///
+    /// Returns `true` if the selection changed.
+    pub fn recompute_evpn<'a>(
+        &mut self,
+        key: EvpnRouteKey,
+        candidates: impl Iterator<Item = &'a EvpnRibRoute>,
+    ) -> bool {
+        let best = candidates
+            .min_by(|a, b| evpn_tiebreak_simple(a, b))
+            .cloned();
+        match best {
+            Some(new_best) => {
+                // Detect peer switches, GR/LLGR stale flips, AND same-peer
+                // payload / attribute churn. A single originator updating a
+                // Type 2 route with a new MAC Mobility sequence, sticky
+                // flag flip, label/VNI change, Router MAC, ESI Label, or
+                // any other attribute change must trigger redistribution —
+                // `peer` alone would miss all of these cases.
+                let changed = self.evpn_routes.get(&key).is_none_or(|old| {
+                    old.peer != new_best.peer
+                        || old.is_stale != new_best.is_stale
+                        || old.is_llgr_stale != new_best.is_llgr_stale
+                        || old.next_hop != new_best.next_hop
+                        || old.peer_router_id != new_best.peer_router_id
+                        || old.route != new_best.route
+                        || old.attributes != new_best.attributes
+                });
+                if changed {
+                    self.evpn_routes.insert(key, new_best);
+                }
+                changed
+            }
+            None => self.evpn_routes.remove(&key).is_some(),
+        }
+    }
+
+    /// Look up the best EVPN route for a key.
+    #[must_use]
+    pub fn get_evpn(&self, key: &EvpnRouteKey) -> Option<&EvpnRibRoute> {
+        self.evpn_routes.get(key)
+    }
+
+    /// Iterate over all best EVPN routes.
+    pub fn iter_evpn(&self) -> impl Iterator<Item = &EvpnRibRoute> {
+        self.evpn_routes.values()
+    }
+
+    /// Return the number of best EVPN routes.
+    #[must_use]
+    pub fn evpn_len(&self) -> usize {
+        self.evpn_routes.len()
+    }
+
+    /// Remove the best EVPN route for a key. Returns `true` if it existed.
+    pub fn remove_evpn(&mut self, key: &EvpnRouteKey) -> bool {
+        self.evpn_routes.remove(key).is_some()
+    }
+}
+
+/// Three-tier stale ranking for EVPN: fresh (0) > GR-stale (1) > LLGR-stale (2).
+/// Lower value = more preferred.
+fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
+/// BGP-preference + EVPN-aware tie-break for EVPN routes (RFC 7432 §15).
+///
+/// For Type 2 (MAC/IP Advertisement) routes, runs a MAC Mobility head
+/// first: higher sequence number wins, with sticky-MAC preservation —
+/// a sticky MAC is not displaced by a non-sticky advertisement even at
+/// a higher sequence number. Absence of the MAC Mobility community is
+/// treated as sequence=0, sticky=false per RFC 7432 §7.7.
+///
+/// All route types then fall through to the standard BGP chain, matching
+/// unicast `best_path_cmp` and `flowspec_tiebreak`:
+/// stale → `LocalPref` → `AS_PATH` length → ORIGIN → MED →
+/// eBGP > iBGP → `CLUSTER_LIST` length → `ORIGINATOR_ID` → peer address.
+fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
+    // 0. Three-tier freshness: fresh (0) > GR-stale (1) > LLGR-stale (2)
+    //    per RFC 4724 §4.2 / RFC 9494 §4.7. LLGR promotion clears
+    //    `is_stale` and sets `is_llgr_stale` (see AdjRibIn::promote_evpn_to_llgr_stale),
+    //    so a single rank function avoids the inversion that two independent
+    //    bool comparisons would cause when the bools are not nested.
+    //
+    //    Runs BEFORE the Type 2 MAC Mobility head — otherwise a stale route
+    //    with a higher MAC Mobility sequence (or sticky bit) would beat a
+    //    fresh alternative inside the head and skip this check entirely.
+    match evpn_stale_rank(a).cmp(&evpn_stale_rank(b)) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+
+    // Type-specific head for Type 2 (MAC/IP): MAC Mobility sequence + sticky.
+    if a.route_type() == 2 && b.route_type() == 2 {
+        let (a_sticky, a_seq) = extract_mac_mobility(a);
+        let (b_sticky, b_seq) = extract_mac_mobility(b);
+        // Sticky protects against displacement by non-sticky. If one is
+        // sticky and the other isn't, the sticky wins regardless of seq.
+        match (a_sticky, b_sticky) {
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            _ => {}
+        }
+        // Higher sequence wins — reverse for `min_by`.
+        match b_seq.cmp(&a_seq) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+
+    // 1. Higher LocalPref is better — reverse for `min_by`.
+    match b.local_pref().cmp(&a.local_pref()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 2. Shorter AS_PATH is better.
+    let a_len = a.as_path().map_or(0, AsPath::len);
+    let b_len = b.as_path().map_or(0, AsPath::len);
+    match a_len.cmp(&b_len) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 3. Lowest ORIGIN (IGP=0 < EGP=1 < Incomplete=2).
+    match a.origin().cmp(&b.origin()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 4. Lower MED is better.
+    match a.med().cmp(&b.med()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 5. eBGP preferred over iBGP.
+    match (a.is_ebgp(), b.is_ebgp()) {
+        (true, false) => return Ordering::Less,
+        (false, true) => return Ordering::Greater,
+        _ => {}
+    }
+    // 6. Shorter CLUSTER_LIST wins (RFC 4456 §9).
+    match a.cluster_list().len().cmp(&b.cluster_list().len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 7. Lower ORIGINATOR_ID wins (falls back to peer router-id, RFC 4456 §9).
+    let a_oid = a.originator_id().unwrap_or(a.peer_router_id);
+    let b_oid = b.originator_id().unwrap_or(b.peer_router_id);
+    match a_oid.cmp(&b_oid) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 8. Final tiebreak: lower peer address wins (deterministic).
+    a.peer.cmp(&b.peer)
+}
+
+/// Extract `(sticky, sequence_number)` from the MAC Mobility extended
+/// community, if present. Absent community → `(false, 0)` per RFC 7432 §7.7.
+fn extract_mac_mobility(route: &EvpnRibRoute) -> (bool, u32) {
+    for ec in route.extended_communities() {
+        if let Some((sticky, seq)) = ec.as_mac_mobility() {
+            return (sticky, seq);
+        }
+    }
+    (false, 0)
+}
+
+/// Three-tier stale ranking for `FlowSpec`: fresh (0) > GR-stale (1) > LLGR-stale (2).
+/// Lower value = more preferred. Same shape as `evpn_stale_rank` and
+/// unicast `best_path::stale_rank` — separate `is_stale` / `is_llgr_stale`
+/// comparisons would invert because LLGR promotion clears `is_stale`.
+fn flowspec_stale_rank(route: &FlowSpecRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
 }
 
 /// Full BGP best-path comparison for `FlowSpec` routes.
@@ -140,8 +332,9 @@ impl LocRib {
 ///
 /// RPKI validation is not applicable to `FlowSpec` routes.
 fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
-    // 0. Non-stale preferred over stale (RFC 4724)
-    let cmp = a.is_stale.cmp(&b.is_stale);
+    // 0. Three-tier freshness: fresh > GR-stale > LLGR-stale
+    //    (RFC 4724 §4.2 / RFC 9494 §4.7).
+    let cmp = flowspec_stale_rank(a).cmp(&flowspec_stale_rank(b));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -431,6 +624,52 @@ mod tests {
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
     }
 
+    /// Regression: GR-stale outranks LLGR-stale (RFC 9494 §4.7), and
+    /// LLGR-stale must not beat fresh — even with higher `LocalPref`.
+    /// Mirrors EVPN promotion state: GR-stale carries
+    /// `is_stale=true, is_llgr_stale=false`; LLGR-stale carries
+    /// `is_stale=false, is_llgr_stale=true`. Two independent boolean
+    /// comparisons would invert this; the single rank function
+    /// gives the correct three-tier ordering.
+    #[test]
+    fn flowspec_gr_stale_beats_llgr_stale() {
+        let rule = make_flowspec_rule();
+        // GR-stale at LP=100 vs LLGR-stale at LP=200 → GR-stale must win.
+        let mut gr =
+            make_flowspec_route(1, 1, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ebgp);
+        gr.is_stale = true;
+        gr.is_llgr_stale = false;
+        let mut llgr =
+            make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(200)], RouteOrigin::Ebgp);
+        llgr.is_stale = false;
+        llgr.is_llgr_stale = true;
+        let mut loc = LocRib::new();
+        loc.recompute_flowspec(rule.clone(), [&gr, &llgr].into_iter());
+        assert_eq!(
+            loc.get_flowspec(&rule).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "GR-stale must outrank LLGR-stale"
+        );
+    }
+
+    #[test]
+    fn flowspec_fresh_beats_llgr_stale_with_higher_localpref() {
+        let rule = make_flowspec_rule();
+        let fresh =
+            make_flowspec_route(1, 1, vec![PathAttribute::LocalPref(50)], RouteOrigin::Ebgp);
+        let mut llgr =
+            make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(500)], RouteOrigin::Ebgp);
+        llgr.is_stale = false;
+        llgr.is_llgr_stale = true;
+        let mut loc = LocRib::new();
+        loc.recompute_flowspec(rule.clone(), [&fresh, &llgr].into_iter());
+        assert_eq!(
+            loc.get_flowspec(&rule).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "fresh must outrank LLGR-stale even with lower LocalPref"
+        );
+    }
+
     #[test]
     fn flowspec_lowest_med_wins() {
         let rule = make_flowspec_rule();
@@ -465,5 +704,291 @@ mod tests {
         let best = loc.get_flowspec(&rule).unwrap();
         // Lowest peer IP wins
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+    }
+
+    // ---- EVPN MAC mobility tie-break tests (RFC 7432 §15.1) ------------
+
+    fn make_evpn_type2(peer_oct: u8, extra_attrs: Vec<PathAttribute>) -> EvpnRibRoute {
+        use rustbgpd_wire::{
+            EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel, RouteDistinguisher,
+        };
+        let peer = Ipv4Addr::new(10, 0, 0, peer_oct);
+        let mac_ip = EvpnRoute::MacIp(EvpnMacIp {
+            rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+            esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(100),
+            mac: MacAddress([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+            ip: None,
+            label1: MplsLabel::new(10_000),
+            label2: None,
+        });
+        let key = mac_ip.key();
+        let mut attrs: Vec<PathAttribute> = vec![PathAttribute::LocalPref(100)];
+        attrs.extend(extra_attrs);
+        EvpnRibRoute {
+            route: mac_ip,
+            key,
+            next_hop: IpAddr::V4(peer),
+            peer: IpAddr::V4(peer),
+            attributes: Arc::new(attrs),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ibgp,
+            peer_router_id: peer,
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    #[test]
+    fn evpn_mac_mobility_higher_sequence_wins() {
+        let mm_low = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 1),
+        ]);
+        let mm_high = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 10),
+        ]);
+        let r_low = make_evpn_type2(2, vec![mm_low]);
+        let r_high = make_evpn_type2(3, vec![mm_high]);
+        assert_eq!(evpn_tiebreak_simple(&r_high, &r_low), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&r_low, &r_high), Ordering::Greater);
+    }
+
+    #[test]
+    fn evpn_mac_mobility_sticky_preserved_against_higher_non_sticky() {
+        let sticky = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(true, 1),
+        ]);
+        let non_sticky_high = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 99),
+        ]);
+        let r_sticky = make_evpn_type2(2, vec![sticky]);
+        let r_non_sticky = make_evpn_type2(3, vec![non_sticky_high]);
+        // Sticky wins even with a lower sequence.
+        assert_eq!(
+            evpn_tiebreak_simple(&r_sticky, &r_non_sticky),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn evpn_mac_mobility_missing_treated_as_seq_zero() {
+        // No MAC Mobility community = implicit (false, 0).
+        let r_no = make_evpn_type2(2, vec![]);
+        let mm = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 5),
+        ]);
+        let r_mm = make_evpn_type2(3, vec![mm]);
+        assert_eq!(evpn_tiebreak_simple(&r_mm, &r_no), Ordering::Less);
+    }
+
+    /// Regression: `recompute_evpn` must report change when the same
+    /// originating peer re-advertises the same key with a different
+    /// MAC Mobility sequence. Previously only `peer` and stale flags were
+    /// compared, so same-peer attribute churn was silently swallowed at
+    /// the Loc-RIB layer and never redistributed.
+    #[test]
+    fn evpn_same_peer_mac_mobility_bump_triggers_change() {
+        let mm1 = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 1),
+        ]);
+        let mm2 = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 2),
+        ]);
+        let r1 = make_evpn_type2(2, vec![mm1]);
+        let r2 = make_evpn_type2(2, vec![mm2]);
+        let key = r1.key;
+
+        let mut loc = LocRib::new();
+        // First install — that's always a change.
+        assert!(loc.recompute_evpn(key, [&r1].into_iter()));
+        // Same peer, bumped sequence — must also report a change.
+        assert!(
+            loc.recompute_evpn(key, [&r2].into_iter()),
+            "same-peer MAC Mobility sequence bump must be detected"
+        );
+        // Same input again — no change.
+        assert!(!loc.recompute_evpn(key, [&r2].into_iter()));
+    }
+
+    /// Regression: a GR-stale EVPN route must NOT beat a fresh alternative
+    /// on local-pref or `AS_PATH`. Prior to the fix the EVPN tie-break ran
+    /// `LocalPref` first without consulting `is_stale`, so a stale route
+    /// with pref=200 would displace a fresh pref=100 — exactly backwards
+    /// from the RFC 4724 intent.
+    #[test]
+    fn evpn_fresh_beats_stale_even_with_lower_localpref() {
+        let mut fresh = make_evpn_type2(2, vec![PathAttribute::LocalPref(100)]);
+        let mut stale = make_evpn_type2(3, vec![PathAttribute::LocalPref(200)]);
+        fresh.is_stale = false;
+        stale.is_stale = true;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &stale), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&stale, &fresh), Ordering::Greater);
+    }
+
+    /// Regression: GR-stale outranks LLGR-stale (RFC 9494 §4.7).
+    ///
+    /// Mirrors the production state set by
+    /// `AdjRibIn::promote_evpn_to_llgr_stale`: GR-stale routes carry
+    /// `is_stale=true, is_llgr_stale=false`; LLGR-stale routes carry
+    /// `is_stale=false, is_llgr_stale=true`. Two independent boolean
+    /// comparisons would invert this ordering — both routes were
+    /// previously checked sequentially and `is_stale` short-circuited
+    /// the wrong way for LLGR. The single `evpn_stale_rank` function
+    /// gives the correct three-tier ordering.
+    #[test]
+    fn evpn_gr_stale_beats_llgr_stale() {
+        // LLGR-stale carries higher LocalPref to prove rank, not LP, decides.
+        let mut gr = make_evpn_type2(2, vec![PathAttribute::LocalPref(100)]);
+        let mut llgr = make_evpn_type2(3, vec![PathAttribute::LocalPref(200)]);
+        gr.is_stale = true;
+        gr.is_llgr_stale = false;
+        llgr.is_stale = false;
+        llgr.is_llgr_stale = true;
+        assert_eq!(
+            evpn_tiebreak_simple(&gr, &llgr),
+            Ordering::Less,
+            "GR-stale must outrank LLGR-stale"
+        );
+        assert_eq!(
+            evpn_tiebreak_simple(&llgr, &gr),
+            Ordering::Greater,
+            "LLGR-stale must rank below GR-stale"
+        );
+    }
+
+    /// Regression: a fresh route with low `LocalPref` still beats
+    /// LLGR-stale with high `LocalPref`. The freshness check must run
+    /// before the BGP preference chain.
+    #[test]
+    fn evpn_fresh_beats_llgr_stale_even_with_lower_localpref() {
+        let mut fresh = make_evpn_type2(2, vec![PathAttribute::LocalPref(50)]);
+        let mut llgr = make_evpn_type2(3, vec![PathAttribute::LocalPref(500)]);
+        fresh.is_stale = false;
+        fresh.is_llgr_stale = false;
+        llgr.is_stale = false;
+        llgr.is_llgr_stale = true;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &llgr), Ordering::Less);
+    }
+
+    /// Regression: a GR-stale Type 2 route with a HIGHER MAC Mobility
+    /// sequence must still lose to a fresh non-stale alternative. Prior
+    /// to the fix the Type 2 head returned on the sequence comparison
+    /// before the stale check fired, so any MAC that had ever moved
+    /// (i.e. carried a MAC Mobility ext-community) would let staleness
+    /// win during the GR window — exactly opposite to RFC 4724 §4.2.
+    #[test]
+    fn evpn_fresh_beats_stale_with_higher_mac_mobility_sequence() {
+        let stale_high = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 100),
+        ]);
+        let fresh_low = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 5),
+        ]);
+        let mut stale = make_evpn_type2(2, vec![stale_high]);
+        let mut fresh = make_evpn_type2(3, vec![fresh_low]);
+        stale.is_stale = true;
+        fresh.is_stale = false;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &stale), Ordering::Less);
+        assert_eq!(evpn_tiebreak_simple(&stale, &fresh), Ordering::Greater);
+    }
+
+    /// Regression: a stale sticky Type 2 route must still lose to a
+    /// fresh non-sticky alternative. Same root cause as the sequence
+    /// case — the sticky branch in the Type 2 head was returning
+    /// before the stale check ran.
+    #[test]
+    fn evpn_fresh_non_sticky_beats_stale_sticky() {
+        let stale_sticky = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(true, 1),
+        ]);
+        let fresh_non_sticky = PathAttribute::ExtendedCommunities(vec![
+            rustbgpd_wire::ExtendedCommunity::mac_mobility(false, 1),
+        ]);
+        let mut stale = make_evpn_type2(2, vec![stale_sticky]);
+        let mut fresh = make_evpn_type2(3, vec![fresh_non_sticky]);
+        stale.is_stale = true;
+        fresh.is_stale = false;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &stale), Ordering::Less);
+    }
+
+    /// Regression: among otherwise-equal candidates, shorter `CLUSTER_LIST`
+    /// wins (RFC 4456 §9). Previously the chain stopped at eBGP-vs-iBGP
+    /// and went straight to peer-address.
+    #[test]
+    fn evpn_shorter_cluster_list_wins() {
+        let short = make_evpn_type2(
+            2,
+            vec![PathAttribute::ClusterList(vec![Ipv4Addr::new(
+                10, 0, 0, 100,
+            )])],
+        );
+        let long = make_evpn_type2(
+            3,
+            vec![PathAttribute::ClusterList(vec![
+                Ipv4Addr::new(10, 0, 0, 100),
+                Ipv4Addr::new(10, 0, 0, 200),
+            ])],
+        );
+        assert_eq!(evpn_tiebreak_simple(&short, &long), Ordering::Less);
+    }
+
+    /// Regression: lower `ORIGINATOR_ID` breaks ties before peer address.
+    #[test]
+    fn evpn_lower_originator_id_wins() {
+        let a = make_evpn_type2(
+            2,
+            vec![PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 50))],
+        );
+        let b = make_evpn_type2(
+            3,
+            vec![PathAttribute::OriginatorId(Ipv4Addr::new(10, 0, 0, 150))],
+        );
+        assert_eq!(evpn_tiebreak_simple(&a, &b), Ordering::Less);
+    }
+
+    /// Regression: same-peer payload change (e.g. VNI / `label1` update)
+    /// must trigger redistribution. Previously only peer + stale flags
+    /// were compared at the Loc-RIB layer.
+    #[test]
+    fn evpn_same_peer_label_change_triggers_change() {
+        use rustbgpd_wire::{
+            EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel, RouteDistinguisher,
+        };
+
+        fn make_with_label(vni: u32) -> EvpnRibRoute {
+            let peer = Ipv4Addr::new(10, 0, 0, 2);
+            let mac_ip = EvpnRoute::MacIp(EvpnMacIp {
+                rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+                esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+                ethernet_tag: EthernetTagId(100),
+                mac: MacAddress([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                ip: None,
+                label1: MplsLabel::new(vni),
+                label2: None,
+            });
+            let key = mac_ip.key();
+            EvpnRibRoute {
+                route: mac_ip,
+                key,
+                next_hop: IpAddr::V4(peer),
+                peer: IpAddr::V4(peer),
+                attributes: Arc::new(vec![PathAttribute::LocalPref(100)]),
+                received_at: Instant::now(),
+                origin_type: RouteOrigin::Ibgp,
+                peer_router_id: peer,
+                is_stale: false,
+                is_llgr_stale: false,
+            }
+        }
+
+        let r1 = make_with_label(10_000);
+        let r2 = make_with_label(20_000);
+        let key = r1.key;
+        let mut loc = LocRib::new();
+        assert!(loc.recompute_evpn(key, [&r1].into_iter()));
+        assert!(
+            loc.recompute_evpn(key, [&r2].into_iter()),
+            "same-peer VNI change must be detected"
+        );
     }
 }

@@ -382,6 +382,78 @@ is structural — HashMap bucket arrays and Route data — with no obvious
 accidental overhead. Further memory reduction would require shared route
 storage across RIB views or alternative data structures.
 
+## EVPN RR Scale (M33)
+
+Measured with the in-tree `bench/evpn-load` generator: two synthetic
+iBGP testers advertise Type 2 MAC/IP routes into a rustbgpd Route
+Reflector, which reflects them to a third peer (the monitor). Tester
+and monitor both listen on port 179 and let the rustbgpd RR dial in
+(rustbgpd's neighbor model always actively dials configured peers, so
+listen-and-accept avoids a TCP collision deadlock). The monitor runs
+the same wire codec as the daemon, tracks live EVPN Type 2 keys in a
+`HashSet<EvpnRouteKey>`, and reports both `initial_convergence_sec`
+(first time the live set reaches the expected count) and
+`stable_convergence_sec` (first time the live set stays at the
+expected count for `stable_sec` continuous seconds — later than
+initial when churn is running, since each withdraw+re-advertise resets
+the stable window). Since the testers and monitor are built directly
+on `rustbgpd-wire`, no third-party daemon is in the measurement path
+— rustbgpd's RR scale is what gets exercised.
+
+**Harness:** `tests/interop/m33-evpn-scale.clab.yml`
+
+**Shape:**
+
+- 2 testers × 25,000 Type 2 routes = 50,000 reflected total
+- Bulk rate: 5,000 routes/sec per tester
+- Churn phase: 60 seconds of 1,000 rps withdraw + re-advertise
+  (sliding window over each tester's MAC space)
+
+**Assertions:**
+
+| Assertion | Target | Observed |
+|-----------|--------|----------|
+| Initial convergence to 50k reflected routes | < 60 s | **5.1 s** |
+| Stable convergence (count steady ≥ 5 s after churn ends) | logged | **~70 s** |
+| Post-churn count (distinct keys) | within ±tester batch (40) of 50,000 | **50,000 — exactly on this run** |
+| Withdrawal events observed during churn | ≥ ½·`CHURN_RATE`·`CHURN_DURATION` (≥ 30,000) | **57,120** |
+| `ListEvpnRoutes` matches observer's view | ≥ 50,000 Type 2 | **50,000** |
+| Tester peers stay Established, zero flaps | both up | **both up, 0 flaps** |
+| RR process stays healthy | yes | **yes — `GetHealth` passes post-run** |
+| Peak RR memory (soft ceiling 2 GB) | < 2 GB | **79 MB** |
+
+Observed wire-level traffic (bulk + churn phases combined):
+
+| Counter | Observed |
+|---------|----------|
+| Total announce events (incl. churn re-advertises) | ~107,000 |
+| Total withdraw events (incl. churn) | ~57,000 |
+| UPDATE messages received by monitor | ~4,100 |
+
+Note: the announce/withdraw counters include idempotent re-advertises
+during churn, so they are larger than the steady-state route count.
+`final_count` (50,000) is the distinct-key cardinality.
+
+Measurement environment: AMD Ryzen 9 7950X (64 logical cores), 125 GB
+RAM, Linux 6.17, Docker 27.x, containerlab. Single
+`rustbgpd:dev` container per node, all four nodes on the same host.
+Numbers reproduce within ±10% across runs.
+
+**Notes on methodology:**
+
+- All routes share one RD (`65000:1`), ethernet-tag `0`, VNI `100`.
+  MACs are deterministic (`02:00:00:XX:YY:ZZ` with 24 bits = route
+  index), so runs are exactly repeatable.
+- ESI is zero — Gate 4 / M32 already validated the multi-homing
+  attribute pipeline; Gate 5 / M33 isolates scale of the reflection
+  hot path.
+- The IETF draft [Benchmarking Methodology for EVPN][evpn-bmwg]
+  proposes much larger targets (32k EVIs, 2M MACs, 24 h soak).
+  M33 is scoped to the production-ready-at-fabric-scale claim
+  (10k+ MACs); larger-scale harness work is future roadmap.
+
+[evpn-bmwg]: https://datatracker.ietf.org/doc/html/draft-kishjac-bmwg-evpntest-00
+
 ## Running End-to-End Benchmarks
 
 End-to-end system benchmarks use [bgperf2](https://github.com/netenglabs/bgperf2),

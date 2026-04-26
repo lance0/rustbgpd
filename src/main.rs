@@ -389,13 +389,13 @@ fn print_startup_banner(config: &Config, grpc_listeners: &[GrpcListenerConfig]) 
     if let Some(ref rpki) = config.rpki {
         let n = rpki.cache_servers.len();
         if n > 0 {
-            eprintln!("  |- rpki: {n} cache{}", if n == 1 { "" } else { "s" },);
+            eprintln!("  |- rpki: {n} cache{}", if n == 1 { "" } else { "s" });
         }
     }
     if let Some(ref bmp) = config.bmp {
         let n = bmp.collectors.len();
         if n > 0 {
-            eprintln!("  |- bmp: {n} collector{}", if n == 1 { "" } else { "s" },);
+            eprintln!("  |- bmp: {n} collector{}", if n == 1 { "" } else { "s" });
         }
     }
     if let Some(ref mrt) = config.mrt {

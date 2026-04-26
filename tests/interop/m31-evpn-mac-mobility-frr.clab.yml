@@ -1,0 +1,93 @@
+# Containerlab topology: rustbgpd EVPN RR ↔ 3× FRR VTEPs
+# (M31 — EVPN MAC mobility: sequence numbers + sticky-MAC preservation)
+#
+# Extends the M30 harness with a third VTEP (VTEP-C) so we can exercise
+# the RFC 7432 §15.1 MAC mobility semantics: when the same MAC moves from
+# VTEP-A to VTEP-C, the MAC Mobility extended community sequence number
+# increments and VTEP-B's best-path tracks the winner. Also validates
+# sticky-MAC preservation — a sticky MAC on VTEP-A is not displaced by a
+# higher-sequence non-sticky advertisement from VTEP-C.
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65000, RR cluster_id 10.0.0.100)
+#     +- iBGP L2VPN/EVPN -- VTEP-A (10.0.0.2, AS 65000)
+#     +- iBGP L2VPN/EVPN -- VTEP-B (10.0.1.2, AS 65000)  <-- observer
+#     +- iBGP L2VPN/EVPN -- VTEP-C (10.0.2.2, AS 65000)
+#
+# VTEP-B is the "observer": it never originates MACs, only validates
+# which VTEP wins best-path as VTEP-A and VTEP-C compete.
+#
+# As in M30, VXLAN data-plane traffic does not need to flow between
+# VTEPs — MAC injection via `bridge fdb add` exercises the control
+# plane only.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m31-evpn-mac-mobility-frr.clab.yml
+#   bash tests/interop/scripts/test-m31-evpn-mac-mobility-frr.sh
+#   containerlab destroy -t tests/interop/m31-evpn-mac-mobility-frr.clab.yml
+
+name: m31-evpn-mac-mobility-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m31-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.2.1/24 dev eth3
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    vtep-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m31-vtep-a.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.0.2 100
+
+    vtep-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m31-vtep-b.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.1.2 100
+
+    vtep-c:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m31-vtep-c.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.2.2 100
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "vtep-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "vtep-b:eth1"]
+    - endpoints: ["rustbgpd:eth3", "vtep-c:eth1"]
+
+# Subnet A: 10.0.0.0/24 — rustbgpd (10.0.0.1) <-> VTEP-A (10.0.0.2)
+# Subnet B: 10.0.1.0/24 — rustbgpd (10.0.1.1) <-> VTEP-B (10.0.1.2)
+# Subnet C: 10.0.2.0/24 — rustbgpd (10.0.2.1) <-> VTEP-C (10.0.2.2)

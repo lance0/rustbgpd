@@ -188,6 +188,8 @@ pub struct MpReachNlri {
     pub announced: Vec<NlriEntry>,
     /// `FlowSpec` NLRI rules (RFC 8955). Populated only when `safi == FlowSpec`.
     pub flowspec_announced: Vec<crate::flowspec::FlowSpecRule>,
+    /// EVPN NLRI routes (RFC 7432). Populated only when `safi == Evpn`.
+    pub evpn_announced: Vec<crate::evpn::EvpnRoute>,
 }
 
 /// RFC 4760 `MP_UNREACH_NLRI` attribute (type 15).
@@ -204,6 +206,8 @@ pub struct MpUnreachNlri {
     pub withdrawn: Vec<NlriEntry>,
     /// `FlowSpec` NLRI rules withdrawn (RFC 8955). Populated only when `safi == FlowSpec`.
     pub flowspec_withdrawn: Vec<crate::flowspec::FlowSpecRule>,
+    /// EVPN NLRI routes withdrawn (RFC 7432). Populated only when `safi == Evpn`.
+    pub evpn_withdrawn: Vec<crate::evpn::EvpnRoute>,
 }
 
 /// RFC 4360 Extended Community — 8-byte value stored as `u64`.
@@ -281,6 +285,162 @@ impl ExtendedCommunity {
             return None;
         }
         self.decode_two_part()
+    }
+
+    // -------------------------------------------------------------------
+    // EVPN-specific typed accessors (RFC 7432 / RFC 8365 / RFC 9135)
+    // -------------------------------------------------------------------
+
+    /// Decode as BGP Encapsulation Extended Community (RFC 9012 §4.1, encoded
+    /// per the widely-deployed RFC 5512 layout: 4-byte reserved + 2-byte
+    /// Tunnel Type). Type 0x03, subtype 0x0C.
+    ///
+    /// Returns the Tunnel Type code. For VXLAN-EVPN (RFC 8365), the value is
+    /// 8. Other common values: 7 = NVGRE, 11 = MPLS-over-GRE.
+    ///
+    /// The reserved bytes are intentionally not validated here: RFC 5512
+    /// specifies MUST-zero on send, ignored on receive. FRR, `GoBGP`, Cisco,
+    /// and Juniper all emit zeros in practice; rejecting non-zero reserves
+    /// would break interop in the rare case an unknown implementation
+    /// re-purposes those bytes. Consumers should treat the returned
+    /// `tunnel_type` as the semantic signal.
+    #[must_use]
+    pub fn as_bgp_encapsulation(self) -> Option<u16> {
+        if self.type_byte() & 0x3F != 0x03 || self.subtype() != 0x0C {
+            return None;
+        }
+        let v = self.value_bytes();
+        Some(u16::from_be_bytes([v[4], v[5]]))
+    }
+
+    /// Construct a BGP Encapsulation Extended Community (RFC 9012 §4.1).
+    ///
+    /// Writes 4 bytes of reserved zero followed by the 16-bit tunnel type.
+    #[must_use]
+    pub fn bgp_encapsulation(tunnel_type: u16) -> Self {
+        let tt = tunnel_type.to_be_bytes();
+        let raw = u64::from_be_bytes([0x03, 0x0C, 0, 0, 0, 0, tt[0], tt[1]]);
+        Self(raw)
+    }
+
+    /// Decode as MAC Mobility Extended Community (RFC 7432 §7.7).
+    /// Type 0x06, subtype 0x00.
+    ///
+    /// Returns `(sticky, sequence_number)`. The sticky bit (bit 0 of the
+    /// flags byte) marks the MAC as non-movable; receivers must not displace
+    /// a sticky MAC with a higher-sequence non-sticky advertisement.
+    #[must_use]
+    pub fn as_mac_mobility(self) -> Option<(bool, u32)> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x00 {
+            return None;
+        }
+        let v = self.value_bytes();
+        let sticky = (v[0] & 0x01) != 0;
+        let seq = u32::from_be_bytes([v[2], v[3], v[4], v[5]]);
+        Some((sticky, seq))
+    }
+
+    /// Construct a MAC Mobility Extended Community (RFC 7432 §7.7).
+    #[must_use]
+    pub fn mac_mobility(sticky: bool, sequence: u32) -> Self {
+        let flags = u8::from(sticky);
+        let s = sequence.to_be_bytes();
+        let raw = u64::from_be_bytes([0x06, 0x00, flags, 0, s[0], s[1], s[2], s[3]]);
+        Self(raw)
+    }
+
+    /// Decode as ESI Label Extended Community (RFC 7432 §7.5).
+    /// Type 0x06, subtype 0x01.
+    ///
+    /// Returns `(single_active, label)`. The single-active flag (bit 0 of
+    /// the flags byte) signals single-active multi-homing mode.
+    #[must_use]
+    pub fn as_esi_label(self) -> Option<(bool, u32)> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x01 {
+            return None;
+        }
+        let v = self.value_bytes();
+        let single_active = (v[0] & 0x01) != 0;
+        let label = (u32::from(v[3]) << 16) | (u32::from(v[4]) << 8) | u32::from(v[5]);
+        Some((single_active, label))
+    }
+
+    /// Construct an ESI Label Extended Community (RFC 7432 §7.5).
+    ///
+    /// `label` is a 24-bit MPLS label or VXLAN VNI; high 8 bits are masked.
+    #[must_use]
+    pub fn esi_label(single_active: bool, label: u32) -> Self {
+        let flags = u8::from(single_active);
+        let l = label & 0x00FF_FFFF;
+        #[expect(clippy::cast_possible_truncation)]
+        let raw = u64::from_be_bytes([
+            0x06,
+            0x01,
+            flags,
+            0,
+            0,
+            (l >> 16) as u8,
+            (l >> 8) as u8,
+            l as u8,
+        ]);
+        Self(raw)
+    }
+
+    /// Decode as ES-Import Route Target Extended Community (RFC 7432 §7.6).
+    /// Type 0x06, subtype 0x02.
+    ///
+    /// Returns the 6-byte MAC address that serves as the import target for
+    /// Type 4 ES routes.
+    #[must_use]
+    pub fn as_es_import_rt(self) -> Option<[u8; 6]> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x02 {
+            return None;
+        }
+        Some(self.value_bytes())
+    }
+
+    /// Construct an ES-Import Route Target Extended Community.
+    #[must_use]
+    pub fn es_import_rt(mac: [u8; 6]) -> Self {
+        let raw = u64::from_be_bytes([0x06, 0x02, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
+        Self(raw)
+    }
+
+    /// Decode as Router MAC Extended Community (RFC 9135 §4.1).
+    /// Type 0x06, subtype 0x03.
+    ///
+    /// Returns the 6-byte router MAC used for symmetric IRB.
+    #[must_use]
+    pub fn as_router_mac(self) -> Option<[u8; 6]> {
+        if self.type_byte() & 0x3F != 0x06 || self.subtype() != 0x03 {
+            return None;
+        }
+        Some(self.value_bytes())
+    }
+
+    /// Construct a Router MAC Extended Community (RFC 9135 §4.1).
+    #[must_use]
+    pub fn router_mac(mac: [u8; 6]) -> Self {
+        let raw = u64::from_be_bytes([0x06, 0x03, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]]);
+        Self(raw)
+    }
+
+    /// Decode as Default Gateway Extended Community (RFC 4761 §3.2.5 /
+    /// RFC 7432). Type 0x03, subtype 0x0D. This is a flag-only community:
+    /// presence is the signal and the 6-byte value field must be all zeros.
+    /// Malformed advertisements with non-zero value bytes are treated as
+    /// non-matches rather than silently accepted — downstream policy and
+    /// validation consumers treat this accessor as semantic truth.
+    #[must_use]
+    pub fn as_default_gateway(self) -> bool {
+        self.type_byte() & 0x3F == 0x03 && self.subtype() == 0x0D && self.value_bytes() == [0u8; 6]
+    }
+
+    /// Construct a Default Gateway Extended Community.
+    #[must_use]
+    pub fn default_gateway() -> Self {
+        let raw = u64::from_be_bytes([0x03, 0x0D, 0, 0, 0, 0, 0, 0]);
+        Self(raw)
     }
 
     /// Decode the 6-byte value field as `(global_admin, local_admin)`.
@@ -807,6 +967,27 @@ fn decode_mp_reach_nlri(
                 octets.copy_from_slice(&nh_bytes[..16]);
                 IpAddr::V6(Ipv6Addr::from(octets))
             }
+            Afi::L2Vpn => match nh_len {
+                4 => IpAddr::V4(Ipv4Addr::new(
+                    nh_bytes[0],
+                    nh_bytes[1],
+                    nh_bytes[2],
+                    nh_bytes[3],
+                )),
+                16 => {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&nh_bytes[..16]);
+                    IpAddr::V6(Ipv6Addr::from(octets))
+                }
+                _ => {
+                    return Err(DecodeError::MalformedField {
+                        message_type: "UPDATE",
+                        detail: format!(
+                            "MP_REACH_NLRI L2VPN next-hop length {nh_len} (expected 4 or 16)"
+                        ),
+                    });
+                }
+            },
         }
     };
 
@@ -823,7 +1004,34 @@ fn decode_mp_reach_nlri(
             next_hop,
             announced: vec![],
             flowspec_announced: flowspec_rules,
+            evpn_announced: vec![],
         }));
+    }
+
+    // EVPN (AFI 25 / SAFI 70): NLRI is typed EVPN routes, not prefixes
+    if afi == Afi::L2Vpn && safi == Safi::Evpn {
+        let routes = crate::evpn::decode_evpn_nlri(nlri_bytes)?;
+        return Ok(PathAttribute::MpReachNlri(MpReachNlri {
+            afi,
+            safi,
+            next_hop,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: routes,
+        }));
+    }
+
+    // SAFI 70 (EVPN) is only defined for AFI 25 (L2VPN). Reject any other
+    // AFI explicitly so the unicast NLRI fallthrough below cannot
+    // misinterpret the typed EVPN payload as a prefix list.
+    if safi == Safi::Evpn {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!(
+                "MP_REACH_NLRI SAFI EVPN with non-L2VPN AFI {} (only AFI L2VPN supported)",
+                afi as u16
+            ),
+        });
     }
 
     let add_path = add_path_families.contains(&(afi, safi));
@@ -850,6 +1058,15 @@ fn decode_mp_reach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(nlri_bytes)?,
+        (Afi::L2Vpn, _) => {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "MP_REACH_NLRI L2VPN with unsupported SAFI {} (only EVPN supported)",
+                    safi as u8
+                ),
+            });
+        }
     };
 
     Ok(PathAttribute::MpReachNlri(MpReachNlri {
@@ -858,6 +1075,7 @@ fn decode_mp_reach_nlri(
         next_hop,
         announced,
         flowspec_announced: vec![],
+        evpn_announced: vec![],
     }))
 }
 
@@ -898,7 +1116,33 @@ fn decode_mp_unreach_nlri(
             safi,
             withdrawn: vec![],
             flowspec_withdrawn: flowspec_rules,
+            evpn_withdrawn: vec![],
         }));
+    }
+
+    // EVPN (AFI 25 / SAFI 70): withdrawn is typed EVPN routes, not prefixes
+    if afi == Afi::L2Vpn && safi == Safi::Evpn {
+        let routes = crate::evpn::decode_evpn_nlri(withdrawn_bytes)?;
+        return Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
+            afi,
+            safi,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: routes,
+        }));
+    }
+
+    // SAFI 70 (EVPN) is only defined for AFI 25 (L2VPN). Reject any other
+    // AFI explicitly so the unicast NLRI fallthrough below cannot
+    // misinterpret the typed EVPN payload as a prefix list.
+    if safi == Safi::Evpn {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: format!(
+                "MP_UNREACH_NLRI SAFI EVPN with non-L2VPN AFI {} (only AFI L2VPN supported)",
+                afi as u16
+            ),
+        });
     }
 
     let add_path = add_path_families.contains(&(afi, safi));
@@ -925,6 +1169,15 @@ fn decode_mp_unreach_nlri(
             })
             .collect(),
         (Afi::Ipv6, true) => crate::nlri::decode_ipv6_nlri_addpath(withdrawn_bytes)?,
+        (Afi::L2Vpn, _) => {
+            return Err(DecodeError::MalformedField {
+                message_type: "UPDATE",
+                detail: format!(
+                    "MP_UNREACH_NLRI L2VPN with unsupported SAFI {} (only EVPN supported)",
+                    safi as u8
+                ),
+            });
+        }
     };
 
     Ok(PathAttribute::MpUnreachNlri(MpUnreachNlri {
@@ -932,6 +1185,7 @@ fn decode_mp_unreach_nlri(
         safi,
         withdrawn,
         flowspec_withdrawn: vec![],
+        evpn_withdrawn: vec![],
     }))
 }
 
@@ -1175,6 +1429,23 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>, add_path: bool) {
         return;
     }
 
+    // EVPN: next-hop is the VTEP loopback IP (4 or 16 bytes), then EVPN NLRI
+    if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn {
+        match mp.next_hop {
+            IpAddr::V4(addr) => {
+                buf.push(4);
+                buf.extend_from_slice(&addr.octets());
+            }
+            IpAddr::V6(addr) => {
+                buf.push(16);
+                buf.extend_from_slice(&addr.octets());
+            }
+        }
+        buf.push(0); // Reserved
+        crate::evpn::encode_evpn_nlri(&mp.evpn_announced, buf);
+        return;
+    }
+
     match mp.next_hop {
         IpAddr::V4(addr) => {
             buf.push(4); // NH-Len
@@ -1210,6 +1481,12 @@ fn encode_mp_unreach_nlri(mp: &MpUnreachNlri, buf: &mut Vec<u8>, add_path: bool)
     // FlowSpec: encode FlowSpec NLRI rules
     if mp.safi == Safi::FlowSpec {
         crate::flowspec::encode_flowspec_nlri(&mp.flowspec_withdrawn, buf, mp.afi);
+        return;
+    }
+
+    // EVPN: encode EVPN NLRI routes
+    if mp.afi == Afi::L2Vpn && mp.safi == Safi::Evpn {
+        crate::evpn::encode_evpn_nlri(&mp.evpn_withdrawn, buf);
         return;
     }
 
@@ -1253,6 +1530,149 @@ fn encode_as_path(as_path: &AsPath, buf: &mut Vec<u8>, four_octet_as: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mp_reach_evpn_attribute_roundtrip() {
+        use crate::evpn::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+
+        let mp = MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![EvpnRoute::Imet(EvpnImet {
+                rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 0x64]),
+                ethernet_tag: EthernetTagId(100),
+                originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+            })],
+        };
+        let attr = PathAttribute::MpReachNlri(mp);
+
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(attr, decoded[0]);
+
+        let PathAttribute::MpReachNlri(dec) = &decoded[0] else {
+            panic!("not MP_REACH after decode");
+        };
+        assert_eq!(dec.afi, Afi::L2Vpn);
+        assert_eq!(dec.safi, Safi::Evpn);
+        assert_eq!(dec.evpn_announced.len(), 1);
+        assert!(matches!(dec.evpn_announced[0], EvpnRoute::Imet(_)));
+    }
+
+    #[test]
+    fn mp_unreach_evpn_attribute_roundtrip() {
+        use crate::evpn::{EthernetSegmentIdentifier, EvpnEs, EvpnRoute, RouteDistinguisher};
+
+        let mp = MpUnreachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            withdrawn: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![EvpnRoute::Es(EvpnEs {
+                rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 0x64]),
+                esi: EthernetSegmentIdentifier([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+                originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            })],
+        };
+        let attr = PathAttribute::MpUnreachNlri(mp);
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(attr, decoded[0]);
+    }
+
+    // ---- EVPN extended community typed accessors (RFC 7432 / 8365 / 9135) ---
+
+    #[test]
+    fn ext_comm_bgp_encapsulation_vxlan() {
+        let c = ExtendedCommunity::bgp_encapsulation(8); // VXLAN
+        assert_eq!(c.type_byte(), 0x03);
+        assert_eq!(c.subtype(), 0x0C);
+        assert_eq!(c.as_bgp_encapsulation(), Some(8));
+        // Wire layout: 4 bytes reserved + 2-byte tunnel type
+        let b = c.as_u64().to_be_bytes();
+        assert_eq!(b[2..6], [0, 0, 0, 0]);
+        assert_eq!(&b[6..8], &[0, 8]);
+        // Negative: other subtypes return None
+        assert_eq!(ExtendedCommunity::new(0).as_bgp_encapsulation(), None);
+    }
+
+    #[test]
+    fn ext_comm_mac_mobility_sticky_and_sequence() {
+        let m1 = ExtendedCommunity::mac_mobility(false, 42);
+        assert_eq!(m1.as_mac_mobility(), Some((false, 42)));
+        let m2 = ExtendedCommunity::mac_mobility(true, 12345);
+        assert_eq!(m2.as_mac_mobility(), Some((true, 12345)));
+        // Round-trip max sequence
+        let m3 = ExtendedCommunity::mac_mobility(true, u32::MAX);
+        assert_eq!(m3.as_mac_mobility(), Some((true, u32::MAX)));
+        assert_eq!(ExtendedCommunity::new(0).as_mac_mobility(), None);
+    }
+
+    #[test]
+    fn ext_comm_esi_label_flags_and_label() {
+        let e1 = ExtendedCommunity::esi_label(false, 10_000);
+        assert_eq!(e1.as_esi_label(), Some((false, 10_000)));
+        let e2 = ExtendedCommunity::esi_label(true, 0x00FF_FFFF);
+        assert_eq!(e2.as_esi_label(), Some((true, 0x00FF_FFFF)));
+    }
+
+    #[test]
+    fn ext_comm_es_import_rt_mac() {
+        let mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let e = ExtendedCommunity::es_import_rt(mac);
+        assert_eq!(e.as_es_import_rt(), Some(mac));
+        assert_eq!(e.type_byte(), 0x06);
+        assert_eq!(e.subtype(), 0x02);
+    }
+
+    #[test]
+    fn ext_comm_router_mac() {
+        let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+        let e = ExtendedCommunity::router_mac(mac);
+        assert_eq!(e.as_router_mac(), Some(mac));
+    }
+
+    #[test]
+    fn ext_comm_default_gateway_flag_only() {
+        let d = ExtendedCommunity::default_gateway();
+        assert!(d.as_default_gateway());
+        // Not a default gateway
+        assert!(!ExtendedCommunity::bgp_encapsulation(8).as_default_gateway());
+    }
+
+    /// Regression: Default Gateway is a flag-only community (RFC 7432).
+    /// Malformed advertisements that set non-zero bytes in the value
+    /// field must NOT be treated as default-gateway matches.
+    #[test]
+    fn ext_comm_default_gateway_rejects_nonzero_value() {
+        // Correct type/subtype (0x03/0x0D) but bogus value.
+        let malformed =
+            ExtendedCommunity::new(u64::from_be_bytes([0x03, 0x0D, 0, 0, 0, 0, 0, 0x01]));
+        assert!(
+            !malformed.as_default_gateway(),
+            "default-gateway accessor must require all-zero value bytes"
+        );
+        // Sanity: the clean form still passes.
+        assert!(ExtendedCommunity::default_gateway().as_default_gateway());
+    }
+
+    #[test]
+    fn ext_comm_accessors_return_none_on_unrelated_communities() {
+        let rt = ExtendedCommunity::new(u64::from_be_bytes([0x00, 0x02, 0xFD, 0xE8, 0, 0, 0, 100])); // RT:65000:100
+        assert_eq!(rt.as_bgp_encapsulation(), None);
+        assert_eq!(rt.as_mac_mobility(), None);
+        assert_eq!(rt.as_esi_label(), None);
+        assert_eq!(rt.as_es_import_rt(), None);
+        assert_eq!(rt.as_router_mac(), None);
+        assert!(!rt.as_default_gateway());
+    }
 
     #[test]
     fn origin_from_u8_roundtrip() {
@@ -1945,6 +2365,7 @@ mod tests {
                 ))),
             ],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -1968,6 +2389,7 @@ mod tests {
                 48,
             )))],
             flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
         };
         let attrs = vec![PathAttribute::MpUnreachNlri(mp.clone())];
 
@@ -1992,6 +2414,7 @@ mod tests {
                 16,
             )))],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2015,6 +2438,7 @@ mod tests {
                 16,
             )))],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2034,6 +2458,7 @@ mod tests {
             next_hop: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             announced: vec![],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         });
         assert_eq!(attr.type_code(), 14);
         // RFC 4760 §3: MP_REACH_NLRI is optional non-transitive
@@ -2049,6 +2474,7 @@ mod tests {
             safi: Safi::Unicast,
             withdrawn: vec![],
             flowspec_withdrawn: vec![],
+            evpn_withdrawn: vec![],
         });
         assert_eq!(attr.type_code(), 15);
         assert_eq!(attr.flags(), attr_flags::OPTIONAL);
@@ -2064,6 +2490,7 @@ mod tests {
             next_hop: IpAddr::V6("fe80::1".parse().unwrap()),
             announced: vec![],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2227,6 +2654,7 @@ mod tests {
                 prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
             }],
             flowspec_announced: vec![],
+            evpn_announced: vec![],
         };
         let attrs = vec![PathAttribute::MpReachNlri(mp.clone())];
 
@@ -2472,5 +2900,45 @@ mod tests {
     fn aspath_string_empty() {
         let p = AsPath { segments: vec![] };
         assert_eq!(p.to_aspath_string(), "");
+    }
+
+    /// Regression: SAFI 70 (EVPN) is only valid under AFI 25 (L2VPN).
+    /// Other AFIs with SAFI=Evpn must be rejected explicitly so the
+    /// unicast NLRI fallthrough never tries to parse the typed EVPN
+    /// payload as a prefix list.
+    #[test]
+    fn mp_reach_nlri_rejects_evpn_safi_with_non_l2vpn_afi() {
+        // AFI=Ipv4 (1), SAFI=Evpn (70), NH-len=4, NH=192.0.2.1, reserved=0,
+        // followed by an arbitrary EVPN-shaped byte (route type 3, len 0).
+        let bytes = vec![
+            0x00, 0x01, // AFI = Ipv4
+            70,   // SAFI = Evpn
+            4, 192, 0, 2, 1, // NH len + NH
+            0, // reserved
+            3, 0, // EVPN-style NLRI (route type 3, length 0)
+        ];
+        let err = decode_mp_reach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(detail.contains("SAFI EVPN"), "unexpected detail: {detail}");
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mp_unreach_nlri_rejects_evpn_safi_with_non_l2vpn_afi() {
+        let bytes = vec![
+            0x00, 0x02, // AFI = Ipv6
+            70,   // SAFI = Evpn
+            3, 0, // EVPN-style withdrawal (route type 3, length 0)
+        ];
+        let err = decode_mp_unreach_nlri(&bytes, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(detail.contains("SAFI EVPN"), "unexpected detail: {detail}");
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
     }
 }

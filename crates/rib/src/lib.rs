@@ -29,7 +29,7 @@ pub use best_path::{BestPathReason, best_path_cmp};
 pub use event::{RouteEvent, RouteEventType};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
-pub use route::{FlowSpecRoute, Route, RouteOrigin};
+pub use route::{EvpnRibRoute, FlowSpecRoute, Route, RouteOrigin};
 pub use update::{
     BestPathCandidate, ExplainAdvertisedRoute, ExplainBestPath, ExplainDecision, ExplainReason,
     MrtPeerEntry, MrtSnapshotData, OutboundRouteUpdate, RibUpdate,

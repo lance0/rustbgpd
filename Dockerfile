@@ -16,6 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /build/target/release/rustbgpd /usr/local/bin/rustbgpd
 COPY --from=builder /build/target/release/rustbgpctl /usr/local/bin/rustbgpctl
+COPY --from=builder /build/target/release/evpn-tester /usr/local/bin/evpn-tester
+COPY --from=builder /build/target/release/evpn-monitor /usr/local/bin/evpn-monitor
 COPY tests/interop/scripts/start-rustbgpd.sh /usr/local/bin/start-rustbgpd.sh
 
 RUN mkdir -p /var/lib/rustbgpd

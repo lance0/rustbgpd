@@ -3,14 +3,40 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
-    Ipv6Prefix, Origin, PathAttribute, Prefix, RpkiValidation, Safi,
+    Afi, AsPath, AsPathSegment, EthernetTagId, EvpnImet, EvpnRoute, FlowSpecComponent,
+    FlowSpecPrefix, FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix,
+    RouteDistinguisher, RpkiValidation, Safi,
 };
 use tokio::sync::oneshot;
 
 use super::*;
 use crate::event::RouteEventType;
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
+
+fn evpn_sendable() -> Vec<(Afi, Safi)> {
+    vec![(Afi::L2Vpn, Safi::Evpn)]
+}
+
+fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
+    let route = EvpnRoute::Imet(EvpnImet {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+        ethernet_tag: EthernetTagId(ethernet_tag),
+        originator_ip: IpAddr::V4(peer),
+    });
+    let key = route.key();
+    EvpnRibRoute {
+        route,
+        key,
+        next_hop: IpAddr::V4(peer),
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(vec![]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+    }
+}
 
 /// Create a dummy (unused) query channel receiver for tests.
 fn dummy_query_rx() -> mpsc::Receiver<RibUpdate> {
@@ -56,6 +82,14 @@ async fn query_received_routes(tx: &mpsc::Sender<RibUpdate>, peer: IpAddr) -> Ve
     })
     .await
     .unwrap();
+    reply_rx.await.unwrap()
+}
+
+async fn query_evpn_routes(tx: &mpsc::Sender<RibUpdate>) -> Vec<EvpnRibRoute> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
+        .await
+        .unwrap();
     reply_rx.await.unwrap()
 }
 
@@ -206,6 +240,8 @@ async fn routes_received_and_queried() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -264,6 +300,8 @@ async fn large_routes_received_batch_preserves_final_state() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -303,6 +341,8 @@ async fn query_channel_observes_partial_progress_during_large_batch() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -346,6 +386,8 @@ async fn peer_down_clears_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -386,6 +428,8 @@ async fn withdrawal_removes_route() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -396,6 +440,8 @@ async fn withdrawal_removes_route() {
         withdrawn: vec![(Prefix::V4(prefix1), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -434,6 +480,8 @@ async fn query_all_peers() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -447,6 +495,8 @@ async fn query_all_peers() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -485,6 +535,8 @@ async fn best_routes_returns_winner() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -496,6 +548,8 @@ async fn best_routes_returns_winner() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -529,6 +583,8 @@ async fn peer_down_promotes_second_best() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -539,6 +595,8 @@ async fn peer_down_promotes_second_best() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -575,6 +633,8 @@ async fn withdrawal_updates_best() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -585,6 +645,8 @@ async fn withdrawal_updates_best() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -596,6 +658,8 @@ async fn withdrawal_updates_best() {
         withdrawn: vec![(Prefix::V4(prefix), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -634,6 +698,8 @@ async fn different_best_per_prefix() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -647,6 +713,8 @@ async fn different_best_per_prefix() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -693,6 +761,8 @@ async fn peer_up_triggers_initial_table_dump() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -756,6 +826,8 @@ async fn route_change_distributes_to_peer() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -802,6 +874,8 @@ async fn single_best_send_normalizes_path_id_to_zero() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -847,6 +921,8 @@ async fn split_horizon_prevents_echo() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -898,6 +974,8 @@ async fn ibgp_route_not_sent_to_ibgp_peer() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -943,6 +1021,8 @@ async fn ibgp_route_sent_to_ebgp_peer() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -992,6 +1072,8 @@ async fn ebgp_route_sent_to_ibgp_peer() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1062,6 +1144,8 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1085,6 +1169,8 @@ async fn ibgp_split_horizon_withdraw_on_best_change() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1470,6 +1556,8 @@ async fn export_policy_blocks_denied() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1519,6 +1607,8 @@ async fn query_advertised_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1624,6 +1714,8 @@ async fn per_peer_export_policy() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1699,6 +1791,8 @@ async fn replace_peer_export_policy_resyncs_outbound_state() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1783,6 +1877,8 @@ async fn export_policy_match_next_hop_filters_route() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1873,6 +1969,8 @@ async fn explain_advertised_route_reports_policy_deny_without_mutation() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -1961,6 +2059,8 @@ async fn explain_advertised_route_reports_modifications() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2043,6 +2143,8 @@ async fn explain_advertised_route_reports_ipv6_next_hop_override() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2163,6 +2265,8 @@ async fn channel_full_marks_dirty_and_resyncs() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2189,6 +2293,8 @@ async fn channel_full_marks_dirty_and_resyncs() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2201,6 +2307,8 @@ async fn channel_full_marks_dirty_and_resyncs() {
         withdrawn: vec![(Prefix::V4(prefix1), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2305,6 +2413,8 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2317,6 +2427,8 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         withdrawn: vec![(Prefix::V4(prefix1), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2329,6 +2441,8 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2342,6 +2456,8 @@ async fn dirty_resync_not_starved_by_query_traffic() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2402,6 +2518,8 @@ async fn initial_dump_failure_leaves_adjribout_empty() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2462,6 +2580,8 @@ async fn initial_dump_failure_resyncs_via_timer() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2479,6 +2599,8 @@ async fn initial_dump_failure_resyncs_via_timer() {
             refresh_markers: vec![],
             flowspec_announce: vec![],
             flowspec_withdraw: vec![],
+            evpn_announce: vec![],
+            evpn_withdraw: vec![],
         })
         .await
         .unwrap();
@@ -2576,6 +2698,8 @@ async fn route_event_added_on_new_best() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2603,6 +2727,8 @@ async fn route_event_withdrawn_on_last_removed() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2617,6 +2743,8 @@ async fn route_event_withdrawn_on_last_removed() {
         withdrawn: vec![(Prefix::V4(prefix), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2647,6 +2775,8 @@ async fn route_event_best_changed_on_better_path() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2661,6 +2791,8 @@ async fn route_event_best_changed_on_better_path() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2691,6 +2823,8 @@ async fn multiple_subscribers_receive_same_events() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2721,6 +2855,8 @@ async fn route_event_withdrawn_carries_previous_peer() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2733,6 +2869,8 @@ async fn route_event_withdrawn_carries_previous_peer() {
         withdrawn: vec![(Prefix::V4(prefix), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2762,6 +2900,8 @@ async fn route_event_best_changed_carries_both_peers() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2774,6 +2914,8 @@ async fn route_event_best_changed_carries_both_peers() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2803,6 +2945,8 @@ async fn route_event_has_timestamp() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2836,6 +2980,8 @@ async fn route_event_added_has_no_previous_peer() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2868,6 +3014,8 @@ async fn route_event_carries_best_path_id() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2899,6 +3047,8 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -2954,6 +3104,8 @@ async fn loc_rib_gauge_tracks_best() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3010,6 +3162,8 @@ async fn adj_rib_out_gauge_tracks_advertised() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3052,6 +3206,8 @@ async fn query_loc_rib_count() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3099,6 +3255,8 @@ async fn query_advertised_count() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3192,6 +3350,8 @@ async fn distribute_changes_filters_unsendable_families() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3253,6 +3413,8 @@ async fn send_initial_table_filters_unsendable_families() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3333,6 +3495,8 @@ async fn dual_stack_peer_receives_both_families() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3379,6 +3543,8 @@ async fn send_initial_table_includes_flowspec_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![fs_route],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3430,6 +3596,8 @@ async fn route_refresh_flowspec_re_advertises_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![fs_route],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3491,6 +3659,8 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3515,6 +3685,8 @@ async fn enhanced_route_refresh_replacement_preserves_refreshed_route() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3557,6 +3729,8 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3580,6 +3754,8 @@ async fn enhanced_route_refresh_eorr_sweeps_unreplaced_route() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3621,6 +3797,8 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3641,6 +3819,8 @@ async fn enhanced_route_refresh_duplicate_borr_rebuilds_snapshot_safely() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3677,6 +3857,8 @@ async fn enhanced_route_refresh_eorr_without_active_state_is_ignored() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3717,6 +3899,8 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3740,6 +3924,8 @@ async fn enhanced_route_refresh_timeout_sweeps_unreplaced_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3781,6 +3967,8 @@ async fn enhanced_route_refresh_timeout_is_family_isolated() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3850,6 +4038,8 @@ async fn dirty_resync_retries_flowspec_updates() {
         withdrawn: vec![],
         flowspec_announced: vec![fs_route],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3907,6 +4097,8 @@ async fn gr_marks_stale_and_demotes_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3978,6 +4170,8 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
         withdrawn: vec![],
         flowspec_announced: vec![route_a],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -3992,6 +4186,8 @@ async fn gr_flowspec_eor_recomputes_and_redistributes() {
         withdrawn: vec![],
         flowspec_announced: vec![route_b],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4057,6 +4253,8 @@ async fn gr_eor_clears_stale() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4125,6 +4323,8 @@ async fn gr_timer_sweeps_stale_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4184,6 +4384,8 @@ async fn gr_peer_up_defers_stale_to_eor() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4277,6 +4479,8 @@ async fn gr_peer_up_timer_expires_sweeps_stale() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4356,6 +4560,8 @@ async fn gr_peer_down_aborts_gr() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4421,6 +4627,8 @@ async fn gr_withdraws_non_gr_family_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4483,6 +4691,8 @@ async fn llgr_gr_timer_promotes_to_llgr_stale() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4541,6 +4751,8 @@ async fn llgr_timer_sweeps_llgr_stale_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4604,6 +4816,8 @@ async fn llgr_eor_clears_llgr_stale() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4692,6 +4906,8 @@ async fn llgr_peer_down_aborts_llgr() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4754,6 +4970,8 @@ async fn llgr_without_peer_capability_falls_through_to_sweep() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4865,6 +5083,8 @@ async fn rr_client_route_reflected_to_all_ibgp() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -4959,6 +5179,8 @@ async fn rr_nonclient_route_reflected_to_clients_only() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5017,6 +5239,8 @@ async fn non_rr_ibgp_split_horizon_unchanged() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5070,6 +5294,8 @@ async fn rr_ebgp_route_to_all_ibgp() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5316,6 +5542,8 @@ async fn routes_validated_on_insert_with_vrp_table() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5357,6 +5585,8 @@ async fn rpki_cache_update_revalidates_existing_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5417,6 +5647,8 @@ async fn rpki_cache_update_changes_best_path() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5426,6 +5658,8 @@ async fn rpki_cache_update_changes_best_path() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5486,6 +5720,8 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5495,6 +5731,8 @@ async fn rpki_cache_update_invalid_demotes_best_path() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5539,6 +5777,8 @@ async fn rpki_no_table_all_not_found() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5595,6 +5835,8 @@ async fn rpki_cache_update_no_change_no_redistribution() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5712,6 +5954,8 @@ async fn multipath_send_advertises_multiple_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5726,6 +5970,8 @@ async fn multipath_send_advertises_multiple_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5790,6 +6036,8 @@ async fn multipath_send_respects_send_max() {
             withdrawn: vec![],
             flowspec_announced: vec![],
             flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
         })
         .await
         .unwrap();
@@ -5849,6 +6097,8 @@ async fn multipath_send_split_horizon() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5863,6 +6113,8 @@ async fn multipath_send_split_horizon() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5940,6 +6192,8 @@ async fn multipath_withdrawal_on_candidate_removal() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5957,6 +6211,8 @@ async fn multipath_withdrawal_on_candidate_removal() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -5971,6 +6227,8 @@ async fn multipath_withdrawal_on_candidate_removal() {
         withdrawn: vec![(Prefix::V4(prefix), 0)],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6008,6 +6266,8 @@ async fn single_best_peer_unaffected_by_multipath_config() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6022,6 +6282,8 @@ async fn single_best_peer_unaffected_by_multipath_config() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6106,6 +6368,8 @@ async fn multipath_peer_down_cleans_up_state() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6175,6 +6439,8 @@ async fn multipath_send_incremental_route_addition() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6194,6 +6460,8 @@ async fn multipath_send_incremental_route_addition() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6237,6 +6505,8 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6251,6 +6521,8 @@ async fn multipath_send_mixed_peers_single_and_multi() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6340,6 +6612,8 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6349,6 +6623,8 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6410,6 +6686,8 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6428,6 +6706,8 @@ async fn multipath_send_partial_negotiation_ipv4_only() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6498,6 +6778,8 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6516,6 +6798,8 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6560,6 +6844,10 @@ async fn multipath_send_partial_negotiation_ipv6_only() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "large end-to-end test covering many route-refresh edge cases"
+)]
 async fn route_refresh_partial_negotiation_respects_family_mode() {
     let (tx, rx) = mpsc::channel(64);
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
@@ -6586,6 +6874,8 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6604,6 +6894,8 @@ async fn route_refresh_partial_negotiation_respects_family_mode() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6689,6 +6981,8 @@ async fn multipath_send_max_one_uses_path_id_one() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6703,6 +6997,8 @@ async fn multipath_send_max_one_uses_path_id_one() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6814,6 +7110,8 @@ async fn multipath_all_candidates_denied_by_export_policy() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6828,6 +7126,8 @@ async fn multipath_all_candidates_denied_by_export_policy() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6863,6 +7163,8 @@ async fn mrt_snapshot_uses_adj_rib_in_routes_without_loc_rib_duplication() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6910,6 +7212,8 @@ async fn mrt_peer_metadata_retained_during_gr() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6959,6 +7263,8 @@ async fn explain_best_path_returns_candidates_without_winner() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -6969,6 +7275,8 @@ async fn explain_best_path_returns_candidates_without_winner() {
         withdrawn: vec![],
         flowspec_announced: vec![],
         flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
     })
     .await
     .unwrap();
@@ -7011,4 +7319,1240 @@ async fn explain_best_path_no_candidates() {
 
     drop(tx);
     handle.await.unwrap();
+}
+
+/// Regression: EVPN routes learned from a peer that goes down must be
+/// withdrawn from remaining peers. Before this fix, `handle_peer_down` removed
+/// the dead peer's Adj-RIB-In but never called `recompute_and_distribute_evpn`,
+/// leaving the Loc-RIB advertising stale MAC/IP reachability.
+#[tokio::test]
+async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
+    let (tx, rx) = mpsc::channel(64);
+    // Cluster-ID is required for iBGP→iBGP reflection (RFC 4456); without it,
+    // should_suppress_ibgp_inner falls back to standard split-horizon.
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Register target as RR client for L2VPN/EVPN (iBGP, same AS).
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Register source as an RR client too — the RibManager needs an outbound
+    // entry for the source or it skips reflection evaluation entirely; the
+    // source's own announces will round-trip to itself but split-horizon
+    // suppresses them at the stage step.
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    // Source advertises a Type 3 IMET route.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Target receives the reflected EVPN announce.
+    let announce = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("target should receive EVPN announce within 2s")
+        .expect("outbound channel open");
+    assert_eq!(announce.evpn_announce.len(), 1);
+    assert_eq!(announce.evpn_announce[0].key, imet_key);
+    assert!(
+        announce.evpn_withdraw.is_empty(),
+        "announce phase should have no withdrawals"
+    );
+
+    // Source goes down.
+    tx.send(RibUpdate::PeerDown { peer: source }).await.unwrap();
+
+    // Target should receive a withdrawal for that EVPN key.
+    let withdraw = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("target should receive EVPN withdrawal within 2s")
+        .expect("outbound channel still open");
+    assert!(
+        withdraw.evpn_announce.is_empty(),
+        "peer-down should not produce announces"
+    );
+    assert_eq!(
+        withdraw.evpn_withdraw,
+        vec![imet_key],
+        "target must see the withdrawal for the dead peer's EVPN route"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: an RR must not reflect an EVPN route back to the peer
+/// that originated it (source-peer split horizon). Prior to the fix the
+/// distribution path went `loc_rib.get_evpn()` → RR suppression check →
+/// stage for all peers including the source. FRR dropped the
+/// self-reflection via `ORIGINATOR_ID`, but RFC 4456 hygiene says we
+/// shouldn't emit it in the first place.
+#[tokio::test]
+async fn evpn_is_not_reflected_back_to_source_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let other = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Source is an RR client.
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    // A second RR client so reflection has somewhere to go.
+    let (other_out_tx, mut other_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: other,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: other_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut other_out_rx).await;
+
+    // Source advertises a Type 3 IMET.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // The "other" client must receive a reflected announce.
+    let other_announce = tokio::time::timeout(Duration::from_secs(2), other_out_rx.recv())
+        .await
+        .expect("other peer should receive reflection within 2s")
+        .expect("outbound channel still open");
+    assert_eq!(other_announce.evpn_announce.len(), 1);
+    assert_eq!(other_announce.evpn_announce[0].key, imet_key);
+
+    // The source must NOT receive its own route back. A short wait is
+    // enough — if the bug exists, the bad announce fires on the same
+    // distribute_changes as the reflection to "other".
+    match tokio::time::timeout(Duration::from_millis(300), source_out_rx.recv()).await {
+        Err(_) => {
+            // Timeout — correct behavior. Source saw nothing.
+        }
+        Ok(Some(msg)) => {
+            assert!(
+                msg.evpn_announce.is_empty(),
+                "source peer must not receive its own EVPN route back (got {:?})",
+                msg.evpn_announce,
+            );
+        }
+        Ok(None) => panic!("source outbound channel closed unexpectedly"),
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: when an EVPN update fails to send (outbound channel full),
+/// the peer is marked dirty; a later `distribute_changes` must resync EVPN
+/// routes, not only unicast / `FlowSpec`. Before this fix, dirty resync
+/// rebuilt unicast prefixes + `FlowSpec` rules but never gathered EVPN keys
+/// or staged EVPN routes, so EVPN deltas could be silently dropped.
+#[tokio::test]
+async fn dirty_resync_includes_evpn_routes_after_channel_full() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    // Target's outbound channel is size 1 — after the EoR, one more slot.
+    // We'll fill it, then the EVPN announce will fail and mark target dirty.
+    let (out_tx, mut out_rx) = mpsc::channel(1);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Source as RR client so reflection isn't suppressed.
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    // Fill the target's outbound channel by NOT draining — send two EVPN
+    // announces in a row. The first lands in the channel (queue size 1);
+    // the second fails `try_send` and marks target dirty.
+    let imet1 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet1_key = imet1.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet1],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Give the RibManager a tick to process and fill the channel.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Second EVPN route arrives; target's channel is full → target goes dirty.
+    let imet2 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 200);
+    let imet2_key = imet2.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet2],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Drain the first queued update to make room, then drain anything the
+    // resync timer delivers.
+    let first = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("first EVPN announce must arrive")
+        .expect("channel open");
+    assert_eq!(first.evpn_announce.len(), 1);
+    assert_eq!(first.evpn_announce[0].key, imet1_key);
+
+    // Collect EVPN announces until we see imet2_key — the dirty-resync path
+    // must eventually deliver it. Time out after 10s (resync timer is faster).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_imet2 = false;
+    while tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
+            Ok(Some(update)) => {
+                if update.evpn_announce.iter().any(|r| r.key == imet2_key) {
+                    saw_imet2 = true;
+                    break;
+                }
+            }
+            Ok(None) => panic!("outbound channel closed unexpectedly"),
+            Err(_) => {}
+        }
+    }
+    assert!(
+        saw_imet2,
+        "dirty resync must eventually deliver the second EVPN announce (imet2) to the target peer"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// EVPN GR/LLGR tests (Gate 2) — mirror the unicast + FlowSpec GR/LLGR suite.
+// Each test spawns a RibManager with a cluster-id so iBGP reflection works,
+// registers two peers (source + target, both RR clients), and drives
+// RibUpdate events to exercise the stale lifecycle.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn evpn_gr_marks_stale_and_demotes_routes() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Source enters graceful restart
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1, "EVPN route should remain in Loc-RIB");
+    assert!(best[0].is_stale, "EVPN route should be marked stale");
+    assert!(!best[0].is_llgr_stale);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_gr_eor_clears_stale() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        restart_time: 120,
+        stale_routes_time: 360,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert!(best[0].is_stale);
+
+    tx.send(RibUpdate::EndOfRib {
+        peer: source,
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(!best[0].is_stale, "EoR should clear stale flag");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_gr_timer_sweeps_stale_routes() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // GR without LLGR — stale routes should be purged on timer expiry.
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: false,
+        peer_llgr_families: vec![],
+        llgr_stale_time: 0,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(best[0].is_stale);
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+
+    let best = query_evpn_routes(&tx).await;
+    assert!(
+        best.is_empty(),
+        "GR timer expiry must sweep stale EVPN routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_llgr_gr_timer_promotes_to_llgr_stale() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        restart_time: 5,
+        stale_routes_time: 10,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 7200,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert!(best[0].is_stale);
+    assert!(!best[0].is_llgr_stale);
+
+    // Advance past GR timer — promotes to LLGR-stale
+    tokio::time::advance(Duration::from_secs(6)).await;
+    tokio::task::yield_now().await;
+
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1, "EVPN route retained during LLGR");
+    assert!(!best[0].is_stale);
+    assert!(best[0].is_llgr_stale);
+    // LLGR_STALE community injected locally
+    assert!(
+        best[0]
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE),
+        "promoted EVPN route must carry LLGR_STALE community"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_llgr_timer_sweeps_llgr_stale_routes() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            forwarding_preserved: false,
+            stale_time: 10,
+        }],
+        llgr_stale_time: 10,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert!(best[0].is_stale);
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    let best = query_evpn_routes(&tx).await;
+    assert!(best[0].is_llgr_stale);
+
+    tokio::time::advance(Duration::from_secs(11)).await;
+    tokio::task::yield_now().await;
+
+    let best = query_evpn_routes(&tx).await;
+    assert!(
+        best.is_empty(),
+        "LLGR timer expiry must sweep LLGR-stale EVPN routes"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_llgr_eor_clears_llgr_stale() {
+    tokio::time::pause();
+
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    })
+    .await
+    .unwrap();
+
+    // Force the manager to process PeerGracefulRestart before advancing time
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(best[0].is_stale);
+
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    let best = query_evpn_routes(&tx).await;
+    assert!(best[0].is_llgr_stale);
+    assert!(
+        best[0]
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE)
+    );
+
+    // EoR during LLGR phase: clears is_llgr_stale + strips locally-injected
+    // LLGR_STALE community
+    tx.send(RibUpdate::EndOfRib {
+        peer: source,
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(!best[0].is_llgr_stale, "LLGR-stale flag must be cleared");
+    assert!(
+        !best[0]
+            .communities()
+            .contains(&rustbgpd_wire::COMMUNITY_LLGR_STALE),
+        "locally-injected LLGR_STALE community must be stripped"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
+    use rustbgpd_wire::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+
+    tokio::time::pause();
+
+    // Build an EVPN route carrying COMMUNITY_NO_LLGR so it must be dropped
+    // when the GR timer expires rather than promoted to LLGR-stale.
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let route = EvpnRoute::Imet(EvpnImet {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+        ethernet_tag: EthernetTagId(100),
+        originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+    });
+    let key = route.key();
+    let imet = EvpnRibRoute {
+        route,
+        key,
+        next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        attributes: Arc::new(vec![PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_NO_LLGR,
+        ])]),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        is_stale: false,
+        is_llgr_stale: false,
+    };
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tx.send(RibUpdate::PeerGracefulRestart {
+        peer: source,
+        restart_time: 2,
+        stale_routes_time: 5,
+        gr_families: vec![(Afi::L2Vpn, Safi::Evpn)],
+        peer_llgr_capable: true,
+        peer_llgr_families: vec![rustbgpd_wire::LlgrFamily {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            forwarding_preserved: false,
+            stale_time: 3600,
+        }],
+        llgr_stale_time: 3600,
+    })
+    .await
+    .unwrap();
+
+    // Force the manager to process PeerGracefulRestart before advancing time
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1);
+    assert!(best[0].is_stale);
+
+    // Advance past GR timer — NO_LLGR route must be removed, not promoted.
+    tokio::time::advance(Duration::from_secs(3)).await;
+    tokio::task::yield_now().await;
+    let best = query_evpn_routes(&tx).await;
+    assert!(
+        best.is_empty(),
+        "NO_LLGR EVPN route must be dropped on GR timer expiry"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Gate 6: controller-driven EVPN injection. `InjectEvpn` places a
+/// `RouteOrigin::Local` EVPN route into the RR's Loc-RIB and reflects
+/// it to peers negotiating L2VPN/EVPN — same shape as `InjectFlowSpec`.
+#[tokio::test]
+async fn inject_evpn_reflects_to_peer() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    // Construct an EVPN Type 3 IMET anchored on a synthetic local
+    // originator (0.0.0.0, matches LOCAL_PEER in the manager).
+    let mut imet = make_evpn_imet(Ipv4Addr::UNSPECIFIED, 100);
+    imet.origin_type = crate::route::RouteOrigin::Local;
+    let injected_key = imet.key;
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::InjectEvpn {
+        route: imet,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx
+        .await
+        .expect("inject reply")
+        .expect("inject must succeed");
+
+    // Peer must see the reflected local route as an announce.
+    let msg = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("peer should receive the injected route within 2s")
+        .expect("outbound channel open");
+    assert_eq!(msg.evpn_announce.len(), 1);
+    assert_eq!(msg.evpn_announce[0].key, injected_key);
+
+    // Withdraw through the same channel; peer must see the retraction.
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawEvpn {
+        key: injected_key,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx
+        .await
+        .expect("withdraw reply")
+        .expect("withdraw must succeed");
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("peer should receive withdraw within 2s")
+        .expect("outbound channel open");
+    assert!(msg.evpn_announce.is_empty());
+    assert_eq!(msg.evpn_withdraw, vec![injected_key]);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Withdrawing an unknown EVPN key surfaces a user-visible error
+/// (controller got a bad route identifier).
+#[tokio::test]
+async fn withdraw_evpn_unknown_key_returns_error() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let fake_key = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 999).key;
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::WithdrawEvpn {
+        key: fake_key,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    let result = reply_rx.await.expect("withdraw reply");
+    assert!(result.is_err(), "unknown key must return an error");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: a peer that joins AFTER the EVPN Loc-RIB has been
+/// populated must receive the existing routes in its initial dump.
+/// Prior to the fix, `send_initial_table` never called
+/// `stage_evpn_routes` and hardcoded `evpn_announce: vec![]`, so a
+/// late-joining VTEP saw an EVPN End-of-RIB with zero routes and
+/// cleared any stale state — operating with no EVPN reachability for
+/// the existing fabric until unrelated RIB churn forced redistribution.
+/// The M30-M33 harnesses miss this because they bring up peers before
+/// any EVPN advertisements; production VTEPs reconnect into a
+/// converged fabric all the time.
+#[tokio::test]
+async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(rx, dummy_query_rx(), None, cluster_id, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let early = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let (early_out_tx, mut early_out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: early,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: early_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut early_out_rx).await;
+
+    // Early peer advertises a Type 3 IMET — this populates the RR's
+    // EVPN Loc-RIB before the late peer connects.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer: early,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Drain side-effects so the early peer's reflection (if any) is
+    // processed before we register the late peer.
+    let _ = query_evpn_routes(&tx).await;
+
+    // Now a late-joining peer connects to the same RR.
+    let late = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let (late_out_tx, mut late_out_rx) = mpsc::channel(16);
+    tx.send(RibUpdate::PeerUp {
+        peer: late,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: late_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+
+    // First message to the late peer must be the initial dump carrying
+    // the existing EVPN route. Without the fix this is just an empty
+    // EoR and the route is silently absent.
+    let msg = tokio::time::timeout(Duration::from_secs(2), late_out_rx.recv())
+        .await
+        .expect("late peer should receive an outbound update within 2s")
+        .expect("outbound channel open");
+
+    assert_eq!(
+        msg.evpn_announce.len(),
+        1,
+        "late-joining peer must see the existing EVPN route in initial dump"
+    );
+    assert_eq!(msg.evpn_announce[0].key, imet_key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: RFC 7313 Enhanced Route Refresh on the L2VPN/EVPN family
+/// must remove re-advertised keys from the per-peer stale set, otherwise
+/// `EoRR` sweeps every reflected EVPN route off the RIB. The unicast and
+/// `FlowSpec` chunks already do this; the EVPN chunks were missing the
+/// hook entirely.
+#[tokio::test]
+async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+
+    // Stage 1: peer advertises one EVPN Type 3 IMET route.
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    let imet_key = imet.key;
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet.clone()],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Stage 2: peer initiates ERR for L2VPN/EVPN. The manager snapshots
+    // imet_key into refresh_stale_evpn[peer] at this point.
+    tx.send(RibUpdate::BeginRouteRefresh {
+        peer,
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+
+    // Quiesce the manager so the BoRR snapshot lands before the
+    // re-advertisement races it.
+    let _drain = query_evpn_routes(&tx).await;
+
+    // Stage 3: peer re-advertises the same key — must remove it from
+    // the stale set. Without the fix this is a no-op on the stale set.
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Stage 4: peer ends the refresh window. EoRR sweeps anything left
+    // in the stale set; with the fix that set is empty, so the route
+    // survives. Without the fix, the route gets withdrawn here.
+    tx.send(RibUpdate::EndRouteRefresh {
+        peer,
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+    })
+    .await
+    .unwrap();
+
+    let best = query_evpn_routes(&tx).await;
+    assert_eq!(best.len(), 1, "refreshed EVPN route must survive EoRR");
+    assert_eq!(best[0].key, imet_key);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: EVPN export-policy `RouteModifications` (community add,
+/// `LocalPref` override, etc.) must be applied to the announced route.
+/// Before the fix, `evaluate_chain`'s result was checked for Permit/Deny
+/// but `result.modifications` was discarded, so RT/community/`LocalPref`
+/// rewrite policy silently had no effect on EVPN exports.
+#[tokio::test]
+#[expect(clippy::too_many_lines)]
+async fn evpn_export_policy_applies_modifications() {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+
+    // Permit-all with a community-add side effect.
+    let added_community: u32 = (65000u32 << 16) | 0x3E7;
+    let mut mods = RouteModifications::default();
+    mods.communities_add.push(added_community);
+    let export_policy = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: mods,
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(export_policy),
+        cluster_id,
+        BgpMetrics::new(),
+    );
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let announce = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("target should receive EVPN announce within 2s")
+        .expect("outbound channel open");
+    assert_eq!(announce.evpn_announce.len(), 1);
+
+    let attrs = announce.evpn_announce[0].attributes.as_ref();
+    let comms_attr = attrs
+        .iter()
+        .find_map(|a| {
+            if let PathAttribute::Communities(c) = a {
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .expect("export policy must add Communities attribute when modifications include communities_add");
+    assert!(
+        comms_attr.contains(&added_community),
+        "added community {added_community:#x} must appear on the reflected EVPN route"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: `PendingRoutesReceived::has_more()` previously omitted
+/// the EVPN iterators, so a `RoutesReceived` carrying more than
+/// `ROUTES_RECEIVED_CHUNK_SIZE` EVPN routes had everything past the
+/// first chunk silently dropped at distribution.rs's `if has_more()
+/// push_front` re-enqueue site. This test drains a 2-chunk-sized batch
+/// of EVPN announces and verifies every route appears in the chunk
+/// stream.
+#[test]
+fn pending_routes_received_drains_full_evpn_announce_batch() {
+    let total = ROUTES_RECEIVED_CHUNK_SIZE * 2 + 7;
+    let peer = Ipv4Addr::new(192, 0, 2, 1);
+    let evpn_announced: Vec<EvpnRibRoute> = (0..u32::try_from(total).unwrap())
+        .map(|tag| make_evpn_imet(peer, tag))
+        .collect();
+
+    let mut pending = PendingRoutesReceived::new(
+        IpAddr::V4(peer),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        evpn_announced,
+        vec![],
+    );
+
+    let mut drained: usize = 0;
+    let mut last_was_evpn = false;
+    while let Some(chunk) = pending.next_chunk() {
+        match chunk {
+            PendingRouteChunk::EvpnAnnounced(routes) => {
+                drained += routes.len();
+                last_was_evpn = true;
+            }
+            PendingRouteChunk::EvpnWithdrawn(routes) => {
+                drained += routes.len();
+                last_was_evpn = true;
+            }
+            _ => last_was_evpn = false,
+        }
+    }
+    assert!(last_was_evpn, "final chunk must be EVPN");
+    assert_eq!(
+        drained, total,
+        "every EVPN route must be drained; has_more() must keep the batch alive"
+    );
+    assert!(
+        !pending.has_more(),
+        "after full drain, has_more() must report false"
+    );
+}
+
+/// Regression: same drain check for EVPN withdrawals, since they also
+/// flow through the `evpn_withdrawn` iterator and `has_more()`.
+#[test]
+fn pending_routes_received_drains_full_evpn_withdraw_batch() {
+    let total = ROUTES_RECEIVED_CHUNK_SIZE + 1;
+    let peer = Ipv4Addr::new(192, 0, 2, 2);
+    let withdrawn: Vec<rustbgpd_wire::EvpnRouteKey> = (0..u32::try_from(total).unwrap())
+        .map(|tag| make_evpn_imet(peer, tag).key)
+        .collect();
+
+    let mut pending = PendingRoutesReceived::new(
+        IpAddr::V4(peer),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        withdrawn,
+    );
+
+    let mut drained: usize = 0;
+    while let Some(chunk) = pending.next_chunk() {
+        if let PendingRouteChunk::EvpnWithdrawn(keys) = chunk {
+            drained += keys.len();
+        }
+    }
+    assert_eq!(drained, total);
+    assert!(!pending.has_more());
 }

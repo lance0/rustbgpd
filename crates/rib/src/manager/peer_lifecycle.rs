@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
 
 use rustbgpd_policy::PolicyChain;
-use rustbgpd_wire::{FlowSpecRule, Prefix};
+use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -36,18 +36,25 @@ impl RibManager {
             let count = rib.len();
             let fs_affected: HashSet<FlowSpecRule> =
                 rib.iter_flowspec().map(|r| r.rule.clone()).collect();
+            let evpn_affected: HashSet<EvpnRouteKey> = rib.iter_evpn().map(|r| r.key).collect();
             debug!(%peer, cleared = count, "peer down — rib cleared");
             self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
+            self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
             let changed = self.recompute_best(&affected);
             self.distribute_changes(&changed, &affected);
             if !fs_affected.is_empty() {
                 self.recompute_and_distribute_flowspec(&fs_affected);
+            }
+            if !evpn_affected.is_empty() {
+                self.recompute_and_distribute_evpn(&evpn_affected);
             }
         }
 
         self.adj_ribs_out.remove(&peer);
         self.metrics
             .set_adj_rib_out_prefixes(&peer.to_string(), "all", 0);
+        self.metrics
+            .set_adj_rib_out_prefixes(&peer.to_string(), "evpn", 0);
         self.outbound_peers.remove(&peer);
         self.peer_export_policies.remove(&peer);
         self.peer_sendable_families.remove(&peer);
@@ -142,6 +149,8 @@ impl RibManager {
         let mut nh_override_flags: Vec<Option<rustbgpd_policy::NextHopAction>> = Vec::new();
         let mut fs_announce = Vec::new();
         let mut fs_withdraw = Vec::new();
+        let mut evpn_announce = Vec::new();
+        let mut evpn_withdraw = Vec::new();
         let export_pol = self.export_policy_for(peer).cloned();
         let sendable = self.peer_sendable_families.get(&peer).cloned();
         let target_is_ebgp = self.peer_is_ebgp.get(&peer).copied().unwrap_or(true);
@@ -238,6 +247,31 @@ impl RibManager {
             );
         }
 
+        // EVPN initial dump — without this, peers that join after the
+        // fabric has converged see an EoR with zero EVPN routes and
+        // operate with no EVPN reachability until unrelated RIB churn
+        // forces redistribution. Mirrors the FlowSpec staging block.
+        let all_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> =
+            self.loc_rib.iter_evpn().map(|route| route.key).collect();
+        if !all_evpn_keys.is_empty() {
+            Self::stage_evpn_routes(
+                loc_rib,
+                &initial_view,
+                &self.peer_is_rr_client,
+                &all_evpn_keys,
+                peer,
+                target_peer_asn,
+                target_peer_group,
+                target_is_ebgp,
+                target_is_rr_client,
+                cluster_id,
+                sendable.as_ref(),
+                export_pol.as_ref(),
+                &mut evpn_announce,
+                &mut evpn_withdraw,
+            );
+        }
+
         // Determine EoR families from this peer's sendable families
         let eor_families = self
             .peer_sendable_families
@@ -248,7 +282,9 @@ impl RibManager {
         if (!announce.is_empty()
             || !withdraw.is_empty()
             || !fs_announce.is_empty()
-            || !fs_withdraw.is_empty())
+            || !fs_withdraw.is_empty()
+            || !evpn_announce.is_empty()
+            || !evpn_withdraw.is_empty())
             && !self.try_send_and_commit_outbound_update(
                 peer,
                 nh_override_flags,
@@ -258,6 +294,8 @@ impl RibManager {
                 vec![],
                 fs_announce,
                 fs_withdraw,
+                evpn_announce,
+                evpn_withdraw,
             )
         {
             warn!(%peer, "outbound channel full or closed during initial dump — marking dirty");
@@ -281,6 +319,8 @@ impl RibManager {
                 refresh_markers: vec![],
                 flowspec_announce: vec![],
                 flowspec_withdraw: vec![],
+                evpn_announce: vec![],
+                evpn_withdraw: vec![],
             };
             if tx.try_send(eor).is_err() {
                 warn!(%peer, "outbound channel full — `EoR` deferred");

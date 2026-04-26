@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::{FlowSpecRule, Prefix};
+use rustbgpd_wire::{EvpnRouteKey, FlowSpecRule, Prefix};
 use smallvec::SmallVec;
 
-use crate::route::{FlowSpecRoute, Route};
+use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Per-peer Adj-RIB-Out: routes advertised to a specific peer.
 ///
@@ -19,6 +19,8 @@ pub struct AdjRibOut {
     prefix_path_ids: HashMap<Prefix, SmallVec<[u32; 1]>>,
     /// `FlowSpec` routes advertised to this peer (always single-best, `path_id=0`).
     flowspec_routes: HashMap<FlowSpecRule, FlowSpecRoute>,
+    /// EVPN routes advertised to this peer, keyed by RFC 7432 route identity.
+    evpn_routes: HashMap<EvpnRouteKey, EvpnRibRoute>,
 }
 
 impl AdjRibOut {
@@ -39,6 +41,7 @@ impl AdjRibOut {
             routes: HashMap::with_capacity(capacity),
             prefix_path_ids: HashMap::with_capacity(capacity),
             flowspec_routes: HashMap::new(),
+            evpn_routes: HashMap::new(),
         }
     }
 
@@ -105,10 +108,13 @@ impl AdjRibOut {
             .map_or(&[], SmallVec::as_slice)
     }
 
-    /// Remove all advertised routes.
+    /// Remove every advertised route — unicast, `FlowSpec`, EVPN — and
+    /// the secondary prefix index.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_path_ids.clear();
+        self.flowspec_routes.clear();
+        self.evpn_routes.clear();
     }
 
     /// Return the number of advertised routes.
@@ -155,6 +161,35 @@ impl AdjRibOut {
     /// Remove all advertised `FlowSpec` routes.
     pub fn clear_flowspec(&mut self) {
         self.flowspec_routes.clear();
+    }
+
+    // --- EVPN methods (RFC 7432) ---
+
+    /// Insert or replace an advertised EVPN route.
+    pub fn insert_evpn(&mut self, route: EvpnRibRoute) {
+        self.evpn_routes.insert(route.key, route);
+    }
+
+    /// Remove an EVPN route by key. Returns `true` if it existed.
+    pub fn remove_evpn(&mut self, key: &EvpnRouteKey) -> bool {
+        self.evpn_routes.remove(key).is_some()
+    }
+
+    /// Look up an EVPN route by key.
+    #[must_use]
+    pub fn get_evpn(&self, key: &EvpnRouteKey) -> Option<&EvpnRibRoute> {
+        self.evpn_routes.get(key)
+    }
+
+    /// Iterate over all advertised EVPN routes.
+    pub fn iter_evpn(&self) -> impl Iterator<Item = &EvpnRibRoute> {
+        self.evpn_routes.values()
+    }
+
+    /// Return the number of advertised EVPN routes.
+    #[must_use]
+    pub fn evpn_len(&self) -> usize {
+        self.evpn_routes.len()
     }
 }
 

@@ -1,0 +1,39 @@
+# M33 — EVPN scale validation: rustbgpd as Route Reflector for 3 peers.
+# 2 testers originate 25k Type 2 routes each; 1 monitor observes the
+# reflected 50k set. All peers are iBGP RR clients.
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+cluster_id = "10.0.0.100"
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.1.1.2"
+remote_asn = 65000
+description = "tester-a"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.1.2.2"
+remote_asn = 65000
+description = "tester-b"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true
+
+[[neighbors]]
+address = "10.1.3.2"
+remote_asn = 65000
+description = "monitor"
+hold_time = 180
+families = ["l2vpn_evpn"]
+route_reflector_client = true

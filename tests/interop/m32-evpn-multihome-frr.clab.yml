@@ -1,0 +1,92 @@
+# Containerlab topology: rustbgpd EVPN RR ↔ 3× FRR VTEPs with shared ESI
+# (M32 — EVPN multi-homing Type 1 EAD + Type 4 ES reflection)
+#
+# Extends the M30/M31 harness with EVPN multi-homing (RFC 7432 §8,
+# RFC 8584). VTEP-A and VTEP-C share an Ethernet Segment via identical
+# `evpn mh es-id 1` + `evpn mh es-sys-mac`, so both originate Type 4 ES
+# and Type 1 EAD routes for the same 10-byte ESI. VTEP-B observes the
+# reflected routes from both peers and its DF election runs
+# independently over the reflected inputs.
+#
+# rustbgpd's role here is control-plane only: reflect Type 1 and Type 4
+# routes unchanged between the three clients. DF election is the VTEPs'
+# responsibility — this test does not assert on election outcomes, just
+# that the reflector does not mutate or drop the routes that feed them.
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65000, RR cluster_id 10.0.0.100)
+#     +- iBGP L2VPN/EVPN -- VTEP-A (10.0.0.2, ES-id 1, ES-SYS-MAC aa:...)
+#     +- iBGP L2VPN/EVPN -- VTEP-B (10.0.1.2, no ES — observer)
+#     +- iBGP L2VPN/EVPN -- VTEP-C (10.0.2.2, ES-id 1, ES-SYS-MAC aa:...)
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m32-evpn-multihome-frr.clab.yml
+#   bash tests/interop/scripts/test-m32-evpn-multihome-frr.sh
+#   containerlab destroy -t tests/interop/m32-evpn-multihome-frr.clab.yml
+
+name: m32-evpn-multihome-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m32-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.0.2.1/24 dev eth3
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    vtep-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m32-vtep-a.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-mh.sh:/usr/local/bin/start-frr-vtep-mh.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-mh.sh 10.0.0.2 100 1 aa:bb:cc:dd:ee:ff
+
+    vtep-b:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m32-vtep-b.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.1.2 100
+
+    vtep-c:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m32-vtep-c.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-mh.sh:/usr/local/bin/start-frr-vtep-mh.sh:ro
+      exec:
+        - ip addr add 10.0.2.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-mh.sh 10.0.2.2 100 1 aa:bb:cc:dd:ee:ff
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "vtep-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "vtep-b:eth1"]
+    - endpoints: ["rustbgpd:eth3", "vtep-c:eth1"]
+
+# Subnet A: 10.0.0.0/24 — rustbgpd (10.0.0.1) <-> VTEP-A (10.0.0.2)
+# Subnet B: 10.0.1.0/24 — rustbgpd (10.0.1.1) <-> VTEP-B (10.0.1.2)
+# Subnet C: 10.0.2.0/24 — rustbgpd (10.0.2.1) <-> VTEP-C (10.0.2.2)
+# Shared ESI: ES Type 0 derived from es-sys-mac aa:bb:cc:dd:ee:ff + es-id 1

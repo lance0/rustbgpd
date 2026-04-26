@@ -1,0 +1,79 @@
+# M33 — EVPN Route Reflector scale validation
+#
+# Gate 5 of docs/evpn-enablement.md. Validates that rustbgpd's EVPN RR
+# sustains the "production-ready at 10k+ MAC scale" claim: 50k Type 2
+# routes flowed through the RR to a third-party observer, with no drops,
+# no session flaps, and measurable convergence.
+#
+# Topology (three point-to-point /30 subnets so there's no shared L2):
+#   rustbgpd (AS 65000, cluster-id 10.0.0.100) — the RR, router-id 10.0.0.1
+#     ├── eth1 10.1.1.1/30 ── tester-a (10.1.1.2, router-id 10.0.0.11) — 25k Type 2
+#     ├── eth2 10.1.2.1/30 ── tester-b (10.1.2.2, router-id 10.0.0.12) — 25k Type 2
+#     └── eth3 10.1.3.1/30 ── monitor  (10.1.3.2, router-id 10.0.0.20) — observer, expects 50k
+#
+# All three peers are RR clients. The monitor receives both testers'
+# routes reflected through rustbgpd; its Established-to-50k-received
+# time is the convergence number.
+#
+# Testers + monitor run the evpn-load crate's binaries, baked into the
+# rustbgpd:dev image. That keeps the load generator fully owned by this
+# repo — no third-party daemon is in the measurement path.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m33-evpn-scale.clab.yml
+#   bash tests/interop/scripts/test-m33-evpn-scale.sh
+#   containerlab destroy -t tests/interop/m33-evpn-scale.clab.yml --cleanup
+
+name: m33-evpn-scale
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m33-scale.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.1.1.1/30 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.1.2.1/30 dev eth2
+        - ip link set eth2 up
+        - ip addr add 10.1.3.1/30 dev eth3
+        - ip link set eth3 up
+      env:
+        RUST_LOG: info
+
+    tester-a:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.1.1.2/30 dev eth1
+        - ip link set eth1 up
+
+    tester-b:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.1.2.2/30 dev eth1
+        - ip link set eth1 up
+
+    monitor:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.1.3.2/30 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "tester-a:eth1"]
+    - endpoints: ["rustbgpd:eth2", "tester-b:eth1"]
+    - endpoints: ["rustbgpd:eth3", "monitor:eth1"]
