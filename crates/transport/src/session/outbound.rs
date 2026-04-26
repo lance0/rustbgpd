@@ -822,15 +822,23 @@ impl PeerSession {
             );
             if msg.encoded_len() > max_len {
                 if chunk_size <= 1 {
+                    // Single-route oversize: a single EVPN route plus its
+                    // attribute set exceeds the negotiated maximum BGP
+                    // message length. Previously the loop logged + skipped
+                    // and continued, returning `true` — a silent desync
+                    // because RIB has already committed the route to
+                    // Adj-RIB-Out and now believes the peer holds it.
+                    // Failing the send path lets the dirty-resync mechanism
+                    // notice and retry; if the route is structurally
+                    // un-sendable the peer will observe the discrepancy
+                    // rather than rustbgpd lying about the advertise state.
                     warn!(
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
                         max = max_len,
-                        "single EVPN route exceeds maximum message length; skipping"
+                        "single EVPN route exceeds maximum message length — failing send so resync can retry"
                     );
-                    idx = end;
-                    chunk_size = 1000;
-                    continue;
+                    return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
@@ -880,11 +888,9 @@ impl PeerSession {
                         peer = %self.peer_label,
                         size = msg.encoded_len(),
                         max = max_len,
-                        "single EVPN withdrawal exceeds maximum message length; skipping"
+                        "single EVPN withdrawal exceeds maximum message length — failing send so resync can retry"
                     );
-                    idx = end;
-                    chunk_size = 1000;
-                    continue;
+                    return false;
                 }
                 chunk_size = (chunk_size / 2).max(1);
                 continue;
