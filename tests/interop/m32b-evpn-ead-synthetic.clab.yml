@@ -1,0 +1,71 @@
+# M32b — EVPN Type 1 EAD-per-EVI reflection (synthetic peers)
+#
+# Phase 1 RR coverage gap: M32 against FRR exercises Type 4 ES
+# reflection but not Type 1 EAD-per-EVI, because FRR only originates
+# EAD-per-EVI when the local ES is bound to a specific EVI via
+# VLAN-aware bridge + SVI sub-interface — out of Phase 1 scope (it
+# belongs in Phase 3 / rustbgpd-as-VTEP). This harness closes that gap
+# by using the in-tree `evpn-tester` (with `--route-type ead-per-evi`)
+# to originate Type 1 EAD-per-EVI routes directly. The RR's job — pick
+# them up, apply RFC 4456 ORIGINATOR_ID + CLUSTER_LIST, reflect them
+# to the observer — is exercised end-to-end with no FRR involvement.
+#
+# Topology (three point-to-point /30 subnets so there's no shared L2):
+#   rustbgpd (AS 65000, cluster-id 10.0.0.100) — the RR, router-id 10.0.0.1
+#     ├── eth1 10.1.1.1/30 ── tester-ead (10.1.1.2, router-id 10.0.0.11)
+#     │                       originates Type 1 EAD-per-EVI routes
+#     └── eth2 10.1.3.1/30 ── monitor    (10.1.3.2, router-id 10.0.0.20)
+#                             observer, expects N Type 1 routes
+#
+# Both peers are RR clients. The monitor receives the tester's routes
+# reflected through rustbgpd; assertions cover the route count, the
+# RR's gRPC view, and presence of RFC 4456 attributes on the tester
+# side (the monitor logs received UPDATEs).
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m32b-evpn-ead-synthetic.clab.yml
+#   bash tests/interop/scripts/test-m32b-evpn-ead-synthetic.sh
+#   containerlab destroy -t tests/interop/m32b-evpn-ead-synthetic.clab.yml --cleanup
+
+name: m32b-evpn-ead-synthetic
+
+mgmt:
+  network: clab-mgmt
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m32b-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.1.1.1/30 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.1.3.1/30 dev eth2
+        - ip link set eth2 up
+      env:
+        RUST_LOG: info
+
+    tester-ead:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.1.1.2/30 dev eth1
+        - ip link set eth1 up
+
+    monitor:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      exec:
+        - ip addr add 10.1.3.2/30 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "tester-ead:eth1"]
+    - endpoints: ["rustbgpd:eth2", "monitor:eth1"]
