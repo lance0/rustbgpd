@@ -109,10 +109,15 @@ impl AdjRibIn {
         removed
     }
 
-    /// Remove all routes and stale tags.
+    /// Remove every route from this Adj-RIB-In — unicast, `FlowSpec`, EVPN —
+    /// plus all secondary indices, stale tags, and the attribute intern
+    /// table. Used when the per-peer Adj-RIB-In needs to be wiped without
+    /// also dropping the [`AdjRibIn`] struct itself.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_index.clear();
+        self.flowspec_routes.clear();
+        self.evpn_routes.clear();
         self.llgr_stale_local_tags.clear();
         self.flowspec_llgr_stale_local_tags.clear();
         self.evpn_llgr_stale_local_tags.clear();

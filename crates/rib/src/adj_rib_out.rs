@@ -108,10 +108,13 @@ impl AdjRibOut {
             .map_or(&[], SmallVec::as_slice)
     }
 
-    /// Remove all advertised routes.
+    /// Remove every advertised route — unicast, `FlowSpec`, EVPN — and
+    /// the secondary prefix index.
     pub fn clear(&mut self) {
         self.routes.clear();
         self.prefix_path_ids.clear();
+        self.flowspec_routes.clear();
+        self.evpn_routes.clear();
     }
 
     /// Return the number of advertised routes.
