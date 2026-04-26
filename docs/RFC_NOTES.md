@@ -653,20 +653,18 @@ implemented per ADR-0040.
   add-imet / delete-mac-ip / delete-imet` CLI subcommands cover
   the operator-facing surface. Type 5 IP-Prefix and Type 1/4
   multi-homing origination are deferred pending use-case signal.
-- **Multi-homing Type 4 ES reflection interop** (RFC 7432 §8):
+- **Multi-homing Type 1 EAD + Type 4 ES reflection interop** (RFC 7432 §8):
   validated via the M32 4-node harness
   (`tests/interop/m32-evpn-multihome-frr.clab.yml`). Two FRR VTEPs
-  share an Ethernet Segment (same `es-id` + `es-sys-mac` →
-  identical 10-byte ESI); both originate Type 4 ES routes that the
-  rustbgpd RR reflects to a third observing VTEP. Gated assertions
-  cover that both ESI-sharing peers' Type 4 ES routes reach the
-  observer with correct `ORIGINATOR_ID` + `CLUSTER_LIST` and that
-  gRPC `ListEvpnRoutes` surfaces both Route Type 4 entries. Type 1
-  EAD-per-EVI presence is advisory only — FRR origination requires
-  the local ES to be bound to a specific EVI via VLAN-aware bridge
-  + SVI sub-interface, which the Phase 1 harness does not configure
-  (deferred to Phase 3 / rustbgpd-as-VTEP execution). DF election
-  itself runs on the VTEPs; the RR is path-transparent.
+  share an Ethernet Segment on a bond ES interface (same `es-id` +
+  `es-sys-mac` → identical 10-byte ESI); both originate Type 4 ES
+  + Type 1 EAD-per-EVI routes that the rustbgpd RR reflects to a
+  third observing VTEP. Gated assertions cover that both ESI-sharing
+  peers' Type 1 EAD + Type 4 ES routes reach the observer with
+  correct `ORIGINATOR_ID` + `CLUSTER_LIST` and that gRPC
+  `ListEvpnRoutes` surfaces both Route Type 1 and Route Type 4
+  entries. DF election itself runs on the VTEPs; the RR is
+  path-transparent.
 - See ADR-0050.
 
 ---

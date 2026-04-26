@@ -540,7 +540,7 @@ for the architectural record.
 | **M29** | Capability sanity — L2VPN/EVPN negotiated with FRR 10.3.1, gRPC `ListEvpnRoutes` returns a well-formed response. |
 | **M30** | Real Type 2 MAC/IP reflection end-to-end through a kernel VXLAN data plane (3-node containerlab + FRR VTEPs). |
 | **M31** | MAC mobility (RFC 7432 §15.1) + sticky-MAC preservation (§7.7) across three VTEPs. |
-| **M32** | Multi-homing reflection — Type 4 ES routes from two VTEPs sharing an Ethernet Segment, reflected unchanged through the RR with correct ORIGINATOR_ID + CLUSTER_LIST. Type 1 EAD-per-EVI reflection is advisory only; FRR origination requires VLAN-aware bridge + SVI which is Phase 3 scope. |
+| **M32** | Multi-homing reflection — Type 1 EAD-per-EVI + Type 4 ES routes from two VTEPs sharing an Ethernet Segment on a bond interface, reflected unchanged through the RR with correct ORIGINATOR_ID + CLUSTER_LIST. |
 | **M33** | Scale validation — 50,000 Type 2 routes + 60 s of 1,000 rps churn through the RR. In-tree iBGP load generator (`bench/evpn-load`), no third-party daemon in the measurement path. |
 
 ### Build Order
@@ -581,10 +581,9 @@ for the architectural record.
    subcommands.
 9. **Five interop harnesses** — M29 capability sanity, M30 Type 2
    reflection with kernel VXLAN, M31 MAC mobility + sticky, M32 multi-
-   homing Type 4 ES reflection (Type 1 EAD-per-EVI advisory; FRR
-   origination needs VLAN-aware bridge + SVI deferred to Phase 3),
-   M33 50k-route scale + churn against the in-tree `bench/evpn-load`
-   generator.
+   homing Type 1 EAD-per-EVI + Type 4 ES reflection (FRR ES on a bond
+   interface), M33 50k-route scale + churn against the in-tree
+   `bench/evpn-load` generator.
 10. **Correctness hardening** — 12 fixes from three review rounds,
     each with regression tests: source-peer suppression,
     same-peer redistribution, full RFC 4456 tie-break, EVPN withdrawals

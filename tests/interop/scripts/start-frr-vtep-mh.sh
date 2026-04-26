@@ -9,14 +9,18 @@
 #   $4 = ES-SYS-MAC (48-bit, colon-separated)
 #
 # Layout built (on top of the plain VTEP layout):
-#   es-dummy  : dummy access interface attached to the bridge. FRR treats
-#               this as the "trunk to the dual-homed CE" and originates
-#               Type 4 ES routes for the configured ESI. Type 1 EAD-
-#               per-EVI is NOT originated by this minimal setup — FRR
-#               binds the ES to a specific EVI only when the bridge is
-#               VLAN-aware and the access port has a tagged VLAN, which
-#               is out of Phase 1 scope. The M32 harness gates on Type
-#               4 ES reflection only; Type 1 EAD presence is advisory.
+#   esdummy        : LACP bond device attached to the bridge — the FRR-
+#                    supported shape for an EVPN-MH ES. `evpn mh es-id`
+#                    + `evpn mh es-sys-mac` configured on this device
+#                    register the ES as local. A plain dummy attached
+#                    to the bridge does not reliably register (FRR's
+#                    behavior on non-bond ES interfaces is undocumented
+#                    and racy across runs).
+#   esdummy-slave  : single dummy enslaved to the bond so it has at
+#                    least one member. Real EVPN-MH expects a hardware
+#                    bond with an LACP partner; a no-partner bond with
+#                    a dummy slave is enough for FRR to emit the local
+#                    ES and originate Type 1 EAD-per-EVI + Type 4 ES.
 #
 # Two VTEPs launched with the same (es-id, es-sys-mac) form a shared
 # Ethernet Segment; both advertise ES routes with the same 10-byte ESI
@@ -54,8 +58,19 @@ ip link add "${VXLAN}" type vxlan \
 ip link set dev "${VXLAN}" master "${BRIDGE}"
 ip link set dev "${VXLAN}" up
 
-# --- Multi-homing extension: dummy access interface attached to bridge ---
-ip link add "${ES_DUMMY}" type dummy 2>/dev/null || true
+# --- Multi-homing extension: bond access interface attached to bridge ---
+# FRR EVPN-MH expects the ES interface to be a bond — `show evpn es`
+# only registers the local ES when the configured `evpn mh es-id`
+# interface is a bond device. A plain dummy attached to the bridge
+# is sometimes recognized and sometimes not (FRR's behavior on
+# non-bond ES interfaces is undocumented and racy). Use a bond with a
+# single dummy slave so the linux interface model matches what FRR
+# expects without requiring a real LACP partner.
+ip link add "${ES_DUMMY}-slave" type dummy 2>/dev/null || true
+ip link add "${ES_DUMMY}" type bond mode 802.3ad 2>/dev/null || true
+ip link set dev "${ES_DUMMY}-slave" down
+ip link set dev "${ES_DUMMY}-slave" master "${ES_DUMMY}"
+ip link set dev "${ES_DUMMY}-slave" up
 ip link set dev "${ES_DUMMY}" master "${BRIDGE}"
 ip link set dev "${ES_DUMMY}" up
 
@@ -77,9 +92,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 
 apply_evpn_mh_config() {
+    # `evpn mh startup-delay` lives at top-level config in FRR 10.3.1,
+    # NOT under `router bgp`. Putting it under `router bgp` produces
+    # "Unknown command" and silently fails — the default 180 s timer
+    # then holds the ES in protodown for the entire test run.
     vtysh -c "configure terminal" \
-          -c "router bgp 65000" \
-          -c " bgp evpn mh startup-delay 5" \
+          -c "evpn mh startup-delay 5" \
           -c "end" >/dev/null 2>&1 || true
     vtysh -c "configure terminal" \
           -c "interface ${ES_DUMMY}" \

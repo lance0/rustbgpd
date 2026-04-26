@@ -1,29 +1,21 @@
 #!/usr/bin/env bash
-# M32 interop test — EVPN multi-homing Type 4 ES reflection
+# M32 interop test — EVPN multi-homing Type 1 EAD + Type 4 ES reflection
 #
 # VTEP-A and VTEP-C share an Ethernet Segment (same es-id + es-sys-mac
 # → same 10-byte ESI). VTEP-B observes the reflected ES routes from
-# both peers. This test asserts the RR reflects Type 4 ES unchanged —
-# DF election itself is run by the VTEPs, not by us.
+# both peers. This test asserts the RR reflects Type 1 EAD-per-EVI and
+# Type 4 ES unchanged — DF election itself is run by the VTEPs, not us.
 #
-# Assertions (gated):
+# Assertions (all gated):
 #   1. All 3 VTEPs Established on L2VPN/EVPN.
 #   2. VTEP-B receives both Type 4 ES routes (from VTEP-A and VTEP-C)
 #      for the shared ESI.
-#   3. RFC 4456 attributes (ORIGINATOR_ID, CLUSTER_LIST) are set
+#   3. VTEP-B receives Type 1 EAD-per-EVI routes from both VTEP-A and
+#      VTEP-C (originated by FRR once the bond ES is bound to the EVI).
+#   4. RFC 4456 attributes (ORIGINATOR_ID, CLUSTER_LIST) are set
 #      correctly on each reflected ES route.
-#   4. rustbgpd's gRPC ListEvpnRoutes surfaces both Type 4 routes.
-#
-# Advisory (logged, not gated):
-#   - Type 1 EAD presence on VTEP-B and in `ListEvpnRoutes`. FRR only
-#     originates EAD-per-EVI when the ES is bound to a specific EVI
-#     via VLAN-aware bridge + SVI sub-interface, which the Phase 1
-#     harness intentionally does not configure. Type 1 EAD reflection
-#     is a Phase 3 concern (rustbgpd-as-VTEP) — the Phase 1 RR test
-#     gates on Type 4 ES reflection, which is what downstream VTEPs
-#     need for ES-Import RT propagation.
-#   - VTEP-B's `show evpn es` listing both VTEPs (FRR observer-side
-#     display only populates when the observer is itself an ES member).
+#   5. rustbgpd's gRPC ListEvpnRoutes surfaces both Type 4 routes.
+#   6. VTEP-B's `show evpn es` lists both VTEPs for the shared ESI.
 #
 # Prerequisites:
 #   - containerlab deployed: containerlab deploy -t tests/interop/m32-evpn-multihome-frr.clab.yml
@@ -83,21 +75,25 @@ else
     echo "$es_output" | head -40 >&2
 fi
 
-# Test: VTEP-B receives Type 1 EAD from both peers (advisory only).
-# FRR originates Type 1 EAD-per-EVI only when the ES is bound to a
-# specific EVI via VLAN-aware bridge + SVI sub-interface, which the
-# Phase 1 multi-homing harness intentionally does not configure (it
-# would require a richer FRR setup that's deferred to Phase 3 / EVPN
-# VTEP execution mode). Type 4 ES + RFC 4456 attribute reflection
-# above is what gates the M32 result; Type 1 EAD presence is logged
-# but not gated. See docs/evpn-enablement.md for the Phase split.
-log "[test] VTEP-B Type 1 EAD presence (advisory — not gated)"
-ead_output=$(docker exec "$VTEP_B" vtysh -c "show bgp l2vpn evpn route type ead" 2>/dev/null || true)
-if echo "$ead_output" | grep -q "$VTEP_A_IP" && echo "$ead_output" | grep -q "$VTEP_C_IP"; then
+# Test: VTEP-B receives Type 1 EAD from both peers. FRR originates
+# EAD-per-EVI when the configured ES is on a bond interface (the
+# supported FRR EVPN-MH shape) — start-frr-vtep-mh.sh creates the ES
+# as a bond device with a dummy slave so this gate fires.
+log "[test] VTEP-B receives reflected Type 1 EAD from both peers"
+both_ead=0
+for _ in $(seq 1 30); do
+    ead_output=$(docker exec "$VTEP_B" vtysh -c "show bgp l2vpn evpn route type ead" 2>/dev/null || true)
+    if echo "$ead_output" | grep -q "$VTEP_A_IP" && echo "$ead_output" | grep -q "$VTEP_C_IP"; then
+        both_ead=1
+        break
+    fi
+    sleep 2
+done
+if [ "$both_ead" -eq 1 ]; then
     ok "VTEP-B sees Type 1 EAD from both VTEP-A and VTEP-C"
 else
-    log "Type 1 EAD not originated by FRR in this minimal setup"
-    log "(non-VLAN-aware bridge → no EVI binding → no EAD-per-EVI)"
+    fail "VTEP-B did not see both Type 1 EAD routes"
+    echo "$ead_output" | head -40 >&2
 fi
 
 # Test: RFC 4456 attributes on the reflected ES routes.
@@ -127,11 +123,16 @@ log "[test] rustbgpd ListEvpnRoutes shows Type 4 ES routes"
 evpn_json=$(grpc_list_evpn)
 type1_count=$(echo "$evpn_json" | grep -c "\"routeType\": 1" || true)
 type4_count=$(echo "$evpn_json" | grep -c "\"routeType\": 4" || true)
-log "Type 1 EAD count from rustbgpd ListEvpnRoutes: $type1_count (advisory)"
 if [ "$type4_count" -ge 2 ]; then
     ok "ListEvpnRoutes has $type4_count Type 4 ES routes (one per sharing VTEP)"
 else
     fail "Expected >= 2 Type 4 ES routes; got $type4_count"
+    echo "$evpn_json" | head -40 >&2
+fi
+if [ "$type1_count" -ge 2 ]; then
+    ok "ListEvpnRoutes has $type1_count Type 1 EAD routes"
+else
+    fail "Expected >= 2 Type 1 EAD routes; got $type1_count"
     echo "$evpn_json" | head -40 >&2
 fi
 
@@ -149,15 +150,8 @@ done
 if [ "$es_state" -eq 1 ]; then
     ok "Both VTEPs visible in VTEP-B's EVPN ES table"
 else
-    # FRR observer-side EVPN ES visibility is filtered when the observer
-    # is not itself a member of the ES, so this view can be empty even
-    # though the BGP routes are present (verified by the Type 4 ES count
-    # assertion above). Log this for diagnosis but do not silently pass:
-    # the BGP-route gate already establishes reflection correctness, and
-    # this test is genuinely observability-only on the FRR side.
-    log "Note: VTEP-B's 'show evpn es' did not list both peers — observer-side"
-    log "FRR display-layer limitation when the observer is not an ES member."
-    log "Reflection correctness covered by the Type 4 ES count gate above."
+    fail "VTEP-B did not list both VTEPs in 'show evpn es'"
+    echo "$es_txt" | head -40 >&2
 fi
 
 print_summary

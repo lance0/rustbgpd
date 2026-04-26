@@ -18,8 +18,9 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 
 - **Gates 0, 1, 2, 3, 4, 5, 6**: done on `feat/evpn-rr`. Capability,
   Type 2 reflection (M30), EVPN GR/LLGR, MAC mobility / sticky
-  (M31), multi-homing Type 4 ES reflection (M32 — Type 1 EAD
-  advisory only; see Gate 4), 50k-route scale validation with
+  (M31), multi-homing Type 1 EAD-per-EVI + Type 4 ES reflection
+  (M32 — FRR ES on a bond interface; see Gate 4), 50k-route
+  scale validation with
   churn (M33), and controller-driven injection via gRPC
   (`AddEvpnRoute` / `DeleteEvpnRoute`). Gates 0-4
   validated against FRR 10.3.1; Gate 5 uses an in-tree iBGP load
@@ -162,49 +163,46 @@ behavior.
 
 ---
 
-### Gate 4 — Multi-homing Type 4 ES reflection ✅
+### Gate 4 — Multi-homing Type 1 EAD + Type 4 ES reflection ✅
 
-Status: **done** (feat/evpn-rr, M32 harness, 2026-04-24)
+Status: **done** (feat/evpn-rr, M32 harness, 2026-04-26)
 
-Unlocks: active-active ToR fabric reflection. Two VTEPs share an ESI;
-rustbgpd reflects Type 4 ES routes unchanged with correct RFC 4456
-attributes; third VTEP observes the reflected inputs.
+Unlocks: active-active ToR fabric reflection. Two VTEPs share an ESI
+on a bond ES interface; rustbgpd reflects both Type 1 EAD-per-EVI and
+Type 4 ES routes unchanged with correct RFC 4456 attributes; third
+VTEP observes the reflected inputs.
 
-Scope intentionally stops at Type 4 ES. Type 1 EAD-per-EVI reflection
-is **advisory** in this harness because FRR only originates EAD-per-EVI
-when the local ES is bound to a specific EVI via VLAN-aware bridge +
-SVI sub-interface, which the Phase 1 lab does not configure (it would
-require a richer FRR setup that's deferred to Phase 3 / rustbgpd-as-
-VTEP execution mode). Type 4 ES is what downstream VTEPs need for
-ES-Import RT propagation; EAD-per-EVI is what aliasing/backup-path
-DF state needs and is exercised in Phase 3.
+The ES is configured on an **LACP bond interface** with a single dummy
+slave. FRR EVPN-MH only registers a local ES when the configured
+interface is a bond — `show evpn es` is empty for plain dummy or
+veth interfaces in FRR 10.3.1, regardless of `evpn mh es-id` /
+`es-sys-mac` config. The bond + dummy-slave shape is the minimal
+FRR-supported config that produces a local ES without requiring a
+real LACP partner, and it triggers EAD-per-EVI origination once the
+ES is bound to the EVI.
 
 Delivered:
 
 | Task | File / location |
 |------|----------------|
 | 4-node topology (RR + 3 VTEPs, 2 sharing an ESI) | `tests/interop/m32-evpn-multihome-frr.clab.yml` |
-| Extended VTEP shim with dummy ES access interface | `tests/interop/scripts/start-frr-vtep-mh.sh` |
+| Extended VTEP shim with bond ES access interface | `tests/interop/scripts/start-frr-vtep-mh.sh` |
 | Per-VTEP FRR configs with `evpn mh es-id` + `es-sys-mac` | `tests/interop/configs/frr-bgpd-m32-vtep-{a,b,c}.conf` |
 | rustbgpd RR config with 3 RR clients | `tests/interop/configs/rustbgpd-m32-rr.toml` |
-| Test script (4 gated + 2 advisory assertions) | `tests/interop/scripts/test-m32-evpn-multihome-frr.sh` |
+| Test script (6 gated assertions) | `tests/interop/scripts/test-m32-evpn-multihome-frr.sh` |
 
 Gated assertions:
 
 - **Type 4 ES reflection**: VTEP-B receives both VTEP-A's and VTEP-C's
   Type 4 ES routes for the shared ESI.
+- **Type 1 EAD-per-EVI reflection**: VTEP-B receives both peers' EAD
+  routes for the shared ESI.
 - **RFC 4456 attribute pass-through**: ORIGINATOR_ID and CLUSTER_LIST
   correctly set on each reflected ES route.
-- **gRPC surface**: `ListEvpnRoutes` shows ≥ 2 Type 4 routes (one per
-  sharing VTEP).
-
-Advisory (logged, not gated):
-
-- **Type 1 EAD presence**: depends on FRR VLAN-aware bridge config —
-  out of Phase 1 scope (see above).
-- **DF election input completeness**: VTEP-B's `show evpn es` listing
-  both VTEPs as members (FRR observer-side display only populates
-  when the observer is itself an ES member).
+- **gRPC surface**: `ListEvpnRoutes` shows ≥ 2 Type 4 ES routes and
+  ≥ 2 Type 1 EAD routes (one of each per sharing VTEP).
+- **DF election input completeness**: VTEP-B's `show evpn es` lists
+  both VTEPs as members for the shared ESI.
 
 Rustbgpd does NOT participate in DF election — it reflects the inputs
 and the VTEPs run the election independently. This test validates

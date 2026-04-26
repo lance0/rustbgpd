@@ -254,9 +254,8 @@ easy operator identification.
 - The EVPN interop surface now spans M29 (capability + session sanity)
   through M33 (50k-route scale + churn): M30 covers real Type 2 MAC
   reflection through kernel VXLAN against FRR 10.3.1; M31 covers MAC
-  mobility + sticky preservation; M32 gates on Type 4 ES reflection
-  for multi-homing (Type 1 EAD-per-EVI is advisory only, since FRR
-  origination needs a VLAN-aware bridge + SVI deferred to Phase 3);
+  mobility + sticky preservation; M32 gates on Type 1 EAD-per-EVI
+  + Type 4 ES reflection for multi-homing (FRR ES on a bond interface);
   M33 dogfoods `rustbgpd-wire` from the
   in-tree `bench/evpn-load` crate. See INTEROP.md § P1.5 for the full
   matrix.

@@ -69,19 +69,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   best path stays on VTEP-A per §7.7. VTEP-B is a pure observer
   with no local MACs, so its Loc-RIB state is driven entirely by
   what rustbgpd reflects.
-- **EVPN multi-homing Type 4 ES reflection interop (Gate 4, M32).**
-  Four-node topology where VTEP-A and VTEP-C share an Ethernet Segment
-  via identical `evpn mh es-id` + `evpn mh es-sys-mac` on a dummy
-  access interface. rustbgpd reflects the Type 4 ES routes unchanged;
+- **EVPN multi-homing Type 1 EAD + Type 4 ES reflection interop
+  (Gate 4, M32).** Four-node topology where VTEP-A and VTEP-C share
+  an Ethernet Segment via identical `evpn mh es-id` + `evpn mh
+  es-sys-mac` on an LACP bond ES interface (single dummy slave —
+  the minimal shape FRR EVPN-MH recognizes as a local ES). rustbgpd
+  reflects both Type 4 ES and Type 1 EAD-per-EVI routes unchanged;
   VTEP-B (observer) receives both peers' copies with correct RFC 4456
   `ORIGINATOR_ID` + `CLUSTER_LIST`. rustbgpd's `ListEvpnRoutes` gRPC
-  surfaces both Type 4 routes (one per sharing peer). Type 1 EAD-per-
-  EVI reflection is advisory in this harness — FRR origination
-  requires VLAN-aware bridge + SVI which is out of Phase 1 scope and
-  exercised under Phase 3 (rustbgpd-as-VTEP). The RR does not execute
-  DF election itself — VTEPs run the election independently over the
-  reflected inputs. New `start-frr-vtep-mh.sh` shim extends M30's
-  VXLAN setup with the dummy ES access interface.
+  surfaces both Type 4 + both Type 1 routes (one of each per sharing
+  peer). The RR does not execute DF election itself — VTEPs run the
+  election independently over the reflected inputs. The
+  `start-frr-vtep-mh.sh` shim extends M30's VXLAN setup with the
+  bond ES access interface and a vtysh-based EVPN-MH config apply
+  loop that handles FRR's startup-delay timer and per-interface
+  config race.
 - **EVPN RR scale validation (Gate 5, M33).** In-tree iBGP load
   generator (`bench/evpn-load` crate — tester + monitor binaries
   built directly on `rustbgpd-wire`, no third-party daemon in the
