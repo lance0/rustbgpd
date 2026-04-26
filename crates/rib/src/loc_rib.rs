@@ -312,6 +312,18 @@ fn extract_mac_mobility(route: &EvpnRibRoute) -> (bool, u32) {
     (false, 0)
 }
 
+/// Three-tier stale ranking for `FlowSpec`: fresh (0) > GR-stale (1) > LLGR-stale (2).
+/// Lower value = more preferred. Same shape as `evpn_stale_rank` and
+/// unicast `best_path::stale_rank` — separate `is_stale` / `is_llgr_stale`
+/// comparisons would invert because LLGR promotion clears `is_stale`.
+fn flowspec_stale_rank(route: &FlowSpecRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
 /// Full BGP best-path comparison for `FlowSpec` routes.
 ///
 /// Uses the same preference chain as unicast `best_path_cmp`:
@@ -320,8 +332,9 @@ fn extract_mac_mobility(route: &EvpnRibRoute) -> (bool, u32) {
 ///
 /// RPKI validation is not applicable to `FlowSpec` routes.
 fn flowspec_tiebreak(a: &FlowSpecRoute, b: &FlowSpecRoute) -> Ordering {
-    // 0. Non-stale preferred over stale (RFC 4724)
-    let cmp = a.is_stale.cmp(&b.is_stale);
+    // 0. Three-tier freshness: fresh > GR-stale > LLGR-stale
+    //    (RFC 4724 §4.2 / RFC 9494 §4.7).
+    let cmp = flowspec_stale_rank(a).cmp(&flowspec_stale_rank(b));
     if cmp != Ordering::Equal {
         return cmp;
     }
@@ -609,6 +622,52 @@ mod tests {
         let best = loc.get_flowspec(&rule).unwrap();
         // Fresh route wins despite lower LOCAL_PREF
         assert_eq!(best.peer, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)));
+    }
+
+    /// Regression: GR-stale outranks LLGR-stale (RFC 9494 §4.7), and
+    /// LLGR-stale must not beat fresh — even with higher `LocalPref`.
+    /// Mirrors EVPN promotion state: GR-stale carries
+    /// `is_stale=true, is_llgr_stale=false`; LLGR-stale carries
+    /// `is_stale=false, is_llgr_stale=true`. Two independent boolean
+    /// comparisons would invert this; the single rank function
+    /// gives the correct three-tier ordering.
+    #[test]
+    fn flowspec_gr_stale_beats_llgr_stale() {
+        let rule = make_flowspec_rule();
+        // GR-stale at LP=100 vs LLGR-stale at LP=200 → GR-stale must win.
+        let mut gr =
+            make_flowspec_route(1, 1, vec![PathAttribute::LocalPref(100)], RouteOrigin::Ebgp);
+        gr.is_stale = true;
+        gr.is_llgr_stale = false;
+        let mut llgr =
+            make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(200)], RouteOrigin::Ebgp);
+        llgr.is_stale = false;
+        llgr.is_llgr_stale = true;
+        let mut loc = LocRib::new();
+        loc.recompute_flowspec(rule.clone(), [&gr, &llgr].into_iter());
+        assert_eq!(
+            loc.get_flowspec(&rule).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "GR-stale must outrank LLGR-stale"
+        );
+    }
+
+    #[test]
+    fn flowspec_fresh_beats_llgr_stale_with_higher_localpref() {
+        let rule = make_flowspec_rule();
+        let fresh =
+            make_flowspec_route(1, 1, vec![PathAttribute::LocalPref(50)], RouteOrigin::Ebgp);
+        let mut llgr =
+            make_flowspec_route(2, 2, vec![PathAttribute::LocalPref(500)], RouteOrigin::Ebgp);
+        llgr.is_stale = false;
+        llgr.is_llgr_stale = true;
+        let mut loc = LocRib::new();
+        loc.recompute_flowspec(rule.clone(), [&fresh, &llgr].into_iter());
+        assert_eq!(
+            loc.get_flowspec(&rule).unwrap().peer,
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            "fresh must outrank LLGR-stale even with lower LocalPref"
+        );
     }
 
     #[test]
