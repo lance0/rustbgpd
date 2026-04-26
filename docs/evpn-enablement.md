@@ -18,9 +18,10 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 
 - **Gates 0, 1, 2, 3, 4, 5, 6**: done on `feat/evpn-rr`. Capability,
   Type 2 reflection (M30), EVPN GR/LLGR, MAC mobility / sticky
-  (M31), multi-homing Type 1 + Type 4 reflection (M32), 50k-route
-  scale validation with churn (M33), and controller-driven
-  injection via gRPC (`AddEvpnRoute` / `DeleteEvpnRoute`). Gates 0-4
+  (M31), multi-homing Type 4 ES reflection (M32 — Type 1 EAD
+  advisory only; see Gate 4), 50k-route scale validation with
+  churn (M33), and controller-driven injection via gRPC
+  (`AddEvpnRoute` / `DeleteEvpnRoute`). Gates 0-4
   validated against FRR 10.3.1; Gate 5 uses an in-tree iBGP load
   generator (the `bench/evpn-load` crate) so rustbgpd's scale is
   what gets exercised, not a third-party daemon's. The
@@ -161,13 +162,22 @@ behavior.
 
 ---
 
-### Gate 4 — Multi-homing reflection (Type 1 + Type 4) ✅
+### Gate 4 — Multi-homing Type 4 ES reflection ✅
 
 Status: **done** (feat/evpn-rr, M32 harness, 2026-04-24)
 
-Unlocks: active-active ToR deployments. Two VTEPs share an ESI; rustbgpd
-reflects Type 1 EAD and Type 4 ES routes unchanged; third VTEP observes
-the reflected inputs and runs DF election independently.
+Unlocks: active-active ToR fabric reflection. Two VTEPs share an ESI;
+rustbgpd reflects Type 4 ES routes unchanged with correct RFC 4456
+attributes; third VTEP observes the reflected inputs.
+
+Scope intentionally stops at Type 4 ES. Type 1 EAD-per-EVI reflection
+is **advisory** in this harness because FRR only originates EAD-per-EVI
+when the local ES is bound to a specific EVI via VLAN-aware bridge +
+SVI sub-interface, which the Phase 1 lab does not configure (it would
+require a richer FRR setup that's deferred to Phase 3 / rustbgpd-as-
+VTEP execution mode). Type 4 ES is what downstream VTEPs need for
+ES-Import RT propagation; EAD-per-EVI is what aliasing/backup-path
+DF state needs and is exercised in Phase 3.
 
 Delivered:
 
@@ -177,20 +187,24 @@ Delivered:
 | Extended VTEP shim with dummy ES access interface | `tests/interop/scripts/start-frr-vtep-mh.sh` |
 | Per-VTEP FRR configs with `evpn mh es-id` + `es-sys-mac` | `tests/interop/configs/frr-bgpd-m32-vtep-{a,b,c}.conf` |
 | rustbgpd RR config with 3 RR clients | `tests/interop/configs/rustbgpd-m32-rr.toml` |
-| Test script (6 assertions) | `tests/interop/scripts/test-m32-evpn-multihome-frr.sh` |
+| Test script (4 gated + 2 advisory assertions) | `tests/interop/scripts/test-m32-evpn-multihome-frr.sh` |
 
-Validated:
+Gated assertions:
 
 - **Type 4 ES reflection**: VTEP-B receives both VTEP-A's and VTEP-C's
   Type 4 ES routes for the shared ESI.
-- **Type 1 EAD reflection**: VTEP-B receives EAD-per-ES routes from both
-  sharing peers; the RR emits distinct copies per-VTEP.
 - **RFC 4456 attribute pass-through**: ORIGINATOR_ID and CLUSTER_LIST
-  correctly set on each reflected ES / EAD route.
-- **gRPC surface**: `ListEvpnRoutes` shows ≥ 2 Type 1 and ≥ 2 Type 4
-  routes (one each per sharing VTEP).
-- **DF election input completeness**: both sharing VTEPs appear in
-  VTEP-B's EVPN ES table — the inputs downstream DF election needs.
+  correctly set on each reflected ES route.
+- **gRPC surface**: `ListEvpnRoutes` shows ≥ 2 Type 4 routes (one per
+  sharing VTEP).
+
+Advisory (logged, not gated):
+
+- **Type 1 EAD presence**: depends on FRR VLAN-aware bridge config —
+  out of Phase 1 scope (see above).
+- **DF election input completeness**: VTEP-B's `show evpn es` listing
+  both VTEPs as members (FRR observer-side display only populates
+  when the observer is itself an ES member).
 
 Rustbgpd does NOT participate in DF election — it reflects the inputs
 and the VTEPs run the election independently. This test validates
@@ -231,10 +245,15 @@ Delivered:
 Validated (with M33 harness):
 
 - **Bulk convergence**: 50,000 reflected Type 2 routes reached the
-  observer under a 60 s ceiling.
+  observer under a 60 s ceiling (initial convergence ~5 s on the
+  reference hardware).
 - **Churn fidelity**: 60 s of 1000/sec withdraw+re-advertise leaves
-  the final count at exactly 50,000 — no routes dropped on the
-  floor during churn.
+  the post-churn count within ±tester batch (40) of 50,000, with at
+  least ½·`CHURN_RATE`·`CHURN_DURATION` withdrawal events observed
+  by the monitor — proving churn fired and the live set tracked it
+  rather than riding flat at 50k due to dropped withdrawals. The
+  ±batch tolerance absorbs the case where the live-set sample at
+  observation end lands mid-cycle.
 - **RR health**: gRPC `GetHealth` + `ListEvpnRoutes` stay responsive
   the entire run; the RR never flaps sessions.
 - **Dogfooded wire crate**: the tester/monitor dogfood

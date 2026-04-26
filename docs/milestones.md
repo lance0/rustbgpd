@@ -540,7 +540,7 @@ for the architectural record.
 | **M29** | Capability sanity — L2VPN/EVPN negotiated with FRR 10.3.1, gRPC `ListEvpnRoutes` returns a well-formed response. |
 | **M30** | Real Type 2 MAC/IP reflection end-to-end through a kernel VXLAN data plane (3-node containerlab + FRR VTEPs). |
 | **M31** | MAC mobility (RFC 7432 §15.1) + sticky-MAC preservation (§7.7) across three VTEPs. |
-| **M32** | Multi-homing reflection — Type 1 EAD-per-ES + Type 4 ES routes from two VTEPs sharing an Ethernet Segment, reflected unchanged through the RR. |
+| **M32** | Multi-homing reflection — Type 4 ES routes from two VTEPs sharing an Ethernet Segment, reflected unchanged through the RR with correct ORIGINATOR_ID + CLUSTER_LIST. Type 1 EAD-per-EVI reflection is advisory only; FRR origination requires VLAN-aware bridge + SVI which is Phase 3 scope. |
 | **M33** | Scale validation — 50,000 Type 2 routes + 60 s of 1,000 rps churn through the RR. In-tree iBGP load generator (`bench/evpn-load`), no third-party daemon in the measurement path. |
 
 ### Build Order
@@ -599,8 +599,10 @@ for the architectural record.
 - M30 validates real Type 2 MAC reflection through a kernel VXLAN data
   plane against FRR 10.3.1.
 - M33 validates 50k Type 2 routes reflected to a third observer with
-  exactly zero loss across 60 s of 1,000 rps churn (initial convergence
-  5.1 s, peak RR memory 87 MB on the reference hardware).
+  post-churn count within ±tester-batch (40 routes) of 50,000 and
+  ≥½·`CHURN_RATE`·`CHURN_DURATION` withdrawal events observed across
+  60 s of 1,000 rps churn (initial convergence 5.1 s, peak RR memory
+  ~80 MB on the reference hardware).
 - Controller can inject Type 2 / Type 3 routes via gRPC; the RR
   reflects them through the same pipeline as iBGP-learned routes.
 - All correctness gaps surfaced by review are fixed with regression

@@ -415,19 +415,20 @@ on `rustbgpd-wire`, no third-party daemon is in the measurement path
 |-----------|--------|----------|
 | Initial convergence to 50k reflected routes | < 60 s | **5.1 s** |
 | Stable convergence (count steady ≥ 5 s after churn ends) | logged | **~70 s** |
-| Post-churn steady-state count (distinct keys) | exactly 50,000 | **50,000 — no loss** |
+| Post-churn count (distinct keys) | within ±tester batch (40) of 50,000 | **50,000 — exactly on this run** |
+| Withdrawal events observed during churn | ≥ ½·`CHURN_RATE`·`CHURN_DURATION` (≥ 30,000) | **57,120** |
 | `ListEvpnRoutes` matches observer's view | ≥ 50,000 Type 2 | **50,000** |
 | Tester peers stay Established, zero flaps | both up | **both up, 0 flaps** |
 | RR process stays healthy | yes | **yes — `GetHealth` passes post-run** |
-| Peak RR memory (soft ceiling 2 GB) | < 2 GB | **87 MB** |
+| Peak RR memory (soft ceiling 2 GB) | < 2 GB | **79 MB** |
 
 Observed wire-level traffic (bulk + churn phases combined):
 
 | Counter | Observed |
 |---------|----------|
-| Total announce events (incl. churn re-advertises) | ~166,000 |
-| Total withdraw events (incl. churn) | ~117,000 |
-| UPDATE messages received by monitor | ~7,088 |
+| Total announce events (incl. churn re-advertises) | ~107,000 |
+| Total withdraw events (incl. churn) | ~57,000 |
+| UPDATE messages received by monitor | ~4,100 |
 
 Note: the announce/withdraw counters include idempotent re-advertises
 during churn, so they are larger than the steady-state route count.

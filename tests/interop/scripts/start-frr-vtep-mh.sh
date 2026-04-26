@@ -11,7 +11,12 @@
 # Layout built (on top of the plain VTEP layout):
 #   es-dummy  : dummy access interface attached to the bridge. FRR treats
 #               this as the "trunk to the dual-homed CE" and originates
-#               Type 4 ES + Type 1 EAD routes for the configured ESI.
+#               Type 4 ES routes for the configured ESI. Type 1 EAD-
+#               per-EVI is NOT originated by this minimal setup — FRR
+#               binds the ES to a specific EVI only when the bridge is
+#               VLAN-aware and the access port has a tagged VLAN, which
+#               is out of Phase 1 scope. The M32 harness gates on Type
+#               4 ES reflection only; Type 1 EAD presence is advisory.
 #
 # Two VTEPs launched with the same (es-id, es-sys-mac) form a shared
 # Ethernet Segment; both advertise ES routes with the same 10-byte ESI

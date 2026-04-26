@@ -65,25 +65,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   best path stays on VTEP-A per §7.7. VTEP-B is a pure observer
   with no local MACs, so its Loc-RIB state is driven entirely by
   what rustbgpd reflects.
-- **EVPN multi-homing Type 1 EAD + Type 4 ES reflection interop
-  (Gate 4, M32).** Four-node topology where VTEP-A and VTEP-C share an
-  Ethernet Segment via identical `evpn mh es-id` + `evpn mh es-sys-mac`
-  on a dummy access interface. rustbgpd reflects the resulting
-  Type 4 ES and Type 1 EAD-per-ES routes unchanged; VTEP-B (observer)
-  receives both peers' copies with correct RFC 4456 `ORIGINATOR_ID` +
-  `CLUSTER_LIST`. rustbgpd's `ListEvpnRoutes` gRPC surfaces both
-  Type 1 and Type 4 routes for each sharing peer. The RR does not
-  execute DF election itself — VTEPs run the election independently
-  over the reflected inputs. New `start-frr-vtep-mh.sh` shim extends
-  M30's VXLAN setup with the dummy ES access interface.
+- **EVPN multi-homing Type 4 ES reflection interop (Gate 4, M32).**
+  Four-node topology where VTEP-A and VTEP-C share an Ethernet Segment
+  via identical `evpn mh es-id` + `evpn mh es-sys-mac` on a dummy
+  access interface. rustbgpd reflects the Type 4 ES routes unchanged;
+  VTEP-B (observer) receives both peers' copies with correct RFC 4456
+  `ORIGINATOR_ID` + `CLUSTER_LIST`. rustbgpd's `ListEvpnRoutes` gRPC
+  surfaces both Type 4 routes (one per sharing peer). Type 1 EAD-per-
+  EVI reflection is advisory in this harness — FRR origination
+  requires VLAN-aware bridge + SVI which is out of Phase 1 scope and
+  exercised under Phase 3 (rustbgpd-as-VTEP). The RR does not execute
+  DF election itself — VTEPs run the election independently over the
+  reflected inputs. New `start-frr-vtep-mh.sh` shim extends M30's
+  VXLAN setup with the dummy ES access interface.
 - **EVPN RR scale validation (Gate 5, M33).** In-tree iBGP load
   generator (`bench/evpn-load` crate — tester + monitor binaries
   built directly on `rustbgpd-wire`, no third-party daemon in the
   measurement path). Three-peer topology: 2 testers originate 25k
   Type 2 MAC/IP routes each (50k total) at 5,000/sec; 60 s of
   1,000/sec churn (withdraw + re-advertise) layered on top; monitor
-  asserts convergence, post-churn count fidelity (no loss), and
-  that rustbgpd's gRPC stays healthy throughout. Binaries ride
+  asserts initial convergence (< 60 s ceiling), post-churn count
+  within ±tester batch (40 routes) of 50,000, observed withdrawal
+  events ≥ ½·`CHURN_RATE`·`CHURN_DURATION` (proves churn fired and
+  withdrawals propagated), tester peers stay Established without
+  flaps, and rustbgpd's gRPC stays healthy throughout. Binaries ride
   the `rustbgpd:dev` image so a single `docker build` + `containerlab
   deploy` reproduces the harness.
 - **Controller-driven EVPN injection (Gate 6).** Two new RPCs on
