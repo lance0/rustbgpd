@@ -1,6 +1,6 @@
 //! gRPC injection service — `AddPath` / `DeletePath` / `AddFlowSpec` / `DeleteFlowSpec`.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 
 use tokio::sync::{mpsc, oneshot};
 use tonic::{Request, Response, Status};
@@ -44,40 +44,52 @@ fn parse_prefix_and_nexthop(
     let addr: IpAddr = prefix_str
         .parse()
         .map_err(|e| Status::invalid_argument(format!("invalid prefix address: {e}")))?;
+    let nh = parse_unicast_nexthop(next_hop_str)?;
     match addr {
         IpAddr::V4(v4) => {
             let len = u8::try_from(prefix_length)
                 .ok()
                 .filter(|&l| l <= 32)
                 .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=32"))?;
-            let nh: Ipv4Addr = next_hop_str
-                .parse()
-                .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
-            if nh.is_unspecified() {
-                return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
-            }
-            if nh.is_multicast() {
-                return Err(Status::invalid_argument("next_hop must not be multicast"));
-            }
-            Ok((Prefix::V4(Ipv4Prefix::new(v4, len)), IpAddr::V4(nh)))
+            Ok((Prefix::V4(Ipv4Prefix::new(v4, len)), nh))
         }
         IpAddr::V6(v6) => {
             let len = u8::try_from(prefix_length)
                 .ok()
                 .filter(|&l| l <= 128)
                 .ok_or_else(|| Status::invalid_argument("prefix_length must be 0..=128"))?;
-            let nh: Ipv6Addr = next_hop_str
-                .parse()
-                .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
-            if nh.is_unspecified() {
-                return Err(Status::invalid_argument("next_hop must not be ::"));
-            }
-            if nh.is_multicast() {
-                return Err(Status::invalid_argument("next_hop must not be multicast"));
-            }
-            Ok((Prefix::V6(Ipv6Prefix::new(v6, len)), IpAddr::V6(nh)))
+            Ok((Prefix::V6(Ipv6Prefix::new(v6, len)), nh))
         }
     }
+}
+
+/// Parse a unicast next-hop string and reject unspecified / multicast values.
+/// Shared by `AddPath`, `AddFlowSpec`, and `AddEvpnRoute` so all injection
+/// surfaces apply the same guardrails.
+#[expect(clippy::result_large_err)]
+fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
+    let nh: IpAddr = s
+        .parse()
+        .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+    match nh {
+        IpAddr::V4(v4) => {
+            if v4.is_unspecified() {
+                return Err(Status::invalid_argument("next_hop must not be 0.0.0.0"));
+            }
+            if v4.is_multicast() {
+                return Err(Status::invalid_argument("next_hop must not be multicast"));
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_unspecified() {
+                return Err(Status::invalid_argument("next_hop must not be ::"));
+            }
+            if v6.is_multicast() {
+                return Err(Status::invalid_argument("next_hop must not be multicast"));
+            }
+        }
+    }
+    Ok(nh)
 }
 
 /// Parse a Large Community string in `"global:local1:local2"` format.
@@ -352,10 +364,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let req = request.into_inner();
 
         let rd = parse_rd(&req.rd)?;
-        let next_hop: IpAddr = req
-            .next_hop
-            .parse()
-            .map_err(|e| Status::invalid_argument(format!("invalid next_hop: {e}")))?;
+        let next_hop = parse_unicast_nexthop(&req.next_hop)?;
 
         let (evpn_route, attributes) = match req.route_type {
             2 => build_type2(&req, rd)?,
@@ -824,6 +833,20 @@ fn build_type2(
     if req.label == 0 {
         return Err(Status::invalid_argument(
             "label (VNI) is required for Type 2",
+        ));
+    }
+    // The wire format reserves 24 bits for label / VNI per RFC 7432 §7.2;
+    // `MplsLabel::new` masks silently, so reject out-of-range inputs at
+    // the API boundary instead of letting the controller-supplied value
+    // round-trip differently than it sent.
+    if req.label > 0x00FF_FFFF {
+        return Err(Status::invalid_argument(
+            "label must fit in 24 bits (0..=16777215)",
+        ));
+    }
+    if req.label2 > 0x00FF_FFFF {
+        return Err(Status::invalid_argument(
+            "label2 must fit in 24 bits (0..=16777215)",
         ));
     }
     let label2 = (req.label2 != 0).then(|| MplsLabel::new(req.label2));
