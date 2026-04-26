@@ -24,10 +24,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `examples/rr-evpn-fabric/config.toml` demonstrates a 3-VTEP fabric RR.
   FRR interop sanity test M29 validates capability negotiation against
   FRR 10.3.1. See [ADR-0050](docs/adr/0050-evpn-route-reflector.md).
-  Phase 1 is RR role only — VTEP mode with local EVI/VRF/VNI state,
-  controller-injection gRPC, DF election (RFC 7432 §8 / RFC 8584),
+  Phase 1 is RR role only — VTEP mode with local EVI/VRF/VNI state
+  (kernel FDB MAC learning + local origination), controller injection
+  beyond Type 2 / Type 3 (Type 5 IP-Prefix, Type 1 / Type 4
+  multi-homing origination), DF election (RFC 7432 §8 / RFC 8584),
   symmetric IRB semantics (RFC 9135), PBB-EVPN (RFC 7623), and EVPN-
-  MVPN integration (RFC 9251) are future-phase work.
+  MVPN integration (RFC 9251) are future-phase work. Gate 6 ships
+  controller-driven Type 2 / Type 3 injection via
+  `AddEvpnRoute` / `DeleteEvpnRoute`.
 - **EVPN Type 2 MAC reflection interop (Gate 1, M30).** Three-node
   containerlab topology (rustbgpd RR + 2× FRR VTEPs running kernel
   VXLAN + bridge) validating Type 2 MAC/IP Advertisement reflection

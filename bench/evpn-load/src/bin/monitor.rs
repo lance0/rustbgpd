@@ -85,14 +85,19 @@ struct Report {
     /// of an already-present key are idempotent.
     final_count: i64,
     /// Seconds from session-Established to the FIRST moment the live
-    /// key set reached `expect`. This is the real convergence number
-    /// — how fast the RR flooded the set through to the observer.
-    initial_convergence_sec: f64,
+    /// key set reached `expect`. `None` (serialized as `null`) when
+    /// convergence never occurred — a non-finite `f64` would crash
+    /// `serde_json` and prevent the report from being emitted at all
+    /// on timeout, which is exactly when the diagnostic is most
+    /// useful.
+    initial_convergence_sec: Option<f64>,
     /// Seconds from session-Established to when the live key set
     /// stabilized at `expect` for at least `stable_sec` continuous
     /// seconds. This is later than `initial_convergence_sec` if
     /// churn was running (each withdraw+readd resets the timer).
-    stable_convergence_sec: f64,
+    /// `None` (serialized as `null`) when stable convergence never
+    /// occurred.
+    stable_convergence_sec: Option<f64>,
     /// Every announce message counted, including idempotent
     /// re-advertisements (so churn shows up here but not in
     /// `final_count`).
@@ -105,7 +110,11 @@ struct Report {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Tracing output goes to stderr so stdout is reserved for the JSON
+    // report — interop scripts redirect `1>monitor.json 2>monitor.log`
+    // and parse the JSON with `jq`.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
@@ -207,9 +216,9 @@ async fn main() -> anyhow::Result<()> {
 
     let elapsed = session_start.elapsed().as_secs_f64();
     let initial_convergence_sec =
-        initial_convergence_at.map_or(f64::NAN, |t| t.duration_since(session_start).as_secs_f64());
+        initial_convergence_at.map(|t| t.duration_since(session_start).as_secs_f64());
     let stable_convergence_sec =
-        converged_at.map_or(f64::NAN, |t| t.duration_since(session_start).as_secs_f64());
+        converged_at.map(|t| t.duration_since(session_start).as_secs_f64());
     let report = Report {
         converged: converged_at.is_some(),
         expected: args.expect,

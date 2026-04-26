@@ -389,8 +389,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 `route_type_filter` accepts 0 (no filter) or `1..=5` matching the RFC 7432
-route type numbers. `peer_filter` and `rd_filter` are optional substring
-matches.
+route type numbers. `peer_filter` is an optional **exact** match against the
+peer IP address (e.g. `"10.0.0.2"`); `rd_filter` is an optional **exact**
+match against the route distinguisher in display form (e.g. `"65000:100"`,
+`"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2). Empty
+strings disable each filter.
 
 ---
 

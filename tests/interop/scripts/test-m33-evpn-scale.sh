@@ -165,7 +165,7 @@ fi
 # Initial convergence: time from session-est to first time the live set
 # reached expect. This is the RR reflection hot-path — the number we
 # actually care about for scale claims.
-initial_sec=$(grep -o '"initial_convergence_sec": [0-9.]*' "$MON_JSON" | awk '{print $2}')
+initial_sec=$(jq -r '.initial_convergence_sec // "null"' "$MON_JSON")
 if [ -n "$initial_sec" ] && [ "$initial_sec" != "null" ]; then
     int_sec=${initial_sec%.*}
     if [ "${int_sec:-0}" -le 60 ]; then
@@ -177,7 +177,7 @@ fi
 # Stable convergence: first time the set reached expect AND stayed there
 # for stable_sec seconds. This is later than initial when churn is on
 # (each churn tick resets the stable window). Logged, not gated.
-stable_sec_reported=$(grep -o '"stable_convergence_sec": [0-9.]*' "$MON_JSON" | awk '{print $2}')
+stable_sec_reported=$(jq -r '.stable_convergence_sec // "null"' "$MON_JSON")
 log "stable-after-churn convergence: ${stable_sec_reported}s"
 
 final_count=$(grep -o '"final_count": [0-9]*' "$MON_JSON" | awk '{print $2}')

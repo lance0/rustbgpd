@@ -103,7 +103,14 @@ apply_evpn_mh_config() {
 for attempt in 1 2 3 4 5 6 7 8 9 10; do
     apply_evpn_mh_config
     sleep 3
-    if vtysh -c "show evpn es" 2>/dev/null | grep -qE "^${ES_SYS_MAC%%:*}|esdummy"; then
+    # The local-ES line in `show evpn es` looks like:
+    #   03:aa:bb:cc:dd:ee:ff:00:00:01  L    esdummy
+    # i.e. starts with the ESI hex and contains "esdummy" + an "L" type
+    # marker. Match either the ESI prefix at line start OR a row that
+    # references our specific ES interface — alternation grouped so it
+    # doesn't read as "starts with prefix OR contains esdummy anywhere".
+    if vtysh -c "show evpn es" 2>/dev/null \
+        | grep -qE "^(${ES_SYS_MAC%%:*}|[0-9a-f:]+).*\b${ES_DUMMY}\b"; then
         echo "start-frr-vtep-mh: ES local on ${ES_DUMMY} after attempt ${attempt}" >&2
         break
     fi

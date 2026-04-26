@@ -105,7 +105,7 @@ else
     fail "monitor did not converge on Type 1 EAD-per-EVI"
 fi
 
-initial_sec=$(grep -o '"initial_convergence_sec": [0-9.]*' "$MON_JSON" | awk '{print $2}')
+initial_sec=$(jq -r '.initial_convergence_sec // "null"' "$MON_JSON")
 if [ -n "$initial_sec" ] && [ "$initial_sec" != "null" ]; then
     int_sec=${initial_sec%.*}
     if [ "${int_sec:-0}" -le 30 ]; then

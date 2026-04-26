@@ -101,7 +101,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Tracing output to stderr so harness scripts that capture stdout
+    // (the rare case for the tester, but routine for the monitor) get
+    // a clean stream. Mirrors evpn-monitor.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
