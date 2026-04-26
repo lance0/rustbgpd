@@ -121,8 +121,9 @@ else
     echo "$es_detail" | head -40 >&2
 fi
 
-# Test: rustbgpd's gRPC shows Type 1 (EAD) and Type 4 (ES) routes
-log "[test] rustbgpd ListEvpnRoutes shows Type 1 + Type 4 routes"
+# Test: rustbgpd's gRPC shows Type 4 ES routes (gated) plus Type 1
+# EAD count (advisory — see EAD note above).
+log "[test] rustbgpd ListEvpnRoutes shows Type 4 ES routes"
 evpn_json=$(grpc_list_evpn)
 type1_count=$(echo "$evpn_json" | grep -c "\"routeType\": 1" || true)
 type4_count=$(echo "$evpn_json" | grep -c "\"routeType\": 4" || true)

@@ -542,9 +542,13 @@ thousands of VTEPs, and gives you structured observability.
   move converges deterministically and sticky MACs aren't displaced.
   Validated end-to-end against FRR via M30 (basic Type 2) and M31
   (mobility + sticky).
-- **Multi-homing reflection (Type 1 EAD + Type 4 ES)** — reflected
-  unchanged so downstream VTEPs run DF election independently.
-  Validated via M32 (two FRR VTEPs sharing an ESI + observer).
+- **Multi-homing Type 4 ES reflection** — reflected unchanged with
+  RFC 4456 ORIGINATOR_ID + CLUSTER_LIST so downstream VTEPs run DF
+  election independently over the same inputs. Validated via M32
+  (two FRR VTEPs sharing an ESI + observer). Type 1 EAD-per-EVI
+  reflection is exercised on the wire codec but not gated end-to-end
+  in Phase 1 — FRR origination needs a VLAN-aware bridge + SVI
+  setup that's part of Phase 3 (rustbgpd-as-VTEP).
 - **GR / LLGR for EVPN** — VTEP restart no longer flaps the rest of
   the fabric: routes are marked stale on `PeerGracefulRestart`,
   promoted to `LLGR_STALE` on GR timer expiry per RFC 9494, and
@@ -579,8 +583,11 @@ thousands of VTEPs, and gives you structured observability.
   fabric operating model still has the VTEP originate from its local
   MAC table.)
 - **DF election** — with a shared ESI multi-homed to two VTEPs, the
-  VTEPs run the election themselves. rustbgpd reflects Type 1 + Type 4
-  unchanged so the election still works.
+  VTEPs run the election themselves. rustbgpd reflects Type 4 ES
+  unchanged so the election still works on the inputs it needs;
+  Type 1 EAD-per-EVI reflection is exercised in the wire codec but
+  not gated end-to-end in Phase 1 (FRR origination needs a VLAN-
+  aware bridge + SVI deferred to Phase 3).
 - **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
   VTEP's job.
 - **IRB semantics** — rustbgpd preserves Type 2 `label2` and the Router

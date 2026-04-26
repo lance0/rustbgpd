@@ -581,8 +581,10 @@ for the architectural record.
    subcommands.
 9. **Five interop harnesses** — M29 capability sanity, M30 Type 2
    reflection with kernel VXLAN, M31 MAC mobility + sticky, M32 multi-
-   homing Type 1/4 reflection, M33 50k-route scale + churn against the
-   in-tree `bench/evpn-load` generator.
+   homing Type 4 ES reflection (Type 1 EAD-per-EVI advisory; FRR
+   origination needs VLAN-aware bridge + SVI deferred to Phase 3),
+   M33 50k-route scale + churn against the in-tree `bench/evpn-load`
+   generator.
 10. **Correctness hardening** — 12 fixes from three review rounds,
     each with regression tests: source-peer suppression,
     same-peer redistribution, full RFC 4456 tie-break, EVPN withdrawals

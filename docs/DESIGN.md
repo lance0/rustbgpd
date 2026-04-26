@@ -438,8 +438,10 @@ Added 2026-04 per ADR-0050. Extends the RIB / transport / gRPC stack with a para
 
 Phase 1 hardening (Gates 0-6 in [evpn-enablement.md](evpn-enablement.md))
 covers reflection of all five RFC 7432 route types, GR + LLGR + Enhanced
-Route Refresh, MAC mobility / sticky preservation, multi-homing Type 1 +
-Type 4 reflection, scale validation (50k Type 2 + churn), and
+Route Refresh, MAC mobility / sticky preservation, multi-homing Type 4
+ES reflection (Type 1 EAD-per-EVI is wire-codec-tested but not gated
+end-to-end — FRR origination requires VLAN-aware bridge + SVI which is
+Phase 3 scope), scale validation (50k Type 2 + churn), and
 controller-driven injection for Type 2 / Type 3. What remains:
 
 - **VTEP mode:** local EVI / VRF / VNI state, kernel FDB MAC learning, local
