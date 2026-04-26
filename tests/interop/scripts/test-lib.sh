@@ -153,6 +153,36 @@ print_summary() {
 }
 
 # ---------------------------------------------------------------------------
+# Trap-based cleanup
+# ---------------------------------------------------------------------------
+# Auto-destroy the containerlab topology on script exit (success, fail,
+# CTRL-C, hup) when CLEANUP=1. Default off so a developer iterating on a
+# failing script can poke at the live containers; flip on for CI.
+#
+# `_clab_topology_file` is resolved against the standard tests/interop
+# layout — sourced scripts live in tests/interop/scripts/, the .clab.yml
+# is in tests/interop/${TOPO}.clab.yml.
+
+_clab_topology_file() {
+    printf "%s/../%s.clab.yml" "$SCRIPT_DIR" "$TOPO"
+}
+
+_cleanup_on_exit() {
+    local exit_code=$?
+    if [ "${CLEANUP:-0}" = "1" ]; then
+        local topo_file
+        topo_file="$(_clab_topology_file)"
+        if [ -f "$topo_file" ]; then
+            log "[cleanup] containerlab destroy -t $topo_file"
+            containerlab destroy -t "$topo_file" --cleanup >/dev/null 2>&1 || true
+        fi
+    fi
+    return "$exit_code"
+}
+
+trap _cleanup_on_exit EXIT INT TERM HUP
+
+# ---------------------------------------------------------------------------
 # Run pre-flight on source
 # ---------------------------------------------------------------------------
 
