@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-04-26
+
 ### Added
 
 - **EVPN Route Reflector (Phase 1, RFC 7432).** L2VPN/EVPN address family
