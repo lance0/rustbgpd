@@ -203,7 +203,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disconnect on unsupported protocol versions instead of sending RFC 8210
   error code 4. The RTR client now also falls back to v1 when the connection
   is closed without completing a handshake, and preserves the v1 downgrade
-  across reconnection attempts.
+  across reconnection attempts. The underlying server-side race was later
+  fixed upstream in [bgp/stayrtr#167](https://github.com/bgp/stayrtr/pull/167)
+  (merged 2026-04-13); the client-side workaround stays in place to support
+  older StayRTR / GoRTR builds.
 
 ---
 

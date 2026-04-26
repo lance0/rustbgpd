@@ -1535,8 +1535,11 @@ Automated test: `bash tests/interop/scripts/test-m20-privateas-frr.sh` — **22 
 
 ## M21 Test Results (2026-03-15, FRR 10.3.1 + StayRTR v0.6.2)
 
-RPKI origin validation via RTR cache. Found and fixed RTR v2→v1 version
-fallback bug (StayRTR/GoRTR disconnect without Error Report on unsupported version).
+RPKI origin validation via RTR cache. Surfaced an RTR v2→v1 version-
+negotiation race in StayRTR/GoRTR (server disconnects without sending the
+RFC 8210 §10 Error Report on unsupported protocol version); rustbgpd's
+RTR client falls back to v1 on connection close, and the upstream race
+was fixed in [bgp/stayrtr#167](https://github.com/bgp/stayrtr/pull/167).
 
 | Test | Result | Details |
 |------|--------|---------|
@@ -1661,7 +1664,7 @@ is missing. Prioritized by risk.
 
 | Gap | What exists today | What's missing |
 |-----|-------------------|----------------|
-| ~~**RPKI/RTR cache**~~ | ~~Done (M21)~~ | ~~StayRTR interop validated: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Found and fixed v2→v1 fallback bug.~~ |
+| ~~**RPKI/RTR cache**~~ | ~~Done (M21)~~ | ~~StayRTR interop validated: RTR session, v2→v1 fallback, VRP delivery, origin validation (Valid/Invalid/NotFound). Underlying server-side race fixed upstream in [bgp/stayrtr#167](https://github.com/bgp/stayrtr/pull/167).~~ |
 | ~~**ASPA/RTR v2 cache**~~ | ~~Done (M27)~~ | ~~Python RTR v2 mock server interop validated: v2 negotiation, ASPA record delivery, validation states (valid/invalid/unknown), best-path preference (step 0.7), ROA+ASPA coexistence.~~ |
 | ~~**FlowSpec peer**~~ | ~~Done (M22)~~ | ~~FRR interop validated: gRPC injection, eBGP distribution, withdrawal propagation. FRR receives but cannot originate.~~ |
 
