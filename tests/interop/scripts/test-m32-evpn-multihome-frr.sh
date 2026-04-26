@@ -95,21 +95,24 @@ else
     echo "$ead_output" | head -40 >&2
 fi
 
-# Test: RFC 4456 attributes on the reflected ES routes
+# Test: RFC 4456 attributes on the reflected ES routes.
+# Strict labelled match — the prior fallback to a bare-IP grep would
+# match the route's own next-hop and pass even when the
+# ORIGINATOR_ID / CLUSTER_LIST attributes were absent from the
+# reflected UPDATE.
 log "[test] Reflected ES routes carry ORIGINATOR_ID + CLUSTER_LIST"
 es_detail=$(docker exec "$VTEP_B" vtysh -c "show bgp l2vpn evpn route type es" 2>/dev/null)
-# Look for VTEP-A's ORIGINATOR_ID (should appear since routes are iBGP-reflected)
-if echo "$es_detail" | grep -q "Originator: $VTEP_A_IP" \
-    || echo "$es_detail" | grep -q "$VTEP_A_IP"; then
-    ok "VTEP-A's router-id present on reflected ES route"
+if echo "$es_detail" | grep -qE "Originator(Id|: ) ?$VTEP_A_IP"; then
+    ok "ORIGINATOR_ID == $VTEP_A_IP on reflected ES route"
 else
-    fail "VTEP-A router-id missing from reflected ES route detail"
+    fail "ORIGINATOR_ID labelled match failed on reflected ES route"
+    echo "$es_detail" | head -40 >&2
 fi
-if echo "$es_detail" | grep -q "Cluster list: $RR_CLUSTER_ID" \
-    || echo "$es_detail" | grep -q "$RR_CLUSTER_ID"; then
-    ok "RR cluster-id $RR_CLUSTER_ID present in reflected ES routes"
+if echo "$es_detail" | grep -qE "Cluster ?[Ll]ist: $RR_CLUSTER_ID"; then
+    ok "CLUSTER_LIST contains $RR_CLUSTER_ID on reflected ES route"
 else
-    fail "RR cluster-id missing from reflected ES route detail"
+    fail "CLUSTER_LIST labelled match failed on reflected ES route"
+    echo "$es_detail" | head -40 >&2
 fi
 
 # Test: rustbgpd's gRPC shows Type 1 (EAD) and Type 4 (ES) routes
@@ -144,13 +147,15 @@ done
 if [ "$es_state" -eq 1 ]; then
     ok "Both VTEPs visible in VTEP-B's EVPN ES table"
 else
-    # Not a hard failure — FRR's 'show evpn es' is observer-only and may
-    # not populate on the observer node without its own ES config.
-    # Accept if the ES routes are present in BGP (checked above).
-    log "Note: VTEP-B's 'show evpn es' did not list both peers; this is a"
-    log "display-layer limitation on observer nodes — the reflected BGP"
-    log "routes are what matter for DF election, and both are present."
-    ok "ES routes reach VTEP-B via BGP (display-layer caveat noted)"
+    # FRR observer-side EVPN ES visibility is filtered when the observer
+    # is not itself a member of the ES, so this view can be empty even
+    # though the BGP routes are present (verified by the Type 4 ES count
+    # assertion above). Log this for diagnosis but do not silently pass:
+    # the BGP-route gate already establishes reflection correctness, and
+    # this test is genuinely observability-only on the FRR side.
+    log "Note: VTEP-B's 'show evpn es' did not list both peers — observer-side"
+    log "FRR display-layer limitation when the observer is not an ES member."
+    log "Reflection correctness covered by the Type 4 ES count gate above."
 fi
 
 print_summary

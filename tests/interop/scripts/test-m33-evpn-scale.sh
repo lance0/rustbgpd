@@ -7,15 +7,24 @@
 # phase (withdraw + re-advertise a sliding window at 1000 rps) and
 # asserts no route loss, no session flap, and RR-side consistency.
 #
-# Assertions:
-#   1. Monitor reaches Established and sees 50,000 Type 2 routes.
-#   2. Convergence completes within 60s.
-#   3. After churn, monitor still shows 50,000 routes (no loss).
-#   4. rustbgpd ListEvpnRoutes reports >= 50,000 Type 2 routes (the RR's
+# Assertions (post-fix; reflect what the script actually checks):
+#   1. Monitor reaches Established and sees 50,000 Type 2 routes during
+#      initial convergence.
+#   2. Initial convergence completes within 60s.
+#   3. After churn, monitor's live route count is within ±batch (40) of
+#      50,000 — sampling at observation end can land mid-cycle, so we
+#      tolerate a single tester batch of slack rather than asserting an
+#      exact equality that would flake on a healthy run.
+#   4. Monitor observed at least floor(CHURN_RATE * CHURN_DURATION / 2)
+#      withdrawals — i.e., churn was actually exercised, not just
+#      announced (gates against a regression that drops withdrawals
+#      and lets the live set ride at 50k forever).
+#   5. rustbgpd ListEvpnRoutes reports >= 50,000 Type 2 routes (RR's
 #      own view matches what the monitor received).
-#   5. All 3 neighbor sessions stay Established throughout (no flaps).
-#   6. rustbgpd gRPC stays healthy the entire time (no crashes).
-#   7. Peak RR memory stays under a soft ceiling (logged even on pass).
+#   6. The two TESTER peers stay Established throughout (the monitor's
+#      session is observation-only; we do not gate on its liveness).
+#   7. rustbgpd gRPC stays healthy the entire time (no crashes).
+#   8. Peak RR memory stays under a soft ceiling (logged, not gated).
 #
 # Notes on assertion scope (see docs/evpn-enablement.md § Gate 5):
 # this suite validates reflection throughput, churn fidelity, and

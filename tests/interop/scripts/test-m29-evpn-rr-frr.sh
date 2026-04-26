@@ -33,9 +33,12 @@ grpc_list_neighbors() {
 }
 
 grpc_list_evpn() {
+    # Capture stderr so a grpcurl failure can be distinguished from an
+    # empty proto3 response in the test below. Stdout is the JSON body
+    # (possibly empty); stderr is the diagnostic.
     grpcurl -plaintext -import-path . -proto "$PROTO" \
         -d '{}' \
-        "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
+        "$GRPC_ADDR" rustbgpd.v1.RibService/ListEvpnRoutes
 }
 
 # ---------------------------------------------------------------------------
@@ -108,17 +111,27 @@ fi
 
 # Test 4: ListEvpnRoutes RPC works (may be empty — FRR won't advertise
 # without configured VNIs/bridges, which Phase 1 doesn't set up).
+# Distinguish "grpcurl exited successfully with empty body" (proto3
+# omits empty repeated fields, valid) from "grpcurl errored" (RPC
+# failure, invalid). Without the rc check, an OK status is reported
+# whenever the body happens to be empty, including on transport errors.
 log "[test 4/4] ListEvpnRoutes RPC returns a well-formed response"
-evpn_routes=$(grpc_list_evpn)
-if echo "$evpn_routes" | grep -q 'routes'; then
+evpn_err=$(mktemp)
+evpn_routes=$(grpc_list_evpn 2>"$evpn_err")
+evpn_rc=$?
+if [ "$evpn_rc" -ne 0 ]; then
+    fail "ListEvpnRoutes RPC failed (exit ${evpn_rc})"
+    cat "$evpn_err" >&2
+elif echo "$evpn_routes" | grep -q 'routes'; then
     ok "ListEvpnRoutes returned a valid response"
 elif [ -z "$evpn_routes" ]; then
-    # Empty body also valid — proto3 omits empty repeated fields.
-    ok "ListEvpnRoutes returned (empty response body)"
+    # Empty body — proto3 omits empty repeated fields.
+    ok "ListEvpnRoutes returned (empty response body, RPC succeeded)"
 else
     fail "ListEvpnRoutes returned unexpected output"
     echo "$evpn_routes" >&2
 fi
+rm -f "$evpn_err"
 
 # ---------------------------------------------------------------------------
 # Summary

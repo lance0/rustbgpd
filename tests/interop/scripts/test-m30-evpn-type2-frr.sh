@@ -174,8 +174,22 @@ if echo "$evpn_json" | grep -q "\"routeType\": 2"; then
         fail "ListEvpnRoutes has a Type 2 route but wrong MAC"
         echo "$evpn_json" | head -40 >&2
     fi
-    if echo "$evpn_json" | grep -q "\"nextHop\": \"$VTEP_A_IP\""; then
-        ok "Type 2 next_hop preserved as $VTEP_A_IP (VTEP-A loopback)"
+    # Strict JSON match: scope to the entry containing the test MAC and
+    # check the `nextHop` field on that entry only. A naked grep across
+    # the whole response can match the IP appearing elsewhere (e.g. as
+    # a peer-address field in a different route).
+    if command -v jq >/dev/null 2>&1; then
+        nh=$(echo "$evpn_json" | jq -r --arg mac "$TEST_MAC" \
+            '.routes[]? | select(.mac == $mac) | .nextHop // empty' \
+            2>/dev/null | head -1)
+        if [ "$nh" = "$VTEP_A_IP" ]; then
+            ok "Type 2 next_hop preserved as $VTEP_A_IP (VTEP-A loopback)"
+        else
+            fail "Type 2 next_hop expected $VTEP_A_IP, got '${nh:-<empty>}'"
+            echo "$evpn_json" | head -40 >&2
+        fi
+    elif echo "$evpn_json" | grep -q "\"nextHop\": \"$VTEP_A_IP\""; then
+        ok "Type 2 next_hop preserved as $VTEP_A_IP (substring match — install jq for strict)"
     else
         fail "Type 2 next_hop not preserved"
         echo "$evpn_json" | head -40 >&2
