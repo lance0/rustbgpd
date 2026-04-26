@@ -599,6 +599,14 @@ fn decode_type1(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
     }
     let rd = decode_rd(&payload[0..8])?;
     let esi = decode_esi(&payload[8..18])?;
+    // RFC 7432 §7.1: EAD routes (per-ES and per-EVI) carry a non-zero ESI
+    // identifying the Ethernet Segment. Reject ESI=0 at the wire boundary.
+    if esi.is_zero() {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "EVPN Type 1 EAD route with all-zero ESI (RFC 7432 §7.1)".into(),
+        });
+    }
     let ethernet_tag = decode_ethernet_tag(&payload[18..22])?;
     let label = decode_mpls_label(&payload[22..25])?;
     if ethernet_tag.is_max_et() {
@@ -767,6 +775,13 @@ fn decode_type4(payload: &[u8]) -> Result<EvpnRoute, DecodeError> {
     }
     let rd = decode_rd(&payload[0..8])?;
     let esi = decode_esi(&payload[8..18])?;
+    // RFC 7432 §7.4: ES routes carry a non-zero ESI identifying the segment.
+    if esi.is_zero() {
+        return Err(DecodeError::MalformedField {
+            message_type: "UPDATE",
+            detail: "EVPN Type 4 ES route with all-zero ESI (RFC 7432 §7.4)".into(),
+        });
+    }
     let ip_len_bits = payload[18];
     let ip_bytes = match ip_len_bits {
         32 => 4,
@@ -1328,6 +1343,36 @@ mod tests {
         // Type 99 claims length 10 but only 2 bytes follow.
         let bytes = [99u8, 10, 0, 0];
         assert!(decode_evpn_nlri(&bytes).is_err());
+    }
+
+    /// Regression: RFC 7432 §7.1 — Type 1 EAD with all-zero ESI is malformed.
+    #[test]
+    fn decode_type1_rejects_zero_esi() {
+        let mut bytes = vec![1u8, 25];
+        bytes.extend_from_slice(&[0u8; 8]); // RD
+        bytes.extend_from_slice(&[0u8; 10]); // ESI = ZERO
+        bytes.extend_from_slice(&[0xFF; 4]); // ethernet_tag MAX_ET
+        bytes.extend_from_slice(&[0, 0, 0]); // label
+        let err = decode_evpn_nlri(&bytes).unwrap_err();
+        let DecodeError::MalformedField { detail, .. } = err else {
+            panic!("expected MalformedField");
+        };
+        assert!(detail.contains("Type 1"), "unexpected detail: {detail}");
+    }
+
+    /// Regression: RFC 7432 §7.4 — Type 4 ES with all-zero ESI is malformed.
+    #[test]
+    fn decode_type4_rejects_zero_esi() {
+        let mut bytes = vec![4u8, 23];
+        bytes.extend_from_slice(&[0u8; 8]); // RD
+        bytes.extend_from_slice(&[0u8; 10]); // ESI = ZERO
+        bytes.push(32); // IP len bits = IPv4
+        bytes.extend_from_slice(&[10, 0, 0, 1]); // originator IP
+        let err = decode_evpn_nlri(&bytes).unwrap_err();
+        let DecodeError::MalformedField { detail, .. } = err else {
+            panic!("expected MalformedField");
+        };
+        assert!(detail.contains("Type 4"), "unexpected detail: {detail}");
     }
 
     #[test]

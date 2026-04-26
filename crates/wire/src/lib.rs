@@ -35,9 +35,9 @@ pub mod capability;
 pub mod constants;
 /// Decode and encode error types.
 pub mod error;
-/// FlowSpec NLRI types and codec (RFC 8955 / RFC 8956).
+/// EVPN NLRI types and codec (RFC 7432 + RFC 9136).
 pub mod evpn;
-
+/// FlowSpec NLRI types and codec (RFC 8955 / RFC 8956).
 pub mod flowspec;
 /// BGP message header codec (RFC 4271 §4.1).
 pub mod header;
