@@ -110,7 +110,8 @@ start_rustbgpd
 wait_frr_established "$VTEP_A" "10.0.0.1" "VTEP-A L2VPN/EVPN" \
     && ok "VTEP-A Established" \
     || fail "VTEP-A did not reach Established"
-wait_frr_established "$VTEP_B" "10.0.0.1" "VTEP-B L2VPN/EVPN" \
+# VTEP-B is on subnet 10.0.1.0/24 and peers with rustbgpd at 10.0.1.1.
+wait_frr_established "$VTEP_B" "10.0.1.1" "VTEP-B L2VPN/EVPN" \
     && ok "VTEP-B Established" \
     || fail "VTEP-B did not reach Established"
 

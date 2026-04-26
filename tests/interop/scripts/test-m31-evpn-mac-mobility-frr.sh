@@ -124,9 +124,10 @@ start_rustbgpd
 log "[baseline] Waiting for all 3 VTEP sessions to reach Established"
 wait_frr_established "$VTEP_A" "10.0.0.1" "VTEP-A EVPN" \
     && ok "VTEP-A Established" || fail "VTEP-A not Established"
-wait_frr_established "$VTEP_B" "10.0.0.1" "VTEP-B EVPN" \
+# Each VTEP peers with rustbgpd's address on its own subnet.
+wait_frr_established "$VTEP_B" "10.0.1.1" "VTEP-B EVPN" \
     && ok "VTEP-B Established" || fail "VTEP-B not Established"
-wait_frr_established "$VTEP_C" "10.0.0.1" "VTEP-C EVPN" \
+wait_frr_established "$VTEP_C" "10.0.2.1" "VTEP-C EVPN" \
     && ok "VTEP-C Established" || fail "VTEP-C not Established"
 
 # Test 4: VTEP-B sees IMET from both A and C

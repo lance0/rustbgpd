@@ -178,6 +178,25 @@ else
     fail "expected ${TOTAL_COUNT} routes; got ${final_count}"
 fi
 
+# Final-count alone can be satisfied by a regression that drops withdrawals
+# entirely (live set never decrements, then re-announces are no-ops). Gate
+# explicitly on withdrawal events observed at the monitor — churn must
+# have surfaced as actual MP_UNREACH_NLRI traffic. With churn at
+# CHURN_RATE for CHURN_DURATION seconds the expected lower bound is
+# roughly floor(CHURN_RATE * CHURN_DURATION); we gate at half that to
+# absorb startup ramp-up jitter.
+total_withdrawals=$(grep -o '"total_withdrawals": [0-9]*' "$MON_JSON" | awk '{print $2}')
+if [ "${CHURN_RATE:-0}" -gt 0 ] && [ "${CHURN_DURATION:-0}" -gt 0 ]; then
+    expected_min=$(( CHURN_RATE * CHURN_DURATION / 2 ))
+    if [ "${total_withdrawals:-0}" -ge "$expected_min" ]; then
+        ok "monitor observed ${total_withdrawals} withdrawals (>= ${expected_min} expected)"
+    else
+        fail "monitor observed only ${total_withdrawals} withdrawals; expected >= ${expected_min}"
+    fi
+else
+    log "monitor observed ${total_withdrawals:-0} withdrawals (no churn — gate skipped)"
+fi
+
 log "[check] rustbgpd ListEvpnRoutes matches the monitor's view"
 evpn_json=$(grpc_list_evpn)
 type2_count=$(echo "$evpn_json" | grep -c '"routeType": 2' || true)
