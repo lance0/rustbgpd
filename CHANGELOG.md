@@ -15,7 +15,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (AFI 25 / SAFI 70) with wire codec for all 5 RFC 7432 route types
   (EAD per-ES, EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix),
   MAC mobility best-path with sticky-flag preservation per §15.1, RFC 4456
-  reflection, and 7 typed extended-community accessors (BGP Encapsulation
+  reflection, and 6 typed extended-community accessors (BGP Encapsulation
   per RFC 8365/9012, MAC Mobility, ESI Label, ES-Import RT, Router MAC
   per RFC 9135, Default Gateway). `l2vpn_evpn` family string in TOML
   config, `ListEvpnRoutes` gRPC RPC on `RibService`, `rustbgpctl evpn`
@@ -99,7 +99,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   types, read-only access-mode rejection, and end-to-end RIB
   channel round-trip.
 - **Four correctness fixes in the EVPN RR pipeline** (commit
-  7d09108, in response to adversarial review):
+  7d09108, surfaced during code review):
   (1) source-peer split-horizon for EVPN — the RR no longer reflects
       a route back to its originator;
   (2) `LocRib::recompute_evpn` detects same-peer attribute / payload

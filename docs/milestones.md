@@ -550,7 +550,7 @@ for the architectural record.
    IMET, Type 4 ES, Type 5 IP-Prefix per RFC 9136), `EvpnRoute` /
    `EvpnRouteKey` split, RouteDistinguisher / EthernetSegmentIdentifier /
    MplsLabel / MacAddress primitives, fuzz target.
-2. **7 typed extended-community accessors** (`crates/wire/src/attribute.rs`) —
+2. **6 typed extended-community accessors** (`crates/wire/src/attribute.rs`) —
    BGP Encapsulation (RFC 8365 / 9012), MAC Mobility (RFC 7432 §7.7),
    ESI Label (§7.5), ES-Import RT (§7.6), Router MAC (RFC 9135 §4.1),
    Default Gateway (RFC 4761 §3.2.5).
@@ -583,8 +583,8 @@ for the architectural record.
    reflection with kernel VXLAN, M31 MAC mobility + sticky, M32 multi-
    homing Type 1/4 reflection, M33 50k-route scale + churn against the
    in-tree `bench/evpn-load` generator.
-10. **Correctness hardening** — 12 fixes from three adversarial review
-    rounds, each with regression tests: source-peer suppression,
+10. **Correctness hardening** — 12 fixes from three review rounds,
+    each with regression tests: source-peer suppression,
     same-peer redistribution, full RFC 4456 tie-break, EVPN withdrawals
     through both loop branches, max-prefix counting, EVPN initial dump,
     ERR refresh tracking, Type 5 prefix in policy context, proto3

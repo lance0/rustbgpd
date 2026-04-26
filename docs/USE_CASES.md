@@ -590,8 +590,9 @@ thousands of VTEPs, and gives you structured observability.
 
 - Spin up a VTEP with a templated FRR config + a gRPC call to register
   the new peer — no config-file write dance.
-- Pipe EVPN route events into your SDN controller, BMP collector, or
-  fabric-observability tool via `WatchRoutes` and `rustbgpd-bmp`.
+- Pipe EVPN route events into your SDN controller or fabric-observability
+  tool via `WatchRoutes`. (BMP and MRT export carry unicast / FlowSpec
+  today; typed EVPN extraction in those channels is on the roadmap.)
 - Validate policy changes with `rustbgpctl rib explain-best-path` before
   pushing — routable-surface diffs, not CLI scraping.
 

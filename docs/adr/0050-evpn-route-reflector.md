@@ -125,7 +125,7 @@ Not forked into its own function: keeping a single `evpn_tiebreak_simple`
 with a dispatch head is cheaper to maintain than a per-route-type
 function tree.
 
-### 7 typed extended-community accessors
+### 6 typed extended-community accessors
 
 Added to `ExtendedCommunity`:
 
@@ -164,8 +164,11 @@ through per-neighbor `families = ["l2vpn_evpn"]` + `route_reflector_client`.
 
 Inbound (`crates/transport/src/session/inbound.rs`):
 - New `mp.safi == Evpn` branch after the FlowSpec branch
-- Policy context uses a placeholder `0.0.0.0/0` prefix (same trick
-  FlowSpec uses) — RT / community / AS_PATH matching works naturally
+- Policy context for Types 1-4 uses a placeholder `0.0.0.0/0` prefix
+  (same trick FlowSpec uses) — RT / community / AS_PATH matching works
+  naturally; for Type 5 (RFC 9136 IP Prefix) the actual NLRI prefix is
+  surfaced in the `RouteContext` so prefix-based policy clauses match
+  the real destination
 - Builds `EvpnRibRoute`s and sends through `RibUpdate::RoutesReceived`
 - MP EoR detection extended to require `mp.evpn_withdrawn.is_empty()`
 
@@ -191,9 +194,12 @@ clause against `RT:<asn>:<value>` extended communities. A
 `match_evpn_route_type` clause is a Phase 1.5 follow-up if operators
 need it in production.
 
-The placeholder-prefix trick does mean a `match prefix = "0.0.0.0/0"`
-clause will match EVPN routes — operators with prefix-based policy
-chains should scope them by family tag if they care.
+The placeholder-prefix trick for Types 1-4 means a `match prefix =
+"0.0.0.0/0"` clause will match those route types — operators with
+prefix-based policy chains should scope them by family tag if they
+care. Type 5 (IP Prefix) bypasses the placeholder and matches against
+its actual NLRI prefix, so prefix-based policy filters Type 5 EVPN
+routes the same way they filter unicast.
 
 ### gRPC surface
 
