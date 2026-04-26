@@ -8,8 +8,8 @@ use rustbgpd_wire::{Afi, FlowSpecRule, Prefix, RouteRefreshSubtype, Safi};
 use tracing::{debug, info, warn};
 
 use super::helpers::{
-    LOCAL_PEER, gauge_val, prefix_family, routes_equal, should_suppress_ibgp_inner,
-    validate_route_aspa, validate_route_rpki,
+    LOCAL_PEER, evpn_routes_equal, gauge_val, prefix_family, routes_equal,
+    should_suppress_ibgp_inner, validate_route_aspa, validate_route_rpki,
 };
 use super::{PendingRouteChunk, PendingRoutesReceived, RibManager};
 use crate::adj_rib_in::AdjRibIn;
@@ -1317,6 +1317,16 @@ impl RibManager {
                 if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
                     modified.next_hop = addr;
                 }
+            }
+            // Skip the announce if rib_out already holds the same route —
+            // the dirty-resync path in particular re-evaluates every
+            // advertised key and would otherwise re-emit no-op announces
+            // every cycle on a large fabric.
+            if rib_out
+                .get_evpn(key)
+                .is_some_and(|existing| evpn_routes_equal(existing, &modified))
+            {
+                continue;
             }
             evpn_announce.push(modified);
         }

@@ -38,6 +38,18 @@ pub(super) fn routes_equal(a: &crate::route::Route, b: &crate::route::Route) -> 
         && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
 }
 
+/// EVPN counterpart of [`routes_equal`]. Skip the deep attribute compare
+/// when the underlying `Arc<Vec<PathAttribute>>` is the same allocation.
+pub(super) fn evpn_routes_equal(
+    a: &crate::route::EvpnRibRoute,
+    b: &crate::route::EvpnRibRoute,
+) -> bool {
+    a.next_hop == b.next_hop
+        && a.peer == b.peer
+        && a.route == b.route
+        && (Arc::ptr_eq(&a.attributes, &b.attributes) || a.attributes == b.attributes)
+}
+
 #[must_use]
 pub(super) fn prefix_family(prefix: &Prefix) -> (Afi, Safi) {
     match prefix {

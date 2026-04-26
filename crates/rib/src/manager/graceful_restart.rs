@@ -28,10 +28,16 @@ impl RibManager {
         let mut evpn_affected: HashSet<EvpnRouteKey> = HashSet::new();
 
         if let Some(rib) = self.ribs.get_mut(&peer) {
+            // EVPN has a single family tuple, so the inner mark_stale_evpn
+            // call is identical for every entry in `gr_families`. Hoist
+            // it out of the loop and call once when (L2Vpn, Evpn) is
+            // among the GR-preserved families.
             for &family in &gr_families {
                 rib.mark_stale(family);
                 rib.mark_stale_flowspec(family);
-                rib.mark_stale_evpn(family);
+            }
+            if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
+                rib.mark_stale_evpn((Afi::L2Vpn, Safi::Evpn));
             }
             let withdrawn = rib.withdraw_families_except(&gr_families);
             if !withdrawn.is_empty() {
