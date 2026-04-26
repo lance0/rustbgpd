@@ -52,8 +52,11 @@ frr_neighbor_state() {
 
 frr_evpn_negotiated() {
     # FRR's "show bgp neighbor" exposes negotiated address families;
-    # look for "l2VpnEvpn" in the advertised/received capability summary.
-    docker exec "$FRR" vtysh -c "show bgp neighbor 10.0.0.1" 2>/dev/null | grep -c "L2VPN/EVPN"
+    # look for the L2VPN EVPN capability or family advertisement. FRR
+    # versions render the family name with either a slash ("L2VPN/EVPN")
+    # or a space ("L2VPN EVPN"); accept both.
+    docker exec "$FRR" vtysh -c "show bgp neighbor 10.0.0.1" 2>/dev/null \
+        | grep -cE "L2VPN[/ ]EVPN"
 }
 
 # ---------------------------------------------------------------------------
@@ -124,12 +127,17 @@ if [ "$evpn_rc" -ne 0 ]; then
     cat "$evpn_err" >&2
 elif echo "$evpn_routes" | grep -q 'routes'; then
     ok "ListEvpnRoutes returned a valid response"
-elif [ -z "$evpn_routes" ]; then
-    # Empty body — proto3 omits empty repeated fields.
-    ok "ListEvpnRoutes returned (empty response body, RPC succeeded)"
 else
-    fail "ListEvpnRoutes returned unexpected output"
-    echo "$evpn_routes" >&2
+    # Empty proto3 body — grpcurl renders this as either a literal
+    # empty string or `{}` depending on version. Both mean "RPC
+    # succeeded, repeated `routes` field elided per proto3 default."
+    trimmed=$(echo "$evpn_routes" | tr -d '[:space:]')
+    if [ -z "$trimmed" ] || [ "$trimmed" = "{}" ]; then
+        ok "ListEvpnRoutes returned (empty response body, RPC succeeded)"
+    else
+        fail "ListEvpnRoutes returned unexpected output"
+        echo "$evpn_routes" >&2
+    fi
 fi
 rm -f "$evpn_err"
 

@@ -31,6 +31,7 @@ LOCAL_IP="$1"
 VNI="$2"
 BRIDGE="br${VNI}"
 VXLAN="vxlan${VNI}"
+DUMMY="dummy${VNI}"
 
 # 1. Linux bridge for VNI ${VNI}.
 ip link add name "${BRIDGE}" type bridge 2>/dev/null || true
@@ -50,6 +51,16 @@ ip link set dev "${VXLAN}" up
 
 # 3. Make sure the bridge is up as well (some distros leave it down).
 ip link set dev "${BRIDGE}" up
+
+# 4. Dummy interface attached to the bridge as a local (non-VXLAN) port.
+# Zebra treats MACs on the VXLAN port as remote (HER-flooded peers); for
+# zebra to originate a Type 2 MAC/IP advertisement the MAC must appear
+# on a non-VXLAN bridge port. The dummy interface gives M30/M31/M32
+# something to inject MACs onto:
+#     bridge fdb add aa:bb:cc:00:00:01 dev dummy${VNI} master static
+ip link add "${DUMMY}" type dummy 2>/dev/null || true
+ip link set dev "${DUMMY}" master "${BRIDGE}"
+ip link set dev "${DUMMY}" up
 
 # Let zebra see the interfaces before FRR's BGP daemon starts. Small sleep
 # is pragmatic — the exact value isn't critical.

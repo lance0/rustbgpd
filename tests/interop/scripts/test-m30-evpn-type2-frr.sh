@@ -92,11 +92,14 @@ wait_frr_evpn_mac_withdrawn() {
     return 1
 }
 
-frr_evpn_mac_route_json() {
+frr_evpn_mac_route_detail() {
     local container=${1:?}
-    # FRR's MAC/IP route detail JSON — used to pull ORIGINATOR_ID and
-    # CLUSTER_LIST values from the reflected UPDATE.
-    docker exec "$container" vtysh -c "show bgp l2vpn evpn route type macip json" 2>/dev/null
+    # FRR's MAC/IP route detail text — `show evpn mac vni X json` does
+    # not expose ORIGINATOR_ID or CLUSTER_LIST in its JSON schema, but
+    # `show bgp l2vpn evpn route detail` does in plain text. Use the
+    # text view so the assertions can match labelled fields rather
+    # than substring-grepping the route's own next-hop.
+    docker exec "$container" vtysh -c "show bgp l2vpn evpn route detail" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -135,7 +138,12 @@ fi
 
 # Test 4: inject MAC on VTEP-A, expect it on VTEP-B
 log "[test] Injecting $TEST_MAC on VTEP-A vxlan${VNI} FDB"
-docker exec "$VTEP_A" bridge fdb add "$TEST_MAC" dev "vxlan${VNI}" self master static >/dev/null
+# Inject on the dummy port (a non-VXLAN bridge port). FRR zebra only
+# treats MACs on a non-VXLAN bridge port as locally-learned, which is
+# what triggers the Type 2 origination — MACs on the VXLAN port are
+# treated as remote / HER-flooded and never advertised. `replace`
+# rather than `add` so the test is idempotent across re-runs.
+docker exec "$VTEP_A" bridge fdb replace "$TEST_MAC" dev "dummy${VNI}" master static >/dev/null
 if wait_frr_evpn_mac_learned "$VTEP_B" "$VNI" "$TEST_MAC" 30; then
     ok "VTEP-B learned $TEST_MAC via EVPN reflection"
 else
@@ -143,25 +151,28 @@ else
     docker exec "$VTEP_B" vtysh -c "show evpn mac vni $VNI" >&2 || true
 fi
 
-# Test 5: VTEP-B's reflected Type 2 UPDATE carries RFC 4456 attributes
+# Test 5: VTEP-B's reflected Type 2 UPDATE carries RFC 4456 attributes.
+# Use the labelled detail view; FRR's `show evpn mac vni X json` does
+# not expose ORIGINATOR_ID / CLUSTER_LIST, so a JSON-shaped check
+# would always be a substring grep that false-positives on the
+# next-hop IP.
 log "[test] Reflected Type 2 has ORIGINATOR_ID + CLUSTER_LIST set"
-macip_json=$(frr_evpn_mac_route_json "$VTEP_B")
-if echo "$macip_json" | grep -q "\"$TEST_MAC\""; then
-    if echo "$macip_json" | grep -q "\"originatorIp\":\"$VTEP_A_IP\"" \
-        || echo "$macip_json" | grep -q "\"originator\":\"$VTEP_A_IP\""; then
+macip_detail=$(frr_evpn_mac_route_detail "$VTEP_B")
+if echo "$macip_detail" | grep -q "$TEST_MAC"; then
+    if echo "$macip_detail" | grep -qE "Originator: ?$VTEP_A_IP"; then
         ok "ORIGINATOR_ID == $VTEP_A_IP on reflected UPDATE"
     else
         fail "ORIGINATOR_ID not set to VTEP-A's router-id"
-        echo "$macip_json" | head -40 >&2
+        echo "$macip_detail" | head -40 >&2
     fi
-    if echo "$macip_json" | grep -q "$RR_CLUSTER_ID"; then
+    if echo "$macip_detail" | grep -qE "Cluster ?[Ll]ist: ?$RR_CLUSTER_ID"; then
         ok "CLUSTER_LIST contains RR cluster-id $RR_CLUSTER_ID"
     else
         fail "CLUSTER_LIST missing the RR cluster-id"
-        echo "$macip_json" | head -40 >&2
+        echo "$macip_detail" | head -40 >&2
     fi
 else
-    fail "VTEP-B's MAC/IP route JSON doesn't contain $TEST_MAC"
+    fail "VTEP-B's MAC/IP route detail doesn't contain $TEST_MAC"
 fi
 
 # Test 6: rustbgpd's gRPC ListEvpnRoutes surfaces the Type 2 route
@@ -214,8 +225,8 @@ fi
 
 # Test 7: withdrawal — remove the FDB entry, expect VTEP-B to drop it
 log "[test] Withdrawal: removing MAC from VTEP-A FDB"
-docker exec "$VTEP_A" bridge fdb del "$TEST_MAC" dev "vxlan${VNI}" self master 2>/dev/null || \
-    docker exec "$VTEP_A" bridge fdb del "$TEST_MAC" dev "vxlan${VNI}" self 2>/dev/null || true
+docker exec "$VTEP_A" bridge fdb del "$TEST_MAC" dev "dummy${VNI}" master 2>/dev/null || \
+    docker exec "$VTEP_A" bridge fdb del "$TEST_MAC" dev "dummy${VNI}" 2>/dev/null || true
 if wait_frr_evpn_mac_withdrawn "$VTEP_B" "$VNI" "$TEST_MAC" 15; then
     ok "VTEP-B dropped $TEST_MAC after VTEP-A withdrawal"
 else

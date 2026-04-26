@@ -33,6 +33,11 @@ VXLAN="vxlan${VNI}"
 ES_DUMMY="esdummy"
 
 # --- Standard VTEP: bridge + VXLAN interface with nolearning ---
+# Non-VLAN-aware bridge — VNI is implicit (one VNI per bridge). A
+# VLAN-aware bridge would let FRR auto-bind the ES to a specific EVI
+# and origination Type 1 EAD-per-EVI routes, but that requires SVI
+# sub-interfaces and a richer FRR config that's out of scope for the
+# Phase 1 multi-homing reflection test.
 ip link add name "${BRIDGE}" type bridge 2>/dev/null || true
 ip link set dev "${BRIDGE}" up
 
@@ -51,9 +56,53 @@ ip link set dev "${ES_DUMMY}" up
 
 ip link set dev "${BRIDGE}" up
 
-# ES-ID and ES-SYS-MAC come through as FRR config on this interface
-# (see frr-bgpd-m32-vtep-*.conf). Surface them here for log-visibility
-# when the shim runs as a container exec hook.
+# Apply the EVPN MH config dynamically via vtysh — putting it in
+# frr.conf races with the interface creation here, and on FRR 10.3.1
+# one of the two VTEPs sometimes fails to pick up the per-interface
+# config when esdummy appears later. Issuing the config after the
+# interface exists is reliable.
 echo "start-frr-vtep-mh: local=${LOCAL_IP} vni=${VNI} es-id=${ES_ID} es-sys-mac=${ES_SYS_MAC}" >&2
+
+# Wait briefly for FRR daemons to be reachable via vtysh.
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if vtysh -c "show version" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
+apply_evpn_mh_config() {
+    vtysh -c "configure terminal" \
+          -c "router bgp 65000" \
+          -c " bgp evpn mh startup-delay 5" \
+          -c "end" >/dev/null 2>&1 || true
+    vtysh -c "configure terminal" \
+          -c "interface ${ES_DUMMY}" \
+          -c "no evpn mh es-id ${ES_ID}" \
+          -c "no evpn mh es-sys-mac ${ES_SYS_MAC}" \
+          -c "end" >/dev/null 2>&1 || true
+    vtysh -c "configure terminal" \
+          -c "interface ${ES_DUMMY}" \
+          -c "evpn mh es-id ${ES_ID}" \
+          -c "evpn mh es-sys-mac ${ES_SYS_MAC}" \
+          -c "end" >/dev/null 2>&1 || true
+}
+
+# FRR's per-interface EVPN-MH config has a startup race with esdummy
+# creation: occasionally one of two co-deployed VTEPs ends up without
+# a local ES even though the running config shows it. Reapply with
+# a no/yes dance until `show evpn es` confirms a local ES, or give up
+# after ~30 s. Also clamp `bgp evpn mh startup-delay` (default 180 s)
+# down to 5 s so the ES exits protodown promptly — there is no LACP
+# in this lab so the production safety window is unneeded.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    apply_evpn_mh_config
+    sleep 3
+    if vtysh -c "show evpn es" 2>/dev/null | grep -qE "^${ES_SYS_MAC%%:*}|esdummy"; then
+        echo "start-frr-vtep-mh: ES local on ${ES_DUMMY} after attempt ${attempt}" >&2
+        break
+    fi
+    echo "start-frr-vtep-mh: ES not yet local on attempt ${attempt}, retrying" >&2
+done
 
 sleep 1

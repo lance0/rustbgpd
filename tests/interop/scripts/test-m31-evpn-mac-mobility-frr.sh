@@ -85,14 +85,37 @@ wait_frr_evpn_mac_remote() {
 }
 
 # Extract MAC Mobility sequence number (if any) for <mac> from VTEP-B's
-# reflected route table. Echoes the number or "-" if absent. Uses FRR's
-# detail view; the `Sequence Number:` text field has been stable across
-# recent FRR releases.
+# reflected route table. Echoes the number or empty if absent. Uses
+# FRR's detail view filtered for the target MAC; `show bgp l2vpn evpn
+# route mac <m>` is "Ambiguous command" on FRR 10.3.1, and a non-zero
+# vtysh exit + `set -o pipefail` would otherwise tear the test down.
+#
+# FRR encodes the MAC Mobility extcomm in two places — the verbose
+# "Sequence Number:" / "MAC Mobility Sequence Number:" line on some
+# versions, and the compact "MM:<n>" or "MM:<n>:S" token in the
+# Extended Community line on FRR 10.x. Match either form.
 frr_mac_mobility_seq() {
     local container=${1:?}
     local mac=${2:?}
-    docker exec "$container" vtysh -c "show bgp l2vpn evpn route mac $mac" 2>/dev/null \
-        | awk '/[Ss]equence [Nn]umber/ {print $NF; exit}' \
+    local output
+    output=$(docker exec "$container" vtysh -c "show bgp l2vpn evpn route detail" 2>/dev/null || true)
+    echo "$output" \
+        | awk -v mac="$mac" '
+            tolower($0) ~ tolower(mac) {found=1}
+            found && /[Ss]equence [Nn]umber/ {
+                # last field is the bare sequence number
+                print $NF; exit
+            }
+            found && match($0, /MM:[0-9]+/) {
+                # extract digits after MM:
+                tok = substr($0, RSTART, RLENGTH)
+                sub(/^MM:/, "", tok)
+                # strip optional trailing :S sticky flag
+                sub(/:.*$/, "", tok)
+                print tok; exit
+            }
+            /^BGP routing table entry/ && found && !/[Ss]equence/ && !/MM:/ {found=0}
+        ' \
         | tr -d '\r'
 }
 
@@ -101,15 +124,20 @@ inject_mac() {
     local mac=${2:?}
     local flags=${3:-static}
     # flags: "static" for plain; "sticky static" for sticky-MAC test.
-    docker exec "$container" bridge fdb add "$mac" dev "vxlan${VNI}" self master $flags >/dev/null
+    # Inject on the dummy port (a non-VXLAN bridge port) so FRR zebra
+    # treats the MAC as locally-learned and originates Type 2. MACs on
+    # the VXLAN port are treated as remote / HER-flooded and never
+    # advertised — see start-frr-vtep.sh for the dummy interface setup.
+    # `replace` is idempotent across re-runs; `add` would fail with
+    # "RTNETLINK answers: File exists" and trip `set -e`.
+    docker exec "$container" bridge fdb replace "$mac" dev "dummy${VNI}" master $flags >/dev/null
 }
 
 withdraw_mac() {
     local container=${1:?}
     local mac=${2:?}
-    # Try both forms — depending on how it was added, one of these works.
-    docker exec "$container" bridge fdb del "$mac" dev "vxlan${VNI}" self master 2>/dev/null \
-        || docker exec "$container" bridge fdb del "$mac" dev "vxlan${VNI}" self 2>/dev/null \
+    docker exec "$container" bridge fdb del "$mac" dev "dummy${VNI}" master 2>/dev/null \
+        || docker exec "$container" bridge fdb del "$mac" dev "dummy${VNI}" 2>/dev/null \
         || true
 }
 
