@@ -232,26 +232,30 @@ fi
 log "[check] tester peers stayed Established without mid-run flaps"
 neighbors_json=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
     "$GRPC_ADDR" rustbgpd.v1.NeighborService/ListNeighbors 2>/dev/null)
-# Walk each neighbor block separately: count testers in Established
-# state and capture their flap counts. The JSON format puts "state"
-# about 10 lines after the address in each neighbor entry.
-tester_established=$(echo "$neighbors_json" \
-    | awk '/"description": "tester-[ab]"/{inblock=1}
-           inblock && /SESSION_STATE_ESTABLISHED/{found++; inblock=0}
-           END{print found+0}')
-if [ "$tester_established" -eq 2 ]; then
+# `jq` is mandatory — the prior awk parser was fragile to JSON layout
+# changes and could miscount under proto3 default-field elision.
+if ! command -v jq >/dev/null 2>&1; then
+    fail "jq is required for neighbor-state parsing (install with apt-get install jq)"
+    print_summary
+fi
+tester_established=$(echo "$neighbors_json" | jq -r '
+    [.neighbors[]?
+        | select(.config.description // "" | test("^tester-[ab]$"))
+        | select(.state == "SESSION_STATE_ESTABLISHED")]
+    | length')
+if [ "${tester_established:-0}" -eq 2 ]; then
     ok "both tester peers still Established"
 else
     fail "expected 2 tester peers Established; got ${tester_established}"
     echo "$neighbors_json" >&2
 fi
-# flapCount only appears in the JSON when it's non-zero — count the
-# literal field under each tester's block.
-tester_flaps=$(echo "$neighbors_json" \
-    | awk '/"description": "tester-[ab]"/{inblock=1}
-           inblock && /"flapCount"/{found++; inblock=0}
-           /^    \}/{inblock=0}
-           END{print found+0}')
+# Sum flapCount across both tester peers. `flapCount` is omitted when
+# zero (proto3 default elision); jq treats the absent field as 0.
+tester_flaps=$(echo "$neighbors_json" | jq -r '
+    [.neighbors[]?
+        | select(.config.description // "" | test("^tester-[ab]$"))
+        | (.flapCount // 0 | tonumber)]
+    | add // 0')
 if [ "${tester_flaps:-0}" -eq 0 ]; then
     ok "no flap counter on either tester peer"
 else
