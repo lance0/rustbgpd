@@ -202,6 +202,16 @@ impl LocRib {
     }
 }
 
+/// Three-tier stale ranking for EVPN: fresh (0) > GR-stale (1) > LLGR-stale (2).
+/// Lower value = more preferred.
+fn evpn_stale_rank(route: &EvpnRibRoute) -> u8 {
+    if route.is_llgr_stale {
+        2
+    } else {
+        u8::from(route.is_stale)
+    }
+}
+
 /// BGP-preference + EVPN-aware tie-break for EVPN routes (RFC 7432 §15).
 ///
 /// For Type 2 (MAC/IP Advertisement) routes, runs a MAC Mobility head
@@ -215,16 +225,16 @@ impl LocRib {
 /// stale → `LocalPref` → `AS_PATH` length → ORIGIN → MED →
 /// eBGP > iBGP → `CLUSTER_LIST` length → `ORIGINATOR_ID` → peer address.
 fn evpn_tiebreak_simple(a: &EvpnRibRoute, b: &EvpnRibRoute) -> Ordering {
-    // 0. Non-stale preferred over stale (RFC 4724 §4.2 / RFC 9494 §4.7).
-    //    GR-stale must never beat fresh; LLGR-stale is ranked below GR-stale.
+    // 0. Three-tier freshness: fresh (0) > GR-stale (1) > LLGR-stale (2)
+    //    per RFC 4724 §4.2 / RFC 9494 §4.7. LLGR promotion clears
+    //    `is_stale` and sets `is_llgr_stale` (see AdjRibIn::promote_evpn_to_llgr_stale),
+    //    so a single rank function avoids the inversion that two independent
+    //    bool comparisons would cause when the bools are not nested.
+    //
     //    Runs BEFORE the Type 2 MAC Mobility head — otherwise a stale route
     //    with a higher MAC Mobility sequence (or sticky bit) would beat a
     //    fresh alternative inside the head and skip this check entirely.
-    match a.is_stale.cmp(&b.is_stale) {
-        Ordering::Equal => {}
-        other => return other,
-    }
-    match a.is_llgr_stale.cmp(&b.is_llgr_stale) {
+    match evpn_stale_rank(a).cmp(&evpn_stale_rank(b)) {
         Ordering::Equal => {}
         other => return other,
     }
@@ -757,14 +767,48 @@ mod tests {
     }
 
     /// Regression: GR-stale outranks LLGR-stale (RFC 9494 §4.7).
+    ///
+    /// Mirrors the production state set by
+    /// `AdjRibIn::promote_evpn_to_llgr_stale`: GR-stale routes carry
+    /// `is_stale=true, is_llgr_stale=false`; LLGR-stale routes carry
+    /// `is_stale=false, is_llgr_stale=true`. Two independent boolean
+    /// comparisons would invert this ordering — both routes were
+    /// previously checked sequentially and `is_stale` short-circuited
+    /// the wrong way for LLGR. The single `evpn_stale_rank` function
+    /// gives the correct three-tier ordering.
     #[test]
     fn evpn_gr_stale_beats_llgr_stale() {
+        // LLGR-stale carries higher LocalPref to prove rank, not LP, decides.
         let mut gr = make_evpn_type2(2, vec![PathAttribute::LocalPref(100)]);
-        let mut llgr = make_evpn_type2(3, vec![PathAttribute::LocalPref(100)]);
+        let mut llgr = make_evpn_type2(3, vec![PathAttribute::LocalPref(200)]);
         gr.is_stale = true;
-        llgr.is_stale = true;
+        gr.is_llgr_stale = false;
+        llgr.is_stale = false;
         llgr.is_llgr_stale = true;
-        assert_eq!(evpn_tiebreak_simple(&gr, &llgr), Ordering::Less);
+        assert_eq!(
+            evpn_tiebreak_simple(&gr, &llgr),
+            Ordering::Less,
+            "GR-stale must outrank LLGR-stale"
+        );
+        assert_eq!(
+            evpn_tiebreak_simple(&llgr, &gr),
+            Ordering::Greater,
+            "LLGR-stale must rank below GR-stale"
+        );
+    }
+
+    /// Regression: a fresh route with low `LocalPref` still beats
+    /// LLGR-stale with high `LocalPref`. The freshness check must run
+    /// before the BGP preference chain.
+    #[test]
+    fn evpn_fresh_beats_llgr_stale_even_with_lower_localpref() {
+        let mut fresh = make_evpn_type2(2, vec![PathAttribute::LocalPref(50)]);
+        let mut llgr = make_evpn_type2(3, vec![PathAttribute::LocalPref(500)]);
+        fresh.is_stale = false;
+        fresh.is_llgr_stale = false;
+        llgr.is_stale = false;
+        llgr.is_llgr_stale = true;
+        assert_eq!(evpn_tiebreak_simple(&fresh, &llgr), Ordering::Less);
     }
 
     /// Regression: a GR-stale Type 2 route with a HIGHER MAC Mobility

@@ -264,6 +264,8 @@ impl PendingRoutesReceived {
             || !self.announced.as_slice().is_empty()
             || !self.flowspec_withdrawn.as_slice().is_empty()
             || !self.flowspec_announced.as_slice().is_empty()
+            || !self.evpn_withdrawn.as_slice().is_empty()
+            || !self.evpn_announced.as_slice().is_empty()
     }
 }
 

@@ -1299,11 +1299,26 @@ impl RibManager {
                 med: best.med_attr(),
             };
             let result = rustbgpd_policy::evaluate_chain(export_pol, &ctx);
-            if result.action == rustbgpd_policy::PolicyAction::Permit {
-                evpn_announce.push(best.clone());
-            } else if rib_out.get_evpn(key).is_some() {
-                evpn_withdraw.push(*key);
+            if result.action != rustbgpd_policy::PolicyAction::Permit {
+                if rib_out.get_evpn(key).is_some() {
+                    evpn_withdraw.push(*key);
+                }
+                continue;
             }
+
+            // Apply export modifications (community add/remove, RT add/remove,
+            // next-hop). Skip the deep attribute clone when nothing changes.
+            let mut modified = best.clone();
+            if !result.modifications.is_empty() {
+                let nh = rustbgpd_policy::apply_modifications(
+                    std::sync::Arc::make_mut(&mut modified.attributes),
+                    &result.modifications,
+                );
+                if let Some(rustbgpd_policy::NextHopAction::Specific(addr)) = nh {
+                    modified.next_hop = addr;
+                }
+            }
+            evpn_announce.push(modified);
         }
     }
 

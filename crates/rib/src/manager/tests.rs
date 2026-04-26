@@ -8350,3 +8350,209 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
     drop(tx);
     handle.await.unwrap();
 }
+
+/// Regression: EVPN export-policy `RouteModifications` (community add,
+/// `LocalPref` override, etc.) must be applied to the announced route.
+/// Before the fix, `evaluate_chain`'s result was checked for Permit/Deny
+/// but `result.modifications` was discarded, so RT/community/`LocalPref`
+/// rewrite policy silently had no effect on EVPN exports.
+#[tokio::test]
+#[expect(clippy::too_many_lines)]
+async fn evpn_export_policy_applies_modifications() {
+    use rustbgpd_policy::{Policy, PolicyAction, PolicyChain, PolicyStatement, RouteModifications};
+
+    // Permit-all with a community-add side effect.
+    let added_community: u32 = (65000u32 << 16) | 0x3E7;
+    let mut mods = RouteModifications::default();
+    mods.communities_add.push(added_community);
+    let export_policy = PolicyChain::new(vec![Policy {
+        entries: vec![PolicyStatement {
+            prefix: None,
+            ge: None,
+            le: None,
+            action: PolicyAction::Permit,
+            match_community: vec![],
+            match_as_path: None,
+            match_neighbor_set: None,
+            match_route_type: None,
+            match_rpki_validation: None,
+            match_aspa_validation: None,
+            match_as_path_length_ge: None,
+            match_as_path_length_le: None,
+            match_local_pref_ge: None,
+            match_local_pref_le: None,
+            match_med_ge: None,
+            match_med_le: None,
+            match_next_hop: None,
+            modifications: mods,
+        }],
+        default_action: PolicyAction::Permit,
+    }]);
+
+    let (tx, rx) = mpsc::channel(64);
+    let cluster_id = Some(Ipv4Addr::new(10, 0, 0, 100));
+    let manager = RibManager::new(
+        rx,
+        dummy_query_rx(),
+        Some(export_policy),
+        cluster_id,
+        BgpMetrics::new(),
+    );
+    let handle = tokio::spawn(manager.run());
+
+    let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    let (out_tx, mut out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut out_rx).await;
+
+    let (source_out_tx, mut source_out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: source,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::new(10, 0, 0, 1),
+        outbound_tx: source_out_tx,
+        export_policy: None,
+        sendable_families: evpn_sendable(),
+        is_ebgp: false,
+        route_reflector_client: true,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+    drain_eor(&mut source_out_rx).await;
+
+    let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
+    tx.send(RibUpdate::RoutesReceived {
+        peer: source,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![imet],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let announce = tokio::time::timeout(Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("target should receive EVPN announce within 2s")
+        .expect("outbound channel open");
+    assert_eq!(announce.evpn_announce.len(), 1);
+
+    let attrs = announce.evpn_announce[0].attributes.as_ref();
+    let comms_attr = attrs
+        .iter()
+        .find_map(|a| {
+            if let PathAttribute::Communities(c) = a {
+                Some(c)
+            } else {
+                None
+            }
+        })
+        .expect("export policy must add Communities attribute when modifications include communities_add");
+    assert!(
+        comms_attr.contains(&added_community),
+        "added community {added_community:#x} must appear on the reflected EVPN route"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: `PendingRoutesReceived::has_more()` previously omitted
+/// the EVPN iterators, so a `RoutesReceived` carrying more than
+/// `ROUTES_RECEIVED_CHUNK_SIZE` EVPN routes had everything past the
+/// first chunk silently dropped at distribution.rs's `if has_more()
+/// push_front` re-enqueue site. This test drains a 2-chunk-sized batch
+/// of EVPN announces and verifies every route appears in the chunk
+/// stream.
+#[test]
+fn pending_routes_received_drains_full_evpn_announce_batch() {
+    let total = ROUTES_RECEIVED_CHUNK_SIZE * 2 + 7;
+    let peer = Ipv4Addr::new(192, 0, 2, 1);
+    let evpn_announced: Vec<EvpnRibRoute> = (0..u32::try_from(total).unwrap())
+        .map(|tag| make_evpn_imet(peer, tag))
+        .collect();
+
+    let mut pending = PendingRoutesReceived::new(
+        IpAddr::V4(peer),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        evpn_announced,
+        vec![],
+    );
+
+    let mut drained: usize = 0;
+    let mut last_was_evpn = false;
+    while let Some(chunk) = pending.next_chunk() {
+        match chunk {
+            PendingRouteChunk::EvpnAnnounced(routes) => {
+                drained += routes.len();
+                last_was_evpn = true;
+            }
+            PendingRouteChunk::EvpnWithdrawn(routes) => {
+                drained += routes.len();
+                last_was_evpn = true;
+            }
+            _ => last_was_evpn = false,
+        }
+    }
+    assert!(last_was_evpn, "final chunk must be EVPN");
+    assert_eq!(
+        drained, total,
+        "every EVPN route must be drained; has_more() must keep the batch alive"
+    );
+    assert!(
+        !pending.has_more(),
+        "after full drain, has_more() must report false"
+    );
+}
+
+/// Regression: same drain check for EVPN withdrawals, since they also
+/// flow through the `evpn_withdrawn` iterator and `has_more()`.
+#[test]
+fn pending_routes_received_drains_full_evpn_withdraw_batch() {
+    let total = ROUTES_RECEIVED_CHUNK_SIZE + 1;
+    let peer = Ipv4Addr::new(192, 0, 2, 2);
+    let withdrawn: Vec<rustbgpd_wire::EvpnRouteKey> = (0..u32::try_from(total).unwrap())
+        .map(|tag| make_evpn_imet(peer, tag).key)
+        .collect();
+
+    let mut pending = PendingRoutesReceived::new(
+        IpAddr::V4(peer),
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        vec![],
+        withdrawn,
+    );
+
+    let mut drained: usize = 0;
+    while let Some(chunk) = pending.next_chunk() {
+        if let PendingRouteChunk::EvpnWithdrawn(keys) = chunk {
+            drained += keys.len();
+        }
+    }
+    assert_eq!(drained, total);
+    assert!(!pending.has_more());
+}
