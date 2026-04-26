@@ -920,10 +920,19 @@ fn flowspec_route_to_proto(route: &FlowSpecRoute) -> proto::FlowSpecRouteEntry {
         })
         .collect();
 
+    // FlowSpec routes never carry AFI L2VPN; map any unexpected variant
+    // to UNSPECIFIED rather than panicking inside the async gRPC handler
+    // (an `unreachable!` here would abort the task and drop the
+    // connection, masking an upstream invariant violation as a transport
+    // error). Debug builds still surface the bug via debug_assert.
+    debug_assert!(
+        !matches!(route.afi, Afi::L2Vpn),
+        "FlowSpec route with AFI L2VPN — upstream invariant violation"
+    );
     let afi_safi = match route.afi {
         Afi::Ipv4 => proto::AddressFamily::Ipv4Flowspec,
         Afi::Ipv6 => proto::AddressFamily::Ipv6Flowspec,
-        Afi::L2Vpn => unreachable!("FlowSpec route cannot carry L2VPN AFI"),
+        Afi::L2Vpn => proto::AddressFamily::Unspecified,
     };
 
     proto::FlowSpecRouteEntry {

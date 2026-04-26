@@ -92,6 +92,18 @@ fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
     Ok(nh)
 }
 
+/// Map a RIB-side withdraw error string into the right gRPC status code.
+/// "not found" maps to `NotFound`; everything else stays `Internal`.
+/// Shared by `DeletePath`, `DeleteFlowSpec`, and `DeleteEvpnRoute` so
+/// the surface is consistent.
+fn map_withdraw_error(e: &str) -> Status {
+    if e.contains("not found") {
+        Status::not_found(e.to_string())
+    } else {
+        Status::internal(format!("withdraw failed: {e}"))
+    }
+}
+
 /// Parse a Large Community string in `"global:local1:local2"` format.
 fn parse_large_community(s: &str) -> Result<LargeCommunity, String> {
     let parts: Vec<&str> = s.splitn(3, ':').collect();
@@ -249,7 +261,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("withdraw failed: {e}")))?;
+            .map_err(|e| map_withdraw_error(&e))?;
 
         Ok(Response::new(proto::DeletePathResponse {}))
     }
@@ -349,7 +361,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("withdraw failed: {e}")))?;
+            .map_err(|e| map_withdraw_error(&e))?;
 
         Ok(Response::new(proto::DeleteFlowSpecResponse {}))
     }
@@ -458,7 +470,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         reply_rx
             .await
             .map_err(|_| Status::internal("RIB manager dropped reply"))?
-            .map_err(|e| Status::internal(format!("withdraw failed: {e}")))?;
+            .map_err(|e| map_withdraw_error(&e))?;
 
         Ok(Response::new(proto::DeleteEvpnRouteResponse {}))
     }
@@ -869,6 +881,23 @@ fn build_type3(
     req: &proto::AddEvpnRouteRequest,
     rd: RouteDistinguisher,
 ) -> Result<(EvpnRoute, Vec<PathAttribute>), Status> {
+    // Reject Type-2-only fields explicitly — silently ignoring them
+    // makes controller mistakes look like successful injects.
+    if !req.mac.is_empty() {
+        return Err(Status::invalid_argument(
+            "mac is Type 2 only; must be empty for Type 3 IMET",
+        ));
+    }
+    if req.label != 0 {
+        return Err(Status::invalid_argument(
+            "label is Type 2 only; must be 0 for Type 3 IMET",
+        ));
+    }
+    if req.label2 != 0 {
+        return Err(Status::invalid_argument(
+            "label2 is Type 2 only; must be 0 for Type 3 IMET",
+        ));
+    }
     let originator_ip = parse_ip_required(&req.ip, "ip (originator_ip for Type 3)")?;
     let route = EvpnRoute::Imet(EvpnImet {
         rd,
@@ -912,18 +941,35 @@ fn parse_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
     let value: u32 = val
         .parse()
         .map_err(|_| Status::invalid_argument("route_target value must be u32"))?;
-    let admin_num: u64 = admin
-        .parse()
-        .map_err(|_| Status::invalid_argument("route_target admin must be numeric ASN"))?;
+
+    // RFC 4360 Type 0x01: IPv4-admin RT — `dotted.quad.ipv4:u16`.
+    // Recognized when the admin part parses as an IPv4 address and the
+    // value fits in 16 bits. EVPN deployments commonly use this form for
+    // RTs whose admin ID is a router-id (loopback) rather than an ASN.
+    if let Ok(ipv4) = admin.parse::<std::net::Ipv4Addr>() {
+        let v16 = u16::try_from(value).map_err(|_| {
+            Status::invalid_argument("IPv4-admin route_target value must fit in u16")
+        })?;
+        let a = ipv4.octets();
+        let v = v16.to_be_bytes();
+        // Type=0x01 (transitive IPv4-admin), Subtype=0x02 (RT).
+        return Ok(ExtendedCommunity::new(u64::from_be_bytes([
+            0x01, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+        ])));
+    }
+
+    let admin_num: u64 = admin.parse().map_err(|_| {
+        Status::invalid_argument("route_target admin must be numeric ASN or dotted IPv4 address")
+    })?;
     if let Ok(admin16) = u16::try_from(admin_num) {
-        // Type 0x02 (RT, 2-octet ASN), subtype 0x02.
+        // Type=0x00 (transitive 2-octet AS), Subtype=0x02 (RT).
         let a = admin16.to_be_bytes();
         let v = value.to_be_bytes();
         Ok(ExtendedCommunity::new(u64::from_be_bytes([
             0x00, 0x02, a[0], a[1], v[0], v[1], v[2], v[3],
         ])))
     } else {
-        // Type 0x02 (RT, 4-octet ASN), subtype 0x02 — wire type 0x02 flips to 0x02.
+        // Type=0x02 (transitive 4-octet AS), Subtype=0x02 (RT).
         let admin32 =
             u32::try_from(admin_num).map_err(|_| Status::invalid_argument("RT ASN > 32 bits"))?;
         let v16 = u16::try_from(value)
