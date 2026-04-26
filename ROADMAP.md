@@ -194,6 +194,9 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
   - `match_evpn_route_type` policy clause — operators currently filter via RT or community matches; a route-type-keyed predicate would be ergonomic.
   - EVPN BMP export and MRT dump integration — unicast/FlowSpec already export; EVPN routes are not yet emitted on those channels.
   - GR / LLGR interop harness (kill / restart / measure) — unit tests cover the EVPN GR pipeline; FRR-vs-rustbgpd kill-and-recover interop is not in the M29-M33 set.
+  - **24-hour soak harness for M33** — current scale validation runs for ~3 minutes (50k routes + 60s churn). A leak in the intern table or AdjRibOut prefix index wouldn't surface in that window. Wrap M33 in a loop, sample memory every minute, fail if growth is non-zero post-convergence. Highest-leverage perf assurance gap left from v0.9.0.
+  - **`EvpnRibRoute` payload + key redundancy** — the struct stores both the full `EvpnRoute` payload and a cached `EvpnRouteKey` derived from it. Identity is recomputed independently in API delete, outbound withdrawal reconstruction, and display/filtering paths. Refactor before v1.0 so adding RFC 9251 Route Types 6-8 doesn't multiply the inconsistency surface. Pre-1.0 design debt; not load-bearing for v0.9.0 RR functionality.
+  - **CI wiring for M29-M33** — five interop scripts run cleanly on a developer box but aren't tied into the GitHub Actions matrix. M29 (~10 s, no kernel data plane) is the cheapest entry point. Promotes the harness from "manual gate" to "regression net." Tracked separately from the soak harness because the latter needs a long-running runner; M29 could land in the existing CI today.
 
 ### P2.5 — Operational Polish
 
