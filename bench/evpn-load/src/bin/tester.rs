@@ -130,8 +130,30 @@ async fn main() -> anyhow::Result<()> {
         families: vec![(Afi::L2Vpn, Safi::Evpn)],
     };
 
-    let handle = establish(cfg).await?;
+    let mut handle = establish(cfg).await?;
     tracing::info!("session established");
+
+    // Drain inbound traffic so the reader task in evpn-load's
+    // `establish()` doesn't back-pressure on its bounded `rx_tx`
+    // channel (currently 65 536). Without this drainer, RR-side
+    // reflections of the *other* tester's churn (~25 UPDATE/sec at
+    // 1 k rps) fill the channel in roughly 65 536 / 25 ≈ 44 minutes,
+    // the reader parks on send, the kernel TCP receive buffer fills,
+    // RR's writer task parks on `write_all`, and the
+    // ADR-0051 saturation handler fires `Cease/8` — what the M33 soak
+    // harness was attributing to a "monitor saturation" bug in
+    // rustbgpd. The bug was always in this binary: a write-only
+    // synthetic peer that ignored its rx side. See
+    // `evpn_load::PeerHandle` rustdoc.
+    let mut rx = std::mem::replace(&mut handle.rx, {
+        let (_, rx_placeholder) = tokio::sync::mpsc::channel(1);
+        rx_placeholder
+    });
+    tokio::spawn(async move {
+        while rx.recv().await.is_some() {
+            // discard — the tester is write-only.
+        }
+    });
 
     // Build shared attribute set — identical across all routes except for
     // the NLRI payload itself. That keeps per-route CPU to a minimum on

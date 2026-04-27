@@ -80,10 +80,36 @@ impl PeerConfig {
 
 /// Handle to a live BGP session. Provides a send channel for outbound
 /// messages and a receive stream for inbound ones.
+///
+/// **Important:** the inbound channel `rx` is bounded (currently
+/// 65 536 messages). The reader task drives `rx_tx.send(m).await`,
+/// which means it **back-pressures the TCP read loop** if the consumer
+/// stops draining. A non-draining consumer (e.g. a write-only synthetic
+/// peer) under sustained inbound traffic will eventually fill the
+/// channel, the reader task will park on send, the kernel TCP receive
+/// buffer will fill, and the remote peer's writer will block on
+/// `write_all` — surfacing as "saturated" from rustbgpd's perspective.
+///
+/// This is fine for an honest BGP daemon because real BGP daemons
+/// always drain their inbound traffic. For load-test scaffolding that
+/// only sends, **either drain `rx` in a discard task or use a real
+/// consumer**:
+///
+/// ```ignore
+/// // Drain-and-discard pattern for a write-only synthetic peer.
+/// let mut rx = handle.rx;
+/// tokio::spawn(async move { while rx.recv().await.is_some() {} });
+/// ```
+///
+/// The +49-min "wedge" the M33 soak harness reproduced before
+/// `f7c1033` was exactly this: the testers leaked their `rx` and
+/// stalled the RR's writer.
 pub struct PeerHandle {
     /// Send messages to be written to the wire.
     pub tx: mpsc::Sender<Message>,
-    /// Inbound messages decoded off the wire.
+    /// Inbound messages decoded off the wire. **Must be drained** —
+    /// see the type-level docs for the consumer-stalls-the-reader
+    /// gotcha.
     pub rx: mpsc::Receiver<Message>,
     /// Time the session reached Established.
     pub established_at: Instant,
