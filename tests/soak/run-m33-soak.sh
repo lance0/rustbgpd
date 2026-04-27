@@ -73,6 +73,11 @@ MONITOR_TIMEOUT_SEC=$(( SOAK_SEC + 60 ))
 # CONVERGE_TIMEOUT is the runner's deadline for Stage 3 (waiting for the
 # RR's Loc-RIB to fill) — independent of the monitor's --timeout-sec.
 CONVERGE_TIMEOUT=${CONVERGE_TIMEOUT:-120}
+# Extra args appended to the evpn-monitor invocation. Used by the
+# ADR-0051 saturation investigation to flip on bisection flags
+# (`--no-live-set`, `--no-parse`) without editing this script. Empty
+# by default; production soaks should not set this.
+MONITOR_EXTRA_ARGS=${MONITOR_EXTRA_ARGS:-}
 
 TESTER_A="clab-${TOPO}-tester-a"
 TESTER_B="clab-${TOPO}-tester-b"
@@ -192,7 +197,7 @@ log "Prometheus endpoint: http://${RR_IP}:9179/metrics"
 # Stage 1 — launch monitor (exits when converged_at + observe-sec elapses)
 # ---------------------------------------------------------------------------
 
-log "[stage 1] launching monitor (expect=$((COUNT_PER_TESTER * 2)), timeout-sec=${MONITOR_TIMEOUT_SEC}, observe-sec=${MONITOR_OBSERVE_SEC})"
+log "[stage 1] launching monitor (expect=$((COUNT_PER_TESTER * 2)), timeout-sec=${MONITOR_TIMEOUT_SEC}, observe-sec=${MONITOR_OBSERVE_SEC}${MONITOR_EXTRA_ARGS:+, extra='${MONITOR_EXTRA_ARGS}'})"
 docker exec -d "$MONITOR" sh -c "evpn-monitor \
     --listen 0.0.0.0:179 \
     --local-as 65000 \
@@ -201,6 +206,7 @@ docker exec -d "$MONITOR" sh -c "evpn-monitor \
     --stable-sec 5 \
     --timeout-sec ${MONITOR_TIMEOUT_SEC} \
     --observe-sec ${MONITOR_OBSERVE_SEC} \
+    ${MONITOR_EXTRA_ARGS} \
     > /tmp/monitor.json 2> /tmp/monitor.log"
 sleep 2
 
