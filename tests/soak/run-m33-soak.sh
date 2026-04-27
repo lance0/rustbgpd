@@ -49,7 +49,10 @@ source "$INTEROP_SCRIPT_DIR/test-lib.sh"
 # ---------------------------------------------------------------------------
 
 SOAK_HOURS=${SOAK_HOURS:-24}
-SOAK_SEC=$(( SOAK_HOURS * 3600 ))
+# SOAK_SEC takes precedence — useful for sub-hour smoke runs that the
+# integer SOAK_HOURS knob can't express (e.g. SOAK_SEC=600 for a 10-min
+# wiring smoke).
+SOAK_SEC=${SOAK_SEC:-$(( SOAK_HOURS * 3600 ))}
 WARMUP_SEC=${WARMUP_SEC:-600}
 SAMPLE_INTERVAL=${SAMPLE_INTERVAL:-60}
 HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-300}
