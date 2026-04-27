@@ -2702,3 +2702,71 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
         _ => panic!("expected RoutesReceived from the AS_PATH-loop path"),
     }
 }
+
+/// ADR-0051: when the writer's bulk channel saturates, the session must
+/// emit a `Cease` / `Out of Resources` (RFC 4486 §4 subcode 8)
+/// NOTIFICATION on the priority channel and tear the session down,
+/// rather than blackholing routes silently. Drives
+/// `trigger_outbound_saturation_teardown` directly to verify the
+/// invariants without trying to force kernel TCP buffer saturation
+/// from a unit test.
+#[tokio::test]
+async fn outbound_saturation_teardown_emits_cease_out_of_resources() {
+    use rustbgpd_wire::notification::{NotificationCode, cease_subcode};
+
+    let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
+    let (client, mut server) = connected_stream_pair().await;
+    session.test_install_stream(client);
+
+    // Sanity: writer is up before the trigger.
+    assert!(session.read_half.is_some());
+    assert!(session.writer_bulk_tx.is_some());
+    assert!(session.writer_priority_tx.is_some());
+    assert!(session.writer_join.is_some());
+
+    session.trigger_outbound_saturation_teardown();
+
+    // Post-trigger invariants: read half + writer senders dropped, but
+    // the JoinHandle stays in place so the run loop's writer-exit arm
+    // can still observe the writer's natural exit.
+    assert!(
+        session.read_half.is_none(),
+        "trigger_outbound_saturation_teardown must clear read_half"
+    );
+    assert!(
+        session.writer_bulk_tx.is_none(),
+        "writer_bulk_tx must be dropped to signal writer to exit"
+    );
+    assert!(
+        session.writer_priority_tx.is_none(),
+        "writer_priority_tx must be dropped to signal writer to exit"
+    );
+    let join = session
+        .writer_join
+        .take()
+        .expect("writer_join should outlive the trigger so the run loop observes exit");
+
+    // The writer pulled the Cease/8 from the priority channel before
+    // seeing both senders dropped, so it should be on the wire now.
+    let msg = read_single_bgp_message(&mut server).await;
+    let Message::Notification(notif) = msg else {
+        panic!("expected NOTIFICATION on saturation, got {msg:?}");
+    };
+    assert_eq!(notif.code, NotificationCode::Cease);
+    assert_eq!(
+        notif.subcode,
+        cease_subcode::OUT_OF_RESOURCES,
+        "saturation must surface as Cease/Out-of-Resources, not silent drop"
+    );
+
+    // After the priority message drains and both senders are gone, the
+    // biased select's `else` arm fires and the writer exits Ok.
+    let result = tokio::time::timeout(Duration::from_secs(2), join)
+        .await
+        .expect("writer should exit within 2s of senders dropped")
+        .expect("writer task should not panic");
+    assert!(
+        result.is_ok(),
+        "writer should exit Ok after clean shutdown, got: {result:?}"
+    );
+}

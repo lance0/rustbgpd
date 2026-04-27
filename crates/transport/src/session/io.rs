@@ -32,13 +32,15 @@ impl PeerSession {
     /// Encode `msg` and enqueue it on the writer's **bulk** channel
     /// (`UPDATE`, `RouteRefresh` `BoRR`/`EoRR` markers, `EoR` markers). Returns
     /// `OutboundChannelFull` when the writer hasn't drained the bounded
-    /// queue — the caller threads that up to the saturation handler in
-    /// the session task's outbound select arm. `WriterClosed` if there
+    /// queue — callers should pair this with [`Self::trigger_outbound_saturation_teardown`]
+    /// rather than just logging and continuing. `WriterClosed` if there
     /// is no active TCP connection.
     pub(super) fn enqueue_bulk(&mut self, msg: &Message) -> Result<(), TransportError> {
         let max_len = self.max_message_len();
         let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
-        let Some(tx) = self.writer_bulk_tx.as_ref() else {
+        // Clone the sender so the caller's mutable borrow of self is
+        // free for the saturation handler if try_send returns Full.
+        let Some(tx) = self.writer_bulk_tx.clone() else {
             debug!(
                 peer = %self.peer_label,
                 msg_type = %msg.message_type(),
@@ -48,7 +50,16 @@ impl PeerSession {
         };
         match tx.try_send(Bytes::from(encoded)) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(TransportError::OutboundChannelFull),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Centralize the saturation policy here so all 13+
+                // bulk callers in `outbound.rs` get the same behavior:
+                // send `Cease/Out-of-Resources`, drop writer senders,
+                // let the run-loop's writer-exit arm drive teardown.
+                // Caller still receives `Err(OutboundChannelFull)` so
+                // it knows to abort the rest of the batch.
+                self.trigger_outbound_saturation_teardown();
+                Err(TransportError::OutboundChannelFull)
+            }
             Err(mpsc::error::TrySendError::Closed(_)) => Err(TransportError::WriterClosed),
         }
     }
@@ -77,6 +88,45 @@ impl PeerSession {
                 )),
             }
         }));
+    }
+
+    /// Tear the session down because the writer's bulk channel
+    /// saturated — the peer hasn't drained `OUTBOUND_BUFFER` BGP
+    /// messages, so we send a `Cease` / `Out of Resources` (RFC 4486
+    /// §4 subcode 8) NOTIFICATION on the priority channel ahead of
+    /// any pending bulk traffic, then drop the writer channels.
+    ///
+    /// The writer's biased `select!` picks the priority NOTIFICATION
+    /// before falling through to the `else` arm, so the peer sees a
+    /// clean `Cease/8` if its TCP receive buffer ever drains. The
+    /// session's own writer-exit arm observes the resulting
+    /// `JoinHandle` resolution and drives the FSM through
+    /// `TcpConnectionFails` from there — no need to await an FSM
+    /// transition synchronously here, which keeps the bulk caller
+    /// chain (`send_route_update`) sync.
+    pub(super) fn trigger_outbound_saturation_teardown(&mut self) {
+        warn!(
+            peer = %self.peer_label,
+            "outbound writer channel saturated — sending Cease/Out-of-Resources and tearing down"
+        );
+        let notif = rustbgpd_wire::NotificationMessage::new(
+            NotificationCode::Cease,
+            cease_subcode::OUT_OF_RESOURCES,
+            bytes::Bytes::new(),
+        );
+        // Best-effort: the writer's priority channel is unbounded, so
+        // this only fails if we already dropped the writer (e.g. a
+        // double-trigger race). Either way, proceed with teardown.
+        let _ = self.enqueue_priority(&Message::Notification(notif));
+        self.notifications_sent += 1;
+        self.metrics.record_notification_sent(
+            &self.peer_label,
+            &NotificationCode::Cease.as_u8().to_string(),
+            &cease_subcode::OUT_OF_RESOURCES.to_string(),
+        );
+        self.metrics
+            .record_message_sent(&self.peer_label, "notification");
+        self.handle_tcp_disconnect();
     }
 
     /// Drop the TCP read half + writer channels and clear the read
