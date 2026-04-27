@@ -139,6 +139,12 @@ message NeighborState {
   string last_error = 11;
   // True for peers auto-created from a dynamic_neighbors prefix range.
   bool is_dynamic = 12;
+  // True when the per-peer session-state query did not complete in time
+  // (e.g. session task parked on TCP write back-pressure). The `state`
+  // field is a placeholder Idle in that case — clients that distinguish
+  // "session is genuinely Idle" from "we couldn't read state right now"
+  // should check this flag before treating `state` as authoritative.
+  bool stale = 13;
 }
 
 message DynamicNeighborRange {

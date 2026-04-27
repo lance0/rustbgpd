@@ -1,6 +1,7 @@
 //! Peer session handle and command types.
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
 use bytes::Bytes;
 use rustbgpd_bmp::BmpEvent;
@@ -290,6 +291,56 @@ impl PeerHandle {
         reply_rx.await.ok()
     }
 
+    /// Query the current session state with a bounded deadline.
+    ///
+    /// Wraps both the command-channel `send` and the oneshot reply in
+    /// `tokio::time::timeout`. Returns `None` on timeout, on a full command
+    /// channel that doesn't drain in time, or if the session task has exited.
+    ///
+    /// Prefer this over [`query_state`] in any RPC or admin path: a session
+    /// task parked on TCP write back-pressure cannot service `QueryState`
+    /// commands, and the unbounded variant will hang the caller for as long
+    /// as the peer's outbound buffer stays full.
+    pub async fn query_state_timeout(&self, deadline: Duration) -> Option<PeerSessionState> {
+        Self::query_state_with(self.commands.clone(), deadline).await
+    }
+
+    /// Driver-side variant of [`query_state_timeout`] that takes an owned
+    /// command sender, so it can run inside a `tokio::spawn`-ed `'static`
+    /// future. Use [`commands_sender`](Self::commands_sender) to obtain the
+    /// sender, then spawn one task per peer for concurrent fan-out.
+    pub async fn query_state_with(
+        commands: mpsc::Sender<PeerCommand>,
+        deadline: Duration,
+    ) -> Option<PeerSessionState> {
+        // Outer Result is Err on timeout → flatten to None. Inner Option is
+        // None when either the send failed (channel closed) or the reply
+        // was dropped (session task gone).
+        tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::QueryState { reply: reply_tx })
+                .await
+                .ok()?;
+            reply_rx.await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Clone of the peer command channel sender.
+    ///
+    /// Use with [`query_state_with`](Self::query_state_with) to drive
+    /// per-peer queries from `tokio::spawn`-ed tasks (which require their
+    /// future to be `'static`). The command channel is bounded
+    /// ([`COMMAND_BUFFER`]), so callers should still wrap any send in a
+    /// timeout — `query_state_with` does this for you.
+    #[must_use]
+    pub fn commands_sender(&self) -> mpsc::Sender<PeerCommand> {
+        self.commands.clone()
+    }
+
     /// Replace the effective import policy chain for this session.
     ///
     /// The new chain applies to future inbound UPDATE processing only.
@@ -309,6 +360,43 @@ impl PeerHandle {
         reply_rx
             .await
             .map_err(|_| "session task dropped reply".to_string())?
+    }
+
+    /// Bounded variant of [`update_import_policy`].
+    ///
+    /// Wraps both the command-channel send and the reply wait in
+    /// `tokio::time::timeout`. Use this from the peer-manager actor —
+    /// without a deadline a single back-pressured peer can park the actor
+    /// and cascade into a `GetHealth` wedge.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the session is unreachable, replies with one, or
+    /// doesn't acknowledge inside `deadline`.
+    pub async fn update_import_policy_timeout(
+        &self,
+        policy: Option<PolicyChain>,
+        deadline: Duration,
+    ) -> Result<(), String> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::UpdateImportPolicy {
+                    policy,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| "session task exited".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "session task dropped reply".to_string())?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(format!("update_import_policy timed out after {deadline:?}")),
+        }
     }
 
     /// Replace the effective export policy chain for future `PeerUp` messages.
@@ -332,9 +420,101 @@ impl PeerHandle {
             .map_err(|_| "session task dropped reply".to_string())?
     }
 
+    /// Bounded variant of [`update_export_policy`]. See
+    /// [`update_import_policy_timeout`] for rationale.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, replies with one,
+    /// or doesn't acknowledge inside `deadline`.
+    pub async fn update_export_policy_timeout(
+        &self,
+        policy: Option<PolicyChain>,
+        deadline: Duration,
+    ) -> Result<(), String> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::UpdateExportPolicy {
+                    policy,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| "session task exited".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "session task dropped reply".to_string())?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(format!("update_export_policy timed out after {deadline:?}")),
+        }
+    }
+
     /// Check if the session task has finished.
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.task.is_finished()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Reproduces the `GetHealth` wedge mode where the session-task's
+    /// `select!` is parked on TCP write back-pressure: the command does
+    /// reach the receiver, but the reply is never sent. The bounded
+    /// variant must surface this as `None` within roughly the deadline,
+    /// not hang for as long as the session stays parked.
+    #[tokio::test]
+    async fn query_state_with_bounds_when_reply_is_never_sent() {
+        let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+        // Receiver pulls commands off the channel but holds them so the
+        // contained reply_tx is never dropped — `reply_rx.await` blocks.
+        let _drain = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Some(cmd) = rx.recv().await {
+                held.push(cmd);
+            }
+        });
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = PeerHandle::query_state_with(tx, deadline).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "stalled reply must surface as None");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "query_state_with should bound at ~50ms, took {elapsed:?}"
+        );
+    }
+
+    /// Reproduces the second wedge mode Codex flagged: with a command
+    /// channel buffer of `COMMAND_BUFFER = 8`, repeated probes during a
+    /// stall can fill the channel itself, so `tx.send().await` parks
+    /// indefinitely. The bounded variant must surface that as `None` too,
+    /// not hang on send.
+    #[tokio::test]
+    async fn query_state_with_bounds_when_command_channel_is_full() {
+        let (tx, _rx) = mpsc::channel::<PeerCommand>(1);
+        // Pre-fill the single-slot buffer; the receiver is never read, so
+        // the next send blocks on permit acquisition forever.
+        tx.send(PeerCommand::Start).await.unwrap();
+
+        let deadline = Duration::from_millis(50);
+        let start = Instant::now();
+        let result = PeerHandle::query_state_with(tx, deadline).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "blocked send must surface as None");
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "query_state_with should bound at ~50ms, took {elapsed:?}"
+        );
     }
 }

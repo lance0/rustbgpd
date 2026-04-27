@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
@@ -11,7 +11,7 @@ use rustbgpd_fsm::{PeerConfig, SessionState};
 use rustbgpd_policy::PolicyChain;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
-use rustbgpd_transport::{PeerHandle, SessionNotification, TransportConfig};
+use rustbgpd_transport::{PeerHandle, PeerSessionState, SessionNotification, TransportConfig};
 use rustbgpd_wire::{Afi, Safi};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -29,6 +29,22 @@ const DEFAULT_HOLD_TIME: u16 = 90;
 const DEFAULT_CONNECT_RETRY_SECS: u32 = 5;
 const BGP_PORT: u16 = 179;
 const BMP_STATS_INTERVAL_SECS: u64 = 60;
+
+/// Hard deadline for any single per-peer `query_state` request. Bounded so a
+/// session task that's parked on TCP write back-pressure can't hang an admin
+/// path (`ListPeers`, `GetPeerState`, periodic BMP stats). 100ms is well
+/// above any healthy session-task command latency (typically <1ms) and well
+/// below the 5-minute soak-harness gRPC health-check cadence, so a single
+/// stalled peer surfaces as `stale = true` instead of as a wedged RPC.
+const PEER_QUERY_TIMEOUT: Duration = Duration::from_millis(100);
+
+/// Hard deadline for any single peer-session policy hot-apply (import or
+/// export). Larger than [`PEER_QUERY_TIMEOUT`] because applying a policy
+/// chain involves more session-side work than a state read, but still
+/// bounded so a stalled peer can't park the peer-manager actor mid-reload.
+/// If a policy update fails this deadline, the new policy still applies on
+/// the peer's next session restart — the warn! is just a heads-up.
+const PEER_POLICY_UPDATE_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub(crate) enum InternalCommand {
     ReplaceConfigSnapshot(Box<Config>),
@@ -91,6 +107,79 @@ pub struct PeerManager {
     dynamic_peer_count: usize,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
+}
+
+/// Build a `PeerInfo` snapshot from config + an optional fresh
+/// `PeerSessionState`. `session_state = None` means the bounded
+/// `query_state` either timed out (peer parked on TCP write) or its task
+/// has already exited; in both cases we surface `state = Idle, stale =
+/// true` so consumers know the field isn't authoritative.
+fn build_peer_info(
+    address: IpAddr,
+    managed: &ManagedPeer,
+    session_state: Option<&PeerSessionState>,
+) -> PeerInfo {
+    let stale = session_state.is_none();
+    PeerInfo {
+        address,
+        remote_asn: managed.remote_asn,
+        description: managed.description.clone(),
+        peer_group: managed.peer_group.clone(),
+        state: session_state.map_or(SessionState::Idle, |s| s.fsm_state),
+        enabled: managed.enabled,
+        prefix_count: session_state.map_or(0, |s| s.prefix_count),
+        hold_time: managed.hold_time,
+        max_prefixes: managed.max_prefixes,
+        families: managed.transport_config.peer.families.clone(),
+        remove_private_as: managed.transport_config.remove_private_as,
+        route_server_client: managed.transport_config.route_server_client,
+        add_path_receive: managed.transport_config.peer.add_path_receive,
+        add_path_send: managed.transport_config.peer.add_path_send,
+        add_path_send_max: managed.transport_config.peer.add_path_send_max,
+        updates_received: session_state.map_or(0, |s| s.updates_received),
+        updates_sent: session_state.map_or(0, |s| s.updates_sent),
+        notifications_received: session_state.map_or(0, |s| s.notifications_received),
+        notifications_sent: session_state.map_or(0, |s| s.notifications_sent),
+        flap_count: session_state.map_or(0, |s| s.flap_count),
+        uptime_secs: session_state.map_or(0, |s| s.uptime_secs),
+        last_error: session_state.map_or_else(String::new, |s| s.last_error.clone()),
+        is_dynamic: managed.is_dynamic,
+        stale,
+    }
+}
+
+/// Run a bounded `query_state` against every peer concurrently.
+///
+/// Each query is bounded by [`PEER_QUERY_TIMEOUT`]; a peer whose session
+/// task is parked on TCP write (or whose command channel is full) lands
+/// in the result map as `Some(addr) -> None`. A peer whose task spawn
+/// failed entirely is absent from the map. Both cases are treated as
+/// `stale = true` by [`build_peer_info`].
+async fn collect_session_states(
+    peers: &HashMap<IpAddr, ManagedPeer>,
+) -> HashMap<IpAddr, Option<PeerSessionState>> {
+    let mut tasks: Vec<tokio::task::JoinHandle<(IpAddr, Option<PeerSessionState>)>> =
+        Vec::with_capacity(peers.len());
+    for (&addr, managed) in peers {
+        let commands = managed.handle.commands_sender();
+        tasks.push(tokio::spawn(async move {
+            let state = PeerHandle::query_state_with(commands, PEER_QUERY_TIMEOUT).await;
+            (addr, state)
+        }));
+    }
+
+    let mut out = HashMap::with_capacity(tasks.len());
+    for task in tasks {
+        match task.await {
+            Ok((addr, state)) => {
+                out.insert(addr, state);
+            }
+            Err(e) => {
+                warn!(error = %e, "query_state task join failed");
+            }
+        }
+    }
+    out
 }
 
 impl PeerManager {
@@ -256,7 +345,18 @@ impl PeerManager {
         managed.import_policy.clone_from(&import_policy);
         managed.export_policy.clone_from(&export_policy);
 
-        if let Err(error) = managed.handle.update_import_policy(import_policy).await {
+        // Bounded deadlines on the per-peer session round-trips. Without
+        // them a back-pressured peer parks the peer-manager actor here,
+        // which then can't service `ListPeers` (or any other command), so
+        // a `GetHealth` RPC issued during the reload would wedge for as
+        // long as the back-pressure lasts. Same wedge class fixed by
+        // `query_state_timeout` for the read path; this closes the
+        // hot-apply path.
+        if let Err(error) = managed
+            .handle
+            .update_import_policy_timeout(import_policy, PEER_POLICY_UPDATE_TIMEOUT)
+            .await
+        {
             warn!(
                 %address,
                 error = %error,
@@ -265,7 +365,7 @@ impl PeerManager {
         }
         if let Err(error) = managed
             .handle
-            .update_export_policy(export_policy.clone())
+            .update_export_policy_timeout(export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
             .await
         {
             warn!(
@@ -275,7 +375,7 @@ impl PeerManager {
             );
         }
 
-        if let Some(state) = managed.handle.query_state().await
+        if let Some(state) = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await
             && state.fsm_state == SessionState::Established
         {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -421,76 +521,24 @@ impl PeerManager {
 
     async fn get_peer_info(&self, address: IpAddr) -> Option<PeerInfo> {
         let managed = self.peers.get(&address)?;
-        let session_state = managed.handle.query_state().await;
-
-        Some(PeerInfo {
-            address,
-            remote_asn: managed.remote_asn,
-            description: managed.description.clone(),
-            peer_group: managed.peer_group.clone(),
-            state: session_state
-                .as_ref()
-                .map_or(SessionState::Idle, |s| s.fsm_state),
-            enabled: managed.enabled,
-            prefix_count: session_state.as_ref().map_or(0, |s| s.prefix_count),
-            hold_time: managed.hold_time,
-            max_prefixes: managed.max_prefixes,
-            families: managed.transport_config.peer.families.clone(),
-            remove_private_as: managed.transport_config.remove_private_as,
-            route_server_client: managed.transport_config.route_server_client,
-            add_path_receive: managed.transport_config.peer.add_path_receive,
-            add_path_send: managed.transport_config.peer.add_path_send,
-            add_path_send_max: managed.transport_config.peer.add_path_send_max,
-            updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
-            updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
-            notifications_received: session_state
-                .as_ref()
-                .map_or(0, |s| s.notifications_received),
-            notifications_sent: session_state.as_ref().map_or(0, |s| s.notifications_sent),
-            flap_count: session_state.as_ref().map_or(0, |s| s.flap_count),
-            uptime_secs: session_state.as_ref().map_or(0, |s| s.uptime_secs),
-            last_error: session_state
-                .as_ref()
-                .map_or_else(String::new, |s| s.last_error.clone()),
-            is_dynamic: managed.is_dynamic,
-        })
+        let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
+        Some(build_peer_info(address, managed, session_state.as_ref()))
     }
 
     async fn list_peers(&self) -> Vec<PeerInfo> {
+        // Concurrent fan-out: one bounded `query_state` per peer in parallel.
+        // Sequential `.await` per peer was the GetHealth wedge — a session
+        // task parked on TCP write back-pressure couldn't service its
+        // QueryState command, and the loop hung on the first such peer.
+        // Spawning per-peer tasks needs `'static` futures, so we drive the
+        // query through `PeerHandle::query_state_with` over a cloned command
+        // sender (the sender is `Clone`; the handle proper is not).
+        let states = collect_session_states(&self.peers).await;
+
         let mut infos = Vec::with_capacity(self.peers.len());
         for (&addr, managed) in &self.peers {
-            let session_state = managed.handle.query_state().await;
-            infos.push(PeerInfo {
-                address: addr,
-                remote_asn: managed.remote_asn,
-                description: managed.description.clone(),
-                peer_group: managed.peer_group.clone(),
-                state: session_state
-                    .as_ref()
-                    .map_or(SessionState::Idle, |s| s.fsm_state),
-                enabled: managed.enabled,
-                prefix_count: session_state.as_ref().map_or(0, |s| s.prefix_count),
-                hold_time: managed.hold_time,
-                max_prefixes: managed.max_prefixes,
-                families: managed.transport_config.peer.families.clone(),
-                remove_private_as: managed.transport_config.remove_private_as,
-                route_server_client: managed.transport_config.route_server_client,
-                add_path_receive: managed.transport_config.peer.add_path_receive,
-                add_path_send: managed.transport_config.peer.add_path_send,
-                add_path_send_max: managed.transport_config.peer.add_path_send_max,
-                updates_received: session_state.as_ref().map_or(0, |s| s.updates_received),
-                updates_sent: session_state.as_ref().map_or(0, |s| s.updates_sent),
-                notifications_received: session_state
-                    .as_ref()
-                    .map_or(0, |s| s.notifications_received),
-                notifications_sent: session_state.as_ref().map_or(0, |s| s.notifications_sent),
-                flap_count: session_state.as_ref().map_or(0, |s| s.flap_count),
-                uptime_secs: session_state.as_ref().map_or(0, |s| s.uptime_secs),
-                last_error: session_state
-                    .as_ref()
-                    .map_or_else(String::new, |s| s.last_error.clone()),
-                is_dynamic: managed.is_dynamic,
-            });
+            let session_state = states.get(&addr).and_then(Option::as_ref);
+            infos.push(build_peer_info(addr, managed, session_state));
         }
         infos
     }
@@ -837,7 +885,13 @@ impl PeerManager {
             return;
         }
 
-        let current_state = managed.handle.query_state().await;
+        // Bounded so an inbound TCP arriving during a TCP-back-pressure
+        // wedge on the existing session can't park the peer-manager actor
+        // mid-collision-resolution. A timeout falls back to `Idle` here,
+        // which sends us through the "accept immediately" arm — equivalent
+        // to the existing "no session yet" path, with the same
+        // `replace_with_inbound` outcome.
+        let current_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
         let fsm_state = current_state
             .as_ref()
             .map_or(SessionState::Idle, |s| s.fsm_state);
@@ -1083,8 +1137,12 @@ impl PeerManager {
             return;
         };
 
+        // Same fan-out pattern as `list_peers` — sequential awaits would let
+        // any one TCP-back-pressured peer block the per-minute BMP tick and,
+        // through it, every other admin command queued behind the BMP arm.
+        let states = collect_session_states(&self.peers).await;
         for (&peer_addr, managed) in &self.peers {
-            let Some(state) = managed.handle.query_state().await else {
+            let Some(Some(state)) = states.get(&peer_addr) else {
                 continue;
             };
             if state.fsm_state != SessionState::Established {

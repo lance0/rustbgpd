@@ -177,6 +177,7 @@ fn peer_info_to_proto(info: &PeerInfo) -> proto::NeighborState {
         flap_count: info.flap_count,
         last_error: info.last_error.clone(),
         is_dynamic: info.is_dynamic,
+        stale: info.stale,
     }
 }
 
@@ -708,6 +709,7 @@ mod tests {
                     uptime_secs: 0,
                     last_error: String::new(),
                     is_dynamic: false,
+                    stale: false,
                 }));
             }
         });
@@ -755,6 +757,7 @@ mod tests {
             uptime_secs: 0,
             last_error: String::new(),
             is_dynamic: false,
+            stale: false,
         };
         let state = peer_info_to_proto(&info);
         let config = state.config.unwrap();

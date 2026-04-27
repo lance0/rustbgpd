@@ -360,6 +360,7 @@ mod tests {
             flap_count: 0,
             last_error: String::new(),
             is_dynamic: false,
+            stale: false,
         }
     }
 

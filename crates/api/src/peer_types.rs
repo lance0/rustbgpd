@@ -677,4 +677,11 @@ pub struct PeerInfo {
     pub last_error: String,
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     pub is_dynamic: bool,
+    /// True when the per-peer session-state query did not complete in time
+    /// (e.g. the session task is parked on TCP write back-pressure). The
+    /// `state` field falls back to `Idle` in that case, so consumers that
+    /// care about liveness — `GetHealth`'s active-peer count, `ListNeighbors`
+    /// observability — should treat `stale = true` as "state unknown" rather
+    /// than as an authoritative Idle reading.
+    pub stale: bool,
 }

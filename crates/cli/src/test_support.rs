@@ -310,6 +310,7 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
             flap_count: 0,
             last_error: String::new(),
             is_dynamic: false,
+            stale: false,
         }))
     }
 

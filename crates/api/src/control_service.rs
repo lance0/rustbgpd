@@ -73,9 +73,15 @@ impl proto::control_service_server::ControlService for ControlService {
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?;
 
+        // Only count peers we successfully queried as Established. A
+        // `stale` PeerInfo means the per-peer `query_state` deadline fired
+        // (peer session likely parked on TCP write back-pressure) — its
+        // `state` field is a placeholder Idle, not a real reading, so it
+        // would be misleading either to count it as active or to assert it
+        // is not. Conservative: drop it from the active-peer count.
         let active_peers = peers
             .iter()
-            .filter(|p| p.state == rustbgpd_fsm::SessionState::Established)
+            .filter(|p| !p.stale && p.state == rustbgpd_fsm::SessionState::Established)
             .count();
 
         let (rib_reply_tx, rib_reply_rx) = oneshot::channel();
@@ -302,6 +308,7 @@ mod tests {
                         uptime_secs: 0,
                         last_error: String::new(),
                         is_dynamic: false,
+                        stale: false,
                     },
                     PeerInfo {
                         address: "10.0.0.2".parse().unwrap(),
@@ -327,6 +334,7 @@ mod tests {
                         uptime_secs: 0,
                         last_error: String::new(),
                         is_dynamic: false,
+                        stale: false,
                     },
                 ];
                 let _ = reply.send(peers);
