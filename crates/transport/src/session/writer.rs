@@ -15,10 +15,11 @@
 //!
 //! Saturation policy lives in the session task, not here:
 //! `bulk_tx.try_send` failing with `Full` means the peer hasn't drained
-//! 4096 BGP messages, the session emits a `Cease/9` (Out of Resources)
-//! through `priority_tx`, then drops both senders so this task exits
-//! cleanly. Wiring of that policy is in commit 2/3; this module just
-//! provides the channels and the pipe.
+//! 4096 BGP messages, the session emits a `Cease/8` (Out of Resources,
+//! RFC 4486 §4 subcode 8) through `priority_tx`, then drops both
+//! senders so this task exits cleanly. Wiring lives in
+//! `PeerSession::trigger_outbound_saturation_teardown`; this module
+//! just provides the channels and the pipe.
 
 use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
@@ -79,7 +80,7 @@ impl WriterTask {
         loop {
             // `biased` keeps NOTIFICATIONs and KEEPALIVEs from starving
             // behind a backlog of UPDATEs, and ensures the saturation
-            // `Cease/9` reaches the wire before any further bulk work.
+            // `Cease/8` reaches the wire before any further bulk work.
             // The `else` arm fires when both receivers have closed (all
             // senders dropped + buffers drained), giving us a clean
             // shutdown path with no extra signalling channel.

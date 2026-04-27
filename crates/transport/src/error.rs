@@ -15,8 +15,9 @@ pub enum TransportError {
 
     /// Bulk outbound channel to the writer task is full (peer hasn't
     /// drained `OUTBOUND_BUFFER` BGP messages). Saturation handler in
-    /// the session task converts this into a `Cease/9` (Out of
-    /// Resources) NOTIFICATION + session teardown.
+    /// the session task converts this into a `Cease/8` (Out of
+    /// Resources, RFC 4486 §4 subcode 8) NOTIFICATION + session
+    /// teardown.
     #[error("outbound writer channel saturated")]
     OutboundChannelFull,
 

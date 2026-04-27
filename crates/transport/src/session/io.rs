@@ -10,7 +10,7 @@ use tokio::task::{JoinError, JoinHandle};
 impl PeerSession {
     /// Encode `msg` and enqueue it on the writer's **priority** channel
     /// (OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH command,
-    /// collision-dump Cease, saturation Cease/9). The priority channel
+    /// collision-dump Cease, saturation Cease/8). The priority channel
     /// is unbounded so this only ever reports `WriterClosed` when the
     /// session has no active TCP connection — same effect as today's
     /// "no stream" branch, just at a different layer.

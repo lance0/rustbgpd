@@ -56,18 +56,34 @@ pub(crate) struct PeerSession {
     /// Owned read half of the TCP stream — `Some` when the session has
     /// an active TCP connection. The matching write half lives inside
     /// the per-peer writer task, reachable via `writer_bulk_tx` /
-    /// `writer_priority_tx`. These three fields are always set and
-    /// cleared together (invariant: `read_half.is_some() ==
-    /// writer_bulk_tx.is_some() == writer_priority_tx.is_some() ==
-    /// writer_join.is_some()`).
+    /// `writer_priority_tx`.
+    ///
+    /// **Lifecycle invariants** (subtle — these three groups are
+    /// distinct, see `close_tcp` / `handle_tcp_disconnect` /
+    /// `trigger_outbound_saturation_teardown`):
+    ///
+    /// - **At connect**: `read_half`, both writer senders, and
+    ///   `writer_join` are all set together.
+    /// - **At teardown**: `read_half` and both writer senders are
+    ///   dropped synchronously. `writer_join` is **intentionally
+    ///   retained** so the run-loop's writer-exit `select!` arm can
+    ///   observe the writer task draining its priority queue (e.g. a
+    ///   `Cease/8` we just enqueued) and exiting cleanly. The arm body
+    ///   clears `writer_join = None` after `JoinHandle::await` resolves
+    ///   exactly once — polling a completed `JoinHandle` again panics.
+    /// - **Steady state**: `read_half.is_some() ==
+    ///   writer_bulk_tx.is_some() == writer_priority_tx.is_some()`.
+    ///   `writer_join` may be `Some` while the others are `None`
+    ///   during the brief window between teardown and observed exit.
     read_half: Option<OwnedReadHalf>,
     /// Bounded outbound message channel handed to the writer task.
     /// Bounded by `OUTBOUND_BUFFER`; `try_send` returning `Full` is the
-    /// saturation signal that triggers `Cease/9` + session teardown.
+    /// saturation signal that triggers `Cease/8` (Out of Resources,
+    /// RFC 4486 §4 subcode 8) + session teardown.
     writer_bulk_tx: Option<mpsc::Sender<Bytes>>,
     /// Unbounded priority channel handed to the writer task. Carries
     /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
-    /// and the `Cease/9` we emit on bulk saturation.
+    /// and the `Cease/8` we emit on bulk saturation.
     writer_priority_tx: Option<mpsc::UnboundedSender<Bytes>>,
     /// `JoinHandle` of the writer task. Polled by the session's
     /// `select!` so writer-exit (clean shutdown or TCP error) surfaces
