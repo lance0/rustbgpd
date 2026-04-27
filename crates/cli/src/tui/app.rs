@@ -323,7 +323,14 @@ impl App {
     }
 
     pub fn established_count(&self) -> usize {
-        self.neighbors.iter().filter(|n| n.state == 6).count()
+        // Excludes stale peers — `state == 6` on a stale snapshot is the
+        // placeholder Idle override (see `output::format_state_with_stale`),
+        // so a stalled session would otherwise look Established to the
+        // header bar even when the daemon couldn't read fresh state.
+        self.neighbors
+            .iter()
+            .filter(|n| n.state == 6 && !n.stale)
+            .count()
     }
 
     pub fn total_routes(&self) -> u32 {

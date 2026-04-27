@@ -4,7 +4,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
-use crate::output::{format_duration, format_family, format_state};
+use crate::output::{format_duration, format_family, format_state_with_stale};
 use crate::tui::app::{App, SortColumn, View};
 use crate::tui::theme::Theme;
 
@@ -128,8 +128,8 @@ fn draw_peer_table(f: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
         let cfg = n.config.as_ref();
         let addr = cfg.map(|c| c.address.as_str()).unwrap_or("");
         let asn = cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default();
-        let state_label = format_state(n.state);
-        let state_color = theme.state_color(n.state);
+        let state_label = format_state_with_stale(n.state, n.stale);
+        let state_color = theme.state_color_with_stale(n.state, n.stale);
         let uptime = format_duration(n.uptime_seconds);
         let rx = format_number(n.prefixes_received);
         let tx = format_number(n.prefixes_sent);
@@ -275,8 +275,8 @@ fn draw_peer_detail(f: &mut Frame, app: &mut App, address: &str, theme: &Theme) 
     let inner = block.inner(f.area());
     f.render_widget(block, f.area());
 
-    let state_label = format_state(neighbor.state);
-    let state_color = theme.state_color(neighbor.state);
+    let state_label = format_state_with_stale(neighbor.state, neighbor.stale);
+    let state_color = theme.state_color_with_stale(neighbor.state, neighbor.stale);
     let families = cfg
         .map(|c| {
             c.families

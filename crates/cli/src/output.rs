@@ -67,6 +67,18 @@ pub fn format_state(state: i32) -> &'static str {
     }
 }
 
+/// Format session state, surfacing `Stale` when the daemon couldn't read
+/// fresh state from the peer session task (e.g. session actor parked
+/// under load — the bounded `query_state_timeout` returned `None`).
+///
+/// `stale=true` overrides the state value because a stalled session's
+/// `state` field is a placeholder `Idle` rather than an authoritative
+/// reading; reporting it raw would misclassify a hung-but-alive session
+/// as cleanly torn down.
+pub fn format_state_with_stale(state: i32, stale: bool) -> &'static str {
+    if stale { "Stale" } else { format_state(state) }
+}
+
 /// Return colored session state string.
 pub fn colored_state(state: i32) -> String {
     let label = format_state(state);
@@ -74,6 +86,16 @@ pub fn colored_state(state: i32) -> String {
         6 => format!("{}", label.if_supports_color(Stdout, |s| s.green())),
         2 | 4 | 5 => format!("{}", label.if_supports_color(Stdout, |s| s.yellow())),
         _ => format!("{}", label.if_supports_color(Stdout, |s| s.red())),
+    }
+}
+
+/// Colored variant of [`format_state_with_stale`]. Stale renders in
+/// red+bold so it's visually distinct from a healthy `Idle`.
+pub fn colored_state_with_stale(state: i32, stale: bool) -> String {
+    if stale {
+        format!("{}", "Stale".if_supports_color(Stdout, |s| s.red()))
+    } else {
+        colored_state(state)
     }
 }
 
@@ -142,6 +164,12 @@ pub struct JsonNeighbor {
     pub address: String,
     pub remote_asn: u32,
     pub state: String,
+    /// True when the daemon couldn't read fresh state from the peer
+    /// session task — `state` is a placeholder Idle rather than an
+    /// authoritative reading. Omitted from JSON when false to keep
+    /// healthy-state output uncluttered.
+    #[serde(skip_serializing_if = "is_false")]
+    pub stale: bool,
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_sent: u64,
@@ -153,6 +181,9 @@ pub struct JsonNeighborDetail {
     pub address: String,
     pub remote_asn: u32,
     pub state: String,
+    /// See [`JsonNeighbor::stale`].
+    #[serde(skip_serializing_if = "is_false")]
+    pub stale: bool,
     pub uptime_seconds: u64,
     pub prefixes_received: u64,
     pub prefixes_sent: u64,
@@ -239,6 +270,10 @@ fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 #[derive(Serialize)]
 pub struct JsonHealth {
     pub healthy: bool,
@@ -284,8 +319,8 @@ pub fn print_neighbor_table(neighbors: &[proto::NeighborState]) {
             Row {
                 addr: cfg.map(|c| c.address.clone()).unwrap_or_default(),
                 asn: cfg.map(|c| c.remote_asn.to_string()).unwrap_or_default(),
-                state_plain: format_state(n.state).to_string(),
-                state_colored: colored_state(n.state),
+                state_plain: format_state_with_stale(n.state, n.stale).to_string(),
+                state_colored: colored_state_with_stale(n.state, n.stale),
                 uptime: format_duration(n.uptime_seconds),
                 rx: n.prefixes_received.to_string(),
                 tx: n.prefixes_sent.to_string(),
@@ -510,6 +545,17 @@ mod tests {
     }
 
     #[test]
+    fn test_format_state_with_stale_overrides_state() {
+        // Stale wins regardless of the underlying state: a stalled
+        // session's `state` field is a placeholder Idle, so reporting
+        // it raw would misclassify hung-but-alive sessions.
+        assert_eq!(format_state_with_stale(6, false), "Established");
+        assert_eq!(format_state_with_stale(6, true), "Stale");
+        assert_eq!(format_state_with_stale(1, true), "Stale");
+        assert_eq!(format_state_with_stale(1, false), "Idle");
+    }
+
+    #[test]
     fn test_colored_state_contains_label() {
         assert!(colored_state(6).contains("Established"));
         assert!(colored_state(1).contains("Idle"));
@@ -518,6 +564,12 @@ mod tests {
         assert!(colored_state(4).contains("OpenSent"));
         assert!(colored_state(5).contains("OpenConfirm"));
         assert!(colored_state(0).contains("Unknown"));
+    }
+
+    #[test]
+    fn test_colored_state_with_stale_contains_stale_label() {
+        assert!(colored_state_with_stale(6, true).contains("Stale"));
+        assert!(colored_state_with_stale(6, false).contains("Established"));
     }
 
     #[test]
@@ -561,6 +613,7 @@ mod tests {
             address: "10.0.0.2".to_string(),
             remote_asn: 65002,
             state: "Established".to_string(),
+            stale: false,
             uptime_seconds: 42,
             prefixes_received: 1,
             prefixes_sent: 2,

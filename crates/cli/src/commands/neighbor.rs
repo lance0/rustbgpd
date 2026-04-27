@@ -24,7 +24,8 @@ pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
                 JsonNeighbor {
                     address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
                     remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
-                    state: output::format_state(n.state).to_string(),
+                    state: output::format_state_with_stale(n.state, n.stale).to_string(),
+                    stale: n.stale,
                     uptime_seconds: n.uptime_seconds,
                     prefixes_received: n.prefixes_received,
                     prefixes_sent: n.prefixes_sent,
@@ -59,7 +60,8 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         let out = JsonNeighborDetail {
             address: cfg.map(|c| c.address.clone()).unwrap_or_default(),
             remote_asn: cfg.map(|c| c.remote_asn).unwrap_or(0),
-            state: output::format_state(n.state).to_string(),
+            state: output::format_state_with_stale(n.state, n.stale).to_string(),
+            stale: n.stale,
             uptime_seconds: n.uptime_seconds,
             prefixes_received: n.prefixes_received,
             prefixes_sent: n.prefixes_sent,
@@ -124,7 +126,10 @@ pub async fn show(connection: Connection, address: &str, json: bool) -> Result<(
         if add_path_send_max > 0 {
             println!("Add-Path Send Max:     {add_path_send_max}");
         }
-        println!("State:                 {}", output::colored_state(n.state));
+        println!(
+            "State:                 {}",
+            output::colored_state_with_stale(n.state, n.stale)
+        );
         println!(
             "Uptime:                {}",
             output::format_duration(n.uptime_seconds)

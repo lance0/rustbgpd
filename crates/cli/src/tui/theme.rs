@@ -43,6 +43,18 @@ impl Theme {
         }
     }
 
+    /// Stale takes precedence — a stale snapshot's `state` field is a
+    /// placeholder Idle, so coloring it green-or-red on raw `state`
+    /// would lie. Render stale rows in the down color; the label
+    /// itself becomes "Stale" via `format_state_with_stale`.
+    pub fn state_color_with_stale(&self, state: i32, stale: bool) -> Color {
+        if stale {
+            self.state_down
+        } else {
+            self.state_color(state)
+        }
+    }
+
     pub fn event_color(&self, event_type: &str) -> Color {
         match event_type {
             "added" | "best_changed" => self.event_added,
