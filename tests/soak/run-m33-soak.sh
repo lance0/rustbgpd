@@ -295,7 +295,12 @@ touch "$SAMPLER_RUN_FLAG"
         ts=$(date +%s)
         uptime=$((ts - SOAK_START))
 
-        mem_cpu=$(docker stats --no-stream --format '{{.MemUsage}}|{{.CPUPerc}}' "$RUSTBGPD" 2>/dev/null || echo '|')
+        # Each external call gets a hard ceiling so a wedged docker daemon
+        # or wedged gRPC server can't deadlock the sampler in wait(). Without
+        # these timeouts a single hung grpcurl freezes the sampler subshell
+        # for the rest of the soak (observed in the 2026-04-27 1h smoke when
+        # the daemon's GetHealth handler stalled at +45min).
+        mem_cpu=$(timeout 10 docker stats --no-stream --format '{{.MemUsage}}|{{.CPUPerc}}' "$RUSTBGPD" 2>/dev/null || echo '|')
         # MemUsage is "85.3MiB / 125GiB"; we want the first token before " / ".
         mem_raw=${mem_cpu%%|*}
         mem_raw=${mem_raw%% /*}
@@ -306,8 +311,13 @@ touch "$SAMPLER_RUN_FLAG"
         mem_mb=$(parse_mem_to_mb "$mem_raw")
         [ -z "$mem_mb" ] && mem_mb="NaN"
 
+        # `grpc_health` is a function from test-lib.sh and isn't visible inside
+        # `timeout`'s subprocess, so we inline grpcurl here with -connect-timeout
+        # plus an outer `timeout` ceiling.
         grpc_ok=0
-        if grpc_health >/dev/null 2>&1; then
+        if timeout 10 grpcurl -plaintext -connect-timeout 5 -import-path . \
+            -proto "$PROTO" "$GRPC_ADDR" \
+            rustbgpd.v1.ControlService/GetHealth >/dev/null 2>&1; then
             grpc_ok=1
         fi
 
@@ -341,9 +351,13 @@ while true; do
         log "soak duration reached"
         break
     fi
-    # Check health every HEALTH_CHECK_INTERVAL seconds.
+    # Check health every HEALTH_CHECK_INTERVAL seconds. Wrap in timeout so
+    # the outer loop can't be held up by a wedged GetHealth handler — it
+    # should be detected as a failure, not block here for hours.
     if [ $(( now - last_health_log )) -ge "$HEALTH_CHECK_INTERVAL" ]; then
-        if grpc_health >/dev/null 2>&1; then
+        if timeout 10 grpcurl -plaintext -connect-timeout 5 -import-path . \
+            -proto "$PROTO" "$GRPC_ADDR" \
+            rustbgpd.v1.ControlService/GetHealth >/dev/null 2>&1; then
             consecutive_health_fails=0
             elapsed_h=$(awk -v s=$((now - SOAK_START)) 'BEGIN { printf "%.2f", s/3600.0 }')
             remaining_h=$(awk -v s=$((soak_end - now)) 'BEGIN { printf "%.2f", s/3600.0 }')
