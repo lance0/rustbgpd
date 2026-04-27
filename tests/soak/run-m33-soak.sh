@@ -62,8 +62,16 @@ ADVERTISE_RATE=${ADVERTISE_RATE:-5000}
 CHURN_RATE=${CHURN_RATE:-1000}
 TESTER_LINGER_SEC=${TESTER_LINGER_SEC:-120}
 # Monitor outlives the testers' churn phase by 60s so it doesn't terminate
-# mid-final-sample.
+# mid-final-sample. Both --observe-sec (post-convergence) and --timeout-sec
+# (pre-convergence) need to be longer than the soak: under continuous churn
+# the monitor's stable_sec=5 gate may never fire, so converged_at stays
+# unset and the timeout path is what eventually exits the binary. Without
+# this the monitor's default --timeout-sec=120 fires at +2min, the RR sees
+# the session close, and flap_delta=1 force-fails every soak.
 MONITOR_OBSERVE_SEC=$(( SOAK_SEC + 60 ))
+MONITOR_TIMEOUT_SEC=$(( SOAK_SEC + 60 ))
+# CONVERGE_TIMEOUT is the runner's deadline for Stage 3 (waiting for the
+# RR's Loc-RIB to fill) — independent of the monitor's --timeout-sec.
 CONVERGE_TIMEOUT=${CONVERGE_TIMEOUT:-120}
 
 TESTER_A="clab-${TOPO}-tester-a"
@@ -87,7 +95,8 @@ REPORT_JSON="$RUN_DIR/report.json"
 exec > >(tee -a "$SOAK_LOG") 2>&1
 
 log "M33 soak run $RUN_ID"
-log "  duration:   ${SOAK_HOURS}h (${SOAK_SEC}s)"
+SOAK_DURATION_DESC=$(awk -v s="$SOAK_SEC" 'BEGIN { printf "%.2fh", s/3600.0 }')
+log "  duration:   ${SOAK_DURATION_DESC} (${SOAK_SEC}s)"
 log "  warmup:     ${WARMUP_SEC}s"
 log "  sample:     every ${SAMPLE_INTERVAL}s"
 log "  health:     every ${HEALTH_CHECK_INTERVAL}s"
@@ -183,14 +192,14 @@ log "Prometheus endpoint: http://${RR_IP}:9179/metrics"
 # Stage 1 — launch monitor (exits when converged_at + observe-sec elapses)
 # ---------------------------------------------------------------------------
 
-log "[stage 1] launching monitor (expect=$((COUNT_PER_TESTER * 2)), observe-sec=${MONITOR_OBSERVE_SEC})"
+log "[stage 1] launching monitor (expect=$((COUNT_PER_TESTER * 2)), timeout-sec=${MONITOR_TIMEOUT_SEC}, observe-sec=${MONITOR_OBSERVE_SEC})"
 docker exec -d "$MONITOR" sh -c "evpn-monitor \
     --listen 0.0.0.0:179 \
     --local-as 65000 \
     --router-id 10.0.0.20 \
     --expect $((COUNT_PER_TESTER * 2)) \
     --stable-sec 5 \
-    --timeout-sec ${CONVERGE_TIMEOUT} \
+    --timeout-sec ${MONITOR_TIMEOUT_SEC} \
     --observe-sec ${MONITOR_OBSERVE_SEC} \
     > /tmp/monitor.json 2> /tmp/monitor.log"
 sleep 2
@@ -319,7 +328,7 @@ SAMPLER_PID=$!
 # Stage 5 — outer wait loop with periodic health gate
 # ---------------------------------------------------------------------------
 
-log "[stage 5] soak running for ${SOAK_HOURS}h (${SOAK_SEC}s); health-checking every ${HEALTH_CHECK_INTERVAL}s"
+log "[stage 5] soak running for ${SOAK_DURATION_DESC} (${SOAK_SEC}s); health-checking every ${HEALTH_CHECK_INTERVAL}s"
 
 soak_end=$(( SOAK_START + SOAK_SEC ))
 last_health_log=$SOAK_START
