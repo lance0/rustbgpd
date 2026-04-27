@@ -1,6 +1,6 @@
 # ADR-0051: Per-peer outbound writer task
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-04-27
 
 ## Context
@@ -76,11 +76,17 @@ The writer's inbound channel is bounded at the same size as today's
 session-side outbound buffer (`OUTBOUND_BUFFER = 4096`). When the session
 task tries to enqueue an encoded `Message` and the channel is full:
 
-- **Reject the send and trigger session shutdown via `Cease/9`** (Out of
-  Resources, RFC 4486 §4). The peer's TCP receive socket has not drained
-  4096 BGP messages from us — that is "out of resources" semantics. Other
-  Cease subcodes (e.g. `/4` Other Configuration Change) are wrong:
-  nothing in the local configuration has changed.
+- **Reject the send and trigger session shutdown via `Cease/8`** (Out of
+  Resources, RFC 4486 §4 subcode 8). The peer's TCP receive socket has
+  not drained 4096 BGP messages from us — that is "out of resources"
+  semantics. Other Cease subcodes (e.g. `/4` Other Configuration Change)
+  are wrong: nothing in the local configuration has changed.
+
+  *Note:* an earlier draft of this ADR referenced "Cease/9" — that is
+  RFC 8538's Hard Reset subcode and would imply we want the peer to
+  skip Graceful Restart, which we don't. The implementation
+  (`crates/wire/src/notification.rs`'s `cease_subcode::OUT_OF_RESOURCES
+  = 8`) was always correct; the ADR text has been corrected to match.
 
 Trigger at full saturation, not at 90% or any partial threshold. A
 fractional threshold would imply a retry window and coalescing logic
@@ -121,7 +127,7 @@ This is preferable to the alternatives:
 - Session task stays responsive to commands under arbitrary write
   back-pressure. `query_state`, `Stop`, policy updates work even when
   the peer's read socket is silent.
-- Drops become an explicit, observable event (a `Cease/9` notification
+- Drops become an explicit, observable event (a `Cease/8` notification
   + session restart) instead of an accumulating counter.
 - Memory growth from dirty-resync HashSet rebuilds is bounded by the
   fact that the peer either drains or disconnects within
@@ -144,7 +150,7 @@ This is preferable to the alternatives:
 - The session task's current synchronous `send_message().await` becomes
   an async `enqueue` operation. NOTIFICATION sends in `drive_fsm`
   (`crates/transport/src/session/fsm.rs:71`) must reach the wire even
-  when the bounded queue is full — including the `Cease/9` we send when
+  when the bounded queue is full — including the `Cease/8` we send when
   the queue saturates. Solution: give the writer task two inbound
   channels and a biased `select!`:
 
@@ -187,7 +193,7 @@ Before merging the writer-split PR:
    enqueue outbound updates until the writer queue saturates; assert
    that (a) `query_state_timeout` returns `Some(state)` (not `None`)
    throughout — proving the session stayed responsive — and (b) the
-   session disconnects with `Cease/9` within `OUTBOUND_BUFFER` messages.
+   session disconnects with `Cease/8` within `OUTBOUND_BUFFER` messages.
    Mirrors the test sketched in `crates/transport/src/handle.rs::tests`
    for the `0735dd9` containment, but covers the writer-side actor
    instead of the command-side wedge.
@@ -202,6 +208,48 @@ Before merging the writer-split PR:
 3. **M30/M31/M32 interop runs unchanged**. FRR / GoBGP / BIRD peer in
    normal conditions; the writer split is internal and shouldn't change
    any wire-level behavior in non-stalled paths.
+
+## Validation results (2026-04-27)
+
+Implementation landed across `9675ecb` (writer task scaffolding),
+`bcd2e0d` (wire into `PeerSession`), and `56c7527` (saturation →
+`Cease/8`). M33 1h soak rerun on the post-fix build
+(`tests/soak/runs/20260427T172938Z/`) compared against the
+pre-fix-with-containment soak (`tests/soak/runs/20260427T133455Z/`):
+
+| Gate | Pre-fix (containment only) | Post-fix (writer-split) |
+|------|----------------------------|-------------------------|
+| `grpc_health_failures` | 0 | 0 |
+| `daemon_unhealthy_at_end` | false | false |
+| `outbound_drop_delta` | 613 | **1** |
+| `memory slope_mb_per_hour` | 58.5 | **12.6** |
+| `memory max_mb` | 127.9 | **85.8** |
+| `session_flap_delta` | 0 | **2** |
+
+The wedge transition still happens at the deterministic +49-minute
+mark (peer's TCP receive buffer fills under sustained 1k rps churn).
+What changed: instead of silently accumulating drops + dirty-resync
+allocations for the rest of the run, the saturation now triggers a
+clean `Cease/8` + session restart within milliseconds, and the
+session reconverges cleanly. The CSV shows a 0-49min steady state at
+~75 MB, then a one-time step to ~85 MB during the wedge transition,
+then steady at 85 MB through end-of-run — no ongoing leak. The
+12.6 MB/h "slope" the analyzer reports is a step function being read
+as a linear trend; visual inspection of `samples.csv` confirms.
+
+The 2 session flaps are the designed behavior trade-off: silent drops
+are now observable flaps. Drops dropped from 613 to 1 (the residual 1
+is a brief race between `try_send` returning `Full` and the
+saturation handler firing).
+
+**Open follow-up.** The +49-min wedge transition itself is still a
+real ceiling: at 1k rps EVPN churn against a peer whose TCP receive
+buffer can't keep up, the writer-split contains the damage but does
+not prevent the saturation. Investigating why the monitor peer (or
+its TCP RX buffer) lags under this load is separate work — likely
+either monitor-side parsing speed, kernel buffer tuning, or RIB-side
+distribution batching. None of those is a v0.9.0 blocker now that
+the wedge is bounded and observable.
 
 ## What this does NOT fix
 

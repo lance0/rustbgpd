@@ -9,6 +9,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Per-peer outbound writer task; eliminates `GetHealth` wedge under
+  sustained EVPN churn.** The peer session task no longer owns the TCP
+  write half — a new dedicated writer task (one per peer) holds the
+  `OwnedWriteHalf` and a bounded bulk channel + an unbounded priority
+  channel. The session task encodes BGP messages and enqueues bytes;
+  the writer's biased `select!` ensures NOTIFICATION/KEEPALIVE/OPEN
+  preempt UPDATE backlog. When the bulk channel fills (peer's TCP
+  receive buffer hasn't drained `OUTBOUND_BUFFER = 4096` messages),
+  the session emits a `Cease`/`Out of Resources` (RFC 4486 §4 subcode
+  8) and tears the session down, replacing today's silent
+  `bgp_outbound_route_drops_total` accumulation with an observable
+  flap. Together with the bounded `query_state_timeout` containment in
+  `0735dd9`, this closes the deterministic +46-min wedge surfaced by
+  the M33 1h soak. See [ADR-0051](docs/adr/0051-per-peer-outbound-writer-task.md)
+  and `tests/soak/runs/20260427T133455Z/` for the reproducer of
+  record. Internal architectural change — no proto-side or config-side
+  effects beyond the new `bool stale = 13` field on `NeighborState`
+  added in `0735dd9`.
+
 ## [0.9.0] — 2026-04-26
 
 ### Added
