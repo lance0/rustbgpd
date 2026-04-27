@@ -297,7 +297,7 @@ impl PeerHandle {
     /// `tokio::time::timeout`. Returns `None` on timeout, on a full command
     /// channel that doesn't drain in time, or if the session task has exited.
     ///
-    /// Prefer this over [`query_state`] in any RPC or admin path: a session
+    /// Prefer this over [`Self::query_state`] in any RPC or admin path: a session
     /// task parked on TCP write back-pressure cannot service `QueryState`
     /// commands, and the unbounded variant will hang the caller for as long
     /// as the peer's outbound buffer stays full.
@@ -305,9 +305,9 @@ impl PeerHandle {
         Self::query_state_with(self.commands.clone(), deadline).await
     }
 
-    /// Driver-side variant of [`query_state_timeout`] that takes an owned
-    /// command sender, so it can run inside a `tokio::spawn`-ed `'static`
-    /// future. Use [`commands_sender`](Self::commands_sender) to obtain the
+    /// Driver-side variant of [`Self::query_state_timeout`] that takes an
+    /// owned command sender, so it can run inside a `tokio::spawn`-ed
+    /// `'static` future. Use [`Self::commands_sender`] to obtain the
     /// sender, then spawn one task per peer for concurrent fan-out.
     pub async fn query_state_with(
         commands: mpsc::Sender<PeerCommand>,
@@ -331,11 +331,11 @@ impl PeerHandle {
 
     /// Clone of the peer command channel sender.
     ///
-    /// Use with [`query_state_with`](Self::query_state_with) to drive
-    /// per-peer queries from `tokio::spawn`-ed tasks (which require their
-    /// future to be `'static`). The command channel is bounded
-    /// ([`COMMAND_BUFFER`]), so callers should still wrap any send in a
-    /// timeout — `query_state_with` does this for you.
+    /// Use with [`Self::query_state_with`] to drive per-peer queries
+    /// from `tokio::spawn`-ed tasks (which require their future to be
+    /// `'static`). The command channel is bounded (`COMMAND_BUFFER`),
+    /// so callers should still wrap any send in a timeout —
+    /// `query_state_with` does this for you.
     #[must_use]
     pub fn commands_sender(&self) -> mpsc::Sender<PeerCommand> {
         self.commands.clone()
@@ -362,7 +362,7 @@ impl PeerHandle {
             .map_err(|_| "session task dropped reply".to_string())?
     }
 
-    /// Bounded variant of [`update_import_policy`].
+    /// Bounded variant of [`Self::update_import_policy`].
     ///
     /// Wraps both the command-channel send and the reply wait in
     /// `tokio::time::timeout`. Use this from the peer-manager actor —
@@ -420,8 +420,8 @@ impl PeerHandle {
             .map_err(|_| "session task dropped reply".to_string())?
     }
 
-    /// Bounded variant of [`update_export_policy`]. See
-    /// [`update_import_policy_timeout`] for rationale.
+    /// Bounded variant of [`Self::update_export_policy`]. See
+    /// [`Self::update_import_policy_timeout`] for rationale.
     ///
     /// # Errors
     ///
