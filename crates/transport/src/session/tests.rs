@@ -249,7 +249,7 @@ async fn shutdown_aborts_inflight_connect_task() {
 async fn session_established_emits_bmp_peer_up() {
     let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
     let (client, _server) = connected_stream_pair().await;
-    session.stream = Some(client);
+    session.test_install_stream(client);
     session.local_open_pdu = Some(Bytes::from_static(&[1, 2, 3]));
     session.remote_open_pdu = Some(Bytes::from_static(&[4, 5, 6]));
 
@@ -550,7 +550,7 @@ fn route_server_client_force_next_hop_self_still_wins() {
 async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
-    session.stream = Some(client);
+    session.test_install_stream(client);
     let negotiated = negotiated_session(65002, false);
     session
         .negotiated_families
@@ -583,19 +583,17 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
         ..route1.clone()
     };
 
-    session
-        .send_route_update(OutboundRouteUpdate {
-            announce: vec![route1, route2],
-            withdraw: vec![],
-            end_of_rib: vec![],
-            refresh_markers: vec![],
-            next_hop_override: vec![None, None],
-            flowspec_announce: vec![],
-            flowspec_withdraw: vec![],
-            evpn_announce: vec![],
-            evpn_withdraw: vec![],
-        })
-        .await;
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![route1, route2],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![None, None],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    });
 
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
@@ -608,7 +606,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
 async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
-    session.stream = Some(client);
+    session.test_install_stream(client);
     session.config.route_server_client = true;
 
     let mut negotiated = negotiated_session(65002, false);
@@ -644,19 +642,17 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
         ..route1.clone()
     };
 
-    session
-        .send_route_update(OutboundRouteUpdate {
-            announce: vec![route1, route2],
-            withdraw: vec![],
-            end_of_rib: vec![],
-            refresh_markers: vec![],
-            next_hop_override: vec![None, None],
-            flowspec_announce: vec![],
-            flowspec_withdraw: vec![],
-            evpn_announce: vec![],
-            evpn_withdraw: vec![],
-        })
-        .await;
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![route1, route2],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![None, None],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    });
 
     let Message::Update(first) = read_single_bgp_message(&mut server).await else {
         panic!("expected first UPDATE");
@@ -692,7 +688,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
 async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
-    session.stream = Some(client);
+    session.test_install_stream(client);
 
     let mut negotiated = negotiated_session(65002, false);
     negotiated.negotiated_families = vec![(Afi::Ipv6, Safi::Unicast)];
@@ -705,19 +701,17 @@ async fn send_route_update_uses_ipv6_specific_next_hop_override() {
     let override_nh =
         rustbgpd_policy::NextHopAction::Specific(IpAddr::V6("2001:db8::42".parse().unwrap()));
 
-    session
-        .send_route_update(OutboundRouteUpdate {
-            announce: vec![route],
-            withdraw: vec![],
-            end_of_rib: vec![],
-            refresh_markers: vec![],
-            next_hop_override: vec![Some(override_nh)],
-            flowspec_announce: vec![],
-            flowspec_withdraw: vec![],
-            evpn_announce: vec![],
-            evpn_withdraw: vec![],
-        })
-        .await;
+    session.send_route_update(OutboundRouteUpdate {
+        announce: vec![route],
+        withdraw: vec![],
+        end_of_rib: vec![],
+        refresh_markers: vec![],
+        next_hop_override: vec![Some(override_nh)],
+        flowspec_announce: vec![],
+        flowspec_withdraw: vec![],
+        evpn_announce: vec![],
+        evpn_withdraw: vec![],
+    });
 
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
@@ -1006,7 +1000,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
 async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
-    session.stream = Some(client);
+    session.test_install_stream(client);
     session.config.route_server_client = true;
 
     let negotiated = negotiated_session(65002, true);
@@ -1046,7 +1040,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         evpn_withdraw: vec![],
     };
 
-    session.send_route_update(update).await;
+    session.send_route_update(update);
 
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
@@ -1070,7 +1064,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
 async fn route_server_client_ipv6_preserves_next_hop() {
     let (mut session, _rib_rx) = make_test_session_with_rib(65001, 65002);
     let (client, mut server) = connected_stream_pair().await;
-    session.stream = Some(client);
+    session.test_install_stream(client);
     session.config.route_server_client = true;
 
     let mut negotiated = negotiated_session(65002, false);
@@ -1111,7 +1105,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         evpn_withdraw: vec![],
     };
 
-    session.send_route_update(update).await;
+    session.send_route_update(update);
 
     let Message::Update(msg) = read_single_bgp_message(&mut server).await else {
         panic!("expected UPDATE");
@@ -1472,6 +1466,7 @@ async fn update_import_policy_applies_to_future_updates() {
             reply: reply_tx,
         })
         .await;
+
     assert_eq!(flow, ControlFlow::Continue(()));
     assert_eq!(reply_rx.await.unwrap(), Ok(()));
 
@@ -2588,6 +2583,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
     session
         .process_update(send_announces(vec![make_route(0x01), make_route(0x02)]))
         .await;
+
     assert_eq!(
         session.known_prefix_count(),
         2,
@@ -2598,6 +2594,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
     session
         .process_update(send_announces(vec![make_route(0x03)]))
         .await;
+
     assert!(
         session.known_prefix_count() > 2,
         "EVPN floods must visibly exceed the cap so enforcement fires"

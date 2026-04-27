@@ -1,34 +1,62 @@
 use super::{
-    AsyncWriteExt, BmpEvent, Event, Message, NotificationCode, PeerDownReason, PeerSession,
+    BmpEvent, Bytes, Event, Message, NotificationCode, OwnedReadHalf, PeerDownReason, PeerSession,
     RibUpdate, RouteRefreshSubtype, TcpStream, TransportError, cease_subcode, debug, error, info,
     warn,
 };
 use crate::config::TransportConfig;
+use tokio::sync::mpsc;
 use tokio::task::{JoinError, JoinHandle};
 
 impl PeerSession {
-    /// Encode and send a BGP message to the peer.
-    pub(super) async fn send_message(&mut self, msg: &Message) -> Result<(), TransportError> {
+    /// Encode `msg` and enqueue it on the writer's **priority** channel
+    /// (OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH command,
+    /// collision-dump Cease, saturation Cease/9). The priority channel
+    /// is unbounded so this only ever reports `WriterClosed` when the
+    /// session has no active TCP connection — same effect as today's
+    /// "no stream" branch, just at a different layer.
+    pub(super) fn enqueue_priority(&mut self, msg: &Message) -> Result<(), TransportError> {
         let max_len = self.max_message_len();
         let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
-        if let Some(stream) = self.stream.as_mut() {
-            stream.write_all(&encoded).await?;
-            stream.flush().await?;
-            Ok(())
-        } else {
+        let Some(tx) = self.writer_priority_tx.as_ref() else {
             debug!(
                 peer = %self.peer_label,
                 msg_type = %msg.message_type(),
-                "cannot send — not connected"
+                "cannot send — not connected (priority)"
             );
-            Ok(())
+            return Ok(());
+        };
+        tx.send(Bytes::from(encoded))
+            .map_err(|_| TransportError::WriterClosed)
+    }
+
+    /// Encode `msg` and enqueue it on the writer's **bulk** channel
+    /// (`UPDATE`, `RouteRefresh` `BoRR`/`EoRR` markers, `EoR` markers). Returns
+    /// `OutboundChannelFull` when the writer hasn't drained the bounded
+    /// queue — the caller threads that up to the saturation handler in
+    /// the session task's outbound select arm. `WriterClosed` if there
+    /// is no active TCP connection.
+    pub(super) fn enqueue_bulk(&mut self, msg: &Message) -> Result<(), TransportError> {
+        let max_len = self.max_message_len();
+        let encoded = rustbgpd_wire::encode_message_with_limit(msg, max_len)?;
+        let Some(tx) = self.writer_bulk_tx.as_ref() else {
+            debug!(
+                peer = %self.peer_label,
+                msg_type = %msg.message_type(),
+                "cannot send — not connected (bulk)"
+            );
+            return Ok(());
+        };
+        match tx.try_send(Bytes::from(encoded)) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TransportError::OutboundChannelFull),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TransportError::WriterClosed),
         }
     }
 
     /// Start an outbound TCP connection in the background so the main session
     /// loop can continue servicing commands while connect is in flight.
     pub(super) fn start_connect_attempt(&mut self) {
-        if self.stream.is_some() || self.connect_task.is_some() {
+        if self.read_half.is_some() || self.connect_task.is_some() {
             return;
         }
 
@@ -51,24 +79,36 @@ impl PeerSession {
         }));
     }
 
-    /// Drop the TCP stream and clear the read buffer.
+    /// Drop the TCP read half + writer channels and clear the read
+    /// buffer. Dropping the writer's `Sender` halves causes the writer
+    /// task's biased `select!` to fall through to its `else` arm and
+    /// exit cleanly; the `JoinHandle` then resolves and the session's
+    /// own select observes it via the writer-exit arm.
     pub(super) fn close_tcp(&mut self) {
         if let Some(task) = self.connect_task.take() {
             task.abort();
         }
-        if self.stream.take().is_some() {
+        if self.read_half.take().is_some() {
             debug!(peer = %self.peer_label, "TCP connection closed");
         }
+        // Dropping these signals the writer task to exit. The
+        // JoinHandle is intentionally not cleared here — the session's
+        // writer-exit select arm needs it to observe the exit.
+        self.writer_bulk_tx = None;
+        self.writer_priority_tx = None;
         self.read_buf.clear();
     }
 
-    /// Clear TCP state after disconnect or error.
+    /// Clear TCP state after disconnect or error. Same writer-channel
+    /// drop pattern as `close_tcp`.
     pub(super) fn handle_tcp_disconnect(&mut self) {
         debug!(peer = %self.peer_label, "TCP disconnected");
         if let Some(task) = self.connect_task.take() {
             task.abort();
         }
-        self.stream = None;
+        self.read_half = None;
+        self.writer_bulk_tx = None;
+        self.writer_priority_tx = None;
         self.read_buf.clear();
     }
 
@@ -369,14 +409,31 @@ async fn create_and_connect(
     Ok(stream)
 }
 
-/// Read from TCP into the buffer. Extracted as a freestanding async fn
-/// so that `tokio::select!` can borrow the stream and buffer independently
-/// from other `self` fields.
+/// Read from the TCP read half into the buffer. Extracted as a
+/// freestanding async fn so that `tokio::select!` can borrow the read
+/// half and buffer independently from other `self` fields.
 pub(super) async fn read_tcp(
-    stream: &mut Option<TcpStream>,
+    read_half: &mut Option<OwnedReadHalf>,
     buf: &mut bytes::BytesMut,
 ) -> std::io::Result<usize> {
     use tokio::io::AsyncReadExt;
-    let stream = stream.as_mut().expect("read_tcp called without stream");
-    stream.read_buf(buf).await
+    let read_half = read_half
+        .as_mut()
+        .expect("read_tcp called without read_half");
+    read_half.read_buf(buf).await
+}
+
+/// Awaitable view of the writer task's `JoinHandle`. The select arm
+/// that drives this is guarded by `self.writer_join.is_some()`, so the
+/// `expect` only fires on a programming error (guard out of sync).
+/// After the `JoinHandle` resolves once, the session must clear
+/// `writer_join = None` before the next select iteration — polling a
+/// completed `JoinHandle` a second time panics per tokio semantics.
+pub(super) async fn await_writer_join(
+    handle: &mut Option<JoinHandle<std::io::Result<()>>>,
+) -> Result<std::io::Result<()>, JoinError> {
+    let join = handle
+        .as_mut()
+        .expect("await_writer_join called without handle");
+    join.await
 }

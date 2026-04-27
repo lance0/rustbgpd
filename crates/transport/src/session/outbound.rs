@@ -138,8 +138,14 @@ impl PeerSession {
     }
 
     /// Send an outbound route update as wire UPDATE messages.
-    #[expect(clippy::too_many_lines)]
-    pub(super) async fn send_route_update(&mut self, update: OutboundRouteUpdate) {
+    ///
+    /// Encodes each piece (`BoRR` markers, withdrawals, announcements,
+    /// `FlowSpec`, EVPN, `EoR` markers, `EoRR` markers) and pushes the bytes
+    /// onto the writer task's bulk channel via [`Self::enqueue_bulk`].
+    /// Returns synchronously — there's no awaiting on TCP writes here
+    /// after the writer-task split (ADR-0051).
+    #[expect(clippy::too_many_lines, clippy::needless_pass_by_value)]
+    pub(super) fn send_route_update(&mut self, update: OutboundRouteUpdate) {
         let four_octet_as = self.negotiated.as_ref().is_some_and(|n| n.four_octet_as);
         let is_ebgp = self
             .negotiated
@@ -182,7 +188,7 @@ impl PeerSession {
                 let msg = Message::RouteRefresh(RouteRefreshMessage::new_with_subtype(
                     afi, safi, subtype,
                 ));
-                if let Err(e) = self.send_message(&msg).await {
+                if let Err(e) = self.enqueue_bulk(&msg) {
                     warn!(
                         peer = %self.peer_label,
                         error = %e,
@@ -198,9 +204,9 @@ impl PeerSession {
 
         // Extract TCP local addresses for NEXT_HOP rewrite
         let local_addr = self
-            .stream
+            .read_half
             .as_ref()
-            .and_then(|s| s.local_addr().ok())
+            .and_then(|h| h.local_addr().ok())
             .map(|a| a.ip());
         let local_ipv4 = local_addr
             .and_then(|a| match a {
@@ -270,7 +276,7 @@ impl PeerSession {
                 )
             };
             let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send withdrawal UPDATE");
                 return;
             }
@@ -296,7 +302,7 @@ impl PeerSession {
                 Ipv4UnicastMode::Body,
             );
             let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 withdrawal UPDATE");
                 return;
             }
@@ -398,7 +404,7 @@ impl PeerSession {
                     Ipv4UnicastMode::MpReach,
                 );
                 let wire_msg = Message::Update(msg);
-                if let Err(e) = self.send_message(&wire_msg).await {
+                if let Err(e) = self.enqueue_bulk(&wire_msg) {
                     warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
                     return;
                 }
@@ -451,7 +457,7 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 );
                 let wire_msg = Message::Update(msg);
-                if let Err(e) = self.send_message(&wire_msg).await {
+                if let Err(e) = self.enqueue_bulk(&wire_msg) {
                     warn!(peer = %self.peer_label, error = %e, "failed to send announce UPDATE");
                     return;
                 }
@@ -559,7 +565,7 @@ impl PeerSession {
                 Ipv4UnicastMode::Body,
             );
             let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send v6 announce UPDATE");
                 return;
             }
@@ -610,7 +616,7 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 );
                 let wire_msg = Message::Update(msg);
-                if let Err(e) = self.send_message(&wire_msg).await {
+                if let Err(e) = self.enqueue_bulk(&wire_msg) {
                     warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec withdrawal UPDATE");
                     return;
                 }
@@ -622,7 +628,7 @@ impl PeerSession {
         // Send EVPN withdrawals via MP_UNREACH_NLRI, chunked so each UPDATE
         // fits the negotiated maximum message length (4096 / 65535 with
         // RFC 8654 Extended Messages). A bulk withdrawal of an entire fabric
-        // can otherwise exceed the limit and `send_message` returns
+        // can otherwise exceed the limit and `enqueue_bulk` returns
         // `MessageTooLong`, dropping the rest of the update.
         if !update.evpn_withdraw.is_empty() {
             let routes: Vec<EvpnRoute> = update
@@ -631,10 +637,7 @@ impl PeerSession {
                 .map(|key| evpn_route_from_key(*key))
                 .collect();
             let max_len = usize::from(self.max_message_len());
-            if !self
-                .send_evpn_unreach_chunked(routes, four_octet_as, max_len)
-                .await
-            {
+            if !self.send_evpn_unreach_chunked(&routes, four_octet_as, max_len) {
                 return;
             }
         }
@@ -661,9 +664,7 @@ impl PeerSession {
             }
             let max_len = usize::from(self.max_message_len());
             for (next_hop, attrs, routes) in evpn_groups {
-                if !self
-                    .send_evpn_reach_chunked(next_hop, &attrs, routes, four_octet_as, max_len)
-                    .await
+                if !self.send_evpn_reach_chunked(next_hop, &attrs, &routes, four_octet_as, max_len)
                 {
                     return;
                 }
@@ -702,7 +703,7 @@ impl PeerSession {
                     Ipv4UnicastMode::Body,
                 );
                 let wire_msg = Message::Update(msg);
-                if let Err(e) = self.send_message(&wire_msg).await {
+                if let Err(e) = self.enqueue_bulk(&wire_msg) {
                     warn!(peer = %self.peer_label, error = %e, "failed to send FlowSpec announce UPDATE");
                     return;
                 }
@@ -721,7 +722,7 @@ impl PeerSession {
                 let msg = Message::RouteRefresh(RouteRefreshMessage::new_with_subtype(
                     afi, safi, subtype,
                 ));
-                if let Err(e) = self.send_message(&msg).await {
+                if let Err(e) = self.enqueue_bulk(&msg) {
                     warn!(
                         peer = %self.peer_label,
                         error = %e,
@@ -773,7 +774,7 @@ impl PeerSession {
                 )
             };
             let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send End-of-RIB for {afi:?}/{safi:?}");
                 return;
             }
@@ -788,11 +789,11 @@ impl PeerSession {
     /// Starts with a generous chunk size and halves on `MessageTooLong`,
     /// down to a single route. Returns `false` on send error so the caller
     /// can abort the whole route batch the same way the unicast path does.
-    async fn send_evpn_reach_chunked(
+    fn send_evpn_reach_chunked(
         &mut self,
         next_hop: IpAddr,
         base_attrs: &[PathAttribute],
-        routes: Vec<EvpnRoute>,
+        routes: &[EvpnRoute],
         four_octet_as: bool,
         max_len: usize,
     ) -> bool {
@@ -844,7 +845,7 @@ impl PeerSession {
                 continue;
             }
             let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN announce UPDATE");
                 return false;
             }
@@ -857,9 +858,9 @@ impl PeerSession {
 
     /// Send a batch of EVPN withdrawals as one or more `MP_UNREACH_NLRI`
     /// UPDATEs, splitting so each encoded message fits `max_len` bytes.
-    async fn send_evpn_unreach_chunked(
+    fn send_evpn_unreach_chunked(
         &mut self,
-        routes: Vec<EvpnRoute>,
+        routes: &[EvpnRoute],
         four_octet_as: bool,
         max_len: usize,
     ) -> bool {
@@ -896,7 +897,7 @@ impl PeerSession {
                 continue;
             }
             let wire_msg = Message::Update(msg);
-            if let Err(e) = self.send_message(&wire_msg).await {
+            if let Err(e) = self.enqueue_bulk(&wire_msg) {
                 warn!(peer = %self.peer_label, error = %e, "failed to send EVPN withdrawal UPDATE");
                 return false;
             }

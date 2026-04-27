@@ -20,13 +20,6 @@
 //! cleanly. Wiring of that policy is in commit 2/3; this module just
 //! provides the channels and the pipe.
 
-// Dead-code allow: this module is committed in two stages. Commit 1
-// (this commit) lands the implementation + unit tests and verifies the
-// writer pipe behavior in isolation. Commit 2 wires it into
-// `PeerSession`, removes this allow, and removes the legacy
-// `send_message`/`stream` paths it replaces.
-#![allow(dead_code)]
-
 use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
 use tokio::net::tcp::OwnedWriteHalf;

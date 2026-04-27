@@ -50,7 +50,7 @@ impl PeerSession {
                     {
                         self.local_open_pdu = Some(Bytes::from(encoded));
                     }
-                    if let Err(e) = self.send_message(&msg).await {
+                    if let Err(e) = self.enqueue_priority(&msg) {
                         warn!(peer = %self.peer_label, error = %e, "failed to send OPEN");
                         self.handle_tcp_disconnect();
                         follow_up.push(Event::TcpConnectionFails);
@@ -59,7 +59,7 @@ impl PeerSession {
                     self.metrics.record_message_sent(&self.peer_label, "open");
                 }
                 Action::SendKeepalive => {
-                    if let Err(e) = self.send_message(&Message::Keepalive).await {
+                    if let Err(e) = self.enqueue_priority(&Message::Keepalive) {
                         warn!(peer = %self.peer_label, error = %e, "failed to send KEEPALIVE");
                         self.handle_tcp_disconnect();
                         follow_up.push(Event::TcpConnectionFails);
@@ -83,7 +83,7 @@ impl PeerSession {
                         self.last_down_reason =
                             Some(PeerDownReason::LocalNotification(Bytes::from(encoded)));
                     }
-                    if let Err(e) = self.send_message(&msg).await {
+                    if let Err(e) = self.enqueue_priority(&msg) {
                         warn!(peer = %self.peer_label, error = %e, "failed to send NOTIFICATION");
                         // Continue — we're tearing down anyway
                     }
@@ -110,7 +110,7 @@ impl PeerSession {
                     self.timers.stop(timer_type);
                 }
                 Action::InitiateTcpConnection => {
-                    if self.stream.is_some() {
+                    if self.read_half.is_some() {
                         debug!(peer = %self.peer_label, "already connected (inbound)");
                         follow_up.push(Event::TcpConnectionConfirmed);
                     } else {
@@ -194,9 +194,9 @@ impl PeerSession {
                     let is_ebgp = neg.peer_asn != self.config.peer.local_asn;
                     let sendable_families = if is_ebgp {
                         let local_ipv6 = self
-                            .stream
+                            .read_half
                             .as_ref()
-                            .and_then(|s| s.local_addr().ok())
+                            .and_then(|h| h.local_addr().ok())
                             .and_then(|a| match a.ip() {
                                 IpAddr::V6(v6) => Some(v6),
                                 IpAddr::V4(_) => None,
@@ -256,11 +256,11 @@ impl PeerSession {
 
                     // Emit BMP Peer Up event
                     if self.bmp_tx.is_some() {
-                        let (local_addr, local_port, remote_port) = self.stream.as_ref().map_or(
+                        let (local_addr, local_port, remote_port) = self.read_half.as_ref().map_or(
                             (IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0, 0),
-                            |s| {
-                                let local = s.local_addr().ok();
-                                let remote = s.peer_addr().ok();
+                            |h| {
+                                let local = h.local_addr().ok();
+                                let remote = h.peer_addr().ok();
                                 (
                                     local.map_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED), |a| a.ip()),
                                     local.map_or(0, |a| a.port()),

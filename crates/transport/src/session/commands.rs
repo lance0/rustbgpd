@@ -78,7 +78,7 @@ impl PeerSession {
                     return ControlFlow::Continue(());
                 }
                 let msg = Message::RouteRefresh(RouteRefreshMessage::new(afi, safi));
-                if let Err(e) = self.send_message(&msg).await {
+                if let Err(e) = self.enqueue_priority(&msg) {
                     let _ = reply.send(Err(format!("send failed: {e}")));
                 } else {
                     info!(peer = %self.peer_label, ?afi, ?safi, "sent ROUTE-REFRESH");
@@ -108,7 +108,7 @@ impl PeerSession {
                     cease_subcode::CONNECTION_COLLISION_RESOLUTION,
                     bytes::Bytes::new(),
                 );
-                let _ = self.send_message(&Message::Notification(notif)).await;
+                let _ = self.enqueue_priority(&Message::Notification(notif));
                 self.notifications_sent += 1;
                 // Clean up RIB if Established
                 if self.fsm.state() == SessionState::Established {

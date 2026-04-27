@@ -24,8 +24,8 @@ use rustbgpd_wire::{
     NotificationMessage, PathAttribute, Prefix, RouteRefreshMessage, RouteRefreshSubtype, Safi,
     UpdateMessage, is_private_asn,
 };
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedReadHalf;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Sleep;
@@ -53,7 +53,26 @@ use self::outbound::remove_private_asns;
 pub(crate) struct PeerSession {
     config: TransportConfig,
     fsm: Session,
-    stream: Option<TcpStream>,
+    /// Owned read half of the TCP stream — `Some` when the session has
+    /// an active TCP connection. The matching write half lives inside
+    /// the per-peer writer task, reachable via `writer_bulk_tx` /
+    /// `writer_priority_tx`. These three fields are always set and
+    /// cleared together (invariant: `read_half.is_some() ==
+    /// writer_bulk_tx.is_some() == writer_priority_tx.is_some() ==
+    /// writer_join.is_some()`).
+    read_half: Option<OwnedReadHalf>,
+    /// Bounded outbound message channel handed to the writer task.
+    /// Bounded by `OUTBOUND_BUFFER`; `try_send` returning `Full` is the
+    /// saturation signal that triggers `Cease/9` + session teardown.
+    writer_bulk_tx: Option<mpsc::Sender<Bytes>>,
+    /// Unbounded priority channel handed to the writer task. Carries
+    /// OPEN, KEEPALIVE, NOTIFICATION, operator ROUTE-REFRESH commands,
+    /// and the `Cease/9` we emit on bulk saturation.
+    writer_priority_tx: Option<mpsc::UnboundedSender<Bytes>>,
+    /// `JoinHandle` of the writer task. Polled by the session's
+    /// `select!` so writer-exit (clean shutdown or TCP error) surfaces
+    /// as a TCP-disconnect event.
+    writer_join: Option<JoinHandle<std::io::Result<()>>>,
     read_buf: ReadBuffer,
     timers: Timers,
     metrics: BgpMetrics,
@@ -140,12 +159,12 @@ const OUTBOUND_BUFFER: usize = 4096;
 fn resolve_import_nexthop(
     nh_action: Option<&rustbgpd_policy::NextHopAction>,
     original: IpAddr,
-    stream: Option<&TcpStream>,
+    read_half: Option<&OwnedReadHalf>,
     config: &TransportConfig,
 ) -> IpAddr {
     match nh_action {
-        Some(rustbgpd_policy::NextHopAction::Self_) => stream
-            .and_then(|s| s.local_addr().ok())
+        Some(rustbgpd_policy::NextHopAction::Self_) => read_half
+            .and_then(|h| h.local_addr().ok())
             .map_or(IpAddr::V4(config.peer.local_router_id), |a| a.ip()),
         Some(rustbgpd_policy::NextHopAction::Specific(addr)) => *addr,
         None => original,
@@ -203,7 +222,10 @@ impl PeerSession {
         Self {
             config,
             fsm,
-            stream: None,
+            read_half: None,
+            writer_bulk_tx: None,
+            writer_priority_tx: None,
+            writer_join: None,
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
             metrics,
@@ -260,10 +282,19 @@ impl PeerSession {
         let peer_ip = config.remote_addr.ip();
         let fsm = Session::new(config.peer.clone());
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_BUFFER);
+        // Split the inbound stream and spawn the writer immediately —
+        // we're in async context here (inside `tokio::spawn` from
+        // `PeerHandle::spawn_inbound`), so `tokio::spawn` inside
+        // `writer::spawn` works.
+        let (read_half, write_half) = stream.into_split();
+        let writer_handle = writer::spawn(write_half, OUTBOUND_BUFFER);
         Self {
             config,
             fsm,
-            stream: Some(stream),
+            read_half: Some(read_half),
+            writer_bulk_tx: Some(writer_handle.bulk_tx),
+            writer_priority_tx: Some(writer_handle.priority_tx),
+            writer_join: Some(writer_handle.join),
             read_buf: ReadBuffer::new(),
             timers: Timers::default(),
             metrics,
@@ -329,23 +360,28 @@ impl PeerSession {
     }
 
     /// Main event loop. Runs until Shutdown command or fatal error.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "single select! over 9 arms — splitting hides the dispatch shape"
+    )]
     pub(crate) async fn run(&mut self) -> Result<(), TransportError> {
         loop {
             // Destructure to split borrows for tokio::select!
             let Self {
-                stream,
+                read_half,
                 read_buf,
                 timers,
                 commands,
                 reconnect_timer,
                 connect_task,
                 outbound_rx,
+                writer_join,
                 ..
             } = self;
 
             tokio::select! {
                 // TCP read — only when connected
-                result = read_tcp(stream, &mut read_buf.buf), if stream.is_some() => {
+                result = read_tcp(read_half, &mut read_buf.buf), if read_half.is_some() => {
                     match result {
                         Ok(0) => {
                             self.handle_tcp_disconnect();
@@ -402,7 +438,17 @@ impl PeerSession {
                     match result {
                         Ok(Ok(stream)) => {
                             info!(peer = %self.peer_label, "TCP connected");
-                            self.stream = Some(stream);
+                            // Split the stream and spawn the writer task.
+                            // Read half stays here for the read_tcp arm; the
+                            // write half lives inside the writer task,
+                            // reachable via the cached bulk_tx/priority_tx
+                            // senders.
+                            let (rh, wh) = stream.into_split();
+                            let handle = writer::spawn(wh, OUTBOUND_BUFFER);
+                            self.read_half = Some(rh);
+                            self.writer_bulk_tx = Some(handle.bulk_tx);
+                            self.writer_priority_tx = Some(handle.priority_tx);
+                            self.writer_join = Some(handle.join);
                             self.drive_fsm(Event::TcpConnectionConfirmed).await;
                         }
                         Ok(Err(e)) => {
@@ -416,13 +462,54 @@ impl PeerSession {
                     }
                 }
 
+                // Writer task exit — clean shutdown when both senders
+                // dropped (close_tcp / handle_tcp_disconnect did their
+                // job), or `Err(io::Error)` when TCP write/flush failed.
+                // Either way, treat as TCP-disconnect from the session's
+                // perspective. The arm clears `writer_join = None` to
+                // prevent the second-poll panic.
+                join_result = io::await_writer_join(writer_join), if writer_join.is_some() => {
+                    self.writer_join = None;
+                    match join_result {
+                        Ok(Ok(())) => {
+                            debug!(peer = %self.peer_label, "writer task exited cleanly");
+                        }
+                        Ok(Err(e)) => {
+                            debug!(peer = %self.peer_label, error = %e, "writer task TCP error");
+                            self.handle_tcp_disconnect();
+                            self.drive_fsm(Event::TcpConnectionFails).await;
+                        }
+                        Err(e) => {
+                            warn!(peer = %self.peer_label, error = %e, "writer task panicked");
+                            self.handle_tcp_disconnect();
+                            self.drive_fsm(Event::TcpConnectionFails).await;
+                        }
+                    }
+                }
+
                 // Outbound route updates from RIB manager
                 Some(update) = outbound_rx.recv(),
                     if self.fsm.state() == SessionState::Established => {
-                    self.send_route_update(update).await;
+                    self.send_route_update(update);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl PeerSession {
+    /// Test-only: install an already-connected `TcpStream` by splitting
+    /// it into halves and spawning the writer task. Replaces direct
+    /// `session.stream = Some(client)` assignments from the
+    /// pre-writer-split test scaffolding.
+    pub(super) fn test_install_stream(&mut self, stream: TcpStream) {
+        let (rh, wh) = stream.into_split();
+        let handle = writer::spawn(wh, OUTBOUND_BUFFER);
+        self.read_half = Some(rh);
+        self.writer_bulk_tx = Some(handle.bulk_tx);
+        self.writer_priority_tx = Some(handle.priority_tx);
+        self.writer_join = Some(handle.join);
     }
 }
 

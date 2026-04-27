@@ -461,7 +461,7 @@ impl PeerSession {
                 let next_hop = resolve_import_nexthop(
                     nh_action.as_ref(),
                     body_next_hop,
-                    self.stream.as_ref(),
+                    self.read_half.as_ref(),
                     &self.config,
                 );
                 Some(Route {
@@ -675,7 +675,7 @@ impl PeerSession {
                             let next_hop = resolve_import_nexthop(
                                 nh_action.as_ref(),
                                 mp.next_hop,
-                                self.stream.as_ref(),
+                                self.read_half.as_ref(),
                                 &self.config,
                             );
                             announced.push(Route {
