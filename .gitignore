@@ -22,3 +22,6 @@ __pycache__/
 # Containerlab generated
 *.bak
 clab-*/
+
+# Soak harness output (one directory per run; machine-specific timeseries)
+tests/soak/runs/
