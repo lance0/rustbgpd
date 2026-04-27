@@ -110,18 +110,42 @@ def detect_restart(rows: list[dict]) -> bool:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("csv", help="path to samples.csv")
-    ap.add_argument("--monitor-json", help="optional path to monitor.json (informational)")
-    ap.add_argument("--warmup-sec", type=int, default=600,
-                    help="skip samples with uptime_sec < this for the regression (default 600)")
-    ap.add_argument("--soak-hours", type=float, default=24.0,
-                    help="declared soak duration in hours, recorded in the report")
-    ap.add_argument("--slope-fail-mb-per-hour", type=float, default=1.0,
-                    help="memory slope >= this MB/h fails the gate (default 1.0)")
-    ap.add_argument("--slope-clean-mb-per-hour", type=float, default=0.5,
-                    help="memory slope < this MB/h is reported as clean (default 0.5)")
-    ap.add_argument("--mem-max-fail-mb", type=float, default=512.0,
-                    help="peak RSS >= this MB fails the gate (default 512)")
-    ap.add_argument("--output", help="write report JSON to this path in addition to stdout")
+    ap.add_argument(
+        "--monitor-json", help="optional path to monitor.json (informational)"
+    )
+    ap.add_argument(
+        "--warmup-sec",
+        type=int,
+        default=600,
+        help="skip samples with uptime_sec < this for the regression (default 600)",
+    )
+    ap.add_argument(
+        "--soak-hours",
+        type=float,
+        default=24.0,
+        help="declared soak duration in hours, recorded in the report",
+    )
+    ap.add_argument(
+        "--slope-fail-mb-per-hour",
+        type=float,
+        default=1.0,
+        help="memory slope >= this MB/h fails the gate (default 1.0)",
+    )
+    ap.add_argument(
+        "--slope-clean-mb-per-hour",
+        type=float,
+        default=0.5,
+        help="memory slope < this MB/h is reported as clean (default 0.5)",
+    )
+    ap.add_argument(
+        "--mem-max-fail-mb",
+        type=float,
+        default=512.0,
+        help="peak RSS >= this MB fails the gate (default 512)",
+    )
+    ap.add_argument(
+        "--output", help="write report JSON to this path in addition to stdout"
+    )
     args = ap.parse_args()
 
     try:
@@ -184,12 +208,8 @@ def main() -> int:
 
     # Daemon unhealthy at end: last 3 samples with grpc_ok==0 OR mem_mb==NaN.
     tail = rows[-3:]
-    daemon_unhealthy_at_end = (
-        len(tail) >= 1
-        and all(
-            r.get("grpc_ok") == "0" or safe_float(r.get("mem_mb")) is None
-            for r in tail
-        )
+    daemon_unhealthy_at_end = len(tail) >= 1 and all(
+        r.get("grpc_ok") == "0" or safe_float(r.get("mem_mb")) is None for r in tail
     )
 
     restart_detected = detect_restart(rows)
@@ -261,7 +281,9 @@ def main() -> int:
         "samples_total": total_samples,
         "samples_steady": len(steady_pairs),
         "memory": {
-            "slope_mb_per_hour": None if math.isnan(slope_mb_per_hour) else slope_mb_per_hour,
+            "slope_mb_per_hour": None
+            if math.isnan(slope_mb_per_hour)
+            else slope_mb_per_hour,
             "intercept_mb": None if math.isnan(intercept_mb) else intercept_mb,
             "first_mb": None if math.isnan(mem_first) else mem_first,
             "last_mb": None if math.isnan(mem_last) else mem_last,

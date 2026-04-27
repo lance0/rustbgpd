@@ -225,22 +225,40 @@ docker exec -d "$TESTER_B" sh -c "evpn-tester \
     > /tmp/tester.log 2>&1"
 
 # ---------------------------------------------------------------------------
-# Stage 3 — wait for monitor convergence (warmup checkpoint)
+# Stage 3 — wait for initial convergence (warmup checkpoint)
+#
+# We can't gate on monitor.json — monitor.rs only emits its JSON report when
+# it exits, and with --observe-sec set to SOAK_SEC+60 that's 24h+ from now.
+# Poll the RR's Prometheus Loc-RIB gauge instead: when bgp_rib_loc_prefixes
+# {afi_safi="evpn"} reaches the expected total, the testers fired and the RR
+# absorbed the routes. As a backstop we also accept the monitor's "converged"
+# tracing event in /tmp/monitor.log.
 # ---------------------------------------------------------------------------
 
-log "[stage 3] waiting for initial convergence (timeout ${CONVERGE_TIMEOUT}s)"
+EXPECTED_TOTAL=$((COUNT_PER_TESTER * 2))
+log "[stage 3] waiting for RR Loc-RIB EVPN count to reach ${EXPECTED_TOTAL} (timeout ${CONVERGE_TIMEOUT}s)"
 warmup_start=$(date +%s)
 warmup_deadline=$(( warmup_start + CONVERGE_TIMEOUT + 30 ))
 while true; do
     now=$(date +%s)
     if [ "$now" -ge "$warmup_deadline" ]; then
-        echo "ERROR: monitor never reported convergence within $((CONVERGE_TIMEOUT + 30))s" >&2
+        echo "ERROR: RR never reached ${EXPECTED_TOTAL} EVPN routes within $((CONVERGE_TIMEOUT + 30))s" >&2
         docker cp "${MONITOR}:/tmp/monitor.log" "$RUN_DIR/monitor-pre-converge.log" 2>/dev/null || true
+        last_count=$(curl -s --max-time 5 "http://${RR_IP}:9179/metrics" 2>/dev/null \
+            | awk '/^bgp_rib_loc_prefixes\{afi_safi="evpn"\}/ { print $2; exit }')
+        echo "ERROR: last observed Loc-RIB EVPN count: ${last_count:-<none>}" >&2
         exit 2
     fi
-    if docker exec "$MONITOR" sh -c 'test -s /tmp/monitor.json' 2>/dev/null \
-        && docker exec "$MONITOR" sh -c 'grep -q "\"converged\": true" /tmp/monitor.json' 2>/dev/null; then
-        log "initial convergence reached at $((now - warmup_start))s"
+    rib_count=$(curl -s --max-time 5 "http://${RR_IP}:9179/metrics" 2>/dev/null \
+        | awk '/^bgp_rib_loc_prefixes\{afi_safi="evpn"\}/ { print $2; exit }')
+    # Strip a Prometheus-style trailing ".0" for integer comparison.
+    rib_count_int=${rib_count%.*}
+    if [ -n "$rib_count_int" ] && [ "$rib_count_int" -ge "$EXPECTED_TOTAL" ] 2>/dev/null; then
+        log "initial convergence reached at $((now - warmup_start))s — Loc-RIB EVPN count=${rib_count}"
+        break
+    fi
+    if docker exec "$MONITOR" sh -c 'test -s /tmp/monitor.log && grep -q converged /tmp/monitor.log' 2>/dev/null; then
+        log "monitor reported converged at $((now - warmup_start))s (Loc-RIB count was ${rib_count:-<unknown>})"
         break
     fi
     sleep 2
@@ -348,9 +366,31 @@ while kill -0 "$SAMPLER_PID" 2>/dev/null; do
     sleep 1
 done
 
-log "copying monitor.json out of $MONITOR"
+# monitor.rs only emits its JSON report on exit (after observe-sec elapses),
+# so monitor.json is empty until the binary returns. With observe-sec set to
+# SOAK_SEC + 60 the monitor is still running ~60s past our soak deadline.
+# Wait up to MONITOR_EXIT_TIMEOUT seconds for the monitor process to exit
+# before copying monitor.json out — partial copies are useless.
+MONITOR_EXIT_TIMEOUT=${MONITOR_EXIT_TIMEOUT:-180}
+log "[stage 6] waiting up to ${MONITOR_EXIT_TIMEOUT}s for monitor binary to exit + flush JSON"
+# `docker top` runs on the host (no in-container deps — the runtime image
+# is debian-slim with only iproute2, no procps/pgrep). Detect exit by
+# observing that evpn-monitor is no longer in the container's process list.
+monitor_wait_deadline=$(( $(date +%s) + MONITOR_EXIT_TIMEOUT ))
+while [ "$(date +%s)" -lt "$monitor_wait_deadline" ]; do
+    if ! docker top "$MONITOR" 2>/dev/null | grep -q evpn-monitor; then
+        log "monitor exited"
+        break
+    fi
+    sleep 2
+done
+
+log "copying monitor.json + monitor.log out of $MONITOR"
 docker cp "${MONITOR}:/tmp/monitor.json" "$MONITOR_JSON" 2>/dev/null || true
 docker cp "${MONITOR}:/tmp/monitor.log" "$RUN_DIR/monitor.log" 2>/dev/null || true
+if [ ! -s "$MONITOR_JSON" ]; then
+    log "WARNING: monitor.json missing or empty — analyzer's monitor summary will be null"
+fi
 
 # ---------------------------------------------------------------------------
 # Stage 7 — analyze
