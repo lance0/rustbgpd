@@ -3,6 +3,7 @@ mod fsm;
 mod inbound;
 mod io;
 mod outbound;
+mod writer;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
