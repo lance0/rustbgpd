@@ -7,6 +7,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
+use rustbgpd_telemetry::BgpMetrics;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -29,6 +30,7 @@ pub struct BmpClient {
     sys_name: String,
     sys_descr: String,
     control_tx: Option<mpsc::Sender<BmpControlEvent>>,
+    metrics: BgpMetrics,
 }
 
 impl BmpClient {
@@ -67,6 +69,7 @@ impl BmpClient {
         sys_name: String,
         sys_descr: String,
         control_tx: Option<mpsc::Sender<BmpControlEvent>>,
+        metrics: BgpMetrics,
     ) -> Self {
         Self {
             config,
@@ -74,6 +77,7 @@ impl BmpClient {
             sys_name,
             sys_descr,
             control_tx,
+            metrics,
         }
     }
 
@@ -116,7 +120,9 @@ impl BmpClient {
             // collector, even though the collector is connected and
             // looks healthy from the client side. Use a 1 s timed
             // send so a wedged manager doesn't block reconnect
-            // forever.
+            // forever — and bump bmp_control_event_drops_total on
+            // either failure mode so operators can alert on the
+            // skipped replay rather than tail logs.
             if let Some(ref control_tx) = self.control_tx {
                 let event = BmpControlEvent::CollectorConnected {
                     collector_id: id,
@@ -129,14 +135,28 @@ impl BmpClient {
                 .await
                 {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) => warn!(
-                        collector = %addr,
-                        "BMP control channel closed; PeerUp replay will not fire"
-                    ),
-                    Err(_) => warn!(
-                        collector = %addr,
-                        "BMP control channel send timed out; PeerUp replay will not fire"
-                    ),
+                    Ok(Err(_)) => {
+                        self.metrics.record_bmp_control_event_drop(
+                            &addr.to_string(),
+                            "collector_connected",
+                            "channel_closed",
+                        );
+                        warn!(
+                            collector = %addr,
+                            "BMP control channel closed; PeerUp replay will not fire"
+                        );
+                    }
+                    Err(_) => {
+                        self.metrics.record_bmp_control_event_drop(
+                            &addr.to_string(),
+                            "collector_connected",
+                            "channel_timeout",
+                        );
+                        warn!(
+                            collector = %addr,
+                            "BMP control channel send timed out; PeerUp replay will not fire"
+                        );
+                    }
                 }
             }
 
@@ -154,10 +174,28 @@ impl BmpClient {
                 if let Err(e) = Self::write_all_with_timeout(&mut stream, &msg).await {
                     warn!(collector = %addr, error = %e, "BMP write failed, reconnecting");
                     if let Some(ref control_tx) = self.control_tx {
-                        let _ = control_tx.try_send(BmpControlEvent::CollectorDisconnected {
-                            collector_id: id,
-                            collector_addr: addr,
-                        });
+                        // CollectorDisconnected is best-effort but
+                        // still observable: a dropped Disconnected
+                        // means the manager won't see the gap until
+                        // the next reconnect's Connected — count it
+                        // so operators can spot stuck disconnected
+                        // states.
+                        if let Err(send_err) =
+                            control_tx.try_send(BmpControlEvent::CollectorDisconnected {
+                                collector_id: id,
+                                collector_addr: addr,
+                            })
+                        {
+                            let reason = match send_err {
+                                mpsc::error::TrySendError::Full(_) => "channel_full",
+                                mpsc::error::TrySendError::Closed(_) => "channel_closed",
+                            };
+                            self.metrics.record_bmp_control_event_drop(
+                                &addr.to_string(),
+                                "collector_disconnected",
+                                reason,
+                            );
+                        }
                     }
                     break; // reconnect
                 }
@@ -190,6 +228,7 @@ mod tests {
             "rustbgpd".to_string(),
             "test".to_string(),
             Some(control_tx),
+            BgpMetrics::new(),
         );
         let handle = tokio::spawn(client.run());
 
@@ -215,6 +254,90 @@ mod tests {
             }
             other => panic!("expected CollectorConnected, got {other:?}"),
         }
+
+        handle.abort();
+    }
+
+    /// When the manager's control channel is wedged (saturated and
+    /// not draining), `CollectorConnected` send times out — but the
+    /// collector stays connected and the rest of the BMP stream
+    /// continues. We must surface the silent skipped replay via
+    /// `bmp_control_event_drops_total{kind=collector_connected,
+    /// reason=channel_timeout}`.
+    #[tokio::test]
+    async fn collector_connected_send_timeout_increments_control_drop_counter() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (_msg_tx, msg_rx) = mpsc::channel(8);
+        // 1-deep + pre-fill = next send blocks until pre-fill is drained.
+        // The manager-side receiver here is never read, so the send
+        // hits the 1 s timeout in the client.
+        let (control_tx, _control_rx) = mpsc::channel::<BmpControlEvent>(1);
+        control_tx
+            .try_send(BmpControlEvent::CollectorDisconnected {
+                collector_id: 0,
+                collector_addr: addr,
+            })
+            .unwrap();
+
+        let metrics = BgpMetrics::new();
+        let client = BmpClient::new(
+            BmpClientConfig {
+                collector_id: 7,
+                collector_addr: addr,
+                reconnect_interval: 1,
+            },
+            msg_rx,
+            "rustbgpd".to_string(),
+            "test".to_string(),
+            Some(control_tx),
+            metrics.clone(),
+        );
+        let handle = tokio::spawn(client.run());
+
+        // Accept and drain so the Initiation write completes — the
+        // failure mode we want to exercise is post-Initiation.
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 64];
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Wait long enough for the 1 s control_tx.send timeout to elapse
+        // and the metric to be incremented.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
+        )]
+        let drops = metrics
+            .registry()
+            .gather()
+            .iter()
+            .find(|f| f.get_name() == "bmp_control_event_drops_total")
+            .map_or(0, |f| {
+                f.get_metric()
+                    .iter()
+                    .filter(|m| {
+                        m.get_label().iter().any(|l| {
+                            l.get_name() == "kind" && l.get_value() == "collector_connected"
+                        }) && m
+                            .get_label()
+                            .iter()
+                            .any(|l| l.get_name() == "reason" && l.get_value() == "channel_timeout")
+                    })
+                    .map(|m| m.get_counter().get_value() as u64)
+                    .sum::<u64>()
+            });
+        assert!(
+            drops >= 1,
+            "wedged control channel should bump bmp_control_event_drops_total \
+             {{kind=collector_connected, reason=channel_timeout}} (got {drops})"
+        );
 
         handle.abort();
     }

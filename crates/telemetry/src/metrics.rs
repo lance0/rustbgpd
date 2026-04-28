@@ -58,6 +58,7 @@ pub struct BgpMetrics {
     bmp_source_drops: IntCounterVec,
     bmp_collector_drops: IntCounterVec,
     bmp_replay_attempts: IntCounterVec,
+    bmp_control_event_drops: IntCounterVec,
 }
 
 impl BgpMetrics {
@@ -272,6 +273,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let bmp_control_event_drops = IntCounterVec::new(
+            Opts::new(
+                "bmp_control_event_drops_total",
+                "BMP control events (collector_connected, collector_disconnected) that failed to reach the manager — surfaces silent skipped PeerUp replay when the control channel is wedged",
+            ),
+            &["collector", "kind", "reason"],
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -338,6 +348,9 @@ impl BgpMetrics {
         registry
             .register(Box::new(bmp_replay_attempts.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(bmp_control_event_drops.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -363,6 +376,7 @@ impl BgpMetrics {
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
+            bmp_control_event_drops,
         }
     }
 
@@ -516,6 +530,18 @@ impl BgpMetrics {
     pub fn record_bmp_replay_attempt(&self, collector: &str) {
         self.bmp_replay_attempts
             .with_label_values(&[collector])
+            .inc();
+    }
+
+    /// Record a BMP control event (e.g., `CollectorConnected`) that
+    /// failed to reach the manager. `reason` ∈ {`channel_closed`,
+    /// `channel_timeout`}. When this counter is non-zero the manager
+    /// hasn't processed the corresponding event, which (for
+    /// `collector_connected`) means the `PeerUp` cache replay never
+    /// fires for that reconnect.
+    pub fn record_bmp_control_event_drop(&self, collector: &str, kind: &str, reason: &str) {
+        self.bmp_control_event_drops
+            .with_label_values(&[collector, kind, reason])
             .inc();
     }
 }
@@ -788,6 +814,26 @@ mod tests {
             .with_label_values(&["127.0.0.1:5000", "replay", "channel_full"])
             .get();
         assert_eq!(replay, 7);
+    }
+
+    #[test]
+    fn bmp_control_event_drop_counter() {
+        let m = BgpMetrics::new();
+        m.record_bmp_control_event_drop("127.0.0.1:5000", "collector_connected", "channel_timeout");
+        m.record_bmp_control_event_drop("127.0.0.1:5000", "collector_connected", "channel_closed");
+        m.record_bmp_control_event_drop("127.0.0.1:5000", "collector_connected", "channel_timeout");
+
+        let timeouts = m
+            .bmp_control_event_drops
+            .with_label_values(&["127.0.0.1:5000", "collector_connected", "channel_timeout"])
+            .get();
+        assert_eq!(timeouts, 2);
+
+        let closed = m
+            .bmp_control_event_drops
+            .with_label_values(&["127.0.0.1:5000", "collector_connected", "channel_closed"])
+            .get();
+        assert_eq!(closed, 1);
     }
 
     #[test]

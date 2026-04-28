@@ -7,15 +7,17 @@ resolved.
 
 ## Resolved
 
-- **BMP drop / replay Prometheus counters (resolved).** Three new
+- **BMP drop / replay Prometheus counters (resolved).** Four new
   `bmp_*` counters surface what was previously only `tracing::warn!`
   output: `bmp_source_drops_total{peer, reason}` covers the
   PeerSession→BmpManager mpsc fill, `bmp_collector_drops_total
   {collector, phase, reason}` covers the per-collector mpsc fill
   (with `phase` distinguishing fan-out from PeerUp-cache replay),
-  and `bmp_replay_attempts_total{collector}` is the denominator for
-  a "replay drop rate" alert. Operators can now alert on BMP loss
-  without a log scraper.
+  `bmp_replay_attempts_total{collector}` is the denominator for a
+  "replay drop rate" alert, and `bmp_control_event_drops_total
+  {collector, kind, reason}` surfaces BMP control events that fail
+  to reach the manager (closing the silent skipped-replay window).
+  Operators can now alert on BMP loss without a log scraper.
 
 - **CLI gRPC integration tests added (fixed).** `rustbgpctl` now has
   mock-server integration tests covering health, global, neighbor add,

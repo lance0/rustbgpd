@@ -772,6 +772,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 sys_name.clone(),
                 sys_descr.clone(),
                 Some(bmp_control_tx.clone()),
+                metrics.clone(),
             );
             info!(collector = %addr, "spawning BMP client");
             client_handles.push(tokio::spawn(client.run()));

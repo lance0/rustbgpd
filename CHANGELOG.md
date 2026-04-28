@@ -11,13 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **BMP drop / replay Prometheus counters.** Three new `bmp_*_total`
+- **BMP drop / replay Prometheus counters.** Four new `bmp_*_total`
   metrics surface what previously was only `tracing::warn!` output:
   `bmp_source_drops_total{peer, reason}` for the PeerSession→BmpManager
   mpsc fill, `bmp_collector_drops_total{collector, phase, reason}` for
   the per-collector mpsc fill (with `phase` distinguishing fan-out
-  from `PeerUp`-cache replay), and `bmp_replay_attempts_total
-  {collector}` as the denominator for a "replay drop rate" alert.
+  from `PeerUp`-cache replay), `bmp_replay_attempts_total
+  {collector}` as the denominator for a "replay drop rate" alert,
+  and `bmp_control_event_drops_total{collector, kind, reason}` for
+  BMP control events (`collector_connected`, `collector_disconnected`)
+  that fail to reach the manager — that path is what makes the
+  difference between "the manager is wedged but Prometheus tells you
+  so" and "the manager is wedged and your replay metrics are silently
+  flat."
   `reason` is parsed from `mpsc::error::TrySendError` (`channel_full` /
   `channel_closed`); the `collector` label uses the SocketAddr string
   for stability across config reloads. Replay aborts attribute every
