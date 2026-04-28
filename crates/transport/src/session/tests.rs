@@ -333,6 +333,83 @@ async fn inbound_update_emits_bmp_route_monitoring() {
     }
 }
 
+/// Inbound EVPN UPDATE → BMP `RouteMonitoring` with byte-equal `update_pdu`.
+///
+/// The BMP emit site at `crates/transport/src/session/io.rs` has no AFI/SAFI
+/// filter — every UPDATE flows to the collector with the raw wire bytes.
+/// This regression test locks that behavior in: it negotiates L2VPN/EVPN,
+/// pushes a Type 2 (MAC/IP) `MP_REACH_NLRI` UPDATE, and asserts that the
+/// `BmpEvent::RouteMonitoring` carries the original encoded bytes
+/// unchanged. A future refactor that quietly added a unicast-only family
+/// gate would fail this test.
+#[tokio::test]
+async fn inbound_evpn_update_emits_bmp_route_monitoring() {
+    use rustbgpd_wire::attribute::MpReachNlri;
+    use rustbgpd_wire::{
+        EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+        RouteDistinguisher,
+    };
+
+    let (mut session, _rib_rx, mut bmp_rx) = make_test_session_with_rib_and_bmp(65001, 65002);
+    session.negotiated = Some(negotiated_session(65002, false));
+    session.negotiated_families = vec![(Afi::L2Vpn, Safi::Evpn)];
+
+    let evpn_route = EvpnRoute::MacIp(EvpnMacIp {
+        rd: RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]),
+        esi: EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: EthernetTagId(0),
+        mac: MacAddress([0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]),
+        ip: Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))),
+        label1: MplsLabel::new(100),
+        label2: None,
+    });
+
+    let attrs = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![65002])],
+        }),
+        PathAttribute::MpReachNlri(MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![evpn_route],
+        }),
+    ];
+
+    let update = rustbgpd_wire::UpdateMessage::build(
+        &[],
+        &[],
+        &attrs,
+        true,
+        false,
+        rustbgpd_wire::Ipv4UnicastMode::Body,
+    );
+    let encoded = rustbgpd_wire::encode_message(&Message::Update(update)).unwrap();
+    session.read_buf.buf.extend_from_slice(&encoded);
+
+    session.process_read_buffer().await;
+
+    match bmp_rx.recv().await.unwrap() {
+        BmpEvent::RouteMonitoring {
+            peer_info,
+            update_pdu,
+        } => {
+            assert_eq!(peer_info.peer_addr, session.peer_ip);
+            assert_eq!(
+                update_pdu.as_ref(),
+                encoded.as_ref(),
+                "BMP RouteMonitoring update_pdu must be byte-equal to the inbound \
+                 EVPN UPDATE — collectors parse the inner MP_REACH_NLRI to \
+                 discover AFI=25/SAFI=70"
+            );
+        }
+        other => panic!("expected BMP RouteMonitoring, got {other:?}"),
+    }
+}
+
 #[test]
 fn ebgp_prepends_asn() {
     let session = make_test_session(65001, 65002);
