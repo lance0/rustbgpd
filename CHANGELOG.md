@@ -20,9 +20,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   {collector}` as the denominator for a "replay drop rate" alert.
   `reason` is parsed from `mpsc::error::TrySendError` (`channel_full` /
   `channel_closed`); the `collector` label uses the SocketAddr string
-  for stability across config reloads. Operators can now alert on BMP
-  loss without a log scraper. Closes the
-  [BMP drop/replay counters](KNOWN_ISSUES.md) gap.
+  for stability across config reloads. Replay aborts attribute every
+  remaining cached `PeerUp` message as dropped (not just the first
+  failed `try_send`), so a saturated reconnect on a fabric with
+  thousands of peers reports the real loss. The collector-side
+  `CollectorConnected` event now uses an awaited send with a 1 s
+  timeout instead of `try_send` so a wedged manager can't silently
+  skip the whole `PeerUp` replay while the collector still looks
+  healthy. Operators can now alert on BMP loss without a log scraper.
+  Closes the [BMP drop/replay counters](KNOWN_ISSUES.md) gap.
 
 - **M30b interop: EVPN Type 5 / IP Prefix origination against FRR
   10.3.1.** Single-VTEP containerlab topology

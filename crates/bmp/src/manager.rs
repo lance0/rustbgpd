@@ -177,16 +177,23 @@ impl BmpManager {
         let addr_label = addr.to_string();
         self.metrics.record_bmp_replay_attempt(&addr_label);
 
-        for msg in self.peer_up_cache.values() {
-            if let Err(e) = tx.try_send(msg.clone()) {
+        // Iterate via a counted index so an abort can attribute every
+        // remaining cached-PeerUp message as dropped — otherwise a
+        // single saturation event under-reports thousands of skipped
+        // peers as one drop.
+        let cache_values: Vec<&Bytes> = self.peer_up_cache.values().collect();
+        for (idx, msg) in cache_values.iter().enumerate() {
+            if let Err(e) = tx.try_send((*msg).clone()) {
                 let reason = trysend_reason(&e);
+                let remaining = u64::try_from(cache_values.len() - idx).unwrap_or(u64::MAX);
                 self.metrics
-                    .record_bmp_collector_drop(&addr_label, "replay", reason);
+                    .record_bmp_collector_drop(&addr_label, "replay", reason, remaining);
                 warn!(
                     collector_id,
                     collector = %addr,
                     error = %e,
-                    "BMP collector channel full or closed during replay"
+                    skipped = remaining,
+                    "BMP collector channel full or closed during replay; remaining PeerUp messages dropped"
                 );
                 break;
             }
@@ -198,7 +205,7 @@ impl BmpManager {
             if let Err(e) = tx.try_send(msg.clone()) {
                 let reason = trysend_reason(&e);
                 self.metrics
-                    .record_bmp_collector_drop(&addr.to_string(), "fan_out", reason);
+                    .record_bmp_collector_drop(&addr.to_string(), "fan_out", reason, 1);
                 warn!(
                     collector = %addr,
                     error = %e,
@@ -549,6 +556,93 @@ mod tests {
             &[("phase", "fan_out")],
         );
         assert_eq!(dropped, 1, "fan-out drop should have incremented counter");
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// Replay aborts after the first `try_send` failure, so it must
+    /// attribute every remaining cached-PeerUp message as dropped. Otherwise
+    /// a saturated reconnect on a fabric with many peers under-reports the
+    /// loss as a single drop and operators see "1 drop" while thousands of
+    /// peers are missing from the collector's view.
+    ///
+    /// Builds a 5-deep `PeerUp` cache via 5 distinct `PeerUp` events, then
+    /// replays into a 1-deep collector channel pre-filled with one byte
+    /// so every replay `try_send` hits Full. Asserts the replay-phase
+    /// drop counter equals the cache size, not 1.
+    #[tokio::test]
+    async fn replay_drop_counts_every_skipped_cached_peer() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        // 5-deep collector channel: enough to absorb 5 PeerUp fan-outs
+        // during cache build, then we'll saturate it before triggering replay.
+        let (c_tx, mut c_rx) = mpsc::channel::<Bytes>(5);
+        let addr = collector_addr(9);
+
+        let metrics = BgpMetrics::new();
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(addr, c_tx.clone())],
+            metrics.clone(),
+        );
+        let handle = tokio::spawn(mgr.run());
+
+        // Build a 5-peer PeerUp cache. Each PeerUp also fan-outs to the
+        // collector, so we drain those as they arrive.
+        for octet in 1..=5u8 {
+            let mut info = sample_peer_info();
+            info.peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, octet));
+            info.peer_bgp_id = Ipv4Addr::new(10, 0, 0, octet);
+            event_tx
+                .send(BmpEvent::PeerUp {
+                    peer_info: info,
+                    local_open: Bytes::from_static(&[0xFF; 29]),
+                    remote_open: Bytes::from_static(&[0xFE; 29]),
+                    local_addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+                    local_port: 179,
+                    remote_port: 54321,
+                })
+                .await
+                .unwrap();
+            // Drain the fan-out so the channel is empty before replay.
+            let _ = c_rx.recv().await.unwrap();
+        }
+
+        // Saturate the collector channel — every replay try_send will hit Full.
+        for _ in 0..5 {
+            c_tx.try_send(Bytes::from_static(b"x")).unwrap();
+        }
+
+        // Trigger replay.
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: addr,
+            })
+            .await
+            .unwrap();
+
+        // Wait for the counter to reflect at least the full cache size.
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if metric_family_sum(&metrics, "bmp_collector_drops_total") >= 5 {
+                break;
+            }
+        }
+
+        let dropped = metric_value_with_labels(
+            &metrics,
+            "bmp_collector_drops_total",
+            &[("phase", "replay")],
+        );
+        assert_eq!(
+            dropped, 5,
+            "replay abort should attribute every skipped cached PeerUp (5), \
+             not just the first try_send failure"
+        );
 
         drop(event_tx);
         drop(control_tx);

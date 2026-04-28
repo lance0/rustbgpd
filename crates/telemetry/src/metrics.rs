@@ -496,11 +496,20 @@ impl BgpMetrics {
             .inc();
     }
 
-    /// Record a BMP message dropped at the BmpManager→BmpClient channel.
-    pub fn record_bmp_collector_drop(&self, collector: &str, phase: &str, reason: &str) {
+    /// Record `count` BMP messages dropped at the BmpManager→BmpClient
+    /// channel. `count = 1` for fan-out drops; replay aborts pass the
+    /// remaining cached-PeerUp count so an early break still surfaces
+    /// every skipped message.
+    pub fn record_bmp_collector_drop(
+        &self,
+        collector: &str,
+        phase: &str,
+        reason: &str,
+        count: u64,
+    ) {
         self.bmp_collector_drops
             .with_label_values(&[collector, phase, reason])
-            .inc();
+            .inc_by(count);
     }
 
     /// Record a PeerUp-cache replay attempt for a reconnected BMP collector.
@@ -762,9 +771,11 @@ mod tests {
     #[test]
     fn bmp_collector_drop_counter() {
         let m = BgpMetrics::new();
-        m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full");
-        m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full");
-        m.record_bmp_collector_drop("127.0.0.1:5000", "replay", "channel_full");
+        m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full", 1);
+        m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full", 1);
+        // Replay abort: count every cached-PeerUp message that was
+        // skipped, not just one.
+        m.record_bmp_collector_drop("127.0.0.1:5000", "replay", "channel_full", 7);
 
         let fan_out = m
             .bmp_collector_drops
@@ -776,7 +787,7 @@ mod tests {
             .bmp_collector_drops
             .with_label_values(&["127.0.0.1:5000", "replay", "channel_full"])
             .get();
-        assert_eq!(replay, 1);
+        assert_eq!(replay, 7);
     }
 
     #[test]

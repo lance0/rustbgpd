@@ -109,12 +109,35 @@ impl BmpClient {
                 continue; // reconnect
             }
 
-            // Collector is now ready to receive BMP messages.
+            // Collector is now ready to receive BMP messages. Surface
+            // a back-pressure or closed-channel failure here loudly:
+            // dropping this event silently means the manager never
+            // replays the PeerUp cache to a freshly reconnected
+            // collector, even though the collector is connected and
+            // looks healthy from the client side. Use a 1 s timed
+            // send so a wedged manager doesn't block reconnect
+            // forever.
             if let Some(ref control_tx) = self.control_tx {
-                let _ = control_tx.try_send(BmpControlEvent::CollectorConnected {
+                let event = BmpControlEvent::CollectorConnected {
                     collector_id: id,
                     collector_addr: addr,
-                });
+                };
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    control_tx.send(event),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => warn!(
+                        collector = %addr,
+                        "BMP control channel closed; PeerUp replay will not fire"
+                    ),
+                    Err(_) => warn!(
+                        collector = %addr,
+                        "BMP control channel send timed out; PeerUp replay will not fire"
+                    ),
+                }
             }
 
             // Stream messages until error or channel close
