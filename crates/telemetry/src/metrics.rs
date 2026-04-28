@@ -53,6 +53,11 @@ pub struct BgpMetrics {
 
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records_total: IntGauge,
+
+    // ── BMP exporter ───────────────────────────────────────────
+    bmp_source_drops: IntCounterVec,
+    bmp_collector_drops: IntCounterVec,
+    bmp_replay_attempts: IntCounterVec,
 }
 
 impl BgpMetrics {
@@ -240,6 +245,33 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let bmp_source_drops = IntCounterVec::new(
+            Opts::new(
+                "bmp_source_drops_total",
+                "BMP events dropped at the PeerSession→BmpManager channel by reason (channel_full, channel_closed)",
+            ),
+            &["peer", "reason"],
+        )
+        .expect("valid metric definition");
+
+        let bmp_collector_drops = IntCounterVec::new(
+            Opts::new(
+                "bmp_collector_drops_total",
+                "BMP messages dropped at the BmpManager→BmpClient channel per collector, by phase (fan_out, replay) and reason (channel_full, channel_closed)",
+            ),
+            &["collector", "phase", "reason"],
+        )
+        .expect("valid metric definition");
+
+        let bmp_replay_attempts = IntCounterVec::new(
+            Opts::new(
+                "bmp_replay_attempts_total",
+                "PeerUp-cache replay attempts triggered by a BMP collector reconnect",
+            ),
+            &["collector"],
+        )
+        .expect("valid metric definition");
+
         registry
             .register(Box::new(state_transitions.clone()))
             .expect("metric not already registered");
@@ -297,6 +329,15 @@ impl BgpMetrics {
         registry
             .register(Box::new(aspa_records_total.clone()))
             .expect("metric not already registered");
+        registry
+            .register(Box::new(bmp_source_drops.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(bmp_collector_drops.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(bmp_replay_attempts.clone()))
+            .expect("metric not already registered");
 
         Self {
             registry,
@@ -319,6 +360,9 @@ impl BgpMetrics {
             gr_timer_expired,
             rpki_vrp_count,
             aspa_records_total,
+            bmp_source_drops,
+            bmp_collector_drops,
+            bmp_replay_attempts,
         }
     }
 
@@ -443,6 +487,27 @@ impl BgpMetrics {
     /// Set ASPA record count.
     pub fn set_aspa_records_total(&self, count: i64) {
         self.aspa_records_total.set(count);
+    }
+
+    /// Record a BMP event dropped at the PeerSession→BmpManager channel.
+    pub fn record_bmp_source_drop(&self, peer: &str, reason: &str) {
+        self.bmp_source_drops
+            .with_label_values(&[peer, reason])
+            .inc();
+    }
+
+    /// Record a BMP message dropped at the BmpManager→BmpClient channel.
+    pub fn record_bmp_collector_drop(&self, collector: &str, phase: &str, reason: &str) {
+        self.bmp_collector_drops
+            .with_label_values(&[collector, phase, reason])
+            .inc();
+    }
+
+    /// Record a PeerUp-cache replay attempt for a reconnected BMP collector.
+    pub fn record_bmp_replay_attempt(&self, collector: &str) {
+        self.bmp_replay_attempts
+            .with_label_values(&[collector])
+            .inc();
     }
 }
 
@@ -672,5 +737,65 @@ mod tests {
 
         let families = m.registry().gather();
         assert!(!families.is_empty());
+    }
+
+    #[test]
+    fn bmp_source_drop_counter() {
+        let m = BgpMetrics::new();
+        m.record_bmp_source_drop("10.0.0.1", "channel_full");
+        m.record_bmp_source_drop("10.0.0.1", "channel_full");
+        m.record_bmp_source_drop("10.0.0.2", "channel_closed");
+
+        let full = m
+            .bmp_source_drops
+            .with_label_values(&["10.0.0.1", "channel_full"])
+            .get();
+        assert_eq!(full, 2);
+
+        let closed = m
+            .bmp_source_drops
+            .with_label_values(&["10.0.0.2", "channel_closed"])
+            .get();
+        assert_eq!(closed, 1);
+    }
+
+    #[test]
+    fn bmp_collector_drop_counter() {
+        let m = BgpMetrics::new();
+        m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full");
+        m.record_bmp_collector_drop("127.0.0.1:5000", "fan_out", "channel_full");
+        m.record_bmp_collector_drop("127.0.0.1:5000", "replay", "channel_full");
+
+        let fan_out = m
+            .bmp_collector_drops
+            .with_label_values(&["127.0.0.1:5000", "fan_out", "channel_full"])
+            .get();
+        assert_eq!(fan_out, 2);
+
+        let replay = m
+            .bmp_collector_drops
+            .with_label_values(&["127.0.0.1:5000", "replay", "channel_full"])
+            .get();
+        assert_eq!(replay, 1);
+    }
+
+    #[test]
+    fn bmp_replay_attempts_counter() {
+        let m = BgpMetrics::new();
+        m.record_bmp_replay_attempt("127.0.0.1:5000");
+        m.record_bmp_replay_attempt("127.0.0.1:5000");
+        m.record_bmp_replay_attempt("127.0.0.1:5001");
+
+        let a = m
+            .bmp_replay_attempts
+            .with_label_values(&["127.0.0.1:5000"])
+            .get();
+        assert_eq!(a, 2);
+
+        let b = m
+            .bmp_replay_attempts
+            .with_label_values(&["127.0.0.1:5001"])
+            .get();
+        assert_eq!(b, 1);
     }
 }
