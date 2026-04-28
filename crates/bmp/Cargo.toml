@@ -12,6 +12,7 @@ description = "BMP exporter — RFC 7854 BGP Monitoring Protocol"
 readme = "README.md"
 
 [dependencies]
+rustbgpd-telemetry.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

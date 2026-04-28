@@ -3,7 +3,10 @@
 //! Receives `BmpEvent`s from transport, encodes them into BMP wire
 //! format, and distributes the encoded bytes to all collector channels.
 
+use std::net::SocketAddr;
+
 use bytes::Bytes;
+use rustbgpd_telemetry::BgpMetrics;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -14,24 +17,30 @@ use crate::types::{BmpControlEvent, BmpEvent};
 pub struct BmpManager {
     event_rx: mpsc::Receiver<BmpEvent>,
     control_rx: mpsc::Receiver<BmpControlEvent>,
-    collectors: Vec<mpsc::Sender<Bytes>>,
+    /// Per-collector address + sender, paired by index. The address is
+    /// the operator-facing identifier used as the `collector` label on
+    /// `bmp_*` Prometheus counters.
+    collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>)>,
     /// Latest encoded `PeerUp` message per peer address.
     peer_up_cache: std::collections::HashMap<std::net::IpAddr, Bytes>,
+    metrics: BgpMetrics,
 }
 
 impl BmpManager {
-    /// Create a new BMP manager with the given event/control channels and collector senders.
+    /// Create a new BMP manager with the given event/control channels and collectors.
     #[must_use]
     pub fn new(
         event_rx: mpsc::Receiver<BmpEvent>,
         control_rx: mpsc::Receiver<BmpControlEvent>,
-        collectors: Vec<mpsc::Sender<Bytes>>,
+        collectors: Vec<(SocketAddr, mpsc::Sender<Bytes>)>,
+        metrics: BgpMetrics,
     ) -> Self {
         Self {
             event_rx,
             control_rx,
             collectors,
             peer_up_cache: std::collections::HashMap::new(),
+            metrics,
         }
     }
 
@@ -158,18 +167,24 @@ impl BmpManager {
     }
 
     fn replay_peer_up_to_collector(&self, collector_id: usize) {
-        let Some(tx) = self.collectors.get(collector_id) else {
+        let Some((addr, tx)) = self.collectors.get(collector_id) else {
             warn!(
                 collector_id,
                 "BMP replay target collector index out of range, skipping"
             );
             return;
         };
+        let addr_label = addr.to_string();
+        self.metrics.record_bmp_replay_attempt(&addr_label);
 
         for msg in self.peer_up_cache.values() {
             if let Err(e) = tx.try_send(msg.clone()) {
+                let reason = trysend_reason(&e);
+                self.metrics
+                    .record_bmp_collector_drop(&addr_label, "replay", reason);
                 warn!(
                     collector_id,
+                    collector = %addr,
                     error = %e,
                     "BMP collector channel full or closed during replay"
                 );
@@ -179,11 +194,27 @@ impl BmpManager {
     }
 
     fn fan_out(&self, msg: &Bytes) {
-        for tx in &self.collectors {
+        for (addr, tx) in &self.collectors {
             if let Err(e) = tx.try_send(msg.clone()) {
-                warn!(error = %e, "BMP collector channel full or closed, dropping message");
+                let reason = trysend_reason(&e);
+                self.metrics
+                    .record_bmp_collector_drop(&addr.to_string(), "fan_out", reason);
+                warn!(
+                    collector = %addr,
+                    error = %e,
+                    "BMP collector channel full or closed, dropping message"
+                );
             }
         }
+    }
+}
+
+/// Classify a `tokio::sync::mpsc::error::TrySendError` into the
+/// `reason` label used on `bmp_*_drops_total` counters.
+fn trysend_reason<T>(err: &mpsc::error::TrySendError<T>) -> &'static str {
+    match err {
+        mpsc::error::TrySendError::Full(_) => "channel_full",
+        mpsc::error::TrySendError::Closed(_) => "channel_closed",
     }
 }
 
@@ -194,6 +225,10 @@ mod tests {
 
     use super::*;
     use crate::types::{BmpPeerInfo, BmpPeerType, PeerDownReason};
+
+    fn collector_addr(id: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 11000 + id))
+    }
 
     fn sample_peer_info() -> BmpPeerInfo {
         BmpPeerInfo {
@@ -215,7 +250,12 @@ mod tests {
         let (c1_tx, mut c1_rx) = mpsc::channel(16);
         let (c2_tx, mut c2_rx) = mpsc::channel(16);
 
-        let mgr = BmpManager::new(event_rx, control_rx, vec![c1_tx, c2_tx]);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c1_tx), (collector_addr(1), c2_tx)],
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         // Send a RouteMonitoring event
@@ -250,7 +290,12 @@ mod tests {
         let (control_tx, control_rx) = mpsc::channel(16);
         let (c_tx, mut c_rx) = mpsc::channel(16);
 
-        let mgr = BmpManager::new(event_rx, control_rx, vec![c_tx]);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx)],
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         event_tx
@@ -279,7 +324,12 @@ mod tests {
         let (control_tx, control_rx) = mpsc::channel(16);
         let (c_tx, mut c_rx) = mpsc::channel(16);
 
-        let mgr = BmpManager::new(event_rx, control_rx, vec![c_tx]);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx)],
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         event_tx
@@ -304,7 +354,12 @@ mod tests {
         let (control_tx, control_rx) = mpsc::channel(16);
         let (c_tx, mut c_rx) = mpsc::channel(16);
 
-        let mgr = BmpManager::new(event_rx, control_rx, vec![c_tx]);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx)],
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         event_tx
@@ -329,7 +384,12 @@ mod tests {
         let (control_tx, control_rx) = mpsc::channel(16);
         let (c_tx, _c_rx) = mpsc::channel(16);
 
-        let mgr = BmpManager::new(event_rx, control_rx, vec![c_tx]);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx)],
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         drop(event_tx);
@@ -345,7 +405,12 @@ mod tests {
         let (c1_tx, mut c1_rx) = mpsc::channel(16);
         let (c2_tx, mut c2_rx) = mpsc::channel(16);
 
-        let mgr = BmpManager::new(event_rx, control_rx, vec![c1_tx, c2_tx]);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c1_tx), (collector_addr(1), c2_tx)],
+            BgpMetrics::new(),
+        );
         let handle = tokio::spawn(mgr.run());
 
         // First, learn one established peer via normal PeerUp event.
@@ -391,13 +456,162 @@ mod tests {
         handle.await.unwrap();
     }
 
+    /// Sum the values of all metrics in the family with `name`.
+    /// Returns `0` if the family is absent. Counters are always
+    /// integer-valued so `as u64` is exact (no float-cmp drama).
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
+    )]
+    fn metric_family_sum(metrics: &BgpMetrics, name: &str) -> u64 {
+        metrics
+            .registry()
+            .gather()
+            .iter()
+            .find(|f| f.get_name() == name)
+            .map_or(0, |f| {
+                f.get_metric()
+                    .iter()
+                    .map(|m| m.get_counter().get_value() as u64)
+                    .sum()
+            })
+    }
+
+    /// Find a counter sample in the family `name` whose label set
+    /// matches every (key, value) pair in `match_labels`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Prometheus counters are monotonic non-negative integers exposed as f64"
+    )]
+    fn metric_value_with_labels(
+        metrics: &BgpMetrics,
+        name: &str,
+        match_labels: &[(&str, &str)],
+    ) -> u64 {
+        metrics
+            .registry()
+            .gather()
+            .into_iter()
+            .find(|f| f.get_name() == name)
+            .and_then(|mut f| {
+                f.take_metric().into_iter().find(|m| {
+                    match_labels.iter().all(|(k, v)| {
+                        m.get_label()
+                            .iter()
+                            .any(|l| l.get_name() == *k && l.get_value() == *v)
+                    })
+                })
+            })
+            .map_or(0, |m| m.get_counter().get_value() as u64)
+    }
+
+    /// Collector channel saturates during regular fan-out → manager
+    /// records a `bmp_collector_drops_total{phase=fan_out}` increment.
+    ///
+    /// We pre-fill a 1-deep channel before constructing the manager so
+    /// the next `try_send` in `fan_out` is guaranteed to fail with
+    /// `Full`.
+    #[tokio::test]
+    async fn fan_out_drop_increments_collector_drop_counter() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, _c_rx) = mpsc::channel::<Bytes>(1);
+        // Pre-fill the collector channel so the manager's first
+        // try_send hits Full.
+        c_tx.try_send(Bytes::from_static(b"prefill")).unwrap();
+        let addr = collector_addr(7);
+
+        let metrics = BgpMetrics::new();
+        let mgr = BmpManager::new(event_rx, control_rx, vec![(addr, c_tx)], metrics.clone());
+        let handle = tokio::spawn(mgr.run());
+
+        event_tx
+            .send(BmpEvent::RouteMonitoring {
+                peer_info: sample_peer_info(),
+                update_pdu: Bytes::from_static(&[0xAA; 23]),
+            })
+            .await
+            .unwrap();
+
+        // Give the manager a moment to process and bump the counter.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if metric_family_sum(&metrics, "bmp_collector_drops_total") >= 1 {
+                break;
+            }
+        }
+
+        let dropped = metric_value_with_labels(
+            &metrics,
+            "bmp_collector_drops_total",
+            &[("phase", "fan_out")],
+        );
+        assert_eq!(dropped, 1, "fan-out drop should have incremented counter");
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
+    /// Collector reconnect (`CollectorConnected`) → manager records a
+    /// `bmp_replay_attempts_total{collector=...}` increment, even if
+    /// the `PeerUp` cache is empty.
+    #[tokio::test]
+    async fn collector_connected_increments_replay_attempts() {
+        let (event_tx, event_rx) = mpsc::channel(16);
+        let (control_tx, control_rx) = mpsc::channel(16);
+        let (c_tx, _c_rx) = mpsc::channel(16);
+        let addr = collector_addr(3);
+
+        let metrics = BgpMetrics::new();
+        let mgr = BmpManager::new(event_rx, control_rx, vec![(addr, c_tx)], metrics.clone());
+        let handle = tokio::spawn(mgr.run());
+
+        control_tx
+            .send(BmpControlEvent::CollectorConnected {
+                collector_id: 0,
+                collector_addr: addr,
+            })
+            .await
+            .unwrap();
+
+        // Allow the manager to process the control event.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if metric_family_sum(&metrics, "bmp_replay_attempts_total") >= 1 {
+                break;
+            }
+        }
+
+        let attempts = metric_value_with_labels(
+            &metrics,
+            "bmp_replay_attempts_total",
+            &[("collector", &addr.to_string())],
+        );
+        assert_eq!(
+            attempts, 1,
+            "replay attempt should have incremented counter"
+        );
+
+        drop(event_tx);
+        drop(control_tx);
+        handle.await.unwrap();
+    }
+
     #[tokio::test]
     async fn manager_exits_on_explicit_shutdown() {
         let (event_tx, event_rx) = mpsc::channel(16);
         let (control_tx, control_rx) = mpsc::channel(16);
         let (c_tx, _c_rx) = mpsc::channel(16);
 
-        let mgr = BmpManager::new(event_rx, control_rx, vec![c_tx]);
+        let mgr = BmpManager::new(
+            event_rx,
+            control_rx,
+            vec![(collector_addr(0), c_tx)],
+            BgpMetrics::new(),
+        );
         let mut handle = tokio::spawn(mgr.run());
 
         control_tx.send(BmpControlEvent::Shutdown).await.unwrap();

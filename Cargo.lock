@@ -2078,6 +2078,7 @@ name = "rustbgpd-bmp"
 version = "0.9.0"
 dependencies = [
  "bytes",
+ "rustbgpd-telemetry",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

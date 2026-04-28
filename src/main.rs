@@ -745,7 +745,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             bmp_config.sys_descr.clone()
         };
 
-        let mut collector_txs = Vec::new();
+        let mut collectors: Vec<(std::net::SocketAddr, mpsc::Sender<bytes::Bytes>)> = Vec::new();
         let mut client_handles = Vec::new();
         for collector in &bmp_config.collectors {
             let addr: std::net::SocketAddr = match collector.address.parse() {
@@ -760,8 +760,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 }
             };
             let (msg_tx, msg_rx) = mpsc::channel(4096);
-            let collector_id = collector_txs.len();
-            collector_txs.push(msg_tx);
+            let collector_id = collectors.len();
+            collectors.push((addr, msg_tx));
             let client = rustbgpd_bmp::BmpClient::new(
                 rustbgpd_bmp::BmpClientConfig {
                     collector_id,
@@ -777,7 +777,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             client_handles.push(tokio::spawn(client.run()));
         }
 
-        let mgr = rustbgpd_bmp::BmpManager::new(bmp_event_rx, bmp_control_rx, collector_txs);
+        let mgr = rustbgpd_bmp::BmpManager::new(
+            bmp_event_rx,
+            bmp_control_rx,
+            collectors,
+            metrics.clone(),
+        );
         let manager_handle = tokio::spawn(mgr.run());
         bmp_runtime = Some(BmpRuntime {
             control_tx: bmp_control_tx,

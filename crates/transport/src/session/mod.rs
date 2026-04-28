@@ -371,7 +371,13 @@ impl PeerSession {
         if let Some(ref tx) = self.bmp_tx
             && let Err(e) = tx.try_send(event)
         {
-            debug!(peer = %self.peer_label, error = %e, "BMP event channel full or closed");
+            let reason = match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => "channel_full",
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => "channel_closed",
+            };
+            self.metrics
+                .record_bmp_source_drop(&self.peer_label, reason);
+            debug!(peer = %self.peer_label, reason, "BMP event channel full or closed");
         }
     }
 
