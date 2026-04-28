@@ -9,6 +9,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **M30b interop: EVPN Type 5 / IP Prefix origination against FRR
+  10.3.1.** Single-VTEP containerlab topology
+  (`tests/interop/m30b-evpn-type5-frr.clab.yml`) plus the new
+  `start-frr-vtep-l3.sh` kernel-setup helper that builds VRF + L3VNI +
+  bridge + SVI + VXLAN + tenant loopback so FRR will originate Type 5
+  NLRIs (RFC 9136) for a tenant prefix. Test asserts session
+  Established, FRR Type 5 origination for `192.0.2.1/32` with
+  RD/RT `65000:100`, rustbgpd's `ListEvpnRoutes` surfacing the route
+  with correct RD, prefix, next-hop, VNI label, RT ext-community
+  (encoded u64 = 842122827661412), VXLAN `tunnel_type=8`, and
+  withdrawal propagation. Closes a recurring external-review item
+  ("Type 5 wire codec lands but no harness against a real
+  implementation"). Manual-only for now, like M30/M31/M32 — GitHub
+  ubuntu-latest runners' kernel-VXLAN-with-VRF eligibility is
+  unverified. RR-reflection of Type 5 (2-VTEP variant) tracked as
+  M30c.
+
 ### Fixed
 
 - **Per-peer outbound writer task; eliminates `GetHealth` wedge under
