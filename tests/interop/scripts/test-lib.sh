@@ -98,11 +98,32 @@ grpc_health() {
 start_rustbgpd() {
     log "Starting rustbgpd daemon..."
     docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
-    sleep 3
-    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
-        log "rustbgpd is running"
-    else
-        echo "ERROR: rustbgpd failed to start" >&2
+
+    # Poll /proc for rustbgpd up to 10 s. The previous 3 s fixed sleep
+    # was tight under heavy CI load (parallel containerlab deploys);
+    # the loop keeps the local fast path quick while giving slow
+    # environments room to land the fork.
+    local found=0
+    for i in $(seq 1 10); do
+        if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
+            log "rustbgpd is running (after ${i}s)"
+            found=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ "$found" -ne 1 ]; then
+        echo "ERROR: rustbgpd failed to start within 10s" >&2
+        echo "--- docker top $RUSTBGPD ---" >&2
+        docker top "$RUSTBGPD" 2>&1 >&2 || true
+        echo "--- container /proc comm names ---" >&2
+        docker exec "$RUSTBGPD" sh -c 'cat /proc/[0-9]*/comm 2>/dev/null' >&2 || true
+        echo "--- foreground rustbgpd (2 s capture) ---" >&2
+        # Run the binary in the foreground briefly to capture any
+        # immediate-exit output (config error, panic, etc.). If it
+        # does start cleanly here, the 2 s timeout terminates it.
+        docker exec "$RUSTBGPD" sh -c 'timeout 2 /usr/local/bin/rustbgpd /etc/rustbgpd/config.toml 2>&1 || true' >&2 || true
         exit 1
     fi
 
