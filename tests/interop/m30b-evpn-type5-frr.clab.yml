@@ -1,0 +1,69 @@
+# Containerlab topology: rustbgpd EVPN Route Reflector ↔ 1× FRR VTEP
+# (M30b — Type 5 IP Prefix Route, RFC 9136)
+#
+# Validates: rustbgpd's RFC 9136 Type 5 decoder + ListEvpnRoutes gRPC
+# surface against a real FRR origination. FRR exports a /32 from a
+# tenant VRF (vrf1) bound to L3VNI 100, advertising it as a Type 5
+# NLRI over the L2VPN/EVPN session toward rustbgpd as a Route
+# Reflector client.
+#
+# 1 VTEP only — single-VTEP scope is sufficient to validate decode,
+# extended-community preservation, and withdrawal. RR-reflection of
+# Type 5 is tracked as M30c follow-up.
+#
+# Note: the VXLAN tunnel does NOT need to forward real data plane —
+# the kernel VRF + L3VNI binding are required only because FRR's Type
+# 5 origination is coupled to that kernel state (zebra binds the L3VNI
+# to the SVI's MAC for the Router-MAC ext-community per RFC 9135 §3).
+#
+# Topology:
+#   rustbgpd (10.0.0.1, AS 65000, RR with cluster_id 10.0.0.100)
+#     └── iBGP L2VPN/EVPN ── FRR VTEP-A (10.0.0.2, AS 65000)
+#          └── vrf1 (L3VNI 100) advertising 192.0.2.1/32 as Type 5
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m30b-evpn-type5-frr.clab.yml
+#   bash tests/interop/scripts/test-m30b-evpn-type5-frr.sh
+#   containerlab destroy -t tests/interop/m30b-evpn-type5-frr.clab.yml
+
+name: m30b-evpn-type5-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m30b-rr.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    vtep-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m30b-vtep-a.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-l3.sh:/usr/local/bin/start-frr-vtep-l3.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-l3.sh 10.0.0.2 100 vrf1 192.0.2.1/32
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+        TENANT_VRF: vrf1
+        TENANT_PREFIX: 192.0.2.1/32
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "vtep-a:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ VTEP-A (10.0.0.2)
+# L3VNI: 100 (bound to vrf1, encoded in the Type 5 label field)
+# Tenant prefix: 192.0.2.1/32 inside vrf1, redistributed via
+# `redistribute connected` and re-originated as a Type 5 EVPN route.
