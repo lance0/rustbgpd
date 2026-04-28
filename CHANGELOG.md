@@ -98,12 +98,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flap. Together with the bounded `query_state_timeout` containment in
   `0735dd9`, this closes the deterministic +46-min wedge surfaced by
   the M33 1h soak. See [ADR-0051](docs/adr/0051-per-peer-outbound-writer-task.md).
-  M33 1h soak ran `verdict: clean` on `tests/soak/runs/20260427T230448Z/`:
-  0 drops, 0 flaps, memory slope 0.50 MB/h (under the 0.5 clean-tier
-  threshold), max RSS 83.8 MB across the full hour. Internal
-  architectural change — no proto-side or config-side effects beyond
-  the new `bool stale = 13` field on `NeighborState` added in
-  `0735dd9`.
+  Validated end-to-end on the M33 soak harness:
+  `tests/soak/runs/20260428T150509Z/` ran 4 h sustained 1 k-rps EVPN
+  churn with `verdict: clean` — 0 drops, 0 flaps, 0 gRPC health
+  failures, no daemon restart, memory slope -0.10 MB/h (drifted
+  *down*, well inside the 0.5 MB/h clean-tier threshold), p99 RSS
+  83.76 MB, 1.36 M messages sent. The 1 h post-fix run on
+  `20260427T230448Z/` is the original validation; the 4 h run extends
+  it ~5× past the original +46-min wedge with the same headline
+  numbers. Internal architectural change — no proto-side or
+  config-side effects beyond the new `bool stale = 13` field on
+  `NeighborState` added in `0735dd9`.
 
 - **`evpn-load` testers drain inbound traffic.** The synthetic-peer
   testers under `bench/evpn-load` previously held only the `tx` side
