@@ -695,7 +695,17 @@ impl RibManager {
             .flat_map(|rib| rib.iter().cloned())
             .collect();
 
-        let snapshot = MrtSnapshotData { peers, routes };
+        let evpn_routes: Vec<_> = self
+            .ribs
+            .values()
+            .flat_map(|rib| rib.iter_evpn().cloned())
+            .collect();
+
+        let snapshot = MrtSnapshotData {
+            peers,
+            routes,
+            evpn_routes,
+        };
         if reply.send(snapshot).is_err() {
             warn!("MRT snapshot query caller dropped before receiving response");
         }

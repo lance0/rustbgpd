@@ -165,6 +165,7 @@ mod tests {
                         peer_asn: 65001,
                     }],
                     routes: vec![],
+                    evpn_routes: vec![],
                 });
             }
         });
