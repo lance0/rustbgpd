@@ -9,7 +9,53 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-04-28
+
 ### Added
+
+- **`bool stale = 13` on `NeighborState`.** The gRPC neighbor view
+  surfaces a flag indicating that a peer's last `query_state` round-trip
+  exceeded its bounded deadline (default 100 ms). `stale = true` means
+  the row is fresh-but-uncertain rather than absent: it lets dashboards
+  distinguish "peer was Established the last time we got a fast
+  answer, but the session task isn't currently responsive" from "peer
+  Established right now." `rustbgpctl` (text + JSON) and the TUI
+  established-counter / state-column both honor the field — stale rows
+  are excluded from the established count and rendered with a distinct
+  color in the TUI. Behind-the-scenes, every `query_state` and policy
+  hot-apply round-trip in the daemon is now bounded by a deadline; the
+  full set of changes that close the +46-min `GetHealth` wedge are
+  described under the writer-split entry below.
+
+- **M29 + M30 EVPN interop tests gated in GitHub Actions.**
+  `.github/workflows/interop.yml` runs both the L2VPN/EVPN
+  capability-negotiation gate (M29) and the Type 2 MAC reflection +
+  kernel VXLAN gate (M30) against FRR 10.3.1 on every push and PR.
+  Total wall time ~5 min per push (parallel jobs). M30 became viable
+  after `tests/interop/scripts/test-lib.sh`'s `start_rustbgpd` helper
+  swapped its 3 s fixed sleep for a 10 s poll with diagnostic dump on
+  failure (`docker top`, container `/proc/[0-9]*/comm`, 2 s foreground
+  rustbgpd capture) — the original sleep was tight under heavy CI
+  load. M30b stays manual: ubuntu-latest's Azure-tuned kernel
+  (`6.17.0-1010-azure`) ships without the `vrf` module, so the L3VNI
+  binding fails on hosted runners. Captured in INTEROP.md and
+  ROADMAP "CI wiring for M29-M33".
+
+- **M30b interop: EVPN Type 5 / IP Prefix origination against FRR
+  10.3.1.** Single-VTEP containerlab topology
+  (`tests/interop/m30b-evpn-type5-frr.clab.yml`) plus the new
+  `start-frr-vtep-l3.sh` kernel-setup helper that builds VRF + L3VNI +
+  bridge + SVI + VXLAN + tenant loopback so FRR will originate Type 5
+  NLRIs (RFC 9136) for a tenant prefix. Test asserts session
+  Established, FRR Type 5 origination for `192.0.2.1/32` with
+  RD/RT `65000:100`, rustbgpd's `ListEvpnRoutes` surfacing the route
+  with correct RD, prefix, next-hop, VNI label, RT ext-community
+  (encoded u64 = 842122827661412), VXLAN `tunnel_type=8`, and
+  withdrawal propagation. Closes a recurring external-review item
+  ("Type 5 wire codec lands but no harness against a real
+  implementation"). Manual-only — see the M29/M30 CI entry above for
+  why ubuntu-latest can't host the VRF setup. RR-reflection of Type 5
+  (2-VTEP variant) tracked as M30c.
 
 - **BMP drop / replay Prometheus counters.** Four new `bmp_*_total`
   metrics surface what previously was only `tracing::warn!` output:
@@ -35,23 +81,6 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skip the whole `PeerUp` replay while the collector still looks
   healthy. Operators can now alert on BMP loss without a log scraper.
   Closes the [BMP drop/replay counters](KNOWN_ISSUES.md) gap.
-
-- **M30b interop: EVPN Type 5 / IP Prefix origination against FRR
-  10.3.1.** Single-VTEP containerlab topology
-  (`tests/interop/m30b-evpn-type5-frr.clab.yml`) plus the new
-  `start-frr-vtep-l3.sh` kernel-setup helper that builds VRF + L3VNI +
-  bridge + SVI + VXLAN + tenant loopback so FRR will originate Type 5
-  NLRIs (RFC 9136) for a tenant prefix. Test asserts session
-  Established, FRR Type 5 origination for `192.0.2.1/32` with
-  RD/RT `65000:100`, rustbgpd's `ListEvpnRoutes` surfacing the route
-  with correct RD, prefix, next-hop, VNI label, RT ext-community
-  (encoded u64 = 842122827661412), VXLAN `tunnel_type=8`, and
-  withdrawal propagation. Closes a recurring external-review item
-  ("Type 5 wire codec lands but no harness against a real
-  implementation"). Manual-only for now, like M30/M31/M32 — GitHub
-  ubuntu-latest runners' kernel-VXLAN-with-VRF eligibility is
-  unverified. RR-reflection of Type 5 (2-VTEP variant) tracked as
-  M30c.
 
 ### Fixed
 
