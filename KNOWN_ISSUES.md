@@ -7,6 +7,16 @@ resolved.
 
 ## Resolved
 
+- **BMP drop / replay Prometheus counters (resolved).** Three new
+  `bmp_*` counters surface what was previously only `tracing::warn!`
+  output: `bmp_source_drops_total{peer, reason}` covers the
+  PeerSession→BmpManager mpsc fill, `bmp_collector_drops_total
+  {collector, phase, reason}` covers the per-collector mpsc fill
+  (with `phase` distinguishing fan-out from PeerUp-cache replay),
+  and `bmp_replay_attempts_total{collector}` is the denominator for
+  a "replay drop rate" alert. Operators can now alert on BMP loss
+  without a log scraper.
+
 - **CLI gRPC integration tests added (fixed).** `rustbgpctl` now has
   mock-server integration tests covering health, global, neighbor add,
   and soft-reset command-to-RPC paths over both TCP+token and UDS.
@@ -46,9 +56,6 @@ resolved.
   socket and supports optional bearer-token auth on configured listeners,
   but TCP listeners are still plaintext. Use local UDS access or an
   mTLS proxy for remote management. Native TLS/mTLS is post-v1 scope.
-- **BMP drop/replay counters are not exported yet.** BMP channel-full
-  conditions are logged, but no dedicated Prometheus counter currently tracks
-  dropped/replayed BMP events for operational alerting.
 - **SIGHUP reconcile is not transactional.** Reload now logs structured
   per-peer failures and keeps the prior in-memory config snapshot when
   reconciliation is incomplete, but runtime peer changes applied before a

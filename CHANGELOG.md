@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **BMP drop / replay Prometheus counters.** Three new `bmp_*_total`
+  metrics surface what previously was only `tracing::warn!` output:
+  `bmp_source_drops_total{peer, reason}` for the PeerSession→BmpManager
+  mpsc fill, `bmp_collector_drops_total{collector, phase, reason}` for
+  the per-collector mpsc fill (with `phase` distinguishing fan-out
+  from `PeerUp`-cache replay), and `bmp_replay_attempts_total
+  {collector}` as the denominator for a "replay drop rate" alert.
+  `reason` is parsed from `mpsc::error::TrySendError` (`channel_full` /
+  `channel_closed`); the `collector` label uses the SocketAddr string
+  for stability across config reloads. Operators can now alert on BMP
+  loss without a log scraper. Closes the
+  [BMP drop/replay counters](KNOWN_ISSUES.md) gap.
+
 - **M30b interop: EVPN Type 5 / IP Prefix origination against FRR
   10.3.1.** Single-VTEP containerlab topology
   (`tests/interop/m30b-evpn-type5-frr.clab.yml`) plus the new
