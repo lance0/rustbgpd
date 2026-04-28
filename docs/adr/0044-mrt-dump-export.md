@@ -100,6 +100,21 @@ RIB state.
   FlowSpec dump is not standard and is deferred.
 - **Loc-RIB overlay** -- intentionally excluded to prevent duplication.
 
+### EVPN extension
+
+L2VPN/EVPN routes (AFI 25 / SAFI 70) are emitted as `RIB_GENERIC`
+records (subtype 6, RFC 6396 §4.3.5). Per-record layout: 4-byte
+sequence number, 2-byte AFI, 1-byte SAFI, variable-length NLRI
+encoded as the EVPN route TLV (route type + length + body, via
+`encode_evpn_nlri`), 2-byte entry count = 1, then a single RIB
+entry. EVPN does not use Add-Path in this codebase, so no
+`RIB_GENERIC_ADDPATH` variant is needed. Attribute synthesis adds
+an `MP_REACH_NLRI(AFI=25, SAFI=70, next_hop, evpn_announced=[])`
+carrying the next-hop only — the NLRI itself rides in the record
+header. Sort order across EVPN routes is `(peer_index, encoded
+NLRI bytes)` because `EvpnRouteKey` does not derive `Ord`; the
+canonical NLRI byte representation is total-orderable.
+
 ## Consequences
 
 ### Positive

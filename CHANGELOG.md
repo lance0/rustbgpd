@@ -9,6 +9,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN routes in MRT `TABLE_DUMP_V2` snapshots.** Loc-RIB / Adj-RIB-In
+  EVPN routes (AFI 25 / SAFI 70) are now emitted as `RIB_GENERIC`
+  records (RFC 6396 §4.3.5, subtype 6) alongside the existing IPv4 /
+  IPv6 unicast records. Each EVPN route in any peer's Adj-RIB-In
+  becomes a single-entry record carrying the encoded EVPN route TLV
+  in the record header (via `encode_evpn_nlri`) plus a synthesized
+  `MP_REACH_NLRI(AFI=25, SAFI=70, next_hop, evpn_announced=[])` in
+  the attribute set. Operators running rustbgpd as an EVPN RR can
+  now archive forensic snapshots that actually contain the EVPN
+  routes — previously the snapshot path silently skipped them. Type
+  2 (MAC/IP) and Type 5 (IP Prefix) round-trip tests cover the wire
+  format. See ADR-0044 for the encoding choice.
+
+- **BMP regression test for EVPN `RouteMonitoring`.** The BMP emit
+  site at `crates/transport/src/session/io.rs` has no AFI/SAFI
+  filter — every inbound UPDATE flows to the collector with raw
+  wire bytes, regardless of family. EVPN UPDATEs already reach BMP
+  collectors today; the inner `MP_REACH_NLRI` (AFI 25 / SAFI 70)
+  tells the collector how to parse. A new transport-side regression
+  test (`inbound_evpn_update_emits_bmp_route_monitoring`) pins this
+  contract: a future refactor that quietly added a unicast-only
+  family gate at the emit site would now fail at build time.
+
 ## [0.10.0] — 2026-04-28
 
 ### Added
