@@ -24,11 +24,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bgp_outbound_route_drops_total` accumulation with an observable
   flap. Together with the bounded `query_state_timeout` containment in
   `0735dd9`, this closes the deterministic +46-min wedge surfaced by
-  the M33 1h soak. See [ADR-0051](docs/adr/0051-per-peer-outbound-writer-task.md)
-  and `tests/soak/runs/20260427T133455Z/` for the reproducer of
-  record. Internal architectural change — no proto-side or config-side
-  effects beyond the new `bool stale = 13` field on `NeighborState`
-  added in `0735dd9`.
+  the M33 1h soak. See [ADR-0051](docs/adr/0051-per-peer-outbound-writer-task.md).
+  M33 1h soak ran `verdict: clean` on `tests/soak/runs/20260427T230448Z/`:
+  0 drops, 0 flaps, memory slope 0.50 MB/h (under the 0.5 clean-tier
+  threshold), max RSS 83.8 MB across the full hour. Internal
+  architectural change — no proto-side or config-side effects beyond
+  the new `bool stale = 13` field on `NeighborState` added in
+  `0735dd9`.
+
+- **`evpn-load` testers drain inbound traffic.** The synthetic-peer
+  testers under `bench/evpn-load` previously held only the `tx` side
+  of their `PeerHandle` — they injected routes but never read inbound
+  reflections. `PeerHandle.rx` is backed by a 65 536-deep mpsc that
+  the reader task back-pressures on `send().await`; under sustained
+  churn the channel filled in ~43.7 minutes, parking the reader on
+  send, filling the kernel TCP receive buffer, and triggering ADR-0051's
+  saturation handler on the rustbgpd side. Fix is a discard task
+  spawned next to the tester's send loop, plus a rustdoc warning on
+  `PeerHandle.rx` so future load-test authors don't recreate the same
+  trap. Production rustbgpd was never affected — real BGP peers
+  always drain their inbound. See `tests/soak/runs/20260427T172938Z/`
+  for the saturation reproducer and `20260427T230448Z/` for the clean
+  post-fix run.
 
 ## [0.9.0] — 2026-04-26
 

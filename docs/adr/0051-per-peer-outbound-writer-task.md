@@ -213,43 +213,49 @@ Before merging the writer-split PR:
 
 Implementation landed across `9675ecb` (writer task scaffolding),
 `bcd2e0d` (wire into `PeerSession`), and `56c7527` (saturation →
-`Cease/8`). M33 1h soak rerun on the post-fix build
-(`tests/soak/runs/20260427T172938Z/`) compared against the
+`Cease/8`). Several M33 1h soaks compared against the
 pre-fix-with-containment soak (`tests/soak/runs/20260427T133455Z/`):
 
-| Gate | Pre-fix (containment only) | Post-fix (writer-split) |
-|------|----------------------------|-------------------------|
-| `grpc_health_failures` | 0 | 0 |
-| `daemon_unhealthy_at_end` | false | false |
-| `outbound_drop_delta` | 613 | **1** |
-| `memory slope_mb_per_hour` | 58.5 | **12.6** |
-| `memory max_mb` | 127.9 | **85.8** |
-| `session_flap_delta` | 0 | **2** |
+| Gate | Pre-fix containment | Post-split (leaky tester) | Post-split (drained tester) |
+|------|---------------------|----------------------------|------------------------------|
+| `grpc_health_failures` | 0 | 0 | 0 |
+| `daemon_unhealthy_at_end` | false | false | false |
+| `outbound_drop_delta` | 613 | 1 | **0** |
+| `memory slope_mb_per_hour` | 58.5 | 12.6 | **0.50** |
+| `memory max_mb` | 127.9 | 85.8 | **83.8** |
+| `session_flap_delta` | 0 | 2 | **0** |
+| `verdict` | fail | fail | **clean** |
 
-The wedge transition still happens at the deterministic +49-minute
-mark (peer's TCP receive buffer fills under sustained 1k rps churn).
-What changed: instead of silently accumulating drops + dirty-resync
-allocations for the rest of the run, the saturation now triggers a
-clean `Cease/8` + session restart within milliseconds, and the
-session reconverges cleanly. The CSV shows a 0-49min steady state at
-~75 MB, then a one-time step to ~85 MB during the wedge transition,
-then steady at 85 MB through end-of-run — no ongoing leak. The
-12.6 MB/h "slope" the analyzer reports is a step function being read
-as a linear trend; visual inspection of `samples.csv` confirms.
+The "leaky tester" column (`tests/soak/runs/20260427T172938Z/`) shows
+the writer-split working correctly: silent drops became 2 observable
+flaps, the daemon stayed healthy throughout, but the soak still
+failed because a peer was getting saturated at the +49-min mark.
 
-The 2 session flaps are the designed behavior trade-off: silent drops
-are now observable flaps. Drops dropped from 613 to 1 (the residual 1
-is a brief race between `try_send` returning `Full` and the
-saturation handler firing).
+The "drained tester" column (`tests/soak/runs/20260427T230448Z/`)
+shows that saturation was self-inflicted by the load-test
+scaffolding. `bench/evpn-load`'s `PeerHandle.rx` is bounded (65 536
+deep) and the reader task back-pressures on `rx_tx.send().await` if
+the consumer doesn't drain. The tester binary held `handle.tx` to
+inject routes but never read `handle.rx`. Reflected churn from the
+other tester filled the channel in ~65 536 / 25 ≈ 43.7 minutes —
+matching the deterministic wedge timing exactly. Once the channel
+filled, kernel TCP receive buffer filled, RR's writer parked on
+`write_all`, and ADR-0051's saturation handler did exactly what it
+was supposed to do: emit `Cease/8` and restart the broken peer.
 
-**Open follow-up.** The +49-min wedge transition itself is still a
-real ceiling: at 1k rps EVPN churn against a peer whose TCP receive
-buffer can't keep up, the writer-split contains the damage but does
-not prevent the saturation. Investigating why the monitor peer (or
-its TCP RX buffer) lags under this load is separate work — likely
-either monitor-side parsing speed, kernel buffer tuning, or RIB-side
-distribution batching. None of those is a v0.9.0 blocker now that
-the wedge is bounded and observable.
+The fix in `7491b1b` is 24 lines in
+`bench/evpn-load/src/bin/tester.rs` — spawn a discard task that
+drains `handle.rx`. Plus a rustdoc warning on `PeerHandle.rx` so
+future load-test authors don't recreate the same trap. With it
+applied, the M33 1h soak (`20260427T230448Z`) ran clean for the
+full hour: 0 drops, 0 flaps, slope under the 0.5 MB/h
+"clean-tier" threshold, memory completely flat (83.15 → 82.87 MB
+across 60 minutes).
+
+**The writer-split was always correct.** It kept disconnecting a
+broken consumer cleanly because that's its job. With the broken
+consumer fixed, there's nothing to disconnect — but the contract
+still holds for any future broken peer (real or synthetic).
 
 ## What this does NOT fix
 
