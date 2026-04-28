@@ -125,6 +125,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for the saturation reproducer and `20260427T230448Z/` for the clean
   post-fix run.
 
+### Testing
+
+- **M33 long-running soak harness** at `tests/soak/run-m33-soak.sh`
+  extends the M33 EVPN scale topology to arbitrary durations (default
+  24 h, `SOAK_HOURS` / `SOAK_SEC` overrides for shorter runs). Samples
+  cgroup RSS + Prometheus counters every minute into `samples.csv`;
+  runs a stdlib-only Python analyzer (`tests/soak/analyze-soak.py`)
+  that gates on memory slope, peak RSS, session flap delta, drop
+  delta, gRPC health continuity, and process-restart detection
+  (counter monotonicity). The fix-validation infrastructure behind
+  ADR-0051 — the harness surfaced the original +46-min wedge and
+  produced the 1 h + 4 h clean-verdict runs cited above.
+
+- **Bisection flags on `evpn-monitor`.** `--no-live-set` and
+  `--no-parse` let an investigator turn off the live-set tracker and
+  the per-message parse to isolate what's contributing to a
+  saturation event. Periodic stats logging every 5 s, plus a
+  `LifetimeStats` block in the final JSON report (renames the inner
+  helper to `apply_evpn_instrumented` so per-call NLRI counts and
+  parse-failure flags are visible to the bisection flags). Used to
+  rule out daemon-side parse pressure during the +49-min wedge
+  investigation that ultimately turned out to be the load-test bug
+  fixed above.
+
 ## [0.9.0] — 2026-04-26
 
 ### Added
