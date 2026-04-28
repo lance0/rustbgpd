@@ -1,0 +1,74 @@
+name: Interop
+
+# Lightweight interop suite that gates cap-negotiation against a real
+# FRR peer. M29 is the cheapest entry point (~10s once the topology is
+# up): control-plane sanity only — Established + L2VPN/EVPN capability
+# negotiation + gRPC ListEvpnRoutes shape — no kernel VXLAN, no MAC
+# learning, no Type 2 exchange.
+#
+# Heavier interop scripts (M30/M31/M32 with kernel VXLAN, M33 50k-route
+# scale + churn) stay manual on a developer box; they need too much
+# wall time and runner setup to land in the per-push gate. Promoting
+# more of the M-series into CI is tracked under "CI wiring for M29-M33"
+# in ROADMAP.md — M29 is the first one through the door.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  m29:
+    name: M29 — EVPN cap negotiation (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # containerlab and grpcurl are installed locally to the runner;
+      # both are cheap (single Go binaries). Pinned versions to keep the
+      # gate reproducible — bumping is a deliberate change.
+      - name: Install containerlab
+        # Pinned to the version we develop against locally. Bumping is
+        # a deliberate change; verify a clean M29 run on the new
+        # version before merging.
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      # Buildx cache cuts the docker build step from ~6 min to ~30 s on
+      # cache hits. The cargo registry / target dir gets reused via the
+      # GitHub Actions cache backend (type=gha).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M29 topology
+        run: |
+          sudo containerlab deploy -t tests/interop/m29-evpn-rr-frr.clab.yml
+        # The script pulls FRR 10.3.1 on the first run (~150 MB).
+        # Subsequent runs hit Docker's local image cache.
+
+      - name: Run M29 test
+        run: bash tests/interop/scripts/test-m29-evpn-rr-frr.sh
+
+      # Always clean up so a failed run doesn't leave orphan containers
+      # / netns on the runner. `--cleanup` removes generated config too.
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m29-evpn-rr-frr.clab.yml --cleanup || true
