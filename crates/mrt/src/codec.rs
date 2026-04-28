@@ -3,10 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr};
 
-use rustbgpd_rib::route::Route;
+use rustbgpd_rib::route::{EvpnRibRoute, Route};
 use rustbgpd_rib::update::MrtPeerEntry;
 use rustbgpd_wire::attribute::encode_path_attributes;
-use rustbgpd_wire::{PathAttribute, Prefix};
+use rustbgpd_wire::{Afi, MpReachNlri, PathAttribute, Prefix, Safi, encode_evpn_nlri};
 use thiserror::Error;
 
 /// MRT message type for `TABLE_DUMP_V2`.
@@ -16,6 +16,9 @@ const TABLE_DUMP_V2: u16 = 13;
 const PEER_INDEX_TABLE: u16 = 1;
 const RIB_IPV4_UNICAST: u16 = 2;
 const RIB_IPV6_UNICAST: u16 = 4;
+/// RFC 6396 §4.3.5 — generic RIB record carrying any AFI/SAFI.
+/// Used here for L2VPN/EVPN (AFI 25 / SAFI 70).
+const RIB_GENERIC: u16 = 6;
 const RIB_IPV4_UNICAST_ADDPATH: u16 = 8;
 const RIB_IPV6_UNICAST_ADDPATH: u16 = 9;
 
@@ -187,6 +190,73 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
     attrs
 }
 
+/// Synthesize path attributes for an EVPN RIB entry.
+///
+/// `EvpnRibRoute.attributes` was stripped of `MP_REACH_NLRI` at decode
+/// (per MP-BGP architecture). For the MRT encoding we add a fresh
+/// `MP_REACH_NLRI` carrying the next-hop only — the EVPN NLRI itself
+/// rides in the `RIB_GENERIC` record header per RFC 6396 §4.3.5, not
+/// in the attribute.
+#[must_use]
+pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
+    let mut attrs = (*route.attributes).clone();
+    attrs.push(PathAttribute::MpReachNlri(MpReachNlri {
+        afi: Afi::L2Vpn,
+        safi: Safi::Evpn,
+        next_hop: route.next_hop,
+        announced: vec![],
+        flowspec_announced: vec![],
+        evpn_announced: vec![],
+    }));
+    attrs
+}
+
+/// Encode a single EVPN route as a `RIB_GENERIC` (subtype 6) record.
+///
+/// Layout per RFC 6396 §4.3.5:
+/// ```text
+///   Sequence Number (4)
+///   AFI (2)              = 25 (L2VPN)
+///   SAFI (1)             = 70 (EVPN)
+///   NLRI (variable)      = encoded EVPN route TLV (route_type + length + body)
+///   Entry Count (2)      = 1 (EVPN does not use Add-Path in this codebase)
+///   RIB Entries          = single entry [peer_index, originated_time,
+///                          attribute_length, attributes]
+/// ```
+///
+/// # Errors
+///
+/// Returns [`EncodeError::FieldTooLarge`] if the encoded attribute payload
+/// for the entry exceeds the 16-bit `attribute_length` field.
+fn encode_evpn_rib_generic(
+    buf: &mut Vec<u8>,
+    timestamp: u32,
+    seq_num: u32,
+    route: &EvpnRibRoute,
+    peer_index: u16,
+    originated_time: u32,
+) -> Result<(), EncodeError> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&seq_num.to_be_bytes());
+
+    payload.extend_from_slice(&(Afi::L2Vpn as u16).to_be_bytes());
+    payload.push(Safi::Evpn as u8);
+
+    encode_evpn_nlri(std::slice::from_ref(&route.route), &mut payload);
+
+    payload.extend_from_slice(&1u16.to_be_bytes());
+
+    let entry = RibEntry {
+        peer_index,
+        originated_time,
+        path_id: 0,
+        attributes: synthesize_evpn_attributes(route),
+    };
+    encode_rib_entry(&mut payload, &entry, false)?;
+
+    encode_mrt_record(buf, timestamp, RIB_GENERIC, &payload)
+}
+
 /// Encode a single RIB entry (shared by all RIB_* subtypes).
 fn encode_rib_entry(
     buf: &mut Vec<u8>,
@@ -279,10 +349,15 @@ pub fn encode_rib_entries(
 /// Returns [`EncodeError::FieldTooLarge`] if any encoded MRT field exceeds its
 /// wire-size bounds (for example peer index, record payload, or attribute
 /// lengths).
+#[expect(
+    clippy::too_many_lines,
+    reason = "Single-pass encoder over peer index, unicast prefix groups, and EVPN RIB_GENERIC records — splitting hides the linear flow"
+)]
 pub fn encode_snapshot(
     collector_bgp_id: Ipv4Addr,
     peers: &[MrtPeerEntry],
     routes: &[Route],
+    evpn_routes: &[EvpnRibRoute],
     timestamp: u32,
 ) -> Result<Vec<u8>, EncodeError> {
     let mut buf = Vec::new();
@@ -291,6 +366,15 @@ pub fn encode_snapshot(
     let mut effective_peers: Vec<MrtPeerEntry> = peers.to_vec();
     let mut seen_peers: HashSet<IpAddr> = effective_peers.iter().map(|p| p.peer_addr).collect();
     for route in routes {
+        if seen_peers.insert(route.peer) {
+            effective_peers.push(MrtPeerEntry {
+                peer_addr: route.peer,
+                peer_bgp_id: Ipv4Addr::UNSPECIFIED,
+                peer_asn: 0,
+            });
+        }
+    }
+    for route in evpn_routes {
         if seen_peers.insert(route.peer) {
             effective_peers.push(MrtPeerEntry {
                 peer_addr: route.peer,
@@ -387,6 +471,39 @@ pub fn encode_snapshot(
             encode_rib_entries(&mut buf, timestamp, seq_num, prefix, &entries)?;
             seq_num = seq_num.wrapping_add(1);
         }
+    }
+
+    // 6. Encode EVPN routes as RIB_GENERIC records (RFC 6396 §4.3.5).
+    // EVPN does not use Add-Path in this codebase, and EVPN keys are
+    // already per-route (RD + ESI + ETag + MAC + IP), so each route maps
+    // to a single-entry RIB_GENERIC record. Sort for deterministic output
+    // by (peer_index, route).
+    // Sort by (peer_index, encoded EVPN NLRI bytes). EvpnRouteKey doesn't
+    // derive Ord, but the encoded NLRI is a canonical byte representation
+    // and gives a deterministic ordering.
+    let mut sorted_evpn: Vec<(&EvpnRibRoute, Vec<u8>)> = evpn_routes
+        .iter()
+        .map(|route| {
+            let mut nlri_bytes = Vec::new();
+            encode_evpn_nlri(std::slice::from_ref(&route.route), &mut nlri_bytes);
+            (route, nlri_bytes)
+        })
+        .collect();
+    sorted_evpn.sort_by(|(a, a_bytes), (b, b_bytes)| {
+        let a_idx = peer_index.get(&a.peer).copied().unwrap_or(u16::MAX);
+        let b_idx = peer_index.get(&b.peer).copied().unwrap_or(u16::MAX);
+        a_idx.cmp(&b_idx).then_with(|| a_bytes.cmp(b_bytes))
+    });
+    let sorted_evpn: Vec<&EvpnRibRoute> = sorted_evpn.into_iter().map(|(r, _)| r).collect();
+    for route in sorted_evpn {
+        let Some(&idx) = peer_index.get(&route.peer) else {
+            continue;
+        };
+        let age = route.received_at.elapsed().as_secs();
+        let originated_u64 = now_secs.saturating_sub(age);
+        let originated = u32::try_from(originated_u64).unwrap_or(u32::MAX);
+        encode_evpn_rib_generic(&mut buf, timestamp, seq_num, route, idx, originated)?;
+        seq_num = seq_num.wrapping_add(1);
     }
 
     Ok(buf)
@@ -664,8 +781,14 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         );
 
-        let data =
-            encode_snapshot(Ipv4Addr::new(1, 2, 3, 4), &[peer], &[route], 1_700_000_000).unwrap();
+        let data = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[route],
+            &[],
+            1_700_000_000,
+        )
+        .unwrap();
 
         // Should have at least two MRT records (peer index + one RIB entry)
         assert!(data.len() > 24);
@@ -690,10 +813,199 @@ mod tests {
 
     #[test]
     fn empty_snapshot_encoding() {
-        let data = encode_snapshot(Ipv4Addr::new(1, 2, 3, 4), &[], &[], 1_700_000_000).unwrap();
+        let data =
+            encode_snapshot(Ipv4Addr::new(1, 2, 3, 4), &[], &[], &[], 1_700_000_000).unwrap();
         // Should have exactly one MRT record (peer index table with 0 peers)
         assert!(data.len() > 12);
         assert_eq!(u16::from_be_bytes([data[6], data[7]]), 1);
+    }
+
+    fn make_evpn_macip(peer: IpAddr, next_hop: IpAddr) -> EvpnRibRoute {
+        use rustbgpd_wire::{
+            EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, EvpnRouteKey,
+            MacAddress, MplsLabel, RouteDistinguisher,
+        };
+        let rd = RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]);
+        let mac = MacAddress([0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]);
+        let ip = Some(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)));
+        let route = EvpnRoute::MacIp(EvpnMacIp {
+            rd,
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac,
+            ip,
+            label1: MplsLabel::new(100),
+            label2: None,
+        });
+        let key = EvpnRouteKey::MacIp {
+            rd,
+            ethernet_tag: EthernetTagId(0),
+            mac,
+            ip,
+        };
+        EvpnRibRoute {
+            route,
+            key,
+            next_hop,
+            peer,
+            attributes: Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],
+                }),
+                PathAttribute::LocalPref(100),
+            ]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    fn make_evpn_ipprefix(peer: IpAddr, next_hop: IpAddr) -> EvpnRibRoute {
+        use rustbgpd_wire::{
+            EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute, EvpnIpPrefixValue,
+            EvpnRoute, EvpnRouteKey, MplsLabel, RouteDistinguisher,
+        };
+        let rd = RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]);
+        let prefix = EvpnIpPrefixValue::V4(Ipv4Prefix {
+            addr: Ipv4Addr::new(192, 0, 2, 0),
+            len: 24,
+        });
+        let route = EvpnRoute::IpPrefix(EvpnIpPrefixRoute {
+            rd,
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            prefix,
+            gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            label: MplsLabel::new(200),
+        });
+        let key = EvpnRouteKey::IpPrefix {
+            rd,
+            ethernet_tag: EthernetTagId(0),
+            prefix,
+        };
+        EvpnRibRoute {
+            route,
+            key,
+            next_hop,
+            peer,
+            attributes: Arc::new(vec![
+                PathAttribute::Origin(Origin::Igp),
+                PathAttribute::AsPath(AsPath {
+                    segments: vec![rustbgpd_wire::AsPathSegment::AsSequence(vec![65001])],
+                }),
+                PathAttribute::LocalPref(100),
+            ]),
+            received_at: Instant::now(),
+            origin_type: RouteOrigin::Ebgp,
+            peer_router_id: Ipv4Addr::new(10, 0, 0, 2),
+            is_stale: false,
+            is_llgr_stale: false,
+        }
+    }
+
+    /// Locate an `RIB_GENERIC` (subtype 6) record in `data` after the
+    /// `PEER_INDEX_TABLE`. Returns the offset of its MRT header.
+    fn find_rib_generic(data: &[u8]) -> Option<usize> {
+        let mut offset = 0;
+        while offset + 12 <= data.len() {
+            let mrt_type = u16::from_be_bytes([data[offset + 4], data[offset + 5]]);
+            let subtype = u16::from_be_bytes([data[offset + 6], data[offset + 7]]);
+            let length = u32::from_be_bytes([
+                data[offset + 8],
+                data[offset + 9],
+                data[offset + 10],
+                data[offset + 11],
+            ]) as usize;
+            if mrt_type == TABLE_DUMP_V2 && subtype == RIB_GENERIC {
+                return Some(offset);
+            }
+            offset += 12 + length;
+        }
+        None
+    }
+
+    /// EVPN Type 2 (MAC/IP Advertisement) → MRT `RIB_GENERIC`. Asserts the
+    /// record carries AFI 25 / SAFI 70 and the encoded EVPN NLRI bytes
+    /// match `encode_evpn_nlri` for the same route.
+    #[test]
+    fn evpn_type2_rib_generic_encoding() {
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let peer = make_peer(peer_addr, 65002);
+        let route = make_evpn_macip(peer_addr, peer_addr);
+
+        let data = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[],
+            std::slice::from_ref(&route),
+            1_700_000_000,
+        )
+        .unwrap();
+
+        let rib_offset =
+            find_rib_generic(&data).expect("RIB_GENERIC record must be present for EVPN route");
+
+        // Payload starts after 12-byte MRT header.
+        let payload = &data[rib_offset + 12..];
+        // Sequence Number (4 bytes), then AFI (2), SAFI (1).
+        let afi = u16::from_be_bytes([payload[4], payload[5]]);
+        let safi = payload[6];
+        assert_eq!(afi, 25, "RIB_GENERIC AFI must be 25 (L2VPN) for EVPN");
+        assert_eq!(safi, 70, "RIB_GENERIC SAFI must be 70 (EVPN)");
+
+        // NLRI bytes follow. Compare against an independent encode of the
+        // same EvpnRoute — proves the record header carries the canonical
+        // EVPN NLRI TLV (route_type + length + body).
+        let mut expected_nlri = Vec::new();
+        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut expected_nlri);
+        let nlri_start = 7; // after seq(4) + afi(2) + safi(1)
+        let nlri_end = nlri_start + expected_nlri.len();
+        assert_eq!(
+            &payload[nlri_start..nlri_end],
+            expected_nlri.as_slice(),
+            "encoded NLRI bytes must match encode_evpn_nlri output"
+        );
+
+        // Entry Count (2 bytes) immediately after NLRI = 1.
+        let entry_count = u16::from_be_bytes([payload[nlri_end], payload[nlri_end + 1]]);
+        assert_eq!(
+            entry_count, 1,
+            "EVPN does not use Add-Path; entry count must be 1"
+        );
+    }
+
+    /// EVPN Type 5 (IP Prefix) → MRT `RIB_GENERIC`. Same shape as the Type 2
+    /// test but exercises the longer IP-Prefix NLRI encoding.
+    #[test]
+    fn evpn_type5_rib_generic_encoding() {
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let peer = make_peer(peer_addr, 65002);
+        let route = make_evpn_ipprefix(peer_addr, peer_addr);
+
+        let data = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[],
+            std::slice::from_ref(&route),
+            1_700_000_000,
+        )
+        .unwrap();
+
+        let rib_offset =
+            find_rib_generic(&data).expect("RIB_GENERIC record must be present for EVPN Type 5");
+        let payload = &data[rib_offset + 12..];
+        assert_eq!(u16::from_be_bytes([payload[4], payload[5]]), 25);
+        assert_eq!(payload[6], 70);
+
+        let mut expected_nlri = Vec::new();
+        encode_evpn_nlri(std::slice::from_ref(&route.route), &mut expected_nlri);
+        assert_eq!(
+            &payload[7..7 + expected_nlri.len()],
+            expected_nlri.as_slice()
+        );
     }
 
     #[test]
@@ -708,7 +1020,7 @@ mod tests {
         );
 
         let data =
-            encode_snapshot(Ipv4Addr::new(1, 2, 3, 4), &[], &[route], 1_700_000_000).unwrap();
+            encode_snapshot(Ipv4Addr::new(1, 2, 3, 4), &[], &[route], &[], 1_700_000_000).unwrap();
         // Must include a peer index table plus at least one RIB record.
         let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
         let second_offset = 12 + first_len;

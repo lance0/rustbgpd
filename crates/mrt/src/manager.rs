@@ -83,9 +83,14 @@ impl MrtManager {
             .as_secs();
         let ts32 = u32::try_from(timestamp).unwrap_or(u32::MAX);
 
-        let data =
-            codec::encode_snapshot(self.local_bgp_id, &snapshot.peers, &snapshot.routes, ts32)
-                .map_err(|e| format!("encode error: {e}"))?;
+        let data = codec::encode_snapshot(
+            self.local_bgp_id,
+            &snapshot.peers,
+            &snapshot.routes,
+            &snapshot.evpn_routes,
+            ts32,
+        )
+        .map_err(|e| format!("encode error: {e}"))?;
 
         let config = self.config.clone();
         tokio::task::spawn_blocking(move || writer::write_dump(&config, &data))
