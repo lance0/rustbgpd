@@ -23,11 +23,21 @@ resolved.
   losing the original byte. Fixed by adding `Unknown(u8)` variant to
   `NotificationCode`. See ADR-0011.
 
+- **Single task per peer (resolved).** The peer session task no longer
+  owns the TCP write half. A dedicated writer task per peer (ADR-0051,
+  commits `9675ecb` → `bcd2e0d` → `56c7527`) holds the `OwnedWriteHalf`
+  with a bounded bulk channel + unbounded priority channel; the
+  session task encodes BGP messages and enqueues bytes. TCP write
+  back-pressure can no longer park the session's `select!`. Bulk-
+  channel saturation triggers a `Cease/8` (Out of Resources) and a
+  clean BGP session restart instead of silent drops. Validated by the
+  M33 1h soak in `tests/soak/runs/20260427T230448Z/`: 0 drops, 0
+  flaps, memory flat at 83 MB, slope 0.50 MB/h under sustained 1k rps
+  EVPN churn.
+
 ## Limitations (by design, not bugs)
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
-- **Single task per peer.** Adequate for current OPEN/KEEPALIVE/UPDATE
-  traffic. May need split reader/writer tasks for high UPDATE throughput.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does
   not reject LOCAL_PREF from eBGP peers because session type (iBGP vs
@@ -55,9 +65,11 @@ resolved.
   32-byte next-hop (global + link-local), only the first 16 bytes (global
   address) are used. Link-local next-hops are not tracked or advertised.
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
-  but rustbgpd currently implements only IPv4/IPv6 unicast (AFI 1/2,
-  SAFI 1) and IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133). Other families
-  such as VPNv4/VPNv6 and VPN FlowSpec are not implemented.
+  but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
+  IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), and L2VPN/EVPN (AFI 25, SAFI
+  70) RR-mode forwarding (ADR-0050, RFC 7432). Other families such as
+  VPNv4/VPNv6 (AFI 1/2, SAFI 128) and VPN FlowSpec (AFI 1/2, SAFI 134)
+  are not implemented.
 - **Implicit IPv4 prevents IPv6-only peers.** Per RFC 4760 §8, IPv4
   unicast is implicitly added when not explicitly negotiated via
   MultiProtocol capability. A `disable_ipv4_unicast` config option
