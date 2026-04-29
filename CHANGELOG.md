@@ -34,6 +34,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contract: a future refactor that quietly added a unicast-only
   family gate at the emit site would now fail at build time.
 
+### Changed
+
+- **`EvpnRibRoute` no longer caches `EvpnRouteKey`.** The struct
+  previously stored both the full `EvpnRoute` payload and a cached
+  identity key derived from it; the cache had no type-level invariant
+  (every construction site had a `let key = route.key();` line that
+  the compiler did not enforce), and the HashMap that already keys by
+  `EvpnRouteKey` was redundantly carrying the same key inside its
+  values. Identity is now derived on demand via `EvpnRibRoute::key()`
+  — a one-line wrapper around `EvpnRoute::key()`, which is O(1) and
+  allocation-free since `EvpnRouteKey` is `Copy`. Adding RFC 9251
+  Route Types 6/7/8 (S-PMSI, IGMP/MLD JOIN/LEAVE) will now only need
+  new arms in `EvpnRoute::key()` rather than parallel synchronization
+  at every construction site. Internal refactor — no proto-side or
+  config-side effects, no behavior change. Closes ROADMAP §198.
+
 ### Testing
 
 - **12 h soak extends ADR-0051 writer-split validation.**
