@@ -86,6 +86,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **`rustbgpd-wire` 0.7.0 → 0.8.0 (breaking).** The `MpReachNlri`
+  struct gains a new `pub link_local_next_hop: Option<Ipv6Addr>`
+  field so received 32-byte IPv6 next-hops (RFC 4760 §3 / RFC 2545)
+  round-trip through the wire codec, the RIB, and MRT
+  `TABLE_DUMP_V2` snapshots without dropping the link-local
+  address. The field is decoded when NH-Len == 32, emitted as the
+  32-byte form by `encode_mp_reach_nlri`, plumbed through `Route`
+  and `EvpnRibRoute`, and serialized as a 33-byte reduced-form
+  `MP_REACH_NLRI` value (NH-Len=32 + 16-byte global + 16-byte
+  link-local) by the MRT exporter. Any external caller that was
+  constructing `MpReachNlri { ... }` via struct literal will need
+  to add `link_local_next_hop: None` (or the actual value). Closes
+  the long-standing "IPv6 link-local next-hop discarded"
+  KNOWN_ISSUES limitation.
+
 - **`EvpnRibRoute` no longer caches `EvpnRouteKey`.** The struct
   previously stored both the full `EvpnRoute` payload and a cached
   identity key derived from it; the cache had no type-level invariant
