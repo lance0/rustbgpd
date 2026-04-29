@@ -1120,6 +1120,7 @@ impl RibManager {
                             0,
                         )),
                         next_hop: best.peer,
+                        link_local_next_hop: None,
                         peer: best.peer,
                         attributes: std::sync::Arc::new(vec![]),
                         received_at: best.received_at,
@@ -1243,6 +1244,7 @@ impl RibManager {
             let probe = crate::route::Route {
                 prefix: Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(Ipv4Addr::UNSPECIFIED, 0)),
                 next_hop: best.next_hop,
+                link_local_next_hop: None,
                 peer: best.peer,
                 attributes: std::sync::Arc::new(vec![]),
                 received_at: best.received_at,

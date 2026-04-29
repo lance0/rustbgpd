@@ -188,6 +188,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let route = Route {
             prefix,
             next_hop: next_hop_ip,
+            link_local_next_hop: None,
             peer: LOCAL_PEER,
             attributes: std::sync::Arc::new(attributes),
             received_at: std::time::Instant::now(),
@@ -395,6 +396,7 @@ impl proto::injection_service_server::InjectionService for InjectionService {
         let rib_route = EvpnRibRoute {
             route: evpn_route,
             next_hop,
+            link_local_next_hop: None,
             peer: LOCAL_PEER,
             attributes: std::sync::Arc::new(attributes),
             received_at: std::time::Instant::now(),

@@ -812,6 +812,7 @@ mod tests {
         Route {
             prefix: Prefix::V4(prefix),
             next_hop: IpAddr::V4(next_hop),
+            link_local_next_hop: None,
             peer: IpAddr::V4(next_hop),
             attributes: Arc::new(vec![]),
             received_at: Instant::now(),
@@ -829,6 +830,7 @@ mod tests {
         Route {
             prefix: Prefix::V6(prefix),
             next_hop: IpAddr::V6(next_hop),
+            link_local_next_hop: None,
             peer: IpAddr::V6(next_hop),
             attributes: Arc::new(vec![]),
             received_at: Instant::now(),
@@ -1252,6 +1254,7 @@ mod tests {
         let route = EvpnRibRoute {
             route: imet,
             next_hop: peer_ip,
+            link_local_next_hop: None,
             peer: peer_ip,
             attributes: Arc::new(vec![]),
             received_at: Instant::now(),
@@ -1296,6 +1299,7 @@ mod tests {
         rib.insert_evpn(EvpnRibRoute {
             route,
             next_hop: IpAddr::V4(peer),
+            link_local_next_hop: None,
             peer: IpAddr::V4(peer),
             attributes: Arc::new(attrs),
             received_at: Instant::now(),

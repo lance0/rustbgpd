@@ -468,6 +468,7 @@ impl PeerSession {
                 Some(Route {
                     prefix,
                     next_hop,
+                    link_local_next_hop: None,
                     peer: self.peer_ip,
                     attributes: Arc::new(attrs),
                     received_at: now,
@@ -625,6 +626,7 @@ impl PeerSession {
                                 evpn_announced.push(EvpnRibRoute {
                                     route: route.clone(),
                                     next_hop: mp.next_hop,
+                                    link_local_next_hop: mp.link_local_next_hop,
                                     peer: self.peer_ip,
                                     attributes: Arc::new(attrs),
                                     received_at: now,
@@ -683,6 +685,7 @@ impl PeerSession {
                             announced.push(Route {
                                 prefix: entry.prefix,
                                 next_hop,
+                                link_local_next_hop: mp.link_local_next_hop,
                                 peer: self.peer_ip,
                                 attributes: Arc::new(attrs),
                                 received_at: now,

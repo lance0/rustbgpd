@@ -207,6 +207,7 @@ mod tests {
         Route {
             prefix,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            link_local_next_hop: None,
             peer: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
             attributes: Arc::new(vec![]),
             received_at: std::time::Instant::now(),

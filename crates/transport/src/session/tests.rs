@@ -149,6 +149,7 @@ fn make_route(local_pref: u32) -> Route {
     Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -173,6 +174,7 @@ fn make_v6_unicast_route(next_hop: Ipv6Addr) -> Route {
     Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
         next_hop: IpAddr::V6(next_hop),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -373,6 +375,7 @@ async fn inbound_evpn_update_emits_bmp_route_monitoring() {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![evpn_route],
@@ -461,6 +464,7 @@ fn route_server_client_ebgp_does_not_synthesize_as_path() {
     let route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -644,6 +648,7 @@ async fn send_route_update_batches_ipv4_routes_with_identical_attributes() {
     let route1 = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::clone(&attrs),
         received_at: Instant::now(),
@@ -702,6 +707,7 @@ async fn send_route_update_splits_ipv6_routes_by_next_hop() {
     let route1 = Route {
         prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 64)),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::clone(&attrs),
         received_at: Instant::now(),
@@ -885,6 +891,7 @@ fn ibgp_default_local_pref_when_missing() {
     let route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -920,6 +927,7 @@ fn rr_does_not_add_originator_or_cluster_for_local_route() {
     let route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
@@ -966,6 +974,7 @@ fn rr_adds_originator_and_cluster_for_ibgp_route() {
     let route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1014,6 +1023,7 @@ async fn process_update_ignores_ipv4_mp_without_extended_nexthop() {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
             announced: vec![NlriEntry {
                 path_id: 0,
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -1047,6 +1057,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop() {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
             announced: vec![NlriEntry {
                 path_id: 0,
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -1091,6 +1102,7 @@ async fn route_server_client_extended_nexthop_preserves_ipv6_next_hop() {
         announce: vec![Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: IpAddr::V6(v6_nh),
+            link_local_next_hop: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1156,6 +1168,7 @@ async fn route_server_client_ipv6_preserves_next_hop() {
         announce: vec![Route {
             prefix: Prefix::V6(Ipv6Prefix::new(v6_nh, 64)),
             next_hop: IpAddr::V6(v6_nh),
+            link_local_next_hop: None,
             peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1582,6 +1595,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
             announced: vec![Route {
                 prefix: Prefix::V4(denied_prefix),
                 next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                link_local_next_hop: None,
                 peer,
                 attributes: Arc::new(vec![
                     PathAttribute::Origin(Origin::Igp),
@@ -1839,6 +1853,7 @@ async fn process_update_accepts_ipv4_mp_with_extended_nexthop_and_add_path() {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
             announced: vec![NlriEntry {
                 path_id: 42,
                 prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
@@ -2560,6 +2575,7 @@ async fn rr_loop_detected_update_still_applies_evpn_withdrawals() {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![withdrawn_route.clone()],
@@ -2661,6 +2677,7 @@ async fn evpn_routes_counted_toward_max_prefix() {
                 afi: Afi::L2Vpn,
                 safi: Safi::Evpn,
                 next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                link_local_next_hop: None,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: routes,
@@ -2753,6 +2770,7 @@ async fn as_path_loop_update_still_applies_evpn_withdrawals() {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+            link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![withdrawn_route.clone()],

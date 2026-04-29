@@ -170,13 +170,7 @@ pub struct MpReachNlri {
     pub afi: Afi,
     /// Sub-address family.
     pub safi: Safi,
-    /// Next-hop address for the announced prefixes.
-    ///
-    /// For IPv6, this stores only the global address. When a 32-byte
-    /// next-hop is received (global + link-local per RFC 4760 §3), the
-    /// decoder extracts the first 16 bytes (global) and discards the
-    /// link-local portion. `IpAddr` can only hold a single address, and
-    /// link-local next-hops are not needed for routing decisions.
+    /// Global next-hop address for the announced prefixes.
     ///
     /// RFC 8950 allows IPv4 unicast NLRI to use an IPv6 next hop in
     /// `MP_REACH_NLRI`, so this field may be IPv6 even when `afi == Ipv4`.
@@ -184,6 +178,11 @@ pub struct MpReachNlri {
     /// For `FlowSpec` (SAFI 133), next-hop length is 0 and this field is
     /// unused (defaults to `0.0.0.0`).
     pub next_hop: IpAddr,
+    /// Optional IPv6 link-local next-hop carried alongside the global
+    /// address per RFC 4760 §3 / RFC 2545 §3. Populated only when the
+    /// wire NH-Len is 32 bytes (global + link-local). The decoder
+    /// preserves the second 16 bytes here so re-encode round-trips.
+    pub link_local_next_hop: Option<Ipv6Addr>,
     /// Announced NLRI entries.
     pub announced: Vec<NlriEntry>,
     /// `FlowSpec` NLRI rules (RFC 8955). Populated only when `safi == FlowSpec`.
@@ -922,6 +921,7 @@ fn decode_mp_reach_nlri(
 
     let nh_bytes = &value[4..4 + nh_len];
     // FlowSpec (SAFI 133): NH length is 0 — no next-hop for filter rules
+    let mut link_local_next_hop: Option<Ipv6Addr> = None;
     let next_hop = if safi == Safi::FlowSpec {
         if nh_len != 0 {
             return Err(DecodeError::MalformedField {
@@ -942,6 +942,11 @@ fn decode_mp_reach_nlri(
                 16 | 32 => {
                     let mut octets = [0u8; 16];
                     octets.copy_from_slice(&nh_bytes[..16]);
+                    if nh_len == 32 {
+                        let mut ll = [0u8; 16];
+                        ll.copy_from_slice(&nh_bytes[16..32]);
+                        link_local_next_hop = Some(Ipv6Addr::from(ll));
+                    }
                     IpAddr::V6(Ipv6Addr::from(octets))
                 }
                 _ => {
@@ -962,9 +967,13 @@ fn decode_mp_reach_nlri(
                         ),
                     });
                 }
-                // Take first 16 bytes (global address); ignore link-local if 32
                 let mut octets = [0u8; 16];
                 octets.copy_from_slice(&nh_bytes[..16]);
+                if nh_len == 32 {
+                    let mut ll = [0u8; 16];
+                    ll.copy_from_slice(&nh_bytes[16..32]);
+                    link_local_next_hop = Some(Ipv6Addr::from(ll));
+                }
                 IpAddr::V6(Ipv6Addr::from(octets))
             }
             Afi::L2Vpn => match nh_len {
@@ -1002,6 +1011,7 @@ fn decode_mp_reach_nlri(
             afi,
             safi,
             next_hop,
+            link_local_next_hop,
             announced: vec![],
             flowspec_announced: flowspec_rules,
             evpn_announced: vec![],
@@ -1015,6 +1025,7 @@ fn decode_mp_reach_nlri(
             afi,
             safi,
             next_hop,
+            link_local_next_hop,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: routes,
@@ -1073,6 +1084,7 @@ fn decode_mp_reach_nlri(
         afi,
         safi,
         next_hop,
+        link_local_next_hop,
         announced,
         flowspec_announced: vec![],
         evpn_announced: vec![],
@@ -1446,12 +1458,17 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>, add_path: bool) {
         return;
     }
 
-    match mp.next_hop {
-        IpAddr::V4(addr) => {
+    match (mp.next_hop, mp.link_local_next_hop) {
+        (IpAddr::V4(addr), _) => {
             buf.push(4); // NH-Len
             buf.extend_from_slice(&addr.octets());
         }
-        IpAddr::V6(addr) => {
+        (IpAddr::V6(addr), Some(ll)) => {
+            buf.push(32); // NH-Len: global + link-local
+            buf.extend_from_slice(&addr.octets());
+            buf.extend_from_slice(&ll.octets());
+        }
+        (IpAddr::V6(addr), None) => {
             buf.push(16); // NH-Len
             buf.extend_from_slice(&addr.octets());
         }
@@ -1539,6 +1556,7 @@ mod tests {
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 100)),
+            link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![EvpnRoute::Imet(EvpnImet {
@@ -2354,6 +2372,7 @@ mod tests {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
             announced: vec![
                 nlri(Prefix::V6(Ipv6Prefix::new(
                     "2001:db8:1::".parse().unwrap(),
@@ -2409,6 +2428,7 @@ mod tests {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            link_local_next_hop: None,
             announced: vec![nlri(Prefix::V4(crate::nlri::Ipv4Prefix::new(
                 Ipv4Addr::new(10, 1, 0, 0),
                 16,
@@ -2433,6 +2453,7 @@ mod tests {
             afi: Afi::Ipv4,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
             announced: vec![nlri(Prefix::V4(crate::nlri::Ipv4Prefix::new(
                 Ipv4Addr::new(10, 1, 0, 0),
                 16,
@@ -2456,6 +2477,7 @@ mod tests {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![],
@@ -2488,6 +2510,7 @@ mod tests {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("fe80::1".parse().unwrap()),
+            link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: vec![],
@@ -2649,6 +2672,7 @@ mod tests {
             afi: Afi::Ipv6,
             safi: Safi::Unicast,
             next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+            link_local_next_hop: None,
             announced: vec![NlriEntry {
                 path_id: 0,
                 prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
@@ -2677,6 +2701,54 @@ mod tests {
             attrs[0],
             PathAttribute::OriginatorId(Ipv4Addr::new(1, 2, 3, 4))
         );
+    }
+
+    /// 32-byte IPv6 next-hop (global + link-local) round-trips through
+    /// decode/encode without dropping the link-local. Regression for the
+    /// pre-existing limitation where the decoder kept only the first
+    /// 16 bytes and the encoder only emitted 16 bytes.
+    #[test]
+    fn mp_reach_ipv6_32byte_next_hop_roundtrip() {
+        use crate::capability::{Afi, Safi};
+        use crate::nlri::{Ipv6Prefix, Prefix};
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let link_local: Ipv6Addr = "fe80::1".parse().unwrap();
+        let mp = MpReachNlri {
+            afi: Afi::Ipv6,
+            safi: Safi::Unicast,
+            next_hop: IpAddr::V6(global),
+            link_local_next_hop: Some(link_local),
+            announced: vec![NlriEntry {
+                path_id: 0,
+                prefix: Prefix::V6(Ipv6Prefix::new("2001:db8:1::".parse().unwrap(), 48)),
+            }],
+            flowspec_announced: vec![],
+            evpn_announced: vec![],
+        };
+        let attr = PathAttribute::MpReachNlri(mp.clone());
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+
+        // The attribute value should start with NH-Len=32, then the
+        // 16-byte global, then the 16-byte link-local.
+        // Walk header: flags(1) + type(1) + len(1 or 3) + value.
+        let extended = (buf[0] & 0x10) != 0;
+        let value_off = if extended { 4 } else { 3 };
+        // value layout: AFI(2) + SAFI(1) + NH-Len(1) + NH bytes + Reserved(1) + NLRI
+        assert_eq!(buf[value_off + 3], 32, "NH-Len must be 32 for global+LL");
+        assert_eq!(&buf[value_off + 4..value_off + 20], &global.octets());
+        assert_eq!(
+            &buf[value_off + 20..value_off + 36],
+            &link_local.octets(),
+            "encoded link-local bytes must match the input"
+        );
+
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
+        let PathAttribute::MpReachNlri(dec) = &decoded[0] else {
+            panic!("expected MpReachNlri");
+        };
+        assert_eq!(dec.next_hop, IpAddr::V6(global));
+        assert_eq!(dec.link_local_next_hop, Some(link_local));
     }
 
     #[test]

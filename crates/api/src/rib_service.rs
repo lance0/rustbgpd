@@ -1150,6 +1150,7 @@ mod tests {
         let v4 = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: "10.0.0.1".parse().unwrap(),
+            link_local_next_hop: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: Arc::new(vec![]),
             received_at: std::time::Instant::now(),
@@ -1164,6 +1165,7 @@ mod tests {
         let v6 = Route {
             prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
             next_hop: "2001:db8::1".parse().unwrap(),
+            link_local_next_hop: None,
             peer: "2001:db8::1".parse().unwrap(),
             attributes: Arc::new(vec![]),
             received_at: std::time::Instant::now(),
@@ -1362,6 +1364,7 @@ mod tests {
         let route = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 1, 0, 0), 24)),
             next_hop: "10.0.0.1".parse().unwrap(),
+            link_local_next_hop: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: Arc::new(vec![]),
             received_at: std::time::Instant::now(),
@@ -1399,6 +1402,7 @@ mod tests {
         let route = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: "10.0.0.1".parse().unwrap(),
+            link_local_next_hop: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: Arc::new(vec![PathAttribute::Communities(vec![community_val])]),
             received_at: std::time::Instant::now(),
@@ -1435,6 +1439,7 @@ mod tests {
         let route = Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: "10.0.0.1".parse().unwrap(),
+            link_local_next_hop: None,
             peer: "10.0.0.1".parse().unwrap(),
             attributes: Arc::new(vec![PathAttribute::AsPath(AsPath {
                 segments: vec![AsPathSegment::AsSequence(vec![65001, 65002, 65003])],

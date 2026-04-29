@@ -26,6 +26,7 @@ fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
     EvpnRibRoute {
         route,
         next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -141,6 +142,7 @@ fn make_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(next_hop),
+        link_local_next_hop: None,
         peer: IpAddr::V4(next_hop),
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -166,6 +168,7 @@ fn make_v6_route(prefix: Ipv6Prefix, next_hop: Ipv6Addr) -> Route {
     Route {
         prefix: Prefix::V6(prefix),
         next_hop: IpAddr::V6(next_hop),
+        link_local_next_hop: None,
         peer: IpAddr::V6(next_hop),
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -183,6 +186,7 @@ fn make_route_with_lp(prefix: Ipv4Prefix, peer: Ipv4Addr, local_pref: u32) -> Ro
     Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -944,6 +948,7 @@ fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(next_hop),
+        link_local_next_hop: None,
         peer: IpAddr::V4(next_hop),
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -1217,6 +1222,7 @@ async fn local_route_sent_to_ibgp_peer() {
     let route = Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        link_local_next_hop: None,
         peer: LOCAL_PEER,
         attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
@@ -1257,6 +1263,7 @@ async fn local_route_in_initial_table_to_ibgp_peer() {
     let route = Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        link_local_next_hop: None,
         peer: LOCAL_PEER,
         attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
@@ -1376,6 +1383,7 @@ async fn inject_route_enters_loc_rib_and_distributes() {
     let route = Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        link_local_next_hop: None,
         peer: LOCAL_PEER,
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -1445,6 +1453,7 @@ async fn withdraw_injected_removes_and_distributes() {
     let route = Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        link_local_next_hop: None,
         peer: LOCAL_PEER,
         attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
@@ -3336,6 +3345,7 @@ async fn distribute_changes_filters_unsendable_families() {
     let v6_route = Route {
         prefix: Prefix::V6(v6_prefix),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        link_local_next_hop: None,
         peer: source,
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -3399,6 +3409,7 @@ async fn send_initial_table_filters_unsendable_families() {
     let v6_route = Route {
         prefix: Prefix::V6(v6_prefix),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        link_local_next_hop: None,
         peer: source,
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -3481,6 +3492,7 @@ async fn dual_stack_peer_receives_both_families() {
     let v6_route = Route {
         prefix: Prefix::V6(v6_prefix),
         next_hop: IpAddr::V6("2001:db8::1".parse().unwrap()),
+        link_local_next_hop: None,
         peer: source,
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -4615,6 +4627,7 @@ async fn gr_withdraws_non_gr_family_routes() {
     let v6_route = Route {
         prefix: Prefix::V6(v6_prefix),
         next_hop: "2001:db8::1".parse().unwrap(),
+        link_local_next_hop: None,
         peer: source,
         attributes: Arc::new(vec![]),
         received_at: Instant::now(),
@@ -5348,6 +5361,7 @@ async fn rr_local_route_to_all_ibgp() {
     let route = Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+        link_local_next_hop: None,
         peer: LOCAL_PEER,
         attributes: Arc::new(vec![PathAttribute::Origin(Origin::Igp)]),
         received_at: Instant::now(),
@@ -5383,6 +5397,7 @@ fn make_route_with_as_path(prefix: Ipv4Prefix, peer: Ipv4Addr, asns: Vec<u32>) -
     Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -5497,6 +5512,7 @@ fn validate_route_rpki_empty_as_path() {
     let route = Route {
         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
         next_hop: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -5886,6 +5902,7 @@ fn make_multipath_route(
     Route {
         prefix: Prefix::V4(prefix),
         next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -5917,6 +5934,7 @@ fn make_multipath_route_v6(
     Route {
         prefix: Prefix::V6(prefix),
         next_hop: IpAddr::V6(next_hop),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -6593,6 +6611,7 @@ async fn multipath_send_ipv6_advertises_multiple_routes() {
     let mk = |peer_addr: Ipv4Addr, asn: u32, local_pref: u32| Route {
         prefix: Prefix::V6(prefix),
         next_hop: "2001:db8::1".parse().unwrap(),
+        link_local_next_hop: None,
         peer: IpAddr::V4(peer_addr),
         attributes: Arc::new(vec![
             PathAttribute::Origin(Origin::Igp),
@@ -8030,6 +8049,7 @@ async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
     let imet = EvpnRibRoute {
         route,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         attributes: Arc::new(vec![PathAttribute::Communities(vec![
             rustbgpd_wire::COMMUNITY_NO_LLGR,

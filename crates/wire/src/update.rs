@@ -412,6 +412,7 @@ mod tests {
                 afi: Afi::Ipv4,
                 safi: Safi::Unicast,
                 next_hop: IpAddr::V6(Ipv6Addr::LOCALHOST),
+                link_local_next_hop: None,
                 announced: vec![NlriEntry {
                     path_id: 0,
                     prefix: Prefix::V4(announced[0].prefix),

@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,8 +23,13 @@ pub enum RouteOrigin {
 pub struct Route {
     /// The destination prefix.
     pub prefix: Prefix,
-    /// The next-hop address (IPv4 or IPv6).
+    /// The next-hop address (IPv4 or IPv6 global).
     pub next_hop: IpAddr,
+    /// IPv6 link-local next-hop carried alongside the global next-hop
+    /// per RFC 4760 §3 / RFC 2545 §3. Populated when the received
+    /// `MP_REACH_NLRI` had a 32-byte next-hop. Re-encoded by the MRT
+    /// exporter and the BGP UPDATE encoder when present.
+    pub link_local_next_hop: Option<Ipv6Addr>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes (ORIGIN, `AS_PATH`, communities, etc.).
@@ -352,6 +357,12 @@ pub struct EvpnRibRoute {
     pub route: EvpnRoute,
     /// The VTEP loopback IP (next-hop), carried separately for policy / display.
     pub next_hop: IpAddr,
+    /// IPv6 link-local next-hop carried alongside the global next-hop
+    /// per RFC 4760 §3 / RFC 2545 §3. Set when the received
+    /// `MP_REACH_NLRI` had a 32-byte next-hop; preserved through the
+    /// RR forwarding path so re-advertisement and MRT export can
+    /// emit the same wire form.
+    pub link_local_next_hop: Option<Ipv6Addr>,
     /// The peer that advertised this route.
     pub peer: IpAddr,
     /// BGP path attributes (ORIGIN, `AS_PATH`, extended communities, etc.).

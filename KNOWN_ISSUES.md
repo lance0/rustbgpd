@@ -7,6 +7,13 @@ resolved.
 
 ## Resolved
 
+- **IPv6 link-local next-hop preserved (resolved).** `MP_REACH_NLRI`
+  with a 32-byte next-hop (global + link-local per RFC 4760 §3 / RFC
+  2545) is decoded, stored on `Route` / `EvpnRibRoute`, re-emitted by
+  the BGP UPDATE encoder, and round-trips through MRT
+  `TABLE_DUMP_V2` exports as a 33-byte reduced-form attribute value
+  (NH-Len=32 + 16-byte global + 16-byte link-local).
+
 - **Native gRPC mTLS (resolved).** TCP listeners terminate TLS
   in-process via tonic + rustls/ring. Configure via three TOML keys
   on `[global.telemetry.grpc_tcp]`: `tls_cert_file` (server identity),
@@ -86,9 +93,6 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
-- **IPv6 link-local next-hop discarded.** When `MP_REACH_NLRI` carries a
-  32-byte next-hop (global + link-local), only the first 16 bytes (global
-  address) are used. Link-local next-hops are not tracked or advertised.
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), and L2VPN/EVPN (AFI 25, SAFI

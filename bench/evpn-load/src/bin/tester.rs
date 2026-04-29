@@ -270,6 +270,7 @@ fn build_update(
             afi: Afi::L2Vpn,
             safi: Safi::Evpn,
             next_hop: v4_next_hop(next_hop),
+            link_local_next_hop: None,
             announced: vec![],
             flowspec_announced: vec![],
             evpn_announced: routes,

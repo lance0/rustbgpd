@@ -110,6 +110,7 @@ fn make_route(prefix: Prefix, peer_idx: u32, attrs: &[PathAttribute]) -> Route {
     Route {
         prefix,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
+        link_local_next_hop: None,
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, peer_idx as u8, 1)),
         attributes: Arc::new(attrs.to_vec()),
         received_at: Instant::now(),

@@ -248,6 +248,7 @@ mod tests {
         Route {
             prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
             next_hop: IpAddr::V4(peer),
+            link_local_next_hop: None,
             peer: IpAddr::V4(peer),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -610,6 +611,7 @@ mod proptests {
                     Route {
                         prefix: Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24)),
                         next_hop: IpAddr::V4(peer),
+                        link_local_next_hop: None,
                         peer: IpAddr::V4(peer),
                         attributes: Arc::new(attributes),
                         received_at: Instant::now(),

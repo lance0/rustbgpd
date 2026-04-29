@@ -164,6 +164,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                         afi: Afi::Ipv4,
                         safi: Safi::Unicast,
                         next_hop: route.next_hop,
+                        link_local_next_hop: route.link_local_next_hop,
                         announced: vec![],
                         flowspec_announced: vec![],
                         evpn_announced: vec![],
@@ -179,6 +180,7 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: route.next_hop,
+                link_local_next_hop: route.link_local_next_hop,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
@@ -207,6 +209,7 @@ pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
         afi: Afi::L2Vpn,
         safi: Safi::Evpn,
         next_hop: route.next_hop,
+        link_local_next_hop: route.link_local_next_hop,
         announced: vec![],
         flowspec_announced: vec![],
         evpn_announced: vec![],
@@ -301,7 +304,7 @@ fn encode_mrt_rib_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>) {
 
     for attr in attrs {
         if let PathAttribute::MpReachNlri(mp) = attr {
-            encode_mrt_mp_reach(mp.next_hop, buf);
+            encode_mrt_mp_reach(mp.next_hop, mp.link_local_next_hop, buf);
         }
     }
 }
@@ -312,14 +315,26 @@ fn encode_mrt_rib_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>) {
 /// reduced value (NH-Len + NH bytes only). The attribute uses the
 /// optional flag (0x80) and type code 14, matching the standard
 /// `MP_REACH_NLRI` framing.
-fn encode_mrt_mp_reach(next_hop: IpAddr, buf: &mut Vec<u8>) {
-    let mut value: Vec<u8> = Vec::with_capacity(17);
-    match next_hop {
-        IpAddr::V4(addr) => {
+///
+/// When `link_local` is `Some`, the value is 33 bytes: NH-Len=32 +
+/// 16-byte global + 16-byte link-local, per RFC 4760 §3 / RFC 2545.
+fn encode_mrt_mp_reach(
+    next_hop: IpAddr,
+    link_local: Option<std::net::Ipv6Addr>,
+    buf: &mut Vec<u8>,
+) {
+    let mut value: Vec<u8> = Vec::with_capacity(33);
+    match (next_hop, link_local) {
+        (IpAddr::V4(addr), _) => {
             value.push(4);
             value.extend_from_slice(&addr.octets());
         }
-        IpAddr::V6(addr) => {
+        (IpAddr::V6(addr), Some(ll)) => {
+            value.push(32);
+            value.extend_from_slice(&addr.octets());
+            value.extend_from_slice(&ll.octets());
+        }
+        (IpAddr::V6(addr), None) => {
             value.push(16);
             value.extend_from_slice(&addr.octets());
         }
@@ -328,7 +343,7 @@ fn encode_mrt_mp_reach(next_hop: IpAddr, buf: &mut Vec<u8>) {
     buf.push(14);
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "value length is at most 17 bytes"
+        reason = "value length is at most 33 bytes"
     )]
     buf.push(value.len() as u8);
     buf.extend_from_slice(&value);
@@ -597,6 +612,7 @@ mod tests {
         Route {
             prefix,
             next_hop,
+            link_local_next_hop: None,
             peer,
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -892,6 +908,7 @@ mod tests {
         EvpnRibRoute {
             route,
             next_hop,
+            link_local_next_hop: None,
             peer,
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -929,6 +946,7 @@ mod tests {
         EvpnRibRoute {
             route,
             next_hop,
+            link_local_next_hop: None,
             peer,
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -1192,6 +1210,67 @@ mod tests {
             &mp_value[1..17],
             &nh.octets(),
             "NH bytes must equal the route's IPv6 next-hop"
+        );
+    }
+
+    /// RFC 4760 §3 / RFC 2545: IPv6 next-hop can carry global +
+    /// link-local (32 bytes total). When `Route.link_local_next_hop`
+    /// is `Some`, the MRT-reduced `MP_REACH_NLRI` value must be 33
+    /// bytes — NH-Len=32, then the 16-byte global, then the 16-byte
+    /// link-local. Regression for the pre-existing gap where this
+    /// data was discarded.
+    #[test]
+    fn ipv6_unicast_32byte_next_hop_emits_33_byte_attribute_value() {
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = make_peer(peer_addr, 65001);
+        let global = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let link_local = Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1);
+
+        let mut route = make_route(
+            Prefix::V6(Ipv6Prefix {
+                addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                len: 32,
+            }),
+            peer_addr,
+            IpAddr::V6(global),
+        );
+        route.link_local_next_hop = Some(link_local);
+
+        let data = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[route],
+            &[],
+            1_700_000_000,
+        )
+        .unwrap();
+
+        let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let rib_offset = 12 + first_len;
+        let payload = &data[rib_offset + 12..];
+        let entry_start = 4 + 1 + 4 + 2;
+        let attr_len_offset = entry_start + 6;
+        let attr_len =
+            u16::from_be_bytes([payload[attr_len_offset], payload[attr_len_offset + 1]]) as usize;
+        let attrs = &payload[attr_len_offset + 2..attr_len_offset + 2 + attr_len];
+        let mp_value = find_attribute_value(attrs, 14).expect("MP_REACH must be present");
+
+        assert_eq!(
+            mp_value.len(),
+            33,
+            "32-byte NH must produce a 33-byte MP_REACH value (NH-Len=32 + 16 + 16); got {}",
+            mp_value.len()
+        );
+        assert_eq!(mp_value[0], 32, "NH-Len must equal 32 for global+LL form");
+        assert_eq!(
+            &mp_value[1..17],
+            &global.octets(),
+            "global NH bytes mismatch"
+        );
+        assert_eq!(
+            &mp_value[17..33],
+            &link_local.octets(),
+            "link-local NH bytes mismatch"
         );
     }
 

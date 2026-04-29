@@ -377,6 +377,7 @@ mod tests {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+                link_local_next_hop: None,
                 announced: vec![NlriEntry {
                     path_id: 0,
                     prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
@@ -405,6 +406,7 @@ mod tests {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+                link_local_next_hop: None,
                 announced: vec![NlriEntry {
                     path_id: 0,
                     prefix: Prefix::V6(Ipv6Prefix::new("2001:db8::".parse().unwrap(), 32)),
@@ -434,6 +436,7 @@ mod tests {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                link_local_next_hop: None,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
@@ -457,6 +460,7 @@ mod tests {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6("fe80::1".parse().unwrap()),
+                link_local_next_hop: None,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
@@ -480,6 +484,7 @@ mod tests {
                 afi: Afi::Ipv6,
                 safi: Safi::Unicast,
                 next_hop: std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                link_local_next_hop: None,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],
@@ -535,6 +540,7 @@ mod tests {
                 safi: Safi::Unicast,
                 // ff02::1 is multicast
                 next_hop: std::net::IpAddr::V6("ff02::1".parse().unwrap()),
+                link_local_next_hop: None,
                 announced: vec![],
                 flowspec_announced: vec![],
                 evpn_announced: vec![],

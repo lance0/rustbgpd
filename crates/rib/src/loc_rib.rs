@@ -424,6 +424,7 @@ mod tests {
         Route {
             prefix: Prefix::V4(prefix),
             next_hop: IpAddr::V4(peer),
+            link_local_next_hop: None,
             peer: IpAddr::V4(peer),
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
@@ -727,6 +728,7 @@ mod tests {
         EvpnRibRoute {
             route: mac_ip,
             next_hop: IpAddr::V4(peer),
+            link_local_next_hop: None,
             peer: IpAddr::V4(peer),
             attributes: Arc::new(attrs),
             received_at: Instant::now(),
@@ -967,6 +969,7 @@ mod tests {
             EvpnRibRoute {
                 route: mac_ip,
                 next_hop: IpAddr::V4(peer),
+                link_local_next_hop: None,
                 peer: IpAddr::V4(peer),
                 attributes: Arc::new(vec![PathAttribute::LocalPref(100)]),
                 received_at: Instant::now(),
