@@ -80,15 +80,56 @@ operator feedback, competitive analysis, and IX/SDN market research (March 2026)
 *For feature parity details, see [docs/gobgp-parity.md](docs/gobgp-parity.md)
 and [docs/COMPARISON.md](docs/COMPARISON.md).*
 
-### Next Up — High-Impact, Near-Term
+### Release stance
 
-Features with clear market signal and manageable scope. These are the next
-items to ship.
+**rustbgpd is staying in v0.x until real-world deployment feedback and a
+gRPC security audit close.** Both are non-code gates (see Pre-1.0
+Requirements below). The two requirements anchor v1.0; everything else
+is production-ready today.
 
-- [x] **ASPA verification** — upstream path verification with RTR v2 support. AspaTable + verify_upstream() algorithm, RTR v2 codec (ASPA PDU type 11) with automatic v1 fallback, best-path step 0.7 (Valid > Unknown > Invalid), `match_aspa_validation` in import and export policy, gRPC `aspa_state` exposure. Import validation is best-effort against the current snapshot (see validation snapshot delivery item). Downstream verification deferred (needs per-peer relationship config). (ADR-0049)
-- [x] **Config diff** — `rustbgpd --diff` previews what SIGHUP would change: neighbor add/remove/modify (reload-applied), global/rpki/bmp/mrt (restart-required), and peer-group/policy changes (informational). Human-readable colored output + `--json` for scripting. Exit code 1 = actionable changes.
-- [x] **Looking glass REST API** — optional birdwatcher-compatible HTTP server for looking glass frontends (Alice-LG, etc.). Endpoints: `/status`, `/protocols/bgp`, `/routes/protocol/{id}`, `/routes/peer/{peer}`. Response shapes match birdwatcher field names. Configured via `[global.telemetry.looking_glass]`. Not yet integration-tested against Alice-LG.
-- [x] **Best-path explain** — `BestPathReason` enum + `best_path_cmp_with_reason()` function; gRPC `ExplainBestPath` RPC shows all candidates with pairwise decision reasons; `rustbgpctl rib --prefix X --explain` CLI. Answers "why did this route win?" without log correlation.
+The release cadence is: ship operator-visible polish in v0.11+ / v0.12+
+cuts as items below land. v1.0 itself is gated on external validation,
+not feature completeness.
+
+### Next Up — Pre-v1.0 Polish (v0.x cuts)
+
+Operator-visible gaps that should land before v1.0. These are real
+operator-hit items pulled from KNOWN_ISSUES and the Deferred Hardening
+list below; the bullets here are the **active** track, the rest of
+this document is reference / long-tail.
+
+- [ ] **SIGHUP policy/peer-group reconciliation** — today only
+  `[[neighbors]]` deltas reconcile on reload; policy and peer-group
+  changes are detected but not applied. Operators editing TOML and
+  reloading hit this within minutes.
+- [ ] **Effective neighbor diff via peer-group resolution** —
+  `rustbgpd --diff` shows raw peer-group changes; should resolve
+  inheritance and surface which neighbors are *effectively* impacted.
+  Companion to SIGHUP policy/peer-group reconciliation.
+- [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for
+  operators who don't want an Envoy/nginx sidecar. The first thing
+  the security audit will flag.
+- [ ] **CI regression tracking for benchmarks** — automated runs of
+  the criterion benchmarks with threshold-based alerts on PR. The
+  benchmarks exist; the regression gate doesn't.
+- [ ] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
+  GR recovery. Trivial to script on the existing M33 soak harness;
+  closes four open P3.5 bullets.
+- [ ] **`match_evpn_route_type` policy clause** — operators currently
+  filter EVPN by RT/community; route-type-keyed match is the natural
+  ergonomics.
+
+#### Recently shipped (post-v0.7.0)
+
+- [x] **ASPA verification** (v0.7.0) — upstream path verification with RTR v2 support, ADR-0049
+- [x] **Config diff** (v0.7.0) — `rustbgpd --diff` previews SIGHUP changes
+- [x] **Looking glass REST API** (v0.7.0) — birdwatcher-compatible endpoints
+- [x] **Best-path explain** (v0.7.0) — `ExplainBestPath` RPC + `--explain` CLI
+- [x] **EVPN Route Reflector Phase 1** (v0.9.0) — RFC 7432 RR role, all 5 route types, M29-M33 interop
+- [x] **ADR-0051 writer-task split** (v0.10.0) — closes the +46-min `GetHealth` wedge under sustained churn; validated on 1h + 4h + 12h M33 soaks
+- [x] **BMP `bmp_*_total` Prometheus counters** (v0.10.0) — 4 counters cover source / collector / replay / control-event drops
+- [x] **EVPN BMP + MRT export** (post-v0.10.0) — RouteMonitoring already flowed; MRT now emits `RIB_GENERIC` for EVPN
+- [x] **`EvpnRibRoute` payload+key refactor** (post-v0.10.0) — drops cached key, identity derived on demand
 
 ### P0–P2.5 — Complete
 
@@ -137,7 +178,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **BMP collector reconnect replay** — `BmpManager` caches live Peer Up state and replays it only to the collector that just reconnected
 - [x] **BMP periodic Stats Report** — `PeerManager` now emits per-peer periodic BMP Stats Report messages (type 7: Adj-RIB-In routes) every 60 seconds
 - [x] **BMP Termination on daemon shutdown** — coordinated shutdown now signals `BmpManager` explicitly, then drains manager/client tasks with bounded waits so connected collectors receive Termination before process exit
-- [ ] **BMP event-drop counters** — BMP send paths currently log dropped events on channel-full but do not expose a Prometheus counter for replay/stats/route-monitoring drop rates
+- [x] **BMP event-drop counters** (v0.10.0) — `bmp_source_drops_total{peer, reason}`, `bmp_collector_drops_total{collector, phase, reason}`, `bmp_replay_attempts_total{collector}`, and `bmp_control_event_drops_total{collector, kind, reason}` cover every drop / replay / control-event-drop site. Replay aborts attribute every cached `PeerUp` as dropped (not just the first failed `try_send`), and `CollectorConnected` uses an awaited 1 s send so a wedged manager surfaces as a counter increment instead of a silent skipped replay.
 - [x] **BMP transport integration tests** — session-to-BMP emission paths (PeerUp/PeerDown/RouteMonitoring) now covered by transport crate tests
 - [ ] **BMP periodic stats scalability** — `emit_periodic_bmp_stats` serializes `query_state().await` per peer; at hundreds of peers this could stall the PeerManager select! loop; consider concurrent queries or cached counts
 - [ ] **BMP client connect-loop shutdown** — client stuck in TCP connect-backoff cannot observe channel close until next `rx.recv()`; mitigated by abort timeout but prevents clean Termination to unreachable collectors
@@ -192,7 +233,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [ ] **EVPN polish + observability gaps** (low-priority, Phase 1 known limitations):
   - [x] Type 5 (IP Prefix) interop test against FRR (M30b, `tests/interop/m30b-evpn-type5-frr.clab.yml`) — single-VTEP origination from FRR vrf1 / L3VNI 100; rustbgpd RR decodes the Type 5 NLRI and surfaces RD, prefix, next-hop, VNI label, RT extended community, and VXLAN encap via `ListEvpnRoutes`. Withdrawal validated. RR-reflection of Type 5 (2-VTEP topology, ORIGINATOR_ID + CLUSTER_LIST asserts) tracked as M30c.
   - `match_evpn_route_type` policy clause — operators currently filter via RT or community matches; a route-type-keyed predicate would be ergonomic.
-  - EVPN BMP export and MRT dump integration — unicast/FlowSpec already export; EVPN routes are not yet emitted on those channels.
+  - [x] **EVPN BMP export and MRT dump integration** (post-v0.10.0) — BMP `RouteMonitoring` already flows for EVPN at the raw-PDU emit site (no AFI/SAFI gate; pinned by `inbound_evpn_update_emits_bmp_route_monitoring` regression test). MRT `TABLE_DUMP_V2` now emits `RIB_GENERIC` (subtype 6, RFC 6396 §4.3.5) records with AFI 25 / SAFI 70 for every Adj-RIB-In EVPN route. Type 2 + Type 5 round-trip tests assert the wire shape. ADR-0044 carries the encoding choice.
   - GR / LLGR interop harness (kill / restart / measure) — unit tests cover the EVPN GR pipeline; FRR-vs-rustbgpd kill-and-recover interop is not in the M29-M33 set.
   - [x] **M33 soak harness** — `tests/soak/run-m33-soak.sh` extends M33 to arbitrary durations (default 24h, `SOAK_SEC` override for sub-hour smokes), samples cgroup RSS + Prometheus gauges every minute into `samples.csv`, and runs a stdlib-only Python analyzer that gates on memory slope, peak RSS, session flaps, drop deltas, gRPC health continuity, and process-restart detection (counter monotonicity). The first runs surfaced ADR-0051 — see "Sustained-churn writer-task split" below — and `tests/soak/runs/20260427T172938Z/` is the post-fix reproducer of record (drops 613→1, slope 58.5→12.6 MB/h, GetHealth always responsive). Still open: a 24h soak with the writer-split build to confirm the +49-min wedge transition is the only saturation event under continuous load.
   - [x] **`EvpnRibRoute` payload + key redundancy** — landed post-v0.10.0. The cached `EvpnRouteKey` field was removed from `EvpnRibRoute`; identity is now derived on demand via `EvpnRibRoute::key()` (one-line wrapper around `EvpnRoute::key()`, which is O(1) and allocation-free). Adding RFC 9251 Route Types 6-8 will only need new arms in `EvpnRoute::key()` rather than parallel synchronization at every construction site.
@@ -258,7 +299,7 @@ Prove it works under pressure before 1.0.
 - [ ] **Peer flap storms** — repeated session up/down under load; verify no resource leaks
 - [ ] **gRPC churn** — concurrent AddNeighbor/DeleteNeighbor/SoftResetIn calls; verify no deadlocks or panics
 - [ ] **Repeated GR recovery** — back-to-back graceful restart cycles; verify stale sweep correctness
-- [ ] **Long-duration stability** — multi-hour runs with active route exchange; monitor memory and fd usage
+- [x] **Long-duration stability** — M33 1 h + 4 h + 12 h soak runs (`tests/soak/runs/20260427T230448Z/`, `20260428T150509Z/`, `20260429T004656Z/`) all `verdict: clean` under sustained 1 k-rps EVPN churn. 12 h slope **+0.0094 MB/h** (essentially zero), 0 drops, 0 flaps, 0 gRPC health failures, no daemon restart, p99 RSS 85 MB. Anchors the writer-split (ADR-0051) validation across three independent run lengths.
 - [x] **AdjRibIn prefix index** — secondary `HashMap<Prefix, HashSet<u32>>` index on `iter_prefix()` for O(1) prefix lookup. Pipeline 50k prefixes: 7.1s → 82ms (86x improvement). Full-table (900k) extrapolated ~1.5s
 - [x] **End-to-end system benchmarks** — bgperf2-based multi-peer ingestion tests (10p/1k, 2p/10k, 2p/100k) against BIRD 2.18 and GoBGP 4.3.0; results in BENCHMARKS.md
 - [x] **Memory profiling** — tracking allocator test measures per-route footprint: 252 B/route with interning, 547 MB for full table (900k x 2 peers + LocRib); 15-29x less than GoBGP, approaching BIRD-class efficiency
@@ -341,7 +382,9 @@ tests.
 
 ## Pre-1.0 Requirements
 
-Quality gates before tagging 1.0.0:
+Quality gates before tagging 1.0.0. **The two open items below anchor the
+v1.0 cut**; everything else is shipped. Code-side polish continues in v0.x
+releases (see "Next Up — Pre-v1.0 Polish" above).
 
 - [x] MP-BGP (at least IPv6 unicast)
 - [x] Graceful restart
@@ -349,10 +392,18 @@ Quality gates before tagging 1.0.0:
 - [x] Policy actions (match + modify + filter)
 - [x] Large communities (RFC 8092)
 - [x] ASPA verification — upstream verification with RTR v2 (ADR-0049)
-- [ ] Real-world deployment feedback
+- [ ] **Real-world deployment feedback** *(v1.0 gate)* — at least one
+  operator running rustbgpd in a production-shaped environment long
+  enough to surface bugs the soak harness can't. The 12 h soak verdict
+  + interop coverage establish the production *claim*; this gate
+  validates it.
 - [x] Wire crate API stability (`rustbgpd-wire` published on crates.io)
 - [x] Comprehensive rustdoc for public API (hand-written crates; generated proto stubs excluded)
-- [ ] Security audit of gRPC surface
+- [ ] **Security audit of gRPC surface** *(v1.0 gate)* — independent
+  review of the gRPC API surface, listener configuration (mTLS pending,
+  see Next Up), and authorization model. Native gRPC mTLS lands in v0.x
+  before the audit so the audit isn't blocked on a known-missing
+  primitive.
 - [x] **RibManager submodule split** — 8,318-line manager.rs split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs)
 - [x] **RTR expire_interval enforcement** — VRPs are now cleared if no fresh EndOfData arrives before the expiry window
 
