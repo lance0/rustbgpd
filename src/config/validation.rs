@@ -83,6 +83,15 @@ impl Config {
                         .to_string(),
                 });
             }
+            if tls_count == 3 {
+                // SAFETY: all three are Some — checked above.
+                let cert = cfg.tls_cert_file.as_deref().unwrap();
+                let key = cfg.tls_key_file.as_deref().unwrap();
+                let ca = cfg.tls_client_ca_file.as_deref().unwrap();
+                validate_grpc_pem_file(cert, "grpc_tcp.tls_cert_file", PemKind::Certificate)?;
+                validate_grpc_pem_file(key, "grpc_tcp.tls_key_file", PemKind::PrivateKey)?;
+                validate_grpc_pem_file(ca, "grpc_tcp.tls_client_ca_file", PemKind::Certificate)?;
+            }
         }
 
         if let Some(cfg) = uds {
@@ -674,6 +683,96 @@ fn validate_log_level(level: Option<&str>) -> Result<(), ConfigError> {
             }
         }
     }
+    Ok(())
+}
+
+/// What a PEM file is expected to contain. Used by
+/// [`validate_grpc_pem_file`] to surface a clear error when the operator
+/// swapped a cert path with a key path (or vice versa).
+#[derive(Debug, Clone, Copy)]
+enum PemKind {
+    /// A `CERTIFICATE` block (server identity or trust anchor).
+    Certificate,
+    /// A `PRIVATE KEY`, `RSA PRIVATE KEY`, or `EC PRIVATE KEY` block.
+    PrivateKey,
+}
+
+/// Validate a PEM-encoded TLS file at config-load / `--check` time.
+///
+/// Catches the surprises that would otherwise only surface at daemon
+/// startup: missing path, unreadable file, empty file, file with no
+/// PEM markers, file with PEM blocks of the wrong kind (e.g., cert
+/// path pointed at a private key). Tonic's `Identity::from_pem` and
+/// `Certificate::from_pem` only hold the bytes; the actual parser
+/// runs deep inside `ServerTlsConfig::tls_config` at server build
+/// time, well past `--check`. This is a structural pre-flight, not a
+/// full key/cert match — a mismatched cert+key pair will still fail
+/// at server build, but missing-file / wrong-kind errors are caught
+/// before the daemon ever starts.
+fn validate_grpc_pem_file(path: &str, field_name: &str, kind: PemKind) -> Result<(), ConfigError> {
+    if path.trim().is_empty() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!("{field_name} must not be empty"),
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|e| ConfigError::InvalidGrpcConfig {
+        reason: format!("failed to read {field_name} {path:?}: {e}"),
+    })?;
+    if bytes.is_empty() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!("{field_name} {path:?} is empty"),
+        });
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| ConfigError::InvalidGrpcConfig {
+        reason: format!("{field_name} {path:?} is not valid UTF-8 (PEM is ASCII)"),
+    })?;
+
+    let begin_lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("-----BEGIN ") && l.trim_end().ends_with("-----"))
+        .collect();
+    let end_lines: Vec<&str> = text
+        .lines()
+        .filter(|l| l.starts_with("-----END ") && l.trim_end().ends_with("-----"))
+        .collect();
+    if begin_lines.is_empty() || end_lines.is_empty() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!(
+                "{field_name} {path:?} has no PEM blocks (missing -----BEGIN/END----- markers)"
+            ),
+        });
+    }
+    if begin_lines.len() != end_lines.len() {
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!(
+                "{field_name} {path:?} has unbalanced PEM markers ({} BEGIN, {} END)",
+                begin_lines.len(),
+                end_lines.len()
+            ),
+        });
+    }
+
+    let acceptable: &[&str] = match kind {
+        PemKind::Certificate => &["CERTIFICATE"],
+        PemKind::PrivateKey => &["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"],
+    };
+    let any_match = begin_lines.iter().any(|line| {
+        let trimmed = line.trim_end();
+        acceptable
+            .iter()
+            .any(|kind| trimmed == format!("-----BEGIN {kind}-----"))
+    });
+    if !any_match {
+        let kinds = acceptable.join(" / ");
+        return Err(ConfigError::InvalidGrpcConfig {
+            reason: format!(
+                "{field_name} {path:?} contains no PEM block of expected kind ({kinds}) — \
+                 found: {}",
+                begin_lines.first().copied().unwrap_or("<none>")
+            ),
+        });
+    }
+
     Ok(())
 }
 

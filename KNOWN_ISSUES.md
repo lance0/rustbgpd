@@ -19,7 +19,12 @@ resolved.
   on `[global.telemetry.grpc_tcp]`: `tls_cert_file` (server identity),
   `tls_key_file` (server private key), `tls_client_ca_file` (CA used
   to verify client certificates). All three are required together —
-  partial config is rejected at config load. UDS listeners stay
+  partial config is rejected at config load. The validation path
+  also reads each PEM file at config load / `--check` time and
+  rejects missing, unreadable, empty, non-PEM, or wrong-kind files
+  (e.g., a key path swapped with a cert path) before the daemon
+  starts — a successful `--check` proves the listed TLS material
+  is at least structurally usable. UDS listeners stay
   file-system-permission-authenticated, unchanged.
 
 - **BMP drop / replay Prometheus counters (resolved).** Four new

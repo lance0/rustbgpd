@@ -21,6 +21,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Server identity + client-cert verification land together; there is
   no "TLS-without-mTLS" half-mode. UDS listeners are unchanged
   (file-system permissions remain their auth surface).
+  Pre-flight reads each PEM file at config load / `--check` time
+  and rejects missing, unreadable, empty, non-PEM, or wrong-kind
+  files (e.g., a private-key blob at the cert path) before the
+  daemon starts — closes the gap where a successful `--check` could
+  be followed by a startup failure during cert rotation.
   *Restart-required:* gRPC listener config — including TLS material
   — does **not** take effect on SIGHUP. The reload path emits an
   explicit `error!` log when `[global.telemetry.grpc_tcp]` or

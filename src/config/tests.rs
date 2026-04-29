@@ -339,15 +339,32 @@ fn grpc_tls_partial_config_rejected() {
     assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
 }
 
+/// Marker-only PEM stubs are enough for structural validation —
+/// `validate_grpc_pem_file` checks for `BEGIN/END` framing and the
+/// expected block kind, not key/cert math.
+const STUB_CERT: &str = "-----BEGIN CERTIFICATE-----\nMIIBstub\n-----END CERTIFICATE-----\n";
+const STUB_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIIBstub\n-----END PRIVATE KEY-----\n";
+
+fn write_pem(content: &str) -> NamedTempFile {
+    let f = NamedTempFile::new().unwrap();
+    std::fs::write(f.path(), content).unwrap();
+    f
+}
+
 #[test]
 fn grpc_tls_full_config_accepted() {
-    // All three TLS files set together — should parse cleanly. We
-    // don't read the files at parse time, so the paths can be
-    // non-existent placeholders here; the read happens at daemon
-    // start in resolve_grpc_listeners().
+    // All three TLS files set together with real PEM content — should
+    // parse cleanly. Validation now reads the files at config load /
+    // `--check` time, so paths must point at readable PEM-shaped data.
+    let cert = write_pem(STUB_CERT);
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
     let toml_str = format!(
-        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = \"/tmp/cert.pem\"\ntls_key_file = \"/tmp/key.pem\"\ntls_client_ca_file = \"/tmp/ca.pem\"\n",
-        valid_toml()
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        valid_toml(),
+        cert.path(),
+        key.path(),
+        ca.path(),
     );
     let config = parse(&toml_str).unwrap();
     let listeners = config.grpc_listeners();
@@ -358,6 +375,97 @@ fn grpc_tls_full_config_accepted() {
     assert!(
         tls.is_some(),
         "tls config must be populated when all three files are set"
+    );
+}
+
+/// Pre-flight catches a missing cert path before the daemon starts.
+/// Otherwise a successful `--check` could be followed by a startup
+/// failure during cert rotation — the surprise the adversarial review
+/// flagged.
+#[test]
+fn grpc_tls_missing_file_rejected_at_load() {
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = \"/tmp/rustbgpd-tls-does-not-exist.pem\"\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        valid_toml(),
+        key.path(),
+        ca.path(),
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig, got {err:?}");
+    };
+    assert!(
+        reason.contains("tls_cert_file") && reason.contains("failed to read"),
+        "error must mention the offending field and read failure: {reason}"
+    );
+}
+
+#[test]
+fn grpc_tls_empty_file_rejected_at_load() {
+    let cert = NamedTempFile::new().unwrap(); // empty
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        valid_toml(),
+        cert.path(),
+        key.path(),
+        ca.path(),
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(reason.contains("is empty"), "got: {reason}");
+}
+
+#[test]
+fn grpc_tls_non_pem_file_rejected_at_load() {
+    let cert = write_pem("not a pem file at all\n");
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        valid_toml(),
+        cert.path(),
+        key.path(),
+        ca.path(),
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("no PEM blocks"),
+        "error must mention missing PEM markers: {reason}"
+    );
+}
+
+/// Operator swapped the cert and key paths — file is structurally
+/// PEM but the wrong kind. Catching this at load time prevents a
+/// successful `--check` followed by a runtime TLS failure.
+#[test]
+fn grpc_tls_wrong_kind_pem_rejected_at_load() {
+    // cert path points at a private key blob — wrong kind.
+    let cert = write_pem(STUB_KEY);
+    let key = write_pem(STUB_KEY);
+    let ca = write_pem(STUB_CERT);
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = {:?}\ntls_key_file = {:?}\ntls_client_ca_file = {:?}\n",
+        valid_toml(),
+        cert.path(),
+        key.path(),
+        ca.path(),
+    );
+    let err = parse(&toml_str).unwrap_err();
+    let ConfigError::InvalidGrpcConfig { reason } = err else {
+        panic!("expected InvalidGrpcConfig");
+    };
+    assert!(
+        reason.contains("expected kind") && reason.contains("CERTIFICATE"),
+        "error must mention the expected PEM kind: {reason}"
     );
 }
 

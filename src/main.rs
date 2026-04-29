@@ -1502,8 +1502,27 @@ hold_time = 90
         );
 
         // Operator overwrites the file with an mTLS-enabled config.
+        // Validation now reads PEM material at config load, so the
+        // paths must point at real PEM-shaped files.
+        let cert = unique_temp_path("reload-pin-cert.pem");
+        let key = unique_temp_path("reload-pin-key.pem");
+        let ca = unique_temp_path("reload-pin-ca.pem");
         std::fs::write(
-            &path,
+            &cert,
+            "-----BEGIN CERTIFICATE-----\nMIIBstub\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &key,
+            "-----BEGIN PRIVATE KEY-----\nMIIBstub\n-----END PRIVATE KEY-----\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &ca,
+            "-----BEGIN CERTIFICATE-----\nMIIBstub\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let mtls_toml = format!(
             r#"
 [global]
 asn = 65001
@@ -1515,17 +1534,20 @@ log_format = "json"
 
 [global.telemetry.grpc_tcp]
 address = "0.0.0.0:50051"
-tls_cert_file = "/tmp/server.pem"
-tls_key_file = "/tmp/server.key"
-tls_client_ca_file = "/tmp/ca.pem"
+tls_cert_file = {cert:?}
+tls_key_file = {key:?}
+tls_client_ca_file = {ca:?}
 
 [[neighbors]]
 address = "10.0.0.2"
 remote_asn = 65002
 hold_time = 90
 "#,
-        )
-        .unwrap();
+            cert = cert.to_str().unwrap(),
+            key = key.to_str().unwrap(),
+            ca = ca.to_str().unwrap(),
+        );
+        std::fs::write(&path, mtls_toml).unwrap();
 
         let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
         let returned = reload_config(
@@ -1557,6 +1579,9 @@ hold_time = 90
         );
 
         std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&cert).ok();
+        std::fs::remove_file(&key).ok();
+        std::fs::remove_file(&ca).ok();
     }
 
     #[test]
