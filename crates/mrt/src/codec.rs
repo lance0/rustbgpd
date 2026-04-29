@@ -196,7 +196,10 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
 /// (per MP-BGP architecture). For the MRT encoding we add a fresh
 /// `MP_REACH_NLRI` carrying the next-hop only — the EVPN NLRI itself
 /// rides in the `RIB_GENERIC` record header per RFC 6396 §4.3.5, not
-/// in the attribute.
+/// in the attribute. The attribute's NLRI/AFI/SAFI fields are dropped
+/// when the entry is serialized via [`encode_mrt_rib_attributes`],
+/// which rewrites `MP_REACH_NLRI` to the RFC 6396 §4.3.4 reduced form
+/// (NH-Len + NH bytes only).
 #[must_use]
 pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
     let mut attrs = (*route.attributes).clone();
@@ -270,9 +273,8 @@ fn encode_rib_entry(
     buf.extend_from_slice(&entry.peer_index.to_be_bytes());
     buf.extend_from_slice(&entry.originated_time.to_be_bytes());
 
-    // Encode attributes to a temp buffer to get length
     let mut attr_buf = Vec::new();
-    encode_path_attributes(&entry.attributes, &mut attr_buf, true, false);
+    encode_mrt_rib_attributes(&entry.attributes, &mut attr_buf);
     let attr_len = u16::try_from(attr_buf.len()).map_err(|_| EncodeError::FieldTooLarge {
         field: "RIB entry attribute length",
         value: attr_buf.len(),
@@ -280,6 +282,56 @@ fn encode_rib_entry(
     buf.extend_from_slice(&attr_len.to_be_bytes());
     buf.extend_from_slice(&attr_buf);
     Ok(())
+}
+
+/// Encode path attributes for an MRT RIB entry per RFC 6396 §4.3.4.
+///
+/// `MP_REACH_NLRI` is rewritten to the MRT-reduced form: only NH-Len
+/// and the next-hop bytes appear in the attribute value. The AFI,
+/// SAFI, Reserved, and NLRI fields are omitted because the RIB entry
+/// header already carries that information. All other attributes
+/// encode identically to a regular BGP UPDATE.
+fn encode_mrt_rib_attributes(attrs: &[PathAttribute], buf: &mut Vec<u8>) {
+    let others: Vec<PathAttribute> = attrs
+        .iter()
+        .filter(|a| !matches!(a, PathAttribute::MpReachNlri(_)))
+        .cloned()
+        .collect();
+    encode_path_attributes(&others, buf, true, false);
+
+    for attr in attrs {
+        if let PathAttribute::MpReachNlri(mp) = attr {
+            encode_mrt_mp_reach(mp.next_hop, buf);
+        }
+    }
+}
+
+/// Append a single `MP_REACH_NLRI` attribute in MRT-reduced form.
+///
+/// Wire layout per RFC 6396 §4.3.4 — TLV header followed by the
+/// reduced value (NH-Len + NH bytes only). The attribute uses the
+/// optional flag (0x80) and type code 14, matching the standard
+/// `MP_REACH_NLRI` framing.
+fn encode_mrt_mp_reach(next_hop: IpAddr, buf: &mut Vec<u8>) {
+    let mut value: Vec<u8> = Vec::with_capacity(17);
+    match next_hop {
+        IpAddr::V4(addr) => {
+            value.push(4);
+            value.extend_from_slice(&addr.octets());
+        }
+        IpAddr::V6(addr) => {
+            value.push(16);
+            value.extend_from_slice(&addr.octets());
+        }
+    }
+    buf.push(0x80);
+    buf.push(14);
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "value length is at most 17 bytes"
+    )]
+    buf.push(value.len() as u8);
+    buf.extend_from_slice(&value);
 }
 
 /// Encode a prefix into MRT format: length byte then ceil(len/8) prefix bytes.
@@ -993,6 +1045,203 @@ mod tests {
             &payload[7..7 + expected_nlri.len()],
             expected_nlri.as_slice()
         );
+    }
+
+    /// Walk a serialized BGP attribute block and return the value bytes
+    /// of the first attribute matching `type_code`. Used by the
+    /// MRT-reduced-form regression tests below.
+    fn find_attribute_value(attrs: &[u8], type_code: u8) -> Option<&[u8]> {
+        let mut offset = 0;
+        while offset + 2 <= attrs.len() {
+            let flags = attrs[offset];
+            let tc = attrs[offset + 1];
+            let extended = (flags & 0x10) != 0;
+            let (len, header_len) = if extended {
+                if offset + 4 > attrs.len() {
+                    return None;
+                }
+                (
+                    u16::from_be_bytes([attrs[offset + 2], attrs[offset + 3]]) as usize,
+                    4,
+                )
+            } else {
+                if offset + 3 > attrs.len() {
+                    return None;
+                }
+                (attrs[offset + 2] as usize, 3)
+            };
+            let value_start = offset + header_len;
+            let value_end = value_start + len;
+            if value_end > attrs.len() {
+                return None;
+            }
+            if tc == type_code {
+                return Some(&attrs[value_start..value_end]);
+            }
+            offset = value_end;
+        }
+        None
+    }
+
+    /// Locate the encoded `MP_REACH_NLRI` (type 14) value bytes inside
+    /// the single RIB entry of an EVPN `RIB_GENERIC` record.
+    fn evpn_rib_generic_mp_reach_value(data: &[u8]) -> Vec<u8> {
+        let rib_offset = find_rib_generic(data).expect("RIB_GENERIC must be present");
+        let payload = &data[rib_offset + 12..];
+        // Walk: seq(4) + afi(2) + safi(1) + nlri(var) + entry_count(2) + entry.
+        let nlri_start = 7;
+        // EVPN NLRI = route_type(1) + length(1) + body(length) — peek the
+        // length byte to skip past it without re-decoding the whole thing.
+        let nlri_body_len = payload[nlri_start + 1] as usize;
+        let nlri_end = nlri_start + 2 + nlri_body_len;
+        let entry_start = nlri_end + 2; // skip entry_count
+        // Entry header: peer_index(2) + originated_time(4) + attr_len(2).
+        let attr_len_offset = entry_start + 6;
+        let attr_len =
+            u16::from_be_bytes([payload[attr_len_offset], payload[attr_len_offset + 1]]) as usize;
+        let attrs_start = attr_len_offset + 2;
+        let attrs = &payload[attrs_start..attrs_start + attr_len];
+        find_attribute_value(attrs, 14)
+            .expect("MP_REACH_NLRI must be present in EVPN RIB entry")
+            .to_vec()
+    }
+
+    /// RFC 6396 §4.3.4: `MP_REACH_NLRI` inside an MRT RIB entry must
+    /// carry only NH-Len + NH bytes. AFI/SAFI/Reserved/NLRI must be
+    /// omitted because the RIB entry header already encodes them.
+    /// Regression for the EVPN export path.
+    #[test]
+    fn evpn_rib_entry_mp_reach_is_mrt_reduced_form() {
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let next_hop = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 99));
+        let peer = make_peer(peer_addr, 65002);
+        let route = make_evpn_macip(peer_addr, next_hop);
+
+        let data = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[],
+            std::slice::from_ref(&route),
+            1_700_000_000,
+        )
+        .unwrap();
+
+        let mp_value = evpn_rib_generic_mp_reach_value(&data);
+        // Reduced form: 1-byte NH-Len + NH octets, nothing else.
+        assert_eq!(
+            mp_value.len(),
+            5,
+            "EVPN MP_REACH must be 5 bytes (NH-Len=4 + 4-byte IPv4 NH); got {} bytes",
+            mp_value.len()
+        );
+        assert_eq!(mp_value[0], 4, "NH-Len byte must equal 4 for IPv4 NH");
+        assert_eq!(
+            &mp_value[1..5],
+            &[10, 0, 0, 99],
+            "NH bytes must equal the route's next-hop"
+        );
+    }
+
+    /// Same regression for IPv6 unicast — `MP_REACH` in MRT RIB entries
+    /// must be reduced form, not the BGP UPDATE form. Pre-existing
+    /// codepath but never byte-level asserted before.
+    #[test]
+    fn ipv6_unicast_rib_entry_mp_reach_is_mrt_reduced_form() {
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = make_peer(peer_addr, 65001);
+        let nh = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1);
+        let route = make_route(
+            Prefix::V6(Ipv6Prefix {
+                addr: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                len: 32,
+            }),
+            peer_addr,
+            IpAddr::V6(nh),
+        );
+
+        let data = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[route],
+            &[],
+            1_700_000_000,
+        )
+        .unwrap();
+
+        // Walk past PEER_INDEX_TABLE to the RIB_IPV6_UNICAST record.
+        let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let rib_offset = 12 + first_len;
+        let payload = &data[rib_offset + 12..];
+        // Payload: seq(4) + prefix_len(1) + prefix_bytes(ceil(32/8)=4) +
+        // entry_count(2) + entry.
+        let entry_start = 4 + 1 + 4 + 2;
+        let attr_len_offset = entry_start + 6;
+        let attr_len =
+            u16::from_be_bytes([payload[attr_len_offset], payload[attr_len_offset + 1]]) as usize;
+        let attrs = &payload[attr_len_offset + 2..attr_len_offset + 2 + attr_len];
+        let mp_value = find_attribute_value(attrs, 14).expect("MP_REACH must be present");
+
+        assert_eq!(
+            mp_value.len(),
+            17,
+            "IPv6 MP_REACH must be 17 bytes (NH-Len=16 + 16-byte IPv6 NH); got {}",
+            mp_value.len()
+        );
+        assert_eq!(mp_value[0], 16, "NH-Len must equal 16 for IPv6 NH");
+        assert_eq!(
+            &mp_value[1..17],
+            &nh.octets(),
+            "NH bytes must equal the route's IPv6 next-hop"
+        );
+    }
+
+    /// RFC 8950: IPv4 NLRI carried in an `MP_REACH_NLRI` with an IPv6
+    /// next-hop. The MRT encoding still uses the reduced form — the
+    /// `RIB_IPV4_UNICAST` record header carries the prefix, the
+    /// attribute carries only NH-Len + NH.
+    #[test]
+    fn rfc8950_ipv4_with_ipv6_nh_mp_reach_is_mrt_reduced_form() {
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let peer = make_peer(peer_addr, 65001);
+        let nh = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 99);
+        let route = make_route(
+            Prefix::V4(Ipv4Prefix {
+                addr: Ipv4Addr::new(203, 0, 113, 0),
+                len: 24,
+            }),
+            peer_addr,
+            IpAddr::V6(nh),
+        );
+
+        let data = encode_snapshot(
+            Ipv4Addr::new(1, 2, 3, 4),
+            &[peer],
+            &[route],
+            &[],
+            1_700_000_000,
+        )
+        .unwrap();
+
+        let first_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        let rib_offset = 12 + first_len;
+        let payload = &data[rib_offset + 12..];
+        // RIB_IPV4_UNICAST payload: seq(4) + prefix_len(1) +
+        // prefix_bytes(ceil(24/8)=3) + entry_count(2) + entry.
+        let entry_start = 4 + 1 + 3 + 2;
+        let attr_len_offset = entry_start + 6;
+        let attr_len =
+            u16::from_be_bytes([payload[attr_len_offset], payload[attr_len_offset + 1]]) as usize;
+        let attrs = &payload[attr_len_offset + 2..attr_len_offset + 2 + attr_len];
+        let mp_value = find_attribute_value(attrs, 14).expect("MP_REACH must be present");
+
+        assert_eq!(
+            mp_value.len(),
+            17,
+            "RFC 8950 MP_REACH must be 17 bytes (NH-Len=16 + 16-byte IPv6 NH); got {}",
+            mp_value.len()
+        );
+        assert_eq!(mp_value[0], 16);
+        assert_eq!(&mp_value[1..17], &nh.octets());
     }
 
     #[test]
