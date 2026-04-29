@@ -99,12 +99,28 @@ impl Config {
                 .expect("validated in Config::load")
                 .parse()
                 .expect("validated in Config::load");
+            let tls = match (
+                cfg.tls_cert_file.as_ref(),
+                cfg.tls_key_file.as_ref(),
+                cfg.tls_client_ca_file.as_ref(),
+            ) {
+                (Some(cert), Some(key), Some(ca)) => Some(GrpcTlsPaths {
+                    cert_file: PathBuf::from(cert),
+                    key_file: PathBuf::from(key),
+                    client_ca_file: PathBuf::from(ca),
+                }),
+                // Partial TLS config rejected at Config::load via
+                // validate_grpc_tls_config(); the all-None and
+                // any-partial cases both resolve to no-TLS here.
+                _ => None,
+            };
             listeners.push(GrpcListener::Tcp {
                 addr,
                 access_mode: cfg
                     .access_mode
                     .map_or(GrpcAccessMode::ReadWrite, Into::into),
                 token_file: cfg.token_file.as_ref().map(PathBuf::from),
+                tls,
             });
         }
         if let Some(cfg) = uds {
@@ -581,6 +597,7 @@ pub enum GrpcListener {
         addr: SocketAddr,
         access_mode: GrpcAccessMode,
         token_file: Option<PathBuf>,
+        tls: Option<GrpcTlsPaths>,
     },
     Uds {
         path: PathBuf,
@@ -588,6 +605,20 @@ pub enum GrpcListener {
         access_mode: GrpcAccessMode,
         token_file: Option<PathBuf>,
     },
+}
+
+/// PEM file paths for native gRPC mTLS on a TCP listener. All three
+/// fields are required together — there is no "TLS-without-mTLS"
+/// half-mode.
+#[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field-name-postfix repetition mirrors the TOML schema (tls_cert_file / tls_key_file / tls_client_ca_file); operators read TOML, so dropping the suffix here would diverge from the user-facing config keys"
+)]
+pub struct GrpcTlsPaths {
+    pub cert_file: PathBuf,
+    pub key_file: PathBuf,
+    pub client_ca_file: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

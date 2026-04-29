@@ -287,6 +287,7 @@ fn grpc_tcp_listener_parses_when_enabled() {
             addr: "127.0.0.1:50051".parse().unwrap(),
             access_mode: GrpcAccessMode::ReadWrite,
             token_file: None,
+            tls: None,
         }]
     );
 }
@@ -304,6 +305,7 @@ fn grpc_listener_access_mode_parses() {
             addr: "127.0.0.1:50051".parse().unwrap(),
             access_mode: GrpcAccessMode::ReadOnly,
             token_file: None,
+            tls: None,
         }]
     );
 }
@@ -316,6 +318,47 @@ fn grpc_uds_relative_path_rejected() {
     );
     let err = parse(&toml_str).unwrap_err();
     assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
+}
+
+#[test]
+fn grpc_tls_partial_config_rejected() {
+    // Only cert_file set — must reject because mTLS requires all three.
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = \"/tmp/cert.pem\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
+
+    // cert + key but no client CA — still partial.
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = \"/tmp/cert.pem\"\ntls_key_file = \"/tmp/key.pem\"\n",
+        valid_toml()
+    );
+    let err = parse(&toml_str).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidGrpcConfig { .. }));
+}
+
+#[test]
+fn grpc_tls_full_config_accepted() {
+    // All three TLS files set together — should parse cleanly. We
+    // don't read the files at parse time, so the paths can be
+    // non-existent placeholders here; the read happens at daemon
+    // start in resolve_grpc_listeners().
+    let toml_str = format!(
+        "{}\n[global.telemetry.grpc_tcp]\naddress = \"127.0.0.1:50051\"\ntls_cert_file = \"/tmp/cert.pem\"\ntls_key_file = \"/tmp/key.pem\"\ntls_client_ca_file = \"/tmp/ca.pem\"\n",
+        valid_toml()
+    );
+    let config = parse(&toml_str).unwrap();
+    let listeners = config.grpc_listeners();
+    assert_eq!(listeners.len(), 1);
+    let GrpcListener::Tcp { tls, .. } = &listeners[0] else {
+        panic!("expected Tcp listener");
+    };
+    assert!(
+        tls.is_some(),
+        "tls config must be populated when all three files are set"
+    );
 }
 
 #[test]

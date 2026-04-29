@@ -136,6 +136,15 @@ fn load_grpc_token(path: &Path) -> Result<String, String> {
     Ok(token)
 }
 
+fn load_grpc_pem(path: &Path, label: &str) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("failed to read gRPC {label} file {}: {e}", path.display()))?;
+    if bytes.is_empty() {
+        return Err(format!("gRPC {label} file {} is empty", path.display()));
+    }
+    Ok(bytes)
+}
+
 fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, String> {
     config
         .grpc_listeners()
@@ -145,11 +154,27 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 addr,
                 access_mode,
                 token_file,
-            } => Ok(GrpcListenerConfig {
-                endpoint: ListenerEndpoint::Tcp(addr),
-                access_mode: access_mode.into(),
-                auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
-            }),
+                tls,
+            } => {
+                let tls_params = tls
+                    .map(|paths| {
+                        Ok::<_, String>(rustbgpd_api::server::TlsParams {
+                            cert_pem: load_grpc_pem(&paths.cert_file, "tls_cert_file")?,
+                            key_pem: load_grpc_pem(&paths.key_file, "tls_key_file")?,
+                            client_ca_pem: load_grpc_pem(
+                                &paths.client_ca_file,
+                                "tls_client_ca_file",
+                            )?,
+                        })
+                    })
+                    .transpose()?;
+                Ok(GrpcListenerConfig {
+                    endpoint: ListenerEndpoint::Tcp(addr),
+                    access_mode: access_mode.into(),
+                    auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+                    tls: tls_params,
+                })
+            }
             GrpcListener::Uds {
                 path,
                 mode,
@@ -159,6 +184,7 @@ fn resolve_grpc_listeners(config: &Config) -> Result<Vec<GrpcListenerConfig>, St
                 endpoint: ListenerEndpoint::Uds { path, mode },
                 access_mode: access_mode.into(),
                 auth_token: token_file.as_deref().map(load_grpc_token).transpose()?,
+                tls: None,
             }),
         })
         .collect()

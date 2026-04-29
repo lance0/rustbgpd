@@ -67,6 +67,22 @@ impl Config {
                     reason: format!("invalid grpc_tcp.address {addr:?}: {e}"),
                 })?;
             validate_grpc_token_file(cfg.token_file.as_deref(), "grpc_tcp.token_file")?;
+            // mTLS: all three of cert / key / client_ca must be set
+            // together, or none. Partial config rejected.
+            let tls_set = [
+                cfg.tls_cert_file.as_deref().is_some(),
+                cfg.tls_key_file.as_deref().is_some(),
+                cfg.tls_client_ca_file.as_deref().is_some(),
+            ];
+            let tls_count = tls_set.iter().filter(|b| **b).count();
+            if tls_count != 0 && tls_count != 3 {
+                return Err(ConfigError::InvalidGrpcConfig {
+                    reason: "grpc_tcp.tls_cert_file, .tls_key_file, and \
+                             .tls_client_ca_file must all be set together \
+                             (rustbgpd does not support TLS without mTLS)"
+                        .to_string(),
+                });
+            }
         }
 
         if let Some(cfg) = uds {

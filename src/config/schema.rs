@@ -179,6 +179,16 @@ pub struct GrpcTcpListenerConfig {
     pub address: Option<String>,
     pub access_mode: Option<GrpcAccessModeConfig>,
     pub token_file: Option<String>,
+    /// Server certificate (PEM file path). Required to enable mTLS.
+    pub tls_cert_file: Option<String>,
+    /// Server private key (PEM file path). Required when `tls_cert_file`
+    /// is set.
+    pub tls_key_file: Option<String>,
+    /// CA certificate(s) (PEM file path) used to verify client
+    /// certificates. Required when `tls_cert_file` is set — rustbgpd
+    /// always enforces client-cert auth when TLS is on (no
+    /// "TLS-without-mTLS" half-mode).
+    pub tls_client_ca_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

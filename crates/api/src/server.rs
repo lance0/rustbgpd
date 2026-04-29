@@ -55,6 +55,23 @@ pub struct ListenerConfig {
     pub endpoint: ListenerEndpoint,
     pub access_mode: AccessMode,
     pub auth_token: Option<String>,
+    /// Optional native mTLS for TCP listeners. The server presents
+    /// `cert_pem` and accepts client connections that present a
+    /// certificate signed by `client_ca_pem`. Ignored on UDS
+    /// endpoints — file-system permissions are the auth surface there.
+    pub tls: Option<TlsParams>,
+}
+
+/// PEM-encoded TLS material for a gRPC listener (server identity +
+/// client-authentication CA root). Loaded from disk by the daemon
+/// before the listener spawns; storing the bytes inline rather than
+/// the paths means a config reload that changes the path doesn't
+/// silently keep using stale material.
+#[derive(Clone, Debug)]
+pub struct TlsParams {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+    pub client_ca_pem: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +229,7 @@ async fn run_listener(
                 addr,
                 listener.access_mode,
                 listener.auth_token,
+                listener.tls,
                 rib_tx,
                 rib_query_tx,
                 peer_mgr_tx,
@@ -256,6 +274,7 @@ async fn run_tcp_listener(
     addr: SocketAddr,
     access_mode: AccessMode,
     auth_token: Option<String>,
+    tls: Option<TlsParams>,
     rib_tx: mpsc::Sender<RibUpdate>,
     rib_query_tx: mpsc::Sender<RibUpdate>,
     peer_mgr_tx: mpsc::Sender<PeerManagerCommand>,
@@ -273,10 +292,22 @@ async fn run_tcp_listener(
         %addr,
         access_mode = ?access_mode,
         auth_enabled = auth_token.is_some(),
+        tls_enabled = tls.is_some(),
         "starting gRPC TCP listener"
     );
     let interceptor = AuthInterceptor::new(auth_token);
-    Server::builder()
+    let mut builder = Server::builder();
+    if let Some(tls) = tls {
+        let identity = tonic::transport::Identity::from_pem(&tls.cert_pem, &tls.key_pem);
+        let client_ca = tonic::transport::Certificate::from_pem(&tls.client_ca_pem);
+        let tls_cfg = tonic::transport::ServerTlsConfig::new()
+            .identity(identity)
+            .client_ca_root(client_ca);
+        builder = builder
+            .tls_config(tls_cfg)
+            .map_err(|e| format!("TCP listener {addr} TLS config invalid: {e}"))?;
+    }
+    builder
         .add_service(RibServiceServer::with_interceptor(
             RibService::new(rib_query_tx.clone()),
             interceptor.clone(),
