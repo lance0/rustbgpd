@@ -158,6 +158,7 @@ impl RibManager {
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
             route_type: explain.route_type,
+            evpn_route_type: None,
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
@@ -909,6 +910,7 @@ impl RibManager {
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(candidate.origin_type)),
+                evpn_route_type: None,
                 local_pref: candidate.local_pref_attr(),
                 med: candidate.med_attr(),
             };
@@ -1030,6 +1032,7 @@ impl RibManager {
             peer_asn: target_peer_asn,
             peer_group: target_peer_group,
             route_type: Some(route_type(best.origin_type)),
+            evpn_route_type: None,
             local_pref: best.local_pref_attr(),
             med: best.med_attr(),
         };
@@ -1161,6 +1164,7 @@ impl RibManager {
                     peer_asn: target_peer_asn,
                     peer_group: target_peer_group,
                     route_type: Some(route_type(best.origin_type)),
+                    evpn_route_type: None,
                     local_pref: best.local_pref_attr(),
                     med: best.med_attr(),
                 };
@@ -1186,7 +1190,7 @@ impl RibManager {
     ///
     /// Phase 1: policy uses a placeholder `0.0.0.0/0` prefix; RT / community
     /// matching works through the existing `RouteContext` fields.
-    #[expect(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn stage_evpn_routes(
         loc_rib: &LocRib,
         rib_out: &AdjRibOut,
@@ -1295,6 +1299,7 @@ impl RibManager {
                 peer_asn: target_peer_asn,
                 peer_group: target_peer_group,
                 route_type: Some(route_type(best.origin_type)),
+                evpn_route_type: Some(best.route_type()),
                 local_pref: best.local_pref_attr(),
                 med: best.med_attr(),
             };

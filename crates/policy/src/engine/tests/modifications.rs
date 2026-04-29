@@ -16,6 +16,7 @@ fn evaluate_returns_modifications() {
             match_as_path: None,
             match_neighbor_set: None,
             match_route_type: None,
+            match_evpn_route_type: None,
             match_rpki_validation: None,
             match_aspa_validation: None,
             match_as_path_length_ge: None,

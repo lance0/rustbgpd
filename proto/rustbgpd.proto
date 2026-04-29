@@ -327,6 +327,9 @@ message PolicyStatement {
   optional uint32 match_med_le = 21;
   optional string match_next_hop = 22;
   optional string match_aspa_validation = 23;
+  // RFC 7432 / RFC 9136 EVPN route type match (1-5). u32 wire-shape because
+  // proto3 lacks u8; only the low byte is consumed. 0 / unset = no match.
+  optional uint32 match_evpn_route_type = 24;
 }
 
 message AsPathPrepend {

@@ -448,6 +448,7 @@ impl PeerSession {
                     peer_asn: policy_peer_asn,
                     peer_group: self.config.peer_group.as_deref(),
                     route_type: policy_route_type,
+                    evpn_route_type: None,
                     local_pref: policy_local_pref,
                     med: policy_med,
                 };
@@ -554,6 +555,7 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                evpn_route_type: None,
                                 local_pref: policy_local_pref,
                                 med: policy_med,
                             };
@@ -608,6 +610,7 @@ impl PeerSession {
                                 peer_asn: policy_peer_asn,
                                 peer_group: self.config.peer_group.as_deref(),
                                 route_type: policy_route_type,
+                                evpn_route_type: Some(route.route_type()),
                                 local_pref: policy_local_pref,
                                 med: policy_med,
                             };
@@ -659,6 +662,7 @@ impl PeerSession {
                             peer_asn: policy_peer_asn,
                             peer_group: self.config.peer_group.as_deref(),
                             route_type: policy_route_type,
+                            evpn_route_type: None,
                             local_pref: policy_local_pref,
                             med: policy_med,
                         };

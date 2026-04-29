@@ -199,6 +199,7 @@ fn parse_policy_statements(
             && match_as_path.is_none()
             && match_neighbor_set.is_none()
             && match_route_type.is_none()
+            && e.match_evpn_route_type.is_none()
             && e.match_as_path_length_ge.is_none()
             && e.match_as_path_length_le.is_none()
             && e.match_local_pref_ge.is_none()
@@ -226,6 +227,7 @@ fn parse_policy_statements(
             match_as_path,
             match_neighbor_set,
             match_route_type,
+            match_evpn_route_type: e.match_evpn_route_type,
             match_rpki_validation,
             match_aspa_validation,
             match_as_path_length_ge: e.match_as_path_length_ge,

@@ -28,6 +28,7 @@ fn input_statement_to_proto(statement: &PolicyStatementDefinition) -> proto::Pol
         match_as_path: statement.match_as_path.clone(),
         match_neighbor_set: statement.match_neighbor_set.clone(),
         match_route_type: statement.match_route_type.clone(),
+        match_evpn_route_type: statement.match_evpn_route_type.map(u32::from),
         match_as_path_length_ge: statement.match_as_path_length_ge,
         match_as_path_length_le: statement.match_as_path_length_le,
         match_local_pref_ge: statement.match_local_pref_ge,

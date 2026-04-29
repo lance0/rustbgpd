@@ -8,6 +8,7 @@ mod as_path_length;
 mod aspath_regex;
 mod chain;
 mod community;
+mod evpn_route_type;
 mod large_community;
 mod modifications;
 mod peer_context;
@@ -48,6 +49,7 @@ fn ctx<'a>(
         peer_asn: None,
         peer_group: None,
         route_type: None,
+        evpn_route_type: None,
         local_pref: None,
         med: None,
     }
@@ -117,6 +119,7 @@ fn stmt(
         match_as_path: None,
         match_neighbor_set: None,
         match_route_type: None,
+        match_evpn_route_type: None,
         match_rpki_validation: None,
         match_aspa_validation: None,
         match_as_path_length_ge: None,

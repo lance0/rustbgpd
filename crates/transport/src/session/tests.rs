@@ -1204,6 +1204,10 @@ async fn route_server_client_ipv6_preserves_next_hop() {
 
 /// Import policy is applied before `RoutesReceived` reaches the RIB.
 /// Denied routes are filtered locally in transport and never forwarded.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear test scaffold + many fields per PolicyStatement; splitting hurts readability"
+)]
 #[tokio::test]
 async fn import_policy_denied_routes_do_not_reach_rib() {
     // Create a session with import policy that denies 198.51.100.0/24
@@ -1239,6 +1243,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
             match_as_path: None,
             match_neighbor_set: None,
             match_route_type: None,
+            match_evpn_route_type: None,
             match_rpki_validation: None,
             match_aspa_validation: None,
             match_as_path_length_ge: None,
@@ -1354,6 +1359,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_as_path: None,
                 match_neighbor_set: None,
                 match_route_type: None,
+                match_evpn_route_type: None,
                 match_rpki_validation: None,
                 match_aspa_validation: None,
                 match_as_path_length_ge: None,
@@ -1377,6 +1383,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_as_path: None,
                 match_neighbor_set: None,
                 match_route_type: None,
+                match_evpn_route_type: None,
                 match_rpki_validation: None,
                 match_aspa_validation: None,
                 match_as_path_length_ge: None,
@@ -1403,6 +1410,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
                 match_as_path: Some(rustbgpd_policy::AsPathRegex::new("_65002_").unwrap()),
                 match_neighbor_set: None,
                 match_route_type: None,
+                match_evpn_route_type: None,
                 match_rpki_validation: None,
                 match_aspa_validation: None,
                 match_as_path_length_ge: None,
@@ -1522,6 +1530,7 @@ async fn update_import_policy_applies_to_future_updates() {
             match_as_path: None,
             match_neighbor_set: None,
             match_route_type: None,
+            match_evpn_route_type: None,
             match_rpki_validation: None,
             match_aspa_validation: None,
             match_as_path_length_ge: None,
@@ -1638,6 +1647,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
             match_as_path: None,
             match_neighbor_set: None,
             match_route_type: None,
+            match_evpn_route_type: None,
             match_rpki_validation: None,
             match_aspa_validation: None,
             match_as_path_length_ge: None,
@@ -1758,6 +1768,7 @@ async fn import_policy_match_next_hop_filters_route() {
             match_as_path: None,
             match_neighbor_set: None,
             match_route_type: None,
+            match_evpn_route_type: None,
             match_rpki_validation: None,
             match_aspa_validation: None,
             match_as_path_length_ge: None,
@@ -2234,6 +2245,7 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
             match_as_path: None,
             match_neighbor_set: None,
             match_route_type: None,
+            match_evpn_route_type: None,
             match_rpki_validation: Some(rustbgpd_wire::RpkiValidation::Invalid),
             match_aspa_validation: None,
             match_as_path_length_ge: None,
@@ -2368,6 +2380,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
             match_as_path: None,
             match_neighbor_set: None,
             match_route_type: None,
+            match_evpn_route_type: None,
             match_rpki_validation: None,
             match_aspa_validation: Some(rustbgpd_wire::AspaValidation::Invalid),
             match_as_path_length_ge: None,

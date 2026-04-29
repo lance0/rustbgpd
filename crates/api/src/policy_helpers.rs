@@ -45,6 +45,15 @@ pub(crate) fn proto_statement_to_input(
         })
         .transpose()?;
 
+    // EVPN route types are 1..=5 today (RFC 7432 + RFC 9136); reserve
+    // headroom for RFC 9251 6/7/8 by accepting up to 0xFF without an
+    // upper-bound check. Reject only outright type-mismatch (>u8).
+    let match_evpn_route_type = statement
+        .match_evpn_route_type
+        .map(u8::try_from)
+        .transpose()
+        .map_err(|_| Status::invalid_argument("match_evpn_route_type exceeds u8 range"))?;
+
     Ok(PolicyStatementDefinition {
         action: statement.action,
         prefix: statement.prefix,
@@ -54,6 +63,7 @@ pub(crate) fn proto_statement_to_input(
         match_as_path: statement.match_as_path,
         match_neighbor_set: statement.match_neighbor_set,
         match_route_type: statement.match_route_type,
+        match_evpn_route_type,
         match_as_path_length_ge: statement.match_as_path_length_ge,
         match_as_path_length_le: statement.match_as_path_length_le,
         match_local_pref_ge: statement.match_local_pref_ge,

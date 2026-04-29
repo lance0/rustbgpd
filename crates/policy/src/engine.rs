@@ -74,6 +74,11 @@ pub struct RouteContext<'a> {
     pub peer_group: Option<&'a str>,
     /// Route source type.
     pub route_type: Option<RouteType>,
+    /// EVPN route type (RFC 7432 §7) when the route is an EVPN NLRI:
+    /// 1=EAD per-ES/per-EVI, 2=MAC/IP, 3=IMET, 4=ES, 5=IP Prefix
+    /// (RFC 9136). `None` for non-EVPN routes — `match_evpn_route_type`
+    /// never matches non-EVPN traffic.
+    pub evpn_route_type: Option<u8>,
     /// Explicit `LOCAL_PREF` attribute value.
     pub local_pref: Option<u32>,
     /// Explicit MED attribute value.
@@ -497,6 +502,11 @@ pub struct PolicyStatement {
     pub match_neighbor_set: Option<NeighborSetMatch>,
     /// Route source type match criterion.
     pub match_route_type: Option<RouteType>,
+    /// EVPN route type (RFC 7432 §7 / RFC 9136) match criterion. Only
+    /// matches EVPN NLRIs; non-EVPN routes are filtered out when this
+    /// is set. Operators previously had to filter EVPN by RT or
+    /// community match; this is the route-type-keyed shortcut.
+    pub match_evpn_route_type: Option<u8>,
     /// RPKI validation state match criterion (RFC 6811).
     pub match_rpki_validation: Option<RpkiValidation>,
     /// ASPA path verification state match criterion.
@@ -552,6 +562,11 @@ impl PolicyStatement {
                 .is_some_and(|candidate| candidate == route_type)
         });
 
+        let evpn_route_type_ok = self.match_evpn_route_type.is_none_or(|expected| {
+            ctx.evpn_route_type
+                .is_some_and(|candidate| candidate == expected)
+        });
+
         let rpki_ok = self
             .match_rpki_validation
             .is_none_or(|v| v == ctx.validation_state);
@@ -590,6 +605,7 @@ impl PolicyStatement {
             && aspath_ok
             && neighbor_set_ok
             && route_type_ok
+            && evpn_route_type_ok
             && rpki_ok
             && aspa_ok
             && aspath_len_ok

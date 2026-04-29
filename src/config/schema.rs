@@ -383,6 +383,11 @@ pub struct PolicyStatementConfig {
     pub match_neighbor_set: Option<String>,
     /// Route source type to match: `"local"`, `"internal"`, or `"external"`.
     pub match_route_type: Option<String>,
+    /// EVPN route type to match (RFC 7432 §7 / RFC 9136). Numeric: 1
+    /// (EAD per-ES/per-EVI), 2 (MAC/IP), 3 (IMET), 4 (Ethernet Segment),
+    /// 5 (IP Prefix). `None` means no constraint; non-EVPN routes never
+    /// match a set value.
+    pub match_evpn_route_type: Option<u8>,
     /// Minimum `AS_PATH` length (inclusive) to match.
     pub match_as_path_length_ge: Option<u32>,
     /// Maximum `AS_PATH` length (inclusive) to match.
