@@ -199,9 +199,9 @@ pub fn synthesize_attributes(route: &Route) -> Vec<PathAttribute> {
 /// `MP_REACH_NLRI` carrying the next-hop only — the EVPN NLRI itself
 /// rides in the `RIB_GENERIC` record header per RFC 6396 §4.3.5, not
 /// in the attribute. The attribute's NLRI/AFI/SAFI fields are dropped
-/// when the entry is serialized via [`encode_mrt_rib_attributes`],
-/// which rewrites `MP_REACH_NLRI` to the RFC 6396 §4.3.4 reduced form
-/// (NH-Len + NH bytes only).
+/// when the entry is serialized by the internal MRT RIB-attribute
+/// encoder, which rewrites `MP_REACH_NLRI` to the RFC 6396 §4.3.4
+/// reduced form (NH-Len + NH bytes only).
 #[must_use]
 pub fn synthesize_evpn_attributes(route: &EvpnRibRoute) -> Vec<PathAttribute> {
     let mut attrs = (*route.attributes).clone();

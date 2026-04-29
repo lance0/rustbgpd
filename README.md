@@ -273,12 +273,12 @@ control-plane deployments where you are comfortable with an evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.8.0) |
+| **Maturity** | Public alpha (v0.11.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | Kernel FIB integration, EVPN VTEP role (RR role works), VPNv4/v6, Confederation, native gRPC TLS, TCP-AO |
+| **Not yet supported** | Kernel FIB integration, EVPN VTEP role (RR role works), VPNv4/v6, Confederation, TCP-AO |
 | **Tests** | 1245 workspace tests, fuzz targets, 27 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator |
 
 ## Documentation

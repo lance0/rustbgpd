@@ -106,14 +106,17 @@ this document is reference / long-tail.
   `rustbgpd --diff` shows raw peer-group changes; should resolve
   inheritance and surface which neighbors are *effectively* impacted.
   Companion to SIGHUP policy/peer-group reconciliation.
-- [x] **Native gRPC mTLS** (post-v0.10.0) — TCP listeners terminate
+- [x] **Native gRPC mTLS** (v0.11.0) — TCP listeners terminate
   TLS in-process via tonic + rustls/ring. `tls_cert_file`,
   `tls_key_file`, and `tls_client_ca_file` are all required together
   on `[global.telemetry.grpc_tcp]`; partial config is rejected at
-  `Config::load`. No "TLS-without-mTLS" half-mode — server identity
-  + client-cert verification land together. Closes the audit-prep
-  item; UDS listeners are unchanged (file-system permissions remain
-  their auth surface).
+  `Config::load`, and the three PEM files are read at config-load /
+  `--check` time so missing, unreadable, empty, non-PEM, or
+  wrong-kind material fails before the daemon ever starts. No
+  "TLS-without-mTLS" half-mode — server identity + client-cert
+  verification land together. Closes the audit-prep item; UDS
+  listeners are unchanged (file-system permissions remain their
+  auth surface).
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
@@ -133,8 +136,9 @@ this document is reference / long-tail.
 - [x] **EVPN Route Reflector Phase 1** (v0.9.0) — RFC 7432 RR role, all 5 route types, M29-M33 interop
 - [x] **ADR-0051 writer-task split** (v0.10.0) — closes the +46-min `GetHealth` wedge under sustained churn; validated on 1h + 4h + 12h M33 soaks
 - [x] **BMP `bmp_*_total` Prometheus counters** (v0.10.0) — 4 counters cover source / collector / replay / control-event drops
-- [x] **EVPN BMP + MRT export** (post-v0.10.0) — RouteMonitoring already flowed; MRT now emits `RIB_GENERIC` for EVPN
-- [x] **`EvpnRibRoute` payload+key refactor** (post-v0.10.0) — drops cached key, identity derived on demand
+- [x] **EVPN BMP + MRT export** (v0.11.0) — RouteMonitoring already flowed; MRT now emits `RIB_GENERIC` for EVPN with `MP_REACH_NLRI` in RFC 6396 §4.3.4 reduced form
+- [x] **`EvpnRibRoute` payload+key refactor** (v0.11.0) — drops cached key, identity derived on demand
+- [x] **IPv6 link-local next-hop preserved end-to-end** (v0.11.0) — 32-byte `MP_REACH_NLRI` next-hops (RFC 4760 §3 / RFC 2545) round-trip through wire codec, RIB, and MRT exports; closes the long-standing "link-local discarded" KNOWN_ISSUES limitation. `rustbgpd-wire` 0.7.0 → 0.8.0 (breaking — adds `link_local_next_hop` field to `MpReachNlri`).
 
 ### P0–P2.5 — Complete
 
@@ -203,7 +207,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
 - [x] **gRPC listener split** — each configured gRPC listener can now run in `read_only` or `read_write` mode, allowing monitoring/query exposure without exposing mutating control-plane RPCs
 - [x] **Optional Prometheus listener** — `prometheus_addr` is now optional; omit it to skip the metrics HTTP server while still collecting metrics for gRPC health and internal counters
-- [x] **Native gRPC mTLS** (post-v0.10.0) — TCP listeners terminate TLS in-process via tonic + rustls/ring. See "Next Up — Pre-v1.0 Polish" entry above for the config surface and the partial-config rejection rule.
+- [x] **Native gRPC mTLS** (v0.11.0) — TCP listeners terminate TLS in-process via tonic + rustls/ring. See "Next Up — Pre-v1.0 Polish" entry above for the config surface and the partial-config rejection rule.
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 - [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
 - [x] **Validation snapshot delivery to transport sessions** — `match_rpki_validation` and `match_aspa_validation` now work in import policy. `ValidationSnapshot` (VRP + ASPA tables) delivered to transport sessions via `tokio::sync::watch` channel. Each session borrows the latest immutable snapshot and evaluates import policy against it. RIB-side revalidation remains the correctness backstop. Config rejection for import validation matches removed.
@@ -237,8 +241,8 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [ ] **EVPN Phase 4 — Adjacent standards** — PBB-EVPN (RFC 7623), EVPN-MVPN integration (RFC 9251, Route Types 6/7/8), MPLS encapsulation, Add-Path for EVPN (RFC 9252). Service-provider EVPN use cases.
 - [ ] **EVPN polish + observability gaps** (low-priority, Phase 1 known limitations):
   - [x] Type 5 (IP Prefix) interop test against FRR (M30b, `tests/interop/m30b-evpn-type5-frr.clab.yml`) — single-VTEP origination from FRR vrf1 / L3VNI 100; rustbgpd RR decodes the Type 5 NLRI and surfaces RD, prefix, next-hop, VNI label, RT extended community, and VXLAN encap via `ListEvpnRoutes`. Withdrawal validated. RR-reflection of Type 5 (2-VTEP topology, ORIGINATOR_ID + CLUSTER_LIST asserts) tracked as M30c.
-  - [x] **`match_evpn_route_type` policy clause** (post-v0.10.0) — `match_evpn_route_type: u8` on `PolicyStatement` filters EVPN by RFC 7432/§9136 route type (1-5; non-EVPN never matches). Wired through TOML config, gRPC `PolicyStatement` (proto field 24), and the EVPN evaluation sites in `crates/transport/src/session/inbound.rs` + `crates/rib/src/manager/distribution.rs::stage_evpn_routes`.
-  - [x] **EVPN BMP export and MRT dump integration** (post-v0.10.0) — BMP `RouteMonitoring` already flows for EVPN at the raw-PDU emit site (no AFI/SAFI gate; pinned by `inbound_evpn_update_emits_bmp_route_monitoring` regression test). MRT `TABLE_DUMP_V2` now emits `RIB_GENERIC` (subtype 6, RFC 6396 §4.3.5) records with AFI 25 / SAFI 70 for every Adj-RIB-In EVPN route. Type 2 + Type 5 round-trip tests assert the wire shape. ADR-0044 carries the encoding choice.
+  - [x] **`match_evpn_route_type` policy clause** (v0.11.0) — `match_evpn_route_type: u8` on `PolicyStatement` filters EVPN by RFC 7432/§9136 route type (1-5; non-EVPN never matches). Wired through TOML config, gRPC `PolicyStatement` (proto field 24), and the EVPN evaluation sites in `crates/transport/src/session/inbound.rs` + `crates/rib/src/manager/distribution.rs::stage_evpn_routes`.
+  - [x] **EVPN BMP export and MRT dump integration** (v0.11.0) — BMP `RouteMonitoring` already flows for EVPN at the raw-PDU emit site (no AFI/SAFI gate; pinned by `inbound_evpn_update_emits_bmp_route_monitoring` regression test). MRT `TABLE_DUMP_V2` now emits `RIB_GENERIC` (subtype 6, RFC 6396 §4.3.5) records with AFI 25 / SAFI 70 for every Adj-RIB-In EVPN route. Type 2 + Type 5 round-trip tests assert the wire shape. ADR-0044 carries the encoding choice.
   - GR / LLGR interop harness (kill / restart / measure) — unit tests cover the EVPN GR pipeline; FRR-vs-rustbgpd kill-and-recover interop is not in the M29-M33 set.
   - [x] **M33 soak harness** — `tests/soak/run-m33-soak.sh` extends M33 to arbitrary durations (default 24h, `SOAK_SEC` override for sub-hour smokes), samples cgroup RSS + Prometheus gauges every minute into `samples.csv`, and runs a stdlib-only Python analyzer that gates on memory slope, peak RSS, session flaps, drop deltas, gRPC health continuity, and process-restart detection (counter monotonicity). The first runs surfaced ADR-0051 — see "Sustained-churn writer-task split" below — and `tests/soak/runs/20260427T172938Z/` is the post-fix reproducer of record (drops 613→1, slope 58.5→12.6 MB/h, GetHealth always responsive). Still open: a 24h soak with the writer-split build to confirm the +49-min wedge transition is the only saturation event under continuous load.
   - [x] **`EvpnRibRoute` payload + key redundancy** — landed post-v0.10.0. The cached `EvpnRouteKey` field was removed from `EvpnRibRoute`; identity is now derived on demand via `EvpnRibRoute::key()` (one-line wrapper around `EvpnRoute::key()`, which is O(1) and allocation-free). Adding RFC 9251 Route Types 6-8 will only need new arms in `EvpnRoute::key()` rather than parallel synchronization at every construction site.
