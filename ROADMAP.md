@@ -106,9 +106,14 @@ this document is reference / long-tail.
   `rustbgpd --diff` shows raw peer-group changes; should resolve
   inheritance and surface which neighbors are *effectively* impacted.
   Companion to SIGHUP policy/peer-group reconciliation.
-- [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for
-  operators who don't want an Envoy/nginx sidecar. The first thing
-  the security audit will flag.
+- [x] **Native gRPC mTLS** (post-v0.10.0) — TCP listeners terminate
+  TLS in-process via tonic + rustls/ring. `tls_cert_file`,
+  `tls_key_file`, and `tls_client_ca_file` are all required together
+  on `[global.telemetry.grpc_tcp]`; partial config is rejected at
+  `Config::load`. No "TLS-without-mTLS" half-mode — server identity
+  + client-cert verification land together. Closes the audit-prep
+  item; UDS listeners are unchanged (file-system permissions remain
+  their auth surface).
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
@@ -198,7 +203,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
 - [x] **gRPC listener split** — each configured gRPC listener can now run in `read_only` or `read_write` mode, allowing monitoring/query exposure without exposing mutating control-plane RPCs
 - [x] **Optional Prometheus listener** — `prometheus_addr` is now optional; omit it to skip the metrics HTTP server while still collecting metrics for gRPC health and internal counters
-- [ ] **Native gRPC mTLS** — terminate TLS inside the daemon for operators who do not want an Envoy/nginx sidecar
+- [x] **Native gRPC mTLS** (post-v0.10.0) — TCP listeners terminate TLS in-process via tonic + rustls/ring. See "Next Up — Pre-v1.0 Polish" entry above for the config surface and the partial-config rejection rule.
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
 - [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
 - [x] **Validation snapshot delivery to transport sessions** — `match_rpki_validation` and `match_aspa_validation` now work in import policy. `ValidationSnapshot` (VRP + ASPA tables) delivered to transport sessions via `tokio::sync::watch` channel. Each session borrows the latest immutable snapshot and evaluates import policy against it. RIB-side revalidation remains the correctness backstop. Config rejection for import validation matches removed.

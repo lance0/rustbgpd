@@ -7,6 +7,14 @@ resolved.
 
 ## Resolved
 
+- **Native gRPC mTLS (resolved).** TCP listeners terminate TLS
+  in-process via tonic + rustls/ring. Configure via three TOML keys
+  on `[global.telemetry.grpc_tcp]`: `tls_cert_file` (server identity),
+  `tls_key_file` (server private key), `tls_client_ca_file` (CA used
+  to verify client certificates). All three are required together —
+  partial config is rejected at config load. UDS listeners stay
+  file-system-permission-authenticated, unchanged.
+
 - **BMP drop / replay Prometheus counters (resolved).** Four new
   `bmp_*` counters surface what was previously only `tracing::warn!`
   output: `bmp_source_drops_total{peer, reason}` covers the
@@ -54,10 +62,6 @@ resolved.
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does
   not reject LOCAL_PREF from eBGP peers because session type (iBGP vs
   eBGP) is not yet fully distinguished. Will be enforced post-v1.
-- **No native gRPC TLS.** The daemon defaults to a local Unix domain
-  socket and supports optional bearer-token auth on configured listeners,
-  but TCP listeners are still plaintext. Use local UDS access or an
-  mTLS proxy for remote management. Native TLS/mTLS is post-v1 scope.
 - **SIGHUP reconcile is not transactional.** Reload now logs structured
   per-peer failures and keeps the prior in-memory config snapshot when
   reconciliation is incomplete, but runtime peer changes applied before a

@@ -11,6 +11,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Native gRPC mTLS for TCP listeners.** Operators who don't want an
+  Envoy/nginx sidecar can now terminate TLS in-process via tonic +
+  rustls/ring. Three new TOML keys under
+  `[global.telemetry.grpc_tcp]`: `tls_cert_file` (server identity),
+  `tls_key_file` (server private key), `tls_client_ca_file` (CA used
+  to verify client certs). All three are required together — partial
+  config is rejected at `Config::load` with `InvalidGrpcConfig`.
+  Server identity + client-cert verification land together; there is
+  no "TLS-without-mTLS" half-mode. UDS listeners are unchanged
+  (file-system permissions remain their auth surface). Closes the
+  KNOWN_ISSUES "No native gRPC TLS" limitation and the audit-prep
+  ROADMAP item.
+
 - **Chaos stress-test sweep** (`tests/chaos/`). Three short-running
   harnesses that bounce specific subsystems hard and assert
   post-storm health, complementing the M33 long-running soak:
