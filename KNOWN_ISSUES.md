@@ -88,12 +88,16 @@ resolved.
 
 - **SIGHUP reconcile is not transactional.** Reload now applies
   named-policy / neighbor-set / peer-group / global-chain edits in
-  addition to `[[neighbors]]` deltas, and logs structured failures
-  with the prior in-memory config snapshot pinned when reconciliation
-  is incomplete — but runtime peer changes applied before a later
-  failure are not rolled back automatically. Operators inspecting a
-  failed reload should re-apply the prior TOML to converge runtime
-  state, or restart.
+  addition to `[[neighbors]]` deltas. On any step failure, reload
+  halts and returns the partial-state snapshot — the daemon's
+  in-memory config matches what the peer manager actually applied,
+  rather than the previous behaviour of lying that the prior config
+  is still in effect. The operator converges by editing the failing
+  TOML and reloading again; the next diff runs against the half-
+  applied state, so only the remaining steps fire. True rollback
+  (replaying reverse commands to undo successful steps) is still
+  out of scope — peer-group changes flap sessions, and unwinding
+  flap them again.
 - **Inline `policy.import` / `policy.export` reload requires restart.**
   Named-definition / chain edits hot-reload now (post-v0.11.0), but
   the legacy inline global-fallback statements at `[policy.import]` /

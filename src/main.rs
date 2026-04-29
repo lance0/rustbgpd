@@ -37,7 +37,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use rustbgpd_api::peer_types::{PeerManagerCommand, PeerManagerNeighborConfig};
+use rustbgpd_api::peer_types::{ConfigEvent, PeerManagerCommand, PeerManagerNeighborConfig};
 use rustbgpd_api::server::{
     AccessMode as GrpcServerAccessMode, ListenerConfig as GrpcListenerConfig, ListenerEndpoint,
     ServeConfig,
@@ -539,24 +539,49 @@ fn main() {
         };
         let diff = config::diff_config(&config, &new_config);
         if json_output {
+            // The JSON schema mirrors the human `print_config_diff`
+            // bucketing exactly:
+            //   reload_applied  — neighbors + peer-groups + named
+            //                     policies/sets/chains (everything
+            //                     SIGHUP now applies) + the
+            //                     per-neighbor effective-impact view
+            //   restart_required — `[global]`, `[rpki]`, `[bmp]`,
+            //                      `[mrt]`, plus inline `policy.import`
+            //                      / `policy.export` (no runtime swap
+            //                      surface yet)
+            //   informational    — empty (kept on the schema as a
+            //                      stable bucket so consumers don't
+            //                      break when the predicate is true
+            //                      again in a future release)
+            // Automation that classifies hot-applied edits by which
+            // bucket they land in stays correct after this release.
             let output = serde_json::json!({
                 "has_actionable_changes": diff.has_actionable_changes(),
                 "has_informational_changes": diff.has_informational_changes(),
                 "has_any_changes": diff.has_any_changes(),
                 "reload_applied": {
                     "neighbors": &diff.neighbors,
+                    "peer_groups": &diff.peer_groups,
+                    "peer_group_details": &diff.peer_group_details,
+                    "policy_definitions_added": &diff.policy.definitions_added,
+                    "policy_definitions_removed": &diff.policy.definitions_removed,
+                    "policy_definitions_changed": &diff.policy.definitions_changed,
+                    "neighbor_sets_added": &diff.policy.neighbor_sets_added,
+                    "neighbor_sets_removed": &diff.policy.neighbor_sets_removed,
+                    "neighbor_sets_changed": &diff.policy.neighbor_sets_changed,
+                    "import_chain_changed": diff.policy.import_chain_changed,
+                    "export_chain_changed": diff.policy.export_chain_changed,
+                    "effective_neighbor_impact": &diff.effective_neighbor_impact,
                 },
                 "restart_required": {
                     "global_changed": diff.global_changed,
                     "rpki_changed": diff.rpki_changed,
                     "bmp_changed": diff.bmp_changed,
                     "mrt_changed": diff.mrt_changed,
+                    "inline_policy_import_changed": diff.policy.import_changed,
+                    "inline_policy_export_changed": diff.policy.export_changed,
                 },
-                "informational": {
-                    "peer_groups": &diff.peer_groups,
-                    "peer_group_details": &diff.peer_group_details,
-                    "policy": &diff.policy,
-                },
+                "informational": serde_json::Value::Object(serde_json::Map::new()),
             });
             match serde_json::to_string_pretty(&output) {
                 Ok(json) => println!("{json}"),
@@ -1411,139 +1436,162 @@ async fn reload_config(
         );
     }
 
-    let mut step_failures: Vec<ReloadStepFailure> = Vec::new();
+    // working_config is the honest snapshot of runtime state. We
+    // start from `current` and apply each ConfigEvent locally as the
+    // matching peer-manager command succeeds. On any failure we
+    // halt and return Some(working_config) — the caller's in-memory
+    // config then matches what's actually live on the peer manager,
+    // instead of pretending the prior config is in effect when half
+    // of it has already been mutated. Returning the partial state is
+    // honest at the cost of leaving the operator with a half-applied
+    // reload; they re-edit the failing TOML and reload again to
+    // converge. Captured under "SIGHUP reconcile is not transactional"
+    // in KNOWN_ISSUES — this fix moves the snapshot from "lying about
+    // prior state" to "matching live state", which is the practical
+    // step short of true rollback.
+    let mut working_config = current.clone();
 
-    // 1. Neighbor sets (no upstream dependencies) — add then change.
-    for name in &policy_diff.neighbor_sets_added {
-        if let Some(definition) = policy_admin::named_neighbor_set_from_config(&new_config, name) {
-            let cmd_name = name.clone();
-            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
-                name: cmd_name,
-                definition,
-                reply,
-            })
-            .await;
-            if let Err(error) = res {
-                step_failures.push(ReloadStepFailure {
-                    bucket: "neighbor_set.add",
-                    target: name.clone(),
-                    error,
-                });
-            } else {
-                info!(name = %name, "neighbor_set added");
+    // 1. Neighbor sets (no upstream dependencies) — add and change.
+    for name in policy_diff
+        .neighbor_sets_added
+        .iter()
+        .chain(policy_diff.neighbor_sets_changed.iter())
+    {
+        let Some(definition) = policy_admin::named_neighbor_set_from_config(&new_config, name)
+        else {
+            continue;
+        };
+        let bucket = if policy_diff.neighbor_sets_added.contains(name) {
+            "neighbor_set.add"
+        } else {
+            "neighbor_set.change"
+        };
+        let event = ConfigEvent::SetNeighborSet {
+            name: name.clone(),
+            definition: definition.clone(),
+        };
+        let cmd_name = name.clone();
+        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
+            name: cmd_name,
+            definition,
+            reply,
+        })
+        .await
+        {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!(name = %name, %bucket, "reload: neighbor_set applied");
             }
-        }
-    }
-    for name in &policy_diff.neighbor_sets_changed {
-        if let Some(definition) = policy_admin::named_neighbor_set_from_config(&new_config, name) {
-            let cmd_name = name.clone();
-            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetNeighborSet {
-                name: cmd_name,
-                definition,
-                reply,
-            })
-            .await;
-            if let Err(error) = res {
-                step_failures.push(ReloadStepFailure {
-                    bucket: "neighbor_set.change",
-                    target: name.clone(),
-                    error,
-                });
-            } else {
-                info!(name = %name, "neighbor_set changed");
-            }
-        }
-    }
-
-    // 2. Named policy definitions (may reference neighbor_sets) — add then change.
-    for name in &policy_diff.definitions_added {
-        if let Some(definition) = policy_admin::named_policy_from_config(&new_config, name) {
-            let cmd_name = name.clone();
-            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
-                name: cmd_name,
-                definition,
-                reply,
-            })
-            .await;
-            if let Err(error) = res {
-                step_failures.push(ReloadStepFailure {
-                    bucket: "policy.add",
-                    target: name.clone(),
-                    error,
-                });
-            } else {
-                info!(name = %name, "policy added");
-            }
-        }
-    }
-    for name in &policy_diff.definitions_changed {
-        if let Some(definition) = policy_admin::named_policy_from_config(&new_config, name) {
-            let cmd_name = name.clone();
-            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
-                name: cmd_name,
-                definition,
-                reply,
-            })
-            .await;
-            if let Err(error) = res {
-                step_failures.push(ReloadStepFailure {
-                    bucket: "policy.change",
-                    target: name.clone(),
-                    error,
-                });
-            } else {
-                info!(name = %name, "policy changed");
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket,
+                        target: name.clone(),
+                        error,
+                    },
+                );
             }
         }
     }
 
-    // 3. Peer groups (may reference policies) — add then change.
-    for name in &peer_group_diff.added {
-        if let Some(definition) = policy_admin::named_peer_group_from_config(&new_config, name) {
-            let cmd_name = name.clone();
-            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
-                name: cmd_name,
-                definition,
-                reply,
-            })
-            .await;
-            if let Err(error) = res {
-                step_failures.push(ReloadStepFailure {
-                    bucket: "peer_group.add",
-                    target: name.clone(),
-                    error,
-                });
-            } else {
-                info!(name = %name, "peer_group added");
+    // 2. Named policy definitions (may reference neighbor_sets).
+    for name in policy_diff
+        .definitions_added
+        .iter()
+        .chain(policy_diff.definitions_changed.iter())
+    {
+        let Some(definition) = policy_admin::named_policy_from_config(&new_config, name) else {
+            continue;
+        };
+        let bucket = if policy_diff.definitions_added.contains(name) {
+            "policy.add"
+        } else {
+            "policy.change"
+        };
+        let event = ConfigEvent::SetPolicy {
+            name: name.clone(),
+            definition: definition.clone(),
+        };
+        let cmd_name = name.clone();
+        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPolicy {
+            name: cmd_name,
+            definition,
+            reply,
+        })
+        .await
+        {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!(name = %name, %bucket, "reload: policy applied");
             }
-        }
-    }
-    for name in &peer_group_diff.changed {
-        if let Some(definition) = policy_admin::named_peer_group_from_config(&new_config, name) {
-            let cmd_name = name.clone();
-            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
-                name: cmd_name,
-                definition,
-                reply,
-            })
-            .await;
-            if let Err(error) = res {
-                step_failures.push(ReloadStepFailure {
-                    bucket: "peer_group.change",
-                    target: name.clone(),
-                    error,
-                });
-            } else {
-                info!(name = %name, "peer_group changed");
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket,
+                        target: name.clone(),
+                        error,
+                    },
+                );
             }
         }
     }
 
-    // 4. Global named chains (reference named policies — must come after
-    //    any new definitions are registered). Each chain is set as a
-    //    full replacement; clear when the new config has none.
+    // 3. Peer groups (may reference policies).
+    for name in peer_group_diff
+        .added
+        .iter()
+        .chain(peer_group_diff.changed.iter())
+    {
+        let Some(definition) = policy_admin::named_peer_group_from_config(&new_config, name) else {
+            continue;
+        };
+        let bucket = if peer_group_diff.added.contains(name) {
+            "peer_group.add"
+        } else {
+            "peer_group.change"
+        };
+        let event = ConfigEvent::SetPeerGroup {
+            name: name.clone(),
+            definition: definition.clone(),
+        };
+        let cmd_name = name.clone();
+        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetPeerGroup {
+            name: cmd_name,
+            definition,
+            reply,
+        })
+        .await
+        {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!(name = %name, %bucket, "reload: peer_group applied");
+            }
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket,
+                        target: name.clone(),
+                        error,
+                    },
+                );
+            }
+        }
+    }
+
+    // 4. Global named chains (reference named policies — must come
+    //    after any new definitions are registered).
     if policy_diff.import_chain_changed {
         let chain = new_config.policy.import_chain.clone();
+        let event = if chain.is_empty() {
+            ConfigEvent::ClearGlobalImportChain
+        } else {
+            ConfigEvent::SetGlobalImportChain {
+                policy_names: chain.clone(),
+            }
+        };
         let res = if chain.is_empty() {
             send_pm_step(peer_mgr_tx, |reply| {
                 PeerManagerCommand::ClearGlobalImportChain { reply }
@@ -1558,18 +1606,32 @@ async fn reload_config(
             })
             .await
         };
-        if let Err(error) = res {
-            step_failures.push(ReloadStepFailure {
-                bucket: "global_chain.import",
-                target: String::new(),
-                error,
-            });
-        } else {
-            info!("global import chain updated");
+        match res {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!("reload: global import_chain applied");
+            }
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket: "global_chain.import",
+                        target: String::new(),
+                        error,
+                    },
+                );
+            }
         }
     }
     if policy_diff.export_chain_changed {
         let chain = new_config.policy.export_chain.clone();
+        let event = if chain.is_empty() {
+            ConfigEvent::ClearGlobalExportChain
+        } else {
+            ConfigEvent::SetGlobalExportChain {
+                policy_names: chain.clone(),
+            }
+        };
         let res = if chain.is_empty() {
             send_pm_step(peer_mgr_tx, |reply| {
                 PeerManagerCommand::ClearGlobalExportChain { reply }
@@ -1584,22 +1646,27 @@ async fn reload_config(
             })
             .await
         };
-        if let Err(error) = res {
-            step_failures.push(ReloadStepFailure {
-                bucket: "global_chain.export",
-                target: String::new(),
-                error,
-            });
-        } else {
-            info!("global export chain updated");
+        match res {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!("reload: global export_chain applied");
+            }
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket: "global_chain.export",
+                        target: String::new(),
+                        error,
+                    },
+                );
+            }
         }
     }
 
-    // 5. Neighbor reconciliation — only when neighbor list itself moved.
-    //    Steps 1–4 already reshaped runtime state for any policy /
-    //    peer-group edits that flow down to existing neighbors via
-    //    inheritance, so we can skip ReconcilePeers when only those
-    //    upstream sections changed.
+    // 5. Neighbor reconciliation. Only fires when the neighbor list
+    //    itself moved; steps 1–4 already reshaped runtime state for
+    //    inheritance-driven impact on existing neighbors.
     if !neighbors_unchanged {
         info!(
             added = diff.added.len(),
@@ -1633,7 +1700,7 @@ async fn reload_config(
             Ok(p) => p,
             Err(e) => {
                 error!(error = %e, "config reload failed — invalid policy in new config");
-                return None;
+                return Some(working_config);
             }
         };
         let peer_map: std::collections::HashMap<String, _> = peer_configs
@@ -1672,109 +1739,171 @@ async fn reload_config(
             })
             .await
         {
-            step_failures.push(ReloadStepFailure {
-                bucket: "neighbors.reconcile",
-                target: String::new(),
-                error: format!("send: {e}"),
-            });
-        } else {
-            match reply_rx.await {
-                Ok(reconcile) if reconcile.is_success() => {}
-                Ok(reconcile) => {
-                    for failure in &reconcile.failures {
-                        step_failures.push(ReloadStepFailure {
-                            bucket: "neighbors.reconcile",
-                            target: failure.address.to_string(),
-                            error: format!("{:?}: {}", failure.kind, failure.error),
-                        });
+            return halt_partial(
+                working_config,
+                ReloadStepFailure {
+                    bucket: "neighbors.reconcile",
+                    target: String::new(),
+                    error: format!("send: {e}"),
+                },
+            );
+        }
+        match reply_rx.await {
+            Ok(reconcile) if reconcile.is_success() => {
+                // Reconcile succeeded fully; mirror the neighbor list
+                // into working_config. Per-neighbor events would be
+                // more granular but ReconcilePeers is all-or-fail at
+                // the manager today, so a full snapshot copy is the
+                // honest representation.
+                working_config.neighbors = new_config.neighbors.clone();
+            }
+            Ok(reconcile) => {
+                // Reconcile partially failed. Working_config is left
+                // at pre-reconcile state — the manager applied some
+                // adds/removes/changes before the failure, so the
+                // honest snapshot is somewhere between, but we don't
+                // get per-op success info granular enough to
+                // reconstruct exactly what landed. Halt with the
+                // first listed reconcile failure so operators get a
+                // pointer; the manager's own current_config is the
+                // authoritative live state.
+                let first = if let Some(f) = reconcile.failures.first() {
+                    ReloadStepFailure {
+                        bucket: "neighbors.reconcile",
+                        target: f.address.to_string(),
+                        error: format!("{:?}: {}", f.kind, f.error),
                     }
-                }
-                Err(e) => {
-                    step_failures.push(ReloadStepFailure {
+                } else {
+                    ReloadStepFailure {
+                        bucket: "neighbors.reconcile",
+                        target: String::new(),
+                        error: "reconcile reported failure but no entries".to_string(),
+                    }
+                };
+                return halt_partial(working_config, first);
+            }
+            Err(e) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
                         bucket: "neighbors.reconcile",
                         target: String::new(),
                         error: format!("dropped reply: {e}"),
-                    });
-                }
+                    },
+                );
             }
         }
     }
 
     // 6. Removals in reverse-dependency order so `still referenced`
-    //    rejections don't fire transiently. Peer-group deletes have to
-    //    happen after the neighbor reconcile if any obsolete neighbors
+    //    rejections don't fire transiently. Peer-group deletes have
+    //    to happen after neighbor reconcile if any obsolete neighbors
     //    were members; same for policy / neighbor-set deletes vs
     //    peer-group deletes.
     for name in &peer_group_diff.removed {
+        let event = ConfigEvent::DeletePeerGroup { name: name.clone() };
         let cmd_name = name.clone();
-        let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeerGroup {
+        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePeerGroup {
             name: cmd_name,
             reply,
         })
-        .await;
-        if let Err(error) = res {
-            step_failures.push(ReloadStepFailure {
-                bucket: "peer_group.delete",
-                target: name.clone(),
-                error,
-            });
-        } else {
-            info!(name = %name, "peer_group removed");
+        .await
+        {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!(name = %name, "reload: peer_group removed");
+            }
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket: "peer_group.delete",
+                        target: name.clone(),
+                        error,
+                    },
+                );
+            }
         }
     }
     for name in &policy_diff.definitions_removed {
+        let event = ConfigEvent::DeletePolicy { name: name.clone() };
         let cmd_name = name.clone();
-        let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
+        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeletePolicy {
             name: cmd_name,
             reply,
         })
-        .await;
-        if let Err(error) = res {
-            step_failures.push(ReloadStepFailure {
-                bucket: "policy.delete",
-                target: name.clone(),
-                error,
-            });
-        } else {
-            info!(name = %name, "policy removed");
+        .await
+        {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!(name = %name, "reload: policy removed");
+            }
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket: "policy.delete",
+                        target: name.clone(),
+                        error,
+                    },
+                );
+            }
         }
     }
     for name in &policy_diff.neighbor_sets_removed {
+        let event = ConfigEvent::DeleteNeighborSet { name: name.clone() };
         let cmd_name = name.clone();
-        let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeleteNeighborSet {
+        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::DeleteNeighborSet {
             name: cmd_name,
             reply,
         })
-        .await;
-        if let Err(error) = res {
-            step_failures.push(ReloadStepFailure {
-                bucket: "neighbor_set.delete",
-                target: name.clone(),
-                error,
-            });
-        } else {
-            info!(name = %name, "neighbor_set removed");
+        .await
+        {
+            Ok(()) => {
+                let _ = apply_config_event(&mut working_config, &event);
+                info!(name = %name, "reload: neighbor_set removed");
+            }
+            Err(error) => {
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket: "neighbor_set.delete",
+                        target: name.clone(),
+                        error,
+                    },
+                );
+            }
         }
-    }
-
-    if !step_failures.is_empty() {
-        for failure in &step_failures {
-            warn!(
-                bucket = failure.bucket,
-                target = %failure.target,
-                error = %failure.error,
-                "config reload step failed"
-            );
-        }
-        error!(
-            failures = step_failures.len(),
-            "config reload incomplete — keeping current config"
-        );
-        return None;
     }
 
     info!("config reload complete");
-    Some(new_config)
+    Some(working_config)
+}
+
+/// Halt a SIGHUP reload at the first failed step. Logs the failure
+/// at error level and returns the partially-applied config snapshot
+/// so the caller's in-memory config tracks live runtime state
+/// instead of lying that the prior config is still in effect. The
+/// daemon converges by the operator fixing the failing TOML and
+/// reloading again — at that point the diff runs against the
+/// half-applied state and only the remaining steps fire.
+///
+/// Returned wrapped in `Option<Config>` so the call sites can use
+/// `return halt_partial(...)` directly inside `reload_config`,
+/// matching its `Option<Config>` return shape.
+#[expect(
+    clippy::needless_pass_by_value,
+    clippy::unnecessary_wraps,
+    reason = "owned ReloadStepFailure simplifies call sites that build the value inline; Option<Config> return matches reload_config's signature so call sites can `return halt_partial(...)` directly"
+)]
+fn halt_partial(working_config: Config, failure: ReloadStepFailure) -> Option<Config> {
+    error!(
+        bucket = failure.bucket,
+        target = %failure.target,
+        error = %failure.error,
+        "config reload halted at this step — runtime state matches the in-memory snapshot returned by reload (partial). Re-edit TOML and reload again to converge."
+    );
+    Some(working_config)
 }
 
 #[cfg(test)]
@@ -2232,6 +2361,224 @@ hold_time = 90
             tags.contains(&"DeletePolicy(old)".to_string()),
             "expected DeletePolicy(old) — saw {tags:?}"
         );
+    }
+
+    /// When a step early in the reload sequence succeeds and a later
+    /// step fails, reload returns a partial-state snapshot so the
+    /// daemon's in-memory config matches what the peer manager
+    /// actually applied — instead of the previous behaviour where it
+    /// returned `None` ("kept current") while the manager already had
+    /// half the new state in effect. `SetPolicy` lands, then
+    /// `ReconcilePeers` fails; the returned config must contain the
+    /// new policy but not the new neighbors.
+    #[tokio::test]
+    async fn reload_halts_on_failure_with_honest_partial_snapshot() {
+        use rustbgpd_api::peer_types::{ReconcileFailure, ReconcileFailureKind, ReconcileResult};
+
+        let initial_toml = baseline_toml().to_string();
+        let new_toml = format!(
+            "{baseline}\n[policy.definitions.block-private]\ndefault_action = \"deny\"\n\n[[neighbors]]\naddress = \"10.0.0.99\"\nremote_asn = 65099\nhold_time = 90\n",
+            baseline = baseline_toml()
+        );
+
+        let path = unique_temp_path("reload-halt-partial");
+        std::fs::write(&path, &initial_toml).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        std::fs::write(&path, &new_toml).unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel::<PeerManagerCommand>(32);
+        let mock = tokio::spawn(async move {
+            // Reply Ok to every non-reconcile command; reply with a
+            // reconcile failure to simulate a runtime rejection from
+            // the peer manager. Models a valid TOML that fails for
+            // an operational reason at the manager (port bind, TCP
+            // setup, MD5 key push, etc.).
+            while let Some(cmd) = peer_mgr_rx.recv().await {
+                match cmd {
+                    PeerManagerCommand::SetPolicy { reply, .. }
+                    | PeerManagerCommand::DeletePolicy { reply, .. }
+                    | PeerManagerCommand::SetNeighborSet { reply, .. }
+                    | PeerManagerCommand::DeleteNeighborSet { reply, .. }
+                    | PeerManagerCommand::SetPeerGroup { reply, .. }
+                    | PeerManagerCommand::DeletePeerGroup { reply, .. }
+                    | PeerManagerCommand::SetGlobalImportChain { reply, .. }
+                    | PeerManagerCommand::SetGlobalExportChain { reply, .. }
+                    | PeerManagerCommand::ClearGlobalImportChain { reply }
+                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerManagerCommand::ReconcilePeers { reply, .. } => {
+                        let result = ReconcileResult {
+                            failures: vec![ReconcileFailure {
+                                kind: ReconcileFailureKind::Add,
+                                address: "10.0.0.99".parse().unwrap(),
+                                error: "simulated reconcile failure".to_string(),
+                            }],
+                        };
+                        let _ = reply.send(result);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await;
+        drop(peer_mgr_tx);
+        let _ = mock.await;
+        std::fs::remove_file(&path).ok();
+
+        let working = returned.expect(
+            "halt-on-failure must return Some(working_config) so the daemon \
+             snapshot tracks live state instead of lying about prior config",
+        );
+        assert!(
+            working.policy.definitions.contains_key("block-private"),
+            "step that succeeded (SetPolicy) must be reflected in the returned snapshot"
+        );
+        assert!(
+            !working.neighbors.iter().any(|n| n.address == "10.0.0.99"),
+            "step that failed (ReconcilePeers) must NOT advance the snapshot"
+        );
+    }
+
+    /// Effective-impact must catch a *changed policy definition*
+    /// referenced via the global `import_chain`, even when the chain
+    /// list itself is unchanged. Regression for the reviewer's
+    /// transitive-reference finding: prior heuristic only flagged
+    /// changes when the chain list moved, missing the common edit
+    /// shape where operators tweak a definition in place.
+    #[test]
+    fn effective_impact_flags_global_chain_policy_definition_change() {
+        let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "permit"
+
+[policy]
+import_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+        let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "deny"
+
+[policy]
+import_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+"#;
+        let path_a = unique_temp_path("eff-impact-global-old");
+        let path_b = unique_temp_path("eff-impact-global-new");
+        std::fs::write(&path_a, old_toml).unwrap();
+        std::fs::write(&path_b, new_toml).unwrap();
+        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
+        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let diff = config::diff_config(&old, &new);
+        let impacted: Vec<_> = diff
+            .effective_neighbor_impact
+            .iter()
+            .map(|i| i.address.as_str())
+            .collect();
+        assert!(
+            impacted.contains(&"10.0.0.2"),
+            "neighbor must be flagged when a definition referenced via the unchanged global \
+             import_chain changes — got {impacted:?}"
+        );
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
+    }
+
+    /// Same shape but for a peer-group chain reference: a definition
+    /// changes; the peer-group's chain list is unchanged; the
+    /// peer-group record is unchanged. Members must still be flagged.
+    #[test]
+    fn effective_impact_flags_peer_group_chain_policy_definition_change() {
+        let old_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "permit"
+
+[peer_groups.ix]
+hold_time = 90
+import_policy_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ix"
+"#;
+        let new_toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.block-private]
+default_action = "deny"
+
+[peer_groups.ix]
+hold_time = 90
+import_policy_chain = ["block-private"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+peer_group = "ix"
+"#;
+        let path_a = unique_temp_path("eff-impact-pg-chain-old");
+        let path_b = unique_temp_path("eff-impact-pg-chain-new");
+        std::fs::write(&path_a, old_toml).unwrap();
+        std::fs::write(&path_b, new_toml).unwrap();
+        let old = Config::load_with_diagnostics(path_a.to_str().unwrap()).unwrap();
+        let new = Config::load_with_diagnostics(path_b.to_str().unwrap()).unwrap();
+        let diff = config::diff_config(&old, &new);
+        let impacted: Vec<_> = diff
+            .effective_neighbor_impact
+            .iter()
+            .map(|i| i.address.as_str())
+            .collect();
+        assert!(
+            impacted.contains(&"10.0.0.2"),
+            "neighbor must be flagged when a definition referenced via its peer-group's \
+             import_policy_chain changes — got {impacted:?}"
+        );
+        std::fs::remove_file(&path_a).ok();
+        std::fs::remove_file(&path_b).ok();
     }
 
     /// Effective neighbor impact view: when only a peer-group field

@@ -3,7 +3,7 @@ mod parse;
 mod schema;
 mod validation;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -959,44 +959,34 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
 }
 
 /// Walk neighbors that exist in both configs and surface those whose
-/// resolved effective config (peer-group inheritance + policy chain)
-/// would differ between old and new — even if their direct neighbor
-/// record is unchanged. This is the inheritance-driven impact view:
-/// "a peer-group / policy / neighbor-set edit upstream cascades to
-/// these specific neighbors when reload runs."
+/// resolved effective config (peer-group inheritance + policy chain
+/// resolution) differs between old and new — even when their direct
+/// `[[neighbors]]` record is unchanged. This is the inheritance-
+/// driven impact view: "an upstream peer-group / policy / neighbor-
+/// set edit cascades to these specific neighbors when reload runs."
 ///
-/// Reasons attached to each impacted neighbor are short strings
-/// suitable for `--diff` output and structured logging. Coarse but
-/// correct: lists every upstream change the neighbor *could* be
-/// affected by, without re-implementing the full chain resolver.
+/// Implementation: resolve each neighbor in both configs via
+/// `Config::resolve_neighbor` and compare the resolved `import_policy`
+/// / `export_policy` / `transport_config` directly. Catches the
+/// transitive cases the prior heuristic missed:
+///
+/// - A `policy.definitions.foo` edit when `foo` is referenced via
+///   the global `import_chain` (chain list itself unchanged).
+/// - A `policy.definitions.foo` edit when `foo` is referenced via a
+///   peer-group's chain (peer-group record otherwise unchanged).
+/// - A `neighbor_set` edit when the set is referenced by a policy
+///   that's referenced by a neighbor chain.
+///
+/// Resolution failure (invalid chain reference) is treated as "skip" —
+/// the load path already validates the new config, so failures here
+/// indicate a transient inconsistency we don't want to surface as
+/// effective impact.
 fn compute_effective_neighbor_impact(
     old: &Config,
     new: &Config,
-    peer_groups: &PeerGroupDiff,
-    policy: &PolicyDiff,
+    _peer_groups: &PeerGroupDiff,
+    _policy: &PolicyDiff,
 ) -> Vec<EffectiveNeighborImpact> {
-    let pg_changed: HashSet<&str> = peer_groups
-        .changed
-        .iter()
-        .map(String::as_str)
-        .chain(peer_groups.added.iter().map(String::as_str))
-        .collect();
-    let policy_changed: HashSet<&str> = policy
-        .definitions_changed
-        .iter()
-        .map(String::as_str)
-        .chain(policy.definitions_added.iter().map(String::as_str))
-        .chain(policy.definitions_removed.iter().map(String::as_str))
-        .collect();
-    let nset_changed: HashSet<&str> = policy
-        .neighbor_sets_changed
-        .iter()
-        .map(String::as_str)
-        .chain(policy.neighbor_sets_added.iter().map(String::as_str))
-        .chain(policy.neighbor_sets_removed.iter().map(String::as_str))
-        .collect();
-    let global_chain_changed = policy.import_chain_changed || policy.export_chain_changed;
-
     let new_by_addr: HashMap<&str, &Neighbor> = new
         .neighbors
         .iter()
@@ -1008,53 +998,45 @@ fn compute_effective_neighbor_impact(
         let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
             continue;
         };
+        let Ok(old_resolved) = old.resolve_neighbor(old_neighbor) else {
+            continue;
+        };
+        let Ok(new_resolved) = new.resolve_neighbor(new_neighbor) else {
+            continue;
+        };
+
+        // Compare resolved fields via `Debug` representation:
+        // `PolicyChain` and `TransportConfig` derive `Debug` but not
+        // `PartialEq` (the latter would require touching other
+        // crates). The debug output is deterministic enough for this
+        // diff-style equality check, since `resolve_neighbor` runs
+        // the same code path for both configs, the `Instant` field
+        // on `TransportConfig` is set per-process not per-resolve,
+        // and `PolicyChain.policies` is a `Vec` (stable order).
         let mut reasons: Vec<String> = Vec::new();
-
-        // Peer-group impact: either this neighbor's named peer group
-        // moved, or the neighbor was reassigned to a different (still-
-        // existing) peer group.
-        if old_neighbor.peer_group != new_neighbor.peer_group {
-            // Already shows up in the raw neighbor diff; skip here.
-        } else if let Some(name) = new_neighbor.peer_group.as_deref()
-            && pg_changed.contains(name)
+        if format!("{:?}", old_resolved.import_policy)
+            != format!("{:?}", new_resolved.import_policy)
         {
-            reasons.push(format!("peer_group {name:?} changed"));
+            reasons.push("import policy resolved differently".to_string());
         }
-
-        // Policy chain references — for both inline neighbor chains and
-        // peer-group-inherited chains. The chain field on Neighbor is
-        // the inline override; if the neighbor inherits from a peer
-        // group, the upstream peer-group change above already covered
-        // it (peer-group entries that reference the changed policy).
-        let neighbor_chain_refs = old_neighbor
-            .import_policy_chain
-            .iter()
-            .chain(old_neighbor.export_policy_chain.iter())
-            .chain(new_neighbor.import_policy_chain.iter())
-            .chain(new_neighbor.export_policy_chain.iter());
-        for name in neighbor_chain_refs {
-            if policy_changed.contains(name.as_str()) {
-                let entry = format!("policy {name:?} (referenced by neighbor chain) changed");
-                if !reasons.contains(&entry) {
-                    reasons.push(entry);
-                }
-            }
+        if format!("{:?}", old_resolved.export_policy)
+            != format!("{:?}", new_resolved.export_policy)
+        {
+            reasons.push("export policy resolved differently".to_string());
         }
-
-        // Global-chain impact: applies to every neighbor that doesn't
-        // have its own override. Approximate: surface the global-chain
-        // reason for any neighbor without an explicit chain override.
-        let has_neighbor_chain = !new_neighbor.import_policy_chain.is_empty()
-            || !new_neighbor.export_policy_chain.is_empty();
-        if global_chain_changed && !has_neighbor_chain {
-            reasons.push("global import/export chain changed".to_string());
+        if format!("{:?}", old_resolved.transport_config)
+            != format!("{:?}", new_resolved.transport_config)
+        {
+            reasons.push("transport config resolved differently".to_string());
         }
-
-        // Neighbor-set impact: any change to a neighbor_set referenced
-        // by any active policy could re-shape match results for this
-        // neighbor. Coarse — flag whenever any neighbor_set changed.
-        if !nset_changed.is_empty() {
-            reasons.push("referenced neighbor_set changed".to_string());
+        if old_resolved.peer_group != new_resolved.peer_group {
+            // Peer-group reassignment is already a raw neighbor change;
+            // surface it here too because the resolved chain almost
+            // certainly moved.
+            reasons.push(format!(
+                "peer_group resolved as {:?} (was {:?})",
+                new_resolved.peer_group, old_resolved.peer_group
+            ));
         }
 
         if !reasons.is_empty() {

@@ -23,10 +23,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is a single-shot command to the peer manager that goes through
   `apply_policy_change` / `apply_peer_group_change` — runtime
   effect (hot-applied policy chain, delete + re-add for peer-group
-  members) matches the existing gRPC API path. Failures from any
-  step are logged structured (bucket + target + error) and the
-  whole reload is rejected (in-memory snapshot pinned to the prior
-  state) so a partially-applied reload doesn't ship.
+  members) matches the existing gRPC API path. Reload halts at the
+  first step failure and returns a partial-state snapshot, so the
+  daemon's in-memory config tracks what the peer manager actually
+  applied instead of lying that the prior config is still in effect
+  — the operator fixes the failing TOML and reloads again to
+  converge against the half-applied state.
   *Limitation:* inline `policy.import` / `policy.export` (the
   legacy non-named global-fallback statements) still require a
   full restart — they're evaluated at session start, and the
@@ -37,15 +39,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Effective neighbor diff via peer-group resolution.**
   `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
-  neighbor "effective impact" view: when a peer-group, named
-  policy, neighbor-set, or global chain edit cascades down through
-  inheritance, every affected neighbor address is listed with the
-  upstream change(s) responsible. Operators editing a single
-  peer-group field can see at a glance which sessions get
-  re-resolved at reload, instead of only the raw peer-group diff.
-  Coarse-but-correct: lists every upstream change a neighbor
-  *could* be affected by without re-implementing the full chain
-  resolver.
+  neighbor "effective impact" view: every neighbor whose resolved
+  config (after peer-group inheritance and policy-chain resolution)
+  would move at reload is listed with the upstream change(s)
+  responsible. Implementation diffs `Config::resolve_neighbor` for
+  the old vs new config, so transitive references are caught: a
+  policy definition edit picked up via the global `import_chain`
+  (chain list itself unchanged) or via a peer-group's chain
+  (peer-group record unchanged) still flags every affected member.
 
 ### Changed
 
@@ -55,6 +56,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   block is gone. Inline `policy.import` / `policy.export` move to
   the existing "Restart-required" section with an explicit
   migration hint to named definitions + chains.
+
+- **`--diff --json` schema mirrors the human bucketing.** The JSON
+  output now includes peer-groups, peer-group field details, named
+  policy / neighbor-set / global-chain deltas, and the per-neighbor
+  effective-impact view under `reload_applied`; inline
+  `policy.import` / `policy.export` flags appear under
+  `restart_required`; the `informational` block is empty (kept on
+  the schema as a stable bucket so consumers don't break when it's
+  populated again in a future release). Automation classifying
+  hot-applied edits by which bucket they land in stays correct.
+
+- **`TransportConfig` now derives `Debug`.** Used by the new
+  effective-impact diff to compare resolved neighbor configs
+  via `format!("{:?}", ...)` without requiring a `PartialEq` impl
+  (which would mean touching every nested type — out of scope).
+  Cosmetic side benefit: tracing spans that include
+  `TransportConfig` now render readably.
 
 - **`rustbgpd-wire` 0.8.0 → 0.8.1 (patch).** Documentation-only
   refresh of `crates/wire/README.md` so the crates.io and docs.rs
