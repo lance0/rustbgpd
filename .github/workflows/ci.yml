@@ -5,6 +5,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Need history so the wire-readme freshness gate can diff
+          # against the previous commit / PR base.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -17,3 +21,35 @@ jobs:
       - run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+      - name: Wire crate README freshness gate
+        # Catches the common omission where someone bumps
+        # `crates/wire/Cargo.toml` version without revisiting
+        # `crates/wire/README.md`. The README is what crates.io and
+        # docs.rs render, so a stale RFC table or stale "Key types"
+        # list ships to every consumer of the published crate.
+        # If wire's version line moved in this diff, require any
+        # touch to its README. A whitespace-only edit is acceptable
+        # if the README really is current — the gate's purpose is to
+        # force a deliberate review, not to enforce content shape.
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          elif [ -n "${{ github.event.before }}" ] && \
+               [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            base="${{ github.event.before }}"
+          else
+            # Initial push of a new branch — nothing to diff against.
+            echo "no diff base; skipping"
+            exit 0
+          fi
+          if git diff "$base"...HEAD -- crates/wire/Cargo.toml \
+              | grep -qE '^\+version\s*='; then
+            if ! git diff "$base"...HEAD -- crates/wire/README.md \
+                | grep -qE '^[+-]'; then
+              echo "::error file=crates/wire/Cargo.toml::wire crate version was bumped but crates/wire/README.md was not touched. Update the RFC table / Key types / examples to reflect what's actually published, then re-push. (A whitespace-only edit is fine if the README really is current.)"
+              exit 1
+            fi
+            echo "wire bump + README touched — gate passed"
+          fi

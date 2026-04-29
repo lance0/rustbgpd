@@ -9,6 +9,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **`rustbgpd-wire` 0.8.0 → 0.8.1 (patch).** Documentation-only
+  refresh of `crates/wire/README.md` so the crates.io and docs.rs
+  rendering matches the actual published surface: adds RFC 1997,
+  2545, 2918, 4486, 6793, 7313, 7432, 7674, 8365, 9012, 9135, 9136
+  to the Supported RFCs table; lists `EvpnRoute` / `EvpnRouteKey`
+  under Key types; updates the header sentence to mention EVPN.
+  No source changes.
+
+### CI
+
+- **Wire crate README freshness gate.** `.github/workflows/ci.yml`
+  now fails if `crates/wire/Cargo.toml` version was bumped without
+  any touch to `crates/wire/README.md` in the same diff. Catches
+  the failure mode where a wire bump publishes with a stale RFC
+  table or stale Key types list. The gate is escapable with a
+  whitespace-only README edit — its purpose is a forcing function
+  for a deliberate review, not a content lint.
+
 ## [0.11.0] — 2026-04-29
 
 ### Added
