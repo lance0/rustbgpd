@@ -62,14 +62,38 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      - name: Extract CHANGELOG section for this tag
+        # Pull the matching `## [X.Y.Z]` block out of CHANGELOG.md so
+        # the release body shows the curated notes instead of the
+        # auto-generated commit list. Strips the heading line because
+        # the GitHub release page already shows the version. If no
+        # matching section exists, write a stub so the action still
+        # has a body to publish (and surface the gap at release time).
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { in_section=1; print; next }
+            in_section && /^## \[/ { exit }
+            in_section { print }
+          ' CHANGELOG.md | tail -n +2 > release-notes.md
+          if ! [ -s release-notes.md ]; then
+            echo "no \`## [$version]\` section found in CHANGELOG.md" \
+              > release-notes.md
+          fi
+          echo "--- release-notes.md ---"
+          cat release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: release-notes.md
           files: artifacts/*
