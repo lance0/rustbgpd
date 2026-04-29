@@ -568,6 +568,18 @@ fn main() {
 
 #[expect(clippy::too_many_lines)]
 async fn run<T>(mut config: Config, profiler: Option<T>) {
+    // Snapshot the gRPC listener config as it was at process start.
+    // The live TCP/UDS listeners bind once and are not rebuilt on
+    // SIGHUP; this snapshot is what they're actually serving. Reload
+    // compares the new declared config against THIS snapshot (not
+    // against the in-memory mutable `config`) so drift between
+    // declared listener config and live state stays visible across
+    // every reload, not just the first one. The runtime config is
+    // patched on reload to keep these two listener fields equal to
+    // the live state — no other reload semantics change.
+    let live_grpc_tcp = config.global.telemetry.grpc_tcp.clone();
+    let live_grpc_uds = config.global.telemetry.grpc_uds.clone();
+
     let start_time = tokio::time::Instant::now();
     let gr_restart_marker_path = config.gr_restart_marker_path();
     let local_gr_restart_until = match read_gr_restart_marker(&gr_restart_marker_path) {
@@ -1091,7 +1103,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             _ = sighup.recv() => {
                 info!("SIGHUP received, reloading configuration");
                 let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                if let Some(new_config) = reload_config(&path, &config, &peer_mgr_tx).await {
+                if let Some(new_config) = reload_config(
+                    &path,
+                    &config,
+                    live_grpc_tcp.as_ref(),
+                    live_grpc_uds.as_ref(),
+                    &peer_mgr_tx,
+                )
+                .await
+                {
                     // Sync persister's snapshot so future gRPC mutations apply
                     // to the reloaded config, not the stale startup config.
                     if let Some(ref mtx) = config_mutation_tx
@@ -1239,9 +1259,11 @@ fn build_peer_mgr_config(
 async fn reload_config(
     config_path: &str,
     current: &Config,
+    live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
+    live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
 ) -> Option<Config> {
-    let new_config = match Config::load_with_diagnostics(config_path) {
+    let mut new_config = match Config::load_with_diagnostics(config_path) {
         Ok(c) => c,
         Err(diagnostic) => {
             error!("{diagnostic}");
@@ -1263,25 +1285,35 @@ async fn reload_config(
         warn!("[mrt] changed — requires full restart to take effect");
     }
 
-    // Surface gRPC listener / TLS changes specifically. The generic
-    // "[global] changed" warn above covers them, but the security
-    // impact of stale or drifted TLS material is loud enough to
-    // deserve its own error-level call-out — operators rotating
-    // certs or adding mTLS need to know the live listener is still
-    // serving the prior security mode until the daemon is restarted.
-    if new_config.global.telemetry.grpc_tcp != current.global.telemetry.grpc_tcp {
+    // Surface gRPC listener / TLS changes specifically and pin the
+    // returned snapshot's listener fields back to what the live
+    // listener is actually serving. Two reasons we don't just warn
+    // and let the snapshot advance:
+    //   1. Without pinning, a SIGHUP that only touches grpc_tcp
+    //      moves the in-memory config to the new declared state.
+    //      The next reload then compares against the already-
+    //      updated snapshot and stops warning, even though the live
+    //      listener is still on the prior security mode (cert
+    //      rotation, plaintext-to-mTLS migration, etc.).
+    //   2. Drift detection should remain observable across every
+    //      reload until the daemon is actually restarted.
+    if new_config.global.telemetry.grpc_tcp.as_ref() != live_grpc_tcp {
         error!(
-            "[global.telemetry.grpc_tcp] changed (address / token / TLS): \
-             live listener is unchanged. Restart rustbgpd to apply. \
-             Adding, removing, or rotating tls_cert_file / tls_key_file / \
-             tls_client_ca_file does NOT take effect on SIGHUP."
+            "[global.telemetry.grpc_tcp] differs from the live listener \
+             (address / token / TLS): live listener is unchanged. \
+             Restart rustbgpd to apply. Adding, removing, or rotating \
+             tls_cert_file / tls_key_file / tls_client_ca_file does NOT \
+             take effect on SIGHUP."
         );
+        new_config.global.telemetry.grpc_tcp = live_grpc_tcp.cloned();
     }
-    if new_config.global.telemetry.grpc_uds != current.global.telemetry.grpc_uds {
+    if new_config.global.telemetry.grpc_uds.as_ref() != live_grpc_uds {
         error!(
-            "[global.telemetry.grpc_uds] changed (path / mode / token): \
-             live listener is unchanged. Restart rustbgpd to apply."
+            "[global.telemetry.grpc_uds] differs from the live listener \
+             (path / mode / token): live listener is unchanged. Restart \
+             rustbgpd to apply."
         );
+        new_config.global.telemetry.grpc_uds = live_grpc_uds.cloned();
     }
 
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
@@ -1424,6 +1456,107 @@ mod tests {
             .unwrap_or_else(|e| e.duration());
         assert!(diff < Duration::from_secs(1));
         remove_gr_restart_marker(&path).unwrap();
+    }
+
+    /// SIGHUP that adds mTLS to `grpc_tcp` must NOT advance the
+    /// in-memory config's `grpc_tcp` field — the live listener is
+    /// still serving the prior config (no listener rebind on
+    /// reload), so the runtime snapshot has to keep pointing at the
+    /// live state. Without this, future reloads compare against the
+    /// already-mutated snapshot and the drift error stops firing.
+    #[tokio::test]
+    async fn reload_pins_grpc_tcp_to_live_listener_snapshot() {
+        let path = unique_temp_path("reload-grpc-tcp-pin");
+
+        // Initial config: grpc_tcp present but plaintext (no TLS).
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(
+            live_grpc_tcp
+                .as_ref()
+                .is_some_and(|cfg| cfg.tls_cert_file.is_none()),
+            "initial listener must be plaintext"
+        );
+
+        // Operator overwrites the file with an mTLS-enabled config.
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+tls_cert_file = "/tmp/server.pem"
+tls_key_file = "/tmp/server.key"
+tls_client_ca_file = "/tmp/ca.pem"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when grpc_tcp drifts");
+
+        // The returned config's grpc_tcp MUST equal the live listener
+        // snapshot, NOT the new declared mTLS config. Otherwise a
+        // second reload would compare new declared vs already-updated
+        // snapshot and stop warning.
+        assert_eq!(
+            returned.global.telemetry.grpc_tcp, live_grpc_tcp,
+            "reload must pin grpc_tcp to the live listener snapshot until the daemon restarts"
+        );
+        assert!(
+            returned
+                .global
+                .telemetry
+                .grpc_tcp
+                .as_ref()
+                .is_some_and(|cfg| cfg.tls_cert_file.is_none()),
+            "returned grpc_tcp must NOT carry the newly declared TLS material"
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
