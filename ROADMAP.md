@@ -115,7 +115,7 @@ this document is reference / long-tail.
 - [ ] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
   GR recovery. Trivial to script on the existing M33 soak harness;
   closes four open P3.5 bullets.
-- [ ] **`match_evpn_route_type` policy clause** — operators currently
+- [x] **`match_evpn_route_type` policy clause** — operators currently
   filter EVPN by RT/community; route-type-keyed match is the natural
   ergonomics.
 
@@ -232,7 +232,7 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [ ] **EVPN Phase 4 — Adjacent standards** — PBB-EVPN (RFC 7623), EVPN-MVPN integration (RFC 9251, Route Types 6/7/8), MPLS encapsulation, Add-Path for EVPN (RFC 9252). Service-provider EVPN use cases.
 - [ ] **EVPN polish + observability gaps** (low-priority, Phase 1 known limitations):
   - [x] Type 5 (IP Prefix) interop test against FRR (M30b, `tests/interop/m30b-evpn-type5-frr.clab.yml`) — single-VTEP origination from FRR vrf1 / L3VNI 100; rustbgpd RR decodes the Type 5 NLRI and surfaces RD, prefix, next-hop, VNI label, RT extended community, and VXLAN encap via `ListEvpnRoutes`. Withdrawal validated. RR-reflection of Type 5 (2-VTEP topology, ORIGINATOR_ID + CLUSTER_LIST asserts) tracked as M30c.
-  - `match_evpn_route_type` policy clause — operators currently filter via RT or community matches; a route-type-keyed predicate would be ergonomic.
+  - [x] **`match_evpn_route_type` policy clause** (post-v0.10.0) — `match_evpn_route_type: u8` on `PolicyStatement` filters EVPN by RFC 7432/§9136 route type (1-5; non-EVPN never matches). Wired through TOML config, gRPC `PolicyStatement` (proto field 24), and the EVPN evaluation sites in `crates/transport/src/session/inbound.rs` + `crates/rib/src/manager/distribution.rs::stage_evpn_routes`.
   - [x] **EVPN BMP export and MRT dump integration** (post-v0.10.0) — BMP `RouteMonitoring` already flows for EVPN at the raw-PDU emit site (no AFI/SAFI gate; pinned by `inbound_evpn_update_emits_bmp_route_monitoring` regression test). MRT `TABLE_DUMP_V2` now emits `RIB_GENERIC` (subtype 6, RFC 6396 §4.3.5) records with AFI 25 / SAFI 70 for every Adj-RIB-In EVPN route. Type 2 + Type 5 round-trip tests assert the wire shape. ADR-0044 carries the encoding choice.
   - GR / LLGR interop harness (kill / restart / measure) — unit tests cover the EVPN GR pipeline; FRR-vs-rustbgpd kill-and-recover interop is not in the M29-M33 set.
   - [x] **M33 soak harness** — `tests/soak/run-m33-soak.sh` extends M33 to arbitrary durations (default 24h, `SOAK_SEC` override for sub-hour smokes), samples cgroup RSS + Prometheus gauges every minute into `samples.csv`, and runs a stdlib-only Python analyzer that gates on memory slope, peak RSS, session flaps, drop deltas, gRPC health continuity, and process-restart detection (counter monotonicity). The first runs surfaced ADR-0051 — see "Sustained-churn writer-task split" below — and `tests/soak/runs/20260427T172938Z/` is the post-fix reproducer of record (drops 613→1, slope 58.5→12.6 MB/h, GetHealth always responsive). Still open: a 24h soak with the writer-split build to confirm the +49-min wedge transition is the only saturation event under continuous load.

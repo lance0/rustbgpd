@@ -11,6 +11,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`match_evpn_route_type` policy clause.** New numeric match field
+  on `PolicyStatement` filters EVPN routes by RFC 7432 §7 / RFC 9136
+  route type: 1 (EAD per-ES/per-EVI), 2 (MAC/IP), 3 (IMET),
+  4 (Ethernet Segment), 5 (IP Prefix). `u8` leaves headroom for
+  RFC 9251 6/7/8 without bumping the proto/config schema.
+  `RouteContext.evpn_route_type` is `None` for non-EVPN traffic, so
+  a set match value never fires on unicast / FlowSpec — operators
+  can write EVPN-only deny statements without an extra
+  community/RT clause. Wired through TOML config, gRPC
+  `PolicyStatement` (proto field 24), and both EVPN policy
+  evaluation sites in transport (inbound) and the RIB manager
+  (`stage_evpn_routes` outbound). Closes the corresponding ROADMAP
+  Pre-v1.0 Polish bullet.
+
 - **EVPN routes in MRT `TABLE_DUMP_V2` snapshots.** Loc-RIB / Adj-RIB-In
   EVPN routes (AFI 25 / SAFI 70) are now emitted as `RIB_GENERIC`
   records (RFC 6396 §4.3.5, subtype 6) alongside the existing IPv4 /
