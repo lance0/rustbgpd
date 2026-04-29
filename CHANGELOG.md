@@ -34,6 +34,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   contract: a future refactor that quietly added a unicast-only
   family gate at the emit site would now fail at build time.
 
+### Testing
+
+- **12 h soak extends ADR-0051 writer-split validation.**
+  `tests/soak/runs/20260429T004656Z/` ran 12 h sustained 1 k-rps
+  EVPN churn against the post-v0.10.0 image with `verdict: clean`:
+  slope **+0.0094 MB/h** (essentially zero — the 4 h run's
+  -0.10 MB/h drift was within this noise band), 0 drops, 0 flaps,
+  0 gRPC health failures, no daemon restart, p99 RSS 85.10 MB,
+  4.10 M messages sent / 2.05 M received across 708 samples
+  (698 steady-state). Extends the v0.10.0 validation 3× past the
+  original +46-min wedge and ~5× past the 4 h reference run.
+
 ## [0.10.0] — 2026-04-28
 
 ### Added
