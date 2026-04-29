@@ -11,6 +11,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Chaos stress-test sweep** (`tests/chaos/`). Three short-running
+  harnesses that bounce specific subsystems hard and assert
+  post-storm health, complementing the M33 long-running soak:
+  - `chaos-flap-storm.sh` — `EnableNeighbor`/`DisableNeighbor` storm
+    against M33; verifies daemon stays responsive and memory growth
+    < 10 MB across N cycles.
+  - `chaos-grpc-churn.sh` — concurrent `AddNeighbor`/`DeleteNeighbor`/
+    `SoftResetIn` calls via `xargs -P` against 10.99.0.0/16 churn
+    IPs; verifies no deadlock (≥90 % response rate) and no
+    `GetHealth` probe failures.
+  - `chaos-gr-cycles.sh` — repeated GR cycles against an FRR peer
+    (M16 LLGR topology); verifies the RR's stale-sweep / clear-on-
+    reconnect lifecycle stays correct across N back-to-back cycles.
+  Each writes `tests/chaos/runs/<UTC-timestamp>/{driver.log, samples,
+  report.json}` with a clean / needs-attention verdict. Closes ROADMAP
+  P3.5 "Peer flap storms", "gRPC churn", "Repeated GR recovery".
+
 - **`match_evpn_route_type` policy clause.** New numeric match field
   on `PolicyStatement` filters EVPN routes by RFC 7432 §7 / RFC 9136
   route type: 1 (EAD per-ES/per-EVI), 2 (MAC/IP), 3 (IMET),

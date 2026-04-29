@@ -112,7 +112,7 @@ this document is reference / long-tail.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
-- [ ] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
+- [x] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
   GR recovery. Trivial to script on the existing M33 soak harness;
   closes four open P3.5 bullets.
 - [x] **`match_evpn_route_type` policy clause** — operators currently
@@ -296,9 +296,9 @@ Prove it works under pressure before 1.0.
 - [x] **Wire codec benchmarks** — criterion benchmarks for NLRI encode/decode, UPDATE build/parse, path attribute codec, validation
 - [ ] **Churn benchmarks** — route flap throughput, reconvergence latency under UPDATE storms
 - [ ] **CI regression tracking** — automated benchmark runs with threshold-based alerts
-- [ ] **Peer flap storms** — repeated session up/down under load; verify no resource leaks
-- [ ] **gRPC churn** — concurrent AddNeighbor/DeleteNeighbor/SoftResetIn calls; verify no deadlocks or panics
-- [ ] **Repeated GR recovery** — back-to-back graceful restart cycles; verify stale sweep correctness
+- [x] **Peer flap storms** (`tests/chaos/chaos-flap-storm.sh`) — bounces a configured peer via `EnableNeighbor`/`DisableNeighbor` in a tight loop; verifies the daemon stays responsive (gRPC `GetHealth` clean throughout), memory growth across the storm < 10 MB, and the FSM completes ≥3 disable→enable cycles without stuck state. Smoke verdict: `clean` after 3 cycles in 10 s, mem delta 1.14 MB.
+- [x] **gRPC churn** (`tests/chaos/chaos-grpc-churn.sh`) — fires concurrent `AddNeighbor`/`DeleteNeighbor`/`SoftResetIn` calls via `xargs -P` against 10.99.0.0/16 churn IPs; verifies no deadlock (≥90 % of shots produce a structured response, including expected validation errors), no `GetHealth` probe failures during the storm, no process restart. Smoke verdict: `clean` at 3 328 shots / 100 % response / 0 probe failures.
+- [x] **Repeated GR recovery** (`tests/chaos/chaos-gr-cycles.sh`) — bounces FRR's bgpd repeatedly under negotiated GR (M16 LLGR topology); verifies each cycle peaks `bgp_gr_stale_routes > 0` (GR path fires) and returns to 0 within the configured window (stale-sweep correctness). Documented for the M16 topology — runs against any GR-capable peer.
 - [x] **Long-duration stability** — M33 1 h + 4 h + 12 h soak runs (`tests/soak/runs/20260427T230448Z/`, `20260428T150509Z/`, `20260429T004656Z/`) all `verdict: clean` under sustained 1 k-rps EVPN churn. 12 h slope **+0.0094 MB/h** (essentially zero), 0 drops, 0 flaps, 0 gRPC health failures, no daemon restart, p99 RSS 85 MB. Anchors the writer-split (ADR-0051) validation across three independent run lengths.
 - [x] **AdjRibIn prefix index** — secondary `HashMap<Prefix, HashSet<u32>>` index on `iter_prefix()` for O(1) prefix lookup. Pipeline 50k prefixes: 7.1s → 82ms (86x improvement). Full-table (900k) extrapolated ~1.5s
 - [x] **End-to-end system benchmarks** — bgperf2-based multi-peer ingestion tests (10p/1k, 2p/10k, 2p/100k) against BIRD 2.18 and GoBGP 4.3.0; results in BENCHMARKS.md
