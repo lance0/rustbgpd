@@ -1263,6 +1263,27 @@ async fn reload_config(
         warn!("[mrt] changed — requires full restart to take effect");
     }
 
+    // Surface gRPC listener / TLS changes specifically. The generic
+    // "[global] changed" warn above covers them, but the security
+    // impact of stale or drifted TLS material is loud enough to
+    // deserve its own error-level call-out — operators rotating
+    // certs or adding mTLS need to know the live listener is still
+    // serving the prior security mode until the daemon is restarted.
+    if new_config.global.telemetry.grpc_tcp != current.global.telemetry.grpc_tcp {
+        error!(
+            "[global.telemetry.grpc_tcp] changed (address / token / TLS): \
+             live listener is unchanged. Restart rustbgpd to apply. \
+             Adding, removing, or rotating tls_cert_file / tls_key_file / \
+             tls_client_ca_file does NOT take effect on SIGHUP."
+        );
+    }
+    if new_config.global.telemetry.grpc_uds != current.global.telemetry.grpc_uds {
+        error!(
+            "[global.telemetry.grpc_uds] changed (path / mode / token): \
+             live listener is unchanged. Restart rustbgpd to apply."
+        );
+    }
+
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
     if diff.added.is_empty() && diff.removed.is_empty() && diff.changed.is_empty() {
         info!("config reloaded — no neighbor changes detected");

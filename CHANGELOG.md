@@ -20,9 +20,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   config is rejected at `Config::load` with `InvalidGrpcConfig`.
   Server identity + client-cert verification land together; there is
   no "TLS-without-mTLS" half-mode. UDS listeners are unchanged
-  (file-system permissions remain their auth surface). Closes the
-  KNOWN_ISSUES "No native gRPC TLS" limitation and the audit-prep
-  ROADMAP item.
+  (file-system permissions remain their auth surface).
+  *Restart-required:* gRPC listener config — including TLS material
+  — does **not** take effect on SIGHUP. The reload path emits an
+  explicit `error!` log when `[global.telemetry.grpc_tcp]` or
+  `[global.telemetry.grpc_uds]` changes so cert rotation against a
+  running daemon fails loudly instead of silently keeping stale
+  material. Captured in KNOWN_ISSUES; listener rebind on reload is
+  post-v1 scope. Closes the original "No native gRPC TLS" limitation
+  and the audit-prep ROADMAP item.
 
 - **Chaos stress-test sweep** (`tests/chaos/`). Three short-running
   harnesses that bounce specific subsystems hard and assert

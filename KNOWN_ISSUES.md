@@ -62,6 +62,18 @@ resolved.
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does
   not reject LOCAL_PREF from eBGP peers because session type (iBGP vs
   eBGP) is not yet fully distinguished. Will be enforced post-v1.
+- **gRPC listener config (including mTLS) is restart-required.**
+  Adding, removing, or rotating `[global.telemetry.grpc_tcp]` fields
+  — including `tls_cert_file`, `tls_key_file`, `tls_client_ca_file`,
+  `address`, `token_file`, and `access_mode` — does **not** take
+  effect on SIGHUP. The live gRPC listener keeps serving the prior
+  security mode and material until the daemon is restarted. Reload
+  emits an explicit `error!` log when these fields change, so the
+  drift is visible. Listener rebind on reload is post-v1 scope; the
+  workaround for cert rotation today is `systemctl restart rustbgpd`
+  or equivalent. UDS listener config (`grpc_uds`) has the same
+  restart-required semantics.
+
 - **SIGHUP reconcile is not transactional.** Reload now logs structured
   per-peer failures and keeps the prior in-memory config snapshot when
   reconciliation is incomplete, but runtime peer changes applied before a

@@ -123,9 +123,30 @@ if [ "$cycles" -lt 3 ]; then
     verdict="needs-attention"
     failures+=("\"only $cycles cycles completed in ${CHAOS_DURATION_SEC}s (need >=3)\"")
 fi
-# established_after is reported but not gated — re-Establish latency
-# depends on the peer's reconnect cadence; at a tight CHAOS_INTERVAL_SEC
-# the peer may not Establish in time even with a healthy daemon.
+
+# After the last cycle, give the peer up to 30 s to recover Established.
+# A healthy daemon must let *at least one* re-establishment complete by
+# the end of the storm, even if the in-cycle wait was too tight to
+# observe each individual recovery. Without this gate the harness would
+# pass even with a stuck FSM that never re-Establishes after Disable —
+# which would defeat the purpose of bouncing the session.
+log "[chaos-flap-storm] post-storm: waiting up to 30s for $PEER_TARGET to re-Establish"
+post_storm_established=0
+for _ in $(seq 1 30); do
+    state=$(grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d "{\"address\":\"$PEER_TARGET\"}" \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null \
+        | jq -r '.state // empty')
+    if [ "$state" = "SESSION_STATE_ESTABLISHED" ]; then
+        post_storm_established=1
+        break
+    fi
+    sleep 1
+done
+if [ "$post_storm_established" -ne 1 ]; then
+    verdict="needs-attention"
+    failures+=("\"$PEER_TARGET never reached Established within 30s post-storm — possible stuck FSM or writer teardown regression\"")
+fi
 
 failures_json=$(IFS=,; echo "[${failures[*]:-}]")
 
@@ -139,6 +160,7 @@ cat >"$REPORT" <<EOF
   "interval_sec": $CHAOS_INTERVAL_SEC,
   "cycles": $cycles,
   "established_after": $established_after,
+  "post_storm_established": $post_storm_established,
   "health_failures": $health_failures,
   "baseline_mem_bytes": $baseline_mem,
   "final_mem_bytes": $final_mem,
