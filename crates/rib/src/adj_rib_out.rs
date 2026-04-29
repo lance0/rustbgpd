@@ -167,7 +167,7 @@ impl AdjRibOut {
 
     /// Insert or replace an advertised EVPN route.
     pub fn insert_evpn(&mut self, route: EvpnRibRoute) {
-        self.evpn_routes.insert(route.key, route);
+        self.evpn_routes.insert(route.key(), route);
     }
 
     /// Remove an EVPN route by key. Returns `true` if it existed.

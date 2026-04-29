@@ -388,7 +388,7 @@ impl AdjRibIn {
         } else {
             self.attr_intern.insert(route.attributes.clone());
         }
-        self.evpn_routes.insert(route.key, route);
+        self.evpn_routes.insert(route.key(), route);
     }
 
     /// Withdraw an EVPN route. Returns `true` if it existed.
@@ -512,13 +512,13 @@ impl AdjRibIn {
                 {
                     if !comms.contains(&COMMUNITY_LLGR_STALE) {
                         comms.push(COMMUNITY_LLGR_STALE);
-                        self.evpn_llgr_stale_local_tags.insert(route.key);
+                        self.evpn_llgr_stale_local_tags.insert(route.key());
                     }
                 } else {
                     attrs.push(PathAttribute::Communities(vec![COMMUNITY_LLGR_STALE]));
-                    self.evpn_llgr_stale_local_tags.insert(route.key);
+                    self.evpn_llgr_stale_local_tags.insert(route.key());
                 }
-                affected.push(route.key);
+                affected.push(route.key());
             }
         }
 
@@ -1249,10 +1249,8 @@ mod tests {
             ethernet_tag: tag,
             originator_ip: originator,
         });
-        let key = imet.key();
         let route = EvpnRibRoute {
             route: imet,
-            key,
             next_hop: peer_ip,
             peer: peer_ip,
             attributes: Arc::new(vec![]),
@@ -1297,7 +1295,6 @@ mod tests {
         let key = route.key();
         rib.insert_evpn(EvpnRibRoute {
             route,
-            key,
             next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
             attributes: Arc::new(attrs),

@@ -388,14 +388,12 @@ impl proto::injection_service_server::InjectionService for InjectionService {
             }
         };
 
-        let key = evpn_route.key();
         let router_id = match next_hop {
             IpAddr::V4(v4) => v4,
             IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
         };
         let rib_route = EvpnRibRoute {
             route: evpn_route,
-            key,
             next_hop,
             peer: LOCAL_PEER,
             attributes: std::sync::Arc::new(attributes),
@@ -1174,7 +1172,7 @@ mod tests {
                 RibUpdate::InjectEvpn { route, reply } => {
                     assert_eq!(route.route.route_type(), 2);
                     reply.send(Ok(())).ok();
-                    Some(route.key)
+                    Some(route.key())
                 }
                 _ => panic!("expected InjectEvpn"),
             }

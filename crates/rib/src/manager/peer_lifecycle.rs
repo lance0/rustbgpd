@@ -36,7 +36,10 @@ impl RibManager {
             let count = rib.len();
             let fs_affected: HashSet<FlowSpecRule> =
                 rib.iter_flowspec().map(|r| r.rule.clone()).collect();
-            let evpn_affected: HashSet<EvpnRouteKey> = rib.iter_evpn().map(|r| r.key).collect();
+            let evpn_affected: HashSet<EvpnRouteKey> = rib
+                .iter_evpn()
+                .map(crate::route::EvpnRibRoute::key)
+                .collect();
             debug!(%peer, cleared = count, "peer down — rib cleared");
             self.metrics.set_rib_prefixes(&peer.to_string(), "all", 0);
             self.metrics.set_rib_prefixes(&peer.to_string(), "evpn", 0);
@@ -251,8 +254,11 @@ impl RibManager {
         // fabric has converged see an EoR with zero EVPN routes and
         // operate with no EVPN reachability until unrelated RIB churn
         // forces redistribution. Mirrors the FlowSpec staging block.
-        let all_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> =
-            self.loc_rib.iter_evpn().map(|route| route.key).collect();
+        let all_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = self
+            .loc_rib
+            .iter_evpn()
+            .map(crate::route::EvpnRibRoute::key)
+            .collect();
         if !all_evpn_keys.is_empty() {
             Self::stage_evpn_routes(
                 loc_rib,

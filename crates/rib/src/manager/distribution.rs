@@ -569,7 +569,7 @@ impl RibManager {
                 .expect("peer rib must exist before chunk processing");
             for route in evpn_announced {
                 debug!(%peer, route_type = route.route_type(), "evpn announced");
-                let key = route.key;
+                let key = route.key();
                 affected.insert(key);
                 rib.insert_evpn(route);
                 // Enhanced Route Refresh: re-advertised key removes from
@@ -780,7 +780,7 @@ impl RibManager {
         route: crate::route::EvpnRibRoute,
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     ) {
-        let key = route.key;
+        let key = route.key();
         let rib = self
             .ribs
             .entry(LOCAL_PEER)
@@ -1395,10 +1395,13 @@ impl RibManager {
             };
 
             let effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if is_dirty {
-                let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> =
-                    self.loc_rib.iter_evpn().map(|route| route.key).collect();
+                let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = self
+                    .loc_rib
+                    .iter_evpn()
+                    .map(crate::route::EvpnRibRoute::key)
+                    .collect();
                 if let Some(rib_out) = self.adj_ribs_out.get(&peer) {
-                    all.extend(rib_out.iter_evpn().map(|route| route.key));
+                    all.extend(rib_out.iter_evpn().map(crate::route::EvpnRibRoute::key));
                 }
                 all
             } else {
@@ -1705,7 +1708,7 @@ impl RibManager {
             let candidates: Vec<&EvpnRibRoute> = self
                 .ribs
                 .values()
-                .flat_map(|rib| rib.iter_evpn().filter(|r| r.key == *key))
+                .flat_map(|rib| rib.iter_evpn().filter(|r| r.key() == *key))
                 .collect();
             if self.loc_rib.recompute_evpn(*key, candidates.into_iter()) {
                 changed_keys.insert(*key);

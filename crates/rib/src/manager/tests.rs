@@ -23,10 +23,8 @@ fn make_evpn_imet(peer: Ipv4Addr, ethernet_tag: u32) -> EvpnRibRoute {
         ethernet_tag: EthernetTagId(ethernet_tag),
         originator_ip: IpAddr::V4(peer),
     });
-    let key = route.key();
     EvpnRibRoute {
         route,
-        key,
         next_hop: IpAddr::V4(peer),
         peer: IpAddr::V4(peer),
         attributes: Arc::new(vec![]),
@@ -7378,7 +7376,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
 
     // Source advertises a Type 3 IMET route.
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-    let imet_key = imet.key;
+    let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
         peer: source,
         announced: vec![],
@@ -7397,7 +7395,7 @@ async fn peer_down_withdraws_evpn_routes_from_remaining_peers() {
         .expect("target should receive EVPN announce within 2s")
         .expect("outbound channel open");
     assert_eq!(announce.evpn_announce.len(), 1);
-    assert_eq!(announce.evpn_announce[0].key, imet_key);
+    assert_eq!(announce.evpn_announce[0].key(), imet_key);
     assert!(
         announce.evpn_withdraw.is_empty(),
         "announce phase should have no withdrawals"
@@ -7479,7 +7477,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
 
     // Source advertises a Type 3 IMET.
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-    let imet_key = imet.key;
+    let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
         peer: source,
         announced: vec![],
@@ -7498,7 +7496,7 @@ async fn evpn_is_not_reflected_back_to_source_peer() {
         .expect("other peer should receive reflection within 2s")
         .expect("outbound channel still open");
     assert_eq!(other_announce.evpn_announce.len(), 1);
-    assert_eq!(other_announce.evpn_announce[0].key, imet_key);
+    assert_eq!(other_announce.evpn_announce[0].key(), imet_key);
 
     // The source must NOT receive its own route back. A short wait is
     // enough — if the bug exists, the bad announce fires on the same
@@ -7577,7 +7575,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     // announces in a row. The first lands in the channel (queue size 1);
     // the second fails `try_send` and marks target dirty.
     let imet1 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-    let imet1_key = imet1.key;
+    let imet1_key = imet1.key();
     tx.send(RibUpdate::RoutesReceived {
         peer: source,
         announced: vec![],
@@ -7595,7 +7593,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
 
     // Second EVPN route arrives; target's channel is full → target goes dirty.
     let imet2 = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 200);
-    let imet2_key = imet2.key;
+    let imet2_key = imet2.key();
     tx.send(RibUpdate::RoutesReceived {
         peer: source,
         announced: vec![],
@@ -7615,7 +7613,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
         .expect("first EVPN announce must arrive")
         .expect("channel open");
     assert_eq!(first.evpn_announce.len(), 1);
-    assert_eq!(first.evpn_announce[0].key, imet1_key);
+    assert_eq!(first.evpn_announce[0].key(), imet1_key);
 
     // Collect EVPN announces until we see imet2_key — the dirty-resync path
     // must eventually deliver it. Time out after 10s (resync timer is faster).
@@ -7624,7 +7622,7 @@ async fn dirty_resync_includes_evpn_routes_after_channel_full() {
     while tokio::time::Instant::now() < deadline {
         match tokio::time::timeout(Duration::from_millis(500), out_rx.recv()).await {
             Ok(Some(update)) => {
-                if update.evpn_announce.iter().any(|r| r.key == imet2_key) {
+                if update.evpn_announce.iter().any(|r| r.key() == imet2_key) {
                     saw_imet2 = true;
                     break;
                 }
@@ -8021,10 +8019,8 @@ async fn evpn_gr_no_llgr_community_drops_route_on_promotion() {
         ethernet_tag: EthernetTagId(100),
         originator_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
     });
-    let key = route.key();
     let imet = EvpnRibRoute {
         route,
-        key,
         next_hop: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         peer: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
         attributes: Arc::new(vec![PathAttribute::Communities(vec![
@@ -8115,7 +8111,7 @@ async fn inject_evpn_reflects_to_peer() {
     // originator (0.0.0.0, matches LOCAL_PEER in the manager).
     let mut imet = make_evpn_imet(Ipv4Addr::UNSPECIFIED, 100);
     imet.origin_type = crate::route::RouteOrigin::Local;
-    let injected_key = imet.key;
+    let injected_key = imet.key();
 
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::InjectEvpn {
@@ -8135,7 +8131,7 @@ async fn inject_evpn_reflects_to_peer() {
         .expect("peer should receive the injected route within 2s")
         .expect("outbound channel open");
     assert_eq!(msg.evpn_announce.len(), 1);
-    assert_eq!(msg.evpn_announce[0].key, injected_key);
+    assert_eq!(msg.evpn_announce[0].key(), injected_key);
 
     // Withdraw through the same channel; peer must see the retraction.
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -8169,7 +8165,7 @@ async fn withdraw_evpn_unknown_key_returns_error() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let fake_key = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 999).key;
+    let fake_key = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 999).key();
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::WithdrawEvpn {
         key: fake_key,
@@ -8222,7 +8218,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
     // Early peer advertises a Type 3 IMET — this populates the RR's
     // EVPN Loc-RIB before the late peer connects.
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-    let imet_key = imet.key;
+    let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
         peer: early,
         announced: vec![],
@@ -8270,7 +8266,7 @@ async fn late_joining_peer_receives_existing_evpn_routes_in_initial_dump() {
         1,
         "late-joining peer must see the existing EVPN route in initial dump"
     );
-    assert_eq!(msg.evpn_announce[0].key, imet_key);
+    assert_eq!(msg.evpn_announce[0].key(), imet_key);
 
     drop(tx);
     handle.await.unwrap();
@@ -8291,7 +8287,7 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
 
     // Stage 1: peer advertises one EVPN Type 3 IMET route.
     let imet = make_evpn_imet(Ipv4Addr::new(10, 0, 0, 1), 100);
-    let imet_key = imet.key;
+    let imet_key = imet.key();
     tx.send(RibUpdate::RoutesReceived {
         peer,
         announced: vec![],
@@ -8345,7 +8341,7 @@ async fn enhanced_route_refresh_evpn_replacement_preserves_route() {
 
     let best = query_evpn_routes(&tx).await;
     assert_eq!(best.len(), 1, "refreshed EVPN route must survive EoRR");
-    assert_eq!(best[0].key, imet_key);
+    assert_eq!(best[0].key(), imet_key);
 
     drop(tx);
     handle.await.unwrap();
@@ -8534,7 +8530,7 @@ fn pending_routes_received_drains_full_evpn_withdraw_batch() {
     let total = ROUTES_RECEIVED_CHUNK_SIZE + 1;
     let peer = Ipv4Addr::new(192, 0, 2, 2);
     let withdrawn: Vec<rustbgpd_wire::EvpnRouteKey> = (0..u32::try_from(total).unwrap())
-        .map(|tag| make_evpn_imet(peer, tag).key)
+        .map(|tag| make_evpn_imet(peer, tag).key())
         .collect();
 
     let mut pending = PendingRoutesReceived::new(

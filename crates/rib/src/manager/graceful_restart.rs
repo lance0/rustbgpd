@@ -53,7 +53,10 @@ impl RibManager {
                 // Also gather any non-stale EVPN routes that must be
                 // dropped entirely; sweep_stale_evpn only removes stale
                 // ones, so collect remaining keys here.
-                let remaining: Vec<EvpnRouteKey> = rib.iter_evpn().map(|r| r.key).collect();
+                let remaining: Vec<EvpnRouteKey> = rib
+                    .iter_evpn()
+                    .map(crate::route::EvpnRibRoute::key)
+                    .collect();
                 for key in remaining {
                     rib.withdraw_evpn(&key);
                     evpn_affected.insert(key);
@@ -75,7 +78,7 @@ impl RibManager {
             }
             if gr_families.contains(&(Afi::L2Vpn, Safi::Evpn)) {
                 for route in rib.iter_evpn() {
-                    evpn_affected.insert(route.key);
+                    evpn_affected.insert(route.key());
                 }
             }
             self.metrics

@@ -822,8 +822,8 @@ mod tests {
 
     fn make_evpn_macip(peer: IpAddr, next_hop: IpAddr) -> EvpnRibRoute {
         use rustbgpd_wire::{
-            EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, EvpnRouteKey,
-            MacAddress, MplsLabel, RouteDistinguisher,
+            EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, MacAddress, MplsLabel,
+            RouteDistinguisher,
         };
         let rd = RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]);
         let mac = MacAddress([0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01]);
@@ -837,15 +837,8 @@ mod tests {
             label1: MplsLabel::new(100),
             label2: None,
         });
-        let key = EvpnRouteKey::MacIp {
-            rd,
-            ethernet_tag: EthernetTagId(0),
-            mac,
-            ip,
-        };
         EvpnRibRoute {
             route,
-            key,
             next_hop,
             peer,
             attributes: Arc::new(vec![
@@ -866,7 +859,7 @@ mod tests {
     fn make_evpn_ipprefix(peer: IpAddr, next_hop: IpAddr) -> EvpnRibRoute {
         use rustbgpd_wire::{
             EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixRoute, EvpnIpPrefixValue,
-            EvpnRoute, EvpnRouteKey, MplsLabel, RouteDistinguisher,
+            EvpnRoute, MplsLabel, RouteDistinguisher,
         };
         let rd = RouteDistinguisher([0x00, 0x00, 0xFD, 0xE8, 0x00, 0x00, 0x00, 0x64]);
         let prefix = EvpnIpPrefixValue::V4(Ipv4Prefix {
@@ -881,14 +874,8 @@ mod tests {
             gateway: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             label: MplsLabel::new(200),
         });
-        let key = EvpnRouteKey::IpPrefix {
-            rd,
-            ethernet_tag: EthernetTagId(0),
-            prefix,
-        };
         EvpnRibRoute {
             route,
-            key,
             next_hop,
             peer,
             attributes: Arc::new(vec![

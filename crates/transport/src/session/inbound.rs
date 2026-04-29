@@ -619,10 +619,8 @@ impl PeerSession {
                                     &mut attrs,
                                     &result.modifications,
                                 );
-                                let key = route.key();
                                 evpn_announced.push(EvpnRibRoute {
                                     route: route.clone(),
-                                    key,
                                     next_hop: mp.next_hop,
                                     peer: self.peer_ip,
                                     attributes: Arc::new(attrs),
@@ -738,7 +736,7 @@ impl PeerSession {
             self.known_evpn.remove(key);
         }
         for route in &evpn_announced {
-            self.known_evpn.insert(route.key);
+            self.known_evpn.insert(route.key());
         }
 
         let prefix_count = self.known_prefix_count();

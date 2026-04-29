@@ -722,12 +722,10 @@ mod tests {
             label1: MplsLabel::new(10_000),
             label2: None,
         });
-        let key = mac_ip.key();
         let mut attrs: Vec<PathAttribute> = vec![PathAttribute::LocalPref(100)];
         attrs.extend(extra_attrs);
         EvpnRibRoute {
             route: mac_ip,
-            key,
             next_hop: IpAddr::V4(peer),
             peer: IpAddr::V4(peer),
             attributes: Arc::new(attrs),
@@ -796,7 +794,7 @@ mod tests {
         ]);
         let r1 = make_evpn_type2(2, vec![mm1]);
         let r2 = make_evpn_type2(2, vec![mm2]);
-        let key = r1.key;
+        let key = r1.key();
 
         let mut loc = LocRib::new();
         // First install — that's always a change.
@@ -966,10 +964,8 @@ mod tests {
                 label1: MplsLabel::new(vni),
                 label2: None,
             });
-            let key = mac_ip.key();
             EvpnRibRoute {
                 route: mac_ip,
-                key,
                 next_hop: IpAddr::V4(peer),
                 peer: IpAddr::V4(peer),
                 attributes: Arc::new(vec![PathAttribute::LocalPref(100)]),
@@ -983,7 +979,7 @@ mod tests {
 
         let r1 = make_with_label(10_000);
         let r2 = make_with_label(20_000);
-        let key = r1.key;
+        let key = r1.key();
         let mut loc = LocRib::new();
         assert!(loc.recompute_evpn(key, [&r1].into_iter()));
         assert!(

@@ -40,7 +40,11 @@ impl RibManager {
             let evpn_affected: HashSet<EvpnRouteKey> = if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
                 self.ribs
                     .get(&peer)
-                    .map(|rib| rib.iter_evpn().map(|r| r.key).collect())
+                    .map(|rib| {
+                        rib.iter_evpn()
+                            .map(crate::route::EvpnRibRoute::key)
+                            .collect()
+                    })
                     .unwrap_or_default()
             } else {
                 HashSet::new()
@@ -104,7 +108,11 @@ impl RibManager {
             let evpn_affected: HashSet<EvpnRouteKey> = if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
                 self.ribs
                     .get(&peer)
-                    .map(|rib| rib.iter_evpn().map(|r| r.key).collect())
+                    .map(|rib| {
+                        rib.iter_evpn()
+                            .map(crate::route::EvpnRibRoute::key)
+                            .collect()
+                    })
                     .unwrap_or_default()
             } else {
                 HashSet::new()
@@ -176,7 +184,7 @@ impl RibManager {
                 let stale = self.refresh_stale_evpn.entry(peer).or_default();
                 stale.clear();
                 for route in rib.iter_evpn() {
-                    stale.insert(route.key);
+                    stale.insert(route.key());
                 }
             } else {
                 let stale = self.refresh_stale_routes.entry(peer).or_default();
@@ -267,8 +275,11 @@ impl RibManager {
                 );
             }
         } else if (afi, safi) == (Afi::L2Vpn, Safi::Evpn) {
-            let evpn_keys: HashSet<EvpnRouteKey> =
-                self.loc_rib.iter_evpn().map(|r| r.key).collect();
+            let evpn_keys: HashSet<EvpnRouteKey> = self
+                .loc_rib
+                .iter_evpn()
+                .map(crate::route::EvpnRibRoute::key)
+                .collect();
             if !evpn_keys.is_empty() {
                 Self::stage_evpn_routes(
                     loc_rib,
