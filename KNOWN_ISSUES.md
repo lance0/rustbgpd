@@ -86,10 +86,24 @@ resolved.
   or equivalent. UDS listener config (`grpc_uds`) has the same
   restart-required semantics.
 
-- **SIGHUP reconcile is not transactional.** Reload now logs structured
-  per-peer failures and keeps the prior in-memory config snapshot when
-  reconciliation is incomplete, but runtime peer changes applied before a
-  later failure are not rolled back automatically.
+- **SIGHUP reconcile is not transactional.** Reload now applies
+  named-policy / neighbor-set / peer-group / global-chain edits in
+  addition to `[[neighbors]]` deltas, and logs structured failures
+  with the prior in-memory config snapshot pinned when reconciliation
+  is incomplete — but runtime peer changes applied before a later
+  failure are not rolled back automatically. Operators inspecting a
+  failed reload should re-apply the prior TOML to converge runtime
+  state, or restart.
+- **Inline `policy.import` / `policy.export` reload requires restart.**
+  Named-definition / chain edits hot-reload now (post-v0.11.0), but
+  the legacy inline global-fallback statements at `[policy.import]` /
+  `[policy.export]` are evaluated at session start and have no
+  runtime swap surface yet. `rustbgpd --diff` flags them under
+  "Restart-required" with a migration hint to named definitions plus
+  `import_chain` / `export_chain`. Adding a runtime swap is tractable
+  follow-up work — would need a new `ConfigEvent` variant and a
+  `PeerManagerCommand` that re-runs `effective_policy_chains_for_neighbor`
+  for every peer.
 - **MRT snapshot encoding is allocation-heavy at large scale.** The
   `TABLE_DUMP_V2` encoder groups routes by prefix and synthesizes
   per-entry attributes, which is correct but can create extra allocation

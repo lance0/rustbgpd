@@ -9,7 +9,52 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **SIGHUP reconciliation for policy, peer-groups, neighbor-sets,
+  and global chains.** `reload_config` now applies named-policy /
+  neighbor-set / peer-group / global-chain edits at reload time,
+  not just `[[neighbors]]` deltas. Operators editing TOML and
+  running `kill -HUP` get the same effect as a sequence of gRPC
+  policy/peer-group mutations: definitions land first (so peer
+  groups and chains can reference them), then neighbors reconcile,
+  then obsolete definitions delete in reverse-dependency order so
+  `still referenced` rejections don't fire transiently. Each step
+  is a single-shot command to the peer manager that goes through
+  `apply_policy_change` / `apply_peer_group_change` — runtime
+  effect (hot-applied policy chain, delete + re-add for peer-group
+  members) matches the existing gRPC API path. Failures from any
+  step are logged structured (bucket + target + error) and the
+  whole reload is rejected (in-memory snapshot pinned to the prior
+  state) so a partially-applied reload doesn't ship.
+  *Limitation:* inline `policy.import` / `policy.export` (the
+  legacy non-named global-fallback statements) still require a
+  full restart — they're evaluated at session start, and the
+  command surface for swapping them at runtime doesn't exist yet.
+  Operators are warned at reload time; `--diff` surfaces them under
+  "Restart-required" with a one-line migration hint. Closes the top
+  two open ROADMAP "Next Up — Pre-v1.0 Polish" bullets.
+
+- **Effective neighbor diff via peer-group resolution.**
+  `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
+  neighbor "effective impact" view: when a peer-group, named
+  policy, neighbor-set, or global chain edit cascades down through
+  inheritance, every affected neighbor address is listed with the
+  upstream change(s) responsible. Operators editing a single
+  peer-group field can see at a glance which sessions get
+  re-resolved at reload, instead of only the raw peer-group diff.
+  Coarse-but-correct: lists every upstream change a neighbor
+  *could* be affected by without re-implementing the full chain
+  resolver.
+
 ### Changed
+
+- **`rustbgpd --diff` "Informational (not reconciled)" bucket
+  removed.** Per-named definitions, chains, peer-groups, and
+  neighbor-sets all reload now, so the dimmed "informational"
+  block is gone. Inline `policy.import` / `policy.export` move to
+  the existing "Restart-required" section with an explicit
+  migration hint to named definitions + chains.
 
 - **`rustbgpd-wire` 0.8.0 → 0.8.1 (patch).** Documentation-only
   refresh of `crates/wire/README.md` so the crates.io and docs.rs
