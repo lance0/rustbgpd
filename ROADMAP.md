@@ -148,6 +148,28 @@ this document is reference / long-tail.
   Pure CLI / proto-wrapping work — no protocol changes. ~800–1500
   LOC across `crates/cli/src/commands/policy.rs` +
   `peer_group.rs` + clap wiring.
+- [ ] **Auto-retry pending soft-resets across SIGHUP boundaries.**
+  `PeerManager::update_runtime_policies` clobbers
+  `managed.import_policy` *before* calling `soft_reset_in`. If the
+  refresh fails, the new policy is live for future inbound but
+  routes already in the AdjRibIn under the prior policy stay
+  there, and the next SIGHUP sees no policy diff (PM's
+  `current_config` already advanced) so no automatic retry. Today's
+  safety net is the halt + structured log + manual `rustbgpctl
+  neighbor soft-reset-in <addr>`. Proper fix: a `pending_refresh:
+  bool` flag on `ManagedPeer`, set when `soft_reset_in` returns
+  Err, cleared when a subsequent refresh succeeds, drained at the
+  start of every `update_runtime_policies` call. Bounded scope; no
+  protocol changes.
+- [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
+  reload now awaits N+M+P+2+P sequential per-step replies from the
+  peer manager (was 1 reply pre-branch). The await chain runs
+  inside `run()`'s `tokio::select!` SIGHUP arm, so SIGINT /
+  SIGTERM / gRPC shutdown observation is paused for the full
+  reload duration. Behavior extension of an existing pattern, not
+  a regression — but the blocking window grew meaningfully. Fix:
+  spawn the reload onto its own task and `select!` against a
+  oneshot it carries; main loop stays responsive. ~50 LOC change.
 - [x] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
   GR recovery. Trivial to script on the existing M33 soak harness;
   closes four open P3.5 bullets.
