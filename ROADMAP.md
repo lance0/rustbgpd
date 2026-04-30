@@ -207,6 +207,20 @@ this document is reference / long-tail.
   test (peer vanishes between the import apply and the bail
   bookkeeping). ~150 LOC across three new tests; pure unit-test
   hardening, no production code change.
+- [ ] **Soften M34 session-uptime-epoch assertion.** The current
+  M34 interop test asserts strict equality on FRR's
+  `bgpTimerUpEstablishedEpoch` before and after the SIGHUP
+  to detect a session flap. Observed 1/16 flake on the v0.12.0
+  release tag CI run with the epoch shifting by exactly 1 second
+  (1777579323 → 1777579324) under heavy parallel-job runner
+  load — the routes filtered correctly (deny-rule prefix dropped,
+  others stayed) so the test was catching either FRR's internal
+  epoch quirk or a sub-second blip that's not a real flap.
+  Re-run on the same commit passed. Two paths: (a) compare
+  flap_count from rustbgpd's own session telemetry instead of
+  FRR's epoch field — direct signal, no FRR-side timing
+  ambiguity; (b) if keeping the FRR-side check, allow ±1 s
+  tolerance with a clear comment about why. Either way <30 LOC.
 - [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
   reload now awaits N+M+P+2+P sequential per-step replies from the
   peer manager (was 1 reply pre-branch). The await chain runs
