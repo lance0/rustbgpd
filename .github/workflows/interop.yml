@@ -29,6 +29,23 @@ name: Interop
 #     two upstreams + one client). Wire-level path_id encoding +
 #     capability-negotiation fragility.
 #
+# Operational + security tier — BMP monitoring, transport security,
+# FlowSpec:
+#   - M22 (~30 s test): FlowSpec (RFC 5575/8955) injection,
+#     distribution, and withdrawal. Wait windows are deliberately
+#     wide (60 s) because FRR's `show bgp ipv4 flowspec` view
+#     reconverges slowly after MP_UNREACH — observed up to ~44 s
+#     of empty display before rule 2 reappears. Underlying
+#     data-plane state is correct; the lag is FRR's display path.
+#   - M24 (~10 s test): BMP (RFC 7854) — Initiation, PeerUp, and
+#     RouteMonitoring messages received by a BMP receiver. Adds
+#     a python:3.12-slim container running scripts/bmp-receiver.py.
+#     Catches RibManager BMP integration regressions.
+#   - M25 (~10 s test): TCP MD5 (RFC 2385) + GTSM / TTL security
+#     (RFC 5082). Two FRR peers — one over MD5, one over GTSM —
+#     prove both auth/integrity mechanisms hold a session and
+#     deliver routes. Catches transport-layer regressions.
+#
 # EVPN + SIGHUP tier:
 #   - M29 (~10 s test): control-plane sanity — session Established
 #     + L2VPN/EVPN capability negotiation + gRPC ListEvpnRoutes
@@ -297,6 +314,129 @@ jobs:
         if: always()
         run: |
           sudo containerlab destroy -t tests/interop/m17-addpath-frr.clab.yml --cleanup || true
+
+  m22:
+    name: M22 — FlowSpec (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M22 topology
+        run: sudo containerlab deploy -t tests/interop/m22-flowspec-frr.clab.yml
+
+      - name: Run M22 test
+        run: bash tests/interop/scripts/test-m22-flowspec-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m22-flowspec-frr.clab.yml --cleanup || true
+
+  m24:
+    name: M24 — BMP (FRR 10.3.1, Python receiver)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M24 topology
+        run: sudo containerlab deploy -t tests/interop/m24-bmp-frr.clab.yml
+
+      - name: Run M24 test
+        run: bash tests/interop/scripts/test-m24-bmp-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m24-bmp-frr.clab.yml --cleanup || true
+
+  m25:
+    name: M25 — TCP MD5 + GTSM (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M25 topology
+        run: sudo containerlab deploy -t tests/interop/m25-md5-gtsm-frr.clab.yml
+
+      - name: Run M25 test
+        run: bash tests/interop/scripts/test-m25-md5-gtsm-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m25-md5-gtsm-frr.clab.yml --cleanup || true
 
   m29:
     name: M29 — EVPN cap negotiation (FRR 10.3.1)
