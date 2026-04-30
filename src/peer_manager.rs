@@ -1866,19 +1866,26 @@ mod tests {
         assert!(transport.route_server_client);
     }
 
-    /// Regression: a `SetPolicy` mutation that changes the effective
-    /// import policy for an Idle peer must not error. The route-
-    /// refresh trigger added to `update_runtime_policies` only fires
-    /// for Established peers — without that gate, `send_route_refresh`
-    /// returns "session not Established" for any peer mid-reconnect,
-    /// which would propagate through `apply_policy_change` and fail
-    /// the gRPC `SetPolicy` call. This test guards against that
-    /// production-breaking regression.
+    /// Regression: when a policy mutation actually changes the
+    /// effective import policy for an Idle peer (so
+    /// `import_changed` flips true inside
+    /// `update_runtime_policies`), the route-refresh trigger must
+    /// be gated on Established and the mutation must still return
+    /// Ok. Without the gate, `send_route_refresh` returns "session
+    /// not Established" for any peer mid-reconnect, which would
+    /// propagate through `apply_policy_change` and fail the gRPC
+    /// call. Operators with even one peer mid-reconnect would see
+    /// every `SetPolicy` / `SetGlobalImportChain` fail.
+    ///
+    /// The test deliberately wires up a chain reference to the
+    /// policy so `import_changed` actually fires. Earlier shape
+    /// (`SetPolicy` with no chain reference) didn't exercise the
+    /// gate at all — `import_changed` stayed false and the test
+    /// would pass even with the gate removed.
     ///
     /// Companion (Established-side) coverage — that the auto-refresh
-    /// actually fires when a peer is Established — requires a real
-    /// BGP session against a fake speaker; that belongs in interop
-    /// or integration coverage, not in this unit-test layer.
+    /// actually fires when a peer IS Established — is M34 in the
+    /// interop suite (needs a real FRR session).
     #[tokio::test]
     async fn set_policy_does_not_error_on_idle_peers_when_import_changes() {
         use rustbgpd_api::peer_types::{NamedPolicyDefinition, PolicyStatementDefinition};
@@ -1897,27 +1904,27 @@ mod tests {
         );
         let handle = tokio::spawn(mgr.run());
 
-        // Add a peer at an unreachable address so the session task
-        // sits in Idle/Connect without ever reaching Established.
+        // sync_config_snapshot = true so PM's current_config tracks
+        // the new neighbor. Otherwise apply_policy_change's per-peer
+        // loop skips it (the neighbor wouldn't be present in
+        // next_config) and update_runtime_policies never runs —
+        // making the gate untestable.
         let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::AddPeer {
             config: make_config(addr, 65002),
-            sync_config_snapshot: false,
+            sync_config_snapshot: true,
             reply: reply_tx,
         })
         .await
         .unwrap();
         assert!(reply_rx.await.unwrap().is_ok(), "AddPeer must succeed");
 
-        // SetPolicy with a definition that, if installed, would
-        // change the effective import chain. With no chain
-        // referencing the policy, this is a no-op for the actual
-        // peer's resolved chain — but the apply_policy_change loop
-        // still iterates self.peers and calls update_runtime_policies
-        // for each. The Established gate prevents the route-refresh
-        // call for the Idle peer; without that gate, this command
-        // would fail with "session not Established".
+        // Step 1: install a named policy that the peer's resolved
+        // chain will pick up once we attach it via the global
+        // import_chain. This call alone doesn't move
+        // `import_changed` (no chain references the new policy
+        // yet); it's just setup.
         let (reply_tx, reply_rx) = oneshot::channel();
         tx.send(PeerManagerCommand::SetPolicy {
             name: "test-policy".to_string(),
@@ -1929,12 +1936,34 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(
+            reply_rx.await.unwrap().is_ok(),
+            "SetPolicy setup step must succeed"
+        );
 
+        // Step 2: this is the call that actually flips
+        // `import_changed = true`. Setting the global chain to
+        // ["test-policy"] makes the peer's resolved import chain
+        // move from "empty / inline" to "single-policy chain
+        // (deny-default)" — `update_runtime_policies` sees the
+        // change and tries to fire `soft_reset_in`. The peer is
+        // Idle (unreachable address, no session), so without the
+        // Established gate the route-refresh would error and the
+        // reply would be Err.
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tx.send(PeerManagerCommand::SetGlobalImportChain {
+            policy_names: vec!["test-policy".to_string()],
+            reply: reply_tx,
+        })
+        .await
+        .unwrap();
         let result = reply_rx.await.unwrap();
         assert!(
             result.is_ok(),
-            "SetPolicy must succeed even when peers are Idle — \
-             route-refresh trigger must be gated on Established. Got: {result:?}",
+            "SetGlobalImportChain with import-changing chain must succeed when the only \
+             affected peer is Idle — the auto Route Refresh trigger must be gated on \
+             Established or operator gRPC calls would fail every time a peer is mid-reconnect. \
+             Got: {result:?}",
         );
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();

@@ -1457,14 +1457,26 @@ async fn reload_config(
         .iter()
         .chain(policy_diff.neighbor_sets_changed.iter())
     {
-        let Some(definition) = policy_admin::named_neighbor_set_from_config(&new_config, name)
-        else {
-            continue;
-        };
         let bucket = if policy_diff.neighbor_sets_added.contains(name) {
             "neighbor_set.add"
         } else {
             "neighbor_set.change"
+        };
+        // The diff said this neighbor_set is added/changed, so the
+        // new config must contain it. A `None` here means the
+        // diff and the config snapshot disagree — treat as halt.
+        let Some(definition) = policy_admin::named_neighbor_set_from_config(&new_config, name)
+        else {
+            return halt_partial(
+                working_config,
+                ReloadStepFailure {
+                    bucket,
+                    target: name.clone(),
+                    error: format!(
+                        "internal: neighbor_set {name:?} present in diff but not resolvable from new config"
+                    ),
+                },
+            );
         };
         let event = ConfigEvent::SetNeighborSet {
             name: name.clone(),
@@ -1479,7 +1491,18 @@ async fn reload_config(
         .await
         {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket,
+                            target: name.clone(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!(name = %name, %bucket, "reload: neighbor_set applied");
             }
             Err(error) => {
@@ -1501,13 +1524,22 @@ async fn reload_config(
         .iter()
         .chain(policy_diff.definitions_changed.iter())
     {
-        let Some(definition) = policy_admin::named_policy_from_config(&new_config, name) else {
-            continue;
-        };
         let bucket = if policy_diff.definitions_added.contains(name) {
             "policy.add"
         } else {
             "policy.change"
+        };
+        let Some(definition) = policy_admin::named_policy_from_config(&new_config, name) else {
+            return halt_partial(
+                working_config,
+                ReloadStepFailure {
+                    bucket,
+                    target: name.clone(),
+                    error: format!(
+                        "internal: policy {name:?} present in diff but not resolvable from new config"
+                    ),
+                },
+            );
         };
         let event = ConfigEvent::SetPolicy {
             name: name.clone(),
@@ -1522,7 +1554,18 @@ async fn reload_config(
         .await
         {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket,
+                            target: name.clone(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!(name = %name, %bucket, "reload: policy applied");
             }
             Err(error) => {
@@ -1544,13 +1587,22 @@ async fn reload_config(
         .iter()
         .chain(peer_group_diff.changed.iter())
     {
-        let Some(definition) = policy_admin::named_peer_group_from_config(&new_config, name) else {
-            continue;
-        };
         let bucket = if peer_group_diff.added.contains(name) {
             "peer_group.add"
         } else {
             "peer_group.change"
+        };
+        let Some(definition) = policy_admin::named_peer_group_from_config(&new_config, name) else {
+            return halt_partial(
+                working_config,
+                ReloadStepFailure {
+                    bucket,
+                    target: name.clone(),
+                    error: format!(
+                        "internal: peer_group {name:?} present in diff but not resolvable from new config"
+                    ),
+                },
+            );
         };
         let event = ConfigEvent::SetPeerGroup {
             name: name.clone(),
@@ -1565,7 +1617,18 @@ async fn reload_config(
         .await
         {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket,
+                            target: name.clone(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!(name = %name, %bucket, "reload: peer_group applied");
             }
             Err(error) => {
@@ -1608,7 +1671,18 @@ async fn reload_config(
         };
         match res {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket: "global_chain.import",
+                            target: String::new(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!("reload: global import_chain applied");
             }
             Err(error) => {
@@ -1648,7 +1722,18 @@ async fn reload_config(
         };
         match res {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket: "global_chain.export",
+                            target: String::new(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!("reload: global export_chain applied");
             }
             Err(error) => {
@@ -1824,7 +1909,18 @@ async fn reload_config(
         .await
         {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket: "peer_group.delete",
+                            target: name.clone(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!(name = %name, "reload: peer_group removed");
             }
             Err(error) => {
@@ -1849,7 +1945,18 @@ async fn reload_config(
         .await
         {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket: "policy.delete",
+                            target: name.clone(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!(name = %name, "reload: policy removed");
             }
             Err(error) => {
@@ -1874,7 +1981,18 @@ async fn reload_config(
         .await
         {
             Ok(()) => {
-                let _ = apply_config_event(&mut working_config, &event);
+                if let Err(error) = apply_config_event(&mut working_config, &event) {
+                    return halt_partial(
+                        working_config,
+                        ReloadStepFailure {
+                            bucket: "neighbor_set.delete",
+                            target: name.clone(),
+                            error: format!(
+                                "applied at peer manager but local snapshot rejected the event: {error}"
+                            ),
+                        },
+                    );
+                }
                 info!(name = %name, "reload: neighbor_set removed");
             }
             Err(error) => {
