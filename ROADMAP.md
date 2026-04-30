@@ -221,6 +221,40 @@ this document is reference / long-tail.
   FRR's epoch field — direct signal, no FRR-side timing
   ambiguity; (b) if keeping the FRR-side check, allow ±1 s
   tolerance with a clear comment about why. Either way <30 LOC.
+- [ ] **BGP Graceful Shutdown (RFC 8326).** The well-known
+  `GRACEFUL_SHUTDOWN` community (0xFFFF_0000 / 65535:0) is not
+  recognized natively. Operators wanting de-pref-on-maintenance
+  semantics can write the policy by hand today (`match_community
+  = "65535:0"` + `set_local_pref = 0`), but there's no
+  ergonomic surface and no way to *advertise* GShut on planned
+  shutdown. Four-part landing:
+    - **Wire**: `pub const COMMUNITY_GRACEFUL_SHUTDOWN: u32 =
+      0xFFFF_0000;` next to the LLGR constants. Non-breaking
+      addition.
+    - **Policy alias**: `parse_community_match` accepts
+      `"GRACEFUL_SHUTDOWN"` like it already does for
+      `NO_EXPORT` / `NO_ADVERTISE` / `NO_EXPORT_SUBCONFED`.
+    - **Inbound honor (opt-in)**: TOML knob `[global.policy]
+      honor_graceful_shutdown = true` injects an implicit
+      head-of-chain rule (`match GRACEFUL_SHUTDOWN → set
+      local_pref = 0`) on every peer's import chain. Off by
+      default; on for operators who want RFC 8326 receiver
+      behavior without writing the policy by hand.
+    - **Outbound advertise**: gRPC
+      `SetGracefulShutdown { peer: Option<String>, enabled:
+      bool }` toggles attaching the community to all outbound
+      routes for the named peer (or all peers when `None`).
+      Companion CLI: `rustbgpctl shutdown gshut [--peer X]`
+      / `--clear`. Mirrors how operators run planned
+      maintenance on IXPs.
+    - **Interop test (M35-ish)**: rustbgpd ↔ FRR, advertise
+      GShut, assert FRR de-prefers; inbound honor knob,
+      assert local_pref = 0 on tagged routes.
+  Net: ~150 LOC across wire / policy / config / api / cli /
+  interop. No protocol risk (just a community + receiver-side
+  policy convention; no capability negotiation needed). Ranks
+  ahead of BLACKHOLE (RFC 7999) since GShut is operator-lifecycle
+  and BLACKHOLE is data-plane-only.
 - [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
   reload now awaits N+M+P+2+P sequential per-step replies from the
   peer manager (was 1 reply pre-branch). The await chain runs
