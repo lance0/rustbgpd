@@ -78,6 +78,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   under the prior policy until an operator manually reissued
   `SetPolicy` / `rustbgpctl neighbor soft-reset-in`.
 
+- **Bookkeeping is deferred until the session acknowledges a
+  policy update.** `update_runtime_policies` now hot-applies the
+  import / export policy to the session task FIRST and only
+  advances `managed.import_policy` / `managed.export_policy` after
+  the session replies. If the session-side update fails (task
+  back-pressured past the deadline, exited mid-shutdown, mpsc full),
+  the daemon's bookkeeping stays at the prior value so the next
+  call's `import_changed` comparison still sees a delta and retries.
+  When the failure happens against an Established peer with refresh
+  intent, `update_runtime_policies` bails before the RIB update and
+  Route Refresh: firing Route Refresh against a session that still
+  holds the prior policy would re-evaluate `AdjRibIn` against the
+  *old* policy — silently keeping forbidden routes flowing on a
+  permit→deny edit, which was exactly the failure mode the prior
+  warn-and-continue path would mask.
+
 - **Effective neighbor diff via peer-group resolution.**
   `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
   neighbor "effective impact" view: every neighbor whose resolved

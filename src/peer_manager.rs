@@ -373,9 +373,6 @@ impl PeerManager {
         // whatever import change the current call brings.
         let had_pending_refresh = std::mem::take(&mut managed.pending_refresh);
 
-        managed.import_policy.clone_from(&import_policy);
-        managed.export_policy.clone_from(&export_policy);
-
         // Bounded deadlines on the per-peer session round-trips. Without
         // them a back-pressured peer parks the peer-manager actor here,
         // which then can't service `ListPeers` (or any other command), so
@@ -383,17 +380,35 @@ impl PeerManager {
         // long as the back-pressure lasts. Same wedge class fixed by
         // `query_state_timeout` for the read path; this closes the
         // hot-apply path.
-        if let Err(error) = managed
+        //
+        // Hot-apply to the session FIRST and defer advancing
+        // `managed.import_policy` / `managed.export_policy` until the
+        // session acknowledges. If the session-side update fails (task
+        // back-pressured past the deadline, task exited, mpsc full),
+        // leaving the daemon's bookkeeping at the prior value lets the
+        // next call's `import_changed` comparison still see a delta
+        // and retry. The previous "advance bookkeeping then warn-and-
+        // continue on session error" pattern allowed the daemon to
+        // believe the new policy was live while the session task still
+        // held the old one — and worse, would then fire Route Refresh
+        // against the session, which would re-evaluate AdjRibIn against
+        // the *old* policy and silently keep forbidden routes flowing.
+        let import_apply_result = managed
             .handle
-            .update_import_policy_timeout(import_policy, PEER_POLICY_UPDATE_TIMEOUT)
-            .await
-        {
+            .update_import_policy_timeout(import_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
+            .await;
+        let import_apply_failed = if let Err(error) = &import_apply_result {
             warn!(
                 %address,
                 error = %error,
-                "failed to hot-apply import policy to peer session; new policy will apply on next session start"
+                "failed to hot-apply import policy to peer session; retaining prior policy in daemon bookkeeping for retry"
             );
-        }
+            true
+        } else {
+            managed.import_policy = import_policy;
+            false
+        };
+
         if let Err(error) = managed
             .handle
             .update_export_policy_timeout(export_policy.clone(), PEER_POLICY_UPDATE_TIMEOUT)
@@ -402,14 +417,38 @@ impl PeerManager {
             warn!(
                 %address,
                 error = %error,
-                "failed to hot-apply export policy to peer session; new policy will apply on next session start"
+                "failed to hot-apply export policy to peer session; retaining prior policy in daemon bookkeeping for retry"
             );
+        } else {
+            managed.export_policy.clone_from(&export_policy);
         }
 
         let session_state = managed.handle.query_state_timeout(PEER_QUERY_TIMEOUT).await;
         let is_established = session_state
             .as_ref()
             .is_some_and(|s| s.fsm_state == SessionState::Established);
+
+        let needs_refresh = import_changed || had_pending_refresh;
+
+        // Bail before the RIB update and Route Refresh if the session
+        // didn't acknowledge the new import policy and we were going to
+        // refresh. Sending Route Refresh against a session that still
+        // has the prior policy would re-evaluate AdjRibIn against the
+        // *old* policy — doing exactly the wrong thing for a permit→
+        // deny edit. Set `pending_refresh` so the next call retries
+        // both the session-side update and the refresh, then return Err
+        // so the caller (gRPC reply, SIGHUP reload halt path) surfaces
+        // the failure rather than logging-and-forgetting.
+        if is_established && import_apply_failed && needs_refresh {
+            if let Some(managed) = self.peers.get_mut(&address) {
+                managed.pending_refresh = true;
+            }
+            let detail = import_apply_result.err().unwrap_or_default();
+            return Err(format!(
+                "import policy hot-apply to peer {address} failed; refresh deferred to next \
+                 update_runtime_policies call: {detail}"
+            ));
+        }
 
         if is_established {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -457,7 +496,6 @@ impl PeerManager {
         // leave the new policy applied to *future* UPDATEs while
         // routes already in AdjRibIn keep flowing under the prior
         // policy until the operator reissues a SetPolicy.
-        let needs_refresh = import_changed || had_pending_refresh;
         if needs_refresh && is_established {
             if let Err(error) = self.soft_reset_in(address, Vec::new()).await {
                 if let Some(managed) = self.peers.get_mut(&address) {
@@ -2095,6 +2133,177 @@ mod tests {
              not Established. Without this, a transient Err on the original Established \
              refresh would leave routes in AdjRibIn flowing under the prior policy until \
              an operator manually reissues SetPolicy."
+        );
+    }
+
+    /// Adversarial review surfaced a high-severity gap: when
+    /// `update_import_policy_timeout` failed against an Established
+    /// peer, the prior code logged a warning and continued, then
+    /// fired `soft_reset_in`. The session task still held the *old*
+    /// import policy, so Route Refresh would re-evaluate `AdjRibIn`
+    /// against the old policy — silently keeping forbidden routes
+    /// flowing on a permit→deny edit, with the daemon believing
+    /// the new policy was live and clearing any retry intent.
+    ///
+    /// Fix and assertion: when the session-side import-policy update
+    /// fails AND the peer is Established AND there's a refresh
+    /// intent, the function must (a) leave `managed.import_policy`
+    /// at the prior value (so the next call's `import_changed` still
+    /// fires), (b) set `pending_refresh` for retry, (c) NOT call
+    /// `soft_reset_in`, and (d) return Err so the caller surfaces
+    /// the failure. The fake session here drops the import-policy
+    /// reply oneshot (sender side gets "session task dropped reply")
+    /// but answers `QueryState` with Established, which is the exact
+    /// race the review flagged: the production session task can drop
+    /// a reply mid-shutdown while the FSM is still reporting
+    /// Established for one more poll.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn import_apply_failure_on_established_peer_bails_without_refresh() {
+        use rustbgpd_policy::{Policy, PolicyAction};
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // Fake session task: drops UpdateImportPolicy replies (induces
+        // "session task dropped reply" Err on the caller side), replies
+        // OK to UpdateExportPolicy, replies Established to QueryState,
+        // and counts SendRouteRefresh invocations so the test can
+        // assert refresh was NOT issued. Subsequent commands process
+        // sequentially after the dropped import reply because we drop
+        // the reply oneshot inside the same arm — no parking.
+        let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+        let route_refresh_calls = Arc::new(AtomicU32::new(0));
+        let route_refresh_calls_in_task = route_refresh_calls.clone();
+        let task_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. } => {
+                        // Drop reply without responding → caller's
+                        // reply_rx.await yields RecvError → the
+                        // bounded variant maps that to "session task
+                        // dropped reply".
+                        drop(reply);
+                    }
+                    PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: SessionState::Established,
+                            peer_ip: task_addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: Some(90),
+                            four_octet_as: Some(true),
+                            remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: 1,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::SendRouteRefresh { reply, .. } => {
+                        route_refresh_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        // RIB receiver is held but never expected to receive: the bail
+        // path returns Err *before* the `ReplacePeerExportPolicy`
+        // send. Holding rib_rx alive prevents the
+        // `RibUpdate::ReplacePeerExportPolicy` send from failing
+        // spuriously if the bail logic ever regresses.
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_config = make_config(task_addr, 65002);
+        let transport = mgr.build_transport_config(&peer_config);
+        let hold = transport.peer.hold_time;
+        mgr.peers.insert(
+            task_addr,
+            ManagedPeer {
+                handle,
+                remote_asn: 65002,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh: false,
+            },
+        );
+
+        // Build a non-empty PolicyChain so import_changed flips true
+        // (None → Some(...)). The chain content doesn't matter for
+        // the test — only that it's distinct from the prior None.
+        let chain = PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        }]);
+
+        let result = mgr
+            .update_runtime_policies(task_addr, Some(chain), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Established peer with import-changing intent must surface session-side \
+             import-apply failure as Err — silently logging-and-continuing would let \
+             the daemon believe the new policy is live while the session still has the \
+             old one. Got: {result:?}"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("import policy hot-apply"),
+            "error message must explain the failure mode for the operator: {err_msg}"
+        );
+
+        let managed = mgr.peers.get(&task_addr).expect("peer present");
+        assert!(
+            managed.pending_refresh,
+            "pending_refresh must be set so the next update_runtime_policies call \
+             retries the session-side update + Route Refresh as a unit."
+        );
+        assert!(
+            managed.import_policy.is_none(),
+            "managed.import_policy must remain at the prior value when the \
+             session-side update failed — advancing it would mask the delta from \
+             the next call's import_changed comparison and skip the retry. \
+             Got: {:?}",
+            managed.import_policy
+        );
+
+        assert_eq!(
+            route_refresh_calls.load(Ordering::SeqCst),
+            0,
+            "soft_reset_in must NOT have run: firing Route Refresh against a session \
+             that still holds the prior import policy would re-evaluate AdjRibIn \
+             against the OLD policy — exactly the bug the adversarial review caught."
         );
     }
 

@@ -127,6 +127,21 @@ pub struct PeerHandle {
 const COMMAND_BUFFER: usize = 8;
 
 impl PeerHandle {
+    /// Test-only constructor that wraps an already-spawned task plus
+    /// its command sender. Lets tests in dependent crates substitute a
+    /// fake session task for failure-mode coverage that real session
+    /// code can't reach reliably (e.g. "import-policy update times
+    /// out *and* QueryState then reports Established"). Production
+    /// code MUST go through [`Self::spawn`] / [`Self::spawn_inbound`].
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_parts(
+        commands: mpsc::Sender<PeerCommand>,
+        task: JoinHandle<Result<(), TransportError>>,
+    ) -> Self {
+        Self { commands, task }
+    }
+
     /// Spawn a new peer session task and return a handle to control it.
     ///
     /// The session starts in Idle. Send [`PeerCommand::Start`] to initiate
