@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 
 use crate::attribute::{AsPath, AsPathSegment, PathAttribute, attr_error_data};
+use crate::capability::Safi;
 use crate::constants::{attr_flags, attr_type};
 use crate::notification::update_subcode;
 
@@ -48,7 +49,19 @@ pub fn validate_update_attributes(
         match attr {
             PathAttribute::NextHop(addr) => check_next_hop(*addr)?,
             PathAttribute::AsPath(path) => check_as_path(path)?,
-            PathAttribute::MpReachNlri(mp) => check_mp_reach_next_hop(mp.next_hop)?,
+            // RFC 8955 §6.1: for FlowSpec (SAFI 133), the NEXT_HOP
+            // attribute value is "irrelevant" and is recommended
+            // to be 0 when advertising. The on-wire NH-Len for
+            // FlowSpec is 0 and the decoder fills `mp.next_hop`
+            // with 0.0.0.0; running the standard NEXT_HOP validator
+            // (which rejects 0.0.0.0) on a FlowSpec MP_REACH causes
+            // us to send NOTIFICATION 3/8 and tear the session
+            // against any RFC-compliant peer. Skip validation for
+            // FlowSpec; the rule contents travel in
+            // `flowspec_announced`, not next_hop.
+            PathAttribute::MpReachNlri(mp) if mp.safi != Safi::FlowSpec => {
+                check_mp_reach_next_hop(mp.next_hop)?;
+            }
             _ => {}
         }
     }
@@ -548,5 +561,49 @@ mod tests {
         ];
         let err = validate_update_attributes(&attrs, true, false, true).unwrap_err();
         assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
+    }
+
+    /// Regression: an `MP_REACH` for `FlowSpec` (SAFI 133) with
+    /// the recommended-by-RFC-8955-§6.1 next-hop value of 0.0.0.0
+    /// must NOT trip `NEXT_HOP` validation. Before the `FlowSpec`
+    /// guard, validate ran the standard `check_next_hop` against
+    /// every `MP_REACH` next-hop and rejected 0.0.0.0 with subcode
+    /// 8 (Invalid `NEXT_HOP`), causing rustbgpd to send
+    /// `NOTIFICATION` 3/8 and tear the session against any
+    /// RFC-compliant `FlowSpec` peer (FRR, `GoBGP`). M22 was
+    /// masking this with long display-path waits that hid the
+    /// resulting flap-and-recover cycle.
+    #[test]
+    fn mp_reach_flowspec_unspecified_next_hop_is_valid() {
+        use crate::attribute::MpReachNlri;
+        use crate::capability::{Afi, Safi};
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv4,
+                safi: Safi::FlowSpec,
+                // RFC 8955 §6.1 recommends 0.0.0.0 for FlowSpec
+                // advertisements; on the wire NH-Len is 0 and the
+                // decoder defaults this to 0.0.0.0.
+                next_hop: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                link_local_next_hop: None,
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+            }),
+        ];
+        // Empty announced + empty body — FlowSpec EoR-equivalent
+        // shape FRR sends post-handshake. Must pass validation.
+        assert!(
+            validate_update_attributes(&attrs, false, false, true).is_ok(),
+            "FlowSpec MP_REACH with 0.0.0.0 next-hop must pass — RFC 8955 §6.1 \
+             specifies the next-hop value is irrelevant for FlowSpec and \
+             recommends 0. The pre-fix path tore sessions against every \
+             RFC-compliant FlowSpec peer."
+        );
     }
 }
