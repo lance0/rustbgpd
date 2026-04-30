@@ -1,0 +1,58 @@
+# Containerlab topology: rustbgpd ↔ FRR (M34 — Policy SIGHUP soft-reset)
+#
+# Validates: SIGHUP on a policy definition change triggers a
+# Route Refresh against the established peer, and routes already
+# in the AdjRibIn get re-evaluated against the new policy.
+# Specifically guards the auto-fire path inside
+# `PeerManager::update_runtime_policies` introduced post-v0.11.0:
+# previously, a `permit→deny` policy edit would silently leave
+# already-imported routes flowing.
+#
+# FRR (AS 65002) advertises: 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16
+# rustbgpd (AS 65001) starts with permit-all, gets reloaded with a
+# deny rule for 192.168.1.0/24 and must drop that route from its
+# RIB after SIGHUP.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m34-policy-soft-reset-frr.clab.yml
+#   bash tests/interop/scripts/test-m34-policy-soft-reset-frr.sh
+#   containerlab destroy -t tests/interop/m34-policy-soft-reset-frr.clab.yml --cleanup
+
+name: m34-policy-soft-reset-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        # Both config variants land at fixed read-only paths; the
+        # test script `docker cp`s the initial variant onto the
+        # daemon's working path before starting and `docker cp`s
+        # the deny variant over the working path mid-test. Avoids
+        # mutating the host-side files via a bind-RW mount.
+        - ./configs/rustbgpd-m34-policy-soft-reset.toml:/etc/rustbgpd/config.initial.toml:ro
+        - ./configs/rustbgpd-m34-policy-soft-reset-deny.toml:/etc/rustbgpd/config.deny.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - cp /etc/rustbgpd/config.initial.toml /etc/rustbgpd/config.toml
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m34-policy-soft-reset.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1) ↔ FRR (10.0.0.2, AS 65002)

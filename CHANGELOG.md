@@ -42,16 +42,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   policy / peer-group / chain mutation changes a peer's *effective*
   import policy without recreating the session,
   `PeerManager::update_runtime_policies` now issues
-  `soft_reset_in` for that peer so routes already accepted in the
-  AdjRibIn under the old policy get re-evaluated. Driven from
-  inside the peer manager rather than from the SIGHUP-only reload
-  path so dynamic peers — which live only in the manager's
-  runtime table, not in `[[neighbors]]` — get the same correctness
-  guarantee as static peers, and so the same code path covers
-  gRPC `SetPolicy` / `SetPeerGroup` / chain mutations and
-  TOML+SIGHUP. Failure bubbles via the `apply_policy_change`
-  result so SIGHUP reloads halt via `halt_partial` rather than
-  silently logging-and-forgetting.
+  `soft_reset_in` for that peer (gated on the session being
+  Established) so routes already accepted in the AdjRibIn under
+  the old policy get re-evaluated. Driven from inside the peer
+  manager rather than from the SIGHUP-only reload path so dynamic
+  peers — which live only in the manager's runtime table, not in
+  `[[neighbors]]` — get the same correctness guarantee as static
+  peers, and so the same code path covers gRPC `SetPolicy` /
+  `SetPeerGroup` / chain mutations and TOML+SIGHUP. Failure
+  bubbles via the `apply_policy_change` result so SIGHUP reloads
+  halt via `halt_partial` rather than silently logging-and-
+  forgetting. Validated end-to-end against FRR 10.3.1 by the new
+  M34 interop test (`tests/interop/m34-policy-soft-reset-frr.clab.yml`,
+  CI-gated alongside M29 / M30): a SIGHUP that adds a deny rule
+  for one of three advertised prefixes drops just that prefix
+  from the RIB while the session stays Established and the other
+  two prefixes remain.
   *Limitation:* inline `policy.import` / `policy.export` (the
   legacy non-named global-fallback statements) still require a
   full restart — they're evaluated at session start, and the

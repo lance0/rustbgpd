@@ -1,0 +1,32 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Reloaded state: same chain reference (`filter`), but the
+# definition itself gains a deny rule for 192.168.1.0/24. The
+# diff fires a `SetPolicy` command at the peer manager, which
+# detects that the peer's effective import chain moved and
+# issues an auto Route Refresh — the established session
+# re-advertises and 192.168.1.0/24 is filtered out on import.
+[policy.definitions.filter]
+default_action = "permit"
+[[policy.definitions.filter.statements]]
+prefix = "192.168.1.0/24"
+action = "deny"
+
+[policy]
+import_chain = ["filter"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m34"
+hold_time = 90
