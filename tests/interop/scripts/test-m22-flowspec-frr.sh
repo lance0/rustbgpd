@@ -153,7 +153,11 @@ test_inject_rule1() {
 test_frr_receives_rule1() {
     log "Test 3: FRR receives FlowSpec rule 1"
 
-    for i in $(seq 1 15); do
+    # 30 retries × 2 s = 60 s window. FRR's `show bgp ipv4
+    # flowspec` view can lag the underlying RIB update by several
+    # seconds under parallel CI load (separate from data-plane
+    # correctness — observed up to ~33 s on flaked runs).
+    for i in $(seq 1 30); do
         local frr_fs
         frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
         if echo "$frr_fs" | grep -qi "192.168.1.0"; then
@@ -162,7 +166,7 @@ test_frr_receives_rule1() {
         fi
         sleep 2
     done
-    fail "FRR did not receive FlowSpec rule 1 within 30s"
+    fail "FRR did not receive FlowSpec rule 1 within 60s"
     log "DEBUG FRR flowspec table:"
     docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true
 }
@@ -193,7 +197,10 @@ print(len(resp.get('routes', [])))
 test_frr_receives_both() {
     log "Test 5: FRR receives both FlowSpec rules"
 
-    for i in $(seq 1 15); do
+    # 30 retries × 2 s = 60 s window — matches the FRR display
+    # reconvergence budget the other waits use, since this is the
+    # same lag class.
+    for i in $(seq 1 30); do
         local frr_fs
         frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
         local has_rule1=false
@@ -207,7 +214,7 @@ test_frr_receives_both() {
         fi
         sleep 2
     done
-    fail "FRR does not have both FlowSpec rules within 30s"
+    fail "FRR does not have both FlowSpec rules within 60s"
     docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true
 }
 
@@ -245,17 +252,27 @@ test_frr_withdrawal_propagated() {
         sleep 2
     done
 
-    # Give FRR a moment to settle, then check rule 2 separately
-    sleep 2
-    for i in $(seq 1 10); do
+    # FRR's flowspec table can drop *all* displayed rules for an
+    # extended window after MP_UNREACH and rebuild — observed
+    # ~44 s of empty `show bgp ipv4 flowspec` on a peer that was
+    # confirmed holding two rules 3 s earlier. Withdrawal itself
+    # was processed correctly (rule 1 disappeared above and
+    # rustbgpd's Loc-RIB shows the right count); the issue is
+    # FRR-side display reconvergence, not data-plane state.
+    # 5 s settle + 30 retries × 2 s = 65 s window absorbs the
+    # observed worst case under parallel CI load.
+    sleep 5
+    for i in $(seq 1 30); do
         local frr_fs
         frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
         if echo "$frr_fs" | grep -qi "10.0.0.0"; then
             ok "Rule 2 still present on FRR after rule 1 withdrawal (attempt $i)"
             break
         fi
-        if [ "$i" -eq 10 ]; then
-            fail "Rule 2 not found on FRR after rule 1 withdrawal"
+        if [ "$i" -eq 30 ]; then
+            echo "--- FRR flowspec view (final) ---" >&2
+            echo "$frr_fs" >&2
+            fail "Rule 2 not found on FRR after rule 1 withdrawal (65s timeout)"
         fi
         sleep 2
     done
