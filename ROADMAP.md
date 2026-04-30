@@ -148,17 +148,65 @@ this document is reference / long-tail.
   Pure CLI / proto-wrapping work — no protocol changes. ~800–1500
   LOC across `crates/cli/src/commands/policy.rs` +
   `peer_group.rs` + clap wiring.
-- [x] **Auto-retry pending soft-resets across SIGHUP boundaries.**
-  Shipped on the SIGHUP reconcile branch. `ManagedPeer.pending_refresh`
-  is set when `soft_reset_in` returns Err (Established peer, send
-  failure) or when a prior call left the flag and the peer still
-  isn't Established. Drained at the start of every
-  `update_runtime_policies` call: if the peer is now Established the
-  refresh is retried, otherwise the flag is re-armed for the next
-  call. Closes the silent-stale-routes class where a transient
-  refresh failure left routes in `AdjRibIn` accepted under the prior
-  policy until an operator manually reissued `SetPolicy` /
-  `rustbgpctl neighbor soft-reset-in`.
+- [x] **Auto-retry pending soft-resets and policy hot-applies across
+  SIGHUP boundaries.** Shipped on the SIGHUP reconcile branch via
+  five iterations driven by adversarial reviews. The function is
+  now bail-and-retry across every downstream step:
+  - `ManagedPeer.pending_refresh` covers unfired Route Refresh
+    intent (failed `soft_reset_in`, bail-before-refresh on any
+    side, or non-Established peer carrying inherited intent).
+  - `ManagedPeer.pending_export_apply` covers unfired session-side
+    export updates with the same bail-and-carry semantics.
+  - `update_runtime_policies` defers advancing
+    `managed.import_policy` / `managed.export_policy` until the
+    session ACKs, and bails before the RIB update + Route Refresh
+    when any session-side hot-apply fails under apply-changing
+    intent — for any session state, not just Established. Cross-
+    side carry: when one side succeeds (advancing bookkeeping)
+    but another side bails, both pending flags re-arm so the
+    retry pipeline picks up every unfired downstream step. The
+    RIB-failure path also re-arms `pending_refresh` so a transient
+    RIB-channel failure doesn't silently lose refresh intent.
+  Closes the silent-stale-routes class across import / export /
+  RIB / refresh failure modes; six unit tests + one interop test
+  pin the regressions.
+- [ ] **Dead-letter pending flags on dynamic-peer auto-removal and
+  reconcile delete-then-readd.** When a dynamic peer with
+  `pending_refresh` / `pending_export_apply` set goes idle, the
+  auto-removal path (`peer_manager.rs:BackToIdle`) drops the flags
+  silently, and the same shape applies to `apply_peer_group_change`
+  / `reconcile_peers` delete-then-readd. The next session is
+  spawned with policy resolved from `current_config` so the steady-
+  state policy is correct, but any unfired refresh queued under
+  the prior generation is silently lost. Operationally recoverable
+  because tear-down resets `AdjRibIn` anyway, but worth either a
+  doc note or migration of the flags into a per-(peer-address)
+  side-table that survives the `ManagedPeer` value's lifetime.
+  ~50 LOC + a regression test.
+- [ ] **Post-reload sync resilience in `main.rs`.** When
+  `reload_config` returns `Some(new_config)` but the subsequent
+  `config_mutation_tx.send` (persister sync) or
+  `peer_mgr_internal_tx.send` (PM `current_config` sync) fails,
+  the daemon-level `config` variable stays at the prior value
+  even though the peer manager has already applied the per-step
+  changes. Future SIGHUP diffs would diff against stale `config`,
+  potentially re-running edits that already landed. Fix: make
+  the post-reload syncs idempotent / best-effort and unconditionally
+  advance `config = new_config` after `reload_config` returns
+  `Some(...)`. The PM's `current_config` advances per-step inside
+  `apply_*_change` so the explicit `ReplaceConfigSnapshot` is
+  defensive — failing it doesn't cause real drift. ~20 LOC.
+- [ ] **Tighten test failure-mode coverage.** All four hot-apply
+  failure tests inject the same shape (drop the reply oneshot).
+  Production paths can also fail with channel-full / channel-
+  closed / actual timeout. If the bail logic ever conditioned on
+  the *kind* of error, these would pass while regressing real
+  cases. Also missing: a concurrent-update race test (two
+  back-to-back calls for the same peer interleaving with
+  `pending_refresh` consumption), and a peer-deletion-mid-update
+  test (peer vanishes between the import apply and the bail
+  bookkeeping). ~150 LOC across three new tests; pure unit-test
+  hardening, no production code change.
 - [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
   reload now awaits N+M+P+2+P sequential per-step replies from the
   peer manager (was 1 reply pre-branch). The await chain runs

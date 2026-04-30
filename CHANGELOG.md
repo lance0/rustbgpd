@@ -129,6 +129,21 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   makes the retry pipeline pick up *every* unfired downstream
   step regardless of which side bailed.
 
+- **RIB-update failure preserves refresh intent.** Same silent-
+  skip class at a different downstream step: when session-side
+  hot-apply succeeds (bookkeeping advances) but the
+  `RibUpdate::ReplacePeerExportPolicy` step fails — RIB channel
+  closed, reply dropped, RIB returned Err — the `?` short-circuit
+  used to bubble Err without re-arming `pending_refresh`. On
+  retry, `import_changed` would compute false (bookkeeping
+  already advanced) and `soft_reset_in` would silently never
+  fire. Replaced the `?` chain with an explicit match that
+  re-arms `pending_refresh` (when `needs_refresh` was true)
+  before returning Err. Note that "Established gate" applies
+  only to *firing* Route Refresh (via `soft_reset_in`'s own
+  check); the failure-bail and pending-flag carry semantics are
+  state-independent.
+
 - **Effective neighbor diff via peer-group resolution.**
   `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
   neighbor "effective impact" view: every neighbor whose resolved
