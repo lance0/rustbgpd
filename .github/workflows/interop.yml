@@ -17,6 +17,18 @@ name: Interop
 #     gRPC SoftResetIn. Companion to M34 — together they pin both
 #     ends of the contract (gRPC-driven and SIGHUP-driven refresh).
 #
+# Address-family + topology tier — MP-BGP, RR, multi-path:
+#   - M10 (~10 s test): IPv6 dual-stack via MP_REACH_NLRI /
+#     MP_UNREACH_NLRI, IPv4 + IPv6 routes over the same session.
+#     Wire-level fragility check for MP-BGP.
+#   - M14 (~10 s test): Route Reflector (RFC 4456) — RR + 2 iBGP
+#     clients, validates CLUSTER_LIST + ORIGINATOR_ID set
+#     correctly on reflected routes. Spine of every IX deployment.
+#   - M17 (~10 s test): Add-Path (RFC 7911) — multi-path send with
+#     distinct path_ids over a 4-node topology (rustbgpd between
+#     two upstreams + one client). Wire-level path_id encoding +
+#     capability-negotiation fragility.
+#
 # EVPN + SIGHUP tier:
 #   - M29 (~10 s test): control-plane sanity — session Established
 #     + L2VPN/EVPN capability negotiation + gRPC ListEvpnRoutes
@@ -162,6 +174,129 @@ jobs:
         if: always()
         run: |
           sudo containerlab destroy -t tests/interop/m15-rr-frr.clab.yml --cleanup || true
+
+  m10:
+    name: M10 — IPv6 dual-stack / MP-BGP (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M10 topology
+        run: sudo containerlab deploy -t tests/interop/m10-frr-ipv6.clab.yml
+
+      - name: Run M10 test
+        run: bash tests/interop/scripts/test-m10-frr-ipv6.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m10-frr-ipv6.clab.yml --cleanup || true
+
+  m14:
+    name: M14 — Route Reflector (FRR 10.3.1, 3-node iBGP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M14 topology
+        run: sudo containerlab deploy -t tests/interop/m14-rr-frr.clab.yml
+
+      - name: Run M14 test
+        run: bash tests/interop/scripts/test-m14-rr-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m14-rr-frr.clab.yml --cleanup || true
+
+  m17:
+    name: M17 — Add-Path (FRR 10.3.1, 4-node multi-path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M17 topology
+        run: sudo containerlab deploy -t tests/interop/m17-addpath-frr.clab.yml
+
+      - name: Run M17 test
+        run: bash tests/interop/scripts/test-m17-addpath-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m17-addpath-frr.clab.yml --cleanup || true
 
   m29:
     name: M29 — EVPN cap negotiation (FRR 10.3.1)
