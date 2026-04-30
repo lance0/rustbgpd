@@ -66,6 +66,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "Restart-required" with a one-line migration hint. Closes the top
   two open ROADMAP "Next Up — Pre-v1.0 Polish" bullets.
 
+- **Auto-retry for failed import-policy refreshes.** Added a
+  `pending_refresh: bool` flag to `ManagedPeer`, set when
+  `soft_reset_in` returns Err for an Established peer and re-armed
+  when an inherited flag finds the peer still not Established.
+  Drained at the start of every `update_runtime_policies` call: if
+  the peer is now Established the refresh is retried, otherwise the
+  flag is held for the next call. Closes the silent-stale-routes
+  class where a transient refresh send failure (peer task mid-
+  restart, mpsc backpressure) left routes in `AdjRibIn` accepted
+  under the prior policy until an operator manually reissued
+  `SetPolicy` / `rustbgpctl neighbor soft-reset-in`.
+
 - **Effective neighbor diff via peer-group resolution.**
   `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
   neighbor "effective impact" view: every neighbor whose resolved

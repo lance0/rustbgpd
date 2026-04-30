@@ -148,19 +148,17 @@ this document is reference / long-tail.
   Pure CLI / proto-wrapping work — no protocol changes. ~800–1500
   LOC across `crates/cli/src/commands/policy.rs` +
   `peer_group.rs` + clap wiring.
-- [ ] **Auto-retry pending soft-resets across SIGHUP boundaries.**
-  `PeerManager::update_runtime_policies` clobbers
-  `managed.import_policy` *before* calling `soft_reset_in`. If the
-  refresh fails, the new policy is live for future inbound but
-  routes already in the AdjRibIn under the prior policy stay
-  there, and the next SIGHUP sees no policy diff (PM's
-  `current_config` already advanced) so no automatic retry. Today's
-  safety net is the halt + structured log + manual `rustbgpctl
-  neighbor soft-reset-in <addr>`. Proper fix: a `pending_refresh:
-  bool` flag on `ManagedPeer`, set when `soft_reset_in` returns
-  Err, cleared when a subsequent refresh succeeds, drained at the
-  start of every `update_runtime_policies` call. Bounded scope; no
-  protocol changes.
+- [x] **Auto-retry pending soft-resets across SIGHUP boundaries.**
+  Shipped on the SIGHUP reconcile branch. `ManagedPeer.pending_refresh`
+  is set when `soft_reset_in` returns Err (Established peer, send
+  failure) or when a prior call left the flag and the peer still
+  isn't Established. Drained at the start of every
+  `update_runtime_policies` call: if the peer is now Established the
+  refresh is retried, otherwise the flag is re-armed for the next
+  call. Closes the silent-stale-routes class where a transient
+  refresh failure left routes in `AdjRibIn` accepted under the prior
+  policy until an operator manually reissued `SetPolicy` /
+  `rustbgpctl neighbor soft-reset-in`.
 - [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
   reload now awaits N+M+P+2+P sequential per-step replies from the
   peer manager (was 1 reply pre-branch). The await chain runs

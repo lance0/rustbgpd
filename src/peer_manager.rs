@@ -66,6 +66,16 @@ struct ManagedPeer {
     /// True for peers auto-created from a `[[dynamic_neighbors]]` range.
     /// Dynamic peers are ephemeral: removed when session falls to Idle.
     is_dynamic: bool,
+    /// Set when an import-policy hot-apply wanted to fire Route Refresh
+    /// but the send failed (transient mpsc backpressure, peer task
+    /// mid-restart, etc.). Drained by the next `update_runtime_policies`
+    /// call: combined with `import_changed` to retry the refresh, then
+    /// re-armed on continued failure or if the peer still isn't
+    /// Established. Without this, a transient failure would leave the
+    /// new policy applied to *future* UPDATEs while routes already in
+    /// `AdjRibIn` — accepted under the prior policy — keep flowing
+    /// until the operator reissues a `SetPolicy`.
+    pending_refresh: bool,
 }
 
 /// Resolved dynamic neighbor range used for prefix matching at connection time.
@@ -356,6 +366,13 @@ impl PeerManager {
         // resolver and `PolicyChain.policies` is a `Vec` (stable order).
         let import_changed = format!("{:?}", managed.import_policy) != format!("{import_policy:?}");
 
+        // Drain any pending refresh from a prior call. If a previous
+        // import-policy update wanted to fire Route Refresh but the
+        // send failed (or the peer wasn't Established yet), we re-arm
+        // the flag so this call retries the refresh in lockstep with
+        // whatever import change the current call brings.
+        let had_pending_refresh = std::mem::take(&mut managed.pending_refresh);
+
         managed.import_policy.clone_from(&import_policy);
         managed.export_policy.clone_from(&export_policy);
 
@@ -433,9 +450,30 @@ impl PeerManager {
         // Failure for an Established peer bubbles up to
         // `apply_policy_change`'s caller — for SIGHUP reloads, that
         // halts the reload via `halt_partial` so the failure is
-        // surfaced rather than logged-and-forgotten.
-        if import_changed && is_established {
-            self.soft_reset_in(address, Vec::new()).await?;
+        // surfaced rather than logged-and-forgotten. Before bubbling
+        // up, set `pending_refresh` so the next operator action
+        // retries the refresh — otherwise a single transient send
+        // failure (peer task mid-restart, mpsc backpressure) would
+        // leave the new policy applied to *future* UPDATEs while
+        // routes already in AdjRibIn keep flowing under the prior
+        // policy until the operator reissues a SetPolicy.
+        let needs_refresh = import_changed || had_pending_refresh;
+        if needs_refresh && is_established {
+            if let Err(error) = self.soft_reset_in(address, Vec::new()).await {
+                if let Some(managed) = self.peers.get_mut(&address) {
+                    managed.pending_refresh = true;
+                }
+                return Err(error);
+            }
+        } else if had_pending_refresh && !is_established {
+            // Inherited a pending refresh but the peer still isn't
+            // Established. Re-arm so the next call retries; the
+            // current call returns Ok because there is nothing
+            // operationally wrong with this peer right now (no
+            // refresh is sendable).
+            if let Some(managed) = self.peers.get_mut(&address) {
+                managed.pending_refresh = true;
+            }
         }
 
         Ok(())
@@ -527,6 +565,7 @@ impl PeerManager {
                 export_policy,
                 pending_inbound: None,
                 is_dynamic: false,
+                pending_refresh: false,
             },
         );
 
@@ -899,6 +938,7 @@ impl PeerManager {
                     export_policy,
                     pending_inbound: None,
                     is_dynamic: true,
+                    pending_refresh: false,
                 };
                 self.peers.insert(peer_addr, managed);
                 self.dynamic_peer_count += 1;
@@ -1968,6 +2008,94 @@ mod tests {
 
         tx.send(PeerManagerCommand::Shutdown).await.unwrap();
         handle.await.unwrap();
+    }
+
+    /// Auto-retry semantics for `pending_refresh`: if a prior call set
+    /// the flag (because an Established refresh send failed), the next
+    /// call to `update_runtime_policies` must drain it. When the peer
+    /// still isn't Established at the time of the next call, the flag
+    /// must be re-armed so a future call retries — without this, a
+    /// transient send failure would silently leave the new policy
+    /// applied to *future* UPDATEs while routes already in `AdjRibIn`
+    /// keep flowing under the prior policy.
+    ///
+    /// Construct `ManagedPeer` directly with `pending_refresh = true`
+    /// to simulate inheriting the flag. Driving the natural failure
+    /// path (Established → `send_route_refresh` Err) requires a real
+    /// session, which is what M34 (interop) covers; the unit test
+    /// focuses on the in-process drain/re-arm bookkeeping.
+    #[tokio::test]
+    async fn pending_refresh_re_arms_when_peer_still_not_established() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics.clone(),
+            rib_tx.clone(),
+            None,
+        );
+
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let peer_config = make_config(addr, 65002);
+        let transport = mgr.build_transport_config(&peer_config);
+        // Spawn a peer session handle but never call `start()` — the
+        // session stays in Idle, so QueryState returns Some(Idle) and
+        // is_established == false inside update_runtime_policies.
+        let handle = rustbgpd_transport::PeerHandle::spawn(
+            transport.clone(),
+            metrics,
+            rib_tx.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        let hold = transport.peer.hold_time;
+        mgr.peers.insert(
+            addr,
+            ManagedPeer {
+                handle,
+                remote_asn: 65002,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh: true,
+            },
+        );
+
+        // Same (None) policies — `import_changed = false` here. The
+        // refresh intent is carried only by `pending_refresh`; if the
+        // drain logic forgot to honor the flag, this call would no-op
+        // and pending_refresh would clear silently.
+        let result = mgr.update_runtime_policies(addr, None, None).await;
+        assert!(
+            result.is_ok(),
+            "update_runtime_policies on Idle peer must return Ok even when retrying a \
+             pending refresh — refresh is gated on Established, so 'not Established yet' \
+             is not an error condition. Got: {result:?}"
+        );
+
+        let pending = mgr.peers.get(&addr).unwrap().pending_refresh;
+        assert!(
+            pending,
+            "pending_refresh must be re-armed after an update where the peer is still \
+             not Established. Without this, a transient Err on the original Established \
+             refresh would leave routes in AdjRibIn flowing under the prior policy until \
+             an operator manually reissues SetPolicy."
+        );
     }
 
     #[test]
