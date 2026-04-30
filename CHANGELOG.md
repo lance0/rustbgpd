@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.1] — 2026-04-30
+
 ### Fixed
 
 - **FlowSpec MP_REACH next-hop validation no longer tears the
@@ -28,6 +30,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   skips `check_mp_reach_next_hop` for `Safi::FlowSpec`. M22
   runtime dropped from ~120 s on the slow-path branch to ~22 s
   deterministic.
+
+### Changed
+
+- **`rustbgpd-wire` 0.8.1 → 0.8.2 (patch).** Carries the FlowSpec
+  `NEXT_HOP` validation fix above. No public API changes — single
+  match-arm guard inside `validate_update_attributes` plus a unit
+  test pinning the regression. Downstream consumers picking up
+  0.8.2 fix the session-tear behaviour against any RFC-compliant
+  FlowSpec peer.
 
 ### CI
 
