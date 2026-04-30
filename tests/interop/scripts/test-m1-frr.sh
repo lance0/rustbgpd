@@ -195,18 +195,9 @@ test_peer_restart() {
     ok "RIB repopulated after peer restart"
 }
 
-# Start rustbgpd inside the container (CMD is sleep infinity)
-start_rustbgpd() {
-    log "Starting rustbgpd daemon..."
-    docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
-    sleep 3
-    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
-        log "rustbgpd is running"
-    else
-        echo "ERROR: rustbgpd failed to start" >&2
-        exit 1
-    fi
-}
+# Use the robust `start_rustbgpd` from test-lib.sh (10 s poll loop
+# rather than a 3 s fixed sleep) — required under parallel CI load
+# where the docker fork can land slowly.
 
 # ---------------------------------------------------------------------------
 # Main
