@@ -99,7 +99,7 @@ resolved.
   out of scope — peer-group changes flap sessions, and unwinding
   flap them again.
 - **Inline `policy.import` / `policy.export` reload requires restart.**
-  Named-definition / chain edits hot-reload now (post-v0.11.0), but
+  Named-definition / chain edits hot-reload now (as of v0.12.0), but
   the legacy inline global-fallback statements at `[policy.import]` /
   `[policy.export]` are evaluated at session start and have no
   runtime swap surface yet. `rustbgpd --diff` flags them under

@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-04-30
+
 ### Added
 
 - **SIGHUP reconciliation for policy, peer-groups, neighbor-sets,
@@ -215,6 +217,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   No source changes.
 
 ### CI
+
+- **Interop suite expanded from 3 to 12 parallel jobs.** Every PR
+  now exercises foundation behaviour (M1 basic UPDATE/RIB, M13
+  policy engine, M15 gRPC SoftResetIn), address-family + topology
+  shapes (M10 IPv6 dual-stack, M14 Route Reflector, M17 Add-Path),
+  operational + security (M22 FlowSpec, M24 BMP, M25 TCP MD5 +
+  GTSM), and EVPN + SIGHUP (M29 cap negotiation, M30 Type 2
+  reflection, M34 SIGHUP soft-reset) against a real FRR 10.3.1
+  peer. Per-job wall-clock is ~5 min, all in parallel. Catches
+  wire-protocol, policy, and reload regressions at PR time
+  instead of post-merge.
+
+- **Standardized rustbgpd startup across all interop scripts.**
+  Eliminates the brittle 3 s fixed-sleep pattern that had drifted
+  into 16 of the 22 interop scripts. The `start_rustbgpd` helper
+  in `tests/interop/scripts/test-lib.sh` is now the single source
+  of truth: 10 s `/proc` poll loop + 30 s gRPC-ready wait +
+  diagnostic capture on failure. Three scripts that need a custom
+  config path (M21 RPKI, M24 BMP, M27 ASPA) use a parametric
+  variant that takes the launch command as an argument. Net diff
+  in the standardization commit: +52 / −246 lines (mostly
+  deletion of duplicated boilerplate).
 
 - **Wire crate README freshness gate.** `.github/workflows/ci.yml`
   now fails if `crates/wire/Cargo.toml` version was bumped without

@@ -98,7 +98,7 @@ operator-hit items pulled from KNOWN_ISSUES and the Deferred Hardening
 list below; the bullets here are the **active** track, the rest of
 this document is reference / long-tail.
 
-- [x] **SIGHUP policy/peer-group reconciliation** (post-v0.11.0) —
+- [x] **SIGHUP policy/peer-group reconciliation** (v0.12.0) —
   `reload_config` now applies named-policy / neighbor-set /
   peer-group / global-chain edits, not just `[[neighbors]]` deltas.
   Each delta routes through the existing
@@ -107,7 +107,7 @@ this document is reference / long-tail.
   `policy.export` still require restart (no runtime swap surface);
   `--diff` flags this under Restart-required.
 - [x] **Effective neighbor diff via peer-group resolution**
-  (post-v0.11.0) — `rustbgpd --diff` surfaces per-neighbor
+  (v0.12.0) — `rustbgpd --diff` surfaces per-neighbor
   "effective impact" via `effective_neighbor_impact` so a single
   peer-group / policy / neighbor-set edit shows every neighbor
   whose resolved chain would move at reload, not just the raw
@@ -130,8 +130,8 @@ this document is reference / long-tail.
   the daemon-side `PolicyService` and `PeerGroupService` gRPC
   surfaces are complete, but the CLI only wraps NeighborService /
   RibService / InjectionService. Operators currently manage policy
-  and peer-groups via TOML+SIGHUP (now hot-reloads — post-v0.11.0
-  branch) or raw `grpcurl`; neither is friendly. Three command
+  and peer-groups via TOML+SIGHUP (now hot-reloads as of v0.12.0)
+  or raw `grpcurl`; neither is friendly. Three command
   classes to add:
     - **Read** — `rustbgpctl policy list/get`, `peer-group list/get`,
       `neighbor-set list/get` (wraps `List*` / `Get*` RPCs).
@@ -298,8 +298,8 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **TCP MD5/GTSM interop** — M25 containerlab scenario: two FRR peers, one with MD5 auth, one with GTSM/TTL security. Both sessions establish and exchange routes.
 - [x] **Cease subcode compatibility** — M26 containerlab scenario: FRR accepts Cease/1 (Max Prefixes) cleanly, session re-establishes. INTEROP.md table updated.
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
-- [x] **SIGHUP policy/peer-group reconciliation** (post-v0.11.0) — `reload_config` now applies named-policy, neighbor-set, peer-group, and global-chain deltas via the same `apply_policy_change` / `apply_peer_group_change` paths the gRPC API uses. Order: definitions/sets/peer-groups/chains add+change first, then `[[neighbors]]` reconcile, then deletes in reverse-dependency order. Inline `policy.import` / `policy.export` still require restart (no runtime swap surface) and surface under "Restart-required" in `--diff`.
-- [x] **Effective neighbor diff via peer-group resolution** (post-v0.11.0) — `ConfigDiff::effective_neighbor_impact` lists neighbors whose resolved chain moves at reload, with the upstream change(s) (peer_group / policy / neighbor_set / global chain) responsible. Surfaced under "Reload-applied" in `rustbgpd --diff` and the JSON diff output.
+- [x] **SIGHUP policy/peer-group reconciliation** (v0.12.0) — `reload_config` now applies named-policy, neighbor-set, peer-group, and global-chain deltas via the same `apply_policy_change` / `apply_peer_group_change` paths the gRPC API uses. Order: definitions/sets/peer-groups/chains add+change first, then `[[neighbors]]` reconcile, then deletes in reverse-dependency order. Inline `policy.import` / `policy.export` still require restart (no runtime swap surface) and surface under "Restart-required" in `--diff`.
+- [x] **Effective neighbor diff via peer-group resolution** (v0.12.0) — `ConfigDiff::effective_neighbor_impact` lists neighbors whose resolved chain moves at reload, with the upstream change(s) (peer_group / policy / neighbor_set / global chain) responsible. Surfaced under "Reload-applied" in `rustbgpd --diff` and the JSON diff output.
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
 - [x] **gRPC listener split** — each configured gRPC listener can now run in `read_only` or `read_write` mode, allowing monitoring/query exposure without exposing mutating control-plane RPCs
 - [x] **Optional Prometheus listener** — `prometheus_addr` is now optional; omit it to skip the metrics HTTP server while still collecting metrics for gRPC health and internal counters
