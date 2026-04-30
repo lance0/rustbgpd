@@ -484,10 +484,26 @@ impl PeerManager {
         let export_bail = export_apply_failed && needs_export_apply;
         if import_bail || export_bail {
             if let Some(managed) = self.peers.get_mut(&address) {
-                if import_bail {
+                // Carry forward *all* unfired apply / refresh intent
+                // across the bail, not just the side that triggered
+                // the bail. Critical cross-side case: import-apply
+                // succeeded (so `managed.import_policy` already
+                // advanced) but the export bail stops us before
+                // `soft_reset_in`. If we only set the bail-triggering
+                // flag, the next retry would see `import_changed =
+                // false` (bookkeeping already advanced) and
+                // `had_pending_refresh = false`, compute
+                // `needs_refresh = false`, and silently skip Route
+                // Refresh — leaving AdjRibIn routes accepted under
+                // the prior import policy stuck against a session
+                // that now has the new policy. Setting both flags
+                // whenever the corresponding intent was present
+                // makes the retry pipeline pick up *every* unfired
+                // step regardless of which side bailed.
+                if needs_refresh {
                     managed.pending_refresh = true;
                 }
-                if export_bail {
+                if needs_export_apply {
                     managed.pending_export_apply = true;
                 }
             }
@@ -2700,6 +2716,224 @@ mod tests {
         );
 
         // Drain rib_rx so the spawned task can exit cleanly when mgr drops.
+        drop(mgr);
+        let _ = rib_drainer.await;
+    }
+
+    /// Cross-side regression: import apply succeeds (advancing
+    /// `managed.import_policy`) but export apply fails on the same
+    /// call. The bail must carry forward the unfired Route Refresh
+    /// intent so a subsequent retry — even one that finds
+    /// `import_changed = false` because bookkeeping already advanced
+    /// — still fires `soft_reset_in`. Without this, an operator
+    /// applying a policy referenced by both import and export chains
+    /// would land the new import policy for *future* UPDATEs but
+    /// leave `AdjRibIn` routes accepted under the prior import
+    /// policy stuck, with no signal that the refresh ever needed
+    /// to run.
+    ///
+    /// First call: fake session ACKs `UpdateImportPolicy`, drops
+    /// `UpdateExportPolicy` reply → bail with both `pending_refresh`
+    /// and `pending_export_apply` set.
+    ///
+    /// Second call (same target policies): fake session ACKs both →
+    /// no bail, `had_pending_refresh = true` carries
+    /// `needs_refresh = true`, `soft_reset_in` fires.
+    ///
+    /// Asserts: first call returns Err with both flags set; second
+    /// call returns Ok with `route_refresh_calls > 0`.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn import_succeeds_export_fails_then_retry_fires_refresh() {
+        use rustbgpd_policy::{Policy, PolicyAction};
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+        let drop_export_replies = Arc::new(AtomicBool::new(true));
+        let route_refresh_calls = Arc::new(AtomicU32::new(0));
+        let drop_export_replies_in_task = drop_export_replies.clone();
+        let route_refresh_calls_in_task = route_refresh_calls.clone();
+        let task_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        if drop_export_replies_in_task.load(Ordering::SeqCst) {
+                            drop(reply);
+                        } else {
+                            let _ = reply.send(Ok(()));
+                        }
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: SessionState::Established,
+                            peer_ip: task_addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: Some(90),
+                            four_octet_as: Some(true),
+                            remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: 1,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::SendRouteRefresh { reply, .. } => {
+                        route_refresh_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        // Drain RIB so the second call's ReplacePeerExportPolicy doesn't
+        // wedge waiting for a reply.
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let rib_drainer = tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_config = make_config(task_addr, 65002);
+        let transport = mgr.build_transport_config(&peer_config);
+        let hold = transport.peer.hold_time;
+        mgr.peers.insert(
+            task_addr,
+            ManagedPeer {
+                handle,
+                remote_asn: 65002,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh: false,
+                pending_export_apply: false,
+            },
+        );
+
+        let import_chain = PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        }]);
+        let export_chain = PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        }]);
+
+        // First call: import succeeds, export drops reply → bail.
+        let result_1 = mgr
+            .update_runtime_policies(
+                task_addr,
+                Some(import_chain.clone()),
+                Some(export_chain.clone()),
+            )
+            .await;
+
+        assert!(
+            result_1.is_err(),
+            "First call must fail: export apply dropped reply. Got: {result_1:?}"
+        );
+
+        let managed = mgr.peers.get(&task_addr).expect("peer present");
+        assert!(
+            managed.import_policy.is_some(),
+            "managed.import_policy must have advanced — import apply succeeded. Got: {:?}",
+            managed.import_policy
+        );
+        assert!(
+            managed.export_policy.is_none(),
+            "managed.export_policy must NOT have advanced — export apply failed. Got: {:?}",
+            managed.export_policy
+        );
+        assert!(
+            managed.pending_refresh,
+            "pending_refresh MUST be set even though import_bail did not trigger — \
+             the refresh intent (import_changed) survives across an export-side bail. \
+             Without this, the retry would see import_changed=false, no pending refresh, \
+             and silently skip Route Refresh, leaving AdjRibIn stuck on prior policy."
+        );
+        assert!(
+            managed.pending_export_apply,
+            "pending_export_apply must be set so the next retry attempts export again."
+        );
+        assert_eq!(
+            route_refresh_calls.load(Ordering::SeqCst),
+            0,
+            "First call must NOT have fired Route Refresh — it bailed before that step."
+        );
+
+        // Flip the fake to ACK export replies, then retry with the
+        // SAME target policies. import_changed will be false on the
+        // retry (bookkeeping already advanced), so the retry must
+        // rely on had_pending_refresh to decide to fire refresh.
+        drop_export_replies.store(false, Ordering::SeqCst);
+
+        let result_2 = mgr
+            .update_runtime_policies(task_addr, Some(import_chain), Some(export_chain))
+            .await;
+
+        assert!(
+            result_2.is_ok(),
+            "Second call (export now succeeds) must return Ok. Got: {result_2:?}"
+        );
+
+        let managed = mgr.peers.get(&task_addr).expect("peer present");
+        assert!(
+            managed.export_policy.is_some(),
+            "managed.export_policy must now be advanced after the successful retry."
+        );
+        assert!(
+            !managed.pending_refresh,
+            "pending_refresh must be cleared after the retry's soft_reset_in succeeded."
+        );
+        assert!(
+            !managed.pending_export_apply,
+            "pending_export_apply must be cleared after the retry's export apply succeeded."
+        );
+
+        assert!(
+            route_refresh_calls.load(Ordering::SeqCst) >= 1,
+            "Retry MUST have fired Route Refresh: this is the regression — without \
+             carrying pending_refresh across the export bail on the first call, \
+             needs_refresh would be false on retry and refresh would silently never \
+             fire, leaving AdjRibIn stuck on prior import policy. \
+             Got: {} refresh calls",
+            route_refresh_calls.load(Ordering::SeqCst)
+        );
+
         drop(mgr);
         let _ = rib_drainer.await;
     }

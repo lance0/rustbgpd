@@ -112,6 +112,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   export edits would silently keep leaking routes until the next
   unrelated mutation or restart.
 
+- **Cross-side retry intent preserved across bails.** When
+  `update_runtime_policies` bails because one side's hot-apply
+  failed, both `pending_refresh` and `pending_export_apply` are
+  set whenever the corresponding intent (`needs_refresh` /
+  `needs_export_apply`) was present — not just the side that
+  triggered the bail. This closes a partial-success failure mode
+  where import apply succeeded (advancing
+  `managed.import_policy`) but export apply failed: the export
+  bail would set only `pending_export_apply`, and on retry
+  `import_changed` would be false (bookkeeping already advanced)
+  with no `pending_refresh` to drive `needs_refresh`. Route
+  Refresh would silently never fire, leaving `AdjRibIn` routes
+  accepted under the prior import policy stuck against a session
+  that now had the new policy. Setting both flags at the bail
+  makes the retry pipeline pick up *every* unfired downstream
+  step regardless of which side bailed.
+
 - **Effective neighbor diff via peer-group resolution.**
   `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
   neighbor "effective impact" view: every neighbor whose resolved
