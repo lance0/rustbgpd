@@ -24,7 +24,8 @@ mod metrics_server;
 mod peer_manager;
 mod policy_admin;
 
-use std::net::Ipv4Addr;
+use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::process;
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
@@ -1758,39 +1759,58 @@ async fn reload_config(
                 working_config.neighbors = new_config.neighbors.clone();
             }
             Ok(reconcile) => {
-                // Reconcile partially failed. Working_config is left
-                // at pre-reconcile state — the manager applied some
-                // adds/removes/changes before the failure, so the
-                // honest snapshot is somewhere between, but we don't
-                // get per-op success info granular enough to
-                // reconstruct exactly what landed. Halt with the
-                // first listed reconcile failure so operators get a
-                // pointer; the manager's own current_config is the
-                // authoritative live state.
-                let first = if let Some(f) = reconcile.failures.first() {
-                    ReloadStepFailure {
-                        bucket: "neighbors.reconcile",
-                        target: f.address.to_string(),
-                        error: format!("{:?}: {}", f.kind, f.error),
-                    }
-                } else {
-                    ReloadStepFailure {
-                        bucket: "neighbors.reconcile",
-                        target: String::new(),
-                        error: "reconcile reported failure but no entries".to_string(),
-                    }
-                };
-                return halt_partial(working_config, first);
+                // Reconcile is the one step where partial failure
+                // leaves the live state genuinely ambiguous: it
+                // sequences delete-then-readd for changed peers,
+                // independent removes, and adds — any subset can
+                // succeed before the failure point, the manager
+                // doesn't update its own `current_config` during the
+                // run, and `delete_peer` / `add_peer` of the wrong
+                // ordering can leave orphaned `PeerHandle`s. Returning
+                // a guessed snapshot here would let the next reload
+                // diff against state that doesn't match live, which is
+                // worse than just bailing.
+                //
+                // Instead: return `None` so the daemon's in-memory
+                // config stays at `current` and log clearly that live
+                // state may differ. Operators investigate via
+                // `rustbgpctl neighbor list`, fix the failing TOML,
+                // and reload again. The retry-succeeded-operations
+                // concern is bounded by the underlying ops being
+                // mostly idempotent (`delete_peer` of a missing peer
+                // returns Ok, `add_peer` of an existing peer returns
+                // a visible error rather than silent corruption); the
+                // operator gets surfaced errors on the retry rather
+                // than hidden drift.
+                for failure in &reconcile.failures {
+                    warn!(
+                        bucket = "neighbors.reconcile",
+                        target = %failure.address,
+                        kind = ?failure.kind,
+                        error = %failure.error,
+                        "config reload step failed"
+                    );
+                }
+                error!(
+                    failures = reconcile.failures.len(),
+                    "config reload halted at neighbor reconcile — live peer-manager state \
+                     may differ from the in-memory config snapshot. Inspect live state via \
+                     `rustbgpctl neighbor list` and re-edit the failing TOML before \
+                     reloading again. Earlier reload steps (policy / peer-group / chain \
+                     edits) DID land at the manager and remain in effect."
+                );
+                return None;
             }
             Err(e) => {
-                return halt_partial(
-                    working_config,
-                    ReloadStepFailure {
-                        bucket: "neighbors.reconcile",
-                        target: String::new(),
-                        error: format!("dropped reply: {e}"),
-                    },
+                error!(
+                    error = %e,
+                    "config reload halted: peer manager dropped reconcile reply — live \
+                     state may differ from the in-memory config snapshot. Inspect via \
+                     `rustbgpctl neighbor list` before reloading again. Earlier reload \
+                     steps (policy / peer-group / chain edits) DID land at the manager \
+                     and remain in effect."
                 );
+                return None;
             }
         }
     }
@@ -1872,6 +1892,63 @@ async fn reload_config(
                         error,
                     },
                 );
+            }
+        }
+    }
+
+    // 9. Soft-reset-in for peers whose effective import policy moved.
+    //    `update_runtime_policies` (driven by `apply_policy_change` in
+    //    steps 1-4) only swaps the policy reference for *future*
+    //    inbound UPDATEs; routes already in the AdjRibIn were accepted
+    //    under the old policy and stay there until the peer
+    //    re-advertises. SoftResetIn issues an outbound Route Refresh
+    //    (RFC 2918) so the peer resends its full Adj-RIB-Out, and the
+    //    new policy gets re-evaluated against fresh inbound. Without
+    //    this step, a permit→deny policy edit could leave forbidden
+    //    routes flowing.
+    //
+    //    Skipped for peers covered by neighbor reconcile (added /
+    //    changed): those got fresh sessions in step 5, which already
+    //    re-import everything under the new policy. Removed peers
+    //    don't need a refresh because they're gone. This best-effort
+    //    step logs warnings on failure but doesn't halt the reload —
+    //    the policy is already live for new traffic, and operators
+    //    can issue a manual `rustbgpctl neighbor soft-reset-in
+    //    <addr>` to converge if the automatic refresh failed.
+    let import_changed = config::effective_import_policy_changed_addrs(current, &new_config);
+    if !import_changed.is_empty() {
+        let raw_changed: HashSet<&str> = diff.changed.iter().map(|n| n.address.as_str()).collect();
+        let raw_added: HashSet<&str> = diff.added.iter().map(|n| n.address.as_str()).collect();
+        let raw_removed: HashSet<IpAddr> = diff.removed.iter().copied().collect();
+        for addr_str in &import_changed {
+            if raw_changed.contains(addr_str.as_str()) || raw_added.contains(addr_str.as_str()) {
+                continue;
+            }
+            let Ok(addr) = addr_str.parse::<IpAddr>() else {
+                continue;
+            };
+            if raw_removed.contains(&addr) {
+                continue;
+            }
+            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SoftResetIn {
+                address: addr,
+                families: Vec::new(),
+                reply,
+            })
+            .await;
+            match res {
+                Ok(()) => {
+                    info!(%addr, "reload: soft-reset-in fired (import policy moved)");
+                }
+                Err(error) => {
+                    warn!(
+                        %addr,
+                        error = %error,
+                        "reload: soft-reset-in failed — routes accepted under prior policy \
+                         stay in AdjRibIn until the peer re-advertises naturally. Issue \
+                         `rustbgpctl neighbor soft-reset-in {addr}` manually to converge."
+                    );
+                }
             }
         }
     }
@@ -2215,6 +2292,9 @@ hold_time = 90
                     changed.len(),
                 )
             }
+            PeerManagerCommand::SoftResetIn { address, .. } => {
+                format!("SoftResetIn({address})")
+            }
             _ => "Other".to_string(),
         }
     }
@@ -2249,7 +2329,8 @@ hold_time = 90
                     | PeerManagerCommand::SetGlobalImportChain { reply, .. }
                     | PeerManagerCommand::SetGlobalExportChain { reply, .. }
                     | PeerManagerCommand::ClearGlobalImportChain { reply }
-                    | PeerManagerCommand::ClearGlobalExportChain { reply } => {
+                    | PeerManagerCommand::ClearGlobalExportChain { reply }
+                    | PeerManagerCommand::SoftResetIn { reply, .. } => {
                         let _ = reply.send(Ok(()));
                     }
                     PeerManagerCommand::ReconcilePeers { reply, .. } => {
@@ -2394,8 +2475,11 @@ hold_time = 90
             // reconcile failure to simulate a runtime rejection from
             // the peer manager. Models a valid TOML that fails for
             // an operational reason at the manager (port bind, TCP
-            // setup, MD5 key push, etc.).
+            // setup, MD5 key push, etc.). Track command tags so the
+            // test can assert which earlier steps successfully fired.
+            let mut tags: Vec<String> = Vec::new();
             while let Some(cmd) = peer_mgr_rx.recv().await {
+                tags.push(cmd_tag(&cmd));
                 match cmd {
                     PeerManagerCommand::SetPolicy { reply, .. }
                     | PeerManagerCommand::DeletePolicy { reply, .. }
@@ -2422,6 +2506,7 @@ hold_time = 90
                     _ => {}
                 }
             }
+            tags
         });
 
         let returned = reload_config(
@@ -2433,20 +2518,96 @@ hold_time = 90
         )
         .await;
         drop(peer_mgr_tx);
-        let _ = mock.await;
+        let tags = mock.await.unwrap();
         std::fs::remove_file(&path).ok();
 
-        let working = returned.expect(
-            "halt-on-failure must return Some(working_config) so the daemon \
-             snapshot tracks live state instead of lying about prior config",
+        // Reconcile partial failure returns None: live peer-manager
+        // state is ambiguous (delete-then-readd ordering, independent
+        // adds/removes), so guessing a snapshot would let the next
+        // reload diff against a config that doesn't match reality.
+        // Operators investigate live state via `rustbgpctl neighbor
+        // list`. Earlier reload steps (the SetPolicy here) DID land
+        // at the manager and remain in effect — assert via the mock's
+        // command log, since the in-memory config doesn't advance for
+        // this failure class.
+        assert!(
+            returned.is_none(),
+            "reconcile partial failure must return None — guessing a snapshot \
+             when live state is ambiguous would let the next reload diff against \
+             a fictional config"
         );
         assert!(
-            working.policy.definitions.contains_key("block-private"),
-            "step that succeeded (SetPolicy) must be reflected in the returned snapshot"
+            tags.contains(&"SetPolicy(block-private)".to_string()),
+            "earlier reload steps must still have fired before the reconcile failure — saw {tags:?}"
+        );
+    }
+
+    /// When a reload changes a peer's effective import policy without
+    /// recreating the session (peer record unchanged, but the policy
+    /// definition referenced via global chain or peer-group chain
+    /// moves), reload must fire `SoftResetIn` for that peer so routes
+    /// already in `AdjRibIn` under the old policy get re-evaluated
+    /// against the new policy. Without this, a permit→deny edit
+    /// silently leaves forbidden routes flowing until the peer
+    /// re-advertises naturally.
+    #[tokio::test]
+    async fn reload_fires_soft_reset_in_for_import_policy_change() {
+        let initial = format!(
+            "{baseline}\n[policy.definitions.block-private]\n\
+             default_action = \"permit\"\n[policy]\nimport_chain = [\"block-private\"]\n",
+            baseline = baseline_toml()
+        );
+        let new_toml = format!(
+            "{baseline}\n[policy.definitions.block-private]\n\
+             default_action = \"deny\"\n[policy]\nimport_chain = [\"block-private\"]\n",
+            baseline = baseline_toml()
+        );
+        let (returned, tags) = drive_reload(&initial, &new_toml).await;
+        assert!(returned.is_some(), "reload must succeed");
+        // The baseline neighbor 10.0.0.2 has an unchanged record;
+        // its effective import policy moved via the global chain
+        // referencing a redefined policy. SoftResetIn must fire so
+        // any already-imported routes get re-filtered.
+        assert!(
+            tags.iter()
+                .any(|t| t.starts_with("SoftResetIn") && t.contains("10.0.0.2")),
+            "expected SoftResetIn to fire for 10.0.0.2 after import policy moved — saw {tags:?}"
+        );
+    }
+
+    /// `SoftResetIn` must NOT fire for peers covered by the neighbor
+    /// reconcile path (added or changed): those got fresh sessions in
+    /// step 5 which re-import everything under the new policy. Issuing
+    /// a redundant Route Refresh would just be noise.
+    #[tokio::test]
+    async fn reload_skips_soft_reset_in_for_reconciled_neighbors() {
+        let initial = format!(
+            "{baseline}\n[policy.definitions.block-private]\n\
+             default_action = \"permit\"\n[policy]\nimport_chain = [\"block-private\"]\n",
+            baseline = baseline_toml()
+        );
+        // New TOML changes the policy AND adds a new neighbor — the
+        // policy edit cascades to both the existing (10.0.0.2) and
+        // the new neighbor (10.0.0.3). Only 10.0.0.2 should get
+        // SoftResetIn; 10.0.0.3 gets a fresh session via reconcile.
+        let new_toml = format!(
+            "{baseline}\n[policy.definitions.block-private]\n\
+             default_action = \"deny\"\n[policy]\nimport_chain = [\"block-private\"]\n\n\
+             [[neighbors]]\naddress = \"10.0.0.3\"\nremote_asn = 65003\nhold_time = 90\n",
+            baseline = baseline_toml()
+        );
+        let (returned, tags) = drive_reload(&initial, &new_toml).await;
+        assert!(returned.is_some(), "reload must succeed");
+        assert!(
+            tags.iter()
+                .any(|t| t.starts_with("SoftResetIn") && t.contains("10.0.0.2")),
+            "10.0.0.2 (unchanged neighbor record, moved import policy) needs SoftResetIn — saw {tags:?}"
         );
         assert!(
-            !working.neighbors.iter().any(|n| n.address == "10.0.0.99"),
-            "step that failed (ReconcilePeers) must NOT advance the snapshot"
+            !tags
+                .iter()
+                .any(|t| t.starts_with("SoftResetIn") && t.contains("10.0.0.3")),
+            "10.0.0.3 (newly-added neighbor) gets a fresh session via reconcile, must not also receive SoftResetIn — saw {tags:?}"
         );
     }
 

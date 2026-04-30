@@ -126,6 +126,28 @@ this document is reference / long-tail.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
+- [ ] **`rustbgpctl` policy / peer-group / neighbor-set commands** —
+  the daemon-side `PolicyService` and `PeerGroupService` gRPC
+  surfaces are complete, but the CLI only wraps NeighborService /
+  RibService / InjectionService. Operators currently manage policy
+  and peer-groups via TOML+SIGHUP (now hot-reloads — post-v0.11.0
+  branch) or raw `grpcurl`; neither is friendly. Three command
+  classes to add:
+    - **Read** — `rustbgpctl policy list/get`, `peer-group list/get`,
+      `neighbor-set list/get` (wraps `List*` / `Get*` RPCs).
+    - **Write** — `rustbgpctl policy set/delete`, `peer-group set/delete`,
+      `neighbor-set set/delete`, plus `policy chain set-global-import/
+      export/clear` (wraps `Set*` / `Delete*` / chain RPCs).
+    - **Runtime-vs-file diff** — `rustbgpctl policy diff <candidate.toml>`
+      compares the daemon's *runtime* state (which may have drifted
+      from disk via gRPC mutations) against a candidate file. This is
+      genuinely different from `rustbgpd --diff` (file-vs-file dry-run
+      of SIGHUP) and pairs naturally with the SIGHUP reconcile work.
+      May require a new gRPC RPC that returns the daemon's effective
+      runtime config snapshot.
+  Pure CLI / proto-wrapping work — no protocol changes. ~800–1500
+  LOC across `crates/cli/src/commands/policy.rs` +
+  `peer_group.rs` + clap wiring.
 - [x] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
   GR recovery. Trivial to script on the existing M33 soak harness;
   closes four open P3.5 bullets.

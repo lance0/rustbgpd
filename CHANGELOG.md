@@ -29,6 +29,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   applied instead of lying that the prior config is still in effect
   — the operator fixes the failing TOML and reloads again to
   converge against the half-applied state.
+  *Exception:* the neighbor reconcile step is the one place where
+  partial failure leaves live state genuinely ambiguous (the peer
+  manager sequences delete-then-readd for changed peers and any
+  subset can succeed before the failure point); reload returns
+  `None` in that specific case rather than guessing a snapshot, and
+  logs an explicit "inspect via `rustbgpctl neighbor list`"
+  pointer. Earlier reload steps (policy / peer-group / chain
+  edits) still land at the manager and remain in effect.
+
+- **`SoftResetIn` for peers whose effective import policy moved.**
+  When a reload changes a peer's resolved import policy without
+  recreating the session — e.g., a `policy.definitions.foo` edit
+  picked up via the unchanged global `import_chain` or via a
+  peer-group chain whose record is otherwise unchanged — reload
+  now issues an outbound Route Refresh (RFC 2918) so the peer
+  re-advertises and the new policy gets re-evaluated against fresh
+  inbound. Without this step, routes already accepted under the
+  old policy stayed in `AdjRibIn` even after a permit→deny edit
+  until the peer re-advertised naturally. Skipped for peers
+  covered by neighbor reconcile (added / changed): those got
+  fresh sessions which re-import everything under the new policy.
+  Best-effort — failures log a `rustbgpctl neighbor soft-reset-in`
+  fallback hint and don't halt the reload.
   *Limitation:* inline `policy.import` / `policy.export` (the
   legacy non-named global-fallback statements) still require a
   full restart — they're evaluated at session start, and the
