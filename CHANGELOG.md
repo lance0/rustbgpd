@@ -87,13 +87,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the daemon's bookkeeping stays at the prior value so the next
   call's `import_changed` / `export_changed` comparisons still see a
   delta and retry. When the failure happens under apply-changing
-  intent, `update_runtime_policies` bails before the RIB update and
-  the Route Refresh: firing those steps against a session that still
-  holds the prior policy would re-evaluate `AdjRibIn` against the
-  *old* import policy and / or drift the RIB's view of the export
-  policy away from what the session is announcing — silently keeping
-  forbidden routes flowing on a permit→deny edit, which was exactly
-  the failure mode the prior warn-and-continue path would mask.
+  intent — for *any* session state, not just Established — the call
+  bails before the RIB update and the Route Refresh: firing those
+  steps against a session that still holds the prior policy would
+  re-evaluate `AdjRibIn` against the *old* import policy and / or
+  drift the RIB's view of the export policy away from what the
+  session is announcing, and silently returning Ok for non-
+  Established peers would let the caller advance `current_config`
+  with no retry signal — leaving the peer to establish later under
+  the stale policy if the session task subsequently dropped the
+  queued command. Route Refresh stays gated by `soft_reset_in`'s
+  own Established check; the gates serve different purposes.
 
 - **Symmetric retry for export-side hot-apply failures.** Added a
   `pending_export_apply: bool` flag to `ManagedPeer` that mirrors

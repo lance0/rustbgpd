@@ -451,29 +451,36 @@ impl PeerManager {
         let needs_export_apply = export_changed || had_pending_export_apply;
 
         // Bail before the RIB update and Route Refresh if either side
-        // failed under an apply-changing intent.
+        // failed under an apply-changing intent. The bail decision is
+        // not gated on `is_established` for either side: Route Refresh
+        // is gated separately by `soft_reset_in`'s own Established
+        // check, but the *failure-surfacing* decision is independent.
+        // For non-Established peers the same staleness exists — the
+        // session task may eventually drop the queued command (task
+        // dies before processing) and reach Established holding the
+        // prior policy. Without bailing, `apply_policy_change` would
+        // advance `current_config`, leaving no signal that the edit
+        // didn't actually land.
         //
-        //   - Import bail: an Established peer with refresh intent
-        //     where the session didn't acknowledge the new import
-        //     policy. Firing Route Refresh against a session that
-        //     still holds the prior policy would re-evaluate AdjRibIn
-        //     against the *old* policy — doing exactly the wrong
-        //     thing for a permit→deny import edit.
+        //   - Import bail: session didn't acknowledge the new import
+        //     policy under refresh intent. For Established peers this
+        //     also prevents firing Route Refresh against a session
+        //     that still holds the prior policy, which would
+        //     re-evaluate AdjRibIn against the *old* policy.
         //
-        //   - Export bail: any state where the session didn't
-        //     acknowledge the new export policy and we have an
-        //     export-changing intent. Letting bookkeeping advance
-        //     here would (a) leave the peer announcing under the
-        //     prior export policy until something else triggers a
-        //     re-apply, and (b) drift the RIB's view (
-        //     `ReplacePeerExportPolicy`) away from the session's
+        //   - Export bail: session didn't acknowledge the new export
+        //     policy under export-apply intent. Letting bookkeeping
+        //     advance here would (a) leave the peer announcing under
+        //     the prior export policy until something else triggered
+        //     a re-apply, and (b) drift the RIB's view
+        //     (`ReplacePeerExportPolicy`) away from the session's
         //     view if we proceeded to the RIB update step.
         //
         // Set the matching pending flag(s) so the next call retries,
         // then return Err so the caller (gRPC reply, SIGHUP reload
         // halt path) surfaces the failure rather than logging-and-
         // forgetting.
-        let import_bail = is_established && import_apply_failed && needs_refresh;
+        let import_bail = import_apply_failed && needs_refresh;
         let export_bail = export_apply_failed && needs_export_apply;
         if import_bail || export_bail {
             if let Some(managed) = self.peers.get_mut(&address) {
@@ -2360,6 +2367,159 @@ mod tests {
             "soft_reset_in must NOT have run: firing Route Refresh against a session \
              that still holds the prior import policy would re-evaluate AdjRibIn \
              against the OLD policy — exactly the bug the adversarial review caught."
+        );
+    }
+
+    /// Non-Established variant of the import-apply failure regression.
+    /// A follow-up review pass flagged that the prior bail condition
+    /// (`is_established && import_apply_failed && needs_refresh`)
+    /// gated the failure surface on Established, which let an Idle /
+    /// Connect peer with a dropped `UpdateImportPolicy` command
+    /// silently return Ok. The caller (`apply_policy_change`) then
+    /// advanced `current_config`, leaving no retry signal — if the
+    /// session task subsequently died before processing the queued
+    /// command, the peer would reach Established holding the prior
+    /// import policy with no record that the edit didn't land.
+    ///
+    /// The fix dropped the `is_established` gate from `import_bail`
+    /// (Route Refresh stays gated by `soft_reset_in`'s own check —
+    /// the gates serve different purposes). This test pins that
+    /// behavior: an Idle peer with a session that drops the
+    /// `UpdateImportPolicy` reply must bail with Err, set
+    /// `pending_refresh = true`, leave `managed.import_policy` at
+    /// the prior value, and (because peer is Idle) NOT fire Route
+    /// Refresh.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn import_apply_failure_on_idle_peer_bails_and_sets_pending_refresh() {
+        use rustbgpd_policy::{Policy, PolicyAction};
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+        let route_refresh_calls = Arc::new(AtomicU32::new(0));
+        let route_refresh_calls_in_task = route_refresh_calls.clone();
+        let task_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. } => {
+                        // Drop without replying — caller observes
+                        // "session task dropped reply".
+                        drop(reply);
+                    }
+                    PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: SessionState::Idle,
+                            peer_ip: task_addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: None,
+                            four_octet_as: None,
+                            remote_router_id: None,
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: 0,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::SendRouteRefresh { reply, .. } => {
+                        route_refresh_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_config = make_config(task_addr, 65002);
+        let transport = mgr.build_transport_config(&peer_config);
+        let hold = transport.peer.hold_time;
+        mgr.peers.insert(
+            task_addr,
+            ManagedPeer {
+                handle,
+                remote_asn: 65002,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh: false,
+                pending_export_apply: false,
+            },
+        );
+
+        let chain = PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        }]);
+
+        let result = mgr
+            .update_runtime_policies(task_addr, Some(chain), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Idle peer with import-changing intent and session-side apply failure must \
+             surface as Err — silently returning Ok would let `apply_policy_change` \
+             advance current_config with no retry signal, so a subsequently dying \
+             session task would leak the stale import policy when the peer establishes. \
+             Got: {result:?}"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("policy hot-apply") && err_msg.contains("import:"),
+            "error message must call out the import side specifically: {err_msg}"
+        );
+
+        let managed = mgr.peers.get(&task_addr).expect("peer present");
+        assert!(
+            managed.pending_refresh,
+            "pending_refresh must be set so the next update_runtime_policies call \
+             retries the session-side import update."
+        );
+        assert!(
+            managed.import_policy.is_none(),
+            "managed.import_policy must remain at the prior value when the session-side \
+             update failed — advancing it would mask the delta from the next call's \
+             import_changed comparison and skip the retry. Got: {:?}",
+            managed.import_policy
+        );
+
+        assert_eq!(
+            route_refresh_calls.load(Ordering::SeqCst),
+            0,
+            "Route Refresh must NOT fire for an Idle peer regardless of the bail \
+             outcome — that's `soft_reset_in`'s own Established gate, which is a \
+             separate concern from the failure-surfacing decision."
         );
     }
 
