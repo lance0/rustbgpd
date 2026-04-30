@@ -3,7 +3,7 @@ mod parse;
 mod schema;
 mod validation;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -779,6 +779,13 @@ impl PolicyDiff {
 #[derive(Debug, serde::Serialize)]
 pub struct ConfigDiff {
     pub neighbors: NeighborDiffSummary,
+    /// Neighbors whose effective config — after peer-group inheritance
+    /// and policy-chain resolution — differs between old and new
+    /// configs, even though their direct neighbor record may be
+    /// unchanged. Surfaces inheritance-driven impact: a peer-group or
+    /// policy edit that flows down to existing members shows up here,
+    /// not just in the raw `peer_groups` / `policy` diffs.
+    pub effective_neighbor_impact: Vec<EffectiveNeighborImpact>,
     pub peer_groups: PeerGroupDiff,
     pub peer_group_details: Vec<(String, Vec<String>)>,
     pub policy: PolicyDiff,
@@ -786,6 +793,44 @@ pub struct ConfigDiff {
     pub rpki_changed: bool,
     pub bmp_changed: bool,
     pub mrt_changed: bool,
+}
+
+/// Per-neighbor impact derived from inheritance / chain resolution.
+///
+/// `reasons` is a short list of upstream changes that flow down to
+/// this neighbor. Possible entries (subset, not exhaustive):
+///
+/// - `"import policy resolved differently"` — the resolved import
+///   chain (peer-group inherited + neighbor inline + global) moved.
+/// - `"export policy resolved differently"` — same, for export.
+/// - `"peer_group \"X\" changed"` — the named peer-group this
+///   neighbor belongs to had a field edit that flows down (no
+///   reassignment, just the group's record moved).
+/// - `"peer_group resolved as <new> (was <old>)"` — the neighbor was
+///   reassigned to a different peer-group.
+/// - `"policy \"foo\" changed"` — a named policy referenced via the
+///   neighbor's chain or peer-group's chain moved.
+/// - `"global import/export chain changed"` — the top-level chain
+///   reference list was edited.
+/// - `"referenced neighbor_set changed"` — a `neighbor_set` edit
+///   may reshape match results for any policy that uses it
+///   (coarse: not resolved per neighbor).
+///
+/// The neighbor address may already appear in the raw `neighbors`
+/// diff (added/removed/changed); the effective view is additive — it
+/// catches the case where the raw record didn't move but the
+/// resolved chain did.
+///
+/// Restart-required `[global]` / `[rpki]` / `[bmp]` / `[mrt]` edits
+/// are deliberately excluded: those flow through different fields
+/// (`local_asn`, `local_router_id` on `PeerConfig`) and reload
+/// can't apply them, so surfacing them under `effective_neighbor_impact`
+/// (which lands under "Reload-applied" in `--diff`) would mislead
+/// operators into expecting a reload to absorb a restart-only edit.
+#[derive(Debug, serde::Serialize)]
+pub struct EffectiveNeighborImpact {
+    pub address: String,
+    pub reasons: Vec<String>,
 }
 
 /// Serializable neighbor diff summary (`NeighborDiff` uses `IpAddr` which is fine,
@@ -810,24 +855,48 @@ pub struct NeighborChangeSummary {
 }
 
 impl ConfigDiff {
-    /// Changes that SIGHUP will actually reconcile (neighbor add/remove/modify).
+    /// Changes that SIGHUP will actually reconcile: neighbor
+    /// add/remove/modify, plus policy / peer-group / neighbor-set /
+    /// global-chain edits that flow down through inheritance.
     pub fn has_reload_applied_changes(&self) -> bool {
         !self.neighbors.added.is_empty()
             || !self.neighbors.removed.is_empty()
             || !self.neighbors.changed.is_empty()
+            || !self.peer_groups.added.is_empty()
+            || !self.peer_groups.removed.is_empty()
+            || !self.peer_groups.changed.is_empty()
+            || !self.policy.definitions_added.is_empty()
+            || !self.policy.definitions_removed.is_empty()
+            || !self.policy.definitions_changed.is_empty()
+            || !self.policy.neighbor_sets_added.is_empty()
+            || !self.policy.neighbor_sets_removed.is_empty()
+            || !self.policy.neighbor_sets_changed.is_empty()
+            || self.policy.import_chain_changed
+            || self.policy.export_chain_changed
     }
 
     /// Changes that require a full daemon restart.
     pub fn has_restart_required_changes(&self) -> bool {
-        self.global_changed || self.rpki_changed || self.bmp_changed || self.mrt_changed
+        self.global_changed
+            || self.rpki_changed
+            || self.bmp_changed
+            || self.mrt_changed
+            || self.policy.import_changed
+            || self.policy.export_changed
     }
 
-    /// Changes detected but not applied by current SIGHUP (peer groups, policy).
-    pub fn has_informational_changes(&self) -> bool {
-        !self.peer_groups.added.is_empty()
-            || !self.peer_groups.removed.is_empty()
-            || !self.peer_groups.changed.is_empty()
-            || self.policy.has_changes()
+    /// Changes detected but not applied by current SIGHUP. Empty
+    /// post the policy / peer-group / chain reload work — kept on
+    /// the public surface as a stable predicate so external diff
+    /// consumers don't break, and as a hook for future "detected but
+    /// not yet applied" buckets (e.g., when a future TOML field
+    /// lands ahead of its reload wiring).
+    #[expect(
+        clippy::unused_self,
+        reason = "method preserved on the public surface for external --diff consumers; will gain logic when a future field lands ahead of its reload wiring"
+    )]
+    pub const fn has_informational_changes(&self) -> bool {
+        false
     }
 
     /// Whether SIGHUP would take any action (reload-applied or restart-required).
@@ -896,9 +965,12 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         .collect();
 
     let policy = diff_policy(&old.policy, &new.policy);
+    let effective_neighbor_impact =
+        compute_effective_neighbor_impact(old, new, &peer_groups, &policy);
 
     ConfigDiff {
         neighbors,
+        effective_neighbor_impact,
         peer_groups,
         peer_group_details,
         policy,
@@ -907,6 +979,165 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         bmp_changed: old.bmp != new.bmp,
         mrt_changed: old.mrt != new.mrt,
     }
+}
+
+/// Walk neighbors that exist in both configs and surface those whose
+/// resolved effective config differs between old and new through a
+/// reload-applied path — peer-group inheritance, named policy chain
+/// edits, neighbor-set membership shifts, peer-group reassignment.
+///
+/// Deliberately scoped to *reload-applied* signals only: comparing
+/// the full resolved `transport_config` would also flag
+/// global-derived fields like `local_asn` / `local_router_id` (from
+/// `[global]`), which are restart-required and shouldn't surface
+/// under `--diff`'s "Reload-applied" bucket. Operators looking at
+/// `effective_neighbor_impact` should be able to act on every entry
+/// without restarting the daemon.
+///
+/// What's compared (each contributes a distinct reason string):
+///
+/// - **Resolved import / export policy chain.** Catches the
+///   transitive cases the prior heuristic missed: a
+///   `policy.definitions.foo` edit when `foo` is referenced via
+///   the unchanged global `import_chain`, or via a peer-group's
+///   chain whose record itself is unchanged.
+/// - **Peer-group reassignment.** The neighbor moved between
+///   peer-groups (its raw record changed, but the cascade is
+///   surfaced here too for visibility).
+/// - **Peer-group field edits.** The neighbor's peer-group is in
+///   `peer_groups.changed`/`added`/`removed`; field edits like
+///   `hold_time` flow down via `apply_peer_group_change`'s
+///   delete-and-readd path.
+/// - **Named policy / neighbor-set / global-chain edits.**
+///   Attributed to the specific name where the change was the
+///   chain-reference itself; otherwise tagged as a coarse
+///   `neighbor_set` or global-chain reason.
+///
+/// `PolicyChain` doesn't derive `PartialEq` (would require touching
+/// nested types in other crates); resolved chain equality goes via
+/// `format!("{:?}", ...)`. Both sides come from the same
+/// `effective_policy_chains_for_neighbor` resolver and
+/// `PolicyChain.policies` is a `Vec` (stable order), so the Debug
+/// output is deterministic enough for diff-style equality.
+///
+/// Resolution failure (invalid chain reference) is treated as
+/// "skip" — the load path already validates the new config, so
+/// failures here indicate a transient inconsistency we don't want
+/// to surface as effective impact.
+fn compute_effective_neighbor_impact(
+    old: &Config,
+    new: &Config,
+    peer_groups: &PeerGroupDiff,
+    policy: &PolicyDiff,
+) -> Vec<EffectiveNeighborImpact> {
+    let pg_changed: HashSet<&str> = peer_groups
+        .changed
+        .iter()
+        .map(String::as_str)
+        .chain(peer_groups.added.iter().map(String::as_str))
+        .chain(peer_groups.removed.iter().map(String::as_str))
+        .collect();
+    let policy_changed: HashSet<&str> = policy
+        .definitions_changed
+        .iter()
+        .map(String::as_str)
+        .chain(policy.definitions_added.iter().map(String::as_str))
+        .chain(policy.definitions_removed.iter().map(String::as_str))
+        .collect();
+    let nset_changed = !policy.neighbor_sets_added.is_empty()
+        || !policy.neighbor_sets_removed.is_empty()
+        || !policy.neighbor_sets_changed.is_empty();
+    let global_chain_changed = policy.import_chain_changed || policy.export_chain_changed;
+
+    let new_by_addr: HashMap<&str, &Neighbor> = new
+        .neighbors
+        .iter()
+        .map(|n| (n.address.as_str(), n))
+        .collect();
+
+    let mut out: Vec<EffectiveNeighborImpact> = Vec::new();
+    for old_neighbor in &old.neighbors {
+        let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
+            continue;
+        };
+        let Ok(old_resolved) = old.resolve_neighbor(old_neighbor) else {
+            continue;
+        };
+        let Ok(new_resolved) = new.resolve_neighbor(new_neighbor) else {
+            continue;
+        };
+
+        let import_moved = format!("{:?}", old_resolved.import_policy)
+            != format!("{:?}", new_resolved.import_policy);
+        let export_moved = format!("{:?}", old_resolved.export_policy)
+            != format!("{:?}", new_resolved.export_policy);
+
+        let mut reasons: Vec<String> = Vec::new();
+        if import_moved {
+            reasons.push("import policy resolved differently".to_string());
+        }
+        if export_moved {
+            reasons.push("export policy resolved differently".to_string());
+        }
+
+        if old_resolved.peer_group != new_resolved.peer_group {
+            reasons.push(format!(
+                "peer_group resolved as {:?} (was {:?})",
+                new_resolved.peer_group, old_resolved.peer_group
+            ));
+        } else if let Some(name) = new_resolved.peer_group.as_deref()
+            && pg_changed.contains(name)
+        {
+            reasons.push(format!("peer_group {name:?} changed"));
+        }
+
+        // Attribute moved chains to specific changed policies / sets
+        // / global chain, but only when something *did* move at the
+        // resolved-chain level — otherwise we'd surface every
+        // neighbor for any neighbor_set edit.
+        if import_moved || export_moved {
+            let mut chain_refs: Vec<&str> = Vec::new();
+            chain_refs.extend(new_neighbor.import_policy_chain.iter().map(String::as_str));
+            chain_refs.extend(new_neighbor.export_policy_chain.iter().map(String::as_str));
+            chain_refs.extend(old_neighbor.import_policy_chain.iter().map(String::as_str));
+            chain_refs.extend(old_neighbor.export_policy_chain.iter().map(String::as_str));
+            if let Some(pg_name) = new_resolved.peer_group.as_deref()
+                && let Some(pg) = new.peer_groups.get(pg_name)
+            {
+                chain_refs.extend(pg.import_policy_chain.iter().map(String::as_str));
+                chain_refs.extend(pg.export_policy_chain.iter().map(String::as_str));
+            }
+            for name in chain_refs {
+                if policy_changed.contains(name) {
+                    let entry = format!("policy {name:?} changed");
+                    if !reasons.contains(&entry) {
+                        reasons.push(entry);
+                    }
+                }
+            }
+            if global_chain_changed {
+                let entry = "global import/export chain changed".to_string();
+                if !reasons.contains(&entry) {
+                    reasons.push(entry);
+                }
+            }
+            if nset_changed {
+                let entry = "referenced neighbor_set changed".to_string();
+                if !reasons.contains(&entry) {
+                    reasons.push(entry);
+                }
+            }
+        }
+
+        if !reasons.is_empty() {
+            out.push(EffectiveNeighborImpact {
+                address: old_neighbor.address.clone(),
+                reasons,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.address.cmp(&b.address));
+    out
 }
 
 /// Compare two peer group maps and return names of added/removed/changed groups.

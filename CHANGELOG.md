@@ -9,7 +9,202 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **SIGHUP reconciliation for policy, peer-groups, neighbor-sets,
+  and global chains.** `reload_config` now applies named-policy /
+  neighbor-set / peer-group / global-chain edits at reload time,
+  not just `[[neighbors]]` deltas. Operators editing TOML and
+  running `kill -HUP` get the same effect as a sequence of gRPC
+  policy/peer-group mutations: definitions land first (so peer
+  groups and chains can reference them), then neighbors reconcile,
+  then obsolete definitions delete in reverse-dependency order so
+  `still referenced` rejections don't fire transiently. Each step
+  is a single-shot command to the peer manager that goes through
+  `apply_policy_change` / `apply_peer_group_change` — runtime
+  effect (hot-applied policy chain, delete + re-add for peer-group
+  members) matches the existing gRPC API path. Reload halts at the
+  first step failure and returns a partial-state snapshot, so the
+  daemon's in-memory config tracks what the peer manager actually
+  applied instead of lying that the prior config is still in effect
+  — the operator fixes the failing TOML and reloads again to
+  converge against the half-applied state.
+  *Exception:* the neighbor reconcile step is the one place where
+  partial failure leaves live state genuinely ambiguous (the peer
+  manager sequences delete-then-readd for changed peers and any
+  subset can succeed before the failure point); reload returns
+  `None` in that specific case rather than guessing a snapshot, and
+  logs an explicit "inspect via `rustbgpctl neighbor list`"
+  pointer. Earlier reload steps (policy / peer-group / chain
+  edits) still land at the manager and remain in effect.
+
+- **Automatic Route Refresh on import-policy hot-apply.** When a
+  policy / peer-group / chain mutation changes a peer's *effective*
+  import policy without recreating the session,
+  `PeerManager::update_runtime_policies` now issues
+  `soft_reset_in` for that peer (gated on the session being
+  Established) so routes already accepted in the AdjRibIn under
+  the old policy get re-evaluated. Driven from inside the peer
+  manager rather than from the SIGHUP-only reload path so dynamic
+  peers — which live only in the manager's runtime table, not in
+  `[[neighbors]]` — get the same correctness guarantee as static
+  peers, and so the same code path covers gRPC `SetPolicy` /
+  `SetPeerGroup` / chain mutations and TOML+SIGHUP. Failure
+  bubbles via the `apply_policy_change` result so SIGHUP reloads
+  halt via `halt_partial` rather than silently logging-and-
+  forgetting. Validated end-to-end against FRR 10.3.1 by the new
+  M34 interop test (`tests/interop/m34-policy-soft-reset-frr.clab.yml`,
+  CI-gated alongside M29 / M30): a SIGHUP that adds a deny rule
+  for one of three advertised prefixes drops just that prefix
+  from the RIB while the session stays Established and the other
+  two prefixes remain.
+  *Limitation:* inline `policy.import` / `policy.export` (the
+  legacy non-named global-fallback statements) still require a
+  full restart — they're evaluated at session start, and the
+  command surface for swapping them at runtime doesn't exist yet.
+  Operators are warned at reload time; `--diff` surfaces them under
+  "Restart-required" with a one-line migration hint. Closes the top
+  two open ROADMAP "Next Up — Pre-v1.0 Polish" bullets.
+
+- **Auto-retry for failed import-policy refreshes.** Added a
+  `pending_refresh: bool` flag to `ManagedPeer`, set when
+  `soft_reset_in` returns Err for an Established peer and re-armed
+  when an inherited flag finds the peer still not Established.
+  Drained at the start of every `update_runtime_policies` call: if
+  the peer is now Established the refresh is retried, otherwise the
+  flag is held for the next call. Closes the silent-stale-routes
+  class where a transient refresh send failure (peer task mid-
+  restart, mpsc backpressure) left routes in `AdjRibIn` accepted
+  under the prior policy until an operator manually reissued
+  `SetPolicy` / `rustbgpctl neighbor soft-reset-in`.
+
+- **Bookkeeping is deferred until the session acknowledges a
+  policy update.** `update_runtime_policies` now hot-applies the
+  import / export policy to the session task FIRST and only
+  advances `managed.import_policy` / `managed.export_policy` after
+  the session replies. If the session-side update fails (task
+  back-pressured past the deadline, exited mid-shutdown, mpsc full),
+  the daemon's bookkeeping stays at the prior value so the next
+  call's `import_changed` / `export_changed` comparisons still see a
+  delta and retry. When the failure happens under apply-changing
+  intent — for *any* session state, not just Established — the call
+  bails before the RIB update and the Route Refresh: firing those
+  steps against a session that still holds the prior policy would
+  re-evaluate `AdjRibIn` against the *old* import policy and / or
+  drift the RIB's view of the export policy away from what the
+  session is announcing, and silently returning Ok for non-
+  Established peers would let the caller advance `current_config`
+  with no retry signal — leaving the peer to establish later under
+  the stale policy if the session task subsequently dropped the
+  queued command. Route Refresh stays gated by `soft_reset_in`'s
+  own Established check; the gates serve different purposes.
+
+- **Symmetric retry for export-side hot-apply failures.** Added a
+  `pending_export_apply: bool` flag to `ManagedPeer` that mirrors
+  `pending_refresh` for the export side. Set when
+  `update_export_policy_timeout` fails for an export-changing edit;
+  drained at the start of every `update_runtime_policies` call and
+  combined with `export_changed` to retry. Closes the symmetric
+  silent-stale-policy class on the export side: a transient session-
+  side export-policy update failure could otherwise leave the peer
+  announcing under the prior policy while the daemon's config
+  snapshot had advanced, with no automatic retry — permit→deny
+  export edits would silently keep leaking routes until the next
+  unrelated mutation or restart.
+
+- **Cross-side retry intent preserved across bails.** When
+  `update_runtime_policies` bails because one side's hot-apply
+  failed, both `pending_refresh` and `pending_export_apply` are
+  set whenever the corresponding intent (`needs_refresh` /
+  `needs_export_apply`) was present — not just the side that
+  triggered the bail. This closes a partial-success failure mode
+  where import apply succeeded (advancing
+  `managed.import_policy`) but export apply failed: the export
+  bail would set only `pending_export_apply`, and on retry
+  `import_changed` would be false (bookkeeping already advanced)
+  with no `pending_refresh` to drive `needs_refresh`. Route
+  Refresh would silently never fire, leaving `AdjRibIn` routes
+  accepted under the prior import policy stuck against a session
+  that now had the new policy. Setting both flags at the bail
+  makes the retry pipeline pick up *every* unfired downstream
+  step regardless of which side bailed.
+
+- **RIB-update failure preserves refresh intent.** Same silent-
+  skip class at a different downstream step: when session-side
+  hot-apply succeeds (bookkeeping advances) but the
+  `RibUpdate::ReplacePeerExportPolicy` step fails — RIB channel
+  closed, reply dropped, RIB returned Err — the `?` short-circuit
+  used to bubble Err without re-arming `pending_refresh`. On
+  retry, `import_changed` would compute false (bookkeeping
+  already advanced) and `soft_reset_in` would silently never
+  fire. Replaced the `?` chain with an explicit match that
+  re-arms `pending_refresh` (when `needs_refresh` was true)
+  before returning Err. Note that "Established gate" applies
+  only to *firing* Route Refresh (via `soft_reset_in`'s own
+  check); the failure-bail and pending-flag carry semantics are
+  state-independent.
+
+- **Stale `query_state_timeout` preserves refresh intent.** When
+  the session task is back-pressured past the query deadline,
+  `query_state_timeout` returns `None` and `is_established`
+  reads false — indistinguishable from a genuinely Idle peer.
+  With a fresh `import_changed = true` (no inherited
+  `had_pending_refresh`), the prior `else if` branch wouldn't
+  re-arm `pending_refresh`; the call would return Ok with
+  bookkeeping advanced, and the next call would compute
+  `import_changed = false` and silently skip Route Refresh.
+  Generalized the re-arm to fire whenever
+  `needs_refresh && !is_established`, regardless of whether the
+  intent was inherited or freshly generated. The wasted-refresh
+  cost on a genuinely Idle peer (next call sends a no-op Route
+  Refresh against an empty `AdjRibIn`) is small and acceptable
+  next to silent stale-routes.
+
+- **SIGHUP `resolved_neighbors` failure routes through
+  `halt_partial`.** The neighbor-resolve failure path previously
+  logged with `error!` and returned `Some(working_config)`
+  directly, bypassing the structured `halt_partial` failure
+  reporting (`bucket` / `target` / `error`) used by every other
+  reload step. Routed through `halt_partial` with
+  `bucket = "neighbors.resolve"` so operators get consistent
+  structured diagnostics across all reload-step halts.
+
+- **Effective neighbor diff via peer-group resolution.**
+  `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
+  neighbor "effective impact" view: every neighbor whose resolved
+  config (after peer-group inheritance and policy-chain resolution)
+  would move at reload is listed with the upstream change(s)
+  responsible. Implementation diffs `Config::resolve_neighbor` for
+  the old vs new config, so transitive references are caught: a
+  policy definition edit picked up via the global `import_chain`
+  (chain list itself unchanged) or via a peer-group's chain
+  (peer-group record unchanged) still flags every affected member.
+
 ### Changed
+
+- **`rustbgpd --diff` "Informational (not reconciled)" bucket
+  removed.** Per-named definitions, chains, peer-groups, and
+  neighbor-sets all reload now, so the dimmed "informational"
+  block is gone. Inline `policy.import` / `policy.export` move to
+  the existing "Restart-required" section with an explicit
+  migration hint to named definitions + chains.
+
+- **`--diff --json` schema mirrors the human bucketing.** The JSON
+  output now includes peer-groups, peer-group field details, named
+  policy / neighbor-set / global-chain deltas, and the per-neighbor
+  effective-impact view under `reload_applied`; inline
+  `policy.import` / `policy.export` flags appear under
+  `restart_required`; the `informational` block is empty (kept on
+  the schema as a stable bucket so consumers don't break when it's
+  populated again in a future release). Automation classifying
+  hot-applied edits by which bucket they land in stays correct.
+
+- **`TransportConfig` now derives `Debug`.** Used by the new
+  effective-impact diff to compare resolved neighbor configs
+  via `format!("{:?}", ...)` without requiring a `PartialEq` impl
+  (which would mean touching every nested type — out of scope).
+  Cosmetic side benefit: tracing spans that include
+  `TransportConfig` now render readably.
 
 - **`rustbgpd-wire` 0.8.0 → 0.8.1 (patch).** Documentation-only
   refresh of `crates/wire/README.md` so the crates.io and docs.rs

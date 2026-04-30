@@ -20,7 +20,7 @@ pub enum RemovePrivateAs {
 }
 
 /// Transport-layer configuration for a single BGP peer.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TransportConfig {
     /// FSM-level peer configuration (ASN, hold time, router ID, etc.).
     pub peer: PeerConfig,

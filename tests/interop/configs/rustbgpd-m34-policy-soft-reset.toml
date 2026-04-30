@@ -1,0 +1,28 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Initial state: a single named policy with no statements and a
+# `permit` default — every received route lands in the RIB. The
+# corresponding -deny.toml replaces this definition with a deny
+# rule for 192.168.1.0/24 and triggers an auto Route Refresh on
+# SIGHUP.
+[policy.definitions.filter]
+default_action = "permit"
+
+[policy]
+import_chain = ["filter"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m34"
+hold_time = 90

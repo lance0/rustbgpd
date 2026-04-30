@@ -98,14 +98,20 @@ operator-hit items pulled from KNOWN_ISSUES and the Deferred Hardening
 list below; the bullets here are the **active** track, the rest of
 this document is reference / long-tail.
 
-- [ ] **SIGHUP policy/peer-group reconciliation** — today only
-  `[[neighbors]]` deltas reconcile on reload; policy and peer-group
-  changes are detected but not applied. Operators editing TOML and
-  reloading hit this within minutes.
-- [ ] **Effective neighbor diff via peer-group resolution** —
-  `rustbgpd --diff` shows raw peer-group changes; should resolve
-  inheritance and surface which neighbors are *effectively* impacted.
-  Companion to SIGHUP policy/peer-group reconciliation.
+- [x] **SIGHUP policy/peer-group reconciliation** (post-v0.11.0) —
+  `reload_config` now applies named-policy / neighbor-set /
+  peer-group / global-chain edits, not just `[[neighbors]]` deltas.
+  Each delta routes through the existing
+  `apply_policy_change` / `apply_peer_group_change` paths so
+  runtime effect matches the gRPC API. Inline `policy.import` /
+  `policy.export` still require restart (no runtime swap surface);
+  `--diff` flags this under Restart-required.
+- [x] **Effective neighbor diff via peer-group resolution**
+  (post-v0.11.0) — `rustbgpd --diff` surfaces per-neighbor
+  "effective impact" via `effective_neighbor_impact` so a single
+  peer-group / policy / neighbor-set edit shows every neighbor
+  whose resolved chain would move at reload, not just the raw
+  upstream change.
 - [x] **Native gRPC mTLS** (v0.11.0) — TCP listeners terminate
   TLS in-process via tonic + rustls/ring. `tls_cert_file`,
   `tls_key_file`, and `tls_client_ca_file` are all required together
@@ -120,6 +126,96 @@ this document is reference / long-tail.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
+- [ ] **`rustbgpctl` policy / peer-group / neighbor-set commands** —
+  the daemon-side `PolicyService` and `PeerGroupService` gRPC
+  surfaces are complete, but the CLI only wraps NeighborService /
+  RibService / InjectionService. Operators currently manage policy
+  and peer-groups via TOML+SIGHUP (now hot-reloads — post-v0.11.0
+  branch) or raw `grpcurl`; neither is friendly. Three command
+  classes to add:
+    - **Read** — `rustbgpctl policy list/get`, `peer-group list/get`,
+      `neighbor-set list/get` (wraps `List*` / `Get*` RPCs).
+    - **Write** — `rustbgpctl policy set/delete`, `peer-group set/delete`,
+      `neighbor-set set/delete`, plus `policy chain set-global-import/
+      export/clear` (wraps `Set*` / `Delete*` / chain RPCs).
+    - **Runtime-vs-file diff** — `rustbgpctl policy diff <candidate.toml>`
+      compares the daemon's *runtime* state (which may have drifted
+      from disk via gRPC mutations) against a candidate file. This is
+      genuinely different from `rustbgpd --diff` (file-vs-file dry-run
+      of SIGHUP) and pairs naturally with the SIGHUP reconcile work.
+      May require a new gRPC RPC that returns the daemon's effective
+      runtime config snapshot.
+  Pure CLI / proto-wrapping work — no protocol changes. ~800–1500
+  LOC across `crates/cli/src/commands/policy.rs` +
+  `peer_group.rs` + clap wiring.
+- [x] **Auto-retry pending soft-resets and policy hot-applies across
+  SIGHUP boundaries.** Shipped on the SIGHUP reconcile branch.
+  `update_runtime_policies` is now bail-and-retry across every
+  downstream step:
+  - `ManagedPeer.pending_refresh` covers unfired Route Refresh
+    intent (failed `soft_reset_in`, bail-before-refresh on any
+    side, or non-Established peer carrying inherited intent).
+  - `ManagedPeer.pending_export_apply` covers unfired session-side
+    export updates with the same bail-and-carry semantics.
+  - `update_runtime_policies` defers advancing
+    `managed.import_policy` / `managed.export_policy` until the
+    session ACKs, and bails before the RIB update + Route Refresh
+    when any session-side hot-apply fails under apply-changing
+    intent — for any session state, not just Established. Cross-
+    side carry: when one side succeeds (advancing bookkeeping)
+    but another side bails, both pending flags re-arm so the
+    retry pipeline picks up every unfired downstream step. The
+    RIB-failure path also re-arms `pending_refresh` so a transient
+    RIB-channel failure doesn't silently lose refresh intent.
+  Closes the silent-stale-routes class across import / export /
+  RIB / refresh failure modes; six unit tests + one interop test
+  pin the regressions.
+- [ ] **Dead-letter pending flags on dynamic-peer auto-removal and
+  reconcile delete-then-readd.** When a dynamic peer with
+  `pending_refresh` / `pending_export_apply` set goes idle, the
+  auto-removal path (`peer_manager.rs:BackToIdle`) drops the flags
+  silently, and the same shape applies to `apply_peer_group_change`
+  / `reconcile_peers` delete-then-readd. The next session is
+  spawned with policy resolved from `current_config` so the steady-
+  state policy is correct, but any unfired refresh queued under
+  the prior generation is silently lost. Operationally recoverable
+  because tear-down resets `AdjRibIn` anyway, but worth either a
+  doc note or migration of the flags into a per-(peer-address)
+  side-table that survives the `ManagedPeer` value's lifetime.
+  ~50 LOC + a regression test.
+- [ ] **Post-reload sync resilience in `main.rs`.** When
+  `reload_config` returns `Some(new_config)` but the subsequent
+  `config_mutation_tx.send` (persister sync) or
+  `peer_mgr_internal_tx.send` (PM `current_config` sync) fails,
+  the daemon-level `config` variable stays at the prior value
+  even though the peer manager has already applied the per-step
+  changes. Future SIGHUP diffs would diff against stale `config`,
+  potentially re-running edits that already landed. Fix: make
+  the post-reload syncs idempotent / best-effort and unconditionally
+  advance `config = new_config` after `reload_config` returns
+  `Some(...)`. The PM's `current_config` advances per-step inside
+  `apply_*_change` so the explicit `ReplaceConfigSnapshot` is
+  defensive — failing it doesn't cause real drift. ~20 LOC.
+- [ ] **Tighten test failure-mode coverage.** All four hot-apply
+  failure tests inject the same shape (drop the reply oneshot).
+  Production paths can also fail with channel-full / channel-
+  closed / actual timeout. If the bail logic ever conditioned on
+  the *kind* of error, these would pass while regressing real
+  cases. Also missing: a concurrent-update race test (two
+  back-to-back calls for the same peer interleaving with
+  `pending_refresh` consumption), and a peer-deletion-mid-update
+  test (peer vanishes between the import apply and the bail
+  bookkeeping). ~150 LOC across three new tests; pure unit-test
+  hardening, no production code change.
+- [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
+  reload now awaits N+M+P+2+P sequential per-step replies from the
+  peer manager (was 1 reply pre-branch). The await chain runs
+  inside `run()`'s `tokio::select!` SIGHUP arm, so SIGINT /
+  SIGTERM / gRPC shutdown observation is paused for the full
+  reload duration. Behavior extension of an existing pattern, not
+  a regression — but the blocking window grew meaningfully. Fix:
+  spawn the reload onto its own task and `select!` against a
+  oneshot it carries; main loop stays responsive. ~50 LOC change.
 - [x] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
   GR recovery. Trivial to script on the existing M33 soak harness;
   closes four open P3.5 bullets.
@@ -202,8 +298,8 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **TCP MD5/GTSM interop** — M25 containerlab scenario: two FRR peers, one with MD5 auth, one with GTSM/TTL security. Both sessions establish and exchange routes.
 - [x] **Cease subcode compatibility** — M26 containerlab scenario: FRR accepts Cease/1 (Max Prefixes) cleanly, session re-establishes. INTEROP.md table updated.
 - [ ] **SIGHUP reconcile rollback semantics** — reload now reports structured per-peer failures and keeps the prior config snapshot, but does not roll back already-applied runtime peer changes from earlier reconcile steps
-- [ ] **SIGHUP policy/peer-group reconciliation** — `reload_config()` only reconciles `[[neighbors]]` changes today; peer-group and policy changes are detected but not applied. Should recompute effective neighbor configs from resolved peer-group inheritance and trigger soft resets for affected peers when policy or peer-group fields change.
-- [ ] **Effective neighbor diff via peer-group resolution** — `rustbgpd --diff` shows raw peer-group changes separately from neighbor changes; should resolve peer-group inheritance for old/new configs and surface which neighbors are effectively impacted, including whether changes are hot-applied or require reconnect.
+- [x] **SIGHUP policy/peer-group reconciliation** (post-v0.11.0) — `reload_config` now applies named-policy, neighbor-set, peer-group, and global-chain deltas via the same `apply_policy_change` / `apply_peer_group_change` paths the gRPC API uses. Order: definitions/sets/peer-groups/chains add+change first, then `[[neighbors]]` reconcile, then deletes in reverse-dependency order. Inline `policy.import` / `policy.export` still require restart (no runtime swap surface) and surface under "Restart-required" in `--diff`.
+- [x] **Effective neighbor diff via peer-group resolution** (post-v0.11.0) — `ConfigDiff::effective_neighbor_impact` lists neighbors whose resolved chain moves at reload, with the upstream change(s) (peer_group / policy / neighbor_set / global chain) responsible. Surfaced under "Reload-applied" in `rustbgpd --diff` and the JSON diff output.
 - [ ] **MRT snapshot encode allocation pressure** — `TABLE_DUMP_V2` encode path currently builds grouped route vectors and clones attributes per entry; correct but allocation-heavy on very large dumps (optimize if MRT CPU/latency becomes material)
 - [x] **gRPC listener split** — each configured gRPC listener can now run in `read_only` or `read_write` mode, allowing monitoring/query exposure without exposing mutating control-plane RPCs
 - [x] **Optional Prometheus listener** — `prometheus_addr` is now optional; omit it to skip the metrics HTTP server while still collecting metrics for gRPC health and internal counters

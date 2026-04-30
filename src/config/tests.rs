@@ -2646,8 +2646,12 @@ fn diff_peer_group_changes_detects_field_diffs() {
     assert!(changes[0].contains("45"));
 }
 
+/// Policy-only edits are now reload-applied (per-named definitions
+/// flow through `apply_policy_change` on SIGHUP). Only the inline
+/// `policy.import` / `policy.export` statements remain
+/// restart-required.
 #[test]
-fn diff_config_policy_only_is_not_actionable() {
+fn diff_config_named_policy_only_is_reload_applied() {
     let old = parse(valid_toml()).unwrap();
     let new_toml = r#"
 [global]
@@ -2671,8 +2675,14 @@ default_action = "deny"
     let new = parse(new_toml).unwrap();
     let diff = super::diff_config(&old, &new);
     assert!(diff.has_any_changes());
-    assert!(diff.has_informational_changes());
-    assert!(!diff.has_actionable_changes());
+    assert!(
+        diff.has_reload_applied_changes(),
+        "named policy add must be reload-applied"
+    );
+    assert!(
+        !diff.has_informational_changes(),
+        "named policy edits no longer fall in the informational bucket"
+    );
 }
 
 // ── Dynamic neighbor config tests ───────────────────────────────
