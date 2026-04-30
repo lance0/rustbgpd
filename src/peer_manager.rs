@@ -342,6 +342,20 @@ impl PeerManager {
             return Ok(());
         };
 
+        // Capture the *prior* import policy before clobbering so we
+        // can decide at the end whether to issue a Route Refresh.
+        // `update_import_policy_timeout` only swaps the policy
+        // reference for *future* inbound UPDATEs — routes already in
+        // AdjRibIn were accepted under the old policy and stay there
+        // until the peer re-advertises. Without an automatic refresh
+        // here, a permit→deny edit silently leaves forbidden routes
+        // flowing. PolicyChain doesn't derive PartialEq (would
+        // require touching nested types in other crates); the Debug
+        // representation is deterministic for this comparison since
+        // both sides come from the same `effective_policy_chains_for_neighbor`
+        // resolver and `PolicyChain.policies` is a `Vec` (stable order).
+        let import_changed = format!("{:?}", managed.import_policy) != format!("{import_policy:?}");
+
         managed.import_policy.clone_from(&import_policy);
         managed.export_policy.clone_from(&export_policy);
 
@@ -391,6 +405,24 @@ impl PeerManager {
                 .await
                 .map_err(|_| "RIB manager dropped reply".to_string())?
                 .map_err(|e| format!("failed to update export policy: {e}"))?;
+        }
+
+        // Issue Route Refresh (RFC 2918) to re-evaluate routes already
+        // in this peer's AdjRibIn against the new import policy.
+        // Driven from here rather than from the SIGHUP-only reload
+        // path so dynamic peers, gRPC mutations, and any other call
+        // site that goes through `apply_policy_change` get the same
+        // correctness guarantee — the loop above iterates
+        // `self.peers`, which includes dynamic peers.
+        //
+        // Only issued when the import policy *materially* changed:
+        // re-applying the same chain (no-op edits, redundant
+        // mutations) shouldn't trigger Route Refresh storms. Failure
+        // bubbles up to `apply_policy_change`'s caller — for SIGHUP
+        // reloads, that halts the reload via `halt_partial` so the
+        // failure is surfaced rather than logged-and-forgotten.
+        if import_changed {
+            self.soft_reset_in(address, Vec::new()).await?;
         }
 
         Ok(())

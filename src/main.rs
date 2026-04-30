@@ -24,8 +24,7 @@ mod metrics_server;
 mod peer_manager;
 mod policy_admin;
 
-use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process;
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
@@ -1751,11 +1750,6 @@ async fn reload_config(
         }
         match reply_rx.await {
             Ok(reconcile) if reconcile.is_success() => {
-                // Reconcile succeeded fully; mirror the neighbor list
-                // into working_config. Per-neighbor events would be
-                // more granular but ReconcilePeers is all-or-fail at
-                // the manager today, so a full snapshot copy is the
-                // honest representation.
                 working_config.neighbors = new_config.neighbors.clone();
             }
             Ok(reconcile) => {
@@ -1896,62 +1890,19 @@ async fn reload_config(
         }
     }
 
-    // 9. Soft-reset-in for peers whose effective import policy moved.
-    //    `update_runtime_policies` (driven by `apply_policy_change` in
-    //    steps 1-4) only swaps the policy reference for *future*
-    //    inbound UPDATEs; routes already in the AdjRibIn were accepted
-    //    under the old policy and stay there until the peer
-    //    re-advertises. SoftResetIn issues an outbound Route Refresh
-    //    (RFC 2918) so the peer resends its full Adj-RIB-Out, and the
-    //    new policy gets re-evaluated against fresh inbound. Without
-    //    this step, a permit→deny policy edit could leave forbidden
-    //    routes flowing.
-    //
-    //    Skipped for peers covered by neighbor reconcile (added /
-    //    changed): those got fresh sessions in step 5, which already
-    //    re-import everything under the new policy. Removed peers
-    //    don't need a refresh because they're gone. This best-effort
-    //    step logs warnings on failure but doesn't halt the reload —
-    //    the policy is already live for new traffic, and operators
-    //    can issue a manual `rustbgpctl neighbor soft-reset-in
-    //    <addr>` to converge if the automatic refresh failed.
-    let import_changed = config::effective_import_policy_changed_addrs(current, &new_config);
-    if !import_changed.is_empty() {
-        let raw_changed: HashSet<&str> = diff.changed.iter().map(|n| n.address.as_str()).collect();
-        let raw_added: HashSet<&str> = diff.added.iter().map(|n| n.address.as_str()).collect();
-        let raw_removed: HashSet<IpAddr> = diff.removed.iter().copied().collect();
-        for addr_str in &import_changed {
-            if raw_changed.contains(addr_str.as_str()) || raw_added.contains(addr_str.as_str()) {
-                continue;
-            }
-            let Ok(addr) = addr_str.parse::<IpAddr>() else {
-                continue;
-            };
-            if raw_removed.contains(&addr) {
-                continue;
-            }
-            let res = send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SoftResetIn {
-                address: addr,
-                families: Vec::new(),
-                reply,
-            })
-            .await;
-            match res {
-                Ok(()) => {
-                    info!(%addr, "reload: soft-reset-in fired (import policy moved)");
-                }
-                Err(error) => {
-                    warn!(
-                        %addr,
-                        error = %error,
-                        "reload: soft-reset-in failed — routes accepted under prior policy \
-                         stay in AdjRibIn until the peer re-advertises naturally. Issue \
-                         `rustbgpctl neighbor soft-reset-in {addr}` manually to converge."
-                    );
-                }
-            }
-        }
-    }
+    // Route Refresh for peers whose import policy moved fires
+    // automatically inside `PeerManager::update_runtime_policies`
+    // for any peer (static or dynamic) on policy / peer-group /
+    // chain edits — the SetPolicy / SetPeerGroup / chain commands
+    // above land at `apply_policy_change`, which calls
+    // `update_runtime_policies` per affected peer, which now issues
+    // `soft_reset_in` when the import policy materially changed.
+    // That covers gRPC mutations and SIGHUP with one mechanism, and
+    // reaches dynamic peers (which live only in the manager's
+    // runtime table, not in `[[neighbors]]`). A soft-reset failure
+    // there bubbles up through the SetPolicy / etc command result
+    // handled above, halting this reload via `halt_partial` so the
+    // failure is surfaced rather than logged-and-forgotten.
 
     info!("config reload complete");
     Some(working_config)
@@ -2542,74 +2493,17 @@ hold_time = 90
         );
     }
 
-    /// When a reload changes a peer's effective import policy without
-    /// recreating the session (peer record unchanged, but the policy
-    /// definition referenced via global chain or peer-group chain
-    /// moves), reload must fire `SoftResetIn` for that peer so routes
-    /// already in `AdjRibIn` under the old policy get re-evaluated
-    /// against the new policy. Without this, a permit→deny edit
-    /// silently leaves forbidden routes flowing until the peer
-    /// re-advertises naturally.
-    #[tokio::test]
-    async fn reload_fires_soft_reset_in_for_import_policy_change() {
-        let initial = format!(
-            "{baseline}\n[policy.definitions.block-private]\n\
-             default_action = \"permit\"\n[policy]\nimport_chain = [\"block-private\"]\n",
-            baseline = baseline_toml()
-        );
-        let new_toml = format!(
-            "{baseline}\n[policy.definitions.block-private]\n\
-             default_action = \"deny\"\n[policy]\nimport_chain = [\"block-private\"]\n",
-            baseline = baseline_toml()
-        );
-        let (returned, tags) = drive_reload(&initial, &new_toml).await;
-        assert!(returned.is_some(), "reload must succeed");
-        // The baseline neighbor 10.0.0.2 has an unchanged record;
-        // its effective import policy moved via the global chain
-        // referencing a redefined policy. SoftResetIn must fire so
-        // any already-imported routes get re-filtered.
-        assert!(
-            tags.iter()
-                .any(|t| t.starts_with("SoftResetIn") && t.contains("10.0.0.2")),
-            "expected SoftResetIn to fire for 10.0.0.2 after import policy moved — saw {tags:?}"
-        );
-    }
-
-    /// `SoftResetIn` must NOT fire for peers covered by the neighbor
-    /// reconcile path (added or changed): those got fresh sessions in
-    /// step 5 which re-import everything under the new policy. Issuing
-    /// a redundant Route Refresh would just be noise.
-    #[tokio::test]
-    async fn reload_skips_soft_reset_in_for_reconciled_neighbors() {
-        let initial = format!(
-            "{baseline}\n[policy.definitions.block-private]\n\
-             default_action = \"permit\"\n[policy]\nimport_chain = [\"block-private\"]\n",
-            baseline = baseline_toml()
-        );
-        // New TOML changes the policy AND adds a new neighbor — the
-        // policy edit cascades to both the existing (10.0.0.2) and
-        // the new neighbor (10.0.0.3). Only 10.0.0.2 should get
-        // SoftResetIn; 10.0.0.3 gets a fresh session via reconcile.
-        let new_toml = format!(
-            "{baseline}\n[policy.definitions.block-private]\n\
-             default_action = \"deny\"\n[policy]\nimport_chain = [\"block-private\"]\n\n\
-             [[neighbors]]\naddress = \"10.0.0.3\"\nremote_asn = 65003\nhold_time = 90\n",
-            baseline = baseline_toml()
-        );
-        let (returned, tags) = drive_reload(&initial, &new_toml).await;
-        assert!(returned.is_some(), "reload must succeed");
-        assert!(
-            tags.iter()
-                .any(|t| t.starts_with("SoftResetIn") && t.contains("10.0.0.2")),
-            "10.0.0.2 (unchanged neighbor record, moved import policy) needs SoftResetIn — saw {tags:?}"
-        );
-        assert!(
-            !tags
-                .iter()
-                .any(|t| t.starts_with("SoftResetIn") && t.contains("10.0.0.3")),
-            "10.0.0.3 (newly-added neighbor) gets a fresh session via reconcile, must not also receive SoftResetIn — saw {tags:?}"
-        );
-    }
+    // SoftResetIn-on-import-policy-change coverage is now PM-side:
+    // `update_runtime_policies` fires `soft_reset_in` automatically
+    // when import policy materially changes, for any peer in
+    // `self.peers` (which includes dynamic peers — the codex finding
+    // that motivated moving this out of the binary's reload loop).
+    // Asserting that behavior at this layer would require a real
+    // `PeerManager` task with established peers; that level of
+    // integration coverage belongs in `peer_manager::tests`. The
+    // reload tests above already prove the SetPolicy / SetPeerGroup
+    // / chain commands fire on the right edits — that's the seam
+    // this layer can exercise without a real peer.
 
     /// Effective-impact must catch a *changed policy definition*
     /// referenced via the global `import_chain`, even when the chain

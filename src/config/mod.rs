@@ -942,8 +942,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         .collect();
 
     let policy = diff_policy(&old.policy, &new.policy);
-    let effective_neighbor_impact =
-        compute_effective_neighbor_impact(old, new, &peer_groups, &policy);
+    let effective_neighbor_impact = compute_effective_neighbor_impact(old, new);
 
     ConfigDiff {
         neighbors,
@@ -956,47 +955,6 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         bmp_changed: old.bmp != new.bmp,
         mrt_changed: old.mrt != new.mrt,
     }
-}
-
-/// Return the addresses of neighbors present in both `old` and `new`
-/// whose resolved *import* policy chain (peer-group inheritance +
-/// global chain + neighbor chain) differs between the two configs.
-/// Used by the SIGHUP reload path to drive `SoftResetIn` for peers
-/// whose effective filter changed without their session being
-/// recreated by neighbor reconcile — `update_runtime_policies` only
-/// affects future inbound `UPDATE` messages, so without a refresh,
-/// routes accepted under the old policy stay in the `AdjRibIn` even
-/// after a permit→deny edit.
-///
-/// Address strings (not `IpAddr`) match the canonical `Neighbor.address`
-/// representation; callers can `parse::<IpAddr>()` as needed.
-#[must_use]
-pub fn effective_import_policy_changed_addrs(old: &Config, new: &Config) -> Vec<String> {
-    let new_by_addr: HashMap<&str, &Neighbor> = new
-        .neighbors
-        .iter()
-        .map(|n| (n.address.as_str(), n))
-        .collect();
-
-    let mut out = Vec::new();
-    for old_neighbor in &old.neighbors {
-        let Some(new_neighbor) = new_by_addr.get(old_neighbor.address.as_str()) else {
-            continue;
-        };
-        let Ok(old_resolved) = old.resolve_neighbor(old_neighbor) else {
-            continue;
-        };
-        let Ok(new_resolved) = new.resolve_neighbor(new_neighbor) else {
-            continue;
-        };
-        if format!("{:?}", old_resolved.import_policy)
-            != format!("{:?}", new_resolved.import_policy)
-        {
-            out.push(old_neighbor.address.clone());
-        }
-    }
-    out.sort();
-    out
 }
 
 /// Walk neighbors that exist in both configs and surface those whose
@@ -1022,12 +980,7 @@ pub fn effective_import_policy_changed_addrs(old: &Config, new: &Config) -> Vec<
 /// the load path already validates the new config, so failures here
 /// indicate a transient inconsistency we don't want to surface as
 /// effective impact.
-fn compute_effective_neighbor_impact(
-    old: &Config,
-    new: &Config,
-    _peer_groups: &PeerGroupDiff,
-    _policy: &PolicyDiff,
-) -> Vec<EffectiveNeighborImpact> {
+fn compute_effective_neighbor_impact(old: &Config, new: &Config) -> Vec<EffectiveNeighborImpact> {
     let new_by_addr: HashMap<&str, &Neighbor> = new
         .neighbors
         .iter()

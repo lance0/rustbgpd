@@ -38,20 +38,20 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pointer. Earlier reload steps (policy / peer-group / chain
   edits) still land at the manager and remain in effect.
 
-- **`SoftResetIn` for peers whose effective import policy moved.**
-  When a reload changes a peer's resolved import policy without
-  recreating the session — e.g., a `policy.definitions.foo` edit
-  picked up via the unchanged global `import_chain` or via a
-  peer-group chain whose record is otherwise unchanged — reload
-  now issues an outbound Route Refresh (RFC 2918) so the peer
-  re-advertises and the new policy gets re-evaluated against fresh
-  inbound. Without this step, routes already accepted under the
-  old policy stayed in `AdjRibIn` even after a permit→deny edit
-  until the peer re-advertised naturally. Skipped for peers
-  covered by neighbor reconcile (added / changed): those got
-  fresh sessions which re-import everything under the new policy.
-  Best-effort — failures log a `rustbgpctl neighbor soft-reset-in`
-  fallback hint and don't halt the reload.
+- **Automatic Route Refresh on import-policy hot-apply.** When a
+  policy / peer-group / chain mutation changes a peer's *effective*
+  import policy without recreating the session,
+  `PeerManager::update_runtime_policies` now issues
+  `soft_reset_in` for that peer so routes already accepted in the
+  AdjRibIn under the old policy get re-evaluated. Driven from
+  inside the peer manager rather than from the SIGHUP-only reload
+  path so dynamic peers — which live only in the manager's
+  runtime table, not in `[[neighbors]]` — get the same correctness
+  guarantee as static peers, and so the same code path covers
+  gRPC `SetPolicy` / `SetPeerGroup` / chain mutations and
+  TOML+SIGHUP. Failure bubbles via the `apply_policy_change`
+  result so SIGHUP reloads halt via `halt_partial` rather than
+  silently logging-and-forgetting.
   *Limitation:* inline `policy.import` / `policy.export` (the
   legacy non-named global-fallback statements) still require a
   full restart — they're evaluated at session start, and the
