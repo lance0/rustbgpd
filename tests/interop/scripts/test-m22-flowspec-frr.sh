@@ -8,10 +8,21 @@
 #   4. Second rule injected, both visible on both sides
 #   5. Withdrawal of first rule propagates to FRR
 #   6. Second rule survives the withdrawal
+#   7. Session stays Established across the entire test (no flap)
+#
+# Convergence-signal discipline (after the second-flake post-mortem):
+# the prior version relied on `show bgp ipv4 flowspec` text grep,
+# which is FRR's display path and lags the underlying RIB by tens of
+# seconds. That hid a real bug — session flaps during FlowSpec
+# exchange would cause both sides to lose state, and the test would
+# only "pass" once FRR re-established and re-received the rules.
+# This rewrite uses `show bgp ipv4 flowspec json` for state queries
+# and `show bgp summary json` to detect flaps directly via
+# `connectionsDropped`. Text views are kept as debug fallbacks only.
 #
 # Prerequisites:
 #   - containerlab deployed: containerlab deploy -t tests/interop/m22-flowspec-frr.clab.yml
-#   - grpcurl installed on the host
+#   - grpcurl + jq installed on the host
 #
 # Usage:
 #   bash tests/interop/scripts/test-m22-flowspec-frr.sh
@@ -44,6 +55,43 @@ grpc_list_flowspec() {
         -d '{"afiSafi": "ADDRESS_FAMILY_IPV4_FLOWSPEC"}' \
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListFlowSpecRoutes 2>/dev/null
 }
+
+
+# ---------------------------------------------------------------------------
+# FRR direct-signal helpers — JSON queries with jq, *not* text grep.
+# ---------------------------------------------------------------------------
+
+# Total FlowSpec routes in FRR's RIB. `null` is rendered as empty
+# string by `jq -r`, which we coerce to 0.
+frr_flowspec_count() {
+    docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null \
+        | jq -r '.totalRoutes // 0' 2>/dev/null \
+        || echo 0
+}
+
+# Returns 0 if FRR has a FlowSpec route whose key contains the given
+# substring (e.g. "192.168.1.0/24"); 1 otherwise. The JSON keys are
+# the FlowSpec NLRI string representation; substring match handles
+# the variable destination/source-port/protocol trailing parts.
+frr_flowspec_has_prefix() {
+    local needle="$1"
+    docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null \
+        | jq -e --arg n "$needle" \
+            '.routes // {} | to_entries | any(.key | contains($n))' \
+            >/dev/null 2>&1
+}
+
+# `connectionsDropped` from FRR's per-peer summary. Increments every
+# time the session leaves Established. Used to assert no flap during
+# the test.
+frr_session_drops() {
+    docker exec "$FRR" vtysh -c "show bgp summary json" 2>/dev/null \
+        | jq -r '.ipv4Unicast.peers["10.0.0.1"].connectionsDropped // 0' 2>/dev/null \
+        || echo 0
+}
+
+# Snapshot at start of test; later checks assert this hasn't grown.
+INITIAL_DROPS=""
 
 
 # ---------------------------------------------------------------------------
@@ -108,6 +156,26 @@ wait_established() {
 # Use the standardized `start_rustbgpd` from test-lib.sh — handles
 # both the /proc poll loop and the gRPC-ready wait.
 
+# Assert the session has NOT flapped since the test started. Called
+# at the end of every test step that touches the session, so a flap
+# is attributed to the operation that caused it rather than masked
+# by an eventual recovery.
+assert_no_flap() {
+    local current
+    current=$(frr_session_drops)
+    if [ "$current" != "$INITIAL_DROPS" ]; then
+        fail "session flapped during test: connectionsDropped \
+$INITIAL_DROPS → $current. The prior test version masked this by \
+waiting on FRR's vtysh display, which would eventually show \
+re-received rules after a re-establish — hiding the flap entirely."
+        echo "--- rustbgpd → FRR session diagnostic ---" >&2
+        docker exec "$FRR" vtysh -c "show bgp neighbor 10.0.0.1" 2>&1 \
+            | grep -iE "Last reset|state|Connections" | head -5 >&2 || true
+        return 1
+    fi
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -148,29 +216,34 @@ test_inject_rule1() {
         fail "Rule 1 not found in rustbgpd FlowSpec Loc-RIB"
         log "DEBUG FlowSpec RIB: $fs_routes"
     fi
+    assert_no_flap
 }
 
 test_frr_receives_rule1() {
-    log "Test 3: FRR receives FlowSpec rule 1"
+    log "Test 3: FRR receives FlowSpec rule 1 (JSON convergence signal)"
 
-    # 60 retries × 2 s = 120 s window. FRR's `show bgp ipv4
-    # flowspec` view can lag the underlying RIB update by over a
-    # minute under parallel CI load — observed 62 s on a flaked
-    # run, so the previous 60 s window was 2 s short. Data-plane
-    # state is fine; this is purely FRR's display-path latency.
-    # 120 s gives 2x headroom over the worst observed lag.
-    for i in $(seq 1 60); do
-        local frr_fs
-        frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
-        if echo "$frr_fs" | grep -qi "192.168.1.0"; then
+    # Direct signal: query FRR's flowspec RIB as JSON via
+    # `show bgp ipv4 flowspec json` and check the routes map.
+    # 30 retries × 1 s = 30 s — generous for a single rule
+    # advertisement under any plausible load. The prior
+    # 60- and 120-second windows were measuring FRR's text
+    # display path, which lags the RIB by a separate
+    # mechanism; the JSON path returns the underlying state
+    # directly and converges within a few seconds in practice.
+    for i in $(seq 1 30); do
+        if frr_flowspec_has_prefix "192.168.1.0/24"; then
             ok "FRR received FlowSpec rule for 192.168.1.0/24 (attempt $i)"
+            assert_no_flap
             return 0
         fi
-        sleep 2
+        sleep 1
     done
-    fail "FRR did not receive FlowSpec rule 1 within 120s"
-    log "DEBUG FRR flowspec table:"
+    fail "FRR did not receive FlowSpec rule 1 within 30s"
+    log "DEBUG FRR flowspec table (text):"
     docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true
+    log "DEBUG FRR flowspec JSON:"
+    docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null || true
+    assert_no_flap
 }
 
 test_inject_rule2() {
@@ -194,30 +267,29 @@ print(len(resp.get('routes', [])))
     else
         fail "Expected 2 FlowSpec rules in rustbgpd, got $count"
     fi
+    assert_no_flap
 }
 
 test_frr_receives_both() {
-    log "Test 5: FRR receives both FlowSpec rules"
+    log "Test 5: FRR receives both FlowSpec rules (JSON convergence signal)"
 
-    # 30 retries × 2 s = 60 s window — matches the FRR display
-    # reconvergence budget the other waits use, since this is the
-    # same lag class.
+    # 30 retries × 1 s = 30 s window using the JSON query.
     for i in $(seq 1 30); do
-        local frr_fs
-        frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
-        local has_rule1=false
-        local has_rule2=false
-        echo "$frr_fs" | grep -qi "192.168.1.0" && has_rule1=true
-        echo "$frr_fs" | grep -qi "10.0.0.0" && has_rule2=true
-
-        if [ "$has_rule1" = true ] && [ "$has_rule2" = true ]; then
-            ok "FRR has both FlowSpec rules (attempt $i)"
+        local count
+        count=$(frr_flowspec_count)
+        if [ "$count" -ge 2 ] \
+            && frr_flowspec_has_prefix "192.168.1.0/24" \
+            && frr_flowspec_has_prefix "10.0.0.0/8"; then
+            ok "FRR has both FlowSpec rules (attempt $i, count=$count)"
+            assert_no_flap
             return 0
         fi
-        sleep 2
+        sleep 1
     done
-    fail "FRR does not have both FlowSpec rules within 60s"
-    docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true
+    fail "FRR does not have both FlowSpec rules within 30s"
+    log "DEBUG FRR flowspec JSON:"
+    docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null || true
+    assert_no_flap
 }
 
 test_withdraw_rule1() {
@@ -234,49 +306,41 @@ test_withdraw_rule1() {
     else
         ok "Rule 1 withdrawn from rustbgpd FlowSpec Loc-RIB"
     fi
+    assert_no_flap
 }
 
 test_frr_withdrawal_propagated() {
     log "Test 7: Withdrawal propagated to FRR, rule 2 survives"
 
-    # Wait for rule 1 to disappear from FRR
-    for i in $(seq 1 15); do
-        local frr_fs
-        frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
-        if ! echo "$frr_fs" | grep -qi "192.168.1.0"; then
-            ok "Rule 1 withdrawn from FRR (attempt $i)"
-            break
-        fi
-        if [ "$i" -eq 15 ]; then
-            fail "FRR still has rule 1 after withdrawal (30s timeout)"
-            return 1
-        fi
-        sleep 2
-    done
-
-    # FRR's flowspec table can drop *all* displayed rules for an
-    # extended window after MP_UNREACH and rebuild — observed
-    # ~44 s of empty `show bgp ipv4 flowspec` on a peer that was
-    # confirmed holding two rules 3 s earlier. Withdrawal itself
-    # was processed correctly (rule 1 disappeared above and
-    # rustbgpd's Loc-RIB shows the right count); the issue is
-    # FRR-side display reconvergence, not data-plane state.
-    # 5 s settle + 30 retries × 2 s = 65 s window absorbs the
-    # observed worst case under parallel CI load.
-    sleep 5
+    # JSON-direct check: rule 1 should be absent and rule 2
+    # should still be present, asserted in a single converged
+    # state. The prior version polled rule 1's disappearance
+    # and rule 2's survival in two separate loops with a 65 s
+    # window because FRR's text view briefly drops both rules
+    # mid-MP_UNREACH-processing. The JSON view (totalRoutes
+    # plus routes-map keys) reflects the underlying RIB
+    # without that display lag, so 30 s is plenty.
     for i in $(seq 1 30); do
-        local frr_fs
-        frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
-        if echo "$frr_fs" | grep -qi "10.0.0.0"; then
-            ok "Rule 2 still present on FRR after rule 1 withdrawal (attempt $i)"
+        local count
+        count=$(frr_flowspec_count)
+        local has_rule1=false
+        local has_rule2=false
+        frr_flowspec_has_prefix "192.168.1.0/24" && has_rule1=true
+        frr_flowspec_has_prefix "10.0.0.0/8" && has_rule2=true
+
+        if [ "$has_rule1" = false ] && [ "$has_rule2" = true ] && [ "$count" -eq 1 ]; then
+            ok "FRR converged on post-withdrawal state: rule 1 gone, rule 2 present (attempt $i)"
             break
         fi
         if [ "$i" -eq 30 ]; then
-            echo "--- FRR flowspec view (final) ---" >&2
-            echo "$frr_fs" >&2
-            fail "Rule 2 not found on FRR after rule 1 withdrawal (65s timeout)"
+            echo "--- FRR flowspec JSON (final) ---" >&2
+            docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec json" 2>/dev/null >&2 || true
+            fail "FRR did not converge on (rule1=gone, rule2=present) within 30s — \
+rule1=$has_rule1 rule2=$has_rule2 totalRoutes=$count"
+            assert_no_flap
+            return 1
         fi
-        sleep 2
+        sleep 1
     done
 
     # Verify rule 2 in rustbgpd
@@ -294,6 +358,7 @@ print(len(resp.get('routes', [])))
     else
         fail "Expected 1 FlowSpec rule in rustbgpd, got $count"
     fi
+    assert_no_flap
 }
 
 # ---------------------------------------------------------------------------
@@ -308,6 +373,13 @@ main() {
 
     wait_established || exit 1
 
+    # Snapshot the connectionsDropped counter immediately after the
+    # session is up. Every test step asserts this hasn't grown,
+    # surfacing a flap at the operation that caused it instead of
+    # letting it hide behind a slow eventual recovery.
+    INITIAL_DROPS=$(frr_session_drops)
+    log "Captured initial connectionsDropped = $INITIAL_DROPS for flap detection"
+
     test_flowspec_capability
     test_inject_rule1
     test_frr_receives_rule1
@@ -317,10 +389,8 @@ main() {
     test_frr_withdrawal_propagated
 
     echo ""
-    log "Results: $pass passed, $fail failed"
-    if [ "$fail" -gt 0 ]; then
-        exit 1
-    fi
+    print_summary
+    [ "$fail" -eq 0 ] || exit 1
 }
 
 main "$@"

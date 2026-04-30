@@ -9,6 +9,38 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **FlowSpec MP_REACH next-hop validation no longer tears the
+  session.** Per RFC 8955 §6.1 the `NEXT_HOP` value for FlowSpec
+  (SAFI 133) advertisements is "irrelevant" and recommended to be
+  0. Wire decoder fills `MpReachNlri.next_hop` with `0.0.0.0`
+  when the on-wire NH-Len is 0 (the FlowSpec convention). The
+  pre-fix validate path then rejected `0.0.0.0` with subcode 8
+  (Invalid `NEXT_HOP`), causing rustbgpd to send `NOTIFICATION`
+  3/8 and tear the session against any RFC-compliant FlowSpec
+  peer (FRR, GoBGP). Result: a flap-and-recover cycle on every
+  FlowSpec UPDATE exchange. M22's prior version masked this with
+  long FRR-display-path waits — the test would "pass" once FRR
+  re-established and re-received the rules. Surfaced by switching
+  M22 to JSON convergence signals + a per-step
+  `connectionsDropped` flap-detection assertion. Validate now
+  skips `check_mp_reach_next_hop` for `Safi::FlowSpec`. M22
+  runtime dropped from ~120 s on the slow-path branch to ~22 s
+  deterministic.
+
+### CI
+
+- **M22 FlowSpec test rewired to direct convergence signals.**
+  Prior version polled `show bgp ipv4 flowspec` text output for
+  every FRR-side check, which lags the underlying RIB by tens of
+  seconds and hid the session-flap bug above. Now uses
+  `show bgp ipv4 flowspec json` parsed with `jq` for state
+  queries, asserts session stability via `connectionsDropped`
+  delta after every test step, and tightens timeouts from the
+  60–120 s slow-path windows to 30 s. M22 also now requires `jq`
+  on the runner; CI wiring already installs it for M30/M34.
+
 ## [0.12.0] — 2026-04-30
 
 ### Added
