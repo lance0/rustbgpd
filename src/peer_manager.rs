@@ -608,12 +608,25 @@ impl PeerManager {
                 }
                 return Err(error);
             }
-        } else if had_pending_refresh && !is_established {
-            // Inherited a pending refresh but the peer still isn't
-            // Established. Re-arm so the next call retries; the
-            // current call returns Ok because there is nothing
-            // operationally wrong with this peer right now (no
-            // refresh is sendable).
+        } else if needs_refresh {
+            // `!is_established` here means one of: the peer really is
+            // Idle / Connect / OpenSent (no AdjRibIn to refresh — the
+            // refresh next call would be a no-op), OR
+            // `query_state_timeout` returned None for an
+            // actually-Established peer (back-pressured session task
+            // missed the deadline) and we cannot distinguish the two
+            // from this side. Re-arm `pending_refresh` unconditionally
+            // so that a subsequent call — once the session unblocks
+            // or the peer reaches Established — fires the refresh.
+            // Without this, a fresh `import_changed = true` in this
+            // call combined with a stale state query would silently
+            // drop refresh intent: bookkeeping advances, the retry
+            // sees `import_changed = false`, and AdjRibIn routes
+            // accepted under the prior policy stay stuck. The
+            // wasted-refresh cost on a genuinely Idle peer (next call
+            // sends Route Refresh against an empty / freshly-populated
+            // AdjRibIn) is small and acceptable next to silent
+            // staleness.
             if let Some(managed) = self.peers.get_mut(&address) {
                 managed.pending_refresh = true;
             }
@@ -3134,6 +3147,150 @@ mod tests {
 
         drop(mgr);
         let _ = rib_drainer.await;
+    }
+
+    /// Sixth-round adversarial-review finding: when
+    /// `query_state_timeout` returns None — because the session task
+    /// is back-pressured past the deadline and missed answering
+    /// `QueryState` — `is_established` reads false even for a peer
+    /// that is genuinely Established. With a fresh
+    /// `import_changed = true`, the prior code (`else if
+    /// had_pending_refresh && !is_established`) wouldn't re-arm
+    /// `pending_refresh` because nothing was inherited; the function
+    /// would advance bookkeeping, return Ok, and the next call would
+    /// see `import_changed = false` and silently never fire refresh.
+    /// `AdjRibIn` routes accepted under the prior import policy
+    /// would stay stuck against a session that now had the new
+    /// policy.
+    ///
+    /// Fix: re-arm `pending_refresh` whenever
+    /// `needs_refresh && !is_established`, regardless of whether
+    /// the intent was inherited or freshly generated. This subsumes
+    /// the prior `had_pending_refresh && !is_established` branch and
+    /// covers the stale-query case that's indistinguishable from
+    /// genuine Idle from this side.
+    ///
+    /// The "wasted refresh on truly-Idle peer" cost is real but
+    /// small (Route Refresh against an empty `AdjRibIn` is a no-op
+    /// on the wire) and is the right tradeoff against silent
+    /// stale-routes.
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn stale_query_state_re_arms_pending_refresh() {
+        use rustbgpd_policy::{Policy, PolicyAction};
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let (tx, mut rx) = mpsc::channel::<PeerCommand>(8);
+        let route_refresh_calls = Arc::new(AtomicU32::new(0));
+        let route_refresh_calls_in_task = route_refresh_calls.clone();
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. }
+                    | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        // Drop the reply — caller observes None,
+                        // simulating a back-pressured session that
+                        // missed the deadline. From `update_runtime_policies`'s
+                        // perspective this is indistinguishable from
+                        // a genuinely Idle peer; the fix must re-arm
+                        // pending_refresh regardless.
+                        drop(reply);
+                    }
+                    PeerCommand::SendRouteRefresh { reply, .. } => {
+                        route_refresh_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let task_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let peer_config = make_config(task_addr, 65002);
+        let transport = mgr.build_transport_config(&peer_config);
+        let hold = transport.peer.hold_time;
+        mgr.peers.insert(
+            task_addr,
+            ManagedPeer {
+                handle,
+                remote_asn: 65002,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh: false,
+                pending_export_apply: false,
+            },
+        );
+
+        let chain = PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        }]);
+
+        // Fresh import_changed=true; both apply paths succeed; query
+        // returns None (stale). Without the fix, this call returns
+        // Ok and silently loses refresh intent.
+        let result = mgr
+            .update_runtime_policies(task_addr, Some(chain), None)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "Stale query state must NOT be treated as a failure — the call should \
+             succeed (apply paths did) and just defer the refresh via pending_refresh. \
+             Got: {result:?}"
+        );
+
+        let managed = mgr.peers.get(&task_addr).expect("peer present");
+        assert!(
+            managed.pending_refresh,
+            "pending_refresh MUST be re-armed when query_state_timeout returned None \
+             with a fresh import_changed=true. The prior code only re-armed when the \
+             pending flag was *inherited*; a fresh refresh intent under a stale query \
+             was silently lost. Without this re-arm, the retry would see \
+             import_changed=false (bookkeeping advanced) and never fire refresh, \
+             leaving AdjRibIn stuck on the prior import policy."
+        );
+        assert!(
+            managed.import_policy.is_some(),
+            "managed.import_policy correctly advanced — session ACKed the new policy. \
+             The query was stale, but the apply itself succeeded."
+        );
+        assert_eq!(
+            route_refresh_calls.load(Ordering::SeqCst),
+            0,
+            "Route Refresh must NOT have fired in this call — soft_reset_in is gated \
+             on Established (via query_state_timeout result), and the query was stale. \
+             The retry-on-next-call path is what fires refresh once the query unblocks."
+        );
     }
 
     #[test]

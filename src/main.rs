@@ -1784,8 +1784,14 @@ async fn reload_config(
         let peer_configs = match new_config.resolved_neighbors() {
             Ok(p) => p,
             Err(e) => {
-                error!(error = %e, "config reload failed — invalid policy in new config");
-                return Some(working_config);
+                return halt_partial(
+                    working_config,
+                    ReloadStepFailure {
+                        bucket: "neighbors.resolve",
+                        target: "new_config.resolved_neighbors".to_string(),
+                        error: e.to_string(),
+                    },
+                );
             }
         };
         let peer_map: std::collections::HashMap<String, _> = peer_configs

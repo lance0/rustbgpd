@@ -144,6 +144,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   check); the failure-bail and pending-flag carry semantics are
   state-independent.
 
+- **Stale `query_state_timeout` preserves refresh intent.** When
+  the session task is back-pressured past the query deadline,
+  `query_state_timeout` returns `None` and `is_established`
+  reads false — indistinguishable from a genuinely Idle peer.
+  With a fresh `import_changed = true` (no inherited
+  `had_pending_refresh`), the prior `else if` branch wouldn't
+  re-arm `pending_refresh`; the call would return Ok with
+  bookkeeping advanced, and the next call would compute
+  `import_changed = false` and silently skip Route Refresh.
+  Generalized the re-arm to fire whenever
+  `needs_refresh && !is_established`, regardless of whether the
+  intent was inherited or freshly generated. The wasted-refresh
+  cost on a genuinely Idle peer (next call sends a no-op Route
+  Refresh against an empty `AdjRibIn`) is small and acceptable
+  next to silent stale-routes.
+
+- **SIGHUP `resolved_neighbors` failure routes through
+  `halt_partial`.** The neighbor-resolve failure path previously
+  logged with `error!` and returned `Some(working_config)`
+  directly, bypassing the structured `halt_partial` failure
+  reporting (`bucket` / `target` / `error`) used by every other
+  reload step. Routed through `halt_partial` with
+  `bucket = "neighbors.resolve"` so operators get consistent
+  structured diagnostics across all reload-step halts.
+
 - **Effective neighbor diff via peer-group resolution.**
   `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
   neighbor "effective impact" view: every neighbor whose resolved
