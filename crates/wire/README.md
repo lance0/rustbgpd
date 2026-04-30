@@ -34,7 +34,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 8538 | Notification GR (N-bit) |
 | 8654 | Extended messages (up to 65535 bytes) |
 | 8950 | Extended next hop (IPv4 NLRI over IPv6 NH) |
-| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators |
+| 8955/8956 | FlowSpec: 13 component types, numeric/bitmask operators; §6.1-compliant `NEXT_HOP` validation (the irrelevant-next-hop case is accepted, not rejected) |
 | 9012 | Tunnel Encapsulation attribute |
 | 9135 | EVPN integrated routing for IRB |
 | 9136 | EVPN Type 5: IP Prefix advertisement |
