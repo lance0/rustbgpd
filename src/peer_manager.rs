@@ -2257,13 +2257,13 @@ mod tests {
         );
     }
 
-    /// Adversarial review surfaced a high-severity gap: when
+    /// Regression for a high-severity gap in the prior code: when
     /// `update_import_policy_timeout` failed against an Established
-    /// peer, the prior code logged a warning and continued, then
-    /// fired `soft_reset_in`. The session task still held the *old*
-    /// import policy, so Route Refresh would re-evaluate `AdjRibIn`
-    /// against the old policy — silently keeping forbidden routes
-    /// flowing on a permit→deny edit, with the daemon believing
+    /// peer, the warn-and-continue path then fired `soft_reset_in`
+    /// regardless. The session task still held the *old* import
+    /// policy, so Route Refresh would re-evaluate `AdjRibIn` against
+    /// the old policy — silently keeping forbidden routes flowing
+    /// on a permit→deny edit, with the daemon believing
     /// the new policy was live and clearing any retry intent.
     ///
     /// Fix and assertion: when the session-side import-policy update
@@ -2274,10 +2274,10 @@ mod tests {
     /// `soft_reset_in`, and (d) return Err so the caller surfaces
     /// the failure. The fake session here drops the import-policy
     /// reply oneshot (sender side gets "session task dropped reply")
-    /// but answers `QueryState` with Established, which is the exact
-    /// race the review flagged: the production session task can drop
-    /// a reply mid-shutdown while the FSM is still reporting
-    /// Established for one more poll.
+    /// but answers `QueryState` with Established. This reproduces
+    /// the production race: the session task can drop a reply
+    /// mid-shutdown while the FSM is still reporting Established
+    /// for one more poll.
     #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn import_apply_failure_on_established_peer_bails_without_refresh() {
@@ -2425,12 +2425,12 @@ mod tests {
             0,
             "soft_reset_in must NOT have run: firing Route Refresh against a session \
              that still holds the prior import policy would re-evaluate AdjRibIn \
-             against the OLD policy — exactly the bug the adversarial review caught."
+             against the OLD policy — the silent-stale-routes regression this test pins."
         );
     }
 
     /// Non-Established variant of the import-apply failure regression.
-    /// A follow-up review pass flagged that the prior bail condition
+    /// The prior bail condition
     /// (`is_established && import_apply_failed && needs_refresh`)
     /// gated the failure surface on Established, which let an Idle /
     /// Connect peer with a dropped `UpdateImportPolicy` command
@@ -2582,12 +2582,12 @@ mod tests {
         );
     }
 
-    /// Symmetric counterpart for the export side. Adversarial review
-    /// flagged that `update_export_policy_timeout` failures were
-    /// being swallowed: the prior code logged a warning and returned
-    /// Ok, leaving the peer announcing under the old export policy
-    /// even though the daemon's bookkeeping had no record that the
-    /// edit didn't land. Different blast radius from the import gap
+    /// Symmetric counterpart for the export side: the prior code
+    /// swallowed `update_export_policy_timeout` failures, logging a
+    /// warning and returning Ok. That left the peer announcing
+    /// under the old export policy even though the daemon's
+    /// bookkeeping had no record that the edit didn't land.
+    /// Different blast radius from the import gap
     /// (no Route Refresh involved), but the same silent-stale-policy
     /// class — and crucially, no `is_established` gate: a session
     /// that's mid-handshake can still drop policy commands, and once
@@ -3149,7 +3149,7 @@ mod tests {
         let _ = rib_drainer.await;
     }
 
-    /// Sixth-round adversarial-review finding: when
+    /// Stale-state-query regression: when
     /// `query_state_timeout` returns None — because the session task
     /// is back-pressured past the deadline and missed answering
     /// `QueryState` — `is_established` reads false even for a peer

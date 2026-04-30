@@ -2620,8 +2620,8 @@ hold_time = 90
     // SoftResetIn-on-import-policy-change coverage is now PM-side:
     // `update_runtime_policies` fires `soft_reset_in` automatically
     // when import policy materially changes, for any peer in
-    // `self.peers` (which includes dynamic peers — the codex finding
-    // that motivated moving this out of the binary's reload loop).
+    // `self.peers` (which includes dynamic peers — the original
+    // motivation for moving this out of the binary's reload loop).
     // Asserting that behavior at this layer would require a real
     // `PeerManager` task with established peers; that level of
     // integration coverage belongs in `peer_manager::tests`. The

@@ -149,9 +149,9 @@ this document is reference / long-tail.
   LOC across `crates/cli/src/commands/policy.rs` +
   `peer_group.rs` + clap wiring.
 - [x] **Auto-retry pending soft-resets and policy hot-applies across
-  SIGHUP boundaries.** Shipped on the SIGHUP reconcile branch via
-  five iterations driven by adversarial reviews. The function is
-  now bail-and-retry across every downstream step:
+  SIGHUP boundaries.** Shipped on the SIGHUP reconcile branch.
+  `update_runtime_policies` is now bail-and-retry across every
+  downstream step:
   - `ManagedPeer.pending_refresh` covers unfired Route Refresh
     intent (failed `soft_reset_in`, bail-before-refresh on any
     side, or non-Established peer carrying inherited intent).
