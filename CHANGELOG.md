@@ -85,14 +85,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the session replies. If the session-side update fails (task
   back-pressured past the deadline, exited mid-shutdown, mpsc full),
   the daemon's bookkeeping stays at the prior value so the next
-  call's `import_changed` comparison still sees a delta and retries.
-  When the failure happens against an Established peer with refresh
+  call's `import_changed` / `export_changed` comparisons still see a
+  delta and retry. When the failure happens under apply-changing
   intent, `update_runtime_policies` bails before the RIB update and
-  Route Refresh: firing Route Refresh against a session that still
+  the Route Refresh: firing those steps against a session that still
   holds the prior policy would re-evaluate `AdjRibIn` against the
-  *old* policy — silently keeping forbidden routes flowing on a
-  permit→deny edit, which was exactly the failure mode the prior
-  warn-and-continue path would mask.
+  *old* import policy and / or drift the RIB's view of the export
+  policy away from what the session is announcing — silently keeping
+  forbidden routes flowing on a permit→deny edit, which was exactly
+  the failure mode the prior warn-and-continue path would mask.
+
+- **Symmetric retry for export-side hot-apply failures.** Added a
+  `pending_export_apply: bool` flag to `ManagedPeer` that mirrors
+  `pending_refresh` for the export side. Set when
+  `update_export_policy_timeout` fails for an export-changing edit;
+  drained at the start of every `update_runtime_policies` call and
+  combined with `export_changed` to retry. Closes the symmetric
+  silent-stale-policy class on the export side: a transient session-
+  side export-policy update failure could otherwise leave the peer
+  announcing under the prior policy while the daemon's config
+  snapshot had advanced, with no automatic retry — permit→deny
+  export edits would silently keep leaking routes until the next
+  unrelated mutation or restart.
 
 - **Effective neighbor diff via peer-group resolution.**
   `rustbgpd --diff` (and `--diff --json`) now surfaces a per-
