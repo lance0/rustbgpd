@@ -153,11 +153,13 @@ test_inject_rule1() {
 test_frr_receives_rule1() {
     log "Test 3: FRR receives FlowSpec rule 1"
 
-    # 30 retries × 2 s = 60 s window. FRR's `show bgp ipv4
-    # flowspec` view can lag the underlying RIB update by several
-    # seconds under parallel CI load (separate from data-plane
-    # correctness — observed up to ~33 s on flaked runs).
-    for i in $(seq 1 30); do
+    # 60 retries × 2 s = 120 s window. FRR's `show bgp ipv4
+    # flowspec` view can lag the underlying RIB update by over a
+    # minute under parallel CI load — observed 62 s on a flaked
+    # run, so the previous 60 s window was 2 s short. Data-plane
+    # state is fine; this is purely FRR's display-path latency.
+    # 120 s gives 2x headroom over the worst observed lag.
+    for i in $(seq 1 60); do
         local frr_fs
         frr_fs=$(docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true)
         if echo "$frr_fs" | grep -qi "192.168.1.0"; then
@@ -166,7 +168,7 @@ test_frr_receives_rule1() {
         fi
         sleep 2
     done
-    fail "FRR did not receive FlowSpec rule 1 within 60s"
+    fail "FRR did not receive FlowSpec rule 1 within 120s"
     log "DEBUG FRR flowspec table:"
     docker exec "$FRR" vtysh -c "show bgp ipv4 flowspec" 2>/dev/null || true
 }
