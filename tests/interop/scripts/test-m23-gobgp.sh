@@ -100,28 +100,8 @@ start_gobgpd() {
     sleep 2
 }
 
-start_rustbgpd() {
-    log "Starting rustbgpd daemon..."
-    docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
-    sleep 3
-    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
-        log "rustbgpd is running"
-    else
-        echo "ERROR: rustbgpd failed to start" >&2
-        exit 1
-    fi
-
-    log "Waiting for gRPC to become available..."
-    for i in $(seq 1 15); do
-        if grpc_health >/dev/null 2>&1; then
-            ok "gRPC endpoint ready (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "gRPC endpoint not reachable within 30s"
-    return 1
-}
+# Use the standardized `start_rustbgpd` from test-lib.sh — handles
+# both the /proc poll loop and the gRPC-ready wait.
 
 # ---------------------------------------------------------------------------
 # Tests

@@ -276,29 +276,12 @@ print(resp.get('totalRoutes', 0))
 # ---------------------------------------------------------------------------
 # Start rustbgpd with patched RPKI config
 # ---------------------------------------------------------------------------
-start_rustbgpd() {
-    log "Starting rustbgpd daemon with RPKI config..."
-    docker exec -d "$RUSTBGPD" sh -c '/usr/local/bin/rustbgpd /tmp/config.toml'
-    sleep 3
-    if docker exec "$RUSTBGPD" sh -c 'cat /proc/*/comm 2>/dev/null' | grep -q rustbgpd; then
-        log "rustbgpd is running"
-    else
-        echo "ERROR: rustbgpd failed to start" >&2
-        docker exec "$RUSTBGPD" cat /tmp/config.toml >&2 || true
-        exit 1
-    fi
-
-    # Wait for gRPC to become available
-    log "Waiting for gRPC to become available..."
-    for i in $(seq 1 15); do
-        if grpc_health >/dev/null 2>&1; then
-            ok "gRPC endpoint ready (attempt $i)"
-            return 0
-        fi
-        sleep 2
-    done
-    fail "gRPC endpoint not reachable within 30s"
-    return 1
+# Custom config path requires running the daemon directly
+# rather than through the wrapper. The standardized
+# `start_rustbgpd` helper accepts an override command for
+# exactly this case.
+start_with_custom_config() {
+    start_rustbgpd "/usr/local/bin/rustbgpd /tmp/config.toml"
 }
 
 # ---------------------------------------------------------------------------
@@ -310,7 +293,7 @@ main() {
 
     resolve_grpc_addr
     patch_rpki_config
-    start_rustbgpd
+    start_with_custom_config
 
     wait_established || exit 1
     wait_routes 3 || exit 1

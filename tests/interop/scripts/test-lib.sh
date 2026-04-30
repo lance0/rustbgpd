@@ -95,9 +95,15 @@ grpc_health() {
         "$GRPC_ADDR" rustbgpd.v1.ControlService/GetHealth 2>/dev/null
 }
 
+# Standardized rustbgpd start, used by every interop script. Pass a
+# custom command string to run a non-default daemon invocation
+# (e.g. M21/M24 launch the binary directly against `/tmp/config.toml`
+# after rewriting placeholders at runtime); omit the argument to use
+# the wrapper at `/usr/local/bin/start-rustbgpd.sh`.
 start_rustbgpd() {
+    local start_cmd="${1:-/usr/local/bin/start-rustbgpd.sh}"
     log "Starting rustbgpd daemon..."
-    docker exec -d "$RUSTBGPD" /usr/local/bin/start-rustbgpd.sh
+    docker exec -d "$RUSTBGPD" sh -c "$start_cmd"
 
     # Poll /proc for rustbgpd up to 10 s. The previous 3 s fixed sleep
     # was tight under heavy CI load (parallel containerlab deploys);
