@@ -201,3 +201,18 @@ resolved.
   convergent filtering, prefer best-path demotion (steps 0.5/0.7) and
   export policy. Use import validation matches as an early discard
   optimization, not as a sole defense.
+- **`[[evpn_instances]]` edits require a daemon restart to take effect.**
+  The Phase-2 VTEP foundation slice (ADR-0052) ships the declarative
+  EVI/VNI domain model — TOML schema, validation, runtime
+  `EvpnInstanceTable`, read-only `EvpnService.ListEvpnInstances`,
+  `rustbgpctl evpn instances` — but no SIGHUP reconcile path. The
+  daemon resolves `[[evpn_instances]]` once at startup and shares the
+  resulting `Arc<EvpnInstanceTable>` to gRPC. Adding, removing, or
+  modifying an instance via SIGHUP logs an error, pins the runtime
+  snapshot to the startup value (so drift detection stays observable
+  on every subsequent reload), and leaves the live state unchanged
+  until restart. `rustbgpd --diff` surfaces the change under
+  Restart-required. Reload-time mutation lands with the kernel-
+  reconciliation slice (Gate 7b — see `docs/evpn-enablement.md`),
+  alongside `AddEvpnInstance` / `DeleteEvpnInstance` gRPC mutations
+  and the `ArcSwap`/`RwLock` swap surface they need.

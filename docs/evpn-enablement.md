@@ -354,12 +354,22 @@ competing with FRR for the VTEP role is a meaningful strategic expansion,
 not a tactical feature. Only worth it if there's a specific use case
 (pure-Rust leaf, better API story, etc.) that justifies the scope.
 
+**Land first, before kernel work begins** — these are the
+groundwork items that make everything else easier to validate, not
+optional polish:
+
+| Task | File / location |
+|------|----------------|
+| Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic — pin it before mutation, swap surfaces, kernel state, or origination land. | `tests/` (new), or extend an existing harness |
+| Dataplane-boundary ADR — what `crates/evpn-linux` (or equivalent) consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0053-...` |
+| Swap surface for the `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work; doesn't reduce to LOC | `crates/api/src/evpn_service.rs`, daemon wiring |
+
 Scope sketch:
 
 | Task | File / location |
 |------|----------------|
 | Netlink client for kernel FDB monitoring | new crate? `crates/netlink/` |
-| Local MAC table (MAC → next-hop + VNI + sequence) | `crates/rib/src/evpn_local.rs` (new) |
+| Local MAC table (MAC → next-hop + VNI + sequence) — domain types in `crates/evpn`, not by overloading `wire::EvpnRoute` | `crates/evpn/src/mac.rs` (new) |
 | Type 2 origination on MAC learn (consumes `EvpnInstanceTable`) | RibManager handler |
 | Type 2 withdrawal on MAC age-out | RibManager handler |
 | Type 3 IMET origination per L2VNI | — |
