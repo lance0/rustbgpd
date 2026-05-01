@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::ops::Range;
 
-use toml_edit::ImDocument;
+use toml_edit::Document;
 
 use super::ConfigError;
 
@@ -141,9 +141,9 @@ fn render_snippet(
     out
 }
 
-/// Parse source into an `ImDocument` (preserves spans, unlike `DocumentMut`).
-fn parse_im(source: &str) -> Option<ImDocument<String>> {
-    ImDocument::parse(source.to_owned()).ok()
+/// Parse source into an `Document` (preserves spans, unlike `DocumentMut`).
+fn parse_im(source: &str) -> Option<Document<String>> {
+    Document::parse(source.to_owned()).ok()
 }
 
 /// Look up a value span via a dotted key path.
