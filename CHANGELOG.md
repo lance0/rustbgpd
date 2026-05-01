@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.2] — 2026-04-30
+
 ### Fixed
 
 - **IPv6 `MP_REACH` link-local next-hop now validated as `fe80::/10`.**
