@@ -137,6 +137,99 @@ ship a footgun.
 Pure proto-wrapping of the gRPC surface. Mirrors the existing
 `evpn list` route-listing command's output style.
 
+## Boundaries — what `crates/evpn` is and isn't
+
+The crate is the **local VTEP / EVPN domain model**, not "the place
+where every EVPN-related thing lives." Three guardrails hold the
+shape across phases:
+
+### `crates/evpn` does *not* absorb existing EVPN machinery
+
+EVPN code that lives elsewhere today stays where it is. Specifically
+**not** moving into `crates/evpn`:
+
+- Wire codec (`crates/wire/src/evpn.rs`) — `EvpnRoute`,
+  `EvpnRouteKey`, RD/ESI/MAC/MPLS-label primitives, NLRI
+  encode/decode, capability bytes. Protocol concepts, not local
+  state.
+- RIB state (`crates/rib`) — `EvpnRibRoute`, EVPN Loc-RIB,
+  Adj-RIB-In/Out, best-path, reflection rules, stale handling. RR
+  behavior is a RIB concern.
+- Session glue (`crates/transport/src/session/`) — inbound
+  `MP_REACH` consumption, outbound EVPN announcement grouping,
+  capability checks. Knows peer state, negotiated families,
+  next-hop context.
+- Controller injection (`InjectionService.{Add,Delete}EvpnRoute`,
+  `RibService.ListEvpnRoutes`) — controller-style route mutation
+  on the RR/transit path. Stays under the existing services.
+
+The load-bearing test of this invariant is the
+`rr-evpn-fabric` example: it must continue to run with
+`crates/evpn` essentially unused. RR-only deployments don't have
+local EVIs and don't need the domain crate's surface.
+
+### Domain types describe desired state, never program the kernel
+
+`EvpnInstance` / `EvpnInstanceTable` express *intent*, not
+behavior. No `inst.create_vxlan_device()`, no `table.program_fdb()`
+methods. The future dataplane crate (working name
+`crates/evpn-linux` or `crates/dataplane`) will own kernel
+observation, diff, and netlink/FDB programming. It consumes
+`EvpnInstanceTable` as input — it never produces or mutates the
+desired-state model.
+
+This split has to land *before* much Linux logic is written. Once
+kernel-side methods start hanging off `EvpnInstance`, the boundary
+is gone, and the next contributor has to either accept the
+conflation or tear it apart later.
+
+### Dependency direction stays one-way
+
+```
+crates/wire ← crates/transport → crates/rib
+                    │
+                    ▼
+              crates/evpn (local VTEP only)
+                    │
+                    ▼
+        future crates/evpn-linux  (dataplane)
+```
+
+`crates/evpn` may depend on `crates/wire` (already does, for
+`RouteDistinguisher`). It must **not** depend on `crates/rib` or
+`crates/transport`. The dataplane crate will depend on
+`crates/evpn` and the OS, nothing else.
+
+`crates/transport` and `crates/rib` may consume *local-VTEP*
+services from `crates/evpn` once Type 2/3 origination lands —
+e.g. "is there a local EVI for this VNI? what's its source
+VTEP IP?" — but plain RR / route-reflection behavior must keep
+working without taking that dependency. The clean test: building
+the daemon with `[[evpn_instances]]` empty must not exercise any
+new code paths that didn't exist pre-Phase-2.
+
+### Future shape — local MAC ownership and mobility
+
+Local-MAC tables (MAC → VNI + sequence number, peer-learned remote
+MACs, mobility state per RFC 7432 §15) belong in `crates/evpn` as
+**separate domain types**, not by overloading
+`rustbgpd_wire::EvpnRoute`. Wire types describe what comes off the
+wire; domain types describe what the local VTEP owns. Two
+crossings: the wire-decode path lifts an inbound Type 2 into a
+local domain MAC entry; the origination path lowers a local MAC
+entry into an outbound `EvpnRoute`. Both crossings live at the
+boundary between `crates/transport` and `crates/evpn`.
+
+### `RouteTarget` placement
+
+`RouteTarget` is in `crates/evpn` today because its only use is
+config / domain RT lists. If it later becomes the canonical typed
+representation of *any* RT extended community in the codebase
+(policy match, controller injection, MRT export), the conversion
+helpers between this domain enum and
+`rustbgpd_wire::ExtendedCommunity` may belong closer to
+`crates/wire`. Reassess at that point; do not preemptively move.
+
 ## Consequences
 
 ### Positive
@@ -182,11 +275,33 @@ Pure proto-wrapping of the gRPC surface. Mirrors the existing
   the same atomic-write TOML pattern when it lands. Out of scope for
   this slice because mutation is out of scope.
 
+## Follow-on architectural work
+
+The Gate 7b (kernel-reconciliation) branch must define the
+dataplane boundary **before** writing much Linux logic. A separate
+ADR will land at the start of that branch covering:
+
+- The `crates/evpn-linux` (or equivalent) crate's surface — what it
+  consumes from `crates/evpn`, what it observes from the kernel,
+  what it returns up.
+- The desired-vs-actual diff loop semantics (push, pull, or
+  reconcile-on-event).
+- How netlink failures surface back to the domain layer (does the
+  domain crate know its intent failed to apply, or does only
+  telemetry see it?).
+
+That ADR is intentionally not written here — early architecture
+decisions for a layer with no code yet tend to ossify the wrong
+shape. The boundary above is enough to keep the foundation slice
+from leaking kernel concerns; the dataplane ADR starts when there's
+real code to anchor it.
+
 ## Cross-References
 
 - ADR-0050 — EVPN Route Reflector (RFC 7432 Phase 1)
 - `docs/evpn-enablement.md` Gate 7 — VTEP mode roadmap
 - RFC 7432 §7 — EVPN routes and MAC-VRF identification
+- RFC 7432 §15 — MAC mobility (referenced by future-shape section)
 - RFC 4364 §4.2 — VPN-IPv4 / Route Distinguisher encodings
 - RFC 4360 §4 / RFC 5668 §2 — Route Target extended communities
 - RFC 8365 §5 — VXLAN VNI semantics
