@@ -14,7 +14,7 @@ analyzers, test harnesses, MRT readers, etc.
 | RFC | Feature |
 |-----|---------|
 | 1997 | Standard communities (4-byte) |
-| 2545 | IPv6 link-local next-hop in `MP_REACH_NLRI` (32-byte form) |
+| 2545 | IPv6 link-local next-hop in `MP_REACH_NLRI` (32-byte form); second-segment validated as `fe80::/10` on receive (rejects malformed advertisements) |
 | 2918 | Route Refresh capability |
 | 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
 | 4360 | Extended communities (route target, route origin, 4-byte AS) |
