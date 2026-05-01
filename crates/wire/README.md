@@ -18,6 +18,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 2918 | Route Refresh capability |
 | 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
 | 4360 | Extended communities (route target, route origin, 4-byte AS) |
+| 4364 §4.2 | Route Distinguisher: 8-byte wire form with all three encodings (2-octet AS, IPv4, 4-octet AS) plus `Display` and `FromStr` for the canonical textual forms |
 | 4456 | Route reflector: ORIGINATOR_ID, CLUSTER_LIST |
 | 4486 | NOTIFICATION subcodes |
 | 4724 | Graceful restart capability |
@@ -103,6 +104,7 @@ let bytes = encode_message(&Message::Open(open));
 - **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path, graceful restart, etc.
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with full payloads (RFC 7432, RFC 9136)
+- **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
 
 ## Fuzz tested
