@@ -1,6 +1,6 @@
 # Benchmarks
 
-Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.5.
+Micro-benchmarks using [Criterion](https://github.com/bheisler/criterion.rs) 0.8.
 All numbers from a single run on an AMD Ryzen 9 / Linux 6.17, compiled with
 `--release` (LTO, codegen-units=1). Your mileage will vary — these are meant
 for relative comparison and regression tracking, not absolute guarantees.

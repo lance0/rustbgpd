@@ -116,7 +116,7 @@ Decode UPDATEs. Store in Adj-RIB-In. Expose via gRPC.
    - `rib_tx` threaded from daemon entrypoint through `PeerHandle::spawn()`
 
 7. **gRPC API** (`crates/api/`)
-   - Proto codegen via `tonic_build` in `build.rs`
+   - Proto codegen via `tonic_prost_build` in `build.rs` (was `tonic_build` until tonic 0.14 split prost-coupled codegen out)
    - `ListReceivedRoutes` with offset pagination (default page_size=100)
    - Other RibService RPCs return `UNIMPLEMENTED`
    - Server on configurable gRPC listeners (UDS by default, optional explicit

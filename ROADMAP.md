@@ -436,7 +436,7 @@ get blog posts written and make operators switch.
 
 #### First-Run Experience
 
-- [x] **Rust-compiler-style config errors** — config validation errors display the offending TOML source line with column markers and underlined spans, using `toml_edit::ImDocument` for span lookup. Zero new deps (hand-rolled renderer, `toml_edit` already transitive).
+- [x] **Rust-compiler-style config errors** — config validation errors display the offending TOML source line with column markers and underlined spans, using `toml_edit::Document` for span lookup (formerly `ImDocument` in toml_edit ≤ 0.24). Zero new deps (hand-rolled renderer, `toml_edit` already transitive).
 - [x] **`rustbgpd --check config.toml`** — validate config without starting the daemon. Print structured errors or "config OK". Operators run this before every reload and deploy.
 - [x] **Startup banner with topology summary** — on boot, print a clean tree showing ASN, router-id, peer count by type, named policies, neighbor sets, listener endpoints, optional subsystems (RPKI caches, BMP collectors, MRT output). First thing an operator sees after starting the daemon.
 - [x] **Shell completions** — `rustbgpctl completions {bash,zsh,fish}` generates completions from clap derives. Pre-generated files shipped in `examples/completions/`.

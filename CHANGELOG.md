@@ -34,6 +34,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   caller that round-trips RD strings without pulling in the EVPN
   domain crate.
 
+### Changed
+
+- **gRPC stack: tonic 0.13 → 0.14, prost 0.13 → 0.14, socket2 0.5 → 0.6.**
+  tonic 0.14 split prost-coupled codegen out into a new
+  `tonic-prost-build` crate; `crates/api/build.rs` and
+  `crates/cli/build.rs` migrated to use it (same `compile_protos` /
+  `configure()` surface, only the crate name changed). socket2 0.6
+  renamed `set_ttl` → `set_ttl_v4`, with a parallel `set_ttl_v6`;
+  GTSM (RFC 5082) on the BGP transport socket is IPv4-only here, so
+  the IPv4-specific setter is the correct call. tonic 0.14's `Status`
+  type is smaller, allowing 17 stale
+  `#[expect(clippy::result_large_err)]` annotations to drop from
+  `crates/api/src/injection_service.rs`. New `tonic-prost` runtime
+  crate added alongside; replaced PRs #20 + #27 (which needed code
+  migrations the bot couldn't write) with a direct migration commit.
+
+- **toml 0.8 → 1.1 (TOML 1.1 spec compliance) + toml_edit 0.22 → 0.25.**
+  toml_edit 0.25 deprecated `ImDocument` in favor of `Document` (the
+  immutable-document type alias was renamed); `src/config/diagnostic.rs`
+  follows the rename. `Document::parse` semantics unchanged — pure
+  rename, no operator-visible behavior change.
+
+- **Patch / minor rollup:** tokio 1.49 → 1.50, criterion 0.5 → 0.8,
+  proptest 1.10 → 1.11, tracing-subscriber 0.3.22 → 0.3.23,
+  clap_complete 4.5 → 4.6, libc 0.2.182 → 0.2.186. No
+  operator-visible changes; criterion bench code uses only stable
+  APIs across 0.5–0.8.
+
+- **GitHub Actions workflow rollup:** actions/checkout 4 → 6,
+  actions/download-artifact 4 → 8, actions/upload-artifact 4 → 7,
+  docker/metadata-action 5 → 6, docker/setup-buildx-action 3 → 4.
+  All workflow YAML keys in use survive the bumps; runners are on
+  Node 24 by default. No workflow edits needed.
+
 ## [0.12.2] — 2026-04-30
 
 ### Fixed

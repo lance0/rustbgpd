@@ -141,7 +141,7 @@ fn render_snippet(
     out
 }
 
-/// Parse source into an `Document` (preserves spans, unlike `DocumentMut`).
+/// Parse source into a `Document` (preserves spans, unlike `DocumentMut`).
 fn parse_im(source: &str) -> Option<Document<String>> {
     Document::parse(source.to_owned()).ok()
 }
