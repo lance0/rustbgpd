@@ -438,6 +438,16 @@ not run DF election. VTEPs (typically FRR on SONiC, or commercial NOS)
 handle local origination and forwarding; rustbgpd handles fan-out and
 attribute integrity in the middle.
 
+> **Phase-2 update (Gate 7a, ADR-0052):** the **declarative** half of
+> VTEP mode has shipped. Operators can configure local
+> `[[evpn_instances]]` (vni / rd / route_targets / local_vtep_ip /
+> optional bridge / advertise_svi_mac) and inspect the resolved table
+> via `EvpnService.ListEvpnInstances` and `rustbgpctl evpn instances`.
+> The kernel-reconciliation half — local MAC learning, Type 2/3
+> origination, MAC mobility, DF execution — remains queued as Gate 7b.
+> See `examples/evpn-vtep-leaf/` for the leaf-mode config shape and
+> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder.
+
 #### Per-neighbor knob
 
 ```toml
