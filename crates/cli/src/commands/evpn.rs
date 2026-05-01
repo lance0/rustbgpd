@@ -69,8 +69,16 @@ pub async fn list(
     } else if resp.routes.is_empty() {
         println!("No EVPN routes");
     } else {
+        // Two distinct concepts both spell "tag" in EVPN-land: the
+        // route-type label (RFC 7432 §7) is `mac-ip` / `imet` / etc.,
+        // and `ethernet_tag` is the EVI/bridge-domain identifier
+        // pushed into `detail` as `tag=N`. Use `route_label` for the
+        // local variable so the bracket prefix and the `tag=` field
+        // don't both render via something named `tag` in the same
+        // function — the operator-facing column header `tag=N`
+        // matches FRR / Cisco convention and stays untouched.
         for r in &resp.routes {
-            let tag = route_type_label(r.route_type);
+            let route_label = route_type_label(r.route_type);
             let mut detail = Vec::new();
             detail.push(format!("rd={}", r.rd));
             if !r.esi.is_empty() {
@@ -103,7 +111,7 @@ pub async fn list(
                 detail.push(format!("encap-type={}", r.tunnel_type));
             }
             println!(
-                "[{tag}] {} via {} from {}",
+                "[{route_label}] {} via {} from {}",
                 detail.join(" "),
                 r.next_hop,
                 r.peer_address,
