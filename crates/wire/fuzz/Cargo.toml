@@ -44,4 +44,10 @@ path = "fuzz_targets/encode_evpn.rs"
 test = false
 doc = false
 
+[[bin]]
+name = "parse_rd"
+path = "fuzz_targets/parse_rd.rs"
+test = false
+doc = false
+
 [workspace]

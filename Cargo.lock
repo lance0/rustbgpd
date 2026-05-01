@@ -2035,6 +2035,8 @@ dependencies = [
  "prost",
  "ratatui",
  "rustbgpd-api",
+ "rustbgpd-evpn",
+ "rustbgpd-wire",
  "serde",
  "serde_json",
  "tempfile",
