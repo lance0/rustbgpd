@@ -199,6 +199,123 @@ impl fmt::Display for RouteDistinguisher {
     }
 }
 
+/// Errors returned by [`RouteDistinguisher::from_str`] when a textual RD
+/// fails to parse against the RFC 4364 §4.2 encodings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteDistinguisherParseError {
+    /// Input did not contain exactly one `':'` separating administrator and
+    /// assigned-number fields.
+    MissingColon,
+    /// The administrator field could not be parsed as either an ASN
+    /// (`u32`) or an IPv4 address.
+    InvalidAdministrator(String),
+    /// The assigned-number field could not be parsed as a non-negative
+    /// integer in the range required for the inferred RD type.
+    InvalidAssignedNumber(String),
+    /// The assigned-number value exceeded the per-RD-type maximum
+    /// (`u32::MAX` for type 0, `u16::MAX` for types 1 and 2).
+    AssignedNumberOutOfRange { value: u64, max: u64 },
+}
+
+impl fmt::Display for RouteDistinguisherParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingColon => write!(
+                f,
+                "expected RD in form `<asn|ipv4>:<assigned>`, missing `:`"
+            ),
+            Self::InvalidAdministrator(s) => write!(
+                f,
+                "invalid RD administrator {s:?}: expected ASN (u32) or IPv4 address"
+            ),
+            Self::InvalidAssignedNumber(s) => {
+                write!(
+                    f,
+                    "invalid RD assigned number {s:?}: expected non-negative integer"
+                )
+            }
+            Self::AssignedNumberOutOfRange { value, max } => write!(
+                f,
+                "RD assigned number {value} exceeds maximum {max} for the inferred RD type"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RouteDistinguisherParseError {}
+
+impl std::str::FromStr for RouteDistinguisher {
+    type Err = RouteDistinguisherParseError;
+
+    /// Parse the textual RD encodings from RFC 4364 §4.2.
+    ///
+    /// - `<u16-asn>:<u32-assigned>`  → Type 0
+    /// - `<ipv4>:<u16-assigned>`     → Type 1
+    /// - `<u32-asn>:<u16-assigned>`  → Type 2 (when ASN > 65535)
+    ///
+    /// Disambiguation between Type 0 and Type 2 follows the convention
+    /// adopted by FRR / Cisco / Junos: an `asn:value` form with
+    /// `asn ≤ 65535` is Type 0; otherwise Type 2.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (admin, assigned) = s
+            .split_once(':')
+            .ok_or(RouteDistinguisherParseError::MissingColon)?;
+        let assigned_u64 = parse_unsigned(assigned)?;
+
+        if let Ok(ipv4) = admin.parse::<Ipv4Addr>() {
+            // Type 1: IPv4 admin + 2-byte assigned.
+            let assigned_u16 = u16::try_from(assigned_u64).map_err(|_| {
+                RouteDistinguisherParseError::AssignedNumberOutOfRange {
+                    value: assigned_u64,
+                    max: u64::from(u16::MAX),
+                }
+            })?;
+            let mut bytes = [0u8; 8];
+            bytes[0..2].copy_from_slice(&1u16.to_be_bytes());
+            bytes[2..6].copy_from_slice(&ipv4.octets());
+            bytes[6..8].copy_from_slice(&assigned_u16.to_be_bytes());
+            return Ok(Self(bytes));
+        }
+
+        let asn = admin
+            .parse::<u32>()
+            .map_err(|_| RouteDistinguisherParseError::InvalidAdministrator(admin.to_string()))?;
+
+        if let Ok(asn_u16) = u16::try_from(asn) {
+            // Type 0: 2-byte ASN + 4-byte assigned.
+            let assigned_u32 = u32::try_from(assigned_u64).map_err(|_| {
+                RouteDistinguisherParseError::AssignedNumberOutOfRange {
+                    value: assigned_u64,
+                    max: u64::from(u32::MAX),
+                }
+            })?;
+            let mut bytes = [0u8; 8];
+            bytes[0..2].copy_from_slice(&0u16.to_be_bytes());
+            bytes[2..4].copy_from_slice(&asn_u16.to_be_bytes());
+            bytes[4..8].copy_from_slice(&assigned_u32.to_be_bytes());
+            Ok(Self(bytes))
+        } else {
+            // Type 2: 4-byte ASN + 2-byte assigned.
+            let assigned_u16 = u16::try_from(assigned_u64).map_err(|_| {
+                RouteDistinguisherParseError::AssignedNumberOutOfRange {
+                    value: assigned_u64,
+                    max: u64::from(u16::MAX),
+                }
+            })?;
+            let mut bytes = [0u8; 8];
+            bytes[0..2].copy_from_slice(&2u16.to_be_bytes());
+            bytes[2..6].copy_from_slice(&asn.to_be_bytes());
+            bytes[6..8].copy_from_slice(&assigned_u16.to_be_bytes());
+            Ok(Self(bytes))
+        }
+    }
+}
+
+fn parse_unsigned(s: &str) -> Result<u64, RouteDistinguisherParseError> {
+    s.parse::<u64>()
+        .map_err(|_| RouteDistinguisherParseError::InvalidAssignedNumber(s.to_string()))
+}
+
 /// A 3-byte MPLS label field (RFC 3032) as carried in EVPN NLRI.
 ///
 /// For VXLAN-encapsulated EVPN (RFC 8365), the 24-bit label field carries
@@ -1129,6 +1246,78 @@ mod tests {
     fn rd_display_type1() {
         let rd = RouteDistinguisher([0x00, 0x01, 10, 0, 0, 1, 0x00, 0x42]);
         assert_eq!(rd.to_string(), "10.0.0.1:66");
+    }
+
+    #[test]
+    fn rd_parse_type0_roundtrip() {
+        // ASN ≤ 65535 picks Type 0 with a 32-bit assigned number.
+        let rd: RouteDistinguisher = "65000:100".parse().unwrap();
+        assert_eq!(rd.rd_type(), 0);
+        assert_eq!(rd.to_string(), "65000:100");
+        // Max 32-bit assigned still parses.
+        let rd_max: RouteDistinguisher = "65000:4294967295".parse().unwrap();
+        assert_eq!(rd_max.rd_type(), 0);
+    }
+
+    #[test]
+    fn rd_parse_type1_roundtrip() {
+        let rd: RouteDistinguisher = "10.0.0.1:66".parse().unwrap();
+        assert_eq!(rd.rd_type(), 1);
+        assert_eq!(rd.to_string(), "10.0.0.1:66");
+    }
+
+    #[test]
+    fn rd_parse_type2_roundtrip() {
+        // ASN > 65535 picks Type 2 with a 16-bit assigned number.
+        let rd: RouteDistinguisher = "4200000000:200".parse().unwrap();
+        assert_eq!(rd.rd_type(), 2);
+        assert_eq!(rd.to_string(), "4200000000:200");
+    }
+
+    #[test]
+    fn rd_parse_rejects_missing_colon() {
+        let err = "65000".parse::<RouteDistinguisher>().unwrap_err();
+        assert!(matches!(err, RouteDistinguisherParseError::MissingColon));
+    }
+
+    #[test]
+    fn rd_parse_rejects_invalid_admin() {
+        let err = "not-an-asn:1".parse::<RouteDistinguisher>().unwrap_err();
+        assert!(matches!(
+            err,
+            RouteDistinguisherParseError::InvalidAdministrator(_)
+        ));
+    }
+
+    #[test]
+    fn rd_parse_rejects_invalid_assigned() {
+        let err = "65000:abc".parse::<RouteDistinguisher>().unwrap_err();
+        assert!(matches!(
+            err,
+            RouteDistinguisherParseError::InvalidAssignedNumber(_)
+        ));
+    }
+
+    #[test]
+    fn rd_parse_rejects_assigned_overflow_type1() {
+        // IPv4 admin → Type 1 → 16-bit assigned ceiling.
+        let err = "10.0.0.1:65536".parse::<RouteDistinguisher>().unwrap_err();
+        assert!(matches!(
+            err,
+            RouteDistinguisherParseError::AssignedNumberOutOfRange { max: 0xFFFF, .. }
+        ));
+    }
+
+    #[test]
+    fn rd_parse_rejects_assigned_overflow_type2() {
+        // ASN > 65535 → Type 2 → 16-bit assigned ceiling.
+        let err = "4200000000:65536"
+            .parse::<RouteDistinguisher>()
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RouteDistinguisherParseError::AssignedNumberOutOfRange { max: 0xFFFF, .. }
+        ));
     }
 
     #[test]
