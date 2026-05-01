@@ -233,7 +233,7 @@ pub async fn delete_imet(
 
 /// List local EVPN instances (Phase 2 VTEP foundation).
 ///
-/// Read-only. Surfaces the daemon's resolved [`EvpnInstanceTable`] —
+/// Read-only. Surfaces the daemon's resolved `EvpnInstanceTable` —
 /// the same data the operator put in `[[evpn_instances]]` blocks,
 /// already normalized through RD/RT parsing and uniqueness checks.
 pub async fn list_instances(connection: Connection, json: bool) -> Result<(), CliError> {

@@ -199,7 +199,7 @@ impl fmt::Display for RouteDistinguisher {
     }
 }
 
-/// Errors returned by [`RouteDistinguisher::from_str`] when a textual RD
+/// Errors returned by `RouteDistinguisher::from_str` when a textual RD
 /// fails to parse against the RFC 4364 §4.2 encodings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteDistinguisherParseError {
