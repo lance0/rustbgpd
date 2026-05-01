@@ -53,7 +53,7 @@ axum = "0.8"
 tower = "0.5"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 toml_edit = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
