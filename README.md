@@ -168,8 +168,12 @@ rustbgpctl completions bash > /etc/bash_completion.d/rustbgpctl
 # Or use pre-generated: examples/completions/
 ```
 
-gRPC defaults to a local Unix domain socket. For remote access, prefer an
-mTLS proxy — see [`examples/envoy-mtls/`](examples/envoy-mtls/) and
+gRPC defaults to a local Unix domain socket. For remote access, configure
+native mTLS on the TCP listener (`tls_cert_file` / `tls_key_file` /
+`tls_client_ca_file` — all three required together; partial config is
+rejected at load time and there is no TLS-without-mTLS half-mode). An
+Envoy proxy front-end is also a valid pattern for multi-host fan-out;
+see [`examples/envoy-mtls/`](examples/envoy-mtls/) and
 [docs/SECURITY.md](docs/SECURITY.md).
 
 ### Docker (standalone)
@@ -237,7 +241,7 @@ and more explicit internal architecture.
 
 - **Default listener:** Unix domain socket at `/var/lib/rustbgpd/grpc.sock` — local-only, no TCP exposure
 - **Optional read-only listeners:** expose monitoring/query RPCs without exposing mutating control RPCs
-- **Remote access:** prefer an mTLS proxy (Envoy example provided) over direct TCP
+- **Remote access:** native gRPC mTLS on the TCP listener (`tls_cert_file` / `tls_key_file` / `tls_client_ca_file`), or an Envoy mTLS proxy front-end for multi-host fan-out — never plaintext TCP off-host
 - **Network controls:** put gRPC on a management VLAN/interface and firewall it to known hosts
 
 ## Testing and correctness
@@ -261,11 +265,10 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 ## Current limitations
 
 - No kernel FIB integration -- rustbgpd is a control-plane daemon, not a forwarding engine
-- EVPN (RFC 7432) is supported in **Route Reflector role only** for VXLAN-EVPN DC fabrics — VTEP mode (local MAC learning, DF election, kernel FDB integration), IRB semantics (RFC 9135), and controller injection beyond Type 2 / Type 3 (Type 5 IP-Prefix, Type 1 / Type 4 multi-homing origination) are follow-up phases
+- EVPN (RFC 7432) is supported in **Route Reflector role only** for VXLAN-EVPN DC fabrics. Reflection covers all 5 RFC 7432 / RFC 9136 route types (Type 1–5) end-to-end against FRR. Controller injection via gRPC (`AddEvpnRoute` / `DeleteEvpnRoute`) is currently scoped to Types 2 and 3; Type 1 / 4 / 5 origination, VTEP mode (local MAC learning, DF election, kernel FDB integration), and IRB semantics (RFC 9135) are follow-up phases
 - No VPNv4 / VPNv6 or Confederation support
-- No native gRPC TLS termination yet (prefer local UDS access or an mTLS proxy)
-- No TCP-AO (RFC 5925) -- TCP MD5 and GTSM are supported
-- Published bgperf2 benchmarks currently cover 10 peers × 1k prefixes, 2 peers × 10k prefixes, and 2 peers × 100k prefixes; churn and long-duration benchmark automation remain future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
+- No TCP-AO (RFC 5925) — TCP MD5 and GTSM are supported
+- Published benchmarks: bgperf2 covers IPv4 unicast at 10 peers × 1k, 2 peers × 10k, and 2 peers × 100k prefixes; the in-tree `bench/evpn-load` M33 scale gate covers 50,000 reflected Type 2 routes with 60 s of 1,000-rps churn (5.1 s initial convergence, post-churn distinct-key count exact). Long-duration / multi-day soak automation remains future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
 
 ## Project status
 
@@ -299,7 +302,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | [docs/INTEROP.md](docs/INTEROP.md) | Interop test coverage and results |
 | [docs/evpn-enablement.md](docs/evpn-enablement.md) | EVPN Phase 1-9 gate ladder: what each gate unlocks, work per gate, priority |
 | [docs/gobgp-parity.md](docs/gobgp-parity.md) | rustbgpd vs GoBGP feature parity by use case |
-| [docs/adr/](docs/adr/) | Architecture decision records (50 ADRs) |
+| [docs/adr/](docs/adr/) | Architecture decision records (52 ADRs) |
 | [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) | Pre-release smoke matrix and release steps |
 | [ROADMAP.md](ROADMAP.md) | Remaining gaps and planned work |
 | [CHANGELOG.md](CHANGELOG.md) | Release history |
