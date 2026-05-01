@@ -102,6 +102,21 @@ container/network exposure.
 | `address`    | string | yes*     | --      | `host:port` bind address (`required when enabled = true`) |
 | `access_mode` | string | no      | `"read_write"` | Listener authorization mode: `"read_write"` or `"read_only"` |
 | `token_file` | string | no       | --      | Optional bearer token file for listener auth |
+| `tls_cert_file` | string | no   | --      | PEM-encoded server certificate (mTLS — requires the two siblings below) |
+| `tls_key_file`  | string | no   | --      | PEM-encoded server private key |
+| `tls_client_ca_file` | string | no | --   | PEM-encoded CA bundle that must sign every client certificate |
+
+**Native gRPC mTLS.** Setting any of `tls_cert_file` / `tls_key_file` /
+`tls_client_ca_file` requires *all three* together; a partial config is
+rejected at `Config::load`. There is no "TLS-without-mTLS" half-mode by
+design. When enabled, the daemon presents the server certificate, requires
+every client to present a certificate signed by `tls_client_ca_file`, and
+rejects unverified clients at the TLS layer before any gRPC handler runs.
+PEM material is pre-flight-validated at config load and `--check` time so a
+successful `--check` rules out cert-rotation surprises at startup. Listener
+config (including any TLS field) is **restart-required** — SIGHUP reload
+pins the runtime listener back to the live values and surfaces the drift
+in `rustbgpd --diff` until the daemon is restarted.
 
 If either listener subtable is present, at least one gRPC listener must remain
 enabled after applying `enabled = false`.
@@ -349,7 +364,7 @@ graceful_restart = false
 honest. The daemon may advertise `R=1` after a planned restart, but it does
 not claim forwarding-state preservation (`forwarding_preserved = false`) and
 does not persist route state across restarts.
-See [ADR-0024](docs/adr/0024-graceful-restart.md).
+See [ADR-0024](adr/0024-graceful-restart.md).
 
 ### Long-Lived Graceful Restart (RFC 9494)
 
@@ -374,7 +389,7 @@ Best-path selection uses three-tier stale ranking: fresh > GR-stale > LLGR-stale
 applied at step 0 (before LOCAL_PREF). LLGR-stale routes are least preferred but
 still participate in best-path selection until the LLGR timer expires.
 
-See [ADR-0024](docs/adr/0024-graceful-restart.md) for the two-phase timer design.
+See [ADR-0024](adr/0024-graceful-restart.md) for the two-phase timer design.
 
 ### Add-Path (RFC 7911)
 
@@ -408,7 +423,7 @@ best-path preference. Paths are assigned rank-based path IDs (best=1,
 second=2, etc.). Split horizon, iBGP suppression, and per-candidate export
 policy are evaluated for each path.
 
-Both IPv4 and IPv6 unicast are supported. See [ADR-0033](docs/adr/0033-add-path.md).
+Both IPv4 and IPv6 unicast are supported. See [ADR-0033](adr/0033-add-path.md).
 
 ### Transparent Route Server Mode
 
@@ -467,7 +482,7 @@ Three modes are available:
 rejects it on iBGP peers. Route server client peers skip private AS
 removal (they already skip AS_PATH manipulation).
 
-See [ADR-0045](docs/adr/0045-private-as-removal.md).
+See [ADR-0045](adr/0045-private-as-removal.md).
 
 ### FlowSpec (RFC 8955)
 
@@ -493,7 +508,7 @@ FlowSpec routes are injected and queried via the gRPC API:
 
 FlowSpec routes pass through the same policy engine as unicast routes:
 import/export policy, iBGP split-horizon, and route reflector rules all
-apply. See [ADR-0035](docs/adr/0035-flowspec.md).
+apply. See [ADR-0035](adr/0035-flowspec.md).
 
 ### Per-neighbor policy
 
@@ -550,7 +565,7 @@ remote_asn = 65001
 # non-client -- receives reflected client routes only
 ```
 
-See [ADR-0029](docs/adr/0029-route-reflector.md) for reflection rules and
+See [ADR-0029](adr/0029-route-reflector.md) for reflection rules and
 ORIGINATOR_ID/CLUSTER_LIST handling.
 
 ---
@@ -653,7 +668,7 @@ Prometheus metrics exposed at the configured metrics endpoint:
 |--------|-------------|
 | `bgp_rpki_vrp_count{af="ipv4\|ipv6"}` | Current VRP entries by address family |
 
-See [ADR-0034](docs/adr/0034-rpki-origin-validation.md) for design details.
+See [ADR-0034](adr/0034-rpki-origin-validation.md) for design details.
 
 ---
 
@@ -1155,7 +1170,7 @@ dumps taken during a peer restart window still include correct peer entries.
 When MRT is not configured, no timer or manager task is spawned — zero
 overhead.
 
-See [ADR-0044](docs/adr/0044-mrt-dump-export.md) for design details.
+See [ADR-0044](adr/0044-mrt-dump-export.md) for design details.
 
 ---
 
@@ -1167,16 +1182,48 @@ are automatically persisted back to the config file via atomic write (temp file
 
 ### SIGHUP Reload
 
-Sending `SIGHUP` to the rustbgpd process triggers a config reload:
+Sending `SIGHUP` to the rustbgpd process triggers a four-bucket config
+reload, applied in dependency order:
 
-1. The daemon re-reads the TOML config file
-2. `diff_neighbors()` computes the delta between running and file state
-3. `ReconcilePeers` applies per-peer add/delete operations
-4. Global config changes (ASN, router_id, etc.) are logged as warnings but
-   require a restart to take effect
+1. **Definitions** — neighbor sets, named policies, peer groups, and
+   global import / export chains. Each bucket diffs against the running
+   config and fires a single-shot command at the peer manager that goes
+   through the same `apply_policy_change` /
+   `apply_peer_group_change` paths the gRPC API uses. Hot-applied
+   policy chains land at every affected peer's session task without
+   tearing the BGP session.
+2. **`[[neighbors]]` reconcile** — adds, deletes, and changes flow
+   through `diff_neighbors()` + a single `ReconcilePeers` command with
+   add/delete/change deltas.
+3. **Deletes of obsolete definitions** in reverse-dependency order —
+   so transient `still referenced` rejections don't fire while a
+   peer group is being deleted before the chain that named it.
+4. **Automatic Route Refresh on import-policy hot-apply** — when a
+   peer's effective import chain changes,
+   `PeerManager::update_runtime_policies` issues `soft_reset_in`
+   (gated on Established) so routes already in `AdjRibIn` get
+   re-evaluated. Operators do not need to follow up with a manual
+   `softreset` after a chain swap.
 
-Reload failures are reported per-peer with structured logging. The previous
-in-memory config snapshot is preserved when reconciliation is incomplete.
+Reload halts at the first step failure and returns a partial-state
+snapshot, so the daemon's in-memory config tracks what the peer
+manager actually applied (operator fixes the failing TOML and
+reloads again to converge against the half-applied state). The
+neighbor-reconcile step returns `None` on partial failure because
+live state is genuinely ambiguous after a delete-then-readd partial;
+earlier reload steps still land at the manager and remain in effect.
+
+Inline `policy.import` / `policy.export` (the legacy global-fallback
+statements), `[global]` ASN/router-id/families,
+`[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`, and
+`[mrt]` are **restart-required** — they're surfaced under
+"Restart-required" in `rustbgpd --diff` and logged at reload time
+with a one-line migration hint to named definitions plus
+`import_chain` / `export_chain` where applicable.
+
+Reload failures are reported per-step with structured logging
+(bucket / target / error). The previous in-memory config snapshot
+is preserved up to the point of failure.
 
 ---
 

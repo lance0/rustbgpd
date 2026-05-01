@@ -9,6 +9,75 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **IPv6 `MP_REACH` link-local next-hop now validated as `fe80::/10`.**
+  The audit follow-up to v0.12.1's FlowSpec `NEXT_HOP` fix found a
+  sibling gap: when an `MP_REACH_NLRI` carried a 32-byte next-hop
+  (the global + link-local form, RFC 4760 §3 / RFC 2545 §3), the
+  validator only inspected the global address and silently accepted
+  any value at `link_local_next_hop`. A peer sending a malformed
+  `MP_REACH` whose second 16 bytes were not in `fe80::/10` would
+  land in the receive path where downstream consumers may treat it
+  as if it were link-local. Now rejected with subcode 8 (Invalid
+  `NEXT_HOP`). Symmetric defense-in-depth `debug_assert` added in
+  the encoder (`crates/wire/src/attribute.rs`) catches future
+  regressions where a non-LL value would be emitted on the wire.
+
+### Changed
+
+- **`rustbgpd-wire` 0.8.2 → 0.8.3 (patch).** Carries the IPv6 LL
+  next-hop validation fix above. No public API changes — single
+  match-arm guard, function signature change limited to a private
+  helper. Downstream consumers picking up 0.8.3 close the
+  symmetric gap to the v0.12.1 FlowSpec patch.
+
+### Tests
+
+- `mp_reach_ipv6_invalid_link_local_segment_rejected` — pins the
+  bug fix; non-LL second segment → subcode 8.
+- `mp_reach_ipv6_global_plus_link_local_accepted` — pins that
+  valid 32-byte form still passes (no over-rejection).
+- `mp_reach_flowspec_rejects_nonzero_nh_len` — pins decoder-side
+  rejection of malformed FlowSpec `NH-Len`, complementing the
+  validate-time skip from v0.12.1.
+
+### Documentation
+
+- **Project-wide doc accuracy pass** after the v0.10.0 → v0.12.1
+  feature surge (SIGHUP reconcile, automatic Route Refresh,
+  FlowSpec `NEXT_HOP` fix, 12-job interop CI gate, native gRPC
+  mTLS, link-local `NEXT_HOP` end-to-end). Highlights:
+  - `crates/wire/README.md` — `OpenMessage` and decode examples
+    rewritten to compile against the actual API (struct field
+    name, `Capability` variant shapes, `decode_message` /
+    `encode_message` entry points).
+  - `docs/SECURITY.md` — native gRPC mTLS is no longer described
+    as deferred; section now leads with the in-daemon TLS path
+    and treats the proxy front-end as a multi-host fallback.
+  - `docs/CONFIGURATION.md` — `tls_cert_file` / `tls_key_file` /
+    `tls_client_ca_file` documented; eight broken `docs/adr/...`
+    cross-references corrected; SIGHUP-reload section rewritten
+    to cover the four-bucket reconcile pipeline.
+  - `docs/OPERATIONS.md` — SIGHUP-reload section rewritten;
+    automatic Route Refresh on import-policy hot-apply called
+    out so operators don't reach for `softreset` after every
+    chain swap.
+  - `docs/INTEROP.md` — CI carve-out section added (12 jobs in
+    four tiers: foundation, address-family, operational+security,
+    EVPN+SIGHUP); M22 results table rewritten for the JSON +
+    flap-detection shape; M34 (SIGHUP soft-reset) section added.
+  - `docs/API.md` — TLS / mTLS section added; missing
+    `*DynamicNeighbor`, `ListEvpnRoutes`, EVPN injection RPCs
+    folded into the service tables; `ADDRESS_FAMILY_L2VPN_EVPN`
+    added to the AF filter list.
+  - `README.md` — workspace test count (1245 → 1312), interop
+    count (27 → 31, of which 12 CI-gated), and RPC tables
+    refreshed.
+  - `ARCHITECTURE.md` — file-path drift swept (`session.rs` →
+    `session/`, `best_path_cmp` location), SIGHUP "Lifecycle
+    Flow" rewritten end-to-end.
+
 ## [0.12.1] — 2026-04-30
 
 ### Fixed

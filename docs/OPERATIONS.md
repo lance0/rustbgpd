@@ -75,14 +75,24 @@ rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml
 rustbgpd --diff /tmp/new-config.toml /etc/rustbgpd/config.toml --json
 ```
 
-Output is grouped into three sections:
+Output is grouped into two actionable sections plus a per-neighbor
+effective-impact view:
 
-- **Reload-applied changes** — neighbor add/remove/modify that SIGHUP will
-  reconcile immediately.
-- **Restart-required changes** — `[global]`, `[rpki]`, `[bmp]`, `[mrt]`
-  changes that require a full daemon restart.
-- **Informational** — peer group and policy changes that are detected but
-  not reconciled by the current SIGHUP path. Shown for visibility only.
+- **Reload-applied changes** — `[[neighbors]]` deltas, neighbor sets,
+  named policies, peer groups, and global / per-neighbor policy
+  chains. SIGHUP reconciles all of these.
+- **Restart-required changes** — `[global]` ASN/router-id/families,
+  `[global.telemetry.grpc_*]` listener config (including TLS / mTLS),
+  `[rpki]`, `[bmp]`, `[mrt]`, and inline `policy.import` /
+  `policy.export` legacy statements. Surfaced with a one-line
+  migration hint where applicable.
+- **Effectively impacted neighbors (via inheritance)** — every
+  neighbor whose resolved import / export chain would move at reload,
+  with the upstream change(s) responsible (peer-group / policy /
+  neighbor-set / global chain). Catches transitive references: a
+  policy definition edit picked up via the global `import_chain`
+  (chain list itself unchanged) or via a peer-group's chain
+  (peer-group record unchanged) still flags every affected member.
 
 Exit codes: 0 = no actionable changes, 1 = actionable changes found,
 2 = error (bad config, missing file).
@@ -94,22 +104,47 @@ sudo systemctl reload rustbgpd
 # or: kill -HUP $(pidof rustbgpd)
 ```
 
-What happens:
+What happens (in dependency order):
 
-1. The daemon re-reads the TOML config file from disk.
-2. `diff_neighbors()` computes per-peer add/remove/change deltas.
-3. New peers are added, removed peers get NOTIFICATION and teardown, changed
-   peers are removed and re-added.
-4. Global section changes (`[global]`, `[rpki]`, `[bmp]`, `[mrt]`) are logged
-   as warnings and **require a full restart** to take effect.
-5. Peer group and policy changes are **not currently reconciled** — they are
-   detected and logged but not applied. This is a known limitation tracked
-   in the roadmap.
+1. The daemon re-reads the TOML config file from disk and diffs it
+   against the running snapshot, bucket by bucket.
+2. **Definitions land first** — neighbor sets, named policies, peer
+   groups, and global import / export chains. Each bucket fires a
+   single-shot command at the peer manager that goes through the same
+   `apply_policy_change` / `apply_peer_group_change` paths the gRPC API
+   uses; effect matches a sequence of `SetPolicy` / `SetPeerGroup` /
+   `SetGlobalImportChain` mutations. Hot-applied policy chains land at
+   every affected peer's session task without tearing the BGP session.
+3. **`[[neighbors]]` reconcile** — `diff_neighbors()` computes per-peer
+   add/remove/change deltas; `ReconcilePeers` applies them.
+4. **Deletes of obsolete definitions** in reverse-dependency order so
+   transient `still referenced` rejections don't fire.
+5. **Automatic Route Refresh on import-policy hot-apply** — when a
+   peer's effective import chain changes (whether triggered by a
+   SIGHUP reload or a gRPC mutation), the peer manager issues
+   `soft_reset_in` (gated on Established) so routes already in
+   `AdjRibIn` get re-evaluated against the new policy. Operators no
+   longer need to run `softreset` manually after a chain swap.
 
-Reload failures are logged per-peer. If reconciliation fails, the daemon
-keeps the previous in-memory config and continues running.
+Reload halts at the first step failure and returns a partial-state
+snapshot, so the daemon's in-memory config tracks what actually
+landed at the peer manager. Operator fixes the failing TOML and
+reloads again to converge against the half-applied state. Per-step
+errors are logged with structured `bucket` / `target` / `error`
+fields.
 
-Use `rustbgpd --diff` to preview changes before reloading.
+**Restart-required surfaces** (logged at reload, surfaced under
+"Restart-required" in `--diff`): `[global]` ASN/router-id/families,
+`[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
+listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
+`[mrt]`, and inline `policy.import` / `policy.export` legacy
+global-fallback statements.
+
+Use `rustbgpd --diff` to preview changes before reloading; the diff
+buckets the changes by Reload-applied / Restart-required and surfaces
+a per-neighbor "effective impact" view for transitive references
+(policy edit picked up via global `import_chain`, peer-group's
+chain, etc.).
 
 ---
 
@@ -311,6 +346,14 @@ rustbgpctl neighbor 10.0.0.2 softreset
 
 Re-applies import policy to all routes from this peer without tearing down
 the session.
+
+> Note: as of v0.12.0, `update_runtime_policies` automatically issues a
+> Route Refresh whenever a peer's effective import chain materially
+> changes (via SIGHUP reload, gRPC `SetPolicy`, `SetPeerGroup`, or
+> chain mutations). Operators only need this command after manual
+> ad-hoc edits or to recover from a session-mid-restart at the time
+> of the original reload. The `pending_refresh` retry semantics on
+> `ManagedPeer` cover most of those edge cases automatically.
 
 ### Enable / disable a peer
 
