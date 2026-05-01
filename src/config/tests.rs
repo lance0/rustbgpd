@@ -2627,6 +2627,12 @@ fn diff_config_json_serializes() {
     let diff = super::diff_config(&old, &old);
     let json = serde_json::to_string(&diff).unwrap();
     assert!(json.contains("\"global_changed\":false"));
+    // EVPN-instance drift must appear in the serialized diff so JSON
+    // consumers (CI guards, dashboards) can act on it.
+    assert!(
+        json.contains("\"evpn_instances_changed\":false"),
+        "expected evpn_instances_changed in serialized diff: {json}"
+    );
 }
 
 #[test]

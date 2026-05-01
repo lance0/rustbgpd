@@ -1431,6 +1431,30 @@ async fn reload_config(
         new_config.global.telemetry.grpc_uds = live_grpc_uds.cloned();
     }
 
+    // [[evpn_instances]] follows the gRPC-listener pinning pattern.
+    // The Phase-2 foundation slice (ADR-0052) shares the resolved
+    // `EvpnInstanceTable` to gRPC via an `Arc` built once at startup;
+    // there is no swap surface yet, so a SIGHUP can't apply edits.
+    // Without pinning, the in-memory `current` config would silently
+    // advance to the new declaration on reload, the next reload would
+    // see "no change", and drift would become invisible. Pin
+    // new_config.evpn_instances back to current.evpn_instances so
+    // (a) the gRPC `EvpnInstanceTable` stays consistent with the
+    // returned snapshot and (b) drift detection remains observable
+    // across every reload until the daemon is actually restarted.
+    if new_config.evpn_instances != current.evpn_instances {
+        error!(
+            "[[evpn_instances]] differs from the live config: the \
+             gRPC EvpnService is still serving the startup snapshot. \
+             Restart rustbgpd to apply EVPN instance edits. Reload-time \
+             mutation lands with the kernel-reconciliation slice (Gate 7b \
+             — see docs/evpn-enablement.md)."
+        );
+        new_config
+            .evpn_instances
+            .clone_from(&current.evpn_instances);
+    }
+
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
     let peer_group_diff = config::diff_peer_groups(&current.peer_groups, &new_config.peer_groups);
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
@@ -2227,6 +2251,108 @@ hold_time = 90
         std::fs::remove_file(&cert).ok();
         std::fs::remove_file(&key).ok();
         std::fs::remove_file(&ca).ok();
+    }
+
+    /// SIGHUP that edits `[[evpn_instances]]` must NOT advance the
+    /// in-memory config's `evpn_instances` field — the gRPC
+    /// `EvpnService` is still serving the startup `Arc<EvpnInstanceTable>`
+    /// (no swap surface yet, ADR-0052). Without pinning, the next
+    /// reload would compare against the already-mutated snapshot and
+    /// the drift error would silently stop firing — operators would
+    /// believe their edits had taken effect when in fact the gRPC
+    /// surface is still on the prior instance set.
+    #[tokio::test]
+    async fn reload_pins_evpn_instances_to_startup_snapshot() {
+        let path = unique_temp_path("reload-evpn-pin");
+
+        // Initial config: one EVPN instance.
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert_eq!(initial.evpn_instances.len(), 1);
+        assert_eq!(initial.evpn_instances[0].vni, 100);
+
+        // Operator rewrites the file: VNI changes, RTs expand, a new
+        // instance appears. None of this can take effect on a SIGHUP
+        // in the foundation slice, but the reload path must surface
+        // the drift and pin the snapshot.
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100", "65000:200"]
+local_vtep_ip = "10.0.0.1"
+
+[[evpn_instances]]
+vni = 200
+rd = "65000:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when only evpn_instances drift");
+
+        // The returned config's evpn_instances MUST equal the startup
+        // snapshot, NOT the new declared block. Otherwise a second
+        // reload would compare new declared vs already-updated snapshot
+        // and stop warning.
+        assert_eq!(
+            returned.evpn_instances, initial.evpn_instances,
+            "reload must pin evpn_instances to the startup snapshot until the daemon restarts"
+        );
+        assert_eq!(
+            returned.evpn_instances.len(),
+            1,
+            "second instance must NOT have advanced into the runtime snapshot"
+        );
+        assert_eq!(
+            returned.evpn_instances[0].route_targets.len(),
+            1,
+            "RT-list expansion must NOT have advanced into the runtime snapshot"
+        );
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
