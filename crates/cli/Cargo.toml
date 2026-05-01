@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 tonic.workspace = true
+tonic-prost.workspace = true
 prost.workspace = true
 tokio.workspace = true
 clap.workspace = true
@@ -30,7 +31,7 @@ ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 [build-dependencies]
-tonic-build.workspace = true
+tonic-prost-build.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

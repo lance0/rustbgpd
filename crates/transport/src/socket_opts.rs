@@ -117,7 +117,10 @@ pub fn set_gtsm(socket: &Socket) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
 
-    socket.set_ttl(255)?;
+    // socket2 0.6 renamed `set_ttl` → `set_ttl_v4` for the IPv4 path.
+    // GTSM (RFC 5082) on this socket is IPv4-only, so the IPv4-specific
+    // setter is the correct call.
+    socket.set_ttl_v4(255)?;
 
     Ok(())
 }

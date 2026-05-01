@@ -35,7 +35,6 @@ impl InjectionService {
 const LOCAL_PEER: std::net::IpAddr = std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED);
 
 /// Parse a prefix address + length + next-hop from a gRPC request.
-#[expect(clippy::result_large_err)]
 fn parse_prefix_and_nexthop(
     prefix_str: &str,
     prefix_length: u32,
@@ -66,7 +65,6 @@ fn parse_prefix_and_nexthop(
 /// Parse a unicast next-hop string and reject unspecified / multicast values.
 /// Shared by `AddPath`, `AddFlowSpec`, and `AddEvpnRoute` so all injection
 /// surfaces apply the same guardrails.
-#[expect(clippy::result_large_err)]
 fn parse_unicast_nexthop(s: &str) -> Result<IpAddr, Status> {
     let nh: IpAddr = s
         .parse()
@@ -477,7 +475,6 @@ impl proto::injection_service_server::InjectionService for InjectionService {
 }
 
 /// Parse the `AddressFamily` field for `FlowSpec` requests.
-#[expect(clippy::result_large_err)]
 fn parse_flowspec_afi(value: i32) -> Result<Afi, Status> {
     match value {
         x if x == proto::AddressFamily::Ipv4Flowspec as i32 => Ok(Afi::Ipv4),
@@ -489,7 +486,6 @@ fn parse_flowspec_afi(value: i32) -> Result<Afi, Status> {
 }
 
 /// Convert proto `FlowSpecComponent` messages into wire types.
-#[expect(clippy::result_large_err)]
 fn parse_flowspec_components(
     components: &[proto::FlowSpecComponent],
     afi: Afi,
@@ -548,7 +544,6 @@ fn parse_flowspec_components(
 }
 
 /// Parse a prefix string (e.g., "10.0.0.0/24") into a `FlowSpecPrefix`.
-#[expect(clippy::result_large_err)]
 fn parse_flowspec_prefix(
     s: &str,
     afi: Afi,
@@ -592,7 +587,6 @@ fn parse_flowspec_prefix(
     }
 }
 
-#[expect(clippy::result_large_err)]
 fn split_match_terms(s: &str, label: &str) -> Result<Vec<(String, bool)>, Status> {
     let mut terms = Vec::new();
     let mut current = String::new();
@@ -630,7 +624,6 @@ fn split_match_terms(s: &str, label: &str) -> Result<Vec<(String, bool)>, Status
 /// Supports comma-separated OR terms and `&`-separated AND terms. Each term may
 /// start with any combination of `=`, `<`, `>` (e.g. `=80`, `>=1024`, `<4096`).
 /// A bare integer is treated as an exact match for backwards compatibility.
-#[expect(clippy::result_large_err)]
 fn parse_numeric_value(s: &str, label: &str) -> Result<Vec<NumericMatch>, Status> {
     let terms = split_match_terms(s, label)?;
     let len = terms.len();
@@ -667,7 +660,6 @@ fn parse_numeric_value(s: &str, label: &str) -> Result<Vec<NumericMatch>, Status
 /// Supports comma-separated OR terms and `&`-separated AND terms. Each term is
 /// parsed as a decimal or hex (with `0x` prefix) integer. The parser accepts the
 /// subset emitted by `format_bitmask_ops()` and preserves AND chaining.
-#[expect(clippy::result_large_err)]
 fn parse_bitmask_value(s: &str, label: &str) -> Result<Vec<BitmaskMatch>, Status> {
     let terms = split_match_terms(s, label)?;
     let len = terms.len();
@@ -709,7 +701,6 @@ fn parse_bitmask_value(s: &str, label: &str) -> Result<Vec<BitmaskMatch>, Status
 }
 
 /// Convert a proto `FlowSpecAction` into a wire `ExtendedCommunity`.
-#[expect(clippy::result_large_err)]
 fn flowspec_action_to_ec(
     action: &proto::FlowSpecAction,
 ) -> Result<Option<ExtendedCommunity>, Status> {
@@ -755,7 +746,6 @@ fn flowspec_action_to_ec(
 ///   Type 2: "<asn-u32>:<assigned-u16>" — e.g. "4200000000:100"
 /// Heuristic: IPv4 form has 4 dot-separated octets before the colon;
 /// numeric > 65535 signals type 2; otherwise type 0.
-#[expect(clippy::result_large_err)]
 fn parse_rd(s: &str) -> Result<RouteDistinguisher, Status> {
     let (admin, assigned) = s.split_once(':').ok_or_else(|| {
         Status::invalid_argument(format!("RD must be \"admin:assigned\"; got {s:?}"))
@@ -799,7 +789,6 @@ fn parse_rd(s: &str) -> Result<RouteDistinguisher, Status> {
     }
 }
 
-#[expect(clippy::result_large_err)]
 fn parse_mac(s: &str) -> Result<[u8; 6], Status> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
@@ -815,7 +804,6 @@ fn parse_mac(s: &str) -> Result<[u8; 6], Status> {
     Ok(out)
 }
 
-#[expect(clippy::result_large_err)]
 fn parse_optional_ip(s: &str) -> Result<Option<IpAddr>, Status> {
     if s.is_empty() {
         return Ok(None);
@@ -825,7 +813,6 @@ fn parse_optional_ip(s: &str) -> Result<Option<IpAddr>, Status> {
         .map_err(|e| Status::invalid_argument(format!("invalid IP: {e}")))
 }
 
-#[expect(clippy::result_large_err)]
 fn parse_ip_required(s: &str, field: &str) -> Result<IpAddr, Status> {
     if s.is_empty() {
         return Err(Status::invalid_argument(format!("{field} is required")));
@@ -835,7 +822,6 @@ fn parse_ip_required(s: &str, field: &str) -> Result<IpAddr, Status> {
 }
 
 /// Assemble a Type 2 MAC/IP route + its path attributes from the request.
-#[expect(clippy::result_large_err)]
 fn build_type2(
     req: &proto::AddEvpnRouteRequest,
     rd: RouteDistinguisher,
@@ -876,7 +862,6 @@ fn build_type2(
 
 /// Assemble a Type 3 IMET route + attributes. IMET carries no MAC/label —
 /// just RD, ethernet-tag, and originator-IP (taken from `ip`).
-#[expect(clippy::result_large_err)]
 fn build_type3(
     req: &proto::AddEvpnRouteRequest,
     rd: RouteDistinguisher,
@@ -910,7 +895,6 @@ fn build_type3(
 /// Build the per-route attribute vector shared by Type 2 and Type 3:
 /// Origin=IGP, empty `AS_PATH`, LocalPref=100, and optional RTs +
 /// VXLAN Encapsulation ext communities.
-#[expect(clippy::result_large_err)]
 fn build_common_attrs(req: &proto::AddEvpnRouteRequest) -> Result<Vec<PathAttribute>, Status> {
     let mut attrs = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -933,7 +917,6 @@ fn build_common_attrs(req: &proto::AddEvpnRouteRequest) -> Result<Vec<PathAttrib
     Ok(attrs)
 }
 
-#[expect(clippy::result_large_err)]
 fn parse_route_target(s: &str) -> Result<ExtendedCommunity, Status> {
     let (admin, val) = s.split_once(':').ok_or_else(|| {
         Status::invalid_argument(format!("route_target must be \"admin:value\"; got {s:?}"))

@@ -45,11 +45,12 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-tonic = { version = "0.13", features = ["tls-ring"] }
-tonic-build = "0.13"
-prost = "0.13"
+tonic = { version = "0.14", features = ["tls-ring"] }
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
 prometheus = "0.13"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 axum = "0.8"
 tower = "0.5"
