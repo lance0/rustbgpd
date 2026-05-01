@@ -42,7 +42,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Tokio transport — single task per peer, inbound listener, TCP MD5/GTSM, session counters, NLRI batching, TCP collision detection (RFC 4271 §6.8)
 - [x] RIB — Adj-RIB-In, Loc-RIB best-path (RFC 4271 §9.1.2 with eBGP preference), Adj-RIB-Out with split horizon, dirty peer resync, route injection, WatchRoutes streaming
 - [x] Policy — prefix lists with ge/le matching (IPv4 + IPv6), per-peer import/export, global fallback
-- [x] gRPC API — 7 services: Global, Neighbor, Policy, PeerGroup, RIB, Injection, Control (all IPv6-capable)
+- [x] gRPC API — 8 services: Global, Neighbor, Policy, PeerGroup, RIB, Injection, Control, Evpn (all IPv6-capable)
 - [x] Dynamic peer management — add, delete, enable, disable neighbors at runtime (IPv4 + IPv6)
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
@@ -310,6 +310,7 @@ this document is reference / long-tail.
 - [x] **EVPN BMP + MRT export** (v0.11.0) — RouteMonitoring already flowed; MRT now emits `RIB_GENERIC` for EVPN with `MP_REACH_NLRI` in RFC 6396 §4.3.4 reduced form
 - [x] **`EvpnRibRoute` payload+key refactor** (v0.11.0) — drops cached key, identity derived on demand
 - [x] **IPv6 link-local next-hop preserved end-to-end** (v0.11.0) — 32-byte `MP_REACH_NLRI` next-hops (RFC 4760 §3 / RFC 2545) round-trip through wire codec, RIB, and MRT exports; closes the long-standing "link-local discarded" KNOWN_ISSUES limitation. `rustbgpd-wire` 0.7.0 → 0.8.0 (breaking — adds `link_local_next_hop` field to `MpReachNlri`).
+- [ ] **EVPN VTEP foundation — declarative EVI/VNI domain model** (in flight on `feat/evpn-vtep-linux-foundation`) — Gate 7a per `docs/evpn-enablement.md`. New `crates/evpn` exposes the runtime [`EvpnInstance`] / [`EvpnInstanceTable`] types; `[[evpn_instances]]` config block lands the operator-facing TOML surface (VNI, RD, RTs, local VTEP IP, optional bridge, `advertise_svi_mac`); read-only `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances` surface the resolved table. Wire crate gains `RouteDistinguisher::from_str`. Empty by default — RR-only deployments unchanged. Kernel reconciliation + Type 2/3 origination land in Gate 7b. ADR-0052.
 
 ### P0–P2.5 — Complete
 

@@ -25,6 +25,12 @@ pub struct Config {
     pub bmp: Option<BmpConfig>,
     #[serde(default)]
     pub mrt: Option<MrtConfig>,
+    /// Local EVPN instances on this VTEP. Empty by default — only set
+    /// when this daemon is acting as a leaf VTEP (Phase 2). Route
+    /// reflector deployments leave this list empty; reflection has no
+    /// dependency on local EVI state.
+    #[serde(default)]
+    pub evpn_instances: Vec<EvpnInstanceConfig>,
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
@@ -439,6 +445,55 @@ pub struct AsPathPrependConfig {
     pub count: u8,
 }
 
+/// One local EVPN instance entry in TOML.
+///
+/// This is the *operator-facing* shape; resolution into the runtime
+/// [`rustbgpd_evpn::EvpnInstance`] domain type happens in
+/// [`Config::resolve_evpn_instances`]. Phase-2 fields (e.g. inbound
+/// MAC-mobility knobs, IRB router-mac) will be added here without
+/// reshaping the existing surface.
+///
+/// Field semantics:
+///
+/// - `vni` — 24-bit VXLAN VNI (RFC 8365 §5). Required, must be 1..=`16_777_215`.
+/// - `rd` — Route Distinguisher (RFC 4364 §4.2). Required, parsed via
+///   the wire crate's [`rustbgpd_wire::RouteDistinguisher`] textual
+///   forms (`asn:val`, `ipv4:val`, 4-octet AS).
+/// - `route_targets` — bidirectional Route Target list (RFC 4360 / RFC 5668).
+///   Required, non-empty; each entry parses through
+///   [`rustbgpd_evpn::RouteTarget`].
+/// - `local_vtep_ip` — VXLAN tunnel source IP for this EVI. Required,
+///   must be a unicast address (rejects unspecified / multicast /
+///   loopback).
+/// - `bridge` — optional Linux bridge name this EVI is bound to.
+///   Reserved for the kernel-reconciliation slice; a bridge name is
+///   accepted today and surfaces in `ListEvpnInstances` output, but
+///   no kernel state is consumed yet.
+/// - `advertise_svi_mac` — toggle for Type 2 origination of the SVI's
+///   own MAC address (RFC 9135 §6.1). Off by default. Wired through to
+///   origination once Type 2 origination lands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvpnInstanceConfig {
+    /// Local VNI for this instance (`1..=16_777_215`).
+    pub vni: u32,
+    /// Route Distinguisher (RFC 4364 §4.2). Textual form: `asn:val` or `ipv4:val`.
+    pub rd: String,
+    /// Bidirectional Route Targets — each entry applies to both import and export.
+    pub route_targets: Vec<String>,
+    /// VXLAN tunnel source IP for this EVI.
+    pub local_vtep_ip: String,
+    /// Optional Linux bridge name this EVI is bound to. Reserved for
+    /// kernel reconciliation; carried on the schema today so the field
+    /// doesn't churn between phases.
+    #[serde(default)]
+    pub bridge: Option<String>,
+    /// Originate Type 2 routes for the SVI's own MAC address (RFC 9135 §6.1).
+    /// Off by default.
+    #[serde(default)]
+    pub advertise_svi_mac: bool,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read config file: {0}")]
@@ -491,4 +546,6 @@ pub enum ConfigError {
     InvalidLogLevel { value: String },
     #[error("invalid dynamic neighbor config: {reason}")]
     InvalidDynamicNeighbor { reason: String },
+    #[error("invalid EVPN instance config: {reason}")]
+    InvalidEvpnInstance { reason: String },
 }

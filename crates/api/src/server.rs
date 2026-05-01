@@ -15,6 +15,7 @@ use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
 use crate::control_service::{ControlService, MrtTriggerTx};
+use crate::evpn_service::EvpnService;
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
@@ -22,6 +23,7 @@ use crate::peer_group_service::PeerGroupService;
 use crate::peer_types::{ConfigEvent, PeerManagerCommand};
 use crate::policy_service::PolicyService;
 use crate::proto::control_service_server::ControlServiceServer;
+use crate::proto::evpn_service_server::EvpnServiceServer;
 use crate::proto::global_service_server::GlobalServiceServer;
 use crate::proto::injection_service_server::InjectionServiceServer;
 use crate::proto::neighbor_service_server::NeighborServiceServer;
@@ -29,6 +31,7 @@ use crate::proto::peer_group_service_server::PeerGroupServiceServer;
 use crate::proto::policy_service_server::PolicyServiceServer;
 use crate::proto::rib_service_server::RibServiceServer;
 use crate::rib_service::RibService;
+use rustbgpd_evpn::EvpnInstanceTable;
 use rustbgpd_rib::RibUpdate;
 use rustbgpd_telemetry::BgpMetrics;
 
@@ -47,6 +50,12 @@ pub struct ServeConfig {
     pub start_time: tokio::time::Instant,
     /// Optional MRT dump trigger channel (None if MRT not configured).
     pub mrt_trigger_tx: Option<MrtTriggerTx>,
+    /// Resolved local EVPN instance table — empty in RR-only deployments.
+    /// Shared across listeners so all gRPC endpoints see the same
+    /// snapshot. Mutation lands in a follow-up phase; today the
+    /// table is built once at daemon start from `[[evpn_instances]]`
+    /// and not swapped at runtime.
+    pub evpn_instances: Arc<EvpnInstanceTable>,
 }
 
 /// Resolved gRPC listener configuration.
@@ -222,6 +231,7 @@ async fn run_listener(
     let metrics = config.metrics;
     let start_time = config.start_time;
     let mrt_trigger_tx = config.mrt_trigger_tx;
+    let evpn_instances = config.evpn_instances;
 
     match listener.endpoint {
         ListenerEndpoint::Tcp(addr) => {
@@ -239,6 +249,7 @@ async fn run_listener(
                 metrics,
                 start_time,
                 mrt_trigger_tx,
+                evpn_instances,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -260,6 +271,7 @@ async fn run_listener(
                 metrics,
                 start_time,
                 mrt_trigger_tx,
+                evpn_instances,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -284,6 +296,7 @@ async fn run_tcp_listener(
     metrics: BgpMetrics,
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
+    evpn_instances: Arc<EvpnInstanceTable>,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -338,6 +351,10 @@ async fn run_tcp_listener(
             GlobalService::new(asn, router_id, listen_port),
             interceptor.clone(),
         ))
+        .add_service(EvpnServiceServer::with_interceptor(
+            EvpnService::new(evpn_instances),
+            interceptor.clone(),
+        ))
         .add_service(ControlServiceServer::with_interceptor(
             ControlService::new(
                 access_mode,
@@ -370,6 +387,7 @@ async fn run_uds_listener(
     metrics: BgpMetrics,
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
+    evpn_instances: Arc<EvpnInstanceTable>,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -412,6 +430,10 @@ async fn run_uds_listener(
         ))
         .add_service(GlobalServiceServer::with_interceptor(
             GlobalService::new(asn, router_id, listen_port),
+            interceptor.clone(),
+        ))
+        .add_service(EvpnServiceServer::with_interceptor(
+            EvpnService::new(evpn_instances),
             interceptor.clone(),
         ))
         .add_service(ControlServiceServer::with_interceptor(

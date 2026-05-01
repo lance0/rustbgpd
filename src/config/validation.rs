@@ -540,6 +540,13 @@ impl Config {
             });
         }
 
+        // Validate EVPN instances by resolving them — this runs the
+        // full per-entry parse plus the table-level uniqueness checks
+        // (duplicate VNI, duplicate RD) in one pass. The resolved
+        // table is discarded; gRPC and future kernel reconciliation
+        // call `resolve_evpn_instances` on demand.
+        let _ = self.resolve_evpn_instances()?;
+
         Ok(())
     }
 }

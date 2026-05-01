@@ -83,9 +83,9 @@ effective-impact view:
   chains. SIGHUP reconciles all of these.
 - **Restart-required changes** — `[global]` ASN/router-id/families,
   `[global.telemetry.grpc_*]` listener config (including TLS / mTLS),
-  `[rpki]`, `[bmp]`, `[mrt]`, and inline `policy.import` /
-  `policy.export` legacy statements. Surfaced with a one-line
-  migration hint where applicable.
+  `[rpki]`, `[bmp]`, `[mrt]`, `[[evpn_instances]]`, and inline
+  `policy.import` / `policy.export` legacy statements. Surfaced with
+  a one-line migration hint where applicable.
 - **Effectively impacted neighbors (via inheritance)** — every
   neighbor whose resolved import / export chain would move at reload,
   with the upstream change(s) responsible (peer-group / policy /
@@ -137,8 +137,11 @@ fields.
 "Restart-required" in `--diff`): `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_tcp]` and `[global.telemetry.grpc_uds]`
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
-`[mrt]`, and inline `policy.import` / `policy.export` legacy
-global-fallback statements.
+`[mrt]`, `[[evpn_instances]]` (Phase-2 VTEP foundation — gRPC
+`EvpnService` shares an `Arc<EvpnInstanceTable>` built once at
+startup; reload-time mutation lands with kernel reconciliation), and
+inline `policy.import` / `policy.export` legacy global-fallback
+statements.
 
 Use `rustbgpd --diff` to preview changes before reloading; the diff
 buckets the changes by Reload-applied / Restart-required and surfaces
@@ -434,6 +437,16 @@ EVI / VRF / VNI state, does not learn MACs from a kernel FDB, and does
 not run DF election. VTEPs (typically FRR on SONiC, or commercial NOS)
 handle local origination and forwarding; rustbgpd handles fan-out and
 attribute integrity in the middle.
+
+> **Phase-2 update (Gate 7a, ADR-0052):** the **declarative** half of
+> VTEP mode has shipped. Operators can configure local
+> `[[evpn_instances]]` (vni / rd / route_targets / local_vtep_ip /
+> optional bridge / advertise_svi_mac) and inspect the resolved table
+> via `EvpnService.ListEvpnInstances` and `rustbgpctl evpn instances`.
+> The kernel-reconciliation half — local MAC learning, Type 2/3
+> origination, MAC mobility, DF execution — remains queued as Gate 7b.
+> See `examples/evpn-vtep-leaf/` for the leaf-mode config shape and
+> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder.
 
 #### Per-neighbor knob
 

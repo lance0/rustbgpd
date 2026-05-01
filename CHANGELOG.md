@@ -9,6 +9,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN VTEP foundation — declarative local EVI/VNI domain model.**
+  Phase 2 of the EVPN track (ADR-0052) lands as two slices; this is
+  the first. New `[[evpn_instances]]` config block declares per-VNI
+  local state: VNI (24-bit, RFC 8365 §5), Route Distinguisher
+  (RFC 4364 §4.2), bidirectional Route Targets (RFC 4360 / RFC 5668),
+  VXLAN tunnel source IP, optional Linux bridge name, and an
+  `advertise_svi_mac` flag (RFC 9135 §6.1; recognized today, wired
+  to origination in the next slice). New `crates/evpn` exposes
+  the runtime [`EvpnInstance`] / [`EvpnInstanceId`] / [`EvpnInstanceTable`]
+  types — kernel-free, route-origination-free, parses / validates /
+  enforces VNI and RD uniqueness. Read-only gRPC surface
+  (`EvpnService.ListEvpnInstances`) and `rustbgpctl evpn instances`
+  expose the resolved table. Empty by default — RR-only
+  deployments (the `rr-evpn-fabric` example) are unchanged.
+  See `examples/evpn-vtep-leaf/config.toml` for the leaf shape.
+
+- **`RouteDistinguisher::from_str` in `rustbgpd-wire`.** Parses the
+  RFC 4364 §4.2 textual encodings (`asn:val`, `ipv4:val`, 4-octet AS
+  form). Disambiguation matches the FRR / Cisco / Junos convention
+  used elsewhere in the codebase. Independently useful for any
+  caller that round-trips RD strings without pulling in the EVPN
+  domain crate.
+
 ## [0.12.2] — 2026-04-30
 
 ### Fixed

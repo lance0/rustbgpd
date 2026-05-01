@@ -609,14 +609,30 @@ for the architectural record.
 - All correctness gaps surfaced by review are fixed with regression
   tests; no known unfixed bugs at merge time.
 
-### Deferred to Phase 2+
+### Phase 2 progress and what's still deferred
 
-- VTEP mode (local EVI / VRF / VNI state, MAC learning from kernel
-  FDB, local route origination beyond what the controller pushes).
-- DF election execution (RFC 7432 §8 + RFC 8584) — Phase 1 reflects
-  the inputs unchanged so VTEPs run the election themselves.
-- Symmetric IRB semantics (RFC 9135) — `label2` and Router MAC are
-  preserved across reflection but not interpreted.
-- Type 5 / Type 1 / Type 4 origination via gRPC.
-- RFC 9251 Route Types 6-8 (multicast EVPN), RFC 7623 PBB-EVPN, MPLS
-  encapsulation, RFC 9252 Add-Path for EVPN.
+- **VTEP foundation (Gate 7a) — landed.** The declarative half of
+  VTEP mode shipped on `feat/evpn-vtep-linux-foundation`: new
+  `crates/evpn` domain crate (`EvpnInstance`, `EvpnInstanceTable`,
+  `RouteTarget`), `[[evpn_instances]]` TOML schema, read-only
+  `EvpnService.ListEvpnInstances` gRPC + `rustbgpctl evpn instances`,
+  wire-side `RouteDistinguisher::from_str`. ADR-0052 codifies the
+  boundary: domain-only, kernel-free; RR-only deployments
+  unchanged.
+- **VTEP kernel reconciliation (Gate 7b) — still deferred.** Local
+  MAC learning from kernel FDB (netlink monitor), Type 2/3
+  origination on MAC learn, Type 2 withdrawal on age-out,
+  anti-spoofing, MAC mobility sequencing. Wires the
+  `advertise_svi_mac` flag through and adds mutation RPCs
+  (`AddEvpnInstance` / `DeleteEvpnInstance`).
+- **DF election execution** (RFC 7432 §8 + RFC 8584) — still
+  deferred. Phase 1 reflects the inputs unchanged so VTEPs run the
+  election themselves.
+- **Symmetric IRB semantics** (RFC 9135) — still deferred. `label2`
+  and Router MAC are preserved across reflection but not
+  interpreted.
+- **Type 5 / Type 1 / Type 4 origination via gRPC** — still
+  deferred.
+- **RFC 9251 Route Types 6-8** (multicast EVPN), **RFC 7623
+  PBB-EVPN**, **MPLS encapsulation**, **RFC 9252 Add-Path for
+  EVPN** — still deferred.

@@ -36,3 +36,5 @@ tonic-build.workspace = true
 tempfile = "3"
 tokio-stream = { workspace = true, features = ["net"] }
 rustbgpd-api.workspace = true
+rustbgpd-evpn.workspace = true
+rustbgpd-wire.workspace = true

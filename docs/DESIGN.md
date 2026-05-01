@@ -30,7 +30,9 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN Route Reflector (VXLAN-EVPN DC fabric).** iBGP route reflector for Type 1-5 RFC 7432 routes between VTEPs; control plane only, VTEPs handle their own DF election and data-plane encapsulation. See ADR-0050.
 
-**Later:** EVPN VTEP mode (local MAC learning, DF election, IRB semantics), VPNv4/v6, MPLS-EVPN encap.
+**EVPN VTEP foundation (declarative model, Phase 2 Gate 7a).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface. Operators declare local VTEP intent today; kernel reconciliation (netlink FDB monitor, Type 2/3 origination) lands with Gate 7b. See ADR-0052 and the boundary it codifies between domain and dataplane.
+
+**Later:** EVPN VTEP kernel reconciliation + origination (Gate 7b), DF election execution, IRB semantics (RFC 9135), VPNv4/v6, MPLS-EVPN encap.
 
 ---
 

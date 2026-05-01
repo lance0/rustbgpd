@@ -1,0 +1,15 @@
+[package]
+publish = false
+name = "rustbgpd-evpn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "EVPN VTEP domain model — local EVPN instances, route targets, instance table (RFC 7432 / RFC 8365)"
+
+[dependencies]
+rustbgpd-wire.workspace = true
+thiserror.workspace = true

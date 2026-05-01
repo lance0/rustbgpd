@@ -14,7 +14,7 @@ Last updated: 2026-04-24
 | IPv6 Labeled Unicast | Yes | No | |
 | VPNv4 / VPNv6 (RFC 4364) | Yes | No | |
 | L2VPN VPLS (RFC 4761) | Yes | No | |
-| L2VPN EVPN (RFC 7432) | Yes | Partial (RR) | Route types 1-5 in RR mode with controller-injection gRPC for Type 2/3 (Gate 6); VTEP local state and Route Types 6-9 not yet implemented (ADR-0050) |
+| L2VPN EVPN (RFC 7432) | Yes | Partial (RR + VTEP foundation) | Route types 1-5 in RR mode with controller-injection gRPC for Type 2/3 (Gate 6, ADR-0050). VTEP foundation slice shipped (Gate 7a, ADR-0052): declarative `[[evpn_instances]]` schema + `EvpnService.ListEvpnInstances`. VTEP kernel reconciliation / Type 2/3 origination (Gate 7b) and Route Types 6-9 not yet implemented |
 | IPv4/IPv6 FlowSpec (RFC 8955) | Yes | Yes | SAFI 133, all 13 component types |
 | VPN FlowSpec | Yes | No | |
 | BGP-LS (RFC 7752) | Yes | No | |

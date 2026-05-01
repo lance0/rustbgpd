@@ -1215,11 +1215,17 @@ earlier reload steps still land at the manager and remain in effect.
 
 Inline `policy.import` / `policy.export` (the legacy global-fallback
 statements), `[global]` ASN/router-id/families,
-`[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`, and
-`[mrt]` are **restart-required** — they're surfaced under
-"Restart-required" in `rustbgpd --diff` and logged at reload time
-with a one-line migration hint to named definitions plus
-`import_chain` / `export_chain` where applicable.
+`[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
+`[mrt]`, and `[[evpn_instances]]` are **restart-required** — they're
+surfaced under "Restart-required" in `rustbgpd --diff` and logged at
+reload time with a one-line migration hint to named definitions plus
+`import_chain` / `export_chain` where applicable. The `[[evpn_instances]]`
+case is the Phase-2 VTEP foundation slice (ADR-0052): the gRPC
+`EvpnService` shares the resolved instance table via an `Arc` built
+once at startup, and SIGHUP pins the in-memory snapshot back to that
+startup value so drift detection stays observable across every reload.
+Reload-time mutation lands with the kernel-reconciliation slice
+(Gate 7b — see `docs/evpn-enablement.md`).
 
 Reload failures are reported per-step with structured logging
 (bucket / target / error). The previous in-memory config snapshot

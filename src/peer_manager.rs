@@ -264,6 +264,7 @@ impl PeerManager {
                 mrt: None,
                 file_path: None,
                 dynamic_neighbors: Vec::new(),
+                evpn_instances: Vec::new(),
             },
         )
     }
@@ -1739,6 +1740,7 @@ mod tests {
             bmp: None,
             mrt: None,
             file_path: None,
+            evpn_instances: Vec::new(),
         }
     }
 

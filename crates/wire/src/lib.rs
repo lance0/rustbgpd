@@ -176,7 +176,8 @@ pub use flowspec::{
 pub use evpn::{
     EthernetSegmentIdentifier, EthernetTagId, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnImet,
     EvpnIpPrefixRoute, EvpnIpPrefixValue, EvpnMacIp, EvpnRoute, EvpnRouteKey, MacAddress,
-    MplsLabel, RouteDistinguisher, decode_evpn_nlri, encode_evpn_nlri,
+    MplsLabel, RouteDistinguisher, RouteDistinguisherParseError, decode_evpn_nlri,
+    encode_evpn_nlri,
 };
 
 // Well-known communities (RFC 1997 + RFC 9494)

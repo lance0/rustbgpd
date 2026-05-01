@@ -2627,6 +2627,12 @@ fn diff_config_json_serializes() {
     let diff = super::diff_config(&old, &old);
     let json = serde_json::to_string(&diff).unwrap();
     assert!(json.contains("\"global_changed\":false"));
+    // EVPN-instance drift must appear in the serialized diff so JSON
+    // consumers (CI guards, dashboards) can act on it.
+    assert!(
+        json.contains("\"evpn_instances_changed\":false"),
+        "expected evpn_instances_changed in serialized diff: {json}"
+    );
 }
 
 #[test]
@@ -2870,4 +2876,441 @@ peer_group = "ix-v6"
 "#;
     let config = parse(toml).unwrap();
     assert_eq!(config.dynamic_neighbors[0].prefix, "2001:db8::/32");
+}
+
+// ---------------------------------------------------------------------------
+// EVPN VTEP foundation — `[[evpn_instances]]` schema, parse, and validation.
+//
+// These tests pin the operator-facing TOML surface for local EVPN
+// instances and the runtime resolution into `EvpnInstanceTable`. They
+// cover all six rules from the foundation brief: VNI range, RD parse,
+// non-empty RT list, unicast VTEP IP, duplicate VNI, duplicate RD —
+// plus the `Display` shape used by future CLI list output.
+// ---------------------------------------------------------------------------
+
+fn evpn_toml_with(extra: &str) -> String {
+    format!(
+        r#"
+[global]
+asn = 65000
+router_id = "10.0.0.100"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+{extra}
+"#
+    )
+}
+
+#[test]
+fn evpn_instances_default_empty() {
+    // No `[[evpn_instances]]` block ⇒ empty list, valid config (RR mode).
+    let config = parse(valid_toml()).unwrap();
+    assert!(config.evpn_instances.is_empty());
+    assert_eq!(config.resolve_evpn_instances().unwrap().len(), 0);
+}
+
+#[test]
+fn evpn_instance_minimal_parses() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    assert_eq!(config.evpn_instances.len(), 1);
+    let table = config.resolve_evpn_instances().unwrap();
+    assert_eq!(table.len(), 1);
+    let inst = table.sorted()[0];
+    assert_eq!(inst.id.as_u32(), 100);
+    assert_eq!(inst.route_targets.len(), 1);
+    assert!(!inst.advertise_svi_mac);
+    assert!(inst.bridge.is_none());
+}
+
+#[test]
+fn evpn_instance_full_parses() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200", "65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br200"
+advertise_svi_mac = true
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_instances().unwrap();
+    let inst = table.sorted()[0];
+    assert_eq!(inst.id.as_u32(), 200);
+    assert_eq!(inst.bridge.as_deref(), Some("br200"));
+    assert!(inst.advertise_svi_mac);
+    // RTs are sorted/deduped on construction.
+    assert_eq!(inst.route_targets.len(), 2);
+}
+
+#[test]
+fn evpn_instance_rejects_unknown_field() {
+    // `deny_unknown_fields` — typos must surface, not silently drop.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+oops_typo = true
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::Parse(_)),
+        "expected toml parse error, got {err}"
+    );
+}
+
+#[test]
+fn evpn_instance_rejects_zero_vni() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 0
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "expected InvalidEvpnInstance, got {msg}",
+    );
+    assert!(msg.contains("VNI 0"), "msg must explain why: {msg}");
+}
+
+#[test]
+fn evpn_instance_rejects_overflow_vni() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 16777216
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {err}"
+    );
+    assert!(err.to_string().contains("24-bit"));
+}
+
+#[test]
+fn evpn_instance_accepts_max_vni() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 16777215
+rd = "10.0.0.100:1"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    parse(&toml).unwrap();
+}
+
+#[test]
+fn evpn_instance_rejects_invalid_rd() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "not-a-real-rd"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {err}"
+    );
+    assert!(err.to_string().contains("rd"));
+}
+
+#[test]
+fn evpn_instance_rejects_empty_route_targets() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = []
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {msg}"
+    );
+    assert!(msg.contains("route_targets"));
+}
+
+#[test]
+fn evpn_instance_rejects_invalid_route_target() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["not-an-rt"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {err}"
+    );
+    assert!(err.to_string().contains("route_target"));
+}
+
+#[test]
+fn evpn_instance_rejects_non_unicast_vtep_ip() {
+    for bad in ["0.0.0.0", "127.0.0.1", "224.0.0.1", "::", "::1"] {
+        let toml = evpn_toml_with(&format!(
+            r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "{bad}"
+"#
+        ));
+        let err = parse(&toml).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+            "expected InvalidEvpnInstance for {bad}, got {err}",
+        );
+    }
+}
+
+#[test]
+fn evpn_instance_rejects_unparseable_vtep_ip() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "not-an-ip"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {err}"
+    );
+    assert!(err.to_string().contains("local_vtep_ip"));
+}
+
+#[test]
+fn evpn_instance_rejects_empty_bridge() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+bridge = "   "
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {err}"
+    );
+    assert!(err.to_string().contains("bridge"));
+}
+
+#[test]
+fn evpn_instance_rejects_duplicate_vni() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {msg}"
+    );
+    assert!(msg.contains("duplicate VNI"), "msg: {msg}");
+}
+
+#[test]
+fn evpn_instance_rejects_duplicate_rd() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:100"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "got {msg}"
+    );
+    assert!(msg.contains("duplicate route distinguisher"), "msg: {msg}");
+}
+
+#[test]
+fn evpn_instances_resolve_in_declaration_order_for_first_error() {
+    // First entry is fine; second has a bad RT. The error should
+    // identify the second entry, not the first.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["bad-rt"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("vni 200"), "msg: {msg}");
+}
+
+#[test]
+fn evpn_instance_multiple_distinct_instances_resolve_cleanly() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 200
+rd = "10.0.0.100:200"
+route_targets = ["65000:200"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_instances]]
+vni = 300
+rd = "10.0.0.100:300"
+route_targets = ["65000:300", "65000:301"]
+local_vtep_ip = "10.0.0.100"
+bridge = "br300"
+advertise_svi_mac = true
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_instances().unwrap();
+    assert_eq!(table.len(), 3);
+    let sorted: Vec<u32> = table.sorted().iter().map(|i| i.id.as_u32()).collect();
+    assert_eq!(sorted, vec![100, 200, 300]);
+
+    // Spot-check display shape on the most-loaded entry.
+    let inst300 = table.get(EvpnInstanceId::new(300).unwrap()).unwrap();
+    let s = inst300.to_string();
+    assert!(
+        s.contains("vni=300")
+            && s.contains("rd=10.0.0.100:300")
+            && s.contains("bridge=br300")
+            && s.contains("advertise-svi-mac"),
+        "display surface broke: {s}",
+    );
+}
+
+#[test]
+fn evpn_instance_diff_flags_changes_as_restart_required() {
+    let with_evi = parse(&evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    ))
+    .unwrap();
+    let without_evi = parse(valid_toml()).unwrap();
+
+    // Add: empty → one EVI ⇒ restart-required.
+    let added = diff_config(&without_evi, &with_evi);
+    assert!(added.evpn_instances_changed);
+    assert!(added.has_restart_required_changes());
+
+    // Remove: one EVI → empty ⇒ restart-required.
+    let removed = diff_config(&with_evi, &without_evi);
+    assert!(removed.evpn_instances_changed);
+    assert!(removed.has_restart_required_changes());
+
+    // No-op: same config on both sides ⇒ not flagged.
+    let same = diff_config(&with_evi, &with_evi);
+    assert!(!same.evpn_instances_changed);
+}
+
+#[test]
+fn evpn_instance_ipv6_vtep_accepted() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "2001:db8::1"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_instances().unwrap();
+    let inst = table.get(EvpnInstanceId::new(100).unwrap()).unwrap();
+    assert_eq!(
+        inst.local_vtep_ip,
+        std::net::IpAddr::V6("2001:db8::1".parse().unwrap())
+    );
 }
