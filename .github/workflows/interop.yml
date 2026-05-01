@@ -88,7 +88,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -129,7 +129,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -170,7 +170,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -211,7 +211,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -252,7 +252,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -293,7 +293,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -338,7 +338,7 @@ jobs:
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -379,7 +379,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -420,7 +420,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin grpcurl
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -470,7 +470,7 @@ jobs:
       # cache hits. The cargo registry / target dir gets reused via the
       # GitHub Actions cache backend (type=gha).
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -520,7 +520,7 @@ jobs:
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
@@ -564,7 +564,7 @@ jobs:
           sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build rustbgpd:dev
         uses: docker/build-push-action@v5
