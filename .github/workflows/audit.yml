@@ -1,0 +1,51 @@
+name: Security audit
+
+# Runs `cargo audit` against the RustSec Advisory Database to surface
+# CVEs and yanked-with-reason crates in our dependency tree.
+#
+# Triggers:
+#   - Daily at 06:00 UTC (catches advisories filed overnight before
+#     the next workday starts)
+#   - Every push to main (so a freshly-merged dep bump can't slip
+#     a regression past the daily window)
+#   - Pull requests that touch Cargo manifests / lockfiles (so
+#     dependabot PRs and manual bumps get checked at PR time)
+#
+# `cargo audit` exits non-zero on any unignored advisory. Runs against
+# the workspace lockfile + the wire crate's transitive deps via a
+# single invocation at the repo root (Cargo unifies the lock).
+
+on:
+  schedule:
+    # 06:00 UTC every day — early enough to land before EU morning,
+    # late enough that the RustSec mirror is settled.
+    - cron: "0 6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/audit.yml"
+  workflow_dispatch: {}
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustsec/audit-check is the canonical action; it caches the
+      # advisory DB and posts findings as PR review comments.
+      # Pinned to a release tag rather than `@v2` floating so the
+      # action contents are reproducible.
+      - name: Run cargo audit
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
