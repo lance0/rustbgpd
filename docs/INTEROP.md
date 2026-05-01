@@ -8,6 +8,23 @@ not "someone tried it once."
 
 ## Test Matrix
 
+### CI coverage
+
+12 of the 31 interop tests are gated on every PR. Per-tier breakdown
+mirrors `.github/workflows/interop.yml`:
+
+- **Foundation** — wire-protocol + core RIB / refresh / policy: **M1**, **M13**, **M15**.
+- **Address-family + topology** — MP-BGP, RR, multi-path: **M10**, **M14**, **M17**.
+- **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**.
+- **EVPN + SIGHUP** — control-plane sanity, MAC reflection, policy soft-reset: **M29**, **M30**, **M34**.
+
+The other 19 tests are gated locally — either because they need
+kernel features missing on the GitHub runner image (`vrf` for L3VNI,
+bond ES for multi-homing), substantial wall-clock (M11/M16 GR/LLGR,
+M33 scale soak), additional fixtures (StayRTR / mock RTR v2 server),
+or platform-diversity gating (BIRD, GoBGP — exercise the wire codec
+against alternate implementations rather than gating every PR).
+
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|
 | FRR (bgpd) | 10.3.1 | `tests/interop/m0-frr.clab.yml` | Tested (M0) | All 5 tests pass | Needs `no bgp ebgp-requires-policy` | Cease on `clear bgp *` |
@@ -39,6 +56,7 @@ not "someone tried it once."
 | FRR (bgpd) | 10.3.1 | `tests/interop/m30b-evpn-type5-frr.clab.yml` | Tested (M30b) | EVPN Type 5 IP Prefix Route origination (RFC 9136) | Single-VTEP topology with kernel VRF + L3VNI + bridge + SVI + VXLAN. FRR's `vrf1` (L3VNI 100) advertises 192.0.2.1/32 as a Type 5 NLRI with explicit RD/RT 65000:100; rustbgpd's gRPC `ListEvpnRoutes` surfaces the route with correct RD, prefix, next-hop, VNI label, RT extended community, and VXLAN encap (`tunnel_type=8`); `ip addr del` on the VRF loopback propagates as a withdrawal. RR-reflection of Type 5 (2-VTEP variant) tracked as M30c follow-up. | Manual only — Azure kernel 6.17.0-1010-azure on ubuntu-latest ships without the `vrf` module, so L3VNI binding fails on hosted runners |
 | FRR (bgpd, 3×) | 10.3.1 | `tests/interop/m31-evpn-mac-mobility-frr.clab.yml` | Tested (M31) | EVPN MAC mobility + sticky preservation (RFC 7432 §15.1, §7.7) | 4-node topology (RR + 3 VTEPs). MAC moved from VTEP-A to VTEP-C; VTEP-B's best path flips and Mobility sequence strictly increments. Sticky MAC on VTEP-A is not displaced by non-sticky on VTEP-C. | — |
 | FRR (bgpd, 3×) | 10.3.1 | `tests/interop/m32-evpn-multihome-frr.clab.yml` | Tested (M32) | EVPN multi-homing Type 1 EAD + Type 4 ES reflection (RFC 7432 §8) | VTEP-A and VTEP-C share an ESI on a bond ES interface (same `evpn mh es-id` + `es-sys-mac`); VTEP-B observer sees both VTEPs' Type 4 ES + Type 1 EAD-per-EVI routes through the RR with correct RFC 4456 attributes (ORIGINATOR_ID + CLUSTER_LIST). RR does not execute DF election — just reflects inputs. | — |
+| (synthetic) | — | `tests/interop/m32b-evpn-ead-synthetic.clab.yml` | Tested (M32b) | EVPN Type 1 EAD-per-EVI reflection with synthetic ESI (no kernel bond) | Manual-only sibling to M32. Uses synthetic EAD-per-EVI advertisements injected via gRPC instead of FRR's bond ES, so it runs without the bond-ES kernel module CI lacks. | — |
 | In-tree evpn-load (2 testers + 1 monitor) | in-tree HEAD | `tests/interop/m33-evpn-scale.clab.yml` | Tested (M33) | EVPN RR scale validation — 50k Type 2 routes + 60 s of 1000/sec churn | 2 synthetic iBGP testers originate 25k Type 2 each via the in-tree `bench/evpn-load` generator; monitor counts reflected UPDATEs and asserts initial convergence < 60 s, post-churn count within ±tester-batch (40) of 50,000, observed withdrawal events ≥ ½·`CHURN_RATE`·`CHURN_DURATION` (proves churn actually fired), tester peers stay Established without flaps, and gRPC health survives. No third-party daemon in the measurement path. | — |
 | FRR (bgpd) | 10.3.1 | `tests/interop/m34-policy-soft-reset-frr.clab.yml` | Tested (M34) | SIGHUP policy soft-reset auto-fire | Single-peer plain BGP topology. FRR advertises 3 prefixes; rustbgpd starts with permit-all named policy + chain. Test SIGHUPs a config that adds `deny 192.168.1.0/24` to the same definition and asserts (a) the session stays Established (no flap — auto-refresh path issues a Route Refresh, not a session reset), and (b) 192.168.1.0/24 is removed from the RIB while the other two prefixes remain. Guards the auto-fire inside `PeerManager::update_runtime_policies` — a permit→deny edit on an established peer's effective import chain previously silently left forbidden routes flowing. | CI-gated alongside M29/M30 (`.github/workflows/interop.yml`) |
 | Junos vMX | — | — | Stretch | Lab only, not CI | — | — |
@@ -1560,25 +1578,33 @@ was fixed in [bgp/stayrtr#167](https://github.com/bgp/stayrtr/pull/167).
 
 ---
 
-## M22 Test Results (2026-03-15, FRR 10.3.1)
+## M22 Test Results (2026-04-30, FRR 10.3.1)
 
-FlowSpec injection via gRPC → distribution to FRR → withdrawal propagation.
-FRR receives FlowSpec but cannot originate.
+FlowSpec injection via gRPC → distribution to FRR → withdrawal
+propagation. Rewritten in v0.12.2 to use **direct convergence
+signals** (`show bgp ipv4 flowspec json` parsed with `jq` for state
+queries; `show bgp summary json` for `connectionsDropped` flap
+detection) after a session-tearing wire-level bug (rejected
+RFC-compliant FlowSpec `NEXT_HOP=0.0.0.0`) hid behind a slow text-
+display path. Per-step `assert_no_flap` surfaces any session reset
+at the operation that caused it instead of letting an eventual
+re-establish mask the failure.
 
 | Test | Result | Details |
 |------|--------|---------|
 | gRPC endpoint ready | PASS | First attempt |
-| BGP session established | PASS | First attempt |
-| FlowSpec capability negotiated | PASS | AFI 1 / SAFI 133 |
-| Rule 1 in rustbgpd RIB | PASS | dest=192.168.1.0/24, proto==6, dst-port==80, action=drop |
-| FRR received rule 1 | PASS | `show bgp ipv4 flowspec` shows 192.168.1.0 |
-| Both rules in rustbgpd RIB | PASS | count=2 after rule 2 injection |
-| FRR received both rules | PASS | Both prefixes visible |
-| Rule 1 withdrawn from rustbgpd | PASS | DeleteFlowSpec succeeds |
-| Rule 1 withdrawn from FRR | PASS | No longer in FRR flowspec table |
-| Rule 2 survives on FRR | PASS | 10.0.0.0 still present after rule 1 withdrawal |
-| Exactly 1 rule in rustbgpd | PASS | count=1 |
-| **Total** | **11/11** | |
+| BGP session established | PASS | Initial Established + initial `connectionsDropped` snapshot captured for flap-detection baseline |
+| FlowSpec capability negotiated | PASS | AFI 1 / SAFI 133 visible in `show bgp neighbors` output |
+| Rule 1 in rustbgpd Loc-RIB | PASS | gRPC `ListFlowSpecRoutes`: dest=192.168.1.0/24, proto==6, dst-port==80, action=drop |
+| Session no flap after rule 1 inject | PASS | `connectionsDropped` unchanged |
+| FRR received rule 1 | PASS | `show bgp ipv4 flowspec json` totalRoutes ≥ 1 with `192.168.1.0/24` substring in routes-map keys (~30 s window) |
+| Both rules in rustbgpd Loc-RIB | PASS | gRPC: count == 2 |
+| Session no flap after rule 2 inject | PASS | `connectionsDropped` unchanged |
+| FRR received both rules | PASS | totalRoutes ≥ 2 with both prefixes in routes-map (~30 s window) |
+| Rule 1 withdrawn from rustbgpd | PASS | gRPC `DeleteFlowSpec` succeeds; Loc-RIB shows count == 1 |
+| Session no flap after withdraw | PASS | `connectionsDropped` unchanged |
+| Post-withdrawal convergence | PASS | rule 1 absent + rule 2 present + totalRoutes == 1 in single converged check (~30 s window) |
+| **Total** | **12/12** | |
 
 ---
 
@@ -1654,6 +1680,52 @@ Cease subcode compatibility. rustbgpd sends Cease/1 (Max Prefixes) when
 | Session flapped | PASS | flapCount=1, cycle through Established |
 | FRR still operational | PASS | vtysh responds after Cease |
 | **Total** | **6/6** | |
+
+---
+
+## M34 Test Procedures (SIGHUP policy soft-reset auto-fire)
+
+Validates the automatic Route Refresh path inside
+`PeerManager::update_runtime_policies` introduced in v0.12.0. A
+permit→deny edit on an established peer's effective import chain
+must (a) not tear the BGP session, and (b) cause the affected prefix
+to drop from rustbgpd's RIB while other prefixes from the same peer
+remain.
+
+**Topology:** `tests/interop/m34-policy-soft-reset-frr.clab.yml` —
+single-peer plain BGP, FRR advertises three prefixes
+(192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16). rustbgpd starts with
+a permit-all named policy attached as the global import chain. No
+kernel features required.
+
+**Sequence:**
+
+1. Wait for the rustbgpd↔FRR session to reach Established and all
+   three FRR-originated prefixes to appear in rustbgpd's Loc-RIB.
+2. Capture FRR's `bgpTimerUpEstablishedEpoch` for flap detection.
+3. Replace the running config with a deny variant (same chain,
+   same `[[neighbors]]`, but the named policy gains a deny rule
+   for 192.168.1.0/24) via `docker cp`, then SIGHUP the daemon.
+4. Wait ~6 s for SIGHUP processing + Route Refresh + re-import.
+5. Assertions: post-SIGHUP epoch matches pre-SIGHUP (no flap),
+   192.168.1.0/24 absent from RIB, both other prefixes still
+   present.
+
+CI-gated alongside M29 / M30 (`.github/workflows/interop.yml`).
+
+## M34 Test Results (2026-04-30, FRR 10.3.1)
+
+| Test | Result | Details |
+|------|--------|---------|
+| Session reached Established | PASS | FRR side reports Established |
+| All 3 prefixes in RIB | PASS | 192.168.1.0/24, 192.168.2.0/24, 10.10.0.0/16 |
+| Pre-SIGHUP epoch captured | PASS | `bgpTimerUpEstablishedEpoch` from FRR |
+| Config swap + SIGHUP delivered | PASS | docker cp, then `kill -HUP $pid` |
+| Session stayed Established | PASS | post-SIGHUP epoch matches pre-SIGHUP |
+| 192.168.1.0/24 dropped | PASS | auto Route Refresh re-imported under deny rule |
+| 192.168.2.0/24 still present | PASS | not matched by deny rule |
+| 10.10.0.0/16 still present | PASS | not matched by deny rule |
+| **Total** | **8/8** | |
 
 ---
 

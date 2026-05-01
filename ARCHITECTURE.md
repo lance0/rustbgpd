@@ -184,10 +184,10 @@ gRPC request
 | FlowSpec NLRI | `crates/wire/src/flowspec.rs` |
 | FSM state transitions | `crates/fsm/src/lib.rs` |
 | Capability negotiation | `crates/fsm/src/negotiation.rs` |
-| Peer session runtime | `crates/transport/src/session.rs` |
-| Outbound UPDATE construction | `crates/transport/src/session.rs` — `prepare_outbound_attributes()` |
+| Peer session runtime | `crates/transport/src/session/` (split into `mod.rs`, `fsm.rs`, `inbound.rs`, `outbound.rs`, `io.rs`, `commands.rs`, `writer.rs`) |
+| Outbound UPDATE construction | `crates/transport/src/session/outbound.rs` — `prepare_outbound_attributes()` |
 | Policy evaluation | `crates/policy/src/engine.rs` |
-| Best-path selection | `crates/rib/src/manager/` — `best_path_cmp()` in `helpers.rs` |
+| Best-path selection | `crates/rib/src/best_path.rs` — `best_path_cmp` / `best_path_cmp_with_reason` |
 | Route distribution | `crates/rib/src/manager/distribution.rs` |
 | Peer lifecycle (GR, LLGR, ERR) | `crates/rib/src/manager/graceful_restart.rs`, `route_refresh.rs` |
 | RIB event loop | `crates/rib/src/manager/mod.rs` — `run()` |
@@ -227,19 +227,50 @@ gRPC request
 
 ### Config Reload (SIGHUP)
 
-1. Signal handler sets reload flag in the main `select!` loop.
-2. `reload_config()` re-reads TOML, calls `diff_neighbors()` against current config.
-3. Sends `ReconcilePeers` command to PeerManager with add/delete deltas.
-4. PeerManager applies changes: spawns new sessions, tears down removed ones.
-5. Global config changes (ASN, router-id) are logged as warnings and ignored (require restart).
+1. Signal handler sets a reload flag in the main `select!` loop.
+2. `reload_config()` re-reads the TOML and diffs the new config against
+   the current snapshot bucket-by-bucket: neighbor sets, named policies,
+   peer groups, global import / export chains, and `[[neighbors]]` deltas.
+3. For each bucket (in dependency order — definitions first, then
+   `[[neighbors]]` reconcile, then deletes in reverse-dependency order
+   so transient `still referenced` rejections don't fire), the binary
+   sends a single-shot command to the peer manager that goes through
+   `apply_policy_change` / `apply_peer_group_change`. Runtime effect
+   matches the existing gRPC API path: hot-applied policy chains, peer
+   re-add for changed peer-group memberships.
+4. Reload halts at the first step failure and returns a partial-state
+   snapshot via `halt_partial`, so the daemon's in-memory config tracks
+   what the peer manager actually applied (operator fixes the failing
+   TOML and reloads again to converge against the half-applied state).
+   Exception: the neighbor-reconcile step returns `None` on partial
+   failure because live state is genuinely ambiguous after a
+   delete-then-readd partial; earlier reload steps still land at the
+   manager and remain in effect.
+5. When an effective import policy changes via SIGHUP (or any gRPC
+   `SetPolicy` / `SetPeerGroup` / chain mutation),
+   `PeerManager::update_runtime_policies` automatically issues a Route
+   Refresh (RFC 2918) to the affected Established peers so routes
+   already in `AdjRibIn` get re-evaluated against the new policy.
+   `pending_refresh` / `pending_export_apply` flags on `ManagedPeer`
+   carry unfired retry intent across calls (e.g. peer mid-reconnect at
+   refresh time, transient mpsc backpressure).
+6. Global config changes that are not hot-reloadable
+   (`[global]` ASN/router-id/families, `[rpki]`, `[bmp]`, `[mrt]`,
+   `[global.telemetry.grpc_*]` listener config, inline
+   `policy.import` / `policy.export` legacy global-fallback statements)
+   are surfaced under "Restart-required" in `rustbgpd --diff` and logged
+   at reload time. The runtime listener config for `grpc_tcp` / `grpc_uds`
+   is pinned back to the live values so subsequent diffs keep flagging
+   the drift until an actual restart happens.
 
 ### Graceful Shutdown
 
 1. SIGTERM or `Shutdown` gRPC RPC triggers shutdown.
 2. Writes GR restart marker file (if any peer has GR enabled) with expiry.
 3. Sends NOTIFICATION/Cease (Administrative Shutdown) to all established peers.
-4. Signals BMP manager to send Termination messages to collectors.
-5. Waits up to 5 seconds for TCP sends to flush, then hard-drops.
+4. Signals BMP manager to send Termination messages to collectors (bounded
+   ~2s for the BMP send-and-drain step).
+5. Drains all peer sessions through the peer manager.
 6. Flushes final telemetry.
 
 ### Graceful Restart (receiving)

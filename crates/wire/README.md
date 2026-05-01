@@ -42,45 +42,56 @@ analyzers, test harnesses, MRT readers, etc.
 
 ## Usage
 
-Parse an UPDATE from raw bytes:
+Decode a single BGP message from raw bytes:
 
 ```rust
 use bytes::Bytes;
-use rustbgpd_wire::{UpdateMessage, Afi, Safi};
+use rustbgpd_wire::{decode_message, encode_message, Message, MAX_MESSAGE_LEN};
 
-let raw = Bytes::from(update_bytes);
-let update = UpdateMessage::decode(&mut raw.clone(), raw.len())?;
-let parsed = update.parse(
-    true,   // 4-octet AS numbers
-    false,  // no Add-Path on body NLRI
-    &[],    // no Add-Path families for MP NLRI
-)?;
+# fn handle(raw_bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+let mut buf = Bytes::from(raw_bytes);
+let msg = decode_message(&mut buf, MAX_MESSAGE_LEN)?;
 
-for route in &parsed.announced {
-    println!("announced: {}", route.prefix);
+match msg {
+    Message::Update(update) => {
+        let parsed = update.parse(
+            true,   // 4-octet AS numbers negotiated
+            false,  // Add-Path not negotiated for body NLRI
+            &[],    // Add-Path families for MP NLRI (empty = none)
+        )?;
+        for entry in &parsed.announced {
+            println!("announced: {}", entry.prefix);
+        }
+        for attr in &parsed.attributes {
+            println!("attribute: {:?}", attr);
+        }
+    }
+    Message::Open(open) => {
+        println!("OPEN: as={} hold={} caps={}", open.my_as, open.hold_time, open.capabilities.len());
+    }
+    _ => {}
 }
-for attr in &parsed.attributes {
-    println!("attribute: {:?}", attr);
-}
+# Ok(()) }
 ```
 
 Build and encode an OPEN message:
 
 ```rust
-use rustbgpd_wire::{Message, open::OpenMessage, capability::Capability};
+use std::net::Ipv4Addr;
+use rustbgpd_wire::{Afi, Capability, encode_message, Message, OpenMessage, Safi};
 
 let open = OpenMessage {
     version: 4,
     my_as: 65000,
     hold_time: 90,
-    bgp_id: [10, 0, 0, 1],
+    bgp_identifier: Ipv4Addr::new(10, 0, 0, 1),
     capabilities: vec![
-        Capability::FourOctetAs(65000),
-        Capability::MultiProtocol { afi: 1, safi: 1 },
+        Capability::FourOctetAs { asn: 65000 },
+        Capability::MultiProtocol { afi: Afi::Ipv4, safi: Safi::Unicast },
+        Capability::RouteRefresh,
     ],
 };
-let msg = Message::Open(open);
-let bytes = rustbgpd_wire::encode_message(&msg);
+let bytes = encode_message(&Message::Open(open));
 ```
 
 ## Key types

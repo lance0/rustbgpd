@@ -23,6 +23,47 @@ address = "127.0.0.1:50051"
 
 The proto definition lives at `proto/rustbgpd.proto`.
 
+## Authentication and TLS
+
+The daemon supports three deployment patterns for the gRPC surface:
+
+| Pattern | Config | Auth |
+|---------|--------|------|
+| Unix domain socket | `[global.telemetry.grpc_uds]` with `path` + `mode` | File-system permissions on the socket path |
+| Plaintext TCP + bearer token | `[global.telemetry.grpc_tcp]` with `address` and optional `token_file` | Bearer token in the `authorization: bearer <value>` metadata header (when `token_file` is set) |
+| **mTLS TCP** | `[global.telemetry.grpc_tcp]` with `tls_cert_file` + `tls_key_file` + `tls_client_ca_file` | Client certificate signed by the configured CA |
+
+The mTLS path is the recommended default for any non-loopback gRPC
+listener. All three TLS fields are required together; partial
+configuration is rejected at `Config::load`. There is no
+"TLS-without-mTLS" half-mode by design — when TLS is enabled the
+daemon presents the server certificate, requires every client to
+present a certificate signed by `tls_client_ca_file`, and rejects
+unverified clients at the TLS layer before any gRPC handler runs.
+
+PEM material is pre-flight-validated at config load and `--check`
+time, so a successful `--check` rules out cert-rotation surprises
+at startup. Adding, removing, or rotating the TLS files is
+**restart-required** — SIGHUP reload pins the runtime listener
+config back to the live values and surfaces the drift in
+`rustbgpd --diff` until the daemon is restarted.
+
+```bash
+# mTLS client example with grpcurl
+grpcurl \
+  -cacert /etc/rustbgpd/server-ca.pem \
+  -cert /etc/operator/client.pem -key /etc/operator/client.key \
+  -import-path . -proto proto/rustbgpd.proto \
+  rustbgpd.example.net:50051 \
+  rustbgpd.v1.GlobalService/GetGlobal
+```
+
+Per-listener `access_mode = "read_only"` rejects mutating RPCs
+(neighbor add/delete, route injection, policy changes, peer-group
+changes, shutdown, MRT trigger) with `PERMISSION_DENIED`. Use this
+on a dedicated monitoring listener that exposes the read surface
+without the mutating control plane.
+
 Each configured listener can independently set `access_mode = "read_write"` or
 `"read_only"`. Read-only listeners allow query and watch RPCs but reject all
 mutating RPCs with `PERMISSION_DENIED`.
@@ -60,6 +101,9 @@ added at runtime.
 | `EnableNeighbor` | Re-enable a previously disabled peer |
 | `DisableNeighbor` | Administratively disable a peer (sends NOTIFICATION) |
 | `SoftResetIn` | Request inbound route refresh (RFC 2918/7313) for one or more families |
+| `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` range — auto-accept peers from a CIDR with a configured AS / peer-group |
+| `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range; in-flight sessions stay until they go Idle |
+| `ListDynamicNeighbors` | List configured dynamic-neighbor ranges with active peer counts |
 
 ### Add a neighbor
 
@@ -149,8 +193,9 @@ changes do not retroactively re-evaluate existing Adj-RIB-In state; use
 Policy statements support the same match surface as TOML config:
 `prefix`, `ge`, `le`, `match_community`, `match_as_path`,
 `match_neighbor_set`, `match_route_type`, `match_as_path_length_ge/le`,
-`match_local_pref_ge/le`, `match_med_ge/le`, `match_next_hop`, and
-`match_rpki_validation`.
+`match_local_pref_ge/le`, `match_med_ge/le`, `match_next_hop`,
+`match_rpki_validation`, `match_aspa_validation`, and
+`match_evpn_route_type`.
 
 ### Create or replace a named policy
 
@@ -319,8 +364,9 @@ explain and exact policy/statement attribution are deferred.
 
 All `List*` RPCs accept an `afi_safi` field to filter by address family.
 Supported values: `IPV4_UNICAST` (1), `IPV6_UNICAST` (2), `IPV4_FLOWSPEC` (3),
-`IPV6_FLOWSPEC` (4), or unspecified (0, returns all families). `WatchRoutes`
-events include the address family of each route change.
+`IPV6_FLOWSPEC` (4), `L2VPN_EVPN` (5), or unspecified (0, returns all
+families). `WatchRoutes` events include the address family of each route
+change.
 
 ### Pagination
 

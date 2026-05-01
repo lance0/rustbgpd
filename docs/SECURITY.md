@@ -30,16 +30,35 @@ Preferred posture:
 
 Preferred posture:
 
-- Keep rustbgpd itself bound to loopback or a local UDS.
-- Put an mTLS proxy or sidecar in front of it for remote access. Envoy is the
-  recommended reference path; see [`examples/envoy-mtls/`](../examples/envoy-mtls/).
+- Configure native mTLS on the daemon's gRPC TCP listener. Set
+  `tls_cert_file`, `tls_key_file`, and `tls_client_ca_file` on
+  `[global.telemetry.grpc_tcp]` — all three are required together; a
+  partial config is rejected at `Config::load`. The daemon presents
+  the server certificate, requires every client to present a
+  certificate signed by `tls_client_ca_file`, and rejects unverified
+  clients at the TLS layer before any gRPC handler runs. There is
+  no "TLS-without-mTLS" half-mode by design. PEM material is
+  pre-flight-validated at load and `--check` time so a successful
+  `--check` rules out cert-rotation surprises at startup.
+- For multi-host fan-out, off-host TLS termination, or richer
+  authorization fan-out, an Envoy / nginx mTLS sidecar in front of
+  the daemon is still a valid pattern; see
+  [`examples/envoy-mtls/`](../examples/envoy-mtls/) for a reference
+  config. The native path is the default recommendation; the proxy
+  path is the multi-tenant / multi-host fallback.
 - If you need to expose monitoring directly, prefer a dedicated
   `access_mode = "read_only"` listener over exposing the mutating control
   surface.
 - Restrict the exposed listener to a management VLAN/interface or a small set
   of management hosts.
-- Even behind a proxy, treat the API as privileged. Read-only RPCs still reveal
-  peer topology, route state, and policy results.
+- Even with mTLS in place, treat the API as privileged. Read-only RPCs still
+  reveal peer topology, route state, and policy results.
+
+> **Listener config is restart-required.** Adding, removing, or
+> rotating `tls_cert_file` / `tls_key_file` / `tls_client_ca_file`
+> takes effect only on a daemon restart, not on SIGHUP. SIGHUP
+> reload pins the runtime listener config back to the live values
+> and surfaces the drift in `rustbgpd --diff` until restart.
 
 ### Direct TCP on a non-loopback address
 
@@ -56,6 +75,7 @@ That includes privileged RPCs such as:
 - `SoftResetIn`
 - `AddPath` / `DeletePath`
 - `AddFlowSpec` / `DeleteFlowSpec`
+- `AddEvpnRoute` / `DeleteEvpnRoute`
 - `TriggerMrtDump`
 
 The daemon logs a warning at startup when a gRPC TCP listener is bound to a
@@ -119,13 +139,12 @@ These protect BGP transport sessions, not the gRPC management surface.
 The following security improvements are intentionally deferred and tracked in
 the roadmap:
 
-- Native gRPC mTLS inside the daemon
 - Finer-grained gRPC authorization beyond "listener allowed / denied"
+- TCP-AO (RFC 5925) for BGP session protection (currently TCP MD5 and GTSM)
 
 ## Current gaps
 
-- No native TLS termination in the daemon today; use a proxy or sidecar for
-  remote encrypted access
 - Authorization is listener-wide (`read_only` vs `read_write`), not per-RPC or
   per-role
 - No TCP-AO (RFC 5925); TCP MD5 and GTSM are the supported session protections
+- Cert rotation on the gRPC TLS listener requires a daemon restart (not SIGHUP)
