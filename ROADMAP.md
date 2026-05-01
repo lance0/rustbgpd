@@ -265,6 +265,23 @@ this document is reference / long-tail.
   policy convention; no capability negotiation needed). Ranks
   ahead of BLACKHOLE (RFC 7999) since GShut is operator-lifecycle
   and BLACKHOLE is data-plane-only.
+- [ ] **Resolve open `cargo audit` findings.** First run of the
+  new audit gate caught one vulnerability + two soundness warnings
+  in our dependency tree. Punt to the next release cycle:
+    - **RUSTSEC-2024-0437** (protobuf 2.28.0, "Crash due to
+      uncontrolled recursion") — pulled in via
+      `prometheus 0.13.4`. Fix: bump `prometheus = "0.13"` →
+      `"0.14"` in the workspace `Cargo.toml`; 0.14 moves to
+      protobuf 3.x and the advisory clears. Verify
+      `crates/telemetry`, `crates/api`, `crates/transport`
+      still build and metrics shape stays compatible.
+    - **RUSTSEC-2026-0097** (rand 0.8.5 + 0.9.2, "unsound with a
+      custom logger using `rand::rng()`") — transitive via
+      `phf_generator → phf_macros → phf → termwiz →
+      ratatui-termwiz` (CLI / `top` command). Either bump
+      ratatui-termwiz or accept as soundness warning (we don't
+      override the rand logger anywhere, so the unsoundness
+      isn't reachable in our usage). Document the call.
 - [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
   reload now awaits N+M+P+2+P sequential per-step replies from the
   peer manager (was 1 reply pre-branch). The await chain runs

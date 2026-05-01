@@ -1,0 +1,68 @@
+# Dependabot config — keeps Cargo dependencies and GitHub Actions
+# pinned versions current. The wire crate is a separate manifest
+# (decoupled versioning + crates.io publish) so it gets its own
+# directory entry; the workspace covers the daemon + 9 internal
+# crates lockstep via the root Cargo.toml.
+#
+# Cadence: weekly. The Cargo ecosystem tends to produce a steady
+# trickle of patch releases (tonic, prost, tokio); weekly avoids
+# review fatigue while keeping us within ~7 days of upstream
+# advisories. Daily would noise; monthly would let things drift.
+#
+# Grouping: workspace-internal `rustbgpd-*` crates are excluded
+# from updates here because they're path-only deps managed by the
+# release process. Other deps land as one PR per group when
+# possible to keep review surface small.
+
+version: 2
+updates:
+  # Workspace root: daemon + 9 internal crates.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      tokio-stack:
+        patterns:
+          - "tokio*"
+          - "tower*"
+          - "hyper*"
+          - "h2"
+      tonic-prost:
+        patterns:
+          - "tonic*"
+          - "prost*"
+      tracing-stack:
+        patterns:
+          - "tracing*"
+      serde-stack:
+        patterns:
+          - "serde*"
+      test-deps:
+        dependency-type: "development"
+    ignore:
+      # Workspace-internal crates are path deps; updates land via the
+      # release process, not Dependabot.
+      - dependency-name: "rustbgpd-*"
+
+  # Wire crate: published to crates.io; its dependencies must stay
+  # current independently because external consumers pin against it.
+  - package-ecosystem: "cargo"
+    directory: "/crates/wire"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      core-deps:
+        patterns:
+          - "bytes"
+          - "thiserror"
+
+  # GitHub Actions versions in workflows/. Catches deprecation
+  # warnings (e.g. Node 20 → Node 24 transition) before they bite.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
