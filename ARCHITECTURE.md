@@ -15,9 +15,10 @@ rpki           ──► wire
 bmp            (no internal deps)
 mrt            ──► wire, rib
 telemetry      (no internal deps)
+evpn           ──► wire
 rib            ──► wire, policy, telemetry, rpki
 transport      ──► wire, fsm, rib, policy, telemetry, bmp
-api            ──► wire, fsm, rib, policy, transport, telemetry
+api            ──► wire, fsm, rib, policy, transport, telemetry, evpn
 cli            (no internal deps — uses tonic codegen directly)
 ```
 
@@ -33,7 +34,8 @@ cli            (no internal deps — uses tonic codegen directly)
 | `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
 | `rustbgpd-bmp` | BMP exporter: RFC 7854 codec, collector clients, manager fan-out. |
 | `rustbgpd-mrt` | MRT dump: RFC 6396 TABLE_DUMP_V2 codec, atomic writer, periodic manager. |
-| `rustbgpd-api` | gRPC server (tonic). Seven services, proto codegen at build time. |
+| `rustbgpd-evpn` | EVPN local VTEP domain model: `EvpnInstance` / `EvpnInstanceTable` / `RouteTarget` (RFC 7432 / RFC 8365). Domain-only, kernel-free. See ADR-0052. |
+| `rustbgpd-api` | gRPC server (tonic). Eight services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 | `rustbgpctl` | CLI tool. Client-only gRPC stubs, no internal crate deps. |
 
@@ -43,6 +45,7 @@ cli            (no internal deps — uses tonic codegen directly)
 - `fsm` depends on `wire` types (message enums, capability structs) and nothing else. It never imports tokio, never touches a socket, never spawns a task.
 - `transport` is the only crate that owns BGP peer TCP session I/O and drives the FSM. Other crates (`api`, `bmp`, `rpki`, `mrt`) run their own async tasks for gRPC serving, collector connections, RTR sessions, and dump I/O respectively.
 - `rib` and `policy` are independent of transport and fsm — they consume route update events.
+- `evpn` is the local-VTEP domain crate (ADR-0052). It depends only on `wire`. It does **not** depend on `rib` or `transport`, and it never programs the kernel — kernel reconciliation belongs to the future `crates/evpn-linux` (or equivalent dataplane) crate. RR-only deployments (`rr-evpn-fabric`) must keep working with `crates/evpn` essentially unused.
 - `api` provides the gRPC server; the binary crate (`src/main.rs`) wires everything together.
 
 ---
@@ -195,6 +198,7 @@ gRPC request
 | RPKI / RTR | `crates/rpki/src/` |
 | BMP export | `crates/bmp/src/` |
 | MRT dump | `crates/mrt/src/` |
+| Local EVPN/VTEP domain | `crates/evpn/src/` — `instance.rs`, `route_target.rs` |
 | CLI tool | `crates/cli/src/` |
 | Config loading + validation | `src/config/` |
 | Startup wiring | `src/main.rs` |

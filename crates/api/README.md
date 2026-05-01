@@ -11,9 +11,11 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **GlobalService** | Read daemon identity and bootstrap config |
 | **NeighborService** | Dynamic peer CRUD, enable/disable, soft reset |
 | **PolicyService** | Named policy CRUD and global/per-neighbor chain assignment |
-| **RibService** | Received/best/advertised route queries and watch stream |
-| **InjectionService** | Inject/withdraw unicast and FlowSpec routes |
+| **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |
+| **RibService** | Received/best/advertised route queries (incl. EVPN) and watch stream |
+| **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |
 | **ControlService** | Health, metrics, shutdown, MRT trigger |
+| **EvpnService** | List configured local EVPN instances (Phase-2 VTEP foundation; read-only) |
 
 See [docs/API.md](../../docs/API.md) for the full RPC reference and examples.
 

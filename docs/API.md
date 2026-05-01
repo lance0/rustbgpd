@@ -1,8 +1,8 @@
 # gRPC API Reference
 
-rustbgpd exposes seven gRPC services over one or more configured listeners. The
-default listener is a local Unix domain socket at
-`/var/lib/rustbgpd/grpc.sock`.
+rustbgpd exposes eight gRPC services (Global, Neighbor, Policy, PeerGroup, Rib,
+Injection, Control, Evpn) over one or more configured listeners. The default
+listener is a local Unix domain socket at `/var/lib/rustbgpd/grpc.sock`.
 
 For same-host administration, prefer UDS:
 
@@ -635,6 +635,44 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.ControlService/TriggerMrtDump
+```
+
+---
+
+## EvpnService
+
+Read-only view of local EVPN instances configured on this VTEP. Empty
+when the daemon is acting purely as an EVPN route reflector — RR mode
+does not declare local instances. See ADR-0052 for the boundary
+between this service (control-plane intent) and the future kernel-
+reconciliation slice (Gate 7b).
+
+| RPC | Description |
+|-----|-------------|
+| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, route_targets, local_vtep_ip, optional bridge, advertise_svi_mac flag) |
+
+Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is deliberately
+out of scope for the foundation slice — adding a runtime mutation
+RPC before the kernel can consume the change would ship a footgun.
+Lands with the kernel-reconciliation slice (see
+[`docs/evpn-enablement.md`](evpn-enablement.md) Gate 7b).
+
+Operators configure instances via the `[[evpn_instances]]` TOML
+block; SIGHUP that edits any instance is restart-required (see
+[KNOWN_ISSUES.md](../KNOWN_ISSUES.md)).
+
+### List local EVPN instances
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.EvpnService/ListEvpnInstances
+```
+
+Or via CLI:
+
+```bash
+rustbgpctl evpn instances           # human format
+rustbgpctl evpn instances --json    # JSON output
 ```
 
 ---

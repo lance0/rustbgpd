@@ -629,11 +629,17 @@ measurement path.
 
 **Known gaps:**
 
-- No VTEP role yet — rustbgpd does not own kernel FDB learning, EVI /
-  L2VNI / L3VNI state, DF election execution, or symmetric IRB. VTEPs
-  (SONiC / FRR leaves) handle those today. See Gates 7-9 in
-  [docs/evpn-enablement.md](evpn-enablement.md) for the strategic
-  decision point.
+- VTEP role is partial — the **declarative foundation slice landed
+  (Gate 7a, ADR-0052)**: operators can declare local EVIs via
+  `[[evpn_instances]]` (vni / rd / route_targets / local_vtep_ip /
+  optional bridge / advertise_svi_mac) and inspect the resolved
+  table via `EvpnService.ListEvpnInstances` and `rustbgpctl evpn
+  instances`. **Kernel reconciliation is still Gate 7b**: rustbgpd
+  does not yet own kernel FDB learning, MAC mobility origination, or
+  Type 2/3 emission from local instances. VTEPs (SONiC / FRR leaves)
+  still handle those today. See Gate 7b in
+  [docs/evpn-enablement.md](evpn-enablement.md) for what's still
+  queued. DF election execution and symmetric IRB remain Gate 8 / 9.
 - Controller injection (Gate 6) covers Type 2 MAC/IP and Type 3 IMET
   via `InjectionService::AddEvpnRoute`; Type 5 IP-Prefix and Type 1/4
   multi-homing origination are deferred pending use-case signal.

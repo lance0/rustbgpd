@@ -27,7 +27,7 @@ reasons.
 
 ## Why rustbgpd
 
-- **API-first control plane** -- full gRPC control surface across 7 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, route injection, policy CRUD, peer groups, streaming events, and daemon control without restarts.
+- **API-first control plane** -- full gRPC control surface across 8 services plus a thin CLI (`rustbgpctl`) with colored tables, dynamic column alignment, and human-readable uptimes. Dynamic peer management, route injection, policy CRUD, peer groups, EVPN instance queries, streaming events, and daemon control without restarts.
 - **Explicit architecture** -- pure FSM with no I/O, single-owner RIB with no locks, bounded channels between tasks. No `Arc<RwLock>` on routing state. See [ARCHITECTURE.md](ARCHITECTURE.md).
 - **Dual-stack and modern protocol support** -- MP-BGP, Add-Path, Extended Next Hop, Extended Messages, GR/LLGR/Notification GR, Route Refresh/Enhanced Route Refresh, FlowSpec, Route Reflector, large and extended communities.
 - **Operational visibility** -- Prometheus metrics, BMP export to collectors, MRT TABLE_DUMP_V2 snapshots, birdwatcher-compatible looking glass REST API, structured JSON logging, per-peer counters, best-path explain.
@@ -49,8 +49,11 @@ architecture diagrams, example configs, and API workflows.
 ## Not the best fit today
 
 - Full general-purpose router deployments requiring FIB integration
-- EVPN **VTEP** role — rustbgpd is a Phase 1 EVPN Route Reflector only;
-  it does not yet do local MAC learning, DF election, or VXLAN data-plane
+- EVPN **VTEP** kernel reconciliation — rustbgpd ships the EVPN Route
+  Reflector role plus the Phase-2 VTEP **declarative** foundation
+  (`[[evpn_instances]]`, `EvpnService.ListEvpnInstances`); kernel FDB
+  learning, local MAC origination, DF election, and VXLAN data-plane
+  programming are deferred to Gate 7b
 - VPNv4 / VPNv6 overlays
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model
@@ -190,7 +193,7 @@ Or use systemd with [`examples/systemd/rustbgpd.service`](examples/systemd/rustb
 
 ## gRPC API
 
-Seven services cover the full operational surface:
+Eight services cover the full operational surface:
 
 | Service | RPCs | Purpose |
 |---------|------|---------|
@@ -201,6 +204,7 @@ Seven services cover the full operational surface:
 | `RibService` | `ListReceivedRoutes`, `ListBestRoutes`, `ListAdvertisedRoutes`, `ExplainAdvertisedRoute`, `ExplainBestPath`, `ListFlowSpecRoutes`, `ListEvpnRoutes`, `WatchRoutes` | RIB queries (incl. EVPN), explain, and streaming |
 | `InjectionService` | `AddPath`, `DeletePath`, `AddFlowSpec`, `DeleteFlowSpec`, `AddEvpnRoute`, `DeleteEvpnRoute` | Programmatic route, FlowSpec, and EVPN injection |
 | `ControlService` | `GetHealth`, `GetMetrics`, `Shutdown`, `TriggerMrtDump` | Health, metrics, lifecycle, MRT dumps |
+| `EvpnService` | `ListEvpnInstances` | Local EVPN VTEP instance state (read-only Phase-2 foundation; ADR-0052) |
 
 ```bash
 # Stream route changes in real time over the default UDS listener
@@ -234,6 +238,8 @@ and more explicit internal architecture.
 | [`examples/ddos-mitigation/`](examples/ddos-mitigation/) | FlowSpec + RTBH for automated DDoS mitigation |
 | [`examples/hosting-provider/`](examples/hosting-provider/) | iBGP route injector for customer prefix management |
 | [`examples/route-collector/`](examples/route-collector/) | Passive collector with MRT dumps and BMP export |
+| [`examples/rr-evpn-fabric/`](examples/rr-evpn-fabric/) | EVPN Route Reflector for a VXLAN-EVPN DC fabric (RFC 7432, RR role) |
+| [`examples/evpn-vtep-leaf/`](examples/evpn-vtep-leaf/) | Leaf VTEP with local `[[evpn_instances]]` declarations (Gate 7a foundation) |
 | [`examples/envoy-mtls/`](examples/envoy-mtls/) | Remote gRPC access via Envoy mTLS proxy |
 | [`examples/systemd/`](examples/systemd/) | systemd unit file with security hardening |
 
@@ -265,7 +271,7 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 ## Current limitations
 
 - No kernel FIB integration -- rustbgpd is a control-plane daemon, not a forwarding engine
-- EVPN (RFC 7432) is supported in **Route Reflector role only** for VXLAN-EVPN DC fabrics. Reflection covers all 5 RFC 7432 / RFC 9136 route types (Type 1–5) end-to-end against FRR. Controller injection via gRPC (`AddEvpnRoute` / `DeleteEvpnRoute`) is currently scoped to Types 2 and 3; Type 1 / 4 / 5 origination, VTEP mode (local MAC learning, DF election, kernel FDB integration), and IRB semantics (RFC 9135) are follow-up phases
+- EVPN (RFC 7432) is supported in **Route Reflector role plus a Phase-2 VTEP foundation slice** (Gate 7a, ADR-0052). RR reflection covers all 5 RFC 7432 / RFC 9136 route types (Type 1–5) end-to-end against FRR. Controller injection via gRPC (`AddEvpnRoute` / `DeleteEvpnRoute`) is currently scoped to Types 2 and 3. The VTEP foundation ships the **declarative** half: `[[evpn_instances]]` TOML schema + `EvpnService.ListEvpnInstances` gRPC + `rustbgpctl evpn instances`, all in the new domain-only `crates/evpn` crate. Kernel FDB learning, local MAC origination, Type 1/4/5 origination, DF election, and IRB semantics (RFC 9135) are queued for Gate 7b
 - No VPNv4 / VPNv6 or Confederation support
 - No TCP-AO (RFC 5925) — TCP MD5 and GTSM are supported
 - Published benchmarks: bgperf2 covers IPv4 unicast at 10 peers × 1k, 2 peers × 10k, and 2 peers × 100k prefixes; the in-tree `bench/evpn-load` M33 scale gate covers 50,000 reflected Type 2 routes with 60 s of 1,000-rps churn (5.1 s initial convergence, post-churn distinct-key count exact). Long-duration / multi-day soak automation remains future work (see [docs/BENCHMARKS.md](docs/BENCHMARKS.md))
@@ -283,7 +289,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | Kernel FIB integration, EVPN VTEP role (RR role works), VPNv4/v6, Confederation, TCP-AO |
+| **Not yet supported** | Kernel FIB integration, EVPN VTEP kernel reconciliation (Gate 7b — RR + Phase-2 declarative foundation work), VPNv4/v6, Confederation, TCP-AO |
 | **Tests** | 1312 workspace tests, fuzz targets, 31 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (12 interop tests gated on every PR) |
 
 ## Documentation
