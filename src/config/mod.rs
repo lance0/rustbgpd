@@ -7,13 +7,17 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
+use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteTarget};
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
     CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
     RouteModifications, parse_community_match,
 };
 use rustbgpd_transport::{RemovePrivateAs, TransportConfig};
-use rustbgpd_wire::{Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix, Safi};
+use rustbgpd_wire::{
+    Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix, RouteDistinguisher,
+    Safi,
+};
 
 pub use schema::*;
 
@@ -526,6 +530,35 @@ impl Config {
             .collect()
     }
 
+    /// Resolve `[[evpn_instances]]` entries into a runtime
+    /// [`EvpnInstanceTable`].
+    ///
+    /// Mirrors the per-entry validation done at `Config::load` time —
+    /// VNI range, RD/RT parsing, unicast VTEP IP — and additionally
+    /// enforces table-level uniqueness on VNI and RD. The validation
+    /// pass already runs the same checks; this method exists to give
+    /// the daemon and the gRPC layer a typed, indexed view that they
+    /// can hand to downstream consumers (CLI list output today, kernel
+    /// reconciliation tomorrow).
+    ///
+    /// # Errors
+    /// Surfaces every malformed entry as a [`ConfigError::InvalidEvpnInstance`]
+    /// with the offending VNI or duplicate marker in the message — the
+    /// entries are processed in declaration order so the first error
+    /// reflects the first bad block.
+    pub fn resolve_evpn_instances(&self) -> Result<EvpnInstanceTable, ConfigError> {
+        let mut table = EvpnInstanceTable::new();
+        for cfg in &self.evpn_instances {
+            let inst = parse_evpn_instance(cfg)?;
+            table
+                .insert(inst)
+                .map_err(|e| ConfigError::InvalidEvpnInstance {
+                    reason: e.to_string(),
+                })?;
+        }
+        Ok(table)
+    }
+
     /// Returns `(TransportConfig, label, import_chain, export_chain)` per neighbor.
     ///
     /// Per-neighbor policy overrides global; if neighbor has no policy entries,
@@ -793,6 +826,12 @@ pub struct ConfigDiff {
     pub rpki_changed: bool,
     pub bmp_changed: bool,
     pub mrt_changed: bool,
+    /// `[[evpn_instances]]` blocks added/removed/modified between old and
+    /// new. Surfaced as restart-required today — the Phase-2 foundation
+    /// slice has no SIGHUP reconcile path; mutation lands with kernel
+    /// reconciliation. Flagging here ensures `--diff` operators don't
+    /// silently miss schema edits.
+    pub evpn_instances_changed: bool,
 }
 
 /// Per-neighbor impact derived from inheritance / chain resolution.
@@ -883,6 +922,7 @@ impl ConfigDiff {
             || self.mrt_changed
             || self.policy.import_changed
             || self.policy.export_changed
+            || self.evpn_instances_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -978,6 +1018,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         rpki_changed: old.rpki != new.rpki,
         bmp_changed: old.bmp != new.bmp,
         mrt_changed: old.mrt != new.mrt,
+        evpn_instances_changed: old.evpn_instances != new.evpn_instances,
     }
 }
 
@@ -1292,6 +1333,73 @@ impl From<GrpcAccessModeConfig> for GrpcAccessMode {
             GrpcAccessModeConfig::ReadWrite => Self::ReadWrite,
         }
     }
+}
+
+/// Parse one [`EvpnInstanceConfig`] entry into the runtime
+/// [`EvpnInstance`] domain type.
+///
+/// All operator-input fields are revalidated here even though
+/// `Config::validate` already touched them — `resolve_evpn_instances`
+/// is called from non-load paths (gRPC `ListEvpnInstances`, future
+/// SIGHUP reconcile) where the config has already passed `validate`,
+/// so the second pass is cheap and protects against misuse if a caller
+/// ever skips validation.
+fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigError> {
+    let id = EvpnInstanceId::new(cfg.vni).map_err(|e| ConfigError::InvalidEvpnInstance {
+        reason: format!("vni {}: {e}", cfg.vni),
+    })?;
+
+    let rd =
+        cfg.rd
+            .parse::<RouteDistinguisher>()
+            .map_err(|e| ConfigError::InvalidEvpnInstance {
+                reason: format!("vni {}: invalid rd {:?}: {e}", cfg.vni, cfg.rd),
+            })?;
+
+    if cfg.route_targets.is_empty() {
+        return Err(ConfigError::InvalidEvpnInstance {
+            reason: format!("vni {}: route_targets must not be empty", cfg.vni),
+        });
+    }
+    let mut rts: Vec<RouteTarget> = Vec::with_capacity(cfg.route_targets.len());
+    for raw in &cfg.route_targets {
+        let rt = raw
+            .parse::<RouteTarget>()
+            .map_err(|e| ConfigError::InvalidEvpnInstance {
+                reason: format!("vni {}: invalid route_target {:?}: {e}", cfg.vni, raw),
+            })?;
+        rts.push(rt);
+    }
+
+    let local_vtep_ip =
+        cfg.local_vtep_ip
+            .parse::<IpAddr>()
+            .map_err(|e| ConfigError::InvalidEvpnInstance {
+                reason: format!(
+                    "vni {}: invalid local_vtep_ip {:?}: {e}",
+                    cfg.vni, cfg.local_vtep_ip
+                ),
+            })?;
+
+    if let Some(bridge) = cfg.bridge.as_deref()
+        && bridge.trim().is_empty()
+    {
+        return Err(ConfigError::InvalidEvpnInstance {
+            reason: format!("vni {}: bridge name must not be empty", cfg.vni),
+        });
+    }
+
+    EvpnInstance::new(
+        id,
+        rd,
+        rts,
+        local_vtep_ip,
+        cfg.bridge.clone(),
+        cfg.advertise_svi_mac,
+    )
+    .map_err(|e| ConfigError::InvalidEvpnInstance {
+        reason: format!("vni {}: {e}", cfg.vni),
+    })
 }
 
 #[cfg(test)]

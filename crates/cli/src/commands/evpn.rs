@@ -1,9 +1,12 @@
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
+use crate::proto::evpn_service_client::EvpnServiceClient;
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
-use crate::proto::{AddEvpnRouteRequest, DeleteEvpnRouteRequest, ListEvpnRequest};
+use crate::proto::{
+    AddEvpnRouteRequest, DeleteEvpnRouteRequest, ListEvpnInstancesRequest, ListEvpnRequest,
+};
 
 fn route_type_label(t: u32) -> &'static str {
     match t {
@@ -217,5 +220,60 @@ pub async fn delete_imet(
         })
         .await?;
     output::print_result(json, "delete_evpn", "", "EVPN Type 3 route deleted");
+    Ok(())
+}
+
+/// List local EVPN instances (Phase 2 VTEP foundation).
+///
+/// Read-only. Surfaces the daemon's resolved [`EvpnInstanceTable`] —
+/// the same data the operator put in `[[evpn_instances]]` blocks,
+/// already normalized through RD/RT parsing and uniqueness checks.
+pub async fn list_instances(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_evpn_instances(ListEvpnInstancesRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        let out: Vec<serde_json::Value> = resp
+            .instances
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "vni": i.vni,
+                    "rd": i.rd,
+                    "route_targets": i.route_targets,
+                    "local_vtep_ip": i.local_vtep_ip,
+                    "bridge": i.bridge,
+                    "advertise_svi_mac": i.advertise_svi_mac,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .expect("failed to serialize EVPN instance list as JSON")
+        );
+    } else if resp.instances.is_empty() {
+        println!("No local EVPN instances configured");
+    } else {
+        for inst in &resp.instances {
+            let mut detail = vec![
+                format!("vni={}", inst.vni),
+                format!("rd={}", inst.rd),
+                format!("vtep={}", inst.local_vtep_ip),
+                format!("rts=[{}]", inst.route_targets.join(",")),
+            ];
+            if !inst.bridge.is_empty() {
+                detail.push(format!("bridge={}", inst.bridge));
+            }
+            if inst.advertise_svi_mac {
+                detail.push("advertise-svi-mac".to_string());
+            }
+            println!("{}", detail.join(" "));
+        }
+    }
     Ok(())
 }

@@ -1,14 +1,15 @@
 //! rustbgpd-api — gRPC API server
 //!
-//! Tonic bindings for all seven rustbgpd services:
+//! Tonic bindings for the rustbgpd services:
 //! `GlobalService`, `NeighborService`, `PolicyService`, `PeerGroupService`,
-//! `RibService`, `InjectionService`, `ControlService`.
+//! `RibService`, `InjectionService`, `ControlService`, `EvpnService`.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
 mod control_service;
+pub mod evpn_service;
 mod global_service;
 mod injection_service;
 mod neighbor_service;
@@ -18,6 +19,8 @@ mod policy_helpers;
 mod policy_service;
 mod rib_service;
 pub mod server;
+
+pub use evpn_service::EvpnService;
 
 /// Generated protobuf/gRPC types.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]

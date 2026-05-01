@@ -1,0 +1,76 @@
+# EVPN VTEP — Phase 2 foundation slice
+#
+# This example shows the *declarative* local EVPN state a leaf-mode
+# rustbgpd will eventually consume to originate Type 2/3/5 routes and
+# reconcile against the Linux kernel's VXLAN dataplane.
+#
+# Today's slice is the model only — no MAC learning, no kernel FDB
+# integration, no origination. The `[[evpn_instances]]` blocks parse
+# and validate; `rustbgpctl evpn instances` lists what's installed; the
+# next phase wires that table to the kernel.
+#
+# Compare with `examples/rr-evpn-fabric/config.toml` — that example has
+# *no* `[[evpn_instances]]` block. The route reflector role is
+# stateless from the EVI point of view: it only reflects routes
+# between VTEPs and never originates its own. A leaf has the inverse
+# shape — it owns local EVIs and may peer with one or more RRs.
+
+[global]
+asn = 65000
+router_id = "10.0.0.10"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+# --- Spine RR peer (single-RR design; replicate for redundancy) ---
+
+[[neighbors]]
+address = "10.0.0.100"
+remote_asn = 65000
+description = "spine-rr-01"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+# --- Local EVPN instances on this leaf ---
+#
+# Each block describes one local EVI/L2VNI on this VTEP.
+#
+# Required fields:
+#   - vni            : 24-bit VXLAN VNI (RFC 8365 §5)
+#   - rd             : Route Distinguisher (RFC 4364 §4.2)
+#                      `asn:val`  → 2-byte ASN form (Type 0)
+#                      `ipv4:val` → IPv4 form (Type 1)
+#                      `4byteasn:val` → 4-byte ASN form (Type 2)
+#   - route_targets  : non-empty bidirectional RT list (import = export)
+#   - local_vtep_ip  : VXLAN tunnel source IP for this EVI (must be unicast)
+#
+# Optional:
+#   - bridge              : Linux bridge name to bind this EVI to
+#   - advertise_svi_mac   : originate Type 2 for the SVI's own MAC (RFC 9135)
+#                          (recognized today; wired through to origination
+#                           in a follow-on phase)
+
+[[evpn_instances]]
+vni = 10100
+rd = "10.0.0.10:10100"
+route_targets = ["65000:10100"]
+local_vtep_ip = "10.0.0.10"
+bridge = "br100"
+
+[[evpn_instances]]
+vni = 10200
+rd = "10.0.0.10:10200"
+route_targets = ["65000:10200"]
+local_vtep_ip = "10.0.0.10"
+bridge = "br200"
+advertise_svi_mac = true
+
+[[evpn_instances]]
+vni = 10300
+# 4-octet AS in the RD — picks RD type 2 automatically.
+rd = "4200000000:300"
+# Multiple RTs allowed; deduplicated and sorted on resolution.
+route_targets = ["65000:10300", "65000:55000"]
+local_vtep_ip = "10.0.0.10"

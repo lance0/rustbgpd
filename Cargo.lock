@@ -2056,6 +2056,7 @@ dependencies = [
  "prometheus",
  "rustbgpd-api",
  "rustbgpd-bmp",
+ "rustbgpd-evpn",
  "rustbgpd-fsm",
  "rustbgpd-mrt",
  "rustbgpd-policy",
@@ -2084,6 +2085,7 @@ dependencies = [
  "bytes",
  "prometheus",
  "prost",
+ "rustbgpd-evpn",
  "rustbgpd-fsm",
  "rustbgpd-policy",
  "rustbgpd-rib",
@@ -2107,6 +2109,14 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rustbgpd-evpn"
+version = "0.12.2"
+dependencies = [
+ "rustbgpd-wire",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

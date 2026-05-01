@@ -318,6 +318,9 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     if diff.mrt_changed {
         restart_sections.push("[mrt]");
     }
+    if diff.evpn_instances_changed {
+        restart_sections.push("[[evpn_instances]]");
+    }
     if p.import_changed {
         restart_sections.push("[policy.import] (inline)");
     }
@@ -578,6 +581,7 @@ fn main() {
                     "rpki_changed": diff.rpki_changed,
                     "bmp_changed": diff.bmp_changed,
                     "mrt_changed": diff.mrt_changed,
+                    "evpn_instances_changed": diff.evpn_instances_changed,
                     "inline_policy_import_changed": diff.policy.import_changed,
                     "inline_policy_export_changed": diff.policy.export_changed,
                 },
@@ -1004,6 +1008,19 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         tokio::spawn(looking_glass::serve(lg_addr, lg_state));
     }
 
+    // Resolve declared EVPN instances once at startup and hand the
+    // gRPC layer a shared `Arc`. The validation pass at config load
+    // already proved this resolution succeeds, so a second failure
+    // here would be a programming error rather than operator input —
+    // but we still surface it as a daemon-fatal `expect` to avoid
+    // silently dropping instances if a future code path skips
+    // validation.
+    let evpn_instances = std::sync::Arc::new(
+        config
+            .resolve_evpn_instances()
+            .expect("EVPN instances re-resolve cleanly after Config::validate"),
+    );
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1015,6 +1032,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         metrics: metrics.clone(),
         start_time,
         mrt_trigger_tx,
+        evpn_instances,
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(
@@ -2323,6 +2341,7 @@ hold_time = 90
             mrt: None,
             file_path: None,
             dynamic_neighbors: Vec::new(),
+            evpn_instances: Vec::new(),
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));

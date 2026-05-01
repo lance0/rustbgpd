@@ -320,11 +320,34 @@ Validation coverage:
 
 ### Gate 7 — VTEP mode (Phase 2)
 
-Status: strategic decision · Estimate: ~4-6 weeks · Blockers: Gates 1-6
+Status: foundation in flight · Estimate: ~3-5 weeks remaining · Blockers: Gates 1-6 (closed)
 
 Unlocks: rustbgpd running on a leaf itself — local EVI/VRF/VNI config,
 MAC learning from the kernel FDB (netlink monitor), local route
 origination, local withdrawal on MAC aging.
+
+Landing as **two slices** (see ADR-0052) so the durable state model
+locks down before kernel reconciliation lands on top of it:
+
+#### Gate 7a — Foundation: declarative EVI/VNI domain model
+
+Status: in flight on `feat/evpn-vtep-linux-foundation`
+
+Unlocks the operator-facing surface and the typed runtime model that
+later phases consume:
+
+| Task | File / location | Status |
+|------|----------------|--------|
+| `crates/evpn` — `EvpnInstance`, `EvpnInstanceId`, `RouteTarget`, `EvpnInstanceTable` | new crate | landed (slice) |
+| `RouteDistinguisher::from_str` | `crates/wire/src/evpn.rs` | landed (slice) |
+| `[[evpn_instances]]` schema + parse + validation | `src/config/schema.rs` + `src/config/mod.rs` | landed (slice) |
+| `EvpnService.ListEvpnInstances` (read-only gRPC) | `crates/api/src/evpn_service.rs` | landed (slice) |
+| `rustbgpctl evpn instances` CLI | `crates/cli/src/commands/evpn.rs` | landed (slice) |
+| Example TOML + ADR | `examples/evpn-vtep-leaf/`, `docs/adr/0052-...` | landed (slice) |
+
+#### Gate 7b — Kernel reconciliation + origination
+
+Status: queued · Blockers: Gate 7a
 
 Why gated on demand: SONiC/FRR leaves do this well today. Rustbgpd
 competing with FRR for the VTEP role is a meaningful strategic expansion,
@@ -335,14 +358,15 @@ Scope sketch:
 
 | Task | File / location |
 |------|----------------|
-| `[[evpn_instances]]` config: EVI ↔ L2VNI ↔ bridge mapping | `src/config/schema.rs` |
 | Netlink client for kernel FDB monitoring | new crate? `crates/netlink/` |
 | Local MAC table (MAC → next-hop + VNI + sequence) | `crates/rib/src/evpn_local.rs` (new) |
-| Type 2 origination on MAC learn | RibManager handler |
+| Type 2 origination on MAC learn (consumes `EvpnInstanceTable`) | RibManager handler |
 | Type 2 withdrawal on MAC age-out | RibManager handler |
 | Type 3 IMET origination per L2VNI | — |
-| Type 5 IP Prefix origination per L3VNI | — |
+| Type 5 IP Prefix origination per L3VNI | (deferred to Gate 9 — IP-VRF concept needed) |
 | Anti-spoofing, MAC move sequence management | — |
+| `advertise_svi_mac` flag wired through to Type 2 origination | — |
+| Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
 ---

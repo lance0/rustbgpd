@@ -377,6 +377,9 @@ enum EvpnAction {
         #[arg(long)]
         ip: String,
     },
+    /// List local EVPN instances configured on this VTEP. Empty when
+    /// the daemon is acting purely as an EVPN route reflector.
+    Instances,
 }
 
 fn resolve_family(family: &Option<String>) -> Result<Option<i32>, CliError> {
@@ -721,6 +724,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 ethernet_tag,
                 ip,
             }) => commands::evpn::delete_imet(connection, rd, ethernet_tag, ip, json).await,
+            Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
         },
 
         Command::Flowspec { action, family } => {

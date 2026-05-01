@@ -11,6 +11,7 @@ members = [
     "crates/cli",
     "crates/bmp",
     "crates/mrt",
+    "crates/evpn",
     "bench/evpn-load",
 ]
 resolver = "2"
@@ -36,6 +37,7 @@ rustbgpd-telemetry = { path = "crates/telemetry", version = "0.12.2" }
 rustbgpd-rpki = { path = "crates/rpki", version = "0.12.2" }
 rustbgpd-bmp = { path = "crates/bmp", version = "0.12.2" }
 rustbgpd-mrt = { path = "crates/mrt", version = "0.12.2" }
+rustbgpd-evpn = { path = "crates/evpn", version = "0.12.2" }
 
 # External dependencies — pinned across workspace
 bytes = "1"
@@ -93,6 +95,7 @@ rustbgpd-telemetry.workspace = true
 rustbgpd-rpki.workspace = true
 rustbgpd-bmp.workspace = true
 rustbgpd-mrt.workspace = true
+rustbgpd-evpn.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
