@@ -1464,6 +1464,21 @@ fn encode_mp_reach_nlri(mp: &MpReachNlri, buf: &mut Vec<u8>, add_path: bool) {
             buf.extend_from_slice(&addr.octets());
         }
         (IpAddr::V6(addr), Some(ll)) => {
+            // Symmetric to inbound validation: a NH-Len=32 form
+            // requires the second 16 bytes to be in fe80::/10. No
+            // live outbound construction site sets a non-LL value
+            // (every `MpReachNlri { link_local_next_hop: ..., .. }`
+            // in the daemon either passes `None` or a peer-validated
+            // LL), so this is a defense-in-depth catch for future
+            // code paths (MRT replay, RR reflection of corrupt
+            // upstream input, etc.). Emitting a malformed 32-byte
+            // form would tear sessions against any RFC-compliant
+            // peer's validator (FRR, GoBGP) — exactly the inverse
+            // of the v0.12.1 inbound bug.
+            debug_assert!(
+                (ll.segments()[0] & 0xffc0) == 0xfe80,
+                "MP_REACH NH-Len=32 second segment must be link-local (fe80::/10), got {ll}"
+            );
             buf.push(32); // NH-Len: global + link-local
             buf.extend_from_slice(&addr.octets());
             buf.extend_from_slice(&ll.octets());
@@ -2749,6 +2764,42 @@ mod tests {
         };
         assert_eq!(dec.next_hop, IpAddr::V6(global));
         assert_eq!(dec.link_local_next_hop, Some(link_local));
+    }
+
+    /// Audit follow-up: a peer sending an `MP_REACH` for `FlowSpec`
+    /// (SAFI 133) with a non-zero `NH-Len` is malformed per RFC
+    /// 8955 §6.1 — the decoder must reject so the rest of the
+    /// pipeline never sees a misshapen `FlowSpec` advertisement.
+    /// Logic exists at `decode_mp_reach_nlri` but had no direct
+    /// regression test; adding one cheaply pins the wire-level
+    /// guarantee that complements the validate-time skip.
+    #[test]
+    fn mp_reach_flowspec_rejects_nonzero_nh_len() {
+        // AFI=1 (IPv4), SAFI=133 (FlowSpec), NH-Len=4, NH=10.0.0.1,
+        // Reserved=0, then a single component-1 prefix (192.168.1.0/24).
+        let value: &[u8] = &[
+            0x00, 0x01, // AFI = IPv4
+            0x85, // SAFI = 133 (FlowSpec)
+            0x04, // NH-Len = 4 (illegal for FlowSpec — must be 0)
+            10, 0, 0, 1,    // NH bytes
+            0x00, // Reserved
+            // FlowSpec NLRI: length(1) + component type 1 + prefix
+            0x07, 0x01, 0x18, 192, 168, 1,
+        ];
+        // attribute header: flags(0x80 = optional) + type(14 =
+        // MP_REACH) + len(value.len() as u8) + value
+        let mut attr = vec![0x80, 14, u8::try_from(value.len()).unwrap()];
+        attr.extend_from_slice(value);
+        let err = decode_path_attributes(&attr, true, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("FlowSpec next-hop length"),
+                    "expected FlowSpec NH-Len rejection, got: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got {other:?}"),
+        }
     }
 
     #[test]

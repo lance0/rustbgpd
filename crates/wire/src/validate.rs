@@ -60,7 +60,7 @@ pub fn validate_update_attributes(
             // FlowSpec; the rule contents travel in
             // `flowspec_announced`, not next_hop.
             PathAttribute::MpReachNlri(mp) if mp.safi != Safi::FlowSpec => {
-                check_mp_reach_next_hop(mp.next_hop)?;
+                check_mp_reach_next_hop(mp.next_hop, mp.link_local_next_hop)?;
             }
             _ => {}
         }
@@ -173,8 +173,21 @@ fn check_next_hop(addr: std::net::Ipv4Addr) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// Validate `MP_REACH_NLRI` next-hop address.
-fn check_mp_reach_next_hop(addr: IpAddr) -> Result<(), UpdateError> {
+/// Validate `MP_REACH_NLRI` next-hop address(es).
+///
+/// `addr` is the global next-hop (always present in any non-FlowSpec
+/// `MP_REACH`). `link_local` is the optional second-16-byte
+/// component carried only when the on-wire NH-Len is 32 (RFC 4760
+/// §3 / RFC 2545 §3 — the IPv6-with-link-local form). When present,
+/// it MUST be in `fe80::/10`; otherwise the peer is sending a
+/// malformed `MP_REACH` and we reject with subcode 8 rather than
+/// accepting a non-link-local second segment into the receive path
+/// where downstream consumers may treat it as if it were
+/// link-local.
+fn check_mp_reach_next_hop(
+    addr: IpAddr,
+    link_local: Option<std::net::Ipv6Addr>,
+) -> Result<(), UpdateError> {
     match addr {
         IpAddr::V4(v4) => check_next_hop(v4)?,
         IpAddr::V6(v6) => {
@@ -185,6 +198,14 @@ fn check_mp_reach_next_hop(addr: IpAddr) -> Result<(), UpdateError> {
                 });
             }
         }
+    }
+    if let Some(ll) = link_local
+        && !is_ipv6_link_local(&ll)
+    {
+        return Err(UpdateError {
+            subcode: update_subcode::INVALID_NEXT_HOP,
+            data: ll.octets().to_vec(),
+        });
     }
     Ok(())
 }
@@ -605,5 +626,66 @@ mod tests {
              recommends 0. The pre-fix path tore sessions against every \
              RFC-compliant FlowSpec peer."
         );
+    }
+
+    /// Audit follow-up: an IPv6 `MP_REACH` with NH-Len=32 (the
+    /// global-and-link-local form, RFC 4760 §3 / RFC 2545 §3)
+    /// where the second 16 bytes are NOT in `fe80::/10` is a
+    /// malformed advertisement. The pre-audit validator only
+    /// inspected `mp.next_hop` and silently accepted any value at
+    /// `mp.link_local_next_hop`, letting a non-link-local second
+    /// segment land in the receive path where downstream consumers
+    /// may treat it as if it were link-local. Reject with subcode
+    /// 8 (Invalid `NEXT_HOP`).
+    #[test]
+    fn mp_reach_ipv6_invalid_link_local_segment_rejected() {
+        use crate::attribute::MpReachNlri;
+        use crate::capability::{Afi, Safi};
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+                // Second 16 bytes purport to be link-local but are a
+                // global address. Should be rejected.
+                link_local_next_hop: Some("2001:db8::2".parse().unwrap()),
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+            }),
+        ];
+        let err = validate_update_attributes(&attrs, false, false, true).unwrap_err();
+        assert_eq!(err.subcode, update_subcode::INVALID_NEXT_HOP);
+    }
+
+    /// Audit follow-up complement to the above: a properly-formed
+    /// 32-byte next-hop (global + actual link-local) must pass.
+    /// Pins that the new validation didn't over-reject the legal form.
+    #[test]
+    fn mp_reach_ipv6_global_plus_link_local_accepted() {
+        use crate::attribute::MpReachNlri;
+        use crate::capability::{Afi, Safi};
+
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath {
+                segments: vec![AsPathSegment::AsSequence(vec![65001])],
+            }),
+            PathAttribute::MpReachNlri(MpReachNlri {
+                afi: Afi::Ipv6,
+                safi: Safi::Unicast,
+                next_hop: std::net::IpAddr::V6("2001:db8::1".parse().unwrap()),
+                link_local_next_hop: Some("fe80::1".parse().unwrap()),
+                announced: vec![],
+                flowspec_announced: vec![],
+                evpn_announced: vec![],
+            }),
+        ];
+        assert!(validate_update_attributes(&attrs, false, false, true).is_ok());
     }
 }

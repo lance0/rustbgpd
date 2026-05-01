@@ -196,6 +196,16 @@ this document is reference / long-tail.
   `Some(...)`. The PM's `current_config` advances per-step inside
   `apply_*_change` so the explicit `ReplaceConfigSnapshot` is
   defensive — failing it doesn't cause real drift. ~20 LOC.
+- [ ] **EVPN IPv6 next-hop roundtrip test.** The wire crate has a
+  generic `mp_reach_ipv6_32byte_next_hop_roundtrip` that pins the
+  global+link-local form for IPv6 unicast, and EVPN encode/decode
+  are individually tested, but there's no roundtrip pinning EVPN
+  (AFI 25 / SAFI 70) with an IPv6 next-hop end-to-end. RFC 7432
+  §7.5 allows the speaker's address to be IPv4 or IPv6; given how
+  much EVPN code touches the next-hop path, a single roundtrip
+  test would close the only gap the validate-side audit flagged
+  but didn't fix in the patch (deemed incremental, not
+  ship-blocking). ~30 LOC. Cheap.
 - [ ] **Tighten test failure-mode coverage.** All four hot-apply
   failure tests inject the same shape (drop the reply oneshot).
   Production paths can also fail with channel-full / channel-
