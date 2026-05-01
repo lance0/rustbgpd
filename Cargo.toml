@@ -49,7 +49,7 @@ tonic = { version = "0.13", features = ["tls-ring"] }
 tonic-build = "0.13"
 prost = "0.13"
 prometheus = "0.13"
-socket2 = { version = "0.5", features = ["all"] }
+socket2 = { version = "0.6", features = ["all"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 axum = "0.8"
 tower = "0.5"
