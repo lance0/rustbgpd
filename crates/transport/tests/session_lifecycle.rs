@@ -143,7 +143,7 @@ async fn full_handshake_reaches_established() {
     let families = metrics.registry().gather();
     let established = families
         .iter()
-        .find(|f| f.get_name() == "bgp_session_established_total");
+        .find(|f| f.name() == "bgp_session_established_total");
     assert!(established.is_some(), "established metric should exist");
 
     // Clean shutdown
@@ -300,7 +300,7 @@ async fn notification_from_peer_tears_down() {
     let families = metrics.registry().gather();
     let notif_metric = families
         .iter()
-        .find(|f| f.get_name() == "bgp_notifications_received_total");
+        .find(|f| f.name() == "bgp_notifications_received_total");
     assert!(notif_metric.is_some(), "notification metric should exist");
 
     handle.shutdown().await.unwrap().unwrap();
@@ -448,7 +448,7 @@ async fn connect_failure_retries() {
     let families = metrics.registry().gather();
     let transitions = families
         .iter()
-        .find(|f| f.get_name() == "bgp_session_state_transitions_total");
+        .find(|f| f.name() == "bgp_session_state_transitions_total");
     assert!(transitions.is_some(), "should have state transitions");
 
     handle.shutdown().await.unwrap().unwrap();

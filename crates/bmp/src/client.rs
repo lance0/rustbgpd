@@ -318,19 +318,19 @@ mod tests {
             .registry()
             .gather()
             .iter()
-            .find(|f| f.get_name() == "bmp_control_event_drops_total")
+            .find(|f| f.name() == "bmp_control_event_drops_total")
             .map_or(0, |f| {
-                f.get_metric()
+                f.metric
                     .iter()
                     .filter(|m| {
-                        m.get_label().iter().any(|l| {
-                            l.get_name() == "kind" && l.get_value() == "collector_connected"
-                        }) && m
-                            .get_label()
+                        m.label
                             .iter()
-                            .any(|l| l.get_name() == "reason" && l.get_value() == "channel_timeout")
+                            .any(|l| l.name() == "kind" && l.value() == "collector_connected")
+                            && m.label
+                                .iter()
+                                .any(|l| l.name() == "reason" && l.value() == "channel_timeout")
                     })
-                    .map(|m| m.get_counter().get_value() as u64)
+                    .map(|m| m.counter.value() as u64)
                     .sum::<u64>()
             });
         assert!(

@@ -196,16 +196,12 @@ this document is reference / long-tail.
   `Some(...)`. The PM's `current_config` advances per-step inside
   `apply_*_change` so the explicit `ReplaceConfigSnapshot` is
   defensive — failing it doesn't cause real drift. ~20 LOC.
-- [ ] **EVPN IPv6 next-hop roundtrip test.** The wire crate has a
-  generic `mp_reach_ipv6_32byte_next_hop_roundtrip` that pins the
-  global+link-local form for IPv6 unicast, and EVPN encode/decode
-  are individually tested, but there's no roundtrip pinning EVPN
-  (AFI 25 / SAFI 70) with an IPv6 next-hop end-to-end. RFC 7432
-  §7.5 allows the speaker's address to be IPv4 or IPv6; given how
-  much EVPN code touches the next-hop path, a single roundtrip
-  test would close the only gap the validate-side audit flagged
-  but didn't fix in the patch (deemed incremental, not
-  ship-blocking). ~30 LOC. Cheap.
+- [x] **EVPN IPv6 next-hop roundtrip test** (v0.13.1) — added
+  `mp_reach_evpn_ipv6_next_hop_roundtrip` pinning the 16-byte single-
+  address IPv6 form end-to-end through `encode_mp_reach_nlri`'s
+  EVPN branch, plus a paired `mp_reach_evpn_rejects_32byte_next_hop`
+  that asserts `NH-Len=32` for L2VPN/EVPN is rejected (RFC 7432 §7.5
+  vs RFC 2545 unicast). Closes the validate-side audit gap.
 - [ ] **Tighten test failure-mode coverage.** All four hot-apply
   failure tests inject the same shape (drop the reply oneshot).
   Production paths can also fail with channel-full / channel-
@@ -217,20 +213,17 @@ this document is reference / long-tail.
   test (peer vanishes between the import apply and the bail
   bookkeeping). ~150 LOC across three new tests; pure unit-test
   hardening, no production code change.
-- [ ] **Soften M34 session-uptime-epoch assertion.** The current
-  M34 interop test asserts strict equality on FRR's
-  `bgpTimerUpEstablishedEpoch` before and after the SIGHUP
-  to detect a session flap. Observed 1/16 flake on the v0.12.0
-  release tag CI run with the epoch shifting by exactly 1 second
-  (1777579323 → 1777579324) under heavy parallel-job runner
-  load — the routes filtered correctly (deny-rule prefix dropped,
-  others stayed) so the test was catching either FRR's internal
-  epoch quirk or a sub-second blip that's not a real flap.
-  Re-run on the same commit passed. Two paths: (a) compare
-  flap_count from rustbgpd's own session telemetry instead of
-  FRR's epoch field — direct signal, no FRR-side timing
-  ambiguity; (b) if keeping the FRR-side check, allow ±1 s
-  tolerance with a clear comment about why. Either way <30 LOC.
+- [x] **Soften M34 session-uptime-epoch assertion** (v0.13.1) —
+  M34 now reads rustbgpd's own `NeighborState.flapCount` and
+  `uptimeSeconds` via gRPC instead of FRR's
+  `bgpTimerUpEstablishedEpoch`. Cross-check pins session continuity:
+  `flapCount` must not increase AND `uptimeSeconds` must
+  monotonically advance. The dual check catches both increment-then-
+  equal and full handle replacement (every fresh `PeerSession` starts
+  at `flap_count = 0`, so flapCount alone would let a hypothetical
+  tear-down + fresh-establish slip through; uptime resets to ~0 on a
+  new handle, so the monotonicity guard catches that case).
+  Mirrors the M33 scale harness's flapCount pattern.
 - [ ] **BGP Graceful Shutdown (RFC 8326).** The well-known
   `GRACEFUL_SHUTDOWN` community (0xFFFF_0000 / 65535:0) is not
   recognized natively. Operators wanting de-pref-on-maintenance
@@ -265,17 +258,18 @@ this document is reference / long-tail.
   policy convention; no capability negotiation needed). Ranks
   ahead of BLACKHOLE (RFC 7999) since GShut is operator-lifecycle
   and BLACKHOLE is data-plane-only.
-- [ ] **Resolve open `cargo audit` findings.** First run of the
-  new audit gate caught one vulnerability + two soundness warnings
-  in our dependency tree. Punt to the next release cycle:
-    - **RUSTSEC-2024-0437** (protobuf 2.28.0, "Crash due to
-      uncontrolled recursion") — pulled in via
-      `prometheus 0.13.4`. Fix: bump `prometheus = "0.13"` →
-      `"0.14"` in the workspace `Cargo.toml`; 0.14 moves to
-      protobuf 3.x and the advisory clears. Verify
-      `crates/telemetry`, `crates/api`, `crates/transport`
-      still build and metrics shape stays compatible.
-    - **RUSTSEC-2026-0097** (rand 0.8.5 + 0.9.2, "unsound with a
+- [ ] **Resolve open `cargo audit` findings.** Partial — the
+  vulnerability cleared in v0.13.1, one soundness warning still
+  open:
+    - [x] **RUSTSEC-2024-0437** (protobuf 2.28.0, "Crash due to
+      uncontrolled recursion") — pulled in via `prometheus 0.13.4`.
+      Cleared in **v0.13.1** by bumping `prometheus 0.13 → 0.14`;
+      0.14 moves to protobuf 3.x. Migrated four test/internal files
+      to the proto-3 field/method API split (`MetricFamily.metric`
+      and `Metric.label/.counter/.gauge` are now public fields;
+      `LabelPair.name()` / `.value()` / `Counter.value()` /
+      `Gauge.value()` stay as methods).
+    - [ ] **RUSTSEC-2026-0097** (rand 0.8.5 + 0.9.2, "unsound with a
       custom logger using `rand::rng()`") — transitive via
       `phf_generator → phf_macros → phf → termwiz →
       ratatui-termwiz` (CLI / `top` command). Either bump
@@ -311,6 +305,7 @@ this document is reference / long-tail.
 - [x] **`EvpnRibRoute` payload+key refactor** (v0.11.0) — drops cached key, identity derived on demand
 - [x] **IPv6 link-local next-hop preserved end-to-end** (v0.11.0) — 32-byte `MP_REACH_NLRI` next-hops (RFC 4760 §3 / RFC 2545) round-trip through wire codec, RIB, and MRT exports; closes the long-standing "link-local discarded" KNOWN_ISSUES limitation. `rustbgpd-wire` 0.7.0 → 0.8.0 (breaking — adds `link_local_next_hop` field to `MpReachNlri`).
 - [x] **EVPN VTEP foundation — declarative EVI/VNI domain model** (v0.13.0) — Gate 7a per `docs/evpn-enablement.md`. New `crates/evpn` exposes the runtime [`EvpnInstance`] / [`EvpnInstanceTable`] types; `[[evpn_instances]]` config block lands the operator-facing TOML surface (VNI, RD, RTs, local VTEP IP, optional bridge, `advertise_svi_mac`); read-only `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances` surface the resolved table. Wire crate gains `RouteDistinguisher::from_str`. Empty by default — RR-only deployments unchanged. Kernel reconciliation + Type 2/3 origination land in Gate 7b. ADR-0052.
+- [x] **Tier-1 post-release cleanup bundle** (v0.13.1) — three small operational items: prometheus 0.13 → 0.14 (clears RUSTSEC-2024-0437; protobuf 3.x API migration in 4 internal/test files); M34 SIGHUP-policy interop test now reads rustbgpd's own `flapCount` + `uptimeSeconds` instead of FRR's `bgpTimerUpEstablishedEpoch` (cross-checked monotonicity catches handle replacement that flapCount alone would miss); EVPN MP_REACH IPv6 next-hop roundtrip + 32-byte rejection tests close the validate-side audit gap from v0.11.0.
 
 ### P0–P2.5 — Complete
 

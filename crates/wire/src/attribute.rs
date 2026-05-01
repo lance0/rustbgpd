@@ -1597,6 +1597,120 @@ mod tests {
         assert!(matches!(dec.evpn_announced[0], EvpnRoute::Imet(_)));
     }
 
+    /// EVPN `MP_REACH` with an IPv6 VTEP next-hop. RFC 7432 §7.5
+    /// allows the egress PE address to be IPv4 *or* IPv6; the
+    /// IPv4 path was covered by `mp_reach_evpn_attribute_roundtrip`,
+    /// the IPv6 path was the one validate-side audit gap. EVPN
+    /// (AFI 25 / SAFI 70) uses a 16-byte single-address next-hop
+    /// for IPv6 — there is no global+link-local 32-byte form here
+    /// (that's RFC 2545 / unicast territory). Pinning it as a
+    /// roundtrip catches any future regression in the EVPN-specific
+    /// branch of `encode_mp_reach_nlri`, which is otherwise only
+    /// exercised on the IPv4 path.
+    #[test]
+    fn mp_reach_evpn_ipv6_next_hop_roundtrip() {
+        use crate::evpn::{EthernetTagId, EvpnImet, EvpnRoute, RouteDistinguisher};
+
+        let vtep_v6: Ipv6Addr = "2001:db8:dead::1".parse().unwrap();
+        let mp = MpReachNlri {
+            afi: Afi::L2Vpn,
+            safi: Safi::Evpn,
+            next_hop: IpAddr::V6(vtep_v6),
+            link_local_next_hop: None,
+            announced: vec![],
+            flowspec_announced: vec![],
+            evpn_announced: vec![EvpnRoute::Imet(EvpnImet {
+                rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 0x64]),
+                ethernet_tag: EthernetTagId(100),
+                originator_ip: IpAddr::V6(vtep_v6),
+            })],
+        };
+        let attr = PathAttribute::MpReachNlri(mp.clone());
+
+        let mut buf = Vec::new();
+        encode_path_attributes(std::slice::from_ref(&attr), &mut buf, true, false);
+
+        // Wire-level shape check: NH-Len byte is 16 (16-byte single
+        // IPv6 address; EVPN does NOT use the 32-byte global+LL form),
+        // followed by the 16 octets of vtep_v6, then Reserved=0,
+        // then EVPN NLRI.
+        // Value layout from `encode_mp_reach_nlri`: AFI(2) + SAFI(1)
+        // + NH-Len(1) + NH bytes + Reserved(1) + NLRI.
+        // Walk past the attribute header (flags(1) + type(1) + len
+        // octet(s)) to land on the value. With a single IMET route
+        // the value comfortably fits a single-byte length so the
+        // header is 3 bytes total.
+        let extended = (buf[0] & 0x10) != 0;
+        let value_off = if extended { 4 } else { 3 };
+        assert_eq!(
+            buf[value_off + 3],
+            16,
+            "EVPN IPv6 NH-Len must be 16, not 32"
+        );
+        assert_eq!(
+            &buf[value_off + 4..value_off + 20],
+            &vtep_v6.octets(),
+            "encoded VTEP next-hop bytes must match the input"
+        );
+
+        let decoded = decode_path_attributes(&buf, true, &[]).expect("decode");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(PathAttribute::MpReachNlri(mp), decoded[0]);
+
+        let PathAttribute::MpReachNlri(dec) = &decoded[0] else {
+            panic!("not MP_REACH after decode");
+        };
+        assert_eq!(dec.afi, Afi::L2Vpn);
+        assert_eq!(dec.safi, Safi::Evpn);
+        assert_eq!(dec.next_hop, IpAddr::V6(vtep_v6));
+        assert!(
+            dec.link_local_next_hop.is_none(),
+            "EVPN's 16-byte form must not synthesize a link-local next-hop"
+        );
+        assert_eq!(dec.evpn_announced.len(), 1);
+        match &dec.evpn_announced[0] {
+            EvpnRoute::Imet(imet) => {
+                assert_eq!(imet.originator_ip, IpAddr::V6(vtep_v6));
+                assert_eq!(imet.ethernet_tag, EthernetTagId(100));
+            }
+            other => panic!("expected IMET, got {other:?}"),
+        }
+    }
+
+    /// EVPN (AFI 25 / SAFI 70) must reject the 32-byte global+
+    /// link-local next-hop form. RFC 7432 §7.5 only permits a
+    /// single IPv4 (4 bytes) or IPv6 (16 bytes) next-hop; the
+    /// 32-byte form is RFC 2545 unicast-only territory. Pinning
+    /// the rejection invariant catches a future regression that
+    /// might broaden the L2VPN decoder by mistake.
+    #[test]
+    fn mp_reach_evpn_rejects_32byte_next_hop() {
+        // Hand-crafted MP_REACH attribute: AFI=25 (L2VPN), SAFI=70
+        // (EVPN), NH-Len=32 (illegal for EVPN), 32 bytes of
+        // next-hop, Reserved=0, then zero bytes of NLRI.
+        // Attribute header: flags=0x80 (optional non-transitive),
+        // type=14 (MP_REACH), length=u8 = 4 + 32 + 1 = 37.
+        let mut attr = vec![0x80u8, 14, 37];
+        attr.extend_from_slice(&[
+            0x00, 0x19, // AFI = 25 (L2VPN)
+            0x46, // SAFI = 70 (EVPN)
+            0x20, // NH-Len = 32 (illegal for L2VPN)
+        ]);
+        attr.extend(std::iter::repeat_n(0u8, 32)); // 32 NH bytes
+        attr.push(0); // Reserved
+
+        let err = decode_path_attributes(&attr, true, &[]).unwrap_err();
+        match err {
+            DecodeError::MalformedField { detail, .. } => {
+                assert!(
+                    detail.contains("L2VPN next-hop length 32"),
+                    "expected L2VPN NH-Len rejection, got: {detail}"
+                );
+            }
+            other => panic!("expected MalformedField, got: {other:?}"),
+        }
+    }
+
     #[test]
     fn mp_unreach_evpn_attribute_roundtrip() {
         use crate::evpn::{EthernetSegmentIdentifier, EvpnEs, EvpnRoute, RouteDistinguisher};

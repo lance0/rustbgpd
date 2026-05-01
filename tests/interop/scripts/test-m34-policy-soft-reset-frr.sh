@@ -77,18 +77,45 @@ wait_route "192.168.2.0/24"
 wait_route "10.10.0.0/16"
 
 # ---------------------------------------------------------------------------
-# 2. Capture session uptime to verify SIGHUP doesn't flap
+# 2. Capture rustbgpd's own no-flap signal — both `flapCount` and
+#    `uptimeSeconds` from NeighborState.
+#
+#    Originally we read FRR's `bgpTimerUpEstablishedEpoch` and
+#    asserted strict equality across the SIGHUP. That signal turned
+#    out to be flaky under heavy parallel-runner CI load — the field
+#    is rounded to whole seconds and the rounding direction can shift
+#    by ±1s without the session actually flapping (observed multiple
+#    times during dependabot churn on 2026-05-01, including epoch
+#    going *backwards* by 1s, which is physically impossible for a
+#    real flap).
+#
+#    `flapCount` alone is necessary but not sufficient: every fresh
+#    `PeerSession` handle starts at `flap_count = 0`, so a regression
+#    that tore the session down and let it re-establish on a new
+#    handle within the 6s sleep would silently roundtrip 0 → 0 and
+#    pass. To pin "session continuity" rather than just "this handle
+#    didn't increment", we additionally require `uptimeSeconds` to
+#    monotonically advance across the SIGHUP — a handle replacement
+#    resets it to ~0, far below the pre-SIGHUP reading.
+#
+#    Cross-checking both: `flapCount` must NOT increase AND
+#    `uptimeSeconds` must NOT decrease. Mirrors the M33 scale
+#    harness's flapCount-based pattern with the added monotonicity
+#    invariant.
 # ---------------------------------------------------------------------------
 
-session_uptime_secs() {
-    docker exec "$FRR" vtysh -c "show bgp neighbors 10.0.0.1 json" 2>/dev/null \
-        | jq -r '."10.0.0.1".bgpTimerUpEstablishedEpoch // 0'
+session_state_json() {
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d '{"address": "10.0.0.2"}' \
+        "$GRPC_ADDR" rustbgpd.v1.NeighborService/GetNeighborState 2>/dev/null
 }
 
-initial_uptime=$(session_uptime_secs)
-log "Pre-SIGHUP session uptime epoch: $initial_uptime"
+initial_state=$(session_state_json)
+initial_flaps=$(echo "$initial_state" | jq -r '.flapCount // 0 | tonumber')
+initial_uptime=$(echo "$initial_state" | jq -r '.uptimeSeconds // 0 | tonumber')
+log "Pre-SIGHUP rustbgpd 10.0.0.2: flapCount=$initial_flaps uptimeSeconds=$initial_uptime"
 if [ "$initial_uptime" = "0" ]; then
-    fail "could not read session uptime epoch from FRR — session not Established?"
+    fail "rustbgpd reports uptimeSeconds=0 — session not Established yet?"
     exit 1
 fi
 
@@ -121,14 +148,20 @@ sleep 6
 # 4. Assertions
 # ---------------------------------------------------------------------------
 
-post_uptime=$(session_uptime_secs)
-log "Post-SIGHUP session uptime epoch: $post_uptime"
-if [ "$post_uptime" != "$initial_uptime" ]; then
-    fail "session flapped during SIGHUP (epoch moved $initial_uptime → $post_uptime); \
+post_state=$(session_state_json)
+post_flaps=$(echo "$post_state" | jq -r '.flapCount // 0 | tonumber')
+post_uptime=$(echo "$post_state" | jq -r '.uptimeSeconds // 0 | tonumber')
+log "Post-SIGHUP rustbgpd 10.0.0.2: flapCount=$post_flaps uptimeSeconds=$post_uptime"
+if [ "$post_flaps" != "$initial_flaps" ]; then
+    fail "session flapped during SIGHUP (rustbgpd flapCount moved $initial_flaps → $post_flaps); \
          policy reload should NOT tear the session — the auto-refresh path is a Route \
          Refresh, not a session reset"
+elif [ "$post_uptime" -lt "$initial_uptime" ]; then
+    fail "session was torn down and re-established (uptimeSeconds dropped \
+         $initial_uptime → $post_uptime); policy reload should NOT replace the \
+         session handle — the auto-refresh path is a Route Refresh, not a session reset"
 else
-    ok "session stayed Established across SIGHUP (no flap)"
+    ok "session stayed Established across SIGHUP (no flap; flapCount=$post_flaps, uptimeSeconds $initial_uptime → $post_uptime)"
 fi
 
 # The headline assertion: 192.168.1.0/24 should be gone, the others stay.

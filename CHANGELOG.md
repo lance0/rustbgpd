@@ -9,6 +9,61 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-05-01
+
+### Changed
+
+- **Bump `prometheus` 0.13 → 0.14** to clear RUSTSEC-2024-0437
+  (uncontrolled-recursion crash in `protobuf` 2.x reachable via
+  `prometheus`'s transitive dependency). Prometheus 0.14 moves to
+  `protobuf` 3.x, splitting its proto-generated types between
+  field access for containers (`MetricFamily.metric`,
+  `Metric.label`, `Metric.counter`, `Metric.gauge`) and method
+  access for leaf accessors (`LabelPair.name()`, `LabelPair.value()`,
+  `Counter.value()`, `Gauge.value()`). Migrated four test/internal
+  files: `crates/bmp/src/client.rs`, `crates/bmp/src/manager.rs`,
+  `crates/rib/src/manager/tests.rs`,
+  `crates/transport/tests/session_lifecycle.rs`. No
+  operator-visible behavior change; closes the open `cargo audit`
+  finding tracked in ROADMAP.
+
+### Fixed
+
+- **M34 SIGHUP-policy interop test stops asserting on FRR's
+  `bgpTimerUpEstablishedEpoch`.** The FRR field is rounded to whole
+  seconds and the rounding direction can shift by ±1s under heavy
+  parallel-runner load (observed multiple times during dependabot
+  churn on 2026-05-01, including the epoch going *backwards* by 1s
+  — physically impossible for a real session flap). M34 now reads
+  rustbgpd's own `NeighborState.flapCount` and `uptimeSeconds` via
+  gRPC: `flapCount` must not increase AND `uptimeSeconds` must
+  monotonically advance across the SIGHUP. The cross-check pins
+  "session continuity" — flapCount alone would let a hypothetical
+  tear-down + fresh-handle re-establish slip through (every fresh
+  `PeerSession` starts at `flap_count = 0`); `uptimeSeconds` resets
+  to ~0 on a new handle, so the monotonicity guard catches that
+  case. Mirrors the `flapCount` pattern M33 has been using.
+
+### Added
+
+- **EVPN `MP_REACH` IPv6 next-hop roundtrip test**
+  (`mp_reach_evpn_ipv6_next_hop_roundtrip` in `crates/wire/src/attribute.rs`).
+  Closes the validate-side audit gap RFC 7432 §7.5 left
+  untested: the egress PE address may be IPv4 or IPv6, and the
+  IPv4 path was the only one with a roundtrip test on the EVPN
+  branch of `encode_mp_reach_nlri`. The new test pins the 16-byte
+  single-address IPv6 form end-to-end (encode → wire → decode →
+  identity).
+- **EVPN `MP_REACH` 32-byte next-hop rejection test**
+  (`mp_reach_evpn_rejects_32byte_next_hop`). Hand-crafts an
+  attribute with `AFI=25 / SAFI=70 / NH-Len=32` and asserts the
+  decoder rejects with `MalformedField`. EVPN does NOT use the
+  global+link-local 32-byte form (that's RFC 2545 unicast
+  territory); the L2VPN decoder branch in
+  `crates/wire/src/attribute.rs` already enforces this, but the
+  invariant had no direct regression test. Pins it now so a
+  future broadening of the L2VPN decoder is caught.
+
 ## [0.13.0] — 2026-05-01
 
 ### Added

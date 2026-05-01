@@ -476,12 +476,9 @@ mod tests {
             .registry()
             .gather()
             .iter()
-            .find(|f| f.get_name() == name)
+            .find(|f| f.name() == name)
             .map_or(0, |f| {
-                f.get_metric()
-                    .iter()
-                    .map(|m| m.get_counter().get_value() as u64)
-                    .sum()
+                f.metric.iter().map(|m| m.counter.value() as u64).sum()
             })
     }
 
@@ -501,17 +498,15 @@ mod tests {
             .registry()
             .gather()
             .into_iter()
-            .find(|f| f.get_name() == name)
+            .find(|f| f.name() == name)
             .and_then(|mut f| {
                 f.take_metric().into_iter().find(|m| {
-                    match_labels.iter().all(|(k, v)| {
-                        m.get_label()
-                            .iter()
-                            .any(|l| l.get_name() == *k && l.get_value() == *v)
-                    })
+                    match_labels
+                        .iter()
+                        .all(|(k, v)| m.label.iter().any(|l| l.name() == *k && l.value() == *v))
                 })
             })
-            .map_or(0, |m| m.get_counter().get_value() as u64)
+            .map_or(0, |m| m.counter.value() as u64)
     }
 
     /// Collector channel saturates during regular fan-out → manager

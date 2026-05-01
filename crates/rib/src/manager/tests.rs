@@ -3077,9 +3077,9 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
     let families = metrics.registry().gather();
     let rib_gauge = families
         .iter()
-        .find(|f| f.get_name() == "bgp_rib_prefixes")
+        .find(|f| f.name() == "bgp_rib_prefixes")
         .expect("bgp_rib_prefixes metric not found");
-    let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = rib_gauge.metric[0].gauge.value();
     assert_eq!(sample as i64, 1);
 
     // PeerDown should zero the gauge
@@ -3093,9 +3093,9 @@ async fn rib_prefixes_gauge_tracks_adjribin() {
     let families = metrics.registry().gather();
     let rib_gauge = families
         .iter()
-        .find(|f| f.get_name() == "bgp_rib_prefixes")
+        .find(|f| f.name() == "bgp_rib_prefixes")
         .expect("bgp_rib_prefixes metric not found");
-    let sample = rib_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = rib_gauge.metric[0].gauge.value();
     assert_eq!(sample as i64, 0);
 
     drop(tx);
@@ -3133,9 +3133,9 @@ async fn loc_rib_gauge_tracks_best() {
     let families = metrics.registry().gather();
     let loc_gauge = families
         .iter()
-        .find(|f| f.get_name() == "bgp_rib_loc_prefixes")
+        .find(|f| f.name() == "bgp_rib_loc_prefixes")
         .expect("bgp_loc_rib_prefixes metric not found");
-    let sample = loc_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = loc_gauge.metric[0].gauge.value();
     assert_eq!(sample as i64, 1);
 
     drop(tx);
@@ -3191,9 +3191,9 @@ async fn adj_rib_out_gauge_tracks_advertised() {
     let families = metrics.registry().gather();
     let out_gauge = families
         .iter()
-        .find(|f| f.get_name() == "bgp_rib_adj_out_prefixes")
+        .find(|f| f.name() == "bgp_rib_adj_out_prefixes")
         .expect("bgp_adj_rib_out_prefixes metric not found");
-    let sample = out_gauge.get_metric()[0].get_gauge().get_value();
+    let sample = out_gauge.metric[0].gauge.value();
     assert_eq!(sample as i64, 1);
 
     drop(tx);
