@@ -30,6 +30,33 @@ All PRs must pass (enforced by CI in `.github/workflows/ci.yml`):
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 
+### Pre-commit hooks
+
+We ship a `.pre-commit-config.yaml` that runs `cargo fmt` and
+`cargo clippy --workspace --all-targets -- -D warnings` on every
+commit and `cargo test --workspace --lib` on every push. The
+clippy invocation matches CI exactly so a clean commit is a clean
+PR. `cargo test` is gated to pre-push (not pre-commit) so commits
+stay fast.
+
+Set it up once:
+
+```bash
+# Recommended: prek (fast Rust port, drop-in compatible)
+cargo install --locked prek
+prek install
+
+# Or via standalone installer (no Rust toolchain needed)
+curl -LsSf https://github.com/j178/prek/releases/latest/download/prek-installer.sh | sh
+
+# Or with the original Python pre-commit
+pipx install pre-commit
+pre-commit install --hook-type pre-commit --hook-type pre-push
+```
+
+After install, hooks run automatically. To run them manually
+against staged files: `prek run` (or `pre-commit run`).
+
 ### Conventions
 
 - No `unsafe` code without a `SAFETY` comment and strong justification
