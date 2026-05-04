@@ -1142,6 +1142,22 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .expect("failed to register SIGHUP handler");
 
     // Wait for shutdown signal: SIGINT, SIGTERM, Shutdown RPC, unexpected gRPC exit, or SIGHUP
+    //
+    // SIGHUP runs `reload_config` on a dedicated tokio task so the
+    // signal-arm dispatch returns immediately. Without this, the SIGHUP
+    // arm's inline `.await` would block the same `select!` from
+    // observing SIGINT/SIGTERM for the duration of the reload (up to
+    // ~7 round-trip commands × 500 ms `PEER_POLICY_UPDATE_TIMEOUT` plus
+    // reconcile round-trip). Operators hitting Ctrl-C mid-reload should
+    // see the daemon respond.
+    //
+    // Concurrency invariant: at most one reload in flight. Concurrent
+    // reloads would race on `peer_mgr_tx` ordering (interleaved
+    // SetPolicy / ReconcilePeers commands) and double-fire the
+    // post-reload sync. A SIGHUP that arrives while a reload is still
+    // running is logged and dropped — the operator-facing back-pressure
+    // surface.
+    let mut reload_in_flight: Option<tokio::task::JoinHandle<Option<Config>>> = None;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -1168,43 +1184,72 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 break;
             }
             _ = sighup.recv() => {
+                if reload_in_flight.is_some() {
+                    warn!("SIGHUP received while previous reload still in flight; ignoring");
+                    continue;
+                }
                 info!("SIGHUP received, reloading configuration");
                 let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                if let Some(new_config) = reload_config(
-                    &path,
-                    &config,
-                    live_grpc_tcp.as_ref(),
-                    live_grpc_uds.as_ref(),
-                    &peer_mgr_tx,
-                )
-                .await
-                {
-                    // Sync persister's snapshot so future gRPC mutations apply
-                    // to the reloaded config, not the stale startup config.
-                    if let Some(ref mtx) = config_mutation_tx
-                        && let Err(e) = mtx
-                            .send(ConfigMutation::ReplaceConfig(Box::new(new_config.clone())))
-                            .await
-                    {
-                        error!(
-                            error = %e,
-                            "failed to sync config persister after reload — keeping previous in-memory config"
-                        );
-                        continue;
+                let snapshot = config.clone();
+                let live_tcp = live_grpc_tcp.clone();
+                let live_uds = live_grpc_uds.clone();
+                let pm_tx = peer_mgr_tx.clone();
+                reload_in_flight = Some(tokio::spawn(async move {
+                    reload_config(
+                        &path,
+                        &snapshot,
+                        live_tcp.as_ref(),
+                        live_uds.as_ref(),
+                        &pm_tx,
+                    )
+                    .await
+                }));
+            }
+            // Only polled when a reload is in flight. Standard tokio
+            // idiom: `std::future::pending().await` parks the arm
+            // forever in the no-handle case so `select!` ignores it.
+            // The `take()` drops the borrow before we touch
+            // `reload_in_flight` again in the body, sidestepping the
+            // borrow-across-await complaint.
+            outcome = async {
+                match reload_in_flight.as_mut() {
+                    Some(handle) => handle.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                reload_in_flight = None;
+                match outcome {
+                    Ok(Some(new_config)) => {
+                        match apply_reload_outcome(
+                            new_config,
+                            &peer_mgr_internal_tx,
+                            config_mutation_tx.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(advanced) => config = advanced,
+                            Err(stage) => error!(
+                                stage,
+                                "post-reload sync failed mid-flight; in-memory config not advanced — next SIGHUP will retry"
+                            ),
+                        }
                     }
-                    if let Err(e) = peer_mgr_internal_tx
-                        .send(InternalCommand::ReplaceConfigSnapshot(Box::new(new_config.clone())))
-                    {
-                        error!(
-                            error = %e,
-                            "failed to sync peer manager config snapshot after reload"
-                        );
-                        continue;
+                    Ok(None) => {
+                        // reload_config already logged the failure.
                     }
-                    config = new_config;
+                    Err(e) => error!(error = %e, "reload task panicked"),
                 }
             }
         }
+    }
+
+    // If a reload is still in flight at shutdown, abort it before
+    // tearing down the peer manager. Letting it run would race the
+    // peer manager's Shutdown command and potentially queue commands
+    // against an already-draining manager.
+    if let Some(handle) = reload_in_flight.take() {
+        handle.abort();
+        let _ = handle.await;
     }
 
     // Drop the profiler now while all data structures are still alive,
@@ -1344,6 +1389,52 @@ async fn send_pm_step(
         Ok(result) => result,
         Err(e) => Err(format!("peer manager dropped reply: {e}")),
     }
+}
+
+/// Forward a freshly reloaded `Config` to the peer manager and the
+/// optional config persister, in that order. Returns the same `Config`
+/// on success so the caller can advance its in-memory snapshot in one
+/// step (`config = apply_reload_outcome(...).await?;`).
+///
+/// Order matters. `peer_mgr_internal_tx` is unbounded and can only fail
+/// on receiver-drop (peer manager task is dead — fatal anyway). The
+/// persister channel is bounded(64) and may either block on
+/// back-pressure or fail on receiver-drop. If we sent the persister
+/// first and the peer manager's receiver had been dropped, the
+/// persister would already hold the new snapshot while the peer
+/// manager would never see it — an observable but silent split-brain
+/// across the next gRPC mutation. Sending the peer manager first means
+/// the authoritative runtime view always advances first; if the
+/// persister then fails, the next SIGHUP retries cleanly because both
+/// downstream consumers replace their snapshot wholesale (idempotent).
+///
+/// Both `Err` returns name the failing stage (`peer_mgr_snapshot` or
+/// `config_persister`) so the caller's log line carries actionable
+/// context. The "in-memory config not advanced" decision is the
+/// caller's — leaving it explicit at the call site keeps the SIGHUP
+/// retry semantics readable.
+async fn apply_reload_outcome(
+    new_config: Config,
+    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    config_mutation_tx: Option<&mpsc::Sender<ConfigMutation>>,
+) -> Result<Config, &'static str> {
+    if peer_mgr_internal_tx
+        .send(InternalCommand::ReplaceConfigSnapshot(Box::new(
+            new_config.clone(),
+        )))
+        .is_err()
+    {
+        return Err("peer_mgr_snapshot");
+    }
+    if let Some(mtx) = config_mutation_tx
+        && mtx
+            .send(ConfigMutation::ReplaceConfig(Box::new(new_config.clone())))
+            .await
+            .is_err()
+    {
+        return Err("config_persister");
+    }
+    Ok(new_config)
 }
 
 /// Reload configuration from disk and reconcile runtime state.
@@ -2760,6 +2851,67 @@ hold_time = 90
             tags.contains(&"SetPolicy(block-private)".to_string()),
             "earlier reload steps must still have fired before the reconcile failure — saw {tags:?}"
         );
+    }
+
+    /// `apply_reload_outcome` must send to the peer manager FIRST, so
+    /// the authoritative runtime view always advances even if the
+    /// optional persister channel later fails. Drives the helper
+    /// directly with a wedged persister to assert the failure stage
+    /// name matches and the peer manager already received the
+    /// snapshot before the persister send was attempted.
+    #[tokio::test]
+    async fn apply_reload_outcome_persister_failure_after_peer_mgr_snapshot() {
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+        let (persister_tx, persister_rx) = mpsc::channel::<ConfigMutation>(1);
+        // Drop the persister rx so the persister send fails fast on
+        // closed-channel rather than blocking forever on a full
+        // bounded(1) buffer.
+        drop(persister_rx);
+
+        let path = unique_temp_path("apply-reload-outcome");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let result =
+            apply_reload_outcome(cfg.clone(), &peer_mgr_internal_tx, Some(&persister_tx)).await;
+
+        assert_eq!(
+            result.err(),
+            Some("config_persister"),
+            "persister failure must surface as the named stage so the caller's log line is actionable"
+        );
+        let snapshot = peer_mgr_internal_rx.try_recv().expect(
+            "peer manager must receive the snapshot before the persister send is attempted",
+        );
+        match snapshot {
+            InternalCommand::ReplaceConfigSnapshot(received) => {
+                assert_eq!(received.global.asn, cfg.global.asn);
+            }
+        }
+    }
+
+    /// Persister-disabled mode (no `file_path`) must succeed: the
+    /// helper takes `Option<&Sender>`, and a `None` persister is the
+    /// runtime configuration when rustbgpd starts without a
+    /// `--config` file (gRPC mutations are non-persistent in that
+    /// mode by design).
+    #[tokio::test]
+    async fn apply_reload_outcome_succeeds_without_persister() {
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+
+        let path = unique_temp_path("apply-reload-outcome-nopersister");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let advanced = apply_reload_outcome(cfg.clone(), &peer_mgr_internal_tx, None)
+            .await
+            .expect("no-persister mode must succeed");
+        assert_eq!(advanced.global.asn, cfg.global.asn);
+        assert!(peer_mgr_internal_rx.try_recv().is_ok());
     }
 
     // SoftResetIn-on-import-policy-change coverage is now PM-side:
