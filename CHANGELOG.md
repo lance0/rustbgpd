@@ -17,11 +17,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SIGHUP.** Reload flips advance the live config snapshot and fan out
   policy recomputation to EBGP peers; established peers reuse the
   existing route-refresh retry path when their effective import policy
-  changes.
+  changes. The hot-apply is best-effort: `set_honor_graceful_shutdown`
+  precomputes every EBGP peer's effective chain against the new
+  snapshot, advances `current_config` unconditionally, then iterates
+  applying and accumulates per-peer failures into an aggregated `Err`.
+  Failed peers retry on their next `update_runtime_policies` via the
+  existing `pending_refresh` / `pending_export_apply` bail-and-carry
+  plumbing — no peer-manager-vs-snapshot drift on partial apply.
 - **RFC 8326 runtime GShut toggles now replay onto dynamic peers.**
-  ADR-0042's dead-letter side table preserves
-  `advertise_graceful_shutdown` across dynamic-peer `BackToIdle`
-  auto-removal and restores it when the same address re-establishes.
+  The per-peer dead-letter side table on `PeerManager` (introduced in
+  v0.13.2 to carry `pending_refresh` / `pending_export_apply` across
+  `BackToIdle` auto-removal) now also snapshots
+  `advertise_graceful_shutdown` and restores it when the same address
+  re-establishes.
+- **Reload no longer rolls back on partial honor-knob hot-apply.**
+  `reload_config` previously `halt_partial`'d on the
+  `set_honor_graceful_shutdown` `Err`, rolling the daemon's
+  `working_config` back to the pre-flip value while the peer manager
+  had already advanced its snapshot — drift one layer up. Reload now
+  logs the partial failure as `warn!` and advances
+  `working_config.global.honor_graceful_shutdown` to match the peer
+  manager's snapshot so both views stay aligned.
 
 ### Tests
 
@@ -30,7 +46,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   L2VPN/EVPN outbound MP_REACH advertisements, complementing M35's
   IPv4 unicast coverage. The tests capture BGP UPDATE bytes inside
   the FRR container so the assertion is on the actual `0xffff0000`
-  community on the wire.
+  community on the wire. The capture parser maintains per-flow TCP
+  reassembly buffers keyed by `(src, sport, dst, dport)` so BGP
+  messages whose marker / length / community attribute span a TCP
+  segment boundary still parse correctly under CI segmentation.
+  `CAPTURE_DURATION_SECS=8` plus a new `wait_for_capture` helper that
+  polls for the parser's JSON output before asserting eliminates the
+  earlier 4 s-capture / 5 s-sleep window mismatch.
 - **Peer-manager failure-mode hardening.** Added unit coverage for
   channel-full policy updates, back-to-back hot-apply updates, and
   peer deletion while retry intent is pending.

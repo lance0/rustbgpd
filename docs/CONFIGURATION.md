@@ -74,8 +74,21 @@ Off by default — the operator opt-in is deliberate, RFC 8326 §4 says receiver
 SHOULD apply this, not MUST.
 
 SIGHUP hot-applies this field. When the value flips, rustbgpd recomputes
-runtime policies for EBGP peers and sends route refresh where needed so
-already-established sessions see the implicit rule without a daemon restart.
+runtime policies for every EBGP peer and forces a policy refresh so
+already-Established sessions see (or stop seeing) the implicit chain-tail
+rule without a daemon restart. iBGP peers are skipped — the rule never
+applied to them in the first place.
+
+Hot-apply is **best-effort with partial-apply semantics**: the daemon's
+working config and the peer manager's current config both advance to the
+new value even if the refresh fan-out fails for some peers (channel-full,
+session wedged, etc.). The value reported by `rustbgpd --diff` and
+`rustbgpd --check` therefore always matches what the daemon believes it is
+running.
+Peers that failed the immediate refresh retry on their next policy edit
+through the same `pending_refresh` / `pending_export_apply` carry-forward
+plumbing used elsewhere in the reload path; transient failures surface as
+`warn!` log lines rather than aborting the whole reload.
 
 The matching initiator-side toggle (`rustbgpctl gshut`) is a runtime gRPC
 operation, not a config field; see `docs/OPERATIONS.md` for the operator
