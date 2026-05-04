@@ -18,12 +18,18 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tracing.workspace = true
 
 # Linux-only — real netlink. cfg-gated so the crate type-checks on
-# macOS dev builds. Wired in Phase 4.
-# [target.'cfg(target_os = "linux")'.dependencies]
-# rtnetlink = "0.14"
-# netlink-packet-route = "0.21"
-# netlink-packet-utils = "0.5"
-# netlink-sys = "0.8"
+# macOS dev builds. rtnetlink 0.14 pairs with netlink-packet-route
+# 0.19 (the older typed message API); newer 0.21+/0.30+ versions
+# moved to a different message shape that tonic-prost transitively
+# pulls in async-std incompatibly. Pinning the pair keeps the
+# workspace's existing tokio/tonic stack happy.
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+netlink-packet-core = "0.7"
+netlink-packet-utils = "0.5"
+netlink-sys = { version = "0.8", features = ["tokio_socket"] }
+futures = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

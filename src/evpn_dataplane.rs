@@ -130,14 +130,23 @@ pub fn spawn(
 
     #[cfg(target_os = "linux")]
     {
-        let dataplane = rustbgpd_evpn_linux::LinuxDataplane::new();
-        Some(spawn_with_dataplane(
-            config,
-            evpn_instances,
-            rib_tx,
-            daemon_shutdown,
-            dataplane,
-        ))
+        match rustbgpd_evpn_linux::LinuxDataplane::connect() {
+            Ok(dataplane) => Some(spawn_with_dataplane(
+                config,
+                evpn_instances,
+                rib_tx,
+                daemon_shutdown,
+                dataplane,
+            )),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not open netlink socket — EVPN dataplane disabled \
+                     (CAP_NET_ADMIN missing or kernel unsupported)"
+                );
+                None
+            }
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
