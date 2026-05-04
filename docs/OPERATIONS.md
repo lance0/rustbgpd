@@ -399,13 +399,81 @@ rustbgpctl rib received 10.0.0.2
 rustbgpctl rib
 ```
 
-### Graceful shutdown
+### Graceful shutdown (daemon exit)
 
 ```bash
 rustbgpctl shutdown
 ```
 
 Sends NOTIFICATION to all peers, writes GR marker, exits cleanly.
+
+### RFC 8326 graceful-shutdown community (planned maintenance)
+
+Distinct from the daemon-shutdown RPC above. RFC 8326 lets you drain
+traffic ahead of a planned EBGP session shutdown by tagging outbound
+paths with the well-known `GRACEFUL_SHUTDOWN` community
+(`65535:0` / `0xFFFF_0000`); receivers that honor the community
+demote `LOCAL_PREF` to `0` so any non-shutting alternate becomes
+preferred. By the time you actually close the session, traffic has
+already moved.
+
+**Initiator (the side going down for maintenance):**
+
+```bash
+# Start the drain on one peer
+rustbgpctl gshut --peer 10.0.0.2
+
+# Or drain every currently-managed peer at once
+rustbgpctl gshut
+
+# Wait for traffic to shift (operator-defined, typically 30s-5min
+# depending on convergence in the upstream AS), then proceed with
+# the actual maintenance — restart, config edit, etc.
+
+# Clear the community when maintenance ends
+rustbgpctl gshut --peer 10.0.0.2 --clear
+rustbgpctl gshut --clear
+```
+
+The toggle is **operator-runtime state**, not config — it lives on
+the `ManagedPeer` desired-state record, mirrors to the live session,
+and survives session flaps mid-maintenance. The toggle does NOT
+persist across daemon restart by design (RFC 8326 is a maintenance-
+window action, not a steady state).
+
+When the toggle flips, rustbgpd issues a `RibUpdate::RefreshPeerOutbound`
+which forces re-emission of all routes already in `AdjRibOut` to the
+target peer. The community appears on the wire immediately (no need
+to wait for an unrelated RIB event).
+
+**Receiver (the side honoring others' GShut):**
+
+Set in `[global]`:
+
+```toml
+[global]
+honor_graceful_shutdown = true
+```
+
+When enabled, an implicit head-of-import-chain rule fires on every
+EBGP peer — see `docs/CONFIGURATION.md` for the exact semantics.
+iBGP peers are exempt because `LOCAL_PREF` is preserved within an AS.
+
+**Verifying the drain is working:**
+
+```bash
+# On the receiver: routes from the draining peer should now show
+# explicit local_pref = 0 in the RIB
+rustbgpctl rib --neighbor <draining-peer> | jq '.routes[] | {prefix, localPref, communities}'
+
+# On the initiator: outbound advertisements should carry 65535:0
+rustbgpctl rib advertised --peer <peer-being-drained> \
+    | jq '.routes[] | select(.communities | index(4294901760))'
+```
+
+Interop is validated in M35 (`tests/interop/m35-graceful-shutdown-frr.clab.yml`)
+against FRR 10.3.1 — both legs (FRR → rustbgpd inbound honor +
+rustbgpd → FRR outbound advertise + clear).
 
 ### Explain best-path selection
 

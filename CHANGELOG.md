@@ -13,11 +13,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **RFC 8326 BGP Graceful Shutdown — well-known `GRACEFUL_SHUTDOWN`
   community (`65535:0` / `0xFFFF_0000`) end-to-end.** Lets operators
-  drain traffic ahead of planned maintenance without writing the
-  policy by hand.
+  drain traffic ahead of planned EBGP-session maintenance without
+  writing the policy by hand. Architecture: ADR-0053.
   - **Wire crate**: new `pub const COMMUNITY_GRACEFUL_SHUTDOWN: u32`
     next to the LLGR constants. rustbgpd-wire 0.8.4 → 0.8.5
-    (non-breaking pub addition). New value-pin test asserts all three
+    (non-breaking pub addition). Value-pin test asserts all three
     well-known constants match their spec values.
   - **Policy engine**: `parse_community_match` accepts
     `"GRACEFUL_SHUTDOWN"` as a community alias. Because
@@ -25,23 +25,61 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `set_community_add` / `set_community_remove`) routes through the
     same parser, the alias works in both match and set positions.
   - **Inbound honor (opt-in)**: new `[global] honor_graceful_shutdown
-    = true` knob injects an implicit head-of-import-chain rule on
-    every EBGP peer (`match GRACEFUL_SHUTDOWN → permit, set
-    local_pref = 0`). Off by default. iBGP exempt because LOCAL_PREF
-    is preserved within an AS.
-  - **Outbound advertise**: new
+    = true` knob appends an implicit chain-tail import rule on every
+    EBGP peer (`match GRACEFUL_SHUTDOWN → permit, set local_pref =
+    0`). Running at the chain *tail* (not head) guarantees the
+    demotion wins last-writer-accumulation against any operator
+    policy that also sets `local_pref` — placing the rule at the head
+    would silently let an operator's `set_local_pref = 200` overwrite
+    the demotion. iBGP exempt because LOCAL_PREF is preserved within
+    an AS. Off by default.
+  - **Outbound advertise (operator-runtime, not policy)**: new
     `NeighborService.SetGracefulShutdown { address, enabled }` gRPC +
-    `rustbgpctl gshut [--peer X] [--clear]` CLI. Toggles attaching
-    the community to outbound updates for one peer or every peer.
-    The CLI is a top-level command rather than nested under
-    `shutdown` because that's already the daemon-shutdown RPC.
-  - **M35 interop test against FRR** (both legs):
-    `tests/interop/m35-graceful-shutdown-frr.clab.yml` +
-    `test-m35-graceful-shutdown-frr.sh`. FRR tags one prefix with
-    `65535:0` outbound — rustbgpd's RIB shows it with `local_pref =
-    0`. rustbgpd injects a prefix and toggles outbound GShut — FRR's
-    `show ip bgp` shows the community attached. Clear-leg verifies
-    the toggle off.
+    `rustbgpctl gshut [--peer X] [--clear]` CLI. Empty `address`
+    broadcasts to all currently-managed peers. The toggle is stored
+    on `ManagedPeer` (the authoritative desired-state record),
+    mirrored to the live `PeerSession`, and replayed onto fresh
+    sessions on collision-replace / inbound-accept so a session flap
+    mid-maintenance doesn't silently drop the toggle. Flipping the
+    toggle issues `RibUpdate::RefreshPeerOutbound` so routes already
+    in `AdjRibOut` re-emit immediately with (or without) the
+    community on the wire.
+  - **gRPC error mapping**: typed `SetGshutError::PeerNotFound` /
+    `Internal` so the handler distinguishes operator-typo
+    (`NOT_FOUND`) from session/RIB dispatch failures (`INTERNAL`).
+    Authoritative state on `ManagedPeer` advances even when the
+    immediate dispatch fails — the toggle takes effect on the next
+    session spawn regardless.
+  - **`Route.local_pref_attr` proto field**: new optional `uint32`
+    that distinguishes "explicit `LOCAL_PREF` attribute set" from
+    "no attribute on the wire". Required for downstream consumers
+    (and the M35 interop test) to verify the implicit demotion
+    actually fired on a tagged route — proto3 omits zero-valued
+    `local_pref` whether policy set it or no attribute was on the
+    wire, so the explicit-vs-default signal would otherwise be lost.
+  - **M35 interop test against FRR 10.3.1**
+    (`tests/interop/m35-graceful-shutdown-frr.clab.yml` +
+    `test-m35-graceful-shutdown-frr.sh`). Receiver leg: FRR tags
+    `192.168.1.0/24` outbound; assertion checks rustbgpd's RIB
+    carries the community AND has `local_pref_attr = 0` on the
+    tagged prefix while the untagged prefix has no attribute.
+    Initiator leg: rustbgpd injects `172.16.0.0/24` and toggles
+    GShut via gRPC; FRR's `show ip bgp ... json` shows the path
+    with `community.list ⊇ ["gracefulShutdown"]`. Clear leg:
+    toggle off + delete + re-add forces a fresh advertise; FRR no
+    longer sees the community.
+
+### Known limitations (tracked in `KNOWN_ISSUES.md` + ROADMAP)
+
+- RFC 8326 EBGP gating uses a simple `remote_asn != global.asn`
+  comparison. Will need an explicit `is_external_neighbor()` helper
+  when confederation support lands.
+- The runtime initiator toggle does not persist across daemon
+  restart by design — it's a maintenance-window action, not config.
+- Dynamic peers that auto-remove and re-establish at the same
+  address come up with the toggle off. Operators re-issue
+  `rustbgpctl gshut` after a re-establish if the maintenance
+  window is still active.
 
 ## [0.13.2] — 2026-05-03
 
