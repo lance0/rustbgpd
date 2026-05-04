@@ -1110,8 +1110,24 @@ impl PeerManager {
             return Ok(());
         }
 
+        // Best-effort fan-out: precompute every EBGP peer's resolved chains
+        // against the *new* snapshot, advance the snapshot unconditionally,
+        // then iterate applying. A failure on peer B must not leave peer A
+        // running with the new effective policy while `current_config`
+        // still shows the old knob value — that drift is what the prior
+        // `?`-shortcircuit shape produced and is hard to debug
+        // operationally. Failed peers will pick up the stale state on
+        // their next `update_runtime_policies` call thanks to the
+        // existing bail-and-carry plumbing (`pending_refresh` /
+        // `pending_export_apply` flags retry on the next policy edit).
+        //
+        // Resolution failures are also non-fatal at the per-peer scope:
+        // if a single neighbor's effective chain can't be resolved
+        // (e.g. peer-group reference broken mid-flight), other peers
+        // shouldn't be punished for it.
         let mut next_config = self.current_config.clone();
         next_config.global.honor_graceful_shutdown = enabled;
+
         let targets: Vec<IpAddr> = self
             .peers
             .iter()
@@ -1120,24 +1136,64 @@ impl PeerManager {
             })
             .collect();
 
+        let mut failures: Vec<String> = Vec::new();
         for address in targets {
             let Some(managed) = self.peers.get(&address) else {
                 continue;
             };
             let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
-            let (import_policy, export_policy) = next_config
-                .effective_policy_chains_for_neighbor(&neighbor)
-                .map_err(|e| e.to_string())?;
-            self.update_runtime_policies(address, import_policy, export_policy)
-                .await?;
+            let chains = next_config.effective_policy_chains_for_neighbor(&neighbor);
+            let (import_policy, export_policy) = match chains {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        %address,
+                        error = %e,
+                        "honor_graceful_shutdown: failed to resolve effective chain — skipping peer"
+                    );
+                    failures.push(format!("{address}: chain-resolve: {e}"));
+                    continue;
+                }
+            };
+            if let Err(e) = self
+                .update_runtime_policies(address, import_policy, export_policy)
+                .await
+            {
+                warn!(
+                    %address,
+                    error = %e,
+                    "honor_graceful_shutdown: failed to hot-apply on peer — desired snapshot \
+                     advances anyway; bail-and-carry will retry on next policy edit"
+                );
+                failures.push(format!("{address}: hot-apply: {e}"));
+            }
         }
 
+        // Snapshot advances regardless of per-peer outcomes — the
+        // authoritative knob value matches the operator's intent. The
+        // alternative (shortcircuit on first failure with no rollback)
+        // leaves successfully-updated peers running ahead of the
+        // snapshot, which is the worse drift.
         self.current_config = next_config;
-        info!(
-            enabled,
-            "hot-applied [global] honor_graceful_shutdown to EBGP peers"
-        );
-        Ok(())
+
+        if failures.is_empty() {
+            info!(
+                enabled,
+                "hot-applied [global] honor_graceful_shutdown to EBGP peers"
+            );
+            Ok(())
+        } else {
+            Err(format!(
+                "honor_graceful_shutdown applied with {} of {} EBGP peers failing \
+                 (snapshot advanced anyway): {}",
+                failures.len(),
+                self.peers
+                    .values()
+                    .filter(|m| m.remote_asn != self.local_asn)
+                    .count(),
+                failures.join("; ")
+            ))
+        }
     }
 
     fn peer_manager_config_from_resolved(

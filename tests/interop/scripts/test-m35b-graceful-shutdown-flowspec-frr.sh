@@ -64,22 +64,74 @@ frr_has_rule() {
 
 install_bgp_capture() {
     docker exec -i "$FRR" sh -c 'cat > /tmp/rustbgpd-bgp-update-capture.py' <<'PY'
+"""BGP UPDATE capture with per-flow TCP stream reassembly.
+
+BGP messages run over TCP and can split across segment boundaries —
+the marker, the length field, or a community-attribute value can each
+land at the boundary. Without buffering per-flow we'd miss UPDATEs or
+miscount when bytes span packets, which makes interop tests flaky
+under CI load. This parser keeps a per-(src,sport,dst,dport) byte
+buffer, appends each segment's TCP payload, and only counts complete
+BGP messages from the head of the buffer (trimming as it goes).
+"""
 import json
 import socket
 import sys
 import time
 
 src_ip, dst_ip, duration, output = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
-marker = b"\xff" * 16
-gshut = b"\xff\xff\x00\x00"
+MARKER = b"\xff" * 16
+GSHUT = b"\xff\xff\x00\x00"
+BGP_HDR_LEN = 19  # 16-byte marker + 2-byte length + 1-byte type
+BGP_TYPE_UPDATE = 2
 
 sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.ntohs(0x0003))
 sock.bind(("eth1", 0))
 sock.settimeout(0.25)
 
+flows = {}  # (src, sport, dst, dport) -> bytearray of in-order TCP payload
 end = time.time() + duration
 updates = 0
 gshut_updates = 0
+
+
+def parse_buf(buf):
+    """Pop complete BGP messages from `buf`. Updates global counters.
+
+    Resyncs to the next marker if the buffer head isn't aligned.
+    Stops cleanly when the next message is incomplete and waits for
+    more bytes to arrive on the next segment.
+    """
+    global updates, gshut_updates
+    while len(buf) >= BGP_HDR_LEN:
+        if bytes(buf[:16]) != MARKER:
+            # Mid-stream desync — skip ahead to the next marker we
+            # find. Drop everything before it; never going to be a
+            # valid BGP message.
+            idx = buf.find(MARKER)
+            if idx < 0:
+                # No marker anywhere; throw away all but the last
+                # 15 bytes (a marker could still be split across the
+                # end of this buffer + the next segment).
+                if len(buf) > 15:
+                    del buf[: len(buf) - 15]
+                return
+            del buf[:idx]
+            continue
+        length = int.from_bytes(buf[16:18], "big")
+        if length < BGP_HDR_LEN:
+            # Malformed length — discard one byte and re-search for
+            # the next marker.
+            del buf[:1]
+            continue
+        if len(buf) < length:
+            return  # need more bytes
+        if buf[18] == BGP_TYPE_UPDATE:
+            updates += 1
+            if GSHUT in bytes(buf[:length]):
+                gshut_updates += 1
+        del buf[:length]
+
 
 while time.time() < end:
     try:
@@ -115,32 +167,50 @@ while time.time() < end:
 
     data_offset = ((frame[tcp + 12] >> 4) & 0x0F) * 4
     payload = frame[tcp + data_offset:]
-    pos = 0
-    while True:
-        idx = payload.find(marker, pos)
-        if idx < 0 or len(payload) < idx + 19:
-            break
-        length = int.from_bytes(payload[idx + 16:idx + 18], "big")
-        if length < 19 or len(payload) < idx + length:
-            pos = idx + 1
-            continue
-        if payload[idx + 18] == 2:
-            updates += 1
-            if gshut in payload[idx:idx + length]:
-                gshut_updates += 1
-        pos = idx + length
+    if not payload:
+        continue
+    key = (src, sport, dst, dport)
+    buf = flows.setdefault(key, bytearray())
+    buf.extend(payload)
+    parse_buf(buf)
 
 with open(output, "w", encoding="utf-8") as f:
     json.dump({"updates": updates, "gshut_updates": gshut_updates}, f)
 PY
 }
 
+# Capture window must exceed the post-emit sleep so a delayed
+# re-emit at the tail of the wait still lands inside the capture.
+# Each call site waits for the capture file to land via
+# `wait_for_capture` before asserting, so we don't have to align
+# durations precisely — just keep the capture longer than the
+# expected re-emit latency under CI load.
+CAPTURE_DURATION_SECS=8
+
 start_bgp_capture() {
     local output=${1:?}
     docker exec "$FRR" rm -f "$output"
     docker exec -d "$FRR" python3 /tmp/rustbgpd-bgp-update-capture.py \
-        10.0.0.1 10.0.0.2 4 "$output" >/dev/null
+        10.0.0.1 10.0.0.2 "$CAPTURE_DURATION_SECS" "$output" >/dev/null
     sleep 0.5
+}
+
+# `start_bgp_capture` runs the python parser in a detached container
+# process; the JSON output file appears only after the capture
+# duration elapses. Poll for it before asserting, with slack beyond
+# the configured duration so the test fails loudly rather than
+# asserting against an empty/missing file.
+wait_for_capture() {
+    local output=${1:?}
+    local deadline=$((CAPTURE_DURATION_SECS * 2 + 4))
+    for _ in $(seq 1 $((deadline * 2))); do
+        if docker exec "$FRR" test -s "$output" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.5
+    done
+    fail "BGP capture file $output never appeared within ${deadline}s"
+    return 1
 }
 
 assert_capture_gshut() {
@@ -208,6 +278,7 @@ log "Injecting FlowSpec rule $RULE_PREFIX while GShut toggle is off..."
 start_bgp_capture /tmp/m35b-initial.json
 grpc_add_flowspec
 sleep 5
+wait_for_capture /tmp/m35b-initial.json
 assert_capture_gshut /tmp/m35b-initial.json absent "Initial FlowSpec advertise omits GShut"
 wait_flowspec_state "FRR has FlowSpec route in steady state"
 
@@ -215,6 +286,7 @@ log "Toggling GRACEFUL_SHUTDOWN advertise ON for FlowSpec peer..."
 start_bgp_capture /tmp/m35b-on.json
 grpc_set_gshut true
 sleep 5
+wait_for_capture /tmp/m35b-on.json
 assert_capture_gshut /tmp/m35b-on.json present "Toggle-on FlowSpec re-emit carries GShut"
 wait_flowspec_state "FRR still has FlowSpec route after GShut toggle-on"
 
@@ -222,6 +294,7 @@ log "Toggling GRACEFUL_SHUTDOWN advertise OFF for FlowSpec peer..."
 start_bgp_capture /tmp/m35b-off.json
 grpc_set_gshut false
 sleep 5
+wait_for_capture /tmp/m35b-off.json
 assert_capture_gshut /tmp/m35b-off.json absent "Toggle-off FlowSpec re-emit clears GShut"
 wait_flowspec_state "FRR still has FlowSpec route after GShut toggle-off"
 

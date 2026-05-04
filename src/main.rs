@@ -2135,14 +2135,29 @@ async fn reload_config(
                 );
             }
             Err(error) => {
-                return halt_partial(
-                    working_config,
-                    ReloadStepFailure {
-                        bucket: "global.honor_graceful_shutdown",
-                        target: String::new(),
-                        error,
-                    },
+                // `set_honor_graceful_shutdown` is intentionally best-
+                // effort: on the peer-manager side it advances its own
+                // `current_config` *unconditionally* and applies to as
+                // many EBGP peers as it can, returning Err only to
+                // surface which peers failed. Halting the reload here
+                // would roll the daemon's `working_config` back to the
+                // old value while the peer manager's snapshot stays
+                // advanced — the same hard-to-debug drift the
+                // best-effort design exists to avoid. Mirror the
+                // peer-manager's snapshot advance in the daemon view,
+                // and surface the failure list as a warn rather than
+                // a halt. Failed peers retry on their next
+                // `update_runtime_policies` call via the existing
+                // bail-and-carry plumbing (`pending_refresh` /
+                // `pending_export_apply`).
+                warn!(
+                    enabled,
+                    error,
+                    "reload: [global] honor_graceful_shutdown partial-apply — snapshot \
+                     advanced anyway; bail-and-carry will retry failed peers on next \
+                     policy edit"
                 );
+                working_config.global.honor_graceful_shutdown = enabled;
             }
         }
     }
