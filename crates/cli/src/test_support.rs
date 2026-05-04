@@ -356,6 +356,13 @@ impl rustbgpd_api::proto::neighbor_service_server::NeighborService for MockNeigh
     ) -> Result<Response<server_proto::DeleteDynamicNeighborResponse>, Status> {
         Err(Status::unimplemented("not in mock"))
     }
+
+    async fn set_graceful_shutdown(
+        &self,
+        _request: Request<server_proto::SetGracefulShutdownRequest>,
+    ) -> Result<Response<server_proto::SetGracefulShutdownResponse>, Status> {
+        Err(Status::unimplemented("not in mock"))
+    }
 }
 
 struct MockRibService {

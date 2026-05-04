@@ -69,6 +69,7 @@ impl RibManager {
         self.peer_group.remove(&peer);
         self.peer_bgp_id.remove(&peer);
         self.dirty_peers.remove(&peer);
+        self.force_outbound_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.pending_route_batches.retain(|prb| prb.peer() != peer);
         self.clear_peer_refresh_state(peer);
@@ -204,6 +205,7 @@ impl RibManager {
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
+                    false, // initial dump — equality check is correct
                 );
             } else {
                 Self::distribute_single_best_prefix(
@@ -222,6 +224,7 @@ impl RibManager {
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
+                    false, // initial dump — equality check is correct
                 );
             }
         }
@@ -275,6 +278,7 @@ impl RibManager {
                 export_pol.as_ref(),
                 &mut evpn_announce,
                 &mut evpn_withdraw,
+                false, // initial dump — equality check is correct
             );
         }
 

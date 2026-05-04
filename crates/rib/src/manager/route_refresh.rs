@@ -296,6 +296,7 @@ impl RibManager {
                     export_pol.as_ref(),
                     &mut evpn_announce,
                     &mut evpn_withdraw,
+                    false, // route refresh re-emits via empty refresh_view
                 );
             }
         } else {
@@ -325,6 +326,7 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        false, // route refresh re-emits all anyway via empty refresh_view
                     );
                 } else {
                     Self::distribute_single_best_prefix(
@@ -343,6 +345,7 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        false,
                     );
                 }
             }

@@ -334,17 +334,27 @@ impl CommunityMatch {
 /// - Extended community: `"RT:65001:100"` or `"RO:192.0.2.1:200"`
 /// - Standard community: `"65001:100"` (`{ASN}:{value}`, both u16)
 /// - Large community: `"LC:65001:100:200"` (`LC:{global}:{local1}:{local2}`)
-/// - Well-known names: `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`
+/// - Well-known names: `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`,
+///   `"GRACEFUL_SHUTDOWN"` (RFC 8326 §3, `0xFFFF_0000`)
 ///
 /// # Errors
 ///
 /// Returns an error if the string cannot be parsed as any of the above formats.
 pub fn parse_community_match(s: &str) -> Result<CommunityMatch, String> {
-    // Well-known community names (RFC 1997)
+    // Well-known community names (RFC 1997 + RFC 8326).
+    // The same alias surface is used by `parse_community_values` for the
+    // policy *set* side (set_community_add / set_community_remove), so
+    // operators can write `"GRACEFUL_SHUTDOWN"` in either match or set
+    // positions without repeating the numeric value.
     match s {
         "NO_EXPORT" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF01 }),
         "NO_ADVERTISE" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF02 }),
         "NO_EXPORT_SUBCONFED" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF03 }),
+        "GRACEFUL_SHUTDOWN" => {
+            return Ok(CommunityMatch::Standard {
+                value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
+            });
+        }
         _ => {}
     }
 

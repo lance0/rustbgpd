@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    ReconcileFailure, ReconcileFailureKind, ReconcileResult,
+    ReconcileFailure, ReconcileFailureKind, ReconcileResult, SetGshutError,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
@@ -99,6 +99,19 @@ struct ManagedPeer {
     /// and the symmetry with the import side guarantees both halves
     /// of a `SetPolicy` carry the same all-or-nothing semantics.
     pending_export_apply: bool,
+    /// RFC 8326 graceful-shutdown initiator toggle — operator-driven
+    /// desired state. When true, every outbound update gets
+    /// `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`) attached.
+    ///
+    /// `PeerManager` is the authority; the per-session bool in
+    /// `PeerSession` mirrors this value and gets re-seeded on every
+    /// session spawn (collision-replace, dynamic peer re-establish,
+    /// flap-and-reconnect). Without this lift, an operator who
+    /// runs `rustbgpctl gshut --peer X` and then experiences a peer
+    /// flap would have the toggle silently lost — the new session
+    /// would come up advertising untagged routes during the very
+    /// maintenance window the toggle was supposed to cover.
+    advertise_graceful_shutdown: bool,
 }
 
 /// Resolved dynamic neighbor range used for prefix matching at connection time.
@@ -274,6 +287,7 @@ impl PeerManager {
                         looking_glass: None,
                     },
                     dynamic_neighbor_limit: None,
+                    honor_graceful_shutdown: false,
                 },
                 neighbors: Vec::new(),
                 peer_groups: HashMap::new(),
@@ -719,6 +733,7 @@ impl PeerManager {
             Some(self.session_notify_tx.clone()),
             self.bmp_tx.clone(),
             self.validation_rx.clone(),
+            false,
         );
 
         if let Err(e) = handle.start().await {
@@ -744,6 +759,7 @@ impl PeerManager {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -838,6 +854,134 @@ impl PeerManager {
             .map_err(|e| format!("failed to stop peer: {e}"))?;
         info!(%address, "peer disabled");
         Ok(())
+    }
+
+    /// RFC 8326 graceful-shutdown initiator: toggle `GRACEFUL_SHUTDOWN`
+    /// community attachment for one peer (`Some(addr)`) or every
+    /// currently-managed peer (`None`).
+    ///
+    /// Three-step per-peer sequence so the toggle is observable on the
+    /// wire AND survives session restart:
+    ///
+    /// 1. **Update desired state on `ManagedPeer`** — survives session
+    ///    restart so a flap mid-maintenance doesn't silently drop the
+    ///    toggle.
+    /// 2. **Send the live-session command** — flips the per-session
+    ///    bool; the next outbound advertise carries (or stops carrying)
+    ///    the community.
+    /// 3. **Issue `RibUpdate::RefreshPeerOutbound`** — forces re-emission
+    ///    of routes already in `AdjRibOut` so the wire form updates
+    ///    immediately. Without this, an operator running
+    ///    `rustbgpctl gshut` against an Established session with active
+    ///    routes would see no change until something else triggered a
+    ///    re-advertise.
+    ///
+    /// `Some(addr)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
+    /// so callers can distinguish that from a session/RIB failure.
+    /// Per-peer dispatch failures aggregate into `Internal`. The
+    /// authoritative state is updated even when the live-session
+    /// command or refresh fails — the toggle takes effect on the next
+    /// session spawn regardless.
+    async fn set_graceful_shutdown(
+        &mut self,
+        address: Option<IpAddr>,
+        enabled: bool,
+    ) -> Result<(), SetGshutError> {
+        let targets: Vec<IpAddr> = match address {
+            Some(addr) => {
+                if !self.peers.contains_key(&addr) {
+                    return Err(SetGshutError::PeerNotFound(addr));
+                }
+                vec![addr]
+            }
+            None => self.peers.keys().copied().collect(),
+        };
+
+        let mut failures: Vec<String> = Vec::new();
+        for addr in &targets {
+            // (1) Update authoritative state on ManagedPeer so it
+            // survives session restart.
+            if let Some(managed) = self.peers.get_mut(addr) {
+                managed.advertise_graceful_shutdown = enabled;
+            } else {
+                // Peer disappeared between snapshot and dispatch; rare
+                // (would require concurrent removal in this same
+                // task). Skip silently.
+                continue;
+            }
+
+            // (2) Tell the live session — best-effort. If the session
+            // task is wedged or already restarting, the new session
+            // will pick up the toggle from ManagedPeer at spawn time.
+            if let Some(managed) = self.peers.get(addr)
+                && let Err(e) = managed
+                    .handle
+                    .update_graceful_shutdown_timeout(enabled, PEER_POLICY_UPDATE_TIMEOUT)
+                    .await
+            {
+                warn!(
+                    %addr,
+                    enabled,
+                    error = %e,
+                    "failed to toggle graceful-shutdown on live peer session — \
+                     desired state stored, will apply on next session"
+                );
+                failures.push(format!("{addr}: session: {e}"));
+                continue;
+            }
+
+            // (3) Force re-emission of already-advertised routes so
+            // the toggle is visible on the wire without waiting for
+            // an unrelated RIB event. RIB ignores peers not yet
+            // registered for outbound (newly added, not Established
+            // yet) — that's fine, the next PeerUp will emit fresh.
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if let Err(e) = self
+                .rib_tx
+                .send(RibUpdate::RefreshPeerOutbound {
+                    peer: *addr,
+                    reply: reply_tx,
+                })
+                .await
+            {
+                warn!(%addr, error = %e, "failed to send RIB refresh after gshut toggle");
+                failures.push(format!("{addr}: rib send: {e}"));
+                continue;
+            }
+            match reply_rx.await {
+                Err(_) => {
+                    warn!(%addr, "RIB dropped reply for gshut refresh");
+                    failures.push(format!("{addr}: rib reply dropped"));
+                }
+                Ok(Err(e)) => {
+                    // "peer X not registered for outbound updates" is
+                    // expected for peers not yet Established — log at
+                    // debug, not as a failure.
+                    debug!(
+                        %addr, error = %e,
+                        "RIB declined refresh (peer likely not yet Established) — \
+                         desired state stored, will apply on next PeerUp"
+                    );
+                }
+                Ok(Ok(())) => {}
+            }
+        }
+
+        if failures.is_empty() {
+            info!(
+                count = targets.len(),
+                enabled, "RFC 8326 graceful-shutdown toggled on peer set"
+            );
+            Ok(())
+        } else {
+            Err(SetGshutError::Internal(format!(
+                "graceful-shutdown toggle had failures on {} of {} peers (desired \
+                 state stored regardless): {}",
+                failures.len(),
+                targets.len(),
+                failures.join("; ")
+            )))
+        }
     }
 
     async fn soft_reset_in(
@@ -1096,6 +1240,7 @@ impl PeerManager {
                     Some(self.session_notify_tx.clone()),
                     self.bmp_tx.clone(),
                     self.validation_rx.clone(),
+                    false, // dynamic peer starts without GShut advertise
                 );
 
                 if let Err(e) = handle.start().await {
@@ -1118,6 +1263,7 @@ impl PeerManager {
                     is_dynamic: true,
                     pending_refresh: false,
                     pending_export_apply: false,
+                    advertise_graceful_shutdown: false,
                 };
                 self.peers.insert(peer_addr, managed);
                 self.dynamic_peer_count += 1;
@@ -1356,6 +1502,10 @@ impl PeerManager {
             return;
         };
 
+        // Replay the operator-driven RFC 8326 toggle on the new
+        // session so a flap or collision-replace doesn't silently
+        // drop the GShut state mid-maintenance.
+        let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let old_handle = std::mem::replace(
             &mut managed.handle,
             PeerHandle::spawn_inbound(
@@ -1368,6 +1518,7 @@ impl PeerManager {
                 Some(self.session_notify_tx.clone()),
                 self.bmp_tx.clone(),
                 self.validation_rx.clone(),
+                advertise_graceful_shutdown,
             ),
         );
 
@@ -1392,6 +1543,24 @@ impl PeerManager {
         let added_count = added.len();
         let removed_count = removed.len();
         let changed_count = changed.len();
+
+        // Capture per-peer operator-runtime state that should survive
+        // a delete-then-readd cycle. RFC 8326 graceful-shutdown
+        // toggle: a static-peer config edit (e.g. `description` change)
+        // triggers a delete+readd in this reconcile path; without
+        // capturing the desired state by address, the freshly added
+        // ManagedPeer would come up with `advertise_graceful_shutdown
+        // = false`, silently dropping the toggle mid-maintenance and
+        // re-emitting untagged routes on the next outbound tick.
+        let preserved_gshut: HashMap<IpAddr, bool> = changed
+            .iter()
+            .filter_map(|cfg| {
+                self.peers
+                    .get(&cfg.address)
+                    .filter(|m| m.advertise_graceful_shutdown)
+                    .map(|_| (cfg.address, true))
+            })
+            .collect();
 
         // Remove peers
         for addr in &removed {
@@ -1422,6 +1591,22 @@ impl PeerManager {
                     address: addr,
                     error: e,
                 });
+            }
+        }
+        // Replay preserved RFC 8326 toggles onto the freshly added
+        // peers. This goes through the same path as the operator's
+        // `rustbgpctl gshut` so the live session bool, ManagedPeer
+        // desired state, AND RIB refresh all advance in lockstep —
+        // even though the new session is mid-bring-up, the desired
+        // state is in place and the bool will be applied to the
+        // session's first emission once it reaches Established.
+        for (addr, enabled) in preserved_gshut {
+            if let Err(e) = self.set_graceful_shutdown(Some(addr), enabled).await {
+                warn!(
+                    %addr,
+                    error = %e,
+                    "reconcile: failed to replay graceful-shutdown toggle on changed peer"
+                );
             }
         }
         // Add new peers
@@ -1554,6 +1739,10 @@ impl PeerManager {
                         }
                         PeerManagerCommand::SoftResetIn { address, families, reply } => {
                             let result = self.soft_reset_in(address, families).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::SetGracefulShutdown { address, enabled, reply } => {
+                            let result = self.set_graceful_shutdown(address, enabled).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::AcceptInbound { stream, peer_addr } => {
@@ -1814,6 +2003,7 @@ mod tests {
                     looking_glass: None,
                 },
                 dynamic_neighbor_limit: Some(100),
+                honor_graceful_shutdown: false,
             },
             neighbors: Vec::new(),
             peer_groups,
@@ -2303,6 +2493,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let hold = transport.peer.hold_time;
         mgr.peers.insert(
@@ -2322,6 +2513,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: true,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -2467,6 +2659,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -2623,6 +2816,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -2789,6 +2983,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -2974,6 +3169,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -3184,6 +3380,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -3337,6 +3534,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 

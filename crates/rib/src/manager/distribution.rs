@@ -298,6 +298,37 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
+    /// Force re-emission of all currently-advertised routes to a peer
+    /// without changing policy. The export-policy path already does
+    /// the same thing as a side-effect of policy replacement; this
+    /// variant exists for outbound *attribute* surface changes that
+    /// don't go through policy (e.g. RFC 8326 `GShut` community attach
+    /// toggle, where the toggle lives as a per-session bool but
+    /// changing it must trigger a fresh outbound emission so peers
+    /// see the updated wire form on routes already in `AdjRibOut`).
+    pub(super) fn handle_refresh_peer_outbound(
+        &mut self,
+        peer: IpAddr,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        if !self.outbound_peers.contains_key(&peer) {
+            let _ = reply.send(Err(format!(
+                "peer {peer} not registered for outbound updates"
+            )));
+            return;
+        }
+        // `force_outbound_peers` (not `dirty_peers`) — a force-only
+        // resync bypasses AdjRibOut equality suppression for currently-
+        // advertised exportable routes, which is exactly what GShut and
+        // similar outbound-attribute toggles need (the wire change is
+        // applied later in transport, invisible to this RIB diff). The
+        // distribution loop clears the entry on successful emission so
+        // the force is one-shot.
+        self.force_outbound_peers.insert(peer);
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        let _ = reply.send(Ok(()));
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub(super) fn enqueue_routes_received(
         &mut self,
@@ -837,6 +868,7 @@ impl RibManager {
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
+        force: bool,
     ) {
         use crate::best_path::best_path_cmp;
 
@@ -935,10 +967,13 @@ impl RibManager {
             };
             modified.path_id = next_rank;
 
-            // Only announce if different from what's already in AdjRibOut
-            let changed = rib_out
-                .get(prefix, next_rank)
-                .is_none_or(|existing| !routes_equal(existing, &modified));
+            // Only announce if different from what's already in AdjRibOut.
+            // `force` mode bypasses the equality check — see
+            // `distribute_single_best_prefix` for the GShut rationale.
+            let changed = force
+                || rib_out
+                    .get(prefix, next_rank)
+                    .is_none_or(|existing| !routes_equal(existing, &modified));
             if changed {
                 nh_override_flags.push(nh_action);
                 announce.push(modified);
@@ -972,6 +1007,7 @@ impl RibManager {
         announce: &mut Vec<crate::route::Route>,
         withdraw: &mut Vec<(Prefix, u32)>,
         nh_override_flags: &mut Vec<Option<rustbgpd_policy::NextHopAction>>,
+        force: bool,
     ) {
         let existing_path_ids = rib_out.path_ids_for_prefix(prefix);
 
@@ -1061,9 +1097,17 @@ impl RibManager {
         };
         modified.path_id = 0;
 
-        let changed = rib_out
-            .get(prefix, 0)
-            .is_none_or(|existing| !routes_equal(existing, &modified));
+        // `force` mode: bypass the AdjRibOut equality suppression so
+        // currently-advertised routes re-emit even when the RIB-level
+        // attribute set is unchanged. Used by RFC 8326 GShut toggle
+        // where the wire change is applied in transport AFTER this
+        // diff. Without `force` the dirty-peers resync would skip
+        // every route that already lives in AdjRibOut, defeating the
+        // whole point of `RefreshPeerOutbound`.
+        let changed = force
+            || rib_out
+                .get(prefix, 0)
+                .is_none_or(|existing| !routes_equal(existing, &modified));
         if changed {
             nh_override_flags.push(nh_action);
             announce.push(modified);
@@ -1207,6 +1251,7 @@ impl RibManager {
         export_pol: Option<&PolicyChain>,
         evpn_announce: &mut Vec<crate::route::EvpnRibRoute>,
         evpn_withdraw: &mut Vec<rustbgpd_wire::EvpnRouteKey>,
+        force: bool,
     ) {
         let evpn_family = (Afi::L2Vpn, Safi::Evpn);
         let peer_supports_evpn = sendable.is_some_and(|f| f.contains(&evpn_family));
@@ -1329,9 +1374,16 @@ impl RibManager {
             // the dirty-resync path in particular re-evaluates every
             // advertised key and would otherwise re-emit no-op announces
             // every cycle on a large fabric.
-            if rib_out
-                .get_evpn(key)
-                .is_some_and(|existing| evpn_routes_equal(existing, &modified))
+            //
+            // `force` mode bypasses this so currently-advertised EVPN
+            // routes re-emit even when the RIB-level attribute set is
+            // unchanged — used for outbound-attribute toggles like the
+            // RFC 8326 GShut community attach where the wire change is
+            // applied later in transport.
+            if !force
+                && rib_out
+                    .get_evpn(key)
+                    .is_some_and(|existing| evpn_routes_equal(existing, &modified))
             {
                 continue;
             }
@@ -1358,7 +1410,11 @@ impl RibManager {
         best_changed: &HashSet<Prefix>,
         all_affected: &HashSet<Prefix>,
     ) {
-        if best_changed.is_empty() && all_affected.is_empty() && self.dirty_peers.is_empty() {
+        if best_changed.is_empty()
+            && all_affected.is_empty()
+            && self.dirty_peers.is_empty()
+            && self.force_outbound_peers.is_empty()
+        {
             return;
         }
 
@@ -1366,7 +1422,13 @@ impl RibManager {
         for peer in peers {
             // For dirty peers, compute full prefix set from Loc-RIB + AdjRibOut
             let is_dirty = self.dirty_peers.contains(&peer);
-            let effective_prefixes: HashSet<Prefix> = if is_dirty {
+            // `is_force` peers are dirty-equivalent for prefix enumeration AND
+            // bypass the AdjRibOut equality suppression in the per-prefix
+            // helpers — see `RibUpdate::RefreshPeerOutbound` rationale on
+            // `force_outbound_peers`.
+            let is_force = self.force_outbound_peers.contains(&peer);
+            let resync = is_dirty || is_force;
+            let effective_prefixes: HashSet<Prefix> = if resync {
                 let mut all: HashSet<Prefix> = self.loc_rib.iter().map(|r| r.prefix).collect();
                 // For multi-path dirty resync, also include all Adj-RIB-In prefixes
                 if self.peer_has_any_add_path_send(peer) {
@@ -1387,7 +1449,7 @@ impl RibManager {
                 }
                 prefixes
             };
-            let effective_flowspec_rules: HashSet<FlowSpecRule> = if is_dirty {
+            let effective_flowspec_rules: HashSet<FlowSpecRule> = if resync {
                 let mut all: HashSet<FlowSpecRule> = self
                     .loc_rib
                     .iter_flowspec()
@@ -1401,7 +1463,7 @@ impl RibManager {
                 HashSet::new()
             };
 
-            let effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if is_dirty {
+            let effective_evpn_keys: HashSet<rustbgpd_wire::EvpnRouteKey> = if resync {
                 let mut all: HashSet<rustbgpd_wire::EvpnRouteKey> = self
                     .loc_rib
                     .iter_evpn()
@@ -1419,6 +1481,19 @@ impl RibManager {
                 && effective_flowspec_rules.is_empty()
                 && effective_evpn_keys.is_empty()
             {
+                // Resync flags must clear here too — otherwise a
+                // force-only refresh on a peer with no exportable
+                // routes would leave `force_outbound_peers` populated,
+                // and the next unrelated dirty resync (or another
+                // RefreshPeerOutbound for a different reason) would
+                // accidentally inherit the bypass-equality-suppression
+                // semantics. Same shape for `dirty_peers` for symmetry.
+                if is_dirty {
+                    self.dirty_peers.remove(&peer);
+                }
+                if is_force {
+                    self.force_outbound_peers.remove(&peer);
+                }
                 continue;
             }
 
@@ -1482,6 +1557,7 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        is_force,
                     );
                 } else {
                     Self::distribute_single_best_prefix(
@@ -1500,11 +1576,12 @@ impl RibManager {
                         &mut announce,
                         &mut withdraw,
                         &mut nh_override_flags,
+                        is_force,
                     );
                 }
             }
 
-            if is_dirty && !effective_flowspec_rules.is_empty() {
+            if resync && !effective_flowspec_rules.is_empty() {
                 Self::stage_flowspec_rules(
                     loc_rib,
                     rib_out,
@@ -1523,7 +1600,7 @@ impl RibManager {
                 );
             }
 
-            if is_dirty && !effective_evpn_keys.is_empty() {
+            if resync && !effective_evpn_keys.is_empty() {
                 Self::stage_evpn_routes(
                     loc_rib,
                     rib_out,
@@ -1539,6 +1616,7 @@ impl RibManager {
                     export_pol.as_ref(),
                     &mut evpn_announce,
                     &mut evpn_withdraw,
+                    is_force,
                 );
             }
 
@@ -1552,6 +1630,10 @@ impl RibManager {
                 // If a prior initial dump / route-refresh EoR was deferred,
                 // piggyback it on the successful dirty resync update so it
                 // can't be starved behind the resync message on a small queue.
+                // EoR piggyback only attaches to *dirty* resyncs (the
+                // dump-deferral pattern). A force-only resync is a
+                // GShut-style outbound-attribute refresh and never
+                // carries pending EoR by definition.
                 let pending_eor = if is_dirty {
                     self.pending_eor
                         .get(&peer)
@@ -1574,32 +1656,47 @@ impl RibManager {
                     evpn_announce,
                     evpn_withdraw,
                 ) {
-                    if is_dirty {
+                    if resync {
                         info!(
                             %peer,
                             announced = announced_count,
                             withdrawn = withdrawn_count,
-                            "outbound routes updated after policy change"
+                            dirty = is_dirty,
+                            force = is_force,
+                            "outbound routes resynced"
                         );
-                        self.dirty_peers.remove(&peer);
-                        if pending_eor.is_empty() {
-                            self.flush_pending_eor(peer);
-                        } else {
-                            self.pending_eor.remove(&peer);
+                        if is_dirty {
+                            self.dirty_peers.remove(&peer);
+                            if pending_eor.is_empty() {
+                                self.flush_pending_eor(peer);
+                            } else {
+                                self.pending_eor.remove(&peer);
+                            }
+                            self.retry_pending_refresh(peer);
                         }
-                        self.retry_pending_refresh(peer);
+                        // Force is one-shot: clear after a successful
+                        // emission so a subsequent unrelated dirty
+                        // resync doesn't re-bypass equality checks.
+                        if is_force {
+                            self.force_outbound_peers.remove(&peer);
+                        }
                     }
                 } else {
                     warn!(%peer, "outbound channel full or closed — marking dirty for resync");
                     self.metrics.record_outbound_route_drop(&peer.to_string());
                     self.dirty_peers.insert(peer);
                 }
-            } else if is_dirty {
-                // Dirty peer with no diff — already in sync
-                debug!(%peer, "outbound routes unchanged after policy change");
-                self.dirty_peers.remove(&peer);
-                self.flush_pending_eor(peer);
-                self.retry_pending_refresh(peer);
+            } else if resync {
+                // Resync triggered but no diff — already in sync.
+                debug!(%peer, "outbound routes unchanged after resync");
+                if is_dirty {
+                    self.dirty_peers.remove(&peer);
+                    self.flush_pending_eor(peer);
+                    self.retry_pending_refresh(peer);
+                }
+                if is_force {
+                    self.force_outbound_peers.remove(&peer);
+                }
             }
         }
     }
@@ -1767,6 +1864,7 @@ impl RibManager {
                 export_pol.as_ref(),
                 &mut evpn_announce,
                 &mut evpn_withdraw,
+                false, // EVPN delta path — equality check is correct
             );
 
             if (!evpn_announce.is_empty() || !evpn_withdraw.is_empty())

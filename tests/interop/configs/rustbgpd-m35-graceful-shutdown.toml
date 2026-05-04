@@ -1,0 +1,27 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+# Receiver leg: routes carrying GRACEFUL_SHUTDOWN get an implicit
+# chain-tail rule that sets local_pref = 0. EBGP-only
+# (this peer is EBGP — remote_asn 65002).
+honor_graceful_shutdown = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# No inline policy chains — default behavior is permit-all on both
+# sides. The receiver leg works because the global knob prepends the
+# implicit GShut rule into a freshly created chain (which then falls
+# through to default_action = permit for every other route). The
+# initiator leg works because the test injects 172.16.0.0/24 via
+# InjectionService and toggles GShut attachment via gRPC.
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m35"
+hold_time = 90

@@ -37,7 +37,7 @@ fn make_test_session(local_asn: u32, remote_asn: u32) -> PeerSession {
     let (rib_tx, _rib_rx) = mpsc::channel(64);
 
     PeerSession::new(
-        config, metrics, cmd_rx, rib_tx, None, None, None, None, None,
+        config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
     )
 }
 
@@ -66,7 +66,7 @@ fn make_test_session_with_rib(
 
     (
         PeerSession::new(
-            config, metrics, cmd_rx, rib_tx, None, None, None, None, None,
+            config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
         ),
         rib_rx,
     )
@@ -111,6 +111,7 @@ fn make_test_session_with_rib_and_bmp(
             None,
             Some(bmp_tx),
             None,
+            false,
         ),
         rib_rx,
         bmp_rx,
@@ -1281,6 +1282,7 @@ async fn import_policy_denied_routes_do_not_reach_rib() {
         None,
         None,
         None,
+        false,
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
@@ -1452,6 +1454,7 @@ async fn import_policy_chain_accumulates_community_and_local_pref() {
         None,
         None,
         None,
+        false,
     );
     session.negotiated = Some(negotiated_session(65002, false));
 
@@ -1506,7 +1509,7 @@ async fn update_import_policy_applies_to_future_updates() {
     let (rib_tx, mut rib_rx) = mpsc::channel(64);
 
     let mut session = PeerSession::new(
-        config, metrics, cmd_rx, rib_tx, None, None, None, None, None,
+        config, metrics, cmd_rx, rib_tx, None, None, None, None, None, false,
     );
     session.negotiated = Some(negotiated_session(65002, false));
 
@@ -1686,6 +1689,7 @@ async fn err_denied_replacement_is_swept_at_eorr() {
         None,
         None,
         None,
+        false,
     );
     let mut negotiated = negotiated_session(65002, false);
     negotiated.peer_enhanced_route_refresh = true;
@@ -1807,6 +1811,7 @@ async fn import_policy_match_next_hop_filters_route() {
         None,
         None,
         None,
+        false,
     );
     session.negotiated = Some(negotiated_session(65002, false));
 
@@ -2285,6 +2290,7 @@ async fn import_policy_filters_rpki_invalid_with_snapshot() {
         None,
         None,
         Some(watch_rx),
+        false,
     );
     let negotiated = negotiated_session(65002, false);
     session
@@ -2420,6 +2426,7 @@ async fn import_policy_filters_aspa_invalid_with_snapshot() {
         None,
         None,
         Some(watch_rx),
+        false,
     );
     let negotiated = negotiated_session(65002, false);
     session

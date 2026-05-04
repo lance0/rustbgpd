@@ -79,6 +79,17 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// RFC 8326 graceful-shutdown initiator: toggle attaching the
+    /// `GRACEFUL_SHUTDOWN` community to outbound updates from this
+    /// session. Receiver behavior on the *other* side of the session
+    /// is what makes this useful — they de-prefer paths carrying the
+    /// community ahead of planned maintenance.
+    UpdateGracefulShutdown {
+        /// `true` attaches the community; `false` clears it.
+        enabled: bool,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
 }
@@ -157,6 +168,7 @@ impl PeerHandle {
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
@@ -175,6 +187,7 @@ impl PeerHandle {
                     session_notify_tx,
                     bmp_tx,
                     validation_rx,
+                    advertise_graceful_shutdown,
                 );
                 session.run().await
             }
@@ -199,6 +212,7 @@ impl PeerHandle {
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
@@ -218,6 +232,7 @@ impl PeerHandle {
                     session_notify_tx,
                     bmp_tx,
                     validation_rx,
+                    advertise_graceful_shutdown,
                 );
                 session.run().await
             }
@@ -465,6 +480,66 @@ impl PeerHandle {
         {
             Ok(result) => result,
             Err(_elapsed) => Err(format!("update_export_policy timed out after {deadline:?}")),
+        }
+    }
+
+    /// Toggle attaching the RFC 8326 `GRACEFUL_SHUTDOWN` community to
+    /// outbound updates from this session. Mirrors the
+    /// `update_*_policy` shape for consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task isn't reachable or replies
+    /// with one.
+    pub async fn update_graceful_shutdown(&self, enabled: bool) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(PeerCommand::UpdateGracefulShutdown {
+                enabled,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "session task exited".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "session task dropped reply".to_string())?
+    }
+
+    /// Bounded variant of [`Self::update_graceful_shutdown`]. See
+    /// [`Self::update_import_policy_timeout`] for rationale — same
+    /// wedge class: a session task parked on TCP write back-pressure
+    /// would otherwise park the peer-manager actor here, blocking
+    /// every other gRPC RPC for as long as the session is wedged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, replies with
+    /// one, or doesn't acknowledge inside `deadline`.
+    pub async fn update_graceful_shutdown_timeout(
+        &self,
+        enabled: bool,
+        deadline: Duration,
+    ) -> Result<(), String> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::UpdateGracefulShutdown {
+                    enabled,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| "session task exited".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "session task dropped reply".to_string())?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(format!(
+                "update_graceful_shutdown timed out after {deadline:?}"
+            )),
         }
     }
 

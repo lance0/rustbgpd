@@ -257,7 +257,7 @@ and more explicit internal architecture.
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
 | Interop suites | 31 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR (12 gated on every PR; remainder run locally) |
-| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR |
+| Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
 ```bash
@@ -290,7 +290,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN VTEP kernel reconciliation (Gate 7b — RR + Phase-2 declarative foundation work), VPNv4/v6, Confederation, TCP-AO |
-| **Tests** | Workspace test suite, fuzz targets, 31 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (12 interop tests gated on every PR) |
+| **Tests** | Workspace test suite, fuzz targets, 32 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (13 interop tests gated on every PR) |
 
 ## Documentation
 

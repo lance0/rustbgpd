@@ -150,6 +150,20 @@ enum Command {
     /// Trigger an on-demand MRT dump
     MrtDump,
 
+    /// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates
+    /// for one peer (`--peer X`) or every currently-managed peer (omit
+    /// `--peer`). Receivers that honor RFC 8326 will set local_pref = 0
+    /// on tagged paths, draining traffic ahead of planned maintenance.
+    Gshut {
+        /// Peer address; omit to toggle for all peers.
+        #[arg(long)]
+        peer: Option<String>,
+
+        /// Clear instead of enabling.
+        #[arg(long)]
+        clear: bool,
+    },
+
     /// Live TUI dashboard
     Top {
         /// Poll interval in seconds (1-60)
@@ -757,6 +771,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Metrics => commands::control::metrics(connection).await,
         Command::Shutdown { reason } => commands::control::shutdown(connection, reason, json).await,
         Command::MrtDump => commands::control::mrt_dump(connection, json).await,
+        Command::Gshut { peer, clear } => {
+            commands::neighbor::set_graceful_shutdown(connection, peer, !clear, json).await
+        }
         Command::Top { interval } => {
             if !(1..=60).contains(&interval) {
                 return Err(CliError::Argument(

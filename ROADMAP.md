@@ -221,40 +221,55 @@ this document is reference / long-tail.
   tear-down + fresh-establish slip through; uptime resets to ~0 on a
   new handle, so the monotonicity guard catches that case).
   Mirrors the M33 scale harness's flapCount pattern.
-- [ ] **BGP Graceful Shutdown (RFC 8326).** The well-known
-  `GRACEFUL_SHUTDOWN` community (0xFFFF_0000 / 65535:0) is not
-  recognized natively. Operators wanting de-pref-on-maintenance
-  semantics can write the policy by hand today (`match_community
-  = "65535:0"` + `set_local_pref = 0`), but there's no
-  ergonomic surface and no way to *advertise* GShut on planned
-  shutdown. Four-part landing:
-    - **Wire**: `pub const COMMUNITY_GRACEFUL_SHUTDOWN: u32 =
-      0xFFFF_0000;` next to the LLGR constants. Non-breaking
-      addition.
-    - **Policy alias**: `parse_community_match` accepts
-      `"GRACEFUL_SHUTDOWN"` like it already does for
-      `NO_EXPORT` / `NO_ADVERTISE` / `NO_EXPORT_SUBCONFED`.
-    - **Inbound honor (opt-in)**: TOML knob `[global.policy]
-      honor_graceful_shutdown = true` injects an implicit
-      head-of-chain rule (`match GRACEFUL_SHUTDOWN → set
-      local_pref = 0`) on every peer's import chain. Off by
-      default; on for operators who want RFC 8326 receiver
-      behavior without writing the policy by hand.
-    - **Outbound advertise**: gRPC
-      `SetGracefulShutdown { peer: Option<String>, enabled:
-      bool }` toggles attaching the community to all outbound
-      routes for the named peer (or all peers when `None`).
-      Companion CLI: `rustbgpctl shutdown gshut [--peer X]`
-      / `--clear`. Mirrors how operators run planned
-      maintenance on IXPs.
-    - **Interop test (M35-ish)**: rustbgpd ↔ FRR, advertise
-      GShut, assert FRR de-prefers; inbound honor knob,
-      assert local_pref = 0 on tagged routes.
-  Net: ~150 LOC across wire / policy / config / api / cli /
-  interop. No protocol risk (just a community + receiver-side
-  policy convention; no capability negotiation needed). Ranks
-  ahead of BLACKHOLE (RFC 7999) since GShut is operator-lifecycle
-  and BLACKHOLE is data-plane-only.
+- [x] **BGP Graceful Shutdown (RFC 8326)** — landed end-to-end.
+  Wire crate exposes `COMMUNITY_GRACEFUL_SHUTDOWN`. Policy engine
+  accepts `"GRACEFUL_SHUTDOWN"` as a community alias on both match
+  and set sides. Receiver behavior: opt-in `[global]
+  honor_graceful_shutdown = true` knob appends an implicit
+  chain-tail rule (`match GRACEFUL_SHUTDOWN → set local_pref = 0`)
+  to every EBGP peer's import chain — chain tail (not head) so the
+  demotion wins last-writer-accumulation against any operator
+  policy that also sets `LOCAL_PREF`; iBGP exempt. Initiator
+  behavior: gRPC `NeighborService.SetGracefulShutdown { address,
+  enabled }` (empty address = all peers) + `rustbgpctl gshut
+  [--peer X] [--clear]` operator-runtime toggle stored on
+  `ManagedPeer` + mirrored to live session, replayed on session
+  restart, triggers `RibUpdate::RefreshPeerOutbound` so the wire
+  state updates immediately. M35 interop validates both legs +
+  the clear leg against FRR 10.3.1. ADR-0053. See `KNOWN_ISSUES.md`
+  for the confederation gating + restart-persistence + dynamic-peer
+  replay limitations called out below.
+- [ ] **RFC 8326 confederation gating.** When confederations land,
+  the EBGP gate inside `effective_policy_chains_for_neighbor` —
+  currently `neighbor.remote_asn != self.global.asn` — needs to
+  key off an explicit `is_external_neighbor()` helper that knows
+  about confederation sub-AS topology. The current gate is correct
+  for the traditional EBGP/iBGP topology rustbgpd supports today;
+  this becomes load-bearing only when confederations land. Tracked
+  in `KNOWN_ISSUES.md`.
+- [ ] **RFC 8326 dynamic-peer GShut replay.** Static + collision-
+  replaced + static-reconcile-rebuilt sessions inherit
+  `advertise_graceful_shutdown` from `ManagedPeer` on spawn.
+  Dynamic peers auto-removed when their session goes Idle lose the
+  entire `ManagedPeer` record; a fresh session at the same address
+  starts with the toggle off. Either extend the dead-letter side
+  table from ADR-0042 to track GShut state, or document the
+  operator workaround (re-issue `rustbgpctl gshut`) as the
+  supported path. ~30 LOC if we extend the side table.
+- [ ] **RFC 8326 honor knob hot-reload.** SIGHUP currently can't
+  flip `[global] honor_graceful_shutdown` — the implicit chain-tail
+  rule is composed at session-spawn / policy-update time and the
+  reload path doesn't propagate the diff. Pinned with `error!` log
+  today; tracked here for the eventual hot-apply (likely calling
+  `update_runtime_policies` on every EBGP peer when this field
+  flips, equivalent to a forced policy refresh).
+- [ ] **M35 FlowSpec + EVPN initiator-leg coverage.** The outbound
+  attach helper `attach_graceful_shutdown_if_enabled` is wired at
+  all three outbound sites (unicast, FlowSpec, EVPN) but M35 only
+  exercises the IPv4 unicast path. Add per-family interop tests
+  (e.g. M35b for FlowSpec, M35c for EVPN) to validate the helper
+  is hit on the right family-specific outbound emission paths. ~80
+  LOC of additional clab + scripts per family.
 - [x] **Resolve open `cargo audit` findings** (v0.13.2) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
   unreachable in v0.13.2:
@@ -311,6 +326,7 @@ this document is reference / long-tail.
 - [x] **EVPN VTEP foundation — declarative EVI/VNI domain model** (v0.13.0) — Gate 7a per `docs/evpn-enablement.md`. New `crates/evpn` exposes the runtime [`EvpnInstance`] / [`EvpnInstanceTable`] types; `[[evpn_instances]]` config block lands the operator-facing TOML surface (VNI, RD, RTs, local VTEP IP, optional bridge, `advertise_svi_mac`); read-only `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances` surface the resolved table. Wire crate gains `RouteDistinguisher::from_str`. Empty by default — RR-only deployments unchanged. Kernel reconciliation + Type 2/3 origination land in Gate 7b. ADR-0052.
 - [x] **Tier-1 post-release cleanup bundle** (v0.13.1) — three small operational items: prometheus 0.13 → 0.14 (clears RUSTSEC-2024-0437; protobuf 3.x API migration in 4 internal/test files); M34 SIGHUP-policy interop test now reads rustbgpd's own `flapCount` + `uptimeSeconds` instead of FRR's `bgpTimerUpEstablishedEpoch` (cross-checked monotonicity catches handle replacement that flapCount alone would miss); EVPN MP_REACH IPv6 next-hop roundtrip + 32-byte rejection tests close the validate-side audit gap from v0.11.0.
 - [x] **Tier-2 patch bundle** (v0.13.2) — four operational-debt fixes: dead-letter side table on `PeerManager` so dynamic peers don't lose `pending_refresh` / `pending_export_apply` across `BackToIdle` auto-removal; gRPC `ConfigEvent` → persister bridge no longer holds a stale snapshot across SIGHUP (replacement now routes through the bridge so subsequent gRPC mutations don't overwrite the persisted file with `stale_pre_reload + one_mutation`); `apply_reload_outcome` helper tightens post-reload sync ordering with named failure stages; `reload_config` runs on a dedicated tokio task so SIGINT/SIGTERM observation is no longer blocked by an in-flight reload. Stale RUSTSEC-2024-0437 ignore dropped from `.cargo/audit.toml`.
+- [x] **RFC 8326 BGP Graceful Shutdown** (v0.13.3) — well-known `GRACEFUL_SHUTDOWN` community (`65535:0` / `0xFFFF_0000`) end-to-end. Wire constant in `crates/wire`, policy alias on match + set sides, opt-in `[global] honor_graceful_shutdown = true` knob that appends an implicit chain-tail rule (`match GRACEFUL_SHUTDOWN → set local_pref = 0`) to EBGP imports — running at the chain tail rather than head guarantees the demotion wins last-writer accumulation against operator policies that also set `LOCAL_PREF`. Initiator side: gRPC `NeighborService.SetGracefulShutdown` + `rustbgpctl gshut [--peer X] [--clear]` toggle. Desired state lives on `ManagedPeer` and replays into freshly spawned sessions on collision-replace / inbound-accept; new `RibUpdate::RefreshPeerOutbound` forces re-emission of `AdjRibOut` routes so the toggle is visible on the wire immediately. Typed `SetGshutError::PeerNotFound` / `Internal` distinguishes operator-typo from session/RIB failures at the gRPC layer. New `Route.local_pref_attr` proto field surfaces the explicit-vs-default `LOCAL_PREF` distinction. M35 interop validates both legs (FRR → rustbgpd inbound honor + rustbgpd → FRR outbound advertise + clear) end-to-end against FRR 10.3.1. ADR-0053. Confederation gating + cross-restart persistence + dynamic-peer replay tracked as follow-ups.
 
 ### P0–P2.5 — Complete
 

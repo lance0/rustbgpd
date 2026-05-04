@@ -232,10 +232,61 @@ impl Config {
         }
     }
 
+    /// Build the implicit RFC 8326 chain-tail import rule:
+    /// `match community = GRACEFUL_SHUTDOWN → permit, set local_pref = 0`.
+    ///
+    /// **Runs LAST in the resolved chain**, not first. `PolicyChain::evaluate`
+    /// short-circuits on `Deny` but accumulates modifications across `Permit`
+    /// matches with last-writer-wins semantics on scalar fields like
+    /// `set_local_pref`. If the implicit rule ran at index 0 and a later
+    /// operator policy explicitly set `local_pref = 200` on the same route,
+    /// the operator's value would overwrite the `GShut` demotion — silently
+    /// breaking the RFC 8326 §4 receiver guarantee. Running at the chain
+    /// tail flips the precedence: operator policy still gets to deny
+    /// (short-circuits), but any route that survives the chain as `Permit`
+    /// has the canonical `local_pref = 0` in the accumulated modifications.
+    fn build_implicit_gshut_policy() -> Policy {
+        Policy {
+            entries: vec![PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Permit,
+                match_community: vec![CommunityMatch::Standard {
+                    value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
+                }],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: RouteModifications {
+                    set_local_pref: Some(0),
+                    ..Default::default()
+                },
+            }],
+            default_action: PolicyAction::Permit,
+        }
+    }
+
     /// Resolve the effective import/export policy chains for one neighbor.
     ///
     /// Per-neighbor named chain overrides per-neighbor inline policy, which
     /// overrides the corresponding global named chain or global inline policy.
+    ///
+    /// When `[global] honor_graceful_shutdown = true` AND the neighbor is
+    /// EBGP, the resolved import chain is prepended with an implicit RFC
+    /// 8326 §4 receiver rule. iBGP is intentionally exempt — `LOCAL_PREF`
+    /// is preserved within an AS, so re-applying the rule per iBGP hop
+    /// would clobber values set legitimately upstream at the EBGP edge.
     pub fn effective_policy_chains_for_neighbor(
         &self,
         neighbor: &Neighbor,
@@ -323,6 +374,29 @@ impl Config {
             )?
         }
         .or_else(|| global_export.clone());
+
+        // RFC 8326 §4 receiver: append implicit GShut rule to the end
+        // of the EBGP import chain when honor_graceful_shutdown is on.
+        // Running LAST guarantees the `GShut` demotion (set_local_pref=0)
+        // wins over any operator policy that also sets local_pref —
+        // PolicyChain::evaluate accumulates with last-writer-wins
+        // semantics on scalar fields. Operator denies still
+        // short-circuit (no demotion needed if the route is dropped).
+        //
+        // FUTURE: when confederation support lands, the EBGP gate
+        // should key off an explicit `is_external_neighbor()` helper
+        // that knows about confederation sub-AS topology rather than
+        // the simple `remote_asn != global.asn` shortcut. Tracked in
+        // ROADMAP under "RFC 8326 confederation gating".
+        let is_ebgp = neighbor.remote_asn != self.global.asn;
+        let import = if self.global.honor_graceful_shutdown && is_ebgp {
+            let gshut = Self::build_implicit_gshut_policy();
+            let mut chain = import.unwrap_or_default();
+            chain.policies.push(gshut);
+            Some(chain)
+        } else {
+            import
+        };
 
         Ok((import, export))
     }

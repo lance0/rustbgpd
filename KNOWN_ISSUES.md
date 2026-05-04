@@ -69,6 +69,65 @@ resolved.
 
 ## Limitations (by design, not bugs)
 
+- **RFC 8326 receiver gating doesn't yet know about confederations.**
+  When `[global] honor_graceful_shutdown = true`, the implicit chain-
+  tail demotion rule fires only on EBGP peers. The current EBGP gate
+  is a simple `neighbor.remote_asn != self.global.asn` comparison.
+  This is correct for traditional EBGP/iBGP topologies (which is all
+  rustbgpd supports today) but will be wrong once confederation
+  support lands: confederation-EBGP peers have a different sub-AS
+  but are still inside the same routing domain for `LOCAL_PREF`
+  preservation purposes. When confederations land, the gate should
+  key off an explicit `is_external_neighbor()` helper that knows
+  about the sub-AS topology. Tracked under "RFC 8326 confederation
+  gating" in `ROADMAP.md`. No-op for the current release because
+  rustbgpd doesn't support confederations yet.
+
+- **RFC 8326 initiator toggle does not persist across daemon restart.**
+  `rustbgpctl gshut --peer X` flips a runtime bool on `ManagedPeer`
+  + the corresponding session, and triggers a RIB refresh so the
+  community appears on the wire. The toggle survives session flaps
+  and collision-replaces during the daemon's lifetime, but is lost
+  on daemon restart by design (RFC 8326 is a maintenance-window
+  action, not steady-state config). Operators running planned
+  maintenance that includes a daemon restart should re-issue the
+  `gshut` command after the daemon comes back. If you want
+  permanent GShut behavior, write it into export policy as
+  `set_community_add = ["GRACEFUL_SHUTDOWN"]` instead.
+
+- **RFC 8326 toggle does not replay onto dynamic peers that
+  re-establish.** Static + inbound-collision-replaced + static-
+  reconcile-rebuilt sessions inherit the toggle from `ManagedPeer`
+  on spawn. Dynamic peers auto-removed when the session goes Idle
+  (the `[[dynamic_neighbors]]` lifecycle) lose their `ManagedPeer`
+  record entirely; when a new session arrives at the same address,
+  the new `ManagedPeer` starts at `advertise_graceful_shutdown =
+  false`. The dead-letter side table (ADR-0042) preserves
+  `pending_refresh` / `pending_export_apply` across this transition
+  but does not currently track GShut state. Re-issue `rustbgpctl
+  gshut --peer X` after a dynamic peer re-establishes if the
+  maintenance window is still active.
+
+- **RFC 8326 honor_graceful_shutdown is SIGHUP-restart-required.**
+  The implicit chain-tail rule is composed at session-spawn /
+  policy-update time; `reload_config` doesn't currently propagate
+  flips of this field through the policy diff engine to already-
+  Established sessions. The reload path detects the diff and pins
+  the field back to the live value with an explicit `error!` log,
+  so drift is loud rather than silent. Restart the daemon to apply
+  a `false → true` (or vice versa) flip. Hot-apply on reload is
+  tracked in ROADMAP under "RFC 8326 honor knob hot-reload".
+
+- **RFC 8326 outbound attach interop only validated for IPv4
+  unicast.** The `attach_graceful_shutdown_if_enabled` helper is
+  wired at all three outbound advertise sites (unicast, FlowSpec,
+  EVPN) so the wire-level behavior is uniform across families, but
+  M35 only exercises the IPv4 unicast path end-to-end against FRR.
+  FlowSpec and EVPN coverage is tracked in ROADMAP as a future
+  test extension; the unit-level evidence (helper called at all
+  three sites, attach is idempotent and folds into existing
+  `Communities`) carries the rest of the way for now.
+
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does

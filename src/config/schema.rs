@@ -142,6 +142,18 @@ pub struct Global {
     /// Maximum number of dynamic (prefix-based) neighbors. Default 100.
     #[serde(default)]
     pub dynamic_neighbor_limit: Option<u32>,
+    /// Honor RFC 8326 `GRACEFUL_SHUTDOWN` community on inbound EBGP routes
+    /// by appending an implicit chain-tail rule that sets `local_pref = 0`
+    /// on tagged routes. Off by default. Per RFC 8326 §4 receivers
+    /// SHOULD apply this on EBGP sessions; iBGP is unaffected because
+    /// `LOCAL_PREF` is preserved within an AS and re-clobbering it here
+    /// would overwrite values set legitimately upstream.
+    ///
+    /// SIGHUP-restart-required: `reload_config` pins this field back to
+    /// the live value because the implicit rule is composed at session-
+    /// spawn / policy-update time, not on reload.
+    #[serde(default)]
+    pub honor_graceful_shutdown: bool,
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,

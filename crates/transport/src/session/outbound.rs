@@ -85,6 +85,29 @@ impl PeerSession {
         });
     }
 
+    /// RFC 8326 initiator: when `advertise_graceful_shutdown` is set
+    /// (via gRPC `SetGracefulShutdown`), ensure every outbound update
+    /// carries the `GRACEFUL_SHUTDOWN` community. If the route already
+    /// has a `Communities` attribute, the value is folded in; otherwise
+    /// a new `Communities` attribute is added. Idempotent — re-applying
+    /// to an already-tagged route is a no-op.
+    fn attach_graceful_shutdown_if_enabled(&self, attrs: &mut Vec<PathAttribute>) {
+        if !self.advertise_graceful_shutdown {
+            return;
+        }
+        for attr in attrs.iter_mut() {
+            if let PathAttribute::Communities(comms) = attr {
+                if !comms.contains(&rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN) {
+                    comms.push(rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN);
+                }
+                return;
+            }
+        }
+        attrs.push(PathAttribute::Communities(vec![
+            rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
+        ]));
+    }
+
     fn route_origin_key(origin: rustbgpd_rib::RouteOrigin) -> u8 {
         match origin {
             rustbgpd_rib::RouteOrigin::Ebgp => 0,
@@ -1085,6 +1108,7 @@ impl PeerSession {
             Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
             Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
         };
+        self.attach_graceful_shutdown_if_enabled(&mut attrs);
         self.strip_llgr_stale_if_needed(&mut attrs, family);
 
         attrs
@@ -1189,6 +1213,7 @@ impl PeerSession {
             }
         }
 
+        self.attach_graceful_shutdown_if_enabled(&mut attrs);
         self.strip_llgr_stale_if_needed(&mut attrs, (route.afi, Safi::FlowSpec));
 
         attrs
@@ -1293,6 +1318,7 @@ impl PeerSession {
             }
         }
 
+        self.attach_graceful_shutdown_if_enabled(&mut attrs);
         self.strip_llgr_stale_if_needed(&mut attrs, (Afi::L2Vpn, Safi::Evpn));
 
         attrs

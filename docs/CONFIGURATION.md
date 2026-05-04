@@ -27,6 +27,7 @@ Required. Defines the local BGP speaker identity.
 | `dynamic_neighbor_limit` | u32 | no     | `100`                | Maximum number of auto-accepted dynamic peers (1--5000) |
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker today) |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
+| `honor_graceful_shutdown` | bool | no  | `false`              | Enable RFC 8326 §4 receiver behavior on EBGP imports — see below |
 
 ```toml
 [global]
@@ -34,6 +35,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/var/lib/rustbgpd"
+honor_graceful_shutdown = true
 ```
 
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
@@ -43,6 +45,50 @@ example `/var/lib/rustbgpd` on a volume, or `/data/rustbgpd`).
 `dynamic_neighbor_limit` caps the number of active peers auto-created from
 `[[dynamic_neighbors]]` ranges. When omitted, rustbgpd allows up to 100 dynamic
 peers at a time.
+
+### `honor_graceful_shutdown` — RFC 8326 receiver behavior
+
+When `true`, rustbgpd appends an implicit chain-tail rule on every
+EBGP peer's import chain:
+
+```
+match community = GRACEFUL_SHUTDOWN (65535:0) → permit, set local_pref = 0
+```
+
+Routes carrying the `GRACEFUL_SHUTDOWN` well-known community land in the RIB
+with `LOCAL_PREF = 0`, demoting the path so any non-shutting peer's path is
+preferred during best-path selection. The originating peer can then close the
+session knowing that traffic has already shifted.
+
+The implicit rule sits at the **end** of the resolved chain so it wins the
+last-writer accumulation against any operator policy that also sets
+`LOCAL_PREF`. Operator denies still short-circuit normally — denied routes
+don't survive to the demotion step.
+
+iBGP peers (`remote_asn == global.asn`) are exempt because `LOCAL_PREF` is
+preserved within an AS; re-applying the demotion per iBGP hop would clobber
+values set legitimately at the upstream EBGP edge. Confederation gating is
+tracked in `KNOWN_ISSUES.md` as a follow-up.
+
+Off by default — the operator opt-in is deliberate, RFC 8326 §4 says receivers
+SHOULD apply this, not MUST.
+
+**SIGHUP is restart-required for this field.** Reload pins
+`honor_graceful_shutdown` back to the live value with an `error!` log if
+operators try to flip it via SIGHUP — the implicit rule is composed at
+session-spawn / policy-update time and the reload path doesn't currently
+propagate the diff to already-Established sessions. Restart the daemon to
+apply a `false → true` (or vice versa) flip. Hot-apply on reload is tracked
+in ROADMAP.
+
+The matching initiator-side toggle (`rustbgpctl gshut`) is a runtime gRPC
+operation, not a config field; see `docs/OPERATIONS.md` for the operator
+workflow.
+
+The `"GRACEFUL_SHUTDOWN"` alias is also accepted everywhere
+`match_community` / `set_community_add` / `set_community_remove` parse
+community values, so policies can refer to it by name without repeating
+`65535:0`.
 
 ---
 

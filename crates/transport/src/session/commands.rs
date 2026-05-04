@@ -98,6 +98,20 @@ impl PeerSession {
                 let _ = reply.send(Ok(()));
                 ControlFlow::Continue(())
             }
+            PeerCommand::UpdateGracefulShutdown { enabled, reply } => {
+                // Idempotent: re-setting to the same value is a no-op.
+                // The toggle takes effect for the next outbound update;
+                // RFC 8326 §5 expects the operator to follow this with
+                // a re-advertise so peers see the tagged routes.
+                self.advertise_graceful_shutdown = enabled;
+                info!(
+                    peer = %self.peer_label,
+                    enabled,
+                    "RFC 8326 graceful-shutdown advertise toggled"
+                );
+                let _ = reply.send(Ok(()));
+                ControlFlow::Continue(())
+            }
             PeerCommand::CollisionDump => {
                 info!(peer = %self.peer_label, "collision dump: sending Cease/7");
                 self.stop_requested = true;
