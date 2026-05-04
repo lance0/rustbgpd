@@ -256,13 +256,12 @@ this document is reference / long-tail.
   table from ADR-0042 to track GShut state, or document the
   operator workaround (re-issue `rustbgpctl gshut`) as the
   supported path. ~30 LOC if we extend the side table.
-- [ ] **RFC 8326 honor knob hot-reload.** SIGHUP currently can't
-  flip `[global] honor_graceful_shutdown` — the implicit chain-tail
-  rule is composed at session-spawn / policy-update time and the
-  reload path doesn't propagate the diff. Pinned with `error!` log
-  today; tracked here for the eventual hot-apply (likely calling
-  `update_runtime_policies` on every EBGP peer when this field
-  flips, equivalent to a forced policy refresh).
+- [x] **RFC 8326 honor knob hot-reload.** SIGHUP flips of
+  `[global] honor_graceful_shutdown` now hot-apply through the peer
+  manager: the live config snapshot advances, every EBGP peer
+  recomputes its effective import/export chains, and any established
+  peer with changed import policy gets the existing route-refresh
+  retry semantics.
 - [ ] **M35 FlowSpec + EVPN initiator-leg coverage.** The outbound
   attach helper `attach_graceful_shutdown_if_enabled` is wired at
   all three outbound sites (unicast, FlowSpec, EVPN) but M35 only

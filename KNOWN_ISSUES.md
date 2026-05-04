@@ -108,16 +108,6 @@ resolved.
   gshut --peer X` after a dynamic peer re-establishes if the
   maintenance window is still active.
 
-- **RFC 8326 honor_graceful_shutdown is SIGHUP-restart-required.**
-  The implicit chain-tail rule is composed at session-spawn /
-  policy-update time; `reload_config` doesn't currently propagate
-  flips of this field through the policy diff engine to already-
-  Established sessions. The reload path detects the diff and pins
-  the field back to the live value with an explicit `error!` log,
-  so drift is loud rather than silent. Restart the daemon to apply
-  a `false → true` (or vice versa) flip. Hot-apply on reload is
-  tracked in ROADMAP under "RFC 8326 honor knob hot-reload".
-
 - **RFC 8326 outbound attach interop only validated for IPv4
   unicast.** The `attach_graceful_shutdown_if_enabled` helper is
   wired at all three outbound advertise sites (unicast, FlowSpec,

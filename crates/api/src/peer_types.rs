@@ -250,6 +250,14 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Hot-apply `[global] honor_graceful_shutdown` by recomputing
+    /// effective runtime policies for EBGP peers.
+    SetHonorGracefulShutdown {
+        /// Whether RFC 8326 receiver behavior is enabled.
+        enabled: bool,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query per-neighbor named import/export chains.
     GetNeighborPolicyChains {
         /// Neighbor address.

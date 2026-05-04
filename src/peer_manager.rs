@@ -1064,6 +1064,78 @@ impl PeerManager {
         Ok(())
     }
 
+    fn policy_resolution_neighbor(
+        config: &Config,
+        address: IpAddr,
+        managed: &ManagedPeer,
+    ) -> crate::config::Neighbor {
+        config
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == address.to_string())
+            .cloned()
+            .unwrap_or_else(|| crate::config::Neighbor {
+                address: address.to_string(),
+                remote_asn: managed.remote_asn,
+                description: None,
+                peer_group: managed.peer_group.clone(),
+                hold_time: None,
+                max_prefixes: None,
+                md5_password: None,
+                ttl_security: None,
+                families: Vec::new(),
+                graceful_restart: None,
+                gr_restart_time: None,
+                gr_stale_routes_time: None,
+                llgr_stale_time: None,
+                local_ipv6_nexthop: None,
+                route_reflector_client: None,
+                route_server_client: None,
+                remove_private_as: None,
+                add_path: None,
+                log_level: None,
+                import_policy: Vec::new(),
+                export_policy: Vec::new(),
+                import_policy_chain: Vec::new(),
+                export_policy_chain: Vec::new(),
+            })
+    }
+
+    async fn set_honor_graceful_shutdown(&mut self, enabled: bool) -> Result<(), String> {
+        if self.current_config.global.honor_graceful_shutdown == enabled {
+            return Ok(());
+        }
+
+        let mut next_config = self.current_config.clone();
+        next_config.global.honor_graceful_shutdown = enabled;
+        let targets: Vec<IpAddr> = self
+            .peers
+            .iter()
+            .filter_map(|(&address, managed)| {
+                (managed.remote_asn != self.local_asn).then_some(address)
+            })
+            .collect();
+
+        for address in targets {
+            let Some(managed) = self.peers.get(&address) else {
+                continue;
+            };
+            let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
+            let (import_policy, export_policy) = next_config
+                .effective_policy_chains_for_neighbor(&neighbor)
+                .map_err(|e| e.to_string())?;
+            self.update_runtime_policies(address, import_policy, export_policy)
+                .await?;
+        }
+
+        self.current_config = next_config;
+        info!(
+            enabled,
+            "hot-applied [global] honor_graceful_shutdown to EBGP peers"
+        );
+        Ok(())
+    }
+
     fn peer_manager_config_from_resolved(
         resolved: crate::config::ResolvedNeighbor,
         gr_restart_eligible: bool,
@@ -1823,6 +1895,10 @@ impl PeerManager {
                             ).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
+                            let result = self.set_honor_graceful_shutdown(enabled).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
                             let _ = reply.send(neighbor_policy_chains_from_config(&self.current_config, address));
                         }
@@ -2037,14 +2113,24 @@ mod tests {
         handle: PeerHandle,
         pending_refresh: bool,
     ) {
-        let peer_config = make_config(addr, 65002);
+        insert_test_managed_peer_with_asn(mgr, addr, 65002, handle, pending_refresh);
+    }
+
+    fn insert_test_managed_peer_with_asn(
+        mgr: &mut PeerManager,
+        addr: IpAddr,
+        remote_asn: u32,
+        handle: PeerHandle,
+        pending_refresh: bool,
+    ) {
+        let peer_config = make_config(addr, remote_asn);
         let transport = mgr.build_transport_config(&peer_config);
         let hold = transport.peer.hold_time;
         mgr.peers.insert(
             addr,
             ManagedPeer {
                 handle,
-                remote_asn: 65002,
+                remote_asn,
                 description: "test".to_string(),
                 peer_group: None,
                 enabled: true,
@@ -2060,6 +2146,34 @@ mod tests {
                 advertise_graceful_shutdown: false,
             },
         );
+    }
+
+    fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
+        crate::config::Neighbor {
+            address: addr.to_string(),
+            remote_asn,
+            description: None,
+            peer_group: None,
+            hold_time: None,
+            max_prefixes: None,
+            md5_password: None,
+            ttl_security: None,
+            families: Vec::new(),
+            graceful_restart: None,
+            gr_restart_time: None,
+            gr_stale_routes_time: None,
+            llgr_stale_time: None,
+            local_ipv6_nexthop: None,
+            route_reflector_client: None,
+            route_server_client: None,
+            remove_private_as: None,
+            add_path: None,
+            log_level: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
+            import_policy_chain: Vec::new(),
+            export_policy_chain: Vec::new(),
+        }
     }
 
     #[tokio::test]
@@ -2838,6 +2952,141 @@ mod tests {
             "a queued or follow-up policy update for a peer deleted during the failure window \
              must no-op cleanly, not resurrect stale pending state: {retry_after_delete:?}"
         );
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        fn fake_established_peer(
+            addr: IpAddr,
+            import_updates: Arc<AtomicU32>,
+            refresh_calls: Arc<AtomicU32>,
+        ) -> PeerHandle {
+            let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+            let task = tokio::spawn(async move {
+                while let Some(cmd) = session_rx.recv().await {
+                    match cmd {
+                        PeerCommand::UpdateImportPolicy { reply, .. } => {
+                            import_updates.fetch_add(1, Ordering::SeqCst);
+                            let _ = reply.send(Ok(()));
+                        }
+                        PeerCommand::UpdateExportPolicy { reply, .. } => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        PeerCommand::QueryState { reply } => {
+                            let _ = reply.send(PeerSessionState {
+                                fsm_state: SessionState::Established,
+                                peer_ip: addr,
+                                prefix_count: 0,
+                                negotiated_hold_time: Some(90),
+                                four_octet_as: Some(true),
+                                remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                                updates_received: 0,
+                                updates_sent: 0,
+                                notifications_received: 0,
+                                notifications_sent: 0,
+                                flap_count: 0,
+                                uptime_secs: 1,
+                                last_error: String::new(),
+                            });
+                        }
+                        PeerCommand::SendRouteRefresh { reply, .. } => {
+                            refresh_calls.fetch_add(1, Ordering::SeqCst);
+                            let _ = reply.send(Ok(()));
+                        }
+                        PeerCommand::Shutdown => break,
+                        _ => {}
+                    }
+                }
+                Ok(())
+            });
+            PeerHandle::from_parts(session_tx, task)
+        }
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let rib_drainer = tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+
+        let ebgp = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let ibgp = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        mgr.current_config.neighbors =
+            vec![config_neighbor(ebgp, 65002), config_neighbor(ibgp, 65001)];
+
+        let ebgp_import_updates = Arc::new(AtomicU32::new(0));
+        let ebgp_refresh_calls = Arc::new(AtomicU32::new(0));
+        let ibgp_import_updates = Arc::new(AtomicU32::new(0));
+        let ibgp_refresh_calls = Arc::new(AtomicU32::new(0));
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            ebgp,
+            65002,
+            fake_established_peer(
+                ebgp,
+                ebgp_import_updates.clone(),
+                ebgp_refresh_calls.clone(),
+            ),
+            false,
+        );
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            ibgp,
+            65001,
+            fake_established_peer(
+                ibgp,
+                ibgp_import_updates.clone(),
+                ibgp_refresh_calls.clone(),
+            ),
+            false,
+        );
+
+        let result = mgr.set_honor_graceful_shutdown(true).await;
+        assert!(result.is_ok(), "hot-apply must succeed: {result:?}");
+        assert!(mgr.current_config.global.honor_graceful_shutdown);
+        assert_eq!(
+            ebgp_import_updates.load(Ordering::SeqCst),
+            1,
+            "EBGP peer must receive recomputed import policy with the implicit GShut rule"
+        );
+        assert_eq!(
+            ebgp_refresh_calls.load(Ordering::SeqCst),
+            1,
+            "Established EBGP peer must get route refresh after the import chain changes"
+        );
+        assert_eq!(
+            ibgp_import_updates.load(Ordering::SeqCst),
+            0,
+            "iBGP peer must be exempt from RFC 8326 receiver hot-apply"
+        );
+        assert_eq!(
+            ibgp_refresh_calls.load(Ordering::SeqCst),
+            0,
+            "iBGP exemption also means no route refresh"
+        );
+
+        mgr.delete_peer(ebgp, false).await.unwrap();
+        mgr.delete_peer(ibgp, false).await.unwrap();
+        drop(mgr);
+        let _ = rib_drainer.await;
     }
 
     /// Regression for a high-severity gap in the prior code: when

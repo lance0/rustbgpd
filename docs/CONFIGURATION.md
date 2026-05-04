@@ -73,13 +73,9 @@ tracked in `KNOWN_ISSUES.md` as a follow-up.
 Off by default — the operator opt-in is deliberate, RFC 8326 §4 says receivers
 SHOULD apply this, not MUST.
 
-**SIGHUP is restart-required for this field.** Reload pins
-`honor_graceful_shutdown` back to the live value with an `error!` log if
-operators try to flip it via SIGHUP — the implicit rule is composed at
-session-spawn / policy-update time and the reload path doesn't currently
-propagate the diff to already-Established sessions. Restart the daemon to
-apply a `false → true` (or vice versa) flip. Hot-apply on reload is tracked
-in ROADMAP.
+SIGHUP hot-applies this field. When the value flips, rustbgpd recomputes
+runtime policies for EBGP peers and sends route refresh where needed so
+already-established sessions see the implicit rule without a daemon restart.
 
 The matching initiator-side toggle (`rustbgpctl gshut`) is a runtime gRPC
 operation, not a config field; see `docs/OPERATIONS.md` for the operator
