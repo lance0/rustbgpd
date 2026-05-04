@@ -3320,7 +3320,7 @@ hold_time = 90
 }
 
 #[test]
-fn effective_chain_prepends_gshut_when_honor_enabled_for_ebgp() {
+fn effective_chain_appends_gshut_when_honor_enabled_for_ebgp() {
     let cfg = parse(&gshut_toml(true, 65002)).unwrap();
     let neighbor = &cfg.neighbors[0];
     let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
@@ -3329,13 +3329,14 @@ fn effective_chain_prepends_gshut_when_honor_enabled_for_ebgp() {
         !chain.policies.is_empty(),
         "implicit GShut policy must be present"
     );
-    let stmt = &chain.policies[0].entries[0];
+    let last = chain.policies.last().expect("chain not empty");
+    let stmt = &last.entries[0];
     assert_eq!(
         stmt.match_community,
         vec![rustbgpd_policy::CommunityMatch::Standard {
             value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
         }],
-        "first statement must match GRACEFUL_SHUTDOWN"
+        "tail statement must match GRACEFUL_SHUTDOWN"
     );
     assert_eq!(
         stmt.modifications.set_local_pref,
@@ -3345,7 +3346,7 @@ fn effective_chain_prepends_gshut_when_honor_enabled_for_ebgp() {
 }
 
 #[test]
-fn effective_chain_does_not_prepend_gshut_for_ibgp() {
+fn effective_chain_does_not_append_gshut_for_ibgp() {
     // remote_asn == local asn (65001) → iBGP, exempt per RFC 8326 §4.
     let cfg = parse(&gshut_toml(true, 65001)).unwrap();
     let neighbor = &cfg.neighbors[0];
@@ -3357,7 +3358,7 @@ fn effective_chain_does_not_prepend_gshut_for_ibgp() {
 }
 
 #[test]
-fn effective_chain_does_not_prepend_gshut_when_honor_disabled() {
+fn effective_chain_does_not_append_gshut_when_honor_disabled() {
     let cfg = parse(&gshut_toml(false, 65002)).unwrap();
     let neighbor = &cfg.neighbors[0];
     let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
@@ -3368,12 +3369,12 @@ fn effective_chain_does_not_prepend_gshut_when_honor_disabled() {
 }
 
 #[test]
-fn effective_chain_gshut_runs_before_operator_chain() {
-    // Operator-configured deny-all import chain. The implicit GShut rule
-    // must sit at chain.policies[0] so it executes first; the operator's
-    // deny still applies on subsequent statements but the GShut
-    // local_pref modification has already landed for any route that the
-    // chain ultimately permits.
+fn effective_chain_gshut_runs_after_operator_chain() {
+    // Implicit GShut rule must sit at the END of the chain so its
+    // set_local_pref=0 wins over an operator policy that also sets
+    // local_pref. PolicyChain::evaluate accumulates with last-writer-
+    // wins on scalar fields; running first would let the operator's
+    // value silently overwrite the GShut demotion.
     let toml = r#"
 [global]
 asn = 65001
@@ -3399,15 +3400,94 @@ import_policy_chain = ["deny-everything"]
     let chain = import.expect("EBGP + honor enabled must yield an import chain");
     assert!(
         chain.policies.len() >= 2,
-        "chain must contain implicit GShut policy + operator's deny-everything"
+        "chain must contain operator's deny-everything + implicit GShut policy"
     );
-    let first = &chain.policies[0].entries[0];
+    let last = chain.policies.last().expect("chain not empty");
+    let stmt = &last.entries[0];
     assert_eq!(
-        first.match_community,
+        stmt.match_community,
         vec![rustbgpd_policy::CommunityMatch::Standard {
             value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
         }],
-        "implicit GShut policy must be at index 0, before operator policies"
+        "implicit GShut policy must be at chain tail (last index), AFTER operator policies"
+    );
+}
+
+#[test]
+fn gshut_demotion_wins_over_operator_local_pref() {
+    // Headline RFC 8326 §4 invariant: when both an operator policy
+    // and the implicit GShut rule set local_pref on the same route,
+    // the GShut demotion must win — otherwise an operator who set
+    // local_pref = 200 on EBGP imports would silently defeat the
+    // RFC 8326 receiver semantics for any GShut-tagged path.
+    use rustbgpd_policy::{RouteContext, evaluate_chain};
+    use rustbgpd_wire::{AspaValidation, RpkiValidation};
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_graceful_shutdown = true
+
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.bump-local-pref]
+default_action = "permit"
+
+  [[policy.definitions.bump-local-pref.statements]]
+  prefix = "0.0.0.0/0"
+  ge = 0
+  action = "permit"
+  set_local_pref = 200
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+import_policy_chain = ["bump-local-pref"]
+"#;
+    let cfg = parse(toml).unwrap();
+    let neighbor = &cfg.neighbors[0];
+    let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
+    let chain = import.expect("EBGP + honor enabled must yield an import chain");
+
+    // Build a context for a route carrying GRACEFUL_SHUTDOWN.
+    let prefix = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        std::net::Ipv4Addr::new(10, 0, 0, 0),
+        8,
+    ));
+    let comms = [rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN];
+    let ctx = RouteContext {
+        prefix,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &comms,
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    let result = evaluate_chain(Some(&chain), &ctx);
+    assert_eq!(
+        result.action,
+        rustbgpd_policy::PolicyAction::Permit,
+        "GShut-tagged route must permit through operator + implicit chain"
+    );
+    assert_eq!(
+        result.modifications.set_local_pref,
+        Some(0),
+        "GShut demotion at chain tail MUST overwrite operator's set_local_pref=200; \
+         got {:?}",
+        result.modifications.set_local_pref
     );
 }
 

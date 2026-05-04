@@ -232,12 +232,19 @@ impl Config {
         }
     }
 
-    /// Build the implicit RFC 8326 head-of-import-chain rule:
+    /// Build the implicit RFC 8326 chain-tail import rule:
     /// `match community = GRACEFUL_SHUTDOWN → permit, set local_pref = 0`.
-    /// Lives at index 0 of the import chain so it runs *before* operator-
-    /// configured policies — those can still subsequently filter the route
-    /// (a deny still denies), but for any route that survives the chain
-    /// the canonical `local_pref = 0` is in place.
+    ///
+    /// **Runs LAST in the resolved chain**, not first. `PolicyChain::evaluate`
+    /// short-circuits on `Deny` but accumulates modifications across `Permit`
+    /// matches with last-writer-wins semantics on scalar fields like
+    /// `set_local_pref`. If the implicit rule ran at index 0 and a later
+    /// operator policy explicitly set `local_pref = 200` on the same route,
+    /// the operator's value would overwrite the `GShut` demotion — silently
+    /// breaking the RFC 8326 §4 receiver guarantee. Running at the chain
+    /// tail flips the precedence: operator policy still gets to deny
+    /// (short-circuits), but any route that survives the chain as `Permit`
+    /// has the canonical `local_pref = 0` in the accumulated modifications.
     fn build_implicit_gshut_policy() -> Policy {
         Policy {
             entries: vec![PolicyStatement {
@@ -368,16 +375,24 @@ impl Config {
         }
         .or_else(|| global_export.clone());
 
-        // RFC 8326 §4 receiver: prepend implicit GShut rule on EBGP imports
-        // when honor_graceful_shutdown is on. The rule sits at index 0 so
-        // operator-configured statements can still filter the route after,
-        // but any permit path through the chain has local_pref = 0
-        // already set on tagged routes.
+        // RFC 8326 §4 receiver: append implicit GShut rule to the end
+        // of the EBGP import chain when honor_graceful_shutdown is on.
+        // Running LAST guarantees the `GShut` demotion (set_local_pref=0)
+        // wins over any operator policy that also sets local_pref —
+        // PolicyChain::evaluate accumulates with last-writer-wins
+        // semantics on scalar fields. Operator denies still
+        // short-circuit (no demotion needed if the route is dropped).
+        //
+        // FUTURE: when confederation support lands, the EBGP gate
+        // should key off an explicit `is_external_neighbor()` helper
+        // that knows about confederation sub-AS topology rather than
+        // the simple `remote_asn != global.asn` shortcut. Tracked in
+        // ROADMAP under "RFC 8326 confederation gating".
         let is_ebgp = neighbor.remote_asn != self.global.asn;
         let import = if self.global.honor_graceful_shutdown && is_ebgp {
             let gshut = Self::build_implicit_gshut_policy();
             let mut chain = import.unwrap_or_default();
-            chain.policies.insert(0, gshut);
+            chain.policies.push(gshut);
             Some(chain)
         } else {
             import
