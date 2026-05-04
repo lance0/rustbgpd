@@ -2543,6 +2543,7 @@ local_vtep_ip = "10.0.0.1"
                     looking_glass: None,
                 },
                 dynamic_neighbor_limit: None,
+                honor_graceful_shutdown: false,
             },
             neighbors: vec![
                 crate::config::Neighbor {

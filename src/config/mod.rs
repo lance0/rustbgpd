@@ -232,10 +232,54 @@ impl Config {
         }
     }
 
+    /// Build the implicit RFC 8326 head-of-import-chain rule:
+    /// `match community = GRACEFUL_SHUTDOWN → permit, set local_pref = 0`.
+    /// Lives at index 0 of the import chain so it runs *before* operator-
+    /// configured policies — those can still subsequently filter the route
+    /// (a deny still denies), but for any route that survives the chain
+    /// the canonical `local_pref = 0` is in place.
+    fn build_implicit_gshut_policy() -> Policy {
+        Policy {
+            entries: vec![PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Permit,
+                match_community: vec![CommunityMatch::Standard {
+                    value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
+                }],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: RouteModifications {
+                    set_local_pref: Some(0),
+                    ..Default::default()
+                },
+            }],
+            default_action: PolicyAction::Permit,
+        }
+    }
+
     /// Resolve the effective import/export policy chains for one neighbor.
     ///
     /// Per-neighbor named chain overrides per-neighbor inline policy, which
     /// overrides the corresponding global named chain or global inline policy.
+    ///
+    /// When `[global] honor_graceful_shutdown = true` AND the neighbor is
+    /// EBGP, the resolved import chain is prepended with an implicit RFC
+    /// 8326 §4 receiver rule. iBGP is intentionally exempt — `LOCAL_PREF`
+    /// is preserved within an AS, so re-applying the rule per iBGP hop
+    /// would clobber values set legitimately upstream at the EBGP edge.
     pub fn effective_policy_chains_for_neighbor(
         &self,
         neighbor: &Neighbor,
@@ -323,6 +367,21 @@ impl Config {
             )?
         }
         .or_else(|| global_export.clone());
+
+        // RFC 8326 §4 receiver: prepend implicit GShut rule on EBGP imports
+        // when honor_graceful_shutdown is on. The rule sits at index 0 so
+        // operator-configured statements can still filter the route after,
+        // but any permit path through the chain has local_pref = 0
+        // already set on tagged routes.
+        let is_ebgp = neighbor.remote_asn != self.global.asn;
+        let import = if self.global.honor_graceful_shutdown && is_ebgp {
+            let gshut = Self::build_implicit_gshut_policy();
+            let mut chain = import.unwrap_or_default();
+            chain.policies.insert(0, gshut);
+            Some(chain)
+        } else {
+            import
+        };
 
         Ok((import, export))
     }
