@@ -298,6 +298,30 @@ impl RibManager {
         let _ = reply.send(Ok(()));
     }
 
+    /// Force re-emission of all currently-advertised routes to a peer
+    /// without changing policy. The export-policy path already does
+    /// the same thing as a side-effect of policy replacement; this
+    /// variant exists for outbound *attribute* surface changes that
+    /// don't go through policy (e.g. RFC 8326 `GShut` community attach
+    /// toggle, where the toggle lives as a per-session bool but
+    /// changing it must trigger a fresh outbound emission so peers
+    /// see the updated wire form on routes already in `AdjRibOut`).
+    pub(super) fn handle_refresh_peer_outbound(
+        &mut self,
+        peer: IpAddr,
+        reply: tokio::sync::oneshot::Sender<Result<(), String>>,
+    ) {
+        if !self.outbound_peers.contains_key(&peer) {
+            let _ = reply.send(Err(format!(
+                "peer {peer} not registered for outbound updates"
+            )));
+            return;
+        }
+        self.dirty_peers.insert(peer);
+        self.distribute_changes(&HashSet::new(), &HashSet::new());
+        let _ = reply.send(Ok(()));
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub(super) fn enqueue_routes_received(
         &mut self,

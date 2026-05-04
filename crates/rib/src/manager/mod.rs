@@ -469,6 +469,9 @@ impl RibManager {
                 export_policy,
                 reply,
             } => self.handle_replace_peer_export_policy(peer, export_policy, reply),
+            RibUpdate::RefreshPeerOutbound { peer, reply } => {
+                self.handle_refresh_peer_outbound(peer, reply);
+            }
             RibUpdate::EndOfRib { peer, afi, safi } => self.handle_end_of_rib(peer, afi, safi),
             RibUpdate::RouteRefreshRequest { peer, afi, safi } => {
                 self.handle_route_refresh_request(peer, afi, safi);

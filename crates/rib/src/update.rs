@@ -257,6 +257,16 @@ pub enum RibUpdate {
         /// Response channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Force re-emission of all currently-advertised routes to a peer
+    /// without changing policy. Used when an outbound *attribute*
+    /// surface changes (e.g. RFC 8326 `GRACEFUL_SHUTDOWN` community
+    /// attach toggle) so the peer sees the updated wire form.
+    RefreshPeerOutbound {
+        /// The target peer.
+        peer: IpAddr,
+        /// Response channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Peer sent us a ROUTE-REFRESH — re-advertise our Loc-RIB for this family.
     RouteRefreshRequest {
         /// The requesting peer.
