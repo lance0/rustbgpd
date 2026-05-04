@@ -59,6 +59,12 @@ pub mod in_memory;
 pub mod reconcile;
 pub mod snapshot;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+
+#[cfg(target_os = "linux")]
+pub use linux::LinuxDataplane;
+
 pub use backoff::{BACKOFF_CAP, BACKOFF_FACTOR, BACKOFF_INITIAL, RetrySchedule};
 pub use dataplane::{Dataplane, DataplaneOp, KernelEvent};
 pub use diff::{Plan, compute_diff};
