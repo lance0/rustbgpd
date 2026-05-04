@@ -76,6 +76,55 @@ fn parse_community_match_well_known() {
     );
 }
 
+#[test]
+fn parse_community_match_graceful_shutdown_alias() {
+    // RFC 8326 §3 — the alias must resolve to the wire-crate constant,
+    // not a duplicated literal, so the spec-mandated value lives in
+    // exactly one place.
+    assert_eq!(
+        parse_community_match("GRACEFUL_SHUTDOWN").unwrap(),
+        CommunityMatch::Standard {
+            value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
+        }
+    );
+}
+
+#[test]
+fn graceful_shutdown_match_fires_on_tagged_route() {
+    // Apply-side: a route carrying 0xFFFF_0000 in its Communities
+    // attribute matches a statement with `match_community =
+    // ["GRACEFUL_SHUTDOWN"]`. This is the receiver-side honor path
+    // (an explicit-policy form; the implicit head-of-chain rule
+    // built into `effective_policy_chains_for_neighbor` is covered
+    // separately in src/config tests).
+    let pl = Policy {
+        entries: vec![stmt(
+            None,
+            PolicyAction::Permit,
+            vec![CommunityMatch::Standard {
+                value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
+            }],
+        )],
+        default_action: PolicyAction::Deny,
+    };
+    let comms = [rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN];
+    let result = evaluate_policy(
+        Some(&pl),
+        v4_prefix([10, 0, 0, 0], 8),
+        &[],
+        &comms,
+        &[],
+        "",
+        0,
+        RpkiValidation::NotFound,
+    );
+    assert_eq!(
+        result.action,
+        PolicyAction::Permit,
+        "GRACEFUL_SHUTDOWN-tagged route must match the explicit alias"
+    );
+}
+
 // -----------------------------------------------------------------------
 // Community matching evaluation
 // -----------------------------------------------------------------------
