@@ -95,19 +95,6 @@ resolved.
   permanent GShut behavior, write it into export policy as
   `set_community_add = ["GRACEFUL_SHUTDOWN"]` instead.
 
-- **RFC 8326 toggle does not replay onto dynamic peers that
-  re-establish.** Static + inbound-collision-replaced + static-
-  reconcile-rebuilt sessions inherit the toggle from `ManagedPeer`
-  on spawn. Dynamic peers auto-removed when the session goes Idle
-  (the `[[dynamic_neighbors]]` lifecycle) lose their `ManagedPeer`
-  record entirely; when a new session arrives at the same address,
-  the new `ManagedPeer` starts at `advertise_graceful_shutdown =
-  false`. The dead-letter side table (ADR-0042) preserves
-  `pending_refresh` / `pending_export_apply` across this transition
-  but does not currently track GShut state. Re-issue `rustbgpctl
-  gshut --peer X` after a dynamic peer re-establishes if the
-  maintenance window is still active.
-
 - **RFC 8326 outbound attach interop only validated for IPv4
   unicast.** The `attach_graceful_shutdown_if_enabled` helper is
   wired at all three outbound advertise sites (unicast, FlowSpec,

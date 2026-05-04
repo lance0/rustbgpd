@@ -247,15 +247,13 @@ this document is reference / long-tail.
   for the traditional EBGP/iBGP topology rustbgpd supports today;
   this becomes load-bearing only when confederations land. Tracked
   in `KNOWN_ISSUES.md`.
-- [ ] **RFC 8326 dynamic-peer GShut replay.** Static + collision-
+- [x] **RFC 8326 dynamic-peer GShut replay.** Static + collision-
   replaced + static-reconcile-rebuilt sessions inherit
   `advertise_graceful_shutdown` from `ManagedPeer` on spawn.
-  Dynamic peers auto-removed when their session goes Idle lose the
-  entire `ManagedPeer` record; a fresh session at the same address
-  starts with the toggle off. Either extend the dead-letter side
-  table from ADR-0042 to track GShut state, or document the
-  operator workaround (re-issue `rustbgpctl gshut`) as the
-  supported path. ~30 LOC if we extend the side table.
+  Dynamic peers now inherit it too: ADR-0042's dead-letter side
+  table snapshots the toggle before `BackToIdle` auto-removal and
+  replays it into the new `ManagedPeer` / inbound session when the
+  peer re-establishes at the same address.
 - [x] **RFC 8326 honor knob hot-reload.** SIGHUP flips of
   `[global] honor_graceful_shutdown` now hot-apply through the peer
   manager: the live config snapshot advances, every EBGP peer

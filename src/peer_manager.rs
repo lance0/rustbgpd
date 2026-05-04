@@ -130,10 +130,14 @@ struct DynamicRange {
 /// that was mid-`pending_refresh` would silently drop the unfired Route
 /// Refresh / export-apply — same correctness risk that
 /// `ManagedPeer::pending_refresh` / `pending_export_apply` exist to close.
+/// The RFC 8326 initiator toggle lives here too: dynamic auto-removal drops
+/// the whole `ManagedPeer`, so this side table is the only place to preserve
+/// an operator's maintenance-window `GShut` toggle across re-establishment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DeadLetteredPending {
     refresh: bool,
     export_apply: bool,
+    graceful_shutdown: bool,
 }
 
 /// Manages the lifecycle of all peer sessions.
@@ -166,9 +170,9 @@ pub struct PeerManager {
     dynamic_peer_count: usize,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
-    /// Dead-lettered hot-apply / Route Refresh intent from dynamic peers
-    /// auto-removed by `BackToIdle`. Restored on the next inbound from
-    /// the same address. Bounded at `dynamic_neighbor_limit` so a
+    /// Dead-lettered hot-apply / Route Refresh / `GShut` intent from dynamic
+    /// peers auto-removed by `BackToIdle`. Restored on the next inbound
+    /// from the same address. Bounded at `dynamic_neighbor_limit` so a
     /// pathological churn pattern can't grow it without bound; an over-
     /// cap insert evicts an arbitrary existing entry with a `warn!`.
     dead_lettered_pending: HashMap<IpAddr, DeadLetteredPending>,
@@ -1301,6 +1305,10 @@ impl PeerManager {
                 let transport = self.build_transport_config(&cfg);
                 let import_policy = cfg.import_policy.clone();
                 let export_policy = cfg.export_policy.clone();
+                let advertise_graceful_shutdown = self
+                    .dead_lettered_pending
+                    .get(&peer_addr)
+                    .is_some_and(|pending| pending.graceful_shutdown);
 
                 let handle = PeerHandle::spawn_inbound(
                     transport.clone(),
@@ -1312,7 +1320,7 @@ impl PeerManager {
                     Some(self.session_notify_tx.clone()),
                     self.bmp_tx.clone(),
                     self.validation_rx.clone(),
-                    false, // dynamic peer starts without GShut advertise
+                    advertise_graceful_shutdown,
                 );
 
                 if let Err(e) = handle.start().await {
@@ -1335,7 +1343,7 @@ impl PeerManager {
                     is_dynamic: true,
                     pending_refresh: false,
                     pending_export_apply: false,
-                    advertise_graceful_shutdown: false,
+                    advertise_graceful_shutdown,
                 };
                 self.peers.insert(peer_addr, managed);
                 self.dynamic_peer_count += 1;
@@ -1424,12 +1432,16 @@ impl PeerManager {
         let Some(managed) = self.peers.get(&peer_addr) else {
             return;
         };
-        if !managed.pending_refresh && !managed.pending_export_apply {
+        if !managed.pending_refresh
+            && !managed.pending_export_apply
+            && !managed.advertise_graceful_shutdown
+        {
             return;
         }
         let entry = DeadLetteredPending {
             refresh: managed.pending_refresh,
             export_apply: managed.pending_export_apply,
+            graceful_shutdown: managed.advertise_graceful_shutdown,
         };
         let cap = self.dynamic_neighbor_limit as usize;
         if cap > 0
@@ -1461,10 +1473,12 @@ impl PeerManager {
         };
         managed.pending_refresh = prev.refresh;
         managed.pending_export_apply = prev.export_apply;
+        managed.advertise_graceful_shutdown = prev.graceful_shutdown;
         info!(
             %peer_addr,
             pending_refresh = prev.refresh,
             pending_export_apply = prev.export_apply,
+            advertise_graceful_shutdown = prev.graceful_shutdown,
             "restored dead-lettered hot-apply intent on dynamic peer re-establishment"
         );
     }
@@ -4432,6 +4446,85 @@ mod tests {
         assert!(
             managed2.pending_export_apply,
             "new ManagedPeer must inherit pending_export_apply from dead-letter table"
+        );
+        assert!(
+            !mgr.dead_lettered_pending.contains_key(&peer_addr2),
+            "dead-letter entry must drain on restore"
+        );
+        drop(next_client_stream);
+    }
+
+    #[tokio::test]
+    async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish() {
+        let (_tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new_with_config(
+            rx,
+            mpsc::unbounded_channel().1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+            None,
+            make_dynamic_manager_config(),
+        );
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+        let (server_stream, remote_addr) = listener.accept().await.unwrap();
+        let client_stream = client.await.unwrap();
+        let peer_addr = remote_addr.ip();
+
+        mgr.handle_inbound(server_stream, peer_addr).await;
+        assert_eq!(mgr.dynamic_peer_count, 1);
+        mgr.peers
+            .get_mut(&peer_addr)
+            .expect("dynamic peer present")
+            .advertise_graceful_shutdown = true;
+
+        mgr.handle_session_notification(SessionNotification::BackToIdle { peer_addr })
+            .await;
+        assert!(mgr.peers.is_empty());
+        let dead = mgr
+            .dead_lettered_pending
+            .get(&peer_addr)
+            .copied()
+            .expect("GShut-only dead-letter entry should be preserved");
+        assert!(
+            dead.graceful_shutdown,
+            "GShut toggle should be carried even when no pending policy flags exist"
+        );
+        assert!(!dead.refresh);
+        assert!(!dead.export_apply);
+        drop(client_stream);
+
+        let next_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let next_listener_addr = next_listener.local_addr().unwrap();
+        let next_client =
+            tokio::spawn(async move { TcpStream::connect(next_listener_addr).await.unwrap() });
+        let (server2, remote_addr2) = next_listener.accept().await.unwrap();
+        let next_client_stream = next_client.await.unwrap();
+        let peer_addr2 = remote_addr2.ip();
+        assert_eq!(
+            peer_addr2, peer_addr,
+            "test relies on both incarnations sharing an IpAddr key"
+        );
+
+        mgr.handle_inbound(server2, peer_addr2).await;
+
+        let managed2 = mgr.peers.get(&peer_addr2).expect("re-established");
+        assert!(
+            managed2.advertise_graceful_shutdown,
+            "new dynamic ManagedPeer must inherit advertise_graceful_shutdown"
+        );
+        assert!(
+            !managed2.pending_refresh && !managed2.pending_export_apply,
+            "GShut-only restore must not synthesize policy retry flags"
         );
         assert!(
             !mgr.dead_lettered_pending.contains_key(&peer_addr2),
