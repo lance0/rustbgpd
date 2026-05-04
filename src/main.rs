@@ -19,6 +19,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod config;
 mod config_persister;
+mod evpn_dataplane;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -1019,6 +1020,19 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         config
             .resolve_evpn_instances()
             .expect("EVPN instances re-resolve cleanly after Config::validate"),
+    );
+
+    // EVPN Linux dataplane reconciler (Gate 7b). Returns None when
+    // [[evpn_instances]] is empty — RR-only deployments don't open a
+    // netlink socket and don't spawn the actor. The handle is held
+    // for the daemon's lifetime; dropping it cancels the reconcile
+    // actor's drain path.
+    let evpn_dataplane_shutdown = tokio_util::sync::CancellationToken::new();
+    let _evpn_dataplane_handle = evpn_dataplane::spawn(
+        evpn_dataplane::SupervisorConfig::default(),
+        &evpn_instances,
+        rib_tx.clone(),
+        evpn_dataplane_shutdown.clone(),
     );
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
