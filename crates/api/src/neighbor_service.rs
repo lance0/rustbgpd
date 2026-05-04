@@ -546,6 +546,44 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
             "runtime dynamic neighbor CRUD not yet implemented; configure via TOML [[dynamic_neighbors]]",
         ))
     }
+
+    async fn set_graceful_shutdown(
+        &self,
+        request: Request<proto::SetGracefulShutdownRequest>,
+    ) -> Result<Response<proto::SetGracefulShutdownResponse>, Status> {
+        if let Some(status) = read_only_rejection(self.access_mode) {
+            return Err(status);
+        }
+        let req = request.into_inner();
+        // Empty address means broadcast to every currently-managed peer
+        // (operator running planned maintenance on the whole router).
+        let address = if req.address.is_empty() {
+            None
+        } else {
+            Some(
+                req.address
+                    .parse::<IpAddr>()
+                    .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
+            )
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.peer_mgr_tx
+            .send(PeerManagerCommand::SetGracefulShutdown {
+                address,
+                enabled: req.enabled,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("peer manager unavailable"))?;
+
+        reply_rx
+            .await
+            .map_err(|_| Status::internal("peer manager dropped reply"))?
+            .map_err(Status::not_found)?;
+
+        Ok(Response::new(proto::SetGracefulShutdownResponse {}))
+    }
 }
 
 #[cfg(test)]

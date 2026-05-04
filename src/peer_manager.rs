@@ -841,6 +841,62 @@ impl PeerManager {
         Ok(())
     }
 
+    /// RFC 8326 graceful-shutdown initiator: toggle `GRACEFUL_SHUTDOWN`
+    /// community attachment for one peer (`Some(addr)`) or every
+    /// currently-managed peer (`None`).
+    ///
+    /// When `address` resolves to multiple peers, attempts dispatch
+    /// sequentially and aggregates per-peer errors into a single
+    /// formatted string. A partial failure (some peers updated, some
+    /// not) returns `Err` so the operator can investigate; the
+    /// successful dispatches stay applied (the toggle is per-session
+    /// state, not transactional).
+    async fn set_graceful_shutdown(
+        &self,
+        address: Option<IpAddr>,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let targets: Vec<IpAddr> = match address {
+            Some(addr) => {
+                if !self.peers.contains_key(&addr) {
+                    return Err(format!("not found: peer {addr}"));
+                }
+                vec![addr]
+            }
+            None => self.peers.keys().copied().collect(),
+        };
+
+        let mut failures: Vec<String> = Vec::new();
+        for addr in &targets {
+            if let Some(managed) = self.peers.get(addr)
+                && let Err(e) = managed.handle.update_graceful_shutdown(enabled).await
+            {
+                warn!(
+                    %addr,
+                    enabled,
+                    error = %e,
+                    "failed to toggle graceful-shutdown on peer session"
+                );
+                failures.push(format!("{addr}: {e}"));
+            }
+        }
+
+        if failures.is_empty() {
+            info!(
+                count = targets.len(),
+                enabled, "RFC 8326 graceful-shutdown toggled on peer set"
+            );
+            Ok(())
+        } else {
+            Err(format!(
+                "graceful-shutdown toggle failed on {} of {} peers: {}",
+                failures.len(),
+                targets.len(),
+                failures.join("; ")
+            ))
+        }
+    }
+
     async fn soft_reset_in(
         &self,
         address: IpAddr,
@@ -1555,6 +1611,10 @@ impl PeerManager {
                         }
                         PeerManagerCommand::SoftResetIn { address, families, reply } => {
                             let result = self.soft_reset_in(address, families).await;
+                            let _ = reply.send(result);
+                        }
+                        PeerManagerCommand::SetGracefulShutdown { address, enabled, reply } => {
+                            let result = self.set_graceful_shutdown(address, enabled).await;
                             let _ = reply.send(result);
                         }
                         PeerManagerCommand::AcceptInbound { stream, peer_addr } => {

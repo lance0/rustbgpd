@@ -106,6 +106,17 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// RFC 8326 graceful-shutdown initiator: toggle attaching the
+    /// `GRACEFUL_SHUTDOWN` community on outbound updates for one peer
+    /// (`Some(addr)`) or every currently-managed peer (`None`).
+    SetGracefulShutdown {
+        /// Peer IP address; `None` applies to all peers.
+        address: Option<IpAddr>,
+        /// `true` attaches the community; `false` clears it.
+        enabled: bool,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Accept an inbound TCP connection for a known peer.
     AcceptInbound {
         /// Already-accepted TCP stream.

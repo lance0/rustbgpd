@@ -79,6 +79,17 @@ pub enum PeerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// RFC 8326 graceful-shutdown initiator: toggle attaching the
+    /// `GRACEFUL_SHUTDOWN` community to outbound updates from this
+    /// session. Receiver behavior on the *other* side of the session
+    /// is what makes this useful — they de-prefer paths carrying the
+    /// community ahead of planned maintenance.
+    UpdateGracefulShutdown {
+        /// `true` attaches the community; `false` clears it.
+        enabled: bool,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Collision resolution: send Cease/7 NOTIFICATION and tear down.
     CollisionDump,
 }
@@ -466,6 +477,28 @@ impl PeerHandle {
             Ok(result) => result,
             Err(_elapsed) => Err(format!("update_export_policy timed out after {deadline:?}")),
         }
+    }
+
+    /// Toggle attaching the RFC 8326 `GRACEFUL_SHUTDOWN` community to
+    /// outbound updates from this session. Mirrors the
+    /// `update_*_policy` shape for consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session task isn't reachable or replies
+    /// with one.
+    pub async fn update_graceful_shutdown(&self, enabled: bool) -> Result<(), String> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.commands
+            .send(PeerCommand::UpdateGracefulShutdown {
+                enabled,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| "session task exited".to_string())?;
+        reply_rx
+            .await
+            .map_err(|_| "session task dropped reply".to_string())?
     }
 
     /// Check if the session task has finished.

@@ -119,6 +119,13 @@ pub(crate) struct PeerSession {
     import_policy: Option<PolicyChain>,
     /// Export policy (sent to RIB manager on `PeerUp` for per-peer filtering).
     export_policy: Option<PolicyChain>,
+    /// RFC 8326 graceful-shutdown initiator toggle: when `true`, every
+    /// outbound update gets `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`)
+    /// added to its Communities attribute (creating one if absent).
+    /// Operator-runtime state (set via gRPC, not policy); resets to
+    /// false on session restart since downstream peers see a fresh
+    /// session and the maintenance signaling needs to be reasserted.
+    advertise_graceful_shutdown: bool,
     /// Channel to notify `PeerManager` of session state changes (collision detection).
     /// Unbounded so notifications are never dropped and never block (avoids
     /// deadlock with `QueryState`). Rate is naturally bounded by FSM transitions.
@@ -258,6 +265,7 @@ impl PeerSession {
             outbound_tx,
             import_policy,
             export_policy,
+            advertise_graceful_shutdown: false,
             session_notify_tx,
             bmp_tx,
             validation_rx,
@@ -327,6 +335,7 @@ impl PeerSession {
             outbound_tx,
             import_policy,
             export_policy,
+            advertise_graceful_shutdown: false,
             session_notify_tx,
             bmp_tx,
             validation_rx,

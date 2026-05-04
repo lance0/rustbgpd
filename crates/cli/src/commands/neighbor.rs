@@ -4,7 +4,8 @@ use crate::output::{self, JsonNeighbor, JsonNeighborDetail};
 use crate::proto::neighbor_service_client::NeighborServiceClient;
 use crate::proto::{
     AddNeighborRequest, DeleteNeighborRequest, DisableNeighborRequest, EnableNeighborRequest,
-    GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, SoftResetInRequest,
+    GetNeighborStateRequest, ListNeighborsRequest, NeighborConfig, SetGracefulShutdownRequest,
+    SoftResetInRequest,
 };
 
 pub async fn list(connection: Connection, json: bool) -> Result<(), CliError> {
@@ -271,6 +272,35 @@ pub async fn softreset(
         "softreset",
         address,
         &format!("Soft reset requested for {address}"),
+    );
+    Ok(())
+}
+
+/// Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates.
+/// `peer = None` applies to every currently-managed peer (operator
+/// running planned maintenance on the whole router).
+pub async fn set_graceful_shutdown(
+    connection: Connection,
+    peer: Option<String>,
+    enabled: bool,
+    json: bool,
+) -> Result<(), CliError> {
+    let mut client =
+        NeighborServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let address = peer.clone().unwrap_or_default();
+    client
+        .set_graceful_shutdown(SetGracefulShutdownRequest {
+            address: address.clone(),
+            enabled,
+        })
+        .await?;
+    let scope = peer.as_deref().unwrap_or("all peers");
+    let verb = if enabled { "enabled" } else { "cleared" };
+    output::print_result(
+        json,
+        "set_graceful_shutdown",
+        scope,
+        &format!("GRACEFUL_SHUTDOWN advertise {verb} for {scope}"),
     );
     Ok(())
 }

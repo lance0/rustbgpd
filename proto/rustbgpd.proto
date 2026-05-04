@@ -99,6 +99,10 @@ service NeighborService {
   rpc ListDynamicNeighbors(ListDynamicNeighborsRequest) returns (ListDynamicNeighborsResponse);
   rpc AddDynamicNeighbor(AddDynamicNeighborRequest) returns (AddDynamicNeighborResponse);
   rpc DeleteDynamicNeighbor(DeleteDynamicNeighborRequest) returns (DeleteDynamicNeighborResponse);
+  // RFC 8326 graceful-shutdown initiator: toggle attaching the
+  // GRACEFUL_SHUTDOWN community (0xFFFF_0000) to outbound updates for
+  // one peer, or all peers when address is empty.
+  rpc SetGracefulShutdown(SetGracefulShutdownRequest) returns (SetGracefulShutdownResponse);
 }
 
 message NeighborConfig {
@@ -219,6 +223,14 @@ message SoftResetInRequest {
 }
 
 message SoftResetInResponse {}
+
+message SetGracefulShutdownRequest {
+  // Per-peer toggle. Empty string means apply to every currently-managed peer.
+  string address = 1;
+  bool enabled = 2;
+}
+
+message SetGracefulShutdownResponse {}
 
 // ---------------------------------------------------------------------------
 // PolicyService — Named policy definitions and chain assignment
