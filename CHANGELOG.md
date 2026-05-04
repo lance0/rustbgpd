@@ -27,6 +27,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   re-incarnates. Regression test:
   `dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establish`.
 
+- **gRPC-config-event bridge no longer holds a stale snapshot across
+  SIGHUP.** The bridge that converts gRPC `ConfigEvent`s into
+  `ReplaceConfig` mutations for the on-disk persister owns its own
+  pre-persist snapshot. SIGHUP-driven reloads previously sent the
+  reloaded snapshot directly to the persister, bypassing the bridge —
+  the bridge's snapshot stayed at the pre-reload state, and the next
+  gRPC mutation overwrote the persisted file with `stale_pre_reload +
+  one_mutation`. Lifted the bridge into a named `run_config_bridge`
+  task that selects on both an event channel and a new
+  `bridge_replace_tx` snapshot-replacement channel (biased toward
+  replacement so a backlog of events can't delay reload visibility).
+  `apply_reload_outcome` now routes through the bridge; the post-
+  SIGHUP gRPC mutation applies to the reloaded snapshot, not the
+  stale one. Regression test:
+  `config_bridge_replacement_makes_subsequent_events_apply_to_new_snapshot`.
+
 - **Post-reload sync ordering.** The SIGHUP arm previously sent the
   config-persister snapshot before the peer-manager internal snapshot;
   if the persister succeeded but the peer-manager send failed (manager
@@ -34,11 +50,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   authoritative runtime view had not, leaving observable but silent
   split-brain across the next gRPC mutation. Lifted the two sends into
   `apply_reload_outcome`: peer manager first (`mpsc::UnboundedSender`,
-  can only fail on receiver-drop and never blocks), persister second.
-  Failure surfaces as a named stage (`peer_mgr_snapshot` /
-  `config_persister`) so the operator log is actionable. Both
-  downstream consumers replace their snapshot wholesale, so the next
-  SIGHUP retries cleanly.
+  can only fail on receiver-drop and never blocks), config bridge
+  second. Failure surfaces as a named stage (`peer_mgr_snapshot` /
+  `config_bridge`) so the operator log is actionable. Both downstream
+  consumers replace their snapshot wholesale, so the next SIGHUP
+  retries cleanly.
 
 ### Changed
 

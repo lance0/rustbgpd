@@ -3665,24 +3665,16 @@ mod tests {
         let (server2, remote_addr2) = next_listener.accept().await.unwrap();
         let next_client_stream = next_client.await.unwrap();
         let peer_addr2 = remote_addr2.ip();
+        // Both incarnations bind LOCALHOST so the IpAddr key (the unit
+        // we dead-letter on) is identical even though the ephemeral
+        // TCP port differs. Pin the precondition explicitly so any
+        // future change that diverges the bind address gets caught.
+        assert_eq!(
+            peer_addr2, peer_addr,
+            "test relies on both incarnations sharing an IpAddr key"
+        );
 
         mgr.handle_inbound(server2, peer_addr2).await;
-
-        // The OS may or may not pick the same loopback port. Force the
-        // address-equivalence test to exercise the carry path by
-        // re-keying the dead-letter entry under whatever address the
-        // second incarnation arrived on.
-        if peer_addr2 != peer_addr {
-            mgr.dead_lettered_pending.remove(&peer_addr);
-            mgr.dead_lettered_pending.insert(
-                peer_addr2,
-                DeadLetteredPending {
-                    refresh: true,
-                    export_apply: true,
-                },
-            );
-            mgr.restore_dead_lettered_pending(peer_addr2);
-        }
 
         let managed2 = mgr.peers.get(&peer_addr2).expect("re-established");
         assert!(
