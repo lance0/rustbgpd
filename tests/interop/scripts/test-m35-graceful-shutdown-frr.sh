@@ -158,16 +158,23 @@ frr_route_json() {
     docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24 json' 2>/dev/null
 }
 
-# Defensive jq: ".paths[0].community" may be absent (no community
-# attribute), null, or contain either ".list" (well-known names) or
-# ".string" (numeric). Try both and treat anything missing as no
-# community.
+# FRR's `show ip bgp X/Y json` renders the community two ways:
+#
+#   "community": {
+#     "string": "graceful-shutdown",     <- hyphenated well-known name
+#     "list":   ["gracefulShutdown"]      <- camelCase well-known name
+#   }
+#
+# Numeric form (65535:0) appears in `.string` only when FRR doesn't
+# recognize the well-known name. Check both forms defensively, and
+# coalesce missing fields to safe defaults so jq -e doesn't false-
+# negative when `.community` is absent entirely.
 frr_has_gshut_community() {
     frr_route_json | jq -e '
         ((.paths // []) | first) as $p
         | ($p.community // {}) as $c
-        | ((($c.list // []) | any(. == "graceful-shutdown"))
-           or (($c.string // "") | test("65535:0")))
+        | ((($c.list // []) | any(. == "gracefulShutdown" or . == "graceful-shutdown"))
+           or (($c.string // "") | test("graceful-shutdown|65535:0")))
     ' > /dev/null 2>&1
 }
 
