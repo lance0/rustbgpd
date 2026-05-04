@@ -94,7 +94,7 @@ fn graceful_shutdown_match_fires_on_tagged_route() {
     // Apply-side: a route carrying 0xFFFF_0000 in its Communities
     // attribute matches a statement with `match_community =
     // ["GRACEFUL_SHUTDOWN"]`. This is the receiver-side honor path
-    // (an explicit-policy form; the implicit head-of-chain rule
+    // (an explicit-policy form; the implicit chain-tail rule
     // built into `effective_policy_chains_for_neighbor` is covered
     // separately in src/config tests).
     let pl = Policy {

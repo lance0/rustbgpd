@@ -248,14 +248,28 @@ this document is reference / long-tail.
   this becomes load-bearing only when confederations land. Tracked
   in `KNOWN_ISSUES.md`.
 - [ ] **RFC 8326 dynamic-peer GShut replay.** Static + collision-
-  replaced sessions inherit `advertise_graceful_shutdown` from
-  `ManagedPeer` on spawn. Dynamic peers auto-removed when their
-  session goes Idle lose the entire `ManagedPeer` record; a fresh
-  session at the same address starts with the toggle off. Either
-  extend the dead-letter side table from ADR-0042 to track GShut
-  state, or document the operator workaround (re-issue
-  `rustbgpctl gshut`) as the supported path. ~30 LOC if we extend
-  the side table.
+  replaced + static-reconcile-rebuilt sessions inherit
+  `advertise_graceful_shutdown` from `ManagedPeer` on spawn.
+  Dynamic peers auto-removed when their session goes Idle lose the
+  entire `ManagedPeer` record; a fresh session at the same address
+  starts with the toggle off. Either extend the dead-letter side
+  table from ADR-0042 to track GShut state, or document the
+  operator workaround (re-issue `rustbgpctl gshut`) as the
+  supported path. ~30 LOC if we extend the side table.
+- [ ] **RFC 8326 honor knob hot-reload.** SIGHUP currently can't
+  flip `[global] honor_graceful_shutdown` — the implicit chain-tail
+  rule is composed at session-spawn / policy-update time and the
+  reload path doesn't propagate the diff. Pinned with `error!` log
+  today; tracked here for the eventual hot-apply (likely calling
+  `update_runtime_policies` on every EBGP peer when this field
+  flips, equivalent to a forced policy refresh).
+- [ ] **M35 FlowSpec + EVPN initiator-leg coverage.** The outbound
+  attach helper `attach_graceful_shutdown_if_enabled` is wired at
+  all three outbound sites (unicast, FlowSpec, EVPN) but M35 only
+  exercises the IPv4 unicast path. Add per-family interop tests
+  (e.g. M35b for FlowSpec, M35c for EVPN) to validate the helper
+  is hit on the right family-specific outbound emission paths. ~80
+  LOC of additional clab + scripts per family.
 - [x] **Resolve open `cargo audit` findings** (v0.13.2) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
   unreachable in v0.13.2:

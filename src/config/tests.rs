@@ -3296,7 +3296,7 @@ local_vtep_ip = "10.0.0.100"
 }
 
 // -----------------------------------------------------------------------
-// RFC 8326 — honor_graceful_shutdown implicit head-of-import-chain rule
+// RFC 8326 — honor_graceful_shutdown implicit chain-tail import rule
 // -----------------------------------------------------------------------
 
 fn gshut_toml(honor: bool, peer_asn: u32) -> String {

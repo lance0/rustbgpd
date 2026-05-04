@@ -455,25 +455,44 @@ Set in `[global]`:
 honor_graceful_shutdown = true
 ```
 
-When enabled, an implicit head-of-import-chain rule fires on every
-EBGP peer — see `docs/CONFIGURATION.md` for the exact semantics.
+When enabled, an implicit chain-tail rule fires on every EBGP peer's
+import chain — see `docs/CONFIGURATION.md` for the exact semantics.
 iBGP peers are exempt because `LOCAL_PREF` is preserved within an AS.
 
 **Verifying the drain is working:**
 
-```bash
-# On the receiver: routes from the draining peer should now show
-# explicit local_pref = 0 in the RIB
-rustbgpctl rib --neighbor <draining-peer> | jq '.routes[] | {prefix, localPref, communities}'
+The community is attached on the wire by the per-peer transport layer
+**after** the RIB-side advertised view is computed, so
+`rustbgpctl rib advertised` does NOT show the GShut community on the
+initiator side — the RIB doesn't know about the toggle. The
+authoritative checks are:
 
-# On the initiator: outbound advertisements should carry 65535:0
-rustbgpctl rib advertised --peer <peer-being-drained> \
-    | jq '.routes[] | select(.communities | index(4294901760))'
+```bash
+# Receiver-side: routes from a draining peer that honor the community
+# show explicit local_pref_attr = 0 in the RIB (proves the implicit
+# chain-tail rule fired). EBGP-received routes have no LOCAL_PREF on
+# the wire, so look at local_pref_attr (explicit) rather than
+# local_pref (proto3 default).
+rustbgpctl rib --neighbor <draining-peer> \
+    | jq '.routes[] | {prefix, localPrefAttr, communities}'
+
+# Initiator-side: confirm the toggle is set on the live session via
+# the daemon log (look for "RFC 8326 graceful-shutdown advertise
+# toggled" in journalctl / Docker logs).
+journalctl -u rustbgpd | grep "graceful-shutdown advertise toggled"
+
+# Or verify on the *receiving* peer's BGP table — the canonical
+# observation. On FRR:
+vtysh -c 'show ip bgp <prefix> json' \
+    | jq '.paths[].community'
+
+# (In a maintenance scenario you usually have control of both ends, so
+# the receiver-side check is what matters for correctness.)
 ```
 
 Interop is validated in M35 (`tests/interop/m35-graceful-shutdown-frr.clab.yml`)
 against FRR 10.3.1 — both legs (FRR → rustbgpd inbound honor +
-rustbgpd → FRR outbound advertise + clear).
+rustbgpd → FRR outbound advertise + clear) end-to-end.
 
 ### Explain best-path selection
 

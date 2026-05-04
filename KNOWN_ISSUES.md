@@ -96,10 +96,10 @@ resolved.
   `set_community_add = ["GRACEFUL_SHUTDOWN"]` instead.
 
 - **RFC 8326 toggle does not replay onto dynamic peers that
-  re-establish.** Static and inbound-collision-replaced sessions
-  inherit the toggle from `ManagedPeer` on spawn. Dynamic peers
-  auto-removed when the session goes Idle (the
-  `[[dynamic_neighbors]]` lifecycle) lose their `ManagedPeer`
+  re-establish.** Static + inbound-collision-replaced + static-
+  reconcile-rebuilt sessions inherit the toggle from `ManagedPeer`
+  on spawn. Dynamic peers auto-removed when the session goes Idle
+  (the `[[dynamic_neighbors]]` lifecycle) lose their `ManagedPeer`
   record entirely; when a new session arrives at the same address,
   the new `ManagedPeer` starts at `advertise_graceful_shutdown =
   false`. The dead-letter side table (ADR-0042) preserves
@@ -107,6 +107,26 @@ resolved.
   but does not currently track GShut state. Re-issue `rustbgpctl
   gshut --peer X` after a dynamic peer re-establishes if the
   maintenance window is still active.
+
+- **RFC 8326 honor_graceful_shutdown is SIGHUP-restart-required.**
+  The implicit chain-tail rule is composed at session-spawn /
+  policy-update time; `reload_config` doesn't currently propagate
+  flips of this field through the policy diff engine to already-
+  Established sessions. The reload path detects the diff and pins
+  the field back to the live value with an explicit `error!` log,
+  so drift is loud rather than silent. Restart the daemon to apply
+  a `false → true` (or vice versa) flip. Hot-apply on reload is
+  tracked in ROADMAP under "RFC 8326 honor knob hot-reload".
+
+- **RFC 8326 outbound attach interop only validated for IPv4
+  unicast.** The `attach_graceful_shutdown_if_enabled` helper is
+  wired at all three outbound advertise sites (unicast, FlowSpec,
+  EVPN) so the wire-level behavior is uniform across families, but
+  M35 only exercises the IPv4 unicast path end-to-end against FRR.
+  FlowSpec and EVPN coverage is tracked in ROADMAP as a future
+  test extension; the unit-level evidence (helper called at all
+  three sites, attach is idempotent and folds into existing
+  `Communities`) carries the rest of the way for now.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
