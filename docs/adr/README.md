@@ -60,6 +60,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0050](0050-evpn-route-reflector.md) | EVPN Route Reflector (RFC 7432 Phase 1) | Accepted | 2026-04-23 |
 | [0051](0051-per-peer-outbound-writer-task.md) | Per-peer outbound writer task | Accepted | 2026-04-27 |
 | [0052](0052-evpn-vtep-foundation.md) | EVPN VTEP Foundation — Local EVI/VNI Domain Model | Accepted | 2026-05-01 |
+| [0053](0053-rfc-8326-graceful-shutdown.md) | RFC 8326 BGP Graceful Shutdown | Accepted | 2026-05-04 |
+| [0054](0054-evpn-linux-dataplane-boundary.md) | EVPN Linux Dataplane Boundary | Accepted | 2026-05-04 |
 
 ## Template
 

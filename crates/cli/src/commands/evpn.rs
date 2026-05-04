@@ -300,11 +300,11 @@ mod tests {
     //! → CLI render works end-to-end.
     //!
     //! The remaining seam — daemon binary `main()` wiring through to
-    //! `ServeConfig.evpn_instances` — is shared with five other
-    //! services (Global, Neighbor, RIB, Injection, Policy). The full
-    //! binary-spawn integration test lands in Gate 7b before kernel
-    //! reconciliation grows the internals (see
-    //! `docs/evpn-enablement.md`).
+    //! `ServeConfig.evpn_instances` — is pinned by
+    //! `tests/evpn_instances_binary.rs`: it boots the real daemon binary
+    //! and drives `rustbgpctl evpn instances` as a subprocess before
+    //! kernel reconciliation grows the internals (see
+    //! `docs/evpn-enablement.md` Gate 7b).
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;

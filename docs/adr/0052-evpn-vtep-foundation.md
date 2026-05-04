@@ -299,6 +299,7 @@ real code to anchor it.
 ## Cross-References
 
 - ADR-0050 — EVPN Route Reflector (RFC 7432 Phase 1)
+- ADR-0054 — EVPN Linux Dataplane Boundary
 - `docs/evpn-enablement.md` Gate 7 — VTEP mode roadmap
 - RFC 7432 §7 — EVPN routes and MAC-VRF identification
 - RFC 7432 §15 — MAC mobility (referenced by future-shape section)

@@ -360,8 +360,8 @@ optional polish:
 
 | Task | File / location |
 |------|----------------|
-| Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic — pin it before mutation, swap surfaces, kernel state, or origination land. | `tests/` (new), or extend an existing harness |
-| Dataplane-boundary ADR — what `crates/evpn-linux` (or equivalent) consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0053-...` |
+| Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic — pin it before mutation, swap surfaces, kernel state, or origination land. | `tests/evpn_instances_binary.rs` |
+| Dataplane-boundary ADR — what `crates/evpn-linux` (or equivalent) consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` |
 | Swap surface for the `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work; doesn't reduce to LOC | `crates/api/src/evpn_service.rs`, daemon wiring |
 
 Scope sketch:
