@@ -45,14 +45,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     failed-apply retry, foreign-entry-preservation through shutdown
     drain, periodic-dump cadence, kernel-event-triggered reconcile,
     and NotReady-instance status emission.
-  - **`LinuxDataplane` cfg-gated stub** at
-    `crates/evpn-linux::linux::LinuxDataplane`. Reports `Unbound`
-    for `bridge = None` and `NotReady` with a "phase 4 stub" reason
-    otherwise; opens no netlink socket. The real
-    rtnetlink/netlink-packet-route integration is queued as the
-    next commit on the feature branch — every other layer (diff
-    loop, actor, supervisor, daemon wiring) is fixed against this
-    contract so the netlink slice can land independently.
+  - **`LinuxDataplane` real rtnetlink integration** at
+    `crates/evpn-linux::linux::LinuxDataplane` (rtnetlink 0.14 +
+    netlink-packet-route 0.19). Three submodules: `links.rs` walks
+    `LinkHandle::get` and stitches VXLAN ports onto their master
+    bridges; `fdb.rs` programs entries via `RTM_NEWNEIGH` with
+    `NTF_EXT_LEARNED` + `NUD_NOARP` + `.replace()` for idempotency,
+    and dumps the bridge FDB with NTF/NUD flag classification;
+    `probe.rs` enforces the ADR §4 five-point readiness check
+    (bridge exists, exactly one VXLAN port, VNI matches,
+    `local_vtep_ip` matches, learning disabled, not VLAN-aware).
+    `connect()` failures (no `CAP_NET_ADMIN`) surface as
+    `DataplaneError::Io` and the daemon spawn path logs `warn!`
+    rather than crashing — running without privileges becomes a
+    no-op for EVPN instead of fatal.
+  - **Privileged netns integration test** at
+    `crates/evpn-linux/tests/netns_dataplane.rs`, gated on
+    `EVPN_LINUX_NETNS=1`. Creates a bridge + VXLAN port inside a
+    Linux namespace, programs a remote-MAC entry through the real
+    dataplane, asserts `bridge fdb show` reports it with
+    `extern_learn`, withdraws it, and verifies a pre-loaded foreign
+    static FDB entry survives the drain (validates ADR-0054 §5/§7
+    foreign-entry preservation end-to-end).
   - **Daemon supervisor** at `src/evpn_dataplane.rs`: polling loop
     queries the RIB's existing `QueryEvpnRoutes` channel every 5 s
     (configurable), projects best-path Type 2 routes into a
@@ -65,18 +79,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Tests
 
-- 38 new tests across the EVPN dataplane stack: 12 domain-type
+- 50 new tests across the EVPN dataplane stack: 12 domain-type
   unit tests in `crates/evpn`, 11 `compute_diff` cases plus a
   key-grounding cross-check, 14 actor + backoff + in-memory fake
-  tests, 4 LinuxDataplane stub tests, 10 projection tests, and 5
-  supervisor / daemon-wiring tests. Workspace count climbs from
-  ~1406 (v0.13.4 baseline) to 1467.
+  tests, 1 LinuxDataplane connect-doesnt-panic smoke + 8 probe.rs
+  rejection-leg tests, 10 projection tests, 5 supervisor / daemon-
+  wiring tests, and 1 binary-spawn RR-only invariant test. Workspace
+  count climbs from ~1406 (v0.13.4 baseline) to 1474.
 
 ### Packaging
 
-- New workspace member `crates/evpn-linux` (`publish = false`,
-  cfg-gated netlink deps reserved for the follow-up commit). Daemon
-  picks up `tokio-util` 0.7 directly for `CancellationToken` (the
+- New workspace member `crates/evpn-linux` (`publish = false`).
+  cfg-gated `target_os = "linux"` deps: rtnetlink 0.14, netlink-
+  packet-route 0.19, netlink-packet-core 0.7, netlink-packet-utils
+  0.5, netlink-sys 0.8 (with `tokio_socket`), futures 0.3. Pinned
+  to the 0.14/0.19 pair because the newer 0.21+/0.30+ releases
+  changed the message-shape ABI and pull async-std incompatibly
+  with the workspace's tokio/tonic stack. Daemon picks up
+  `tokio-util` 0.7 directly for `CancellationToken` (the
   evpn-linux crate already uses it).
 
 ## [0.13.4] — 2026-05-04
