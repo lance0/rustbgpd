@@ -95,16 +95,6 @@ resolved.
   permanent GShut behavior, write it into export policy as
   `set_community_add = ["GRACEFUL_SHUTDOWN"]` instead.
 
-- **RFC 8326 outbound attach interop only validated for IPv4
-  unicast.** The `attach_graceful_shutdown_if_enabled` helper is
-  wired at all three outbound advertise sites (unicast, FlowSpec,
-  EVPN) so the wire-level behavior is uniform across families, but
-  M35 only exercises the IPv4 unicast path end-to-end against FRR.
-  FlowSpec and EVPN coverage is tracked in ROADMAP as a future
-  test extension; the unit-level evidence (helper called at all
-  three sites, attach is idempotent and folds into existing
-  `Communities`) carries the rest of the way for now.
-
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does

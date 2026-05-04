@@ -260,13 +260,13 @@ this document is reference / long-tail.
   recomputes its effective import/export chains, and any established
   peer with changed import policy gets the existing route-refresh
   retry semantics.
-- [ ] **M35 FlowSpec + EVPN initiator-leg coverage.** The outbound
+- [x] **M35 FlowSpec + EVPN initiator-leg coverage.** The outbound
   attach helper `attach_graceful_shutdown_if_enabled` is wired at
-  all three outbound sites (unicast, FlowSpec, EVPN) but M35 only
-  exercises the IPv4 unicast path. Add per-family interop tests
-  (e.g. M35b for FlowSpec, M35c for EVPN) to validate the helper
-  is hit on the right family-specific outbound emission paths. ~80
-  LOC of additional clab + scripts per family.
+  all three outbound sites (unicast, FlowSpec, EVPN); CI now exercises
+  each family-specific outbound emission path against FRR. M35 covers
+  IPv4 unicast, M35b injects FlowSpec and toggles GShut without route
+  churn, and M35c injects an EVPN Type 2 route and toggles GShut
+  without route churn.
 - [ ] **RFC 7999 BLACKHOLE community.** Natural sibling to RFC 8326
   GShut. Well-known `BLACKHOLE` community (`65535:666`) signals
   "drop traffic to this prefix" for DDoS mitigation. Different
