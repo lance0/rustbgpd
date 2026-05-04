@@ -117,6 +117,7 @@ async fn full_handshake_reaches_established() {
         None,
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 
@@ -160,7 +161,7 @@ async fn open_sets_gr_restart_state_during_restart_window() {
     let mut cfg = transport_config(addr);
     cfg.peer.graceful_restart = true;
     cfg.gr_restart_until = Some(Instant::now() + Duration::from_secs(30));
-    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None, None);
+    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None, None, false);
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -191,7 +192,7 @@ async fn open_clears_gr_restart_state_after_restart_window_expires() {
     let mut cfg = transport_config(addr);
     cfg.peer.graceful_restart = true;
     cfg.gr_restart_until = Some(Instant::now() - Duration::from_secs(1));
-    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None, None);
+    let handle = PeerHandle::spawn(cfg, metrics, rib_tx, None, None, None, None, None, false);
     handle.start().await.unwrap();
 
     let (mut peer_stream, _) = listener.accept().await.unwrap();
@@ -228,6 +229,7 @@ async fn peer_disconnect_triggers_retry() {
         None,
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 
@@ -272,6 +274,7 @@ async fn notification_from_peer_tears_down() {
         None,
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 
@@ -326,6 +329,7 @@ async fn keepalive_exchange_in_established() {
         None,
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 
@@ -376,6 +380,7 @@ async fn stop_command_sends_cease() {
         None,
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 
@@ -437,6 +442,7 @@ async fn connect_failure_retries() {
         None,
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 
@@ -476,6 +482,7 @@ async fn open_confirm_sends_session_notification() {
         Some(notify_tx),
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 
@@ -536,6 +543,7 @@ async fn query_state_returns_router_id_at_open_confirm() {
         Some(notify_tx),
         None,
         None,
+        false,
     );
     handle.start().await.unwrap();
 

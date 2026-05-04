@@ -50,6 +50,33 @@ impl ReconcileResult {
 }
 
 /// Commands sent to the `PeerManager` task.
+/// Failure modes for `SetGracefulShutdown`. Surfaced through the
+/// `oneshot` reply on the command so the gRPC handler can map to the
+/// correct `tonic::Status` code (`NOT_FOUND` vs `INTERNAL`).
+#[derive(Debug)]
+pub enum SetGshutError {
+    /// Operator addressed a specific peer that isn't currently managed.
+    /// Maps to gRPC `NOT_FOUND`.
+    PeerNotFound(IpAddr),
+    /// Live-session command, RIB refresh, or aggregated per-peer
+    /// failure during a broadcast. Maps to gRPC `INTERNAL`.
+    /// Authoritative state on `ManagedPeer` has been updated regardless
+    /// — the toggle takes effect on the next session spawn even when
+    /// the immediate dispatch path failed.
+    Internal(String),
+}
+
+impl std::fmt::Display for SetGshutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PeerNotFound(addr) => write!(f, "peer {addr} not found"),
+            Self::Internal(msg) => f.write_str(msg),
+        }
+    }
+}
+
+impl std::error::Error for SetGshutError {}
+
 pub enum PeerManagerCommand {
     /// Add a new peer with the given configuration.
     AddPeer {
@@ -114,8 +141,11 @@ pub enum PeerManagerCommand {
         address: Option<IpAddr>,
         /// `true` attaches the community; `false` clears it.
         enabled: bool,
-        /// Reply channel for success/failure.
-        reply: oneshot::Sender<Result<(), String>>,
+        /// Reply channel; the error type distinguishes
+        /// "peer not found" (operator typo, maps to gRPC `NOT_FOUND`)
+        /// from "internal failure" (session/RIB dispatch issue, maps
+        /// to gRPC `INTERNAL`) so the handler doesn't conflate them.
+        reply: oneshot::Sender<Result<(), SetGshutError>>,
     },
     /// Accept an inbound TCP connection for a known peer.
     AcceptInbound {

@@ -580,7 +580,15 @@ impl proto::neighbor_service_server::NeighborService for NeighborService {
         reply_rx
             .await
             .map_err(|_| Status::internal("peer manager dropped reply"))?
-            .map_err(Status::not_found)?;
+            .map_err(|e| match e {
+                // PeerNotFound is the operator-typo case — distinguish
+                // from session/RIB dispatch failures so clients can
+                // react appropriately.
+                crate::peer_types::SetGshutError::PeerNotFound(addr) => {
+                    Status::not_found(format!("peer {addr} not found"))
+                }
+                crate::peer_types::SetGshutError::Internal(msg) => Status::internal(msg),
+            })?;
 
         Ok(Response::new(proto::SetGracefulShutdownResponse {}))
     }

@@ -237,6 +237,7 @@ impl PeerSession {
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -265,7 +266,7 @@ impl PeerSession {
             outbound_tx,
             import_policy,
             export_policy,
-            advertise_graceful_shutdown: false,
+            advertise_graceful_shutdown,
             session_notify_tx,
             bmp_tx,
             validation_rx,
@@ -301,6 +302,7 @@ impl PeerSession {
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
     ) -> Self {
         let peer_label = config.remote_addr.to_string();
         let peer_ip = config.remote_addr.ip();
@@ -335,7 +337,7 @@ impl PeerSession {
             outbound_tx,
             import_policy,
             export_policy,
-            advertise_graceful_shutdown: false,
+            advertise_graceful_shutdown,
             session_notify_tx,
             bmp_tx,
             validation_rx,

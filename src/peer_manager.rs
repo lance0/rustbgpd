@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use rustbgpd_api::peer_types::{
     ConfigEvent, DynamicNeighborInfo, PeerInfo, PeerManagerCommand, PeerManagerNeighborConfig,
-    ReconcileFailure, ReconcileFailureKind, ReconcileResult,
+    ReconcileFailure, ReconcileFailureKind, ReconcileResult, SetGshutError,
 };
 use rustbgpd_bmp::{BmpEvent, BmpPeerInfo, BmpPeerType};
 use rustbgpd_fsm::{PeerConfig, SessionState};
@@ -99,6 +99,19 @@ struct ManagedPeer {
     /// and the symmetry with the import side guarantees both halves
     /// of a `SetPolicy` carry the same all-or-nothing semantics.
     pending_export_apply: bool,
+    /// RFC 8326 graceful-shutdown initiator toggle — operator-driven
+    /// desired state. When true, every outbound update gets
+    /// `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`) attached.
+    ///
+    /// `PeerManager` is the authority; the per-session bool in
+    /// `PeerSession` mirrors this value and gets re-seeded on every
+    /// session spawn (collision-replace, dynamic peer re-establish,
+    /// flap-and-reconnect). Without this lift, an operator who
+    /// runs `rustbgpctl gshut --peer X` and then experiences a peer
+    /// flap would have the toggle silently lost — the new session
+    /// would come up advertising untagged routes during the very
+    /// maintenance window the toggle was supposed to cover.
+    advertise_graceful_shutdown: bool,
 }
 
 /// Resolved dynamic neighbor range used for prefix matching at connection time.
@@ -720,6 +733,7 @@ impl PeerManager {
             Some(self.session_notify_tx.clone()),
             self.bmp_tx.clone(),
             self.validation_rx.clone(),
+            false,
         );
 
         if let Err(e) = handle.start().await {
@@ -745,6 +759,7 @@ impl PeerManager {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -845,21 +860,37 @@ impl PeerManager {
     /// community attachment for one peer (`Some(addr)`) or every
     /// currently-managed peer (`None`).
     ///
-    /// When `address` resolves to multiple peers, attempts dispatch
-    /// sequentially and aggregates per-peer errors into a single
-    /// formatted string. A partial failure (some peers updated, some
-    /// not) returns `Err` so the operator can investigate; the
-    /// successful dispatches stay applied (the toggle is per-session
-    /// state, not transactional).
+    /// Three-step per-peer sequence so the toggle is observable on the
+    /// wire AND survives session restart:
+    ///
+    /// 1. **Update desired state on `ManagedPeer`** — survives session
+    ///    restart so a flap mid-maintenance doesn't silently drop the
+    ///    toggle.
+    /// 2. **Send the live-session command** — flips the per-session
+    ///    bool; the next outbound advertise carries (or stops carrying)
+    ///    the community.
+    /// 3. **Issue `RibUpdate::RefreshPeerOutbound`** — forces re-emission
+    ///    of routes already in `AdjRibOut` so the wire form updates
+    ///    immediately. Without this, an operator running
+    ///    `rustbgpctl gshut` against an Established session with active
+    ///    routes would see no change until something else triggered a
+    ///    re-advertise.
+    ///
+    /// `Some(addr)` for a missing peer surfaces as `SetGshutError::PeerNotFound`
+    /// so callers can distinguish that from a session/RIB failure.
+    /// Per-peer dispatch failures aggregate into `Internal`. The
+    /// authoritative state is updated even when the live-session
+    /// command or refresh fails — the toggle takes effect on the next
+    /// session spawn regardless.
     async fn set_graceful_shutdown(
-        &self,
+        &mut self,
         address: Option<IpAddr>,
         enabled: bool,
-    ) -> Result<(), String> {
+    ) -> Result<(), SetGshutError> {
         let targets: Vec<IpAddr> = match address {
             Some(addr) => {
                 if !self.peers.contains_key(&addr) {
-                    return Err(format!("not found: peer {addr}"));
+                    return Err(SetGshutError::PeerNotFound(addr));
                 }
                 vec![addr]
             }
@@ -868,6 +899,20 @@ impl PeerManager {
 
         let mut failures: Vec<String> = Vec::new();
         for addr in &targets {
+            // (1) Update authoritative state on ManagedPeer so it
+            // survives session restart.
+            if let Some(managed) = self.peers.get_mut(addr) {
+                managed.advertise_graceful_shutdown = enabled;
+            } else {
+                // Peer disappeared between snapshot and dispatch; rare
+                // (would require concurrent removal in this same
+                // task). Skip silently.
+                continue;
+            }
+
+            // (2) Tell the live session — best-effort. If the session
+            // task is wedged or already restarting, the new session
+            // will pick up the toggle from ManagedPeer at spawn time.
             if let Some(managed) = self.peers.get(addr)
                 && let Err(e) = managed.handle.update_graceful_shutdown(enabled).await
             {
@@ -875,9 +920,47 @@ impl PeerManager {
                     %addr,
                     enabled,
                     error = %e,
-                    "failed to toggle graceful-shutdown on peer session"
+                    "failed to toggle graceful-shutdown on live peer session — \
+                     desired state stored, will apply on next session"
                 );
-                failures.push(format!("{addr}: {e}"));
+                failures.push(format!("{addr}: session: {e}"));
+                continue;
+            }
+
+            // (3) Force re-emission of already-advertised routes so
+            // the toggle is visible on the wire without waiting for
+            // an unrelated RIB event. RIB ignores peers not yet
+            // registered for outbound (newly added, not Established
+            // yet) — that's fine, the next PeerUp will emit fresh.
+            let (reply_tx, reply_rx) = oneshot::channel();
+            if let Err(e) = self
+                .rib_tx
+                .send(RibUpdate::RefreshPeerOutbound {
+                    peer: *addr,
+                    reply: reply_tx,
+                })
+                .await
+            {
+                warn!(%addr, error = %e, "failed to send RIB refresh after gshut toggle");
+                failures.push(format!("{addr}: rib send: {e}"));
+                continue;
+            }
+            match reply_rx.await {
+                Err(_) => {
+                    warn!(%addr, "RIB dropped reply for gshut refresh");
+                    failures.push(format!("{addr}: rib reply dropped"));
+                }
+                Ok(Err(e)) => {
+                    // "peer X not registered for outbound updates" is
+                    // expected for peers not yet Established — log at
+                    // debug, not as a failure.
+                    debug!(
+                        %addr, error = %e,
+                        "RIB declined refresh (peer likely not yet Established) — \
+                         desired state stored, will apply on next PeerUp"
+                    );
+                }
+                Ok(Ok(())) => {}
             }
         }
 
@@ -888,12 +971,13 @@ impl PeerManager {
             );
             Ok(())
         } else {
-            Err(format!(
-                "graceful-shutdown toggle failed on {} of {} peers: {}",
+            Err(SetGshutError::Internal(format!(
+                "graceful-shutdown toggle had failures on {} of {} peers (desired \
+                 state stored regardless): {}",
                 failures.len(),
                 targets.len(),
                 failures.join("; ")
-            ))
+            )))
         }
     }
 
@@ -1153,6 +1237,7 @@ impl PeerManager {
                     Some(self.session_notify_tx.clone()),
                     self.bmp_tx.clone(),
                     self.validation_rx.clone(),
+                    false, // dynamic peer starts without GShut advertise
                 );
 
                 if let Err(e) = handle.start().await {
@@ -1175,6 +1260,7 @@ impl PeerManager {
                     is_dynamic: true,
                     pending_refresh: false,
                     pending_export_apply: false,
+                    advertise_graceful_shutdown: false,
                 };
                 self.peers.insert(peer_addr, managed);
                 self.dynamic_peer_count += 1;
@@ -1413,6 +1499,10 @@ impl PeerManager {
             return;
         };
 
+        // Replay the operator-driven RFC 8326 toggle on the new
+        // session so a flap or collision-replace doesn't silently
+        // drop the GShut state mid-maintenance.
+        let advertise_graceful_shutdown = managed.advertise_graceful_shutdown;
         let old_handle = std::mem::replace(
             &mut managed.handle,
             PeerHandle::spawn_inbound(
@@ -1425,6 +1515,7 @@ impl PeerManager {
                 Some(self.session_notify_tx.clone()),
                 self.bmp_tx.clone(),
                 self.validation_rx.clone(),
+                advertise_graceful_shutdown,
             ),
         );
 
@@ -2365,6 +2456,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let hold = transport.peer.hold_time;
         mgr.peers.insert(
@@ -2384,6 +2476,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: true,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -2529,6 +2622,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -2685,6 +2779,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -2851,6 +2946,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -3036,6 +3132,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -3246,6 +3343,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 
@@ -3399,6 +3497,7 @@ mod tests {
                 is_dynamic: false,
                 pending_refresh: false,
                 pending_export_apply: false,
+                advertise_graceful_shutdown: false,
             },
         );
 

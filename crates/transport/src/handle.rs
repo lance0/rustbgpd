@@ -168,6 +168,7 @@ impl PeerHandle {
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
@@ -186,6 +187,7 @@ impl PeerHandle {
                     session_notify_tx,
                     bmp_tx,
                     validation_rx,
+                    advertise_graceful_shutdown,
                 );
                 session.run().await
             }
@@ -210,6 +212,7 @@ impl PeerHandle {
         session_notify_tx: Option<mpsc::UnboundedSender<SessionNotification>>,
         bmp_tx: Option<mpsc::Sender<BmpEvent>>,
         validation_rx: Option<watch::Receiver<rustbgpd_rpki::ValidationSnapshot>>,
+        advertise_graceful_shutdown: bool,
     ) -> Self {
         let (tx, rx) = mpsc::channel(COMMAND_BUFFER);
         let peer_addr = config.remote_addr.ip();
@@ -229,6 +232,7 @@ impl PeerHandle {
                     session_notify_tx,
                     bmp_tx,
                     validation_rx,
+                    advertise_graceful_shutdown,
                 );
                 session.run().await
             }
