@@ -31,6 +31,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 7911 | Add-Path: path ID in NLRI encode/decode |
 | 8092 | Large communities (3× u32) |
 | 8203 | Admin shutdown communication |
+| 8326 | `GRACEFUL_SHUTDOWN` well-known community (`0xFFFF_0000`) |
 | 8365 | EVPN over VXLAN encapsulation |
 | 8538 | Notification GR (N-bit) |
 | 8654 | Extended messages (up to 65535 bytes) |

@@ -180,7 +180,11 @@ pub use evpn::{
     encode_evpn_nlri,
 };
 
-// Well-known communities (RFC 1997 + RFC 9494)
+// Well-known communities (RFC 1997 + RFC 8326 + RFC 9494)
+/// `GRACEFUL_SHUTDOWN` community (RFC 8326 §3): tags routes on a session
+/// being brought down for maintenance so receivers de-prefer them by
+/// setting `LOCAL_PREF` to a low value (canonical: 0).
+pub const COMMUNITY_GRACEFUL_SHUTDOWN: u32 = 0xFFFF_0000;
 /// `LLGR_STALE` community (RFC 9494 §4.6): marks a route as long-lived stale.
 pub const COMMUNITY_LLGR_STALE: u32 = 0xFFFF_0006;
 /// `NO_LLGR` community (RFC 9494 §4.7): this route must not enter LLGR stale phase.
@@ -188,3 +192,19 @@ pub const COMMUNITY_NO_LLGR: u32 = 0xFFFF_0007;
 
 // Re-export RPKI types
 // (RpkiValidation is defined above in this file)
+
+#[cfg(test)]
+mod well_known_community_tests {
+    use super::*;
+
+    /// Pins the spec-mandated well-known community values. A refactor that
+    /// accidentally renames or repurposes these constants is silently
+    /// behavior-preserving at the type level — this test makes the value
+    /// drift loud.
+    #[test]
+    fn well_known_community_values_match_specs() {
+        assert_eq!(COMMUNITY_GRACEFUL_SHUTDOWN, 0xFFFF_0000, "RFC 8326 §3");
+        assert_eq!(COMMUNITY_LLGR_STALE, 0xFFFF_0006, "RFC 9494 §4.6");
+        assert_eq!(COMMUNITY_NO_LLGR, 0xFFFF_0007, "RFC 9494 §4.7");
+    }
+}
