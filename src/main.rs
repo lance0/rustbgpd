@@ -928,34 +928,34 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     );
     let peer_mgr_handle = tokio::spawn(peer_mgr.run());
 
-    // Spawn config persister (converts gRPC config events → disk writes)
-    let (config_event_tx, config_mutation_tx) = if let Some(ref path) = config.file_path {
-        let (event_tx, mut event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
+    // Spawn config persister (converts gRPC config events → disk writes).
+    //
+    // Two inputs feed the persister:
+    //   * `event_tx` — gRPC layer pushes per-mutation `ConfigEvent`s;
+    //     the bridge applies each onto its locally held snapshot and
+    //     then forwards a full `ReplaceConfig` to the persister.
+    //   * `bridge_replace_tx` — the SIGHUP path pushes the
+    //     authoritative reloaded snapshot. The bridge swaps it into
+    //     its locally held snapshot AND forwards to the persister.
+    //
+    // The replace path MUST go through the bridge (not directly to
+    // the persister) so the bridge's snapshot stays consistent with
+    // what's on disk. Otherwise the next gRPC mutation would apply
+    // to a stale pre-reload snapshot and overwrite the persisted
+    // file with `stale_pre_reload + one_mutation`.
+    let (config_event_tx, bridge_replace_tx) = if let Some(ref path) = config.file_path {
+        let (event_tx, event_rx) = mpsc::channel::<rustbgpd_api::peer_types::ConfigEvent>(64);
         let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(64);
+        let (bridge_replace_tx, bridge_replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
         let persister = ConfigPersister::new(mutation_rx, path.clone(), config.clone());
         tokio::spawn(persister.run());
-        let reload_mutation_tx = mutation_tx.clone();
-        let mut current_config = config.clone();
-
-        // Bridge: convert ConfigEvent → ConfigMutation
-        tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                if let Err(error) = apply_config_event(&mut current_config, &event) {
-                    error!(error = %error, "failed to apply config event before persistence");
-                    continue;
-                }
-                if mutation_tx
-                    .send(ConfigMutation::ReplaceConfig(Box::new(
-                        current_config.clone(),
-                    )))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        });
-        (Some(event_tx), Some(reload_mutation_tx))
+        tokio::spawn(run_config_bridge(
+            event_rx,
+            bridge_replace_rx,
+            mutation_tx,
+            config.clone(),
+        ));
+        (Some(event_tx), Some(bridge_replace_tx))
     } else {
         (None, None)
     };
@@ -1142,6 +1142,22 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         .expect("failed to register SIGHUP handler");
 
     // Wait for shutdown signal: SIGINT, SIGTERM, Shutdown RPC, unexpected gRPC exit, or SIGHUP
+    //
+    // SIGHUP runs `reload_config` on a dedicated tokio task so the
+    // signal-arm dispatch returns immediately. Without this, the SIGHUP
+    // arm's inline `.await` would block the same `select!` from
+    // observing SIGINT/SIGTERM for the duration of the reload (up to
+    // ~7 round-trip commands × 500 ms `PEER_POLICY_UPDATE_TIMEOUT` plus
+    // reconcile round-trip). Operators hitting Ctrl-C mid-reload should
+    // see the daemon respond.
+    //
+    // Concurrency invariant: at most one reload in flight. Concurrent
+    // reloads would race on `peer_mgr_tx` ordering (interleaved
+    // SetPolicy / ReconcilePeers commands) and double-fire the
+    // post-reload sync. A SIGHUP that arrives while a reload is still
+    // running is logged and dropped — the operator-facing back-pressure
+    // surface.
+    let mut reload_in_flight: Option<tokio::task::JoinHandle<Option<Config>>> = None;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -1168,43 +1184,72 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                 break;
             }
             _ = sighup.recv() => {
+                if reload_in_flight.is_some() {
+                    warn!("SIGHUP received while previous reload still in flight; ignoring");
+                    continue;
+                }
                 info!("SIGHUP received, reloading configuration");
                 let path = config.file_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-                if let Some(new_config) = reload_config(
-                    &path,
-                    &config,
-                    live_grpc_tcp.as_ref(),
-                    live_grpc_uds.as_ref(),
-                    &peer_mgr_tx,
-                )
-                .await
-                {
-                    // Sync persister's snapshot so future gRPC mutations apply
-                    // to the reloaded config, not the stale startup config.
-                    if let Some(ref mtx) = config_mutation_tx
-                        && let Err(e) = mtx
-                            .send(ConfigMutation::ReplaceConfig(Box::new(new_config.clone())))
-                            .await
-                    {
-                        error!(
-                            error = %e,
-                            "failed to sync config persister after reload — keeping previous in-memory config"
-                        );
-                        continue;
+                let snapshot = config.clone();
+                let live_tcp = live_grpc_tcp.clone();
+                let live_uds = live_grpc_uds.clone();
+                let pm_tx = peer_mgr_tx.clone();
+                reload_in_flight = Some(tokio::spawn(async move {
+                    reload_config(
+                        &path,
+                        &snapshot,
+                        live_tcp.as_ref(),
+                        live_uds.as_ref(),
+                        &pm_tx,
+                    )
+                    .await
+                }));
+            }
+            // Only polled when a reload is in flight. Standard tokio
+            // idiom: `std::future::pending().await` parks the arm
+            // forever in the no-handle case so `select!` ignores it.
+            // The `take()` drops the borrow before we touch
+            // `reload_in_flight` again in the body, sidestepping the
+            // borrow-across-await complaint.
+            outcome = async {
+                match reload_in_flight.as_mut() {
+                    Some(handle) => handle.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                reload_in_flight = None;
+                match outcome {
+                    Ok(Some(new_config)) => {
+                        match apply_reload_outcome(
+                            new_config,
+                            &peer_mgr_internal_tx,
+                            bridge_replace_tx.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(advanced) => config = advanced,
+                            Err(stage) => error!(
+                                stage,
+                                "post-reload sync failed mid-flight; in-memory config not advanced — next SIGHUP will retry"
+                            ),
+                        }
                     }
-                    if let Err(e) = peer_mgr_internal_tx
-                        .send(InternalCommand::ReplaceConfigSnapshot(Box::new(new_config.clone())))
-                    {
-                        error!(
-                            error = %e,
-                            "failed to sync peer manager config snapshot after reload"
-                        );
-                        continue;
+                    Ok(None) => {
+                        // reload_config already logged the failure.
                     }
-                    config = new_config;
+                    Err(e) => error!(error = %e, "reload task panicked"),
                 }
             }
         }
+    }
+
+    // If a reload is still in flight at shutdown, abort it before
+    // tearing down the peer manager. Letting it run would race the
+    // peer manager's Shutdown command and potentially queue commands
+    // against an already-draining manager.
+    if let Some(handle) = reload_in_flight.take() {
+        handle.abort();
+        let _ = handle.await;
     }
 
     // Drop the profiler now while all data structures are still alive,
@@ -1344,6 +1389,122 @@ async fn send_pm_step(
         Ok(result) => result,
         Err(e) => Err(format!("peer manager dropped reply: {e}")),
     }
+}
+
+/// Bridge between gRPC config events, SIGHUP-driven snapshot
+/// replacements, and the on-disk persister. The bridge owns the
+/// authoritative pre-persist snapshot — both inputs route through
+/// here so the snapshot, the persister, and downstream consumers
+/// stay consistent.
+///
+/// Two inputs:
+///   * `event_rx` — per-mutation events from the gRPC layer. Each
+///     event is folded onto the bridge-held snapshot via
+///     `apply_config_event`, then the full result is forwarded to
+///     the persister as `ReplaceConfig`.
+///   * `bridge_replace_rx` — SIGHUP-reloaded snapshots. The bridge
+///     swaps its held snapshot AND forwards to the persister.
+///
+/// Replacement is `biased` over events so a backlog of events
+/// cannot delay reload visibility — without this, an operator who
+/// SIGHUPs while gRPC is hammering policy mutations would see the
+/// reload sit behind the queue and the next mutation would still
+/// apply to the stale pre-reload base.
+///
+/// Persister send failure (`mutation_tx` closed or full past the
+/// task's tolerance) terminates the bridge — the persister task is
+/// dead, the daemon is shutting down, and there's nothing useful
+/// left to do here.
+async fn run_config_bridge(
+    mut event_rx: mpsc::Receiver<rustbgpd_api::peer_types::ConfigEvent>,
+    mut bridge_replace_rx: mpsc::UnboundedReceiver<Box<Config>>,
+    mutation_tx: mpsc::Sender<ConfigMutation>,
+    initial: Config,
+) {
+    let mut current_config = initial;
+    loop {
+        tokio::select! {
+            biased;
+            replace = bridge_replace_rx.recv() => {
+                let Some(new_snapshot) = replace else { break; };
+                current_config = *new_snapshot;
+                if mutation_tx
+                    .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            event = event_rx.recv() => {
+                let Some(event) = event else { break; };
+                if let Err(error) = apply_config_event(&mut current_config, &event) {
+                    error!(error = %error, "failed to apply config event before persistence");
+                    continue;
+                }
+                if mutation_tx
+                    .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Forward a freshly reloaded `Config` to the peer manager and the
+/// config bridge, in that order. Returns the same `Config` on success
+/// so the caller can advance its in-memory snapshot in one step
+/// (`config = apply_reload_outcome(...).await?;`).
+///
+/// Order matters. `peer_mgr_internal_tx` is unbounded and can only fail
+/// on receiver-drop (peer manager task is dead — fatal anyway). The
+/// bridge channel is also unbounded; it can only fail on receiver-drop
+/// (bridge task is dead — same fatality class as a dead persister, since
+/// the bridge owns the persister-facing channel). Sending the peer
+/// manager first means the authoritative runtime view always advances
+/// first.
+///
+/// The bridge — not a direct persister send — is the right
+/// destination for the reloaded snapshot. The bridge owns its own
+/// pre-persist snapshot that subsequent gRPC mutations apply to;
+/// bypassing it would leave that snapshot stale and the next mutation
+/// would overwrite the persisted file with the pre-reload snapshot
+/// plus that one mutation.
+///
+/// Both `Err` returns name the failing stage (`peer_mgr_snapshot` or
+/// `config_bridge`) so the caller's log line carries actionable
+/// context. The "in-memory config not advanced" decision is the
+/// caller's — leaving it explicit at the call site keeps the SIGHUP
+/// retry semantics readable.
+///
+/// Async only because the SIGHUP-arm caller awaits in the same
+/// position; both internal sends are unbounded and never block.
+#[expect(
+    clippy::unused_async,
+    reason = "uniform async caller signature in the SIGHUP path"
+)]
+async fn apply_reload_outcome(
+    new_config: Config,
+    peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
+    bridge_replace_tx: Option<&mpsc::UnboundedSender<Box<Config>>>,
+) -> Result<Config, &'static str> {
+    if peer_mgr_internal_tx
+        .send(InternalCommand::ReplaceConfigSnapshot(Box::new(
+            new_config.clone(),
+        )))
+        .is_err()
+    {
+        return Err("peer_mgr_snapshot");
+    }
+    if let Some(tx) = bridge_replace_tx
+        && tx.send(Box::new(new_config.clone())).is_err()
+    {
+        return Err("config_bridge");
+    }
+    Ok(new_config)
 }
 
 /// Reload configuration from disk and reconcile runtime state.
@@ -2760,6 +2921,164 @@ hold_time = 90
             tags.contains(&"SetPolicy(block-private)".to_string()),
             "earlier reload steps must still have fired before the reconcile failure — saw {tags:?}"
         );
+    }
+
+    /// `apply_reload_outcome` must send to the peer manager FIRST, so
+    /// the authoritative runtime view always advances even if the
+    /// optional bridge channel later fails. Drives the helper directly
+    /// with a closed bridge channel to assert the failure stage name
+    /// matches and the peer manager already received the snapshot
+    /// before the bridge send was attempted.
+    #[tokio::test]
+    async fn apply_reload_outcome_bridge_failure_after_peer_mgr_snapshot() {
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+        let (bridge_tx, bridge_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        // Drop the bridge rx so the helper's send fails immediately
+        // with a closed-channel error.
+        drop(bridge_rx);
+
+        let path = unique_temp_path("apply-reload-outcome");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let result =
+            apply_reload_outcome(cfg.clone(), &peer_mgr_internal_tx, Some(&bridge_tx)).await;
+
+        assert_eq!(
+            result.err(),
+            Some("config_bridge"),
+            "bridge failure must surface as the named stage so the caller's log line is actionable"
+        );
+        let snapshot = peer_mgr_internal_rx
+            .try_recv()
+            .expect("peer manager must receive the snapshot before the bridge send is attempted");
+        match snapshot {
+            InternalCommand::ReplaceConfigSnapshot(received) => {
+                assert_eq!(received.global.asn, cfg.global.asn);
+            }
+        }
+    }
+
+    /// Bridge-disabled mode (no `file_path`, so no persister and no
+    /// bridge) must succeed: the helper takes `Option<&Sender>`, and a
+    /// `None` bridge is the runtime configuration when rustbgpd starts
+    /// without a `--config` file (gRPC mutations are non-persistent in
+    /// that mode by design).
+    #[tokio::test]
+    async fn apply_reload_outcome_succeeds_without_bridge() {
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+
+        let path = unique_temp_path("apply-reload-outcome-nobridge");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        let advanced = apply_reload_outcome(cfg.clone(), &peer_mgr_internal_tx, None)
+            .await
+            .expect("no-bridge mode must succeed");
+        assert_eq!(advanced.global.asn, cfg.global.asn);
+        assert!(peer_mgr_internal_rx.try_recv().is_ok());
+    }
+
+    /// Regression test for the bridge stale-snapshot bug. Before the
+    /// fix, a SIGHUP-driven `ReplaceConfig` was sent directly to the
+    /// persister, bypassing the bridge that owns the pre-persist
+    /// snapshot used by gRPC mutations. The next mutation would
+    /// therefore apply to the stale pre-reload snapshot and overwrite
+    /// the persisted file with `stale_pre_reload + one_mutation`.
+    /// This test drives the bridge directly: send a snapshot
+    /// replacement, then a `ConfigEvent` that adds a named policy,
+    /// and assert the resulting `ReplaceConfig` to the persister was
+    /// computed against the *replacement* base — i.e. the bridge's
+    /// internal snapshot was successfully swapped.
+    #[tokio::test]
+    async fn config_bridge_replacement_makes_subsequent_events_apply_to_new_snapshot() {
+        use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
+
+        let stale_path = unique_temp_path("bridge-replace-stale");
+        std::fs::write(&stale_path, baseline_toml()).unwrap();
+        let stale = Config::load_with_diagnostics(stale_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&stale_path).ok();
+
+        let new_toml = format!(
+            "{baseline}\n[peer_groups.upstream]\nhold_time = 90\n",
+            baseline = baseline_toml()
+        );
+        let new_path = unique_temp_path("bridge-replace-new");
+        std::fs::write(&new_path, &new_toml).unwrap();
+        let reloaded = Config::load_with_diagnostics(new_path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&new_path).ok();
+
+        assert!(
+            stale.peer_groups.is_empty(),
+            "stale baseline must not have peer groups (preconditions)"
+        );
+        assert!(
+            reloaded.peer_groups.contains_key("upstream"),
+            "reloaded baseline must have the new peer_groups.upstream (preconditions)"
+        );
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mut mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+
+        let bridge = tokio::spawn(run_config_bridge(event_rx, replace_rx, mutation_tx, stale));
+
+        // Push the SIGHUP-style replacement first.
+        replace_tx.send(Box::new(reloaded.clone())).unwrap();
+        // Then a gRPC mutation that adds a policy definition. If the
+        // bridge missed the swap, this would compute against `stale`
+        // and the resulting ReplaceConfig wouldn't carry the new
+        // peer_groups.upstream entry.
+        event_tx
+            .send(ConfigEvent::SetPolicy {
+                name: "block-private".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        // First persister message is the replacement itself.
+        let replace_msg = mutation_rx.recv().await.expect("replacement forwarded");
+        let ConfigMutation::ReplaceConfig(received_replace) = replace_msg else {
+            panic!("bridge must forward replacement as ReplaceConfig");
+        };
+        assert!(
+            received_replace.peer_groups.contains_key("upstream"),
+            "replacement message must carry the new peer_groups.upstream"
+        );
+
+        // Second persister message is the post-event snapshot — must
+        // contain BOTH the replacement-supplied peer_groups.upstream
+        // AND the event-applied policy. If the bridge had missed the
+        // swap, peer_groups.upstream would be absent (proving the
+        // event applied to stale).
+        let event_msg = mutation_rx.recv().await.expect("event forwarded");
+        let ConfigMutation::ReplaceConfig(received_event) = event_msg else {
+            panic!("bridge must forward event-derived snapshot as ReplaceConfig");
+        };
+        assert!(
+            received_event.peer_groups.contains_key("upstream"),
+            "post-event snapshot must still carry the replacement-supplied peer group — \
+             absence here would mean the bridge applied the event to a stale snapshot"
+        );
+        assert!(
+            received_event
+                .policy
+                .definitions
+                .contains_key("block-private"),
+            "post-event snapshot must carry the event-applied policy"
+        );
+
+        drop(replace_tx);
+        drop(event_tx);
+        bridge.await.unwrap();
     }
 
     // SoftResetIn-on-import-policy-change coverage is now PM-side:

@@ -110,6 +110,19 @@ struct DynamicRange {
     description: Option<String>,
 }
 
+/// Snapshot of a removed dynamic peer's unfired hot-apply intent. Carried
+/// across the auto-removal that fires when a dynamic peer goes back to
+/// Idle so a re-establishing peer at the same address inherits the retry.
+/// Without this, a transient TCP drop on a `[[dynamic_neighbors]]` peer
+/// that was mid-`pending_refresh` would silently drop the unfired Route
+/// Refresh / export-apply — same correctness risk that
+/// `ManagedPeer::pending_refresh` / `pending_export_apply` exist to close.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DeadLetteredPending {
+    refresh: bool,
+    export_apply: bool,
+}
+
 /// Manages the lifecycle of all peer sessions.
 ///
 /// Runs as a single tokio task, receiving commands via an mpsc channel.
@@ -140,6 +153,12 @@ pub struct PeerManager {
     dynamic_peer_count: usize,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
+    /// Dead-lettered hot-apply / Route Refresh intent from dynamic peers
+    /// auto-removed by `BackToIdle`. Restored on the next inbound from
+    /// the same address. Bounded at `dynamic_neighbor_limit` so a
+    /// pathological churn pattern can't grow it without bound; an over-
+    /// cap insert evicts an arbitrary existing entry with a `warn!`.
+    dead_lettered_pending: HashMap<IpAddr, DeadLetteredPending>,
 }
 
 /// Build a `PeerInfo` snapshot from config + an optional fresh
@@ -301,6 +320,7 @@ impl PeerManager {
             dynamic_ranges: Self::parse_dynamic_ranges(&current_config),
             dynamic_peer_count: 0,
             dynamic_neighbor_limit: current_config.global.dynamic_neighbor_limit.unwrap_or(100),
+            dead_lettered_pending: HashMap::new(),
             current_config,
         }
     }
@@ -1102,6 +1122,13 @@ impl PeerManager {
                 self.peers.insert(peer_addr, managed);
                 self.dynamic_peer_count += 1;
 
+                // Restore any dead-lettered hot-apply / Route Refresh
+                // intent left behind by a prior dynamic-peer auto-
+                // removal at this address. Carries the retry across
+                // the brief drop-and-recreate window so a transient
+                // TCP flap doesn't silently lose a SetPolicy edit.
+                self.restore_dead_lettered_pending(peer_addr);
+
                 info!(
                     %peer_addr,
                     "accepted dynamic neighbor from configured range"
@@ -1170,6 +1197,60 @@ impl PeerManager {
         }
     }
 
+    /// Snapshot any unfired hot-apply / Route Refresh intent for a peer
+    /// about to be auto-removed, so a re-establishing peer at the same
+    /// address inherits the retry. No-op if neither flag is set.
+    /// Bounded at `dynamic_neighbor_limit` — over-cap evicts an
+    /// arbitrary entry with `warn!` to surface pathological churn.
+    fn dead_letter_pending_for(&mut self, peer_addr: IpAddr) {
+        let Some(managed) = self.peers.get(&peer_addr) else {
+            return;
+        };
+        if !managed.pending_refresh && !managed.pending_export_apply {
+            return;
+        }
+        let entry = DeadLetteredPending {
+            refresh: managed.pending_refresh,
+            export_apply: managed.pending_export_apply,
+        };
+        let cap = self.dynamic_neighbor_limit as usize;
+        if cap > 0
+            && !self.dead_lettered_pending.contains_key(&peer_addr)
+            && self.dead_lettered_pending.len() >= cap
+            && let Some(victim) = self.dead_lettered_pending.keys().next().copied()
+        {
+            warn!(
+                %peer_addr,
+                evicted = %victim,
+                cap,
+                "dead-letter pending table at cap, evicting an existing entry — \
+                 dynamic peers churning faster than they re-establish"
+            );
+            self.dead_lettered_pending.remove(&victim);
+        }
+        self.dead_lettered_pending.insert(peer_addr, entry);
+    }
+
+    /// Drain any dead-lettered hot-apply / Route Refresh intent for a
+    /// freshly accepted dynamic peer at this address and apply it to the
+    /// new `ManagedPeer`. No-op if no entry exists.
+    fn restore_dead_lettered_pending(&mut self, peer_addr: IpAddr) {
+        let Some(prev) = self.dead_lettered_pending.remove(&peer_addr) else {
+            return;
+        };
+        let Some(managed) = self.peers.get_mut(&peer_addr) else {
+            return;
+        };
+        managed.pending_refresh = prev.refresh;
+        managed.pending_export_apply = prev.export_apply;
+        info!(
+            %peer_addr,
+            pending_refresh = prev.refresh,
+            pending_export_apply = prev.export_apply,
+            "restored dead-lettered hot-apply intent on dynamic peer re-establishment"
+        );
+    }
+
     async fn handle_session_notification(&mut self, notification: SessionNotification) {
         match notification {
             SessionNotification::OpenReceived {
@@ -1194,6 +1275,13 @@ impl PeerManager {
                 {
                     // Operator explicitly disabled — don't remove, just let it stay idle.
                 } else if self.peers.get(&peer_addr).is_some_and(|m| m.is_dynamic) {
+                    // Snapshot any unfired hot-apply / Route Refresh
+                    // intent before we drop the ManagedPeer. A
+                    // re-establishing dynamic peer at the same address
+                    // (typical for a transient TCP drop on a
+                    // [[dynamic_neighbors]] range) inherits the retry
+                    // when handle_inbound recreates the ManagedPeer.
+                    self.dead_letter_pending_for(peer_addr);
                     info!(%peer_addr, "dynamic peer session went idle, removing");
                     self.peers.remove(&peer_addr);
                     self.dynamic_peer_count = self.dynamic_peer_count.saturating_sub(1);
@@ -3511,6 +3599,97 @@ mod tests {
         assert!(mgr.peers.is_empty(), "dynamic peer table should be empty");
 
         drop(client_stream);
+    }
+
+    #[tokio::test]
+    async fn dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establish() {
+        let (_tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new_with_config(
+            rx,
+            mpsc::unbounded_channel().1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+            None,
+            make_dynamic_manager_config(),
+        );
+
+        // First incarnation: accept the dynamic peer, then mark it as
+        // carrying both unfired hot-apply flags. We set the flags
+        // directly on the ManagedPeer rather than driving a path that
+        // sets them — the regression covered here is the BackToIdle
+        // → handle_inbound carry, not the flag-setting paths (which
+        // are covered by `pending_refresh_re_arms_when_peer_still_not_established`).
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+        let (server_stream, remote_addr) = listener.accept().await.unwrap();
+        let client_stream = client.await.unwrap();
+        let peer_addr = remote_addr.ip();
+
+        mgr.handle_inbound(server_stream, peer_addr).await;
+        assert_eq!(mgr.dynamic_peer_count, 1);
+
+        let managed = mgr.peers.get_mut(&peer_addr).unwrap();
+        managed.pending_refresh = true;
+        managed.pending_export_apply = true;
+
+        // Tear down — peer auto-removes, flags should land in the
+        // dead-letter side table rather than evaporating.
+        mgr.handle_session_notification(SessionNotification::BackToIdle { peer_addr })
+            .await;
+        assert_eq!(mgr.dynamic_peer_count, 0);
+        assert!(mgr.peers.is_empty());
+        let dead = mgr
+            .dead_lettered_pending
+            .get(&peer_addr)
+            .copied()
+            .expect("dead-lettered pending entry should exist after auto-removal");
+        assert!(dead.refresh, "pending_refresh should be carried");
+        assert!(dead.export_apply, "pending_export_apply should be carried");
+        drop(client_stream);
+
+        // Second incarnation at the same address: the new ManagedPeer
+        // must inherit the dead-lettered flags, and the side-table
+        // entry must drain.
+        let next_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let next_listener_addr = next_listener.local_addr().unwrap();
+        let next_client =
+            tokio::spawn(async move { TcpStream::connect(next_listener_addr).await.unwrap() });
+        let (server2, remote_addr2) = next_listener.accept().await.unwrap();
+        let next_client_stream = next_client.await.unwrap();
+        let peer_addr2 = remote_addr2.ip();
+        // Both incarnations bind LOCALHOST so the IpAddr key (the unit
+        // we dead-letter on) is identical even though the ephemeral
+        // TCP port differs. Pin the precondition explicitly so any
+        // future change that diverges the bind address gets caught.
+        assert_eq!(
+            peer_addr2, peer_addr,
+            "test relies on both incarnations sharing an IpAddr key"
+        );
+
+        mgr.handle_inbound(server2, peer_addr2).await;
+
+        let managed2 = mgr.peers.get(&peer_addr2).expect("re-established");
+        assert!(
+            managed2.pending_refresh,
+            "new ManagedPeer must inherit pending_refresh from dead-letter table"
+        );
+        assert!(
+            managed2.pending_export_apply,
+            "new ManagedPeer must inherit pending_export_apply from dead-letter table"
+        );
+        assert!(
+            !mgr.dead_lettered_pending.contains_key(&peer_addr2),
+            "dead-letter entry must drain on restore"
+        );
+        drop(next_client_stream);
     }
 
     #[test]
