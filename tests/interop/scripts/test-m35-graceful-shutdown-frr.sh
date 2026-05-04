@@ -180,19 +180,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Initiator leg — toggle GShut FIRST, then inject so the very first
-#    outbound advertise of 172.16.0.0/24 already carries the community.
-#
-#    Toggling AFTER an initial advertise ran into a race in v1: the
-#    AdjRibOut prepared-attr cache had already locked in the
-#    no-community bytes, and a subsequent delete + re-add didn't
-#    re-evaluate against the new toggle within the test window.
-#    Setting the toggle before the first injection sidesteps the
-#    cache class entirely and keeps the test focused on the wire
-#    behaviour (does the community land on the wire when the toggle
-#    is set?) rather than the runtime re-advertise behaviour (a
-#    separate concern, and one that's hard to assert reliably from
-#    an interop layer).
+# 3. Initiator leg — INJECT FIRST so the route is steady-state in
+#    AdjRibOut, THEN toggle and verify the community appears on the
+#    wire WITHOUT a delete+re-add. This is the actual maintenance-
+#    window behaviour: an operator running `rustbgpctl gshut` against
+#    a peer with active routes expects them to re-emit with the
+#    community attached. It exercises the runtime force-emit path
+#    (RibUpdate::RefreshPeerOutbound bypassing AdjRibOut equality
+#    suppression) end-to-end.
 # ---------------------------------------------------------------------------
 
 frr_route_json() {
@@ -227,20 +222,37 @@ frr_has_route() {
     frr_route_json | jq -e '(.paths // []) | length > 0' > /dev/null 2>&1
 }
 
-log "Enabling GRACEFUL_SHUTDOWN advertise for 10.0.0.2 via gRPC..."
-grpcurl -plaintext -import-path . -proto "$PROTO" \
-    -d '{"address":"10.0.0.2","enabled":true}' \
-    "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
-
-log "Injecting 172.16.0.0/24 via InjectionService.AddPath..."
+log "Injecting 172.16.0.0/24 via InjectionService.AddPath (steady state)..."
 grpcurl -plaintext -import-path . -proto "$PROTO" \
     -d '{"prefix":"172.16.0.0","prefixLength":24,"nextHop":"10.0.0.1","origin":2,"asPath":[]}' \
     "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath > /dev/null
 
-log "Waiting for FRR to see 172.16.0.0/24 WITH graceful-shutdown..."
+log "Verifying initial advertise is UNTAGGED at FRR (toggle is still off)..."
+for i in $(seq 1 30); do
+    if frr_has_route && ! frr_has_gshut_community; then
+        ok "FRR has 172.16.0.0/24 without graceful-shutdown community after ${i}s (steady state)"
+        break
+    fi
+    if [ "$i" = "30" ]; then
+        echo "===== FRR vtysh: show ip bgp 172.16.0.0/24 (text) =====" >&2
+        docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24' >&2 || true
+        fail "FRR never received untagged 172.16.0.0/24 (or unexpectedly carries GShut)"
+        dump_state_on_failure
+        exit 1
+    fi
+    sleep 1
+done
+
+log "Toggling GRACEFUL_SHUTDOWN advertise ON for 10.0.0.2 via gRPC..."
+log "(no delete + re-add — this exercises RibUpdate::RefreshPeerOutbound force-emit)"
+grpcurl -plaintext -import-path . -proto "$PROTO" \
+    -d '{"address":"10.0.0.2","enabled":true}' \
+    "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
+
+log "Waiting for FRR to see graceful-shutdown community on 172.16.0.0/24..."
 for i in $(seq 1 30); do
     if frr_has_gshut_community; then
-        ok "FRR sees graceful-shutdown community on 172.16.0.0/24 after ${i}s — initiator leg OK"
+        ok "FRR sees graceful-shutdown after ${i}s — runtime force-emit works without delete+re-add"
         break
     fi
     if [ "$i" = "30" ]; then
@@ -248,7 +260,8 @@ for i in $(seq 1 30); do
         docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24' >&2 || true
         echo "===== FRR vtysh: show ip bgp 172.16.0.0/24 (json) =====" >&2
         frr_route_json >&2 || true
-        fail "FRR never saw graceful-shutdown community on 172.16.0.0/24 within 30s"
+        fail "FRR never saw graceful-shutdown community on toggle-on within 30s — \
+             RefreshPeerOutbound force-emit may not be bypassing AdjRibOut equality suppression"
         dump_state_on_failure
         exit 1
     fi
@@ -256,28 +269,20 @@ for i in $(seq 1 30); do
 done
 
 # ---------------------------------------------------------------------------
-# 4. Clear leg — toggle off, force re-advertise via delete+add, confirm
-#    community is no longer attached on the wire.
+# 4. Clear leg — toggle OFF, no delete+re-add, verify community gone.
+#    Same force-emit path as the toggle-on side; the bool flip should
+#    be observable on the wire without a route churn.
 # ---------------------------------------------------------------------------
 
-log "Clearing GRACEFUL_SHUTDOWN advertise for 10.0.0.2..."
+log "Toggling GRACEFUL_SHUTDOWN advertise OFF for 10.0.0.2 via gRPC..."
 grpcurl -plaintext -import-path . -proto "$PROTO" \
     -d '{"address":"10.0.0.2","enabled":false}' \
     "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
 
-log "Forcing re-advertise via delete+re-add of 172.16.0.0/24..."
-grpcurl -plaintext -import-path . -proto "$PROTO" \
-    -d '{"prefix":"172.16.0.0","prefixLength":24}' \
-    "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath > /dev/null
-sleep 2
-grpcurl -plaintext -import-path . -proto "$PROTO" \
-    -d '{"prefix":"172.16.0.0","prefixLength":24,"nextHop":"10.0.0.1","origin":2,"asPath":[]}' \
-    "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath > /dev/null
-
 log "Waiting for FRR to see 172.16.0.0/24 WITHOUT graceful-shutdown..."
 for i in $(seq 1 30); do
     if frr_has_route && ! frr_has_gshut_community; then
-        ok "FRR no longer sees graceful-shutdown community on 172.16.0.0/24 after ${i}s — clear OK"
+        ok "FRR no longer sees graceful-shutdown after ${i}s — clear via runtime force-emit OK"
         break
     fi
     if [ "$i" = "30" ]; then
@@ -285,7 +290,7 @@ for i in $(seq 1 30); do
         docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24' >&2 || true
         echo "===== FRR vtysh: show ip bgp 172.16.0.0/24 (json) =====" >&2
         frr_route_json >&2 || true
-        fail "graceful-shutdown community stuck on 172.16.0.0/24 after clear toggle (or route gone)"
+        fail "graceful-shutdown community stuck on 172.16.0.0/24 after clear toggle"
         dump_state_on_failure
         exit 1
     fi
