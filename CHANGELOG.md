@@ -9,6 +9,59 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.2] — 2026-05-03
+
+### Fixed
+
+- **Dynamic peers no longer silently drop unfired hot-apply intent on
+  auto-removal.** When a `[[dynamic_neighbors]]`-spawned peer went idle
+  and the peer manager auto-removed it, any `pending_refresh` /
+  `pending_export_apply` flag the `ManagedPeer` was carrying (unfired
+  Route Refresh or session-side export-policy apply, normally retried
+  on the next `update_runtime_policies`) evaporated with the dropped
+  struct. A re-establishing peer at the same address restarted both
+  flags at `false`, leaving the prior `SetPolicy` edit unfired against
+  routes already accepted under the old policy. New per-IP dead-letter
+  side table on `PeerManager` (bounded at `dynamic_neighbor_limit`)
+  snapshots the flags at remove and restores them when the peer
+  re-incarnates. Regression test:
+  `dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establish`.
+
+- **Post-reload sync ordering.** The SIGHUP arm previously sent the
+  config-persister snapshot before the peer-manager internal snapshot;
+  if the persister succeeded but the peer-manager send failed (manager
+  task dropped — fatal anyway), the persister had advanced while the
+  authoritative runtime view had not, leaving observable but silent
+  split-brain across the next gRPC mutation. Lifted the two sends into
+  `apply_reload_outcome`: peer manager first (`mpsc::UnboundedSender`,
+  can only fail on receiver-drop and never blocks), persister second.
+  Failure surfaces as a named stage (`peer_mgr_snapshot` /
+  `config_persister`) so the operator log is actionable. Both
+  downstream consumers replace their snapshot wholesale, so the next
+  SIGHUP retries cleanly.
+
+### Changed
+
+- **`reload_config` now runs on a dedicated tokio task.** Previously
+  the SIGHUP arm `.await`'d the reload inline inside the main
+  `tokio::select!`, blocking SIGINT/SIGTERM observation for the
+  duration (up to ~7 round-trip commands × 500 ms
+  `PEER_POLICY_UPDATE_TIMEOUT` plus reconcile round-trip). Operators
+  hitting Ctrl-C mid-reload now see the daemon respond. A SIGHUP that
+  arrives while a reload is still running is logged
+  (`"SIGHUP received while previous reload still in flight; ignoring"`)
+  and dropped — concurrent reloads would race on `peer_mgr_tx` command
+  ordering and double-fire the post-reload sync. Coordinated shutdown
+  aborts any in-flight reload before tearing down the peer manager.
+
+- **`.cargo/audit.toml` ignore-list hygiene.** Dropped the stale
+  RUSTSEC-2024-0437 entry (cleared by the v0.13.1 prometheus 0.14
+  bump). RUSTSEC-2026-0097 (rand soundness via ratatui-termwiz) stays
+  ignored — verified upstream that ratatui-termwiz 0.1.0 is the latest
+  release and the phf ecosystem hasn't bumped rand yet; the soundness
+  case requires a custom rand logger that this workspace does not
+  install.
+
 ## [0.13.1] — 2026-05-01
 
 ### Changed
