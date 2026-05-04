@@ -9,6 +9,40 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **RFC 8326 BGP Graceful Shutdown — well-known `GRACEFUL_SHUTDOWN`
+  community (`65535:0` / `0xFFFF_0000`) end-to-end.** Lets operators
+  drain traffic ahead of planned maintenance without writing the
+  policy by hand.
+  - **Wire crate**: new `pub const COMMUNITY_GRACEFUL_SHUTDOWN: u32`
+    next to the LLGR constants. rustbgpd-wire 0.8.4 → 0.8.5
+    (non-breaking pub addition). New value-pin test asserts all three
+    well-known constants match their spec values.
+  - **Policy engine**: `parse_community_match` accepts
+    `"GRACEFUL_SHUTDOWN"` as a community alias. Because
+    `parse_community_values` (the policy *set* side —
+    `set_community_add` / `set_community_remove`) routes through the
+    same parser, the alias works in both match and set positions.
+  - **Inbound honor (opt-in)**: new `[global] honor_graceful_shutdown
+    = true` knob injects an implicit head-of-import-chain rule on
+    every EBGP peer (`match GRACEFUL_SHUTDOWN → permit, set
+    local_pref = 0`). Off by default. iBGP exempt because LOCAL_PREF
+    is preserved within an AS.
+  - **Outbound advertise**: new
+    `NeighborService.SetGracefulShutdown { address, enabled }` gRPC +
+    `rustbgpctl gshut [--peer X] [--clear]` CLI. Toggles attaching
+    the community to outbound updates for one peer or every peer.
+    The CLI is a top-level command rather than nested under
+    `shutdown` because that's already the daemon-shutdown RPC.
+  - **M35 interop test against FRR** (both legs):
+    `tests/interop/m35-graceful-shutdown-frr.clab.yml` +
+    `test-m35-graceful-shutdown-frr.sh`. FRR tags one prefix with
+    `65535:0` outbound — rustbgpd's RIB shows it with `local_pref =
+    0`. rustbgpd injects a prefix and toggles outbound GShut — FRR's
+    `show ip bgp` shows the community attached. Clear-leg verifies
+    the toggle off.
+
 ## [0.13.2] — 2026-05-03
 
 ### Fixed
