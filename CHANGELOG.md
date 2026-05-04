@@ -9,6 +9,76 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN VTEP Linux dataplane reconciler — Gate 7b foundation
+  (ADR-0054).** The daemon now consumes selected EVPN Type 2
+  best-paths from the RIB and reconciles them through a level-
+  triggered actor against a portable [`Dataplane`] trait. Six commits
+  across the new `crates/evpn-linux` workspace member, the existing
+  `crates/evpn` domain crate, and `src/`:
+  - **Domain types** in `crates/evpn`: `DataplaneIntent`,
+    `DataplaneReport`, `RemoteMacTable` + builder with typed
+    duplicate-key error, `RemoteMacEntry`, `LocalMacObservation`,
+    `InstanceState` (Ready / NotReady / Unbound), `DataplaneOpKind`.
+    The intent surface lives in `crates/evpn` rather than
+    `crates/evpn-linux` so macOS dev builds keep compiling and a
+    future RR-only feature flag can drop the netlink crate cleanly.
+  - **Pure diff loop** in `crates/evpn-linux::diff::compute_diff`.
+    Foreign-entry preservation is structural: the delete pass
+    iterates `OwnedSet` (rustbgpd-programmed keys), never the kernel
+    snapshot, so kernel-learned local MACs and operator-static FDB
+    entries cannot be deleted by the algorithm. Mobility update is
+    triggered by destination-VTEP change; sequence number is
+    recorded on apply for stale-race detection. 11 explicit case
+    tests + key-grounding cross-check.
+  - **Reconcile actor** generic over `Dataplane`, with `tokio::select!`
+    over: new intent (`watch::Receiver`), kernel events (mpsc),
+    60 s periodic full dump (configurable), per-op exponential
+    backoff retry (100 ms → 5 s with ±25% deterministic jitter),
+    and a `CancellationToken` driving a 5 s bounded shutdown drain
+    that withdraws only owned remote FDB entries.
+  - **`InMemoryDataplane` fake** with a cloneable handle for test
+    state inspection and failure injection. The actor's full
+    lifecycle is end-to-end testable without netlink: 7 integration
+    tests cover initial reconcile, fast intent supersession,
+    failed-apply retry, foreign-entry-preservation through shutdown
+    drain, periodic-dump cadence, kernel-event-triggered reconcile,
+    and NotReady-instance status emission.
+  - **`LinuxDataplane` cfg-gated stub** at
+    `crates/evpn-linux::linux::LinuxDataplane`. Reports `Unbound`
+    for `bridge = None` and `NotReady` with a "phase 4 stub" reason
+    otherwise; opens no netlink socket. The real
+    rtnetlink/netlink-packet-route integration is queued as the
+    next commit on the feature branch — every other layer (diff
+    loop, actor, supervisor, daemon wiring) is fixed against this
+    contract so the netlink slice can land independently.
+  - **Daemon supervisor** at `src/evpn_dataplane.rs`: polling loop
+    queries the RIB's existing `QueryEvpnRoutes` channel every 5 s
+    (configurable), projects best-path Type 2 routes into a
+    `RemoteMacTable` via `rustbgpd_evpn::project_evpn_routes`,
+    publishes a `DataplaneIntent` with a monotonic generation
+    counter. Empty `[[evpn_instances]]` short-circuits the spawn so
+    route-reflector deployments incur zero dataplane cost (no
+    netlink socket, no background task — the architectural
+    invariant from ADR-0054 §1).
+
+### Tests
+
+- 38 new tests across the EVPN dataplane stack: 12 domain-type
+  unit tests in `crates/evpn`, 11 `compute_diff` cases plus a
+  key-grounding cross-check, 14 actor + backoff + in-memory fake
+  tests, 4 LinuxDataplane stub tests, 10 projection tests, and 5
+  supervisor / daemon-wiring tests. Workspace count climbs from
+  ~1406 (v0.13.4 baseline) to 1467.
+
+### Packaging
+
+- New workspace member `crates/evpn-linux` (`publish = false`,
+  cfg-gated netlink deps reserved for the follow-up commit). Daemon
+  picks up `tokio-util` 0.7 directly for `CancellationToken` (the
+  evpn-linux crate already uses it).
+
 ## [0.13.4] — 2026-05-04
 
 ### Fixed
