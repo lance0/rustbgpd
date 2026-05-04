@@ -1481,6 +1481,19 @@ impl RibManager {
                 && effective_flowspec_rules.is_empty()
                 && effective_evpn_keys.is_empty()
             {
+                // Resync flags must clear here too — otherwise a
+                // force-only refresh on a peer with no exportable
+                // routes would leave `force_outbound_peers` populated,
+                // and the next unrelated dirty resync (or another
+                // RefreshPeerOutbound for a different reason) would
+                // accidentally inherit the bypass-equality-suppression
+                // semantics. Same shape for `dirty_peers` for symmetry.
+                if is_dirty {
+                    self.dirty_peers.remove(&peer);
+                }
+                if is_force {
+                    self.force_outbound_peers.remove(&peer);
+                }
                 continue;
             }
 

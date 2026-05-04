@@ -69,6 +69,7 @@ impl RibManager {
         self.peer_group.remove(&peer);
         self.peer_bgp_id.remove(&peer);
         self.dirty_peers.remove(&peer);
+        self.force_outbound_peers.remove(&peer);
         self.pending_eor.remove(&peer);
         self.pending_route_batches.retain(|prb| prb.peer() != peer);
         self.clear_peer_refresh_state(peer);
