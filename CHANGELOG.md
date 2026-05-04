@@ -9,6 +9,38 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.4] — 2026-05-04
+
+### Fixed
+
+- **RFC 8326 `[global] honor_graceful_shutdown` now hot-applies on
+  SIGHUP.** Reload flips advance the live config snapshot and fan out
+  policy recomputation to EBGP peers; established peers reuse the
+  existing route-refresh retry path when their effective import policy
+  changes.
+- **RFC 8326 runtime GShut toggles now replay onto dynamic peers.**
+  ADR-0042's dead-letter side table preserves
+  `advertise_graceful_shutdown` across dynamic-peer `BackToIdle`
+  auto-removal and restores it when the same address re-establishes.
+
+### Tests
+
+- **M35b + M35c interop coverage.** New FRR 10.3.1 containerlab tests
+  prove `attach_graceful_shutdown_if_enabled` fires on FlowSpec and
+  L2VPN/EVPN outbound MP_REACH advertisements, complementing M35's
+  IPv4 unicast coverage. The tests capture BGP UPDATE bytes inside
+  the FRR container so the assertion is on the actual `0xffff0000`
+  community on the wire.
+- **Peer-manager failure-mode hardening.** Added unit coverage for
+  channel-full policy updates, back-to-back hot-apply updates, and
+  peer deletion while retry intent is pending.
+
+### Packaging
+
+- Workspace crates bumped to `0.13.4`. `rustbgpd-wire` remains
+  `0.8.5`; this release does not touch `crates/wire/src/` or require
+  a wire-crate publish.
+
 ## [0.13.3] — 2026-05-04
 
 ### Added

@@ -17,7 +17,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.13.3"
+version = "0.13.4"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -28,16 +28,16 @@ categories = ["network-programming"]
 [workspace.dependencies]
 # Internal crates
 rustbgpd-wire = { path = "crates/wire" }
-rustbgpd-fsm = { path = "crates/fsm", version = "0.13.3" }
-rustbgpd-transport = { path = "crates/transport", version = "0.13.3" }
-rustbgpd-rib = { path = "crates/rib", version = "0.13.3" }
-rustbgpd-policy = { path = "crates/policy", version = "0.13.3" }
-rustbgpd-api = { path = "crates/api", version = "0.13.3" }
-rustbgpd-telemetry = { path = "crates/telemetry", version = "0.13.3" }
-rustbgpd-rpki = { path = "crates/rpki", version = "0.13.3" }
-rustbgpd-bmp = { path = "crates/bmp", version = "0.13.3" }
-rustbgpd-mrt = { path = "crates/mrt", version = "0.13.3" }
-rustbgpd-evpn = { path = "crates/evpn", version = "0.13.3" }
+rustbgpd-fsm = { path = "crates/fsm", version = "0.13.4" }
+rustbgpd-transport = { path = "crates/transport", version = "0.13.4" }
+rustbgpd-rib = { path = "crates/rib", version = "0.13.4" }
+rustbgpd-policy = { path = "crates/policy", version = "0.13.4" }
+rustbgpd-api = { path = "crates/api", version = "0.13.4" }
+rustbgpd-telemetry = { path = "crates/telemetry", version = "0.13.4" }
+rustbgpd-rpki = { path = "crates/rpki", version = "0.13.4" }
+rustbgpd-bmp = { path = "crates/bmp", version = "0.13.4" }
+rustbgpd-mrt = { path = "crates/mrt", version = "0.13.4" }
+rustbgpd-evpn = { path = "crates/evpn", version = "0.13.4" }
 
 # External dependencies — pinned across workspace
 bytes = "1"
