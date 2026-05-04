@@ -170,32 +170,29 @@ this document is reference / long-tail.
   Closes the silent-stale-routes class across import / export /
   RIB / refresh failure modes; six unit tests + one interop test
   pin the regressions.
-- [ ] **Dead-letter pending flags on dynamic-peer auto-removal and
-  reconcile delete-then-readd.** When a dynamic peer with
-  `pending_refresh` / `pending_export_apply` set goes idle, the
-  auto-removal path (`peer_manager.rs:BackToIdle`) drops the flags
-  silently, and the same shape applies to `apply_peer_group_change`
-  / `reconcile_peers` delete-then-readd. The next session is
-  spawned with policy resolved from `current_config` so the steady-
-  state policy is correct, but any unfired refresh queued under
-  the prior generation is silently lost. Operationally recoverable
-  because tear-down resets `AdjRibIn` anyway, but worth either a
-  doc note or migration of the flags into a per-(peer-address)
-  side-table that survives the `ManagedPeer` value's lifetime.
-  ~50 LOC + a regression test.
-- [ ] **Post-reload sync resilience in `main.rs`.** When
-  `reload_config` returns `Some(new_config)` but the subsequent
-  `config_mutation_tx.send` (persister sync) or
-  `peer_mgr_internal_tx.send` (PM `current_config` sync) fails,
-  the daemon-level `config` variable stays at the prior value
-  even though the peer manager has already applied the per-step
-  changes. Future SIGHUP diffs would diff against stale `config`,
-  potentially re-running edits that already landed. Fix: make
-  the post-reload syncs idempotent / best-effort and unconditionally
-  advance `config = new_config` after `reload_config` returns
-  `Some(...)`. The PM's `current_config` advances per-step inside
-  `apply_*_change` so the explicit `ReplaceConfigSnapshot` is
-  defensive — failing it doesn't cause real drift. ~20 LOC.
+- [x] **Dead-letter pending flags on dynamic-peer auto-removal**
+  (v0.13.2) — `PeerManager` now carries a per-IP
+  `dead_lettered_pending` side table (bounded at
+  `dynamic_neighbor_limit`) that snapshots `pending_refresh` /
+  `pending_export_apply` before `BackToIdle`'s `peers.remove(...)`
+  and restores them when `handle_inbound` recreates a dynamic
+  `ManagedPeer` at the same address. Closes the silent-loss case
+  for transient TCP drops on `[[dynamic_neighbors]]` peers carrying
+  unfired hot-apply intent. The reconcile delete-then-readd shape
+  is structurally similar but a separate code path; tracked
+  separately if it ever surfaces operationally.
+- [x] **Post-reload sync resilience in `main.rs`** (v0.13.2) —
+  lifted the post-reload sync into `apply_reload_outcome` and
+  reordered: peer manager first (unbounded, can only fail on
+  receiver-drop and never blocks), config bridge second. Failure
+  surfaces as a named stage (`peer_mgr_snapshot` / `config_bridge`)
+  so the operator log is actionable. Same release also fixed a
+  related bug — the gRPC `ConfigEvent` → persister bridge was
+  holding a stale `current_config` across SIGHUP, so a post-reload
+  gRPC mutation would overwrite the persisted file with the
+  pre-reload snapshot plus that one mutation. Replacement now
+  routes through the bridge so the bridge's snapshot and the
+  persister advance in lockstep.
 - [x] **EVPN IPv6 next-hop roundtrip test** (v0.13.1) — added
   `mp_reach_evpn_ipv6_next_hop_roundtrip` pinning the 16-byte single-
   address IPv6 form end-to-end through `encode_mp_reach_nlri`'s
@@ -258,9 +255,9 @@ this document is reference / long-tail.
   policy convention; no capability negotiation needed). Ranks
   ahead of BLACKHOLE (RFC 7999) since GShut is operator-lifecycle
   and BLACKHOLE is data-plane-only.
-- [ ] **Resolve open `cargo audit` findings.** Partial — the
-  vulnerability cleared in v0.13.1, one soundness warning still
-  open:
+- [x] **Resolve open `cargo audit` findings** (v0.13.2) —
+  vulnerability cleared in v0.13.1; soundness warning accepted as
+  unreachable in v0.13.2:
     - [x] **RUSTSEC-2024-0437** (protobuf 2.28.0, "Crash due to
       uncontrolled recursion") — pulled in via `prometheus 0.13.4`.
       Cleared in **v0.13.1** by bumping `prometheus 0.13 → 0.14`;
@@ -268,23 +265,30 @@ this document is reference / long-tail.
       to the proto-3 field/method API split (`MetricFamily.metric`
       and `Metric.label/.counter/.gauge` are now public fields;
       `LabelPair.name()` / `.value()` / `Counter.value()` /
-      `Gauge.value()` stay as methods).
-    - [ ] **RUSTSEC-2026-0097** (rand 0.8.5 + 0.9.2, "unsound with a
-      custom logger using `rand::rng()`") — transitive via
+      `Gauge.value()` stay as methods). Stale ignore entry in
+      `.cargo/audit.toml` dropped in **v0.13.2**.
+    - [x] **RUSTSEC-2026-0097** (rand 0.8.5 + 0.9.2, "unsound with a
+      custom logger using `rand::rng()`") — accepted as
+      unreachable in **v0.13.2**. Transitive via
       `phf_generator → phf_macros → phf → termwiz →
-      ratatui-termwiz` (CLI / `top` command). Either bump
-      ratatui-termwiz or accept as soundness warning (we don't
-      override the rand logger anywhere, so the unsoundness
-      isn't reachable in our usage). Document the call.
-- [ ] **Spawn `reload_config` onto its own task.** The SIGHUP
-  reload now awaits N+M+P+2+P sequential per-step replies from the
-  peer manager (was 1 reply pre-branch). The await chain runs
-  inside `run()`'s `tokio::select!` SIGHUP arm, so SIGINT /
-  SIGTERM / gRPC shutdown observation is paused for the full
-  reload duration. Behavior extension of an existing pattern, not
-  a regression — but the blocking window grew meaningfully. Fix:
-  spawn the reload onto its own task and `select!` against a
-  oneshot it carries; main loop stays responsive. ~50 LOC change.
+      ratatui-termwiz` (CLI / `top` command). Verified upstream
+      that ratatui-termwiz 0.1.0 is the latest release and the
+      `phf` ecosystem hasn't bumped `rand` to a fixed version yet.
+      The workspace does not install a custom rand logger, so the
+      unsoundness condition is not reachable. Documented in
+      `.cargo/audit.toml` with the rationale; revisit on the next
+      ratatui-termwiz release.
+- [x] **Spawn `reload_config` onto its own task** (v0.13.2) —
+  `reload_config` now runs on a dedicated tokio task tracked as
+  `Option<JoinHandle<...>>`. Main `select!` polls the completion
+  handle via the standard `std::future::pending().await` arm-gating
+  pattern; SIGINT / SIGTERM / gRPC shutdown observation is no
+  longer blocked by an in-flight reload. Concurrent reloads are
+  rejected with a `"SIGHUP received while previous reload still in
+  flight; ignoring"` warning — they would race on `peer_mgr_tx`
+  command ordering and double-fire the post-reload sync.
+  Coordinated shutdown aborts any in-flight reload before tearing
+  down the peer manager.
 - [x] **Stress-test sweep** — peer flap storms, gRPC churn, repeated
   GR recovery. Trivial to script on the existing M33 soak harness;
   closes four open P3.5 bullets.
@@ -306,6 +310,7 @@ this document is reference / long-tail.
 - [x] **IPv6 link-local next-hop preserved end-to-end** (v0.11.0) — 32-byte `MP_REACH_NLRI` next-hops (RFC 4760 §3 / RFC 2545) round-trip through wire codec, RIB, and MRT exports; closes the long-standing "link-local discarded" KNOWN_ISSUES limitation. `rustbgpd-wire` 0.7.0 → 0.8.0 (breaking — adds `link_local_next_hop` field to `MpReachNlri`).
 - [x] **EVPN VTEP foundation — declarative EVI/VNI domain model** (v0.13.0) — Gate 7a per `docs/evpn-enablement.md`. New `crates/evpn` exposes the runtime [`EvpnInstance`] / [`EvpnInstanceTable`] types; `[[evpn_instances]]` config block lands the operator-facing TOML surface (VNI, RD, RTs, local VTEP IP, optional bridge, `advertise_svi_mac`); read-only `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances` surface the resolved table. Wire crate gains `RouteDistinguisher::from_str`. Empty by default — RR-only deployments unchanged. Kernel reconciliation + Type 2/3 origination land in Gate 7b. ADR-0052.
 - [x] **Tier-1 post-release cleanup bundle** (v0.13.1) — three small operational items: prometheus 0.13 → 0.14 (clears RUSTSEC-2024-0437; protobuf 3.x API migration in 4 internal/test files); M34 SIGHUP-policy interop test now reads rustbgpd's own `flapCount` + `uptimeSeconds` instead of FRR's `bgpTimerUpEstablishedEpoch` (cross-checked monotonicity catches handle replacement that flapCount alone would miss); EVPN MP_REACH IPv6 next-hop roundtrip + 32-byte rejection tests close the validate-side audit gap from v0.11.0.
+- [x] **Tier-2 patch bundle** (v0.13.2) — four operational-debt fixes: dead-letter side table on `PeerManager` so dynamic peers don't lose `pending_refresh` / `pending_export_apply` across `BackToIdle` auto-removal; gRPC `ConfigEvent` → persister bridge no longer holds a stale snapshot across SIGHUP (replacement now routes through the bridge so subsequent gRPC mutations don't overwrite the persisted file with `stale_pre_reload + one_mutation`); `apply_reload_outcome` helper tightens post-reload sync ordering with named failure stages; `reload_config` runs on a dedicated tokio task so SIGINT/SIGTERM observation is no longer blocked by an in-flight reload. Stale RUSTSEC-2024-0437 ignore dropped from `.cargo/audit.toml`.
 
 ### P0–P2.5 — Complete
 
