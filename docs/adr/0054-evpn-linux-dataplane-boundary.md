@@ -73,23 +73,55 @@ libraries. It must not depend on `crates/rib` or `crates/transport`.
 The daemon wires data between actors. Route-reflector deployments with
 empty `[[evpn_instances]]` must not instantiate the dataplane actor.
 
-### 2. Dataplane input is a snapshot, not mutable callbacks
+### 2. Dataplane input is a coalescing snapshot channel
 
 The crate accepts immutable desired-state snapshots. The initial shape
 is conceptual, not a frozen Rust API:
 
 ```rust
 pub struct DataplaneIntent {
+    pub generation: u64,
     pub instances: Arc<EvpnInstanceTable>,
-    pub remote_macs: Arc<RemoteMacTable>, // future crates/evpn type
+    pub remote_macs: Arc<RemoteMacTable>,
+}
+
+pub struct RemoteMacTable {
+    // Minimum Gate 7b shape. VLAN-aware expansion is a follow-up.
+    pub entries: BTreeMap<(EvpnInstanceId, MacAddress), RemoteMacEntry>,
+}
+
+pub struct RemoteMacEntry {
+    pub remote_vtep_ip: IpAddr,
+    pub mobility_sequence: Option<u32>,
+    pub source: RemoteMacSource,
 }
 ```
 
-The current Gate 7b runway only needs `instances`. Remote/local MAC
-domain tables land when Type 2 origination and remote FDB programming
-start. They should be domain objects such as "MAC X in VNI Y is owned
-locally with mobility sequence N" or "remote MAC X in VNI Y resolves to
-VTEP Z", not raw `rustbgpd_wire::EvpnRoute` values.
+The daemon sends this through a `watch::Sender<Arc<DataplaneIntent>>`.
+That choice is part of the decision:
+
+- intermediate desired snapshots may be dropped;
+- the dataplane actor always reconciles the latest visible snapshot;
+- no queue grows under Type 2 churn;
+- missed snapshots are harmless because the next generation supersedes
+  every prior one.
+
+A plain `mpsc` queue is the wrong default for this surface. It would
+preserve transient desired states that are intentionally obsolete by
+the time the actor sees them.
+
+The `RemoteMacTable` is a **complete snapshot**, not a delta stream. The
+dataplane actor computes create/update/delete operations by comparing
+the new complete desired table against the kernel snapshot and its
+previous applied state. The minimum key is `(VNI, MAC)`;
+`RemoteMacEntry` initially needs the remote VTEP IP, optional MAC
+mobility sequence, and source class. VLAN-aware keys are deferred until
+the EVPN instance schema has an explicit VLAN field.
+
+Remote/local MAC domain tables should be portable domain objects such
+as "MAC X in VNI Y is owned locally with mobility sequence N" or
+"remote MAC X in VNI Y resolves to VTEP Z", not raw
+`rustbgpd_wire::EvpnRoute` values.
 
 ### 3. Kernel observation surface is explicit and narrow
 
@@ -122,13 +154,20 @@ expects the operator or host-networking layer to create them. For an
 2. exactly one VXLAN port for the instance VNI is attached to that
    bridge;
 3. the VXLAN port's local address matches `local_vtep_ip`;
-4. the VXLAN port uses a supported destination port and learning mode.
+4. the VXLAN port uses a supported destination port and learning mode;
+5. the bridge is not VLAN-aware.
 
 If any check fails, the instance is reported `NotReady`; no synthetic
 device is created. This keeps the first Linux integration non-
 destructive and avoids inventing schema fields for VXLAN device names,
 underlay device selection, MTU, source port ranges, or multicast groups
 before the project has real operator signal.
+
+VLAN-aware bridges are rejected for Gate 7b. The current
+`EvpnInstance` schema has no VLAN field, so accepting a VLAN-filtering
+bridge would force the dataplane crate to guess a VNI-to-VLAN mapping.
+That mapping belongs in a follow-on schema/ADR, likely an additive
+`vlan = N` field on the instance.
 
 Future ADRs may allow rustbgpd to create netdev topology, but that is a
 separate ownership decision.
@@ -150,6 +189,13 @@ domain layer decides whether they become local MAC records and whether
 MAC mobility sequence numbers advance. The Linux crate does not run
 RFC 7432 mobility policy.
 
+Local age-out is also an upward observation. When a previously observed
+local MAC disappears from the kernel FDB because of aging or explicit
+operator deletion, `crates/evpn-linux` emits "local MAC no longer
+observed" to the domain layer. The domain layer decides whether that
+causes Type 2 withdrawal, delayed hold-down, or mobility handling; the
+Linux crate does not originate or withdraw EVPN routes directly.
+
 Remote MAC programming flows the opposite direction. Once the control
 plane selects a remote EVPN Type 2 as installed for `(VNI, MAC)`, the
 daemon provides a remote-MAC intent to `crates/evpn-linux`. The Linux
@@ -158,6 +204,12 @@ remote VTEP IP. Remote entries are marked as rustbgpd-owned in the
 internal snapshot and should use kernel ownership flags such as
 `extern_learn` where supported so they are distinguishable from
 kernel-learned local entries.
+
+Remote FDB entries are programmed through the bridge/master path by
+default so the bridge owns the entry and switchdev-capable drivers can
+offload it. Device-local `self` programming is reserved for explicit
+cases where bridge mediation is not desired; it is not the default
+Gate 7b behavior.
 
 ### 6. Reconcile-on-event plus periodic full resync
 
@@ -180,6 +232,24 @@ netlink notification is not fatal because the periodic dump repairs the
 snapshot. Re-applying the same desired snapshot is a no-op. Failed ops
 stay pending with bounded backoff until the next reconcile input.
 
+Startup ordering matters. The actor starts its netlink notification
+subscription, then performs an initial full link/FDB dump. Notifications
+received before that dump completes are buffered and replayed onto the
+initial snapshot before the first reconcile. If ordering metadata is
+available from the netlink library, events newer than the dump snapshot
+win. If not, replay is conservative: create/update events are applied
+over the dump, delete events remove only matching snapshot entries, and
+the periodic dump repairs any ambiguity.
+
+Default timer policy:
+
+- full kernel dump every 60 seconds, configurable later if operators
+  show hosts with very large FDBs need a different cadence;
+- failed netlink ops retry with exponential backoff from 100 ms to a
+  5 second cap, with jitter;
+- any new desired snapshot or netlink event resets the sleep and
+  schedules reconcile immediately.
+
 Deletes are conservative:
 
 - withdraw remote FDB entries only when rustbgpd owns them;
@@ -189,24 +259,85 @@ Deletes are conservative:
   rustbgpd-owned FDB entries for that instance and mark local learned
   observations stale upward.
 
-### 7. Failures surface as status, not domain mutation
+### 7. Shutdown leaves host topology intact and removes owned FDB entries
+
+On daemon shutdown, the dataplane actor attempts a bounded graceful
+drain: delete rustbgpd-owned remote FDB entries, emit final status, and
+exit. The initial timeout target is 5 seconds. If the timeout expires,
+the daemon exits and leaves remaining FDB entries for the kernel,
+operator tooling, or the next rustbgpd start to reconcile.
+
+The actor never deletes bridges, VXLAN links, kernel-learned local MACs,
+or foreign FDB entries on shutdown. Fast restart is handled by the next
+startup's initial dump and ownership reconciliation, not by preserving a
+special daemon-owned runtime file.
+
+### 8. Failures surface as status, not domain mutation
 
 Netlink errors are dataplane status, not edits to `EvpnInstanceTable`.
 The Linux crate returns structured reports:
 
 ```rust
 pub struct DataplaneReport {
-    pub generation: u64,
+    pub intent_generation: u64,
+    pub reconcile_generation: u64,
     pub instance_status: Vec<InstanceDataplaneStatus>,
     pub applied: Vec<AppliedOp>,
     pub failed: Vec<FailedOp>,
 }
 ```
 
-The daemon turns these into logs, metrics, and eventually a gRPC status
-surface. `crates/evpn` does not learn that its desired bridge "failed";
-it remains the source of desired truth. The actual-state failure lives
-in the dataplane actor.
+`intent_generation` echoes the `DataplaneIntent::generation` that
+produced the report, letting the daemon correlate "I sent desired
+snapshot N" with "Linux applied/failed N". `reconcile_generation` is the
+dataplane actor's own monotonic reconcile-pass counter for debugging
+and metrics.
+
+The daemon turns these reports into logs, metrics, and eventually a
+gRPC status surface. `crates/evpn` does not learn that its desired
+bridge "failed"; it remains the source of desired truth. The
+actual-state failure lives in the dataplane actor.
+
+## Rejected Alternatives
+
+### Edge-triggered netlink event processing
+
+Rejected because netlink notifications can be missed, coalesced, or
+arrive around startup dump boundaries. The actor uses events to wake a
+level-triggered reconcile loop; the periodic full dump is the source of
+repair.
+
+### `mpsc` queue of desired snapshots
+
+Rejected because desired snapshots supersede prior snapshots. A queue
+that preserves every intermediate generation can grow under MAC churn
+and make the dataplane actor spend time applying obsolete states.
+
+### Raw `rustbgpd_wire::EvpnRoute` in the dataplane API
+
+Rejected because wire types describe NLRI encoding, not local host
+intent. The dataplane crate consumes portable domain MAC intent and
+kernel snapshots; it should not know how the selected MAC reached the
+daemon.
+
+### Dataplane errors mutate `EvpnInstance`
+
+Rejected because desired state and actual state have different
+lifetimes. A bridge bind failure is operational status, not a reason to
+delete or rewrite the operator's intended EVI.
+
+### `crates/evpn-linux` depends on `crates/rib` or `crates/transport`
+
+Rejected because it would couple route-reflector behavior to local
+Linux dataplane concerns. The daemon is the coordinator; the dataplane
+crate is a Linux actor.
+
+### rustbgpd creates bridge/VXLAN netdev topology in Gate 7b
+
+Deferred. Creating topology needs schema for device names, underlay
+selection, MTU, UDP port, learning mode, VLAN mapping, and cleanup
+ownership. Gate 7b observes existing topology and programs owned FDB
+entries only.
 
 ## Consequences
 
@@ -241,8 +372,8 @@ in the dataplane actor.
   reconciliation until bound to a bridge.
 - L3VNI / IRB / Type 5 origination stay out of this ADR except where
   current fields such as `advertise_svi_mac` need to remain compatible.
-- Switchdev offload is treated as a kernel consequence of bridge FDB
-  programming, not a separate rustbgpd hardware API.
+- Switchdev offload is treated as a kernel consequence of bridge/master
+  FDB programming, not a separate rustbgpd hardware API.
 
 ## Test Obligations
 

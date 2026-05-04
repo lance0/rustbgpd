@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::thread;
@@ -5,29 +6,45 @@ use std::time::{Duration, Instant};
 
 struct Daemon {
     child: Child,
+    stderr_path: PathBuf,
 }
 
 impl Daemon {
-    fn spawn(config_path: &Path) -> Self {
+    fn spawn(config_path: &Path, stderr_path: PathBuf) -> Self {
+        let stderr = File::create(&stderr_path).expect("failed to create daemon stderr log");
         let child = Command::new(env!("CARGO_BIN_EXE_rustbgpd"))
             .arg(config_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .expect("failed to spawn rustbgpd binary");
-        Self { child }
+        Self { child, stderr_path }
     }
 
     fn assert_still_running(&mut self) {
         match self.child.try_wait() {
             Ok(None) => {}
-            Ok(Some(status)) => panic!("rustbgpd exited before test completed: {status}"),
+            Ok(Some(status)) => panic!(
+                "rustbgpd exited before test completed: {status}\nstderr:\n{}",
+                self.stderr()
+            ),
             Err(e) => panic!("failed to query rustbgpd child status: {e}"),
         }
     }
 
+    fn stderr(&self) -> String {
+        std::fs::read_to_string(&self.stderr_path).unwrap_or_else(|e| {
+            format!(
+                "<failed to read daemon stderr {}: {e}>",
+                self.stderr_path.display()
+            )
+        })
+    }
+
     fn shutdown(mut self, grpc_addr: &str) {
         let _ = rustbgpctl(grpc_addr, &["shutdown", "--reason", "evpn binary test"]);
+        // The daemon has coordinated shutdown paths; this no-peer test should
+        // finish well inside 5s even on a slow CI runner.
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
             match self.child.try_wait() {
@@ -66,7 +83,7 @@ fn rustbgpctl(grpc_addr: &str, args: &[&str]) -> Output {
     .expect("failed to spawn rustbgpctl subprocess")
 }
 
-fn wait_for_cli_json(grpc_addr: &str) -> Output {
+fn wait_for_cli_json(grpc_addr: &str, daemon: &mut Daemon) -> Output {
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut last = None;
     while Instant::now() < deadline {
@@ -75,19 +92,22 @@ fn wait_for_cli_json(grpc_addr: &str) -> Output {
             return output;
         }
         last = Some(output);
+        daemon.assert_still_running();
         thread::sleep(Duration::from_millis(100));
     }
     let output = last.expect("rustbgpctl was never invoked");
     panic!(
-        "rustbgpctl evpn instances did not succeed before timeout\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        "rustbgpctl evpn instances did not succeed before timeout\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndaemon stderr:\n{}",
         output.status,
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
+        daemon.stderr(),
     );
 }
 
 fn write_config(dir: &Path) -> PathBuf {
     let runtime_dir = dir.join("runtime");
+    std::fs::create_dir_all(&runtime_dir).expect("failed to create runtime dir");
     let config_path = dir.join("rustbgpd.toml");
     let config = format!(
         r#"
@@ -120,15 +140,22 @@ local_vtep_ip = "10.0.0.10"
     config_path
 }
 
+fn optional_json_string<'a>(row: &'a serde_json::Value, key: &str) -> &'a str {
+    row.get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+}
+
 #[test]
 fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     let temp = tempfile::tempdir().expect("failed to create temp dir");
     let config_path = write_config(temp.path());
     let grpc_sock = temp.path().join("runtime").join("grpc.sock");
     let grpc_addr = format!("unix://{}", grpc_sock.display());
-    let mut daemon = Daemon::spawn(&config_path);
+    let stderr_path = temp.path().join("rustbgpd.stderr.log");
+    let mut daemon = Daemon::spawn(&config_path, stderr_path);
 
-    let json_output = wait_for_cli_json(&grpc_addr);
+    let json_output = wait_for_cli_json(&grpc_addr, &mut daemon);
     daemon.assert_still_running();
 
     let instances: serde_json::Value =
@@ -142,7 +169,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
     assert_eq!(rows[0]["rd"], "65000:100");
     assert_eq!(rows[0]["route_targets"], serde_json::json!(["65000:100"]));
     assert_eq!(rows[0]["local_vtep_ip"], "10.0.0.10");
-    assert_eq!(rows[0]["bridge"], "");
+    assert_eq!(optional_json_string(&rows[0], "bridge"), "");
     assert_eq!(rows[0]["advertise_svi_mac"], false);
 
     assert_eq!(rows[1]["vni"], 200);
@@ -152,7 +179,7 @@ fn daemon_binary_surfaces_configured_evpn_instances_through_rustbgpctl() {
         serde_json::json!(["65000:200", "65000:201"])
     );
     assert_eq!(rows[1]["local_vtep_ip"], "10.0.0.10");
-    assert_eq!(rows[1]["bridge"], "br200");
+    assert_eq!(optional_json_string(&rows[1], "bridge"), "br200");
     assert_eq!(rows[1]["advertise_svi_mac"], true);
 
     let human_output = rustbgpctl(&grpc_addr, &["evpn", "instances"]);
