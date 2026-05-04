@@ -914,7 +914,10 @@ impl PeerManager {
             // task is wedged or already restarting, the new session
             // will pick up the toggle from ManagedPeer at spawn time.
             if let Some(managed) = self.peers.get(addr)
-                && let Err(e) = managed.handle.update_graceful_shutdown(enabled).await
+                && let Err(e) = managed
+                    .handle
+                    .update_graceful_shutdown_timeout(enabled, PEER_POLICY_UPDATE_TIMEOUT)
+                    .await
             {
                 warn!(
                     %addr,
@@ -1541,6 +1544,24 @@ impl PeerManager {
         let removed_count = removed.len();
         let changed_count = changed.len();
 
+        // Capture per-peer operator-runtime state that should survive
+        // a delete-then-readd cycle. RFC 8326 graceful-shutdown
+        // toggle: a static-peer config edit (e.g. `description` change)
+        // triggers a delete+readd in this reconcile path; without
+        // capturing the desired state by address, the freshly added
+        // ManagedPeer would come up with `advertise_graceful_shutdown
+        // = false`, silently dropping the toggle mid-maintenance and
+        // re-emitting untagged routes on the next outbound tick.
+        let preserved_gshut: HashMap<IpAddr, bool> = changed
+            .iter()
+            .filter_map(|cfg| {
+                self.peers
+                    .get(&cfg.address)
+                    .filter(|m| m.advertise_graceful_shutdown)
+                    .map(|_| (cfg.address, true))
+            })
+            .collect();
+
         // Remove peers
         for addr in &removed {
             if let Err(e) = self.delete_peer(*addr, false).await {
@@ -1570,6 +1591,22 @@ impl PeerManager {
                     address: addr,
                     error: e,
                 });
+            }
+        }
+        // Replay preserved RFC 8326 toggles onto the freshly added
+        // peers. This goes through the same path as the operator's
+        // `rustbgpctl gshut` so the live session bool, ManagedPeer
+        // desired state, AND RIB refresh all advance in lockstep —
+        // even though the new session is mid-bring-up, the desired
+        // state is in place and the bool will be applied to the
+        // session's first emission once it reaches Established.
+        for (addr, enabled) in preserved_gshut {
+            if let Err(e) = self.set_graceful_shutdown(Some(addr), enabled).await {
+                warn!(
+                    %addr,
+                    error = %e,
+                    "reconcile: failed to replay graceful-shutdown toggle on changed peer"
+                );
             }
         }
         // Add new peers

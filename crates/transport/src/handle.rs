@@ -505,6 +505,44 @@ impl PeerHandle {
             .map_err(|_| "session task dropped reply".to_string())?
     }
 
+    /// Bounded variant of [`Self::update_graceful_shutdown`]. See
+    /// [`Self::update_import_policy_timeout`] for rationale — same
+    /// wedge class: a session task parked on TCP write back-pressure
+    /// would otherwise park the peer-manager actor here, blocking
+    /// every other gRPC RPC for as long as the session is wedged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the session is unreachable, replies with
+    /// one, or doesn't acknowledge inside `deadline`.
+    pub async fn update_graceful_shutdown_timeout(
+        &self,
+        enabled: bool,
+        deadline: Duration,
+    ) -> Result<(), String> {
+        let commands = self.commands.clone();
+        match tokio::time::timeout(deadline, async move {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            commands
+                .send(PeerCommand::UpdateGracefulShutdown {
+                    enabled,
+                    reply: reply_tx,
+                })
+                .await
+                .map_err(|_| "session task exited".to_string())?;
+            reply_rx
+                .await
+                .map_err(|_| "session task dropped reply".to_string())?
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => Err(format!(
+                "update_graceful_shutdown timed out after {deadline:?}"
+            )),
+        }
+    }
+
     /// Check if the session task has finished.
     #[must_use]
     pub fn is_finished(&self) -> bool {

@@ -1616,6 +1616,28 @@ async fn reload_config(
             .clone_from(&current.evpn_instances);
     }
 
+    // [global] honor_graceful_shutdown follows the same pin pattern.
+    // The implicit chain-tail rule it injects is composed by
+    // `effective_policy_chains_for_neighbor` at session-spawn / policy-
+    // update time and isn't propagated through SIGHUP's policy diff
+    // engine: a flip from `false` to `true` (or vice versa) does not
+    // automatically run `update_runtime_policies` on every EBGP peer,
+    // so the effective import chain on already-Established sessions
+    // would not change. Without pinning, the in-memory snapshot would
+    // silently advance and the operator would believe the new value
+    // is live. Pin back to current so drift is loud and the operator
+    // is told to restart.
+    if new_config.global.honor_graceful_shutdown != current.global.honor_graceful_shutdown {
+        error!(
+            "[global] honor_graceful_shutdown differs from the live \
+             config: the implicit RFC 8326 chain-tail rule is composed \
+             at session-spawn / policy-update time, not on SIGHUP. \
+             Restart rustbgpd to apply this change. (Hot-apply on \
+             reload is tracked in ROADMAP.)"
+        );
+        new_config.global.honor_graceful_shutdown = current.global.honor_graceful_shutdown;
+    }
+
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
     let peer_group_diff = config::diff_peer_groups(&current.peer_groups, &new_config.peer_groups);
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);

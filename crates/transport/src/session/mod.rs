@@ -122,9 +122,17 @@ pub(crate) struct PeerSession {
     /// RFC 8326 graceful-shutdown initiator toggle: when `true`, every
     /// outbound update gets `COMMUNITY_GRACEFUL_SHUTDOWN` (`0xFFFF_0000`)
     /// added to its Communities attribute (creating one if absent).
-    /// Operator-runtime state (set via gRPC, not policy); resets to
-    /// false on session restart since downstream peers see a fresh
-    /// session and the maintenance signaling needs to be reasserted.
+    /// Operator-runtime state (set via gRPC, not policy).
+    ///
+    /// **Authority lives on `ManagedPeer` in `PeerManager`.** This
+    /// per-session bool is a mirror — `PeerSession::new` /
+    /// `new_inbound` take the desired value as a constructor arg, so
+    /// a session restart (collision-replace, inbound-accept,
+    /// reconnect after flap) replays the toggle from `ManagedPeer`
+    /// and the new session comes up with the correct state. The
+    /// daemon-restart case is the only documented loss class
+    /// (`KNOWN_ISSUES.md`): operators re-issue `rustbgpctl gshut` after
+    /// daemon restart if the maintenance window is still active.
     advertise_graceful_shutdown: bool,
     /// Channel to notify `PeerManager` of session state changes (collision detection).
     /// Unbounded so notifications are never dropped and never block (avoids
