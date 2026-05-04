@@ -199,7 +199,7 @@ this document is reference / long-tail.
   EVPN branch, plus a paired `mp_reach_evpn_rejects_32byte_next_hop`
   that asserts `NH-Len=32` for L2VPN/EVPN is rejected (RFC 7432 §7.5
   vs RFC 2545 unicast). Closes the validate-side audit gap.
-- [ ] **Tighten test failure-mode coverage.** All four hot-apply
+- [x] **Tighten test failure-mode coverage.** All four hot-apply
   failure tests inject the same shape (drop the reply oneshot).
   Production paths can also fail with channel-full / channel-
   closed / actual timeout. If the bail logic ever conditioned on

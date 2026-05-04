@@ -2022,6 +2022,46 @@ mod tests {
         }
     }
 
+    fn deny_policy_chain() -> PolicyChain {
+        use rustbgpd_policy::{Policy, PolicyAction};
+
+        PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        }])
+    }
+
+    fn insert_test_managed_peer(
+        mgr: &mut PeerManager,
+        addr: IpAddr,
+        handle: PeerHandle,
+        pending_refresh: bool,
+    ) {
+        let peer_config = make_config(addr, 65002);
+        let transport = mgr.build_transport_config(&peer_config);
+        let hold = transport.peer.hold_time;
+        mgr.peers.insert(
+            addr,
+            ManagedPeer {
+                handle,
+                remote_asn: 65002,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh,
+                pending_export_apply: false,
+                advertise_graceful_shutdown: false,
+            },
+        );
+    }
+
     #[tokio::test]
     async fn add_peer_and_list() {
         let (tx, rx) = mpsc::channel(16);
@@ -2536,6 +2576,267 @@ mod tests {
              not Established. Without this, a transient Err on the original Established \
              refresh would leave routes in AdjRibIn flowing under the prior policy until \
              an operator manually reissues SetPolicy."
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_full_policy_update_bails_and_preserves_pending_refresh() {
+        use rustbgpd_transport::PeerCommand;
+
+        let (session_tx, session_rx) = mpsc::channel::<PeerCommand>(1);
+        let (queued_reply, _queued_rx) = oneshot::channel();
+        assert!(
+            session_tx
+                .try_send(PeerCommand::QueryState {
+                    reply: queued_reply,
+                })
+                .is_ok(),
+            "pre-fill the session command channel so policy hot-apply send blocks"
+        );
+        let (finish_tx, finish_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _session_rx = session_rx;
+            let _ = finish_rx.await;
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(session_tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+        let result = mgr
+            .update_runtime_policies(addr, Some(deny_policy_chain()), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "full session command channel must surface as a failed hot-apply, not a \
+             silent policy success. Got: {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("timed out") && err.contains("import:"),
+            "error should preserve the channel-full timeout detail: {err}"
+        );
+        let managed = mgr.peers.get(&addr).expect("peer remains managed");
+        assert!(
+            managed.pending_refresh,
+            "pending_refresh must be set so a later policy update retries after the \
+             session command channel drains"
+        );
+        assert!(
+            managed.import_policy.is_none(),
+            "daemon bookkeeping must not advance when the session command never accepted \
+             the import-policy update"
+        );
+
+        let _ = finish_tx.send(());
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn back_to_back_updates_do_not_lose_pending_refresh() {
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+        let established = Arc::new(AtomicBool::new(false));
+        let refresh_calls = Arc::new(AtomicU32::new(0));
+        let established_in_task = established.clone();
+        let refresh_calls_in_task = refresh_calls.clone();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. }
+                    | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let state = if established_in_task.load(Ordering::SeqCst) {
+                            SessionState::Established
+                        } else {
+                            SessionState::Idle
+                        };
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: state,
+                            peer_ip: addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: Some(90),
+                            four_octet_as: Some(true),
+                            remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: u64::from(state == SessionState::Established),
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::SendRouteRefresh { reply, .. } => {
+                        refresh_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(session_tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let rib_drainer = tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        insert_test_managed_peer(&mut mgr, addr, handle, true);
+
+        let first = mgr.update_runtime_policies(addr, None, None).await;
+        assert!(
+            first.is_ok(),
+            "first update should re-arm the pending refresh while the peer is idle: {first:?}"
+        );
+        assert!(
+            mgr.peers.get(&addr).unwrap().pending_refresh,
+            "pending_refresh must survive the first back-to-back update while the peer is idle"
+        );
+        assert_eq!(
+            refresh_calls.load(Ordering::SeqCst),
+            0,
+            "idle peer must not receive route refresh yet"
+        );
+
+        established.store(true, Ordering::SeqCst);
+        let second = mgr.update_runtime_policies(addr, None, None).await;
+        assert!(
+            second.is_ok(),
+            "second update should consume the carried refresh once the peer is Established: {second:?}"
+        );
+        assert!(
+            !mgr.peers.get(&addr).unwrap().pending_refresh,
+            "pending_refresh must clear after the retry successfully sends Route Refresh"
+        );
+        assert_eq!(
+            refresh_calls.load(Ordering::SeqCst),
+            1,
+            "second update must fire the previously carried Route Refresh exactly once"
+        );
+
+        mgr.delete_peer(addr, false).await.unwrap();
+        drop(mgr);
+        let _ = rib_drainer.await;
+    }
+
+    #[tokio::test]
+    async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
+        use rustbgpd_transport::PeerCommand;
+
+        let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. } => {
+                        drop(reply);
+                    }
+                    PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: SessionState::Established,
+                            peer_ip: addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: Some(90),
+                            four_octet_as: Some(true),
+                            remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: 1,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(session_tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+        let failed = mgr
+            .update_runtime_policies(addr, Some(deny_policy_chain()), None)
+            .await;
+        assert!(
+            failed.is_err(),
+            "first update should fail and leave pending retry intent: {failed:?}"
+        );
+        assert!(
+            mgr.peers.get(&addr).unwrap().pending_refresh,
+            "failed update must set pending_refresh before deletion"
+        );
+
+        mgr.delete_peer(addr, false)
+            .await
+            .expect("peer deletion after failed update must complete");
+        assert!(
+            mgr.peers.is_empty(),
+            "deleting the peer must drop the ManagedPeer that held pending retry state"
+        );
+
+        let retry_after_delete = mgr
+            .update_runtime_policies(addr, Some(deny_policy_chain()), None)
+            .await;
+        assert!(
+            retry_after_delete.is_ok(),
+            "a queued or follow-up policy update for a peer deleted during the failure window \
+             must no-op cleanly, not resurrect stale pending state: {retry_after_delete:?}"
         );
     }
 
