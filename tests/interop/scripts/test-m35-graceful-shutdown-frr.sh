@@ -4,7 +4,7 @@
 # Receiver leg (rustbgpd inbound honor):
 #   FRR tags 192.168.1.0/24 with GRACEFUL_SHUTDOWN (65535:0) via an
 #   outbound route-map. rustbgpd's [global] honor_graceful_shutdown
-#   = true injects an implicit head-of-import-chain rule that sets
+#   = true appends an implicit chain-tail rule that sets
 #   local_pref = 0 on tagged routes. Assertion: 192.168.1.0/24 lands
 #   in rustbgpd's RIB with local_pref = 0; 192.168.2.0/24 (untagged)
 #   keeps the default 100.
@@ -112,7 +112,7 @@ wait_route_present() {
 # ---------------------------------------------------------------------------
 # 192.168.1.0/24 is GShut-tagged via FRR's outbound route-map. After
 # rustbgpd accepts it, the route's Communities attribute must include
-# 0xFFFF_0000 (the implicit head-of-import-chain rule SETs local_pref=0
+# 0xFFFF_0000 (the implicit chain-tail rule SETs local_pref=0
 # but the policy modification is observable indirectly: the only
 # unambiguous signal at the wire/proto level is community presence,
 # since proto3 omits zero-valued local_pref the same way regardless of

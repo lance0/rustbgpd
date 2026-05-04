@@ -3,7 +3,7 @@ asn = 65001
 router_id = "10.0.0.1"
 listen_port = 179
 # Receiver leg: routes carrying GRACEFUL_SHUTDOWN get an implicit
-# head-of-import-chain rule that sets local_pref = 0. EBGP-only
+# chain-tail rule that sets local_pref = 0. EBGP-only
 # (this peer is EBGP — remote_asn 65002).
 honor_graceful_shutdown = true
 

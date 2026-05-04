@@ -2538,6 +2538,85 @@ local_vtep_ip = "10.0.0.1"
         std::fs::remove_file(&path).ok();
     }
 
+    /// SIGHUP that flips `[global] honor_graceful_shutdown` must NOT
+    /// advance the in-memory config's value — the implicit
+    /// chain-tail RFC 8326 rule is composed at session-spawn /
+    /// policy-update time and `reload_config` doesn't propagate this
+    /// field's diff to already-Established sessions. Without pinning,
+    /// a `false → true` flip would silently land in the snapshot
+    /// without firing on any peer, and operators would believe the
+    /// rule was active when it wasn't.
+    #[tokio::test]
+    async fn reload_pins_honor_graceful_shutdown_to_live_snapshot() {
+        let path = unique_temp_path("reload-honor-gshut-pin");
+
+        // Initial: honor knob OFF (default).
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(!initial.global.honor_graceful_shutdown);
+
+        // Operator rewrites: turns the knob ON. Reload must surface
+        // the drift but NOT advance the field — restart-required.
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_graceful_shutdown = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when only honor_graceful_shutdown drifts");
+
+        assert!(
+            !returned.global.honor_graceful_shutdown,
+            "reload must pin honor_graceful_shutdown to the live (false) value until the daemon \
+             restarts; otherwise an operator would believe the implicit chain-tail rule is \
+             firing while it actually composes only at session-spawn / policy-update time"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn gr_restart_marker_invalid_version_rejected() {
         let path = unique_temp_path("gr-restart-bad-version");
