@@ -463,6 +463,12 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
         path_id: route.path_id,
         validation_state: route.validation_state.to_string(),
         aspa_state: route.aspa_state.to_string(),
+        // Distinguishes "explicit LOCAL_PREF attribute" from "no
+        // attribute" — required for the M35 interop test to assert
+        // that the RFC 8326 implicit demotion actually fired on a
+        // tagged route (otherwise local_pref=0 is ambiguous between
+        // "policy set it" and "no LOCAL_PREF on EBGP wire").
+        local_pref_attr: route.local_pref_attr(),
     }
 }
 

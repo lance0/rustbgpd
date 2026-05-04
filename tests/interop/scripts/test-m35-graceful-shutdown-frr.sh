@@ -62,6 +62,18 @@ route_communities() {
         '[.routes[]? | select("\(.prefix)/\(.prefixLength)" == $p) | .communities[]?] | join(" ")'
 }
 
+# Returns the explicit local_pref_attr value if a LOCAL_PREF attribute
+# is present, or 'absent' if the route has no LOCAL_PREF on the wire
+# (the proto field is `optional uint32 local_pref_attr = 16` so it is
+# omitted from JSON when None — distinguishes "policy set it to 0"
+# from "no attribute").
+route_local_pref_attr() {
+    local prefix=$1
+    grpc_list_received \
+        | jq -r --arg p "$prefix" \
+            '[.routes[]? | select("\(.prefix)/\(.prefixLength)" == $p) | .localPrefAttr] | first // "absent"'
+}
+
 dump_state_on_failure() {
     echo "===== rustbgpd ListReceivedRoutes (raw) =====" >&2
     grpc_list_received | jq . >&2 || true
@@ -138,6 +150,35 @@ else
     ok "192.168.2.0/24 does not carry GRACEFUL_SHUTDOWN community (correct)"
 fi
 
+# Verify the implicit RFC 8326 §4 demotion actually fired:
+#   * GShut-tagged 192.168.1.0/24 must have an explicit LOCAL_PREF=0
+#     attribute (proto3 `optional uint32` surfaces as the value when
+#     present, omitted when absent).
+#   * Untagged 192.168.2.0/24 must have NO LOCAL_PREF attribute
+#     (FRR doesn't send LOCAL_PREF over EBGP and no policy modified
+#     the route on import).
+tagged_lp_attr=$(route_local_pref_attr "192.168.1.0/24")
+log "192.168.1.0/24 local_pref_attr: $tagged_lp_attr"
+if [ "$tagged_lp_attr" = "0" ]; then
+    ok "192.168.1.0/24 has explicit local_pref_attr=0 — RFC 8326 implicit demotion fired"
+else
+    fail "192.168.1.0/24 should have explicit local_pref_attr=0 (RFC 8326 receiver), \
+         got: $tagged_lp_attr"
+    dump_state_on_failure
+    exit 1
+fi
+
+untagged_lp_attr=$(route_local_pref_attr "192.168.2.0/24")
+log "192.168.2.0/24 local_pref_attr: $untagged_lp_attr"
+if [ "$untagged_lp_attr" = "absent" ]; then
+    ok "192.168.2.0/24 has no LOCAL_PREF attribute (correct — EBGP, no policy match)"
+else
+    fail "192.168.2.0/24 should have no LOCAL_PREF (untagged EBGP, no policy match); \
+         got explicit local_pref_attr=$untagged_lp_attr"
+    dump_state_on_failure
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Initiator leg — toggle GShut FIRST, then inject so the very first
 #    outbound advertise of 172.16.0.0/24 already carries the community.
@@ -173,7 +214,11 @@ frr_has_gshut_community() {
     frr_route_json | jq -e '
         ((.paths // []) | first) as $p
         | ($p.community // {}) as $c
-        | ((($c.list // []) | any(. == "gracefulShutdown" or . == "graceful-shutdown"))
+        | ((($c.list // []) | any(
+              . == "gracefulShutdown"
+              or . == "graceful-shutdown"
+              or . == "65535:0"
+           ))
            or (($c.string // "") | test("graceful-shutdown|65535:0")))
     ' > /dev/null 2>&1
 }

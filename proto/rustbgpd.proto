@@ -643,6 +643,14 @@ message Route {
   string validation_state = 14;
   // ASPA path verification state: "valid", "invalid", or "unknown".
   string aspa_state = 15;
+  // Distinguishes "explicit LOCAL_PREF attribute set on the wire or by
+  // policy" (Some(value)) from "no LOCAL_PREF attribute" (absent).
+  // EBGP-received routes have no LOCAL_PREF on the wire, so without
+  // this distinction `local_pref = 0` could mean either "policy set
+  // it to zero" (e.g. RFC 8326 implicit demotion fired) or "no
+  // attribute". Used by the M35 interop test to assert the implicit
+  // honor rule actually fired on a tagged route.
+  optional uint32 local_pref_attr = 16;
 }
 
 message WatchRoutesRequest {
