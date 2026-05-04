@@ -12,6 +12,7 @@ members = [
     "crates/bmp",
     "crates/mrt",
     "crates/evpn",
+    "crates/evpn-linux",
     "bench/evpn-load",
 ]
 resolver = "2"
@@ -38,6 +39,7 @@ rustbgpd-rpki = { path = "crates/rpki", version = "0.13.4" }
 rustbgpd-bmp = { path = "crates/bmp", version = "0.13.4" }
 rustbgpd-mrt = { path = "crates/mrt", version = "0.13.4" }
 rustbgpd-evpn = { path = "crates/evpn", version = "0.13.4" }
+rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.13.4" }
 
 # External dependencies — pinned across workspace
 bytes = "1"

@@ -2178,6 +2178,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustbgpd-evpn-linux"
+version = "0.13.4"
+dependencies = [
+ "rustbgpd-evpn",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rustbgpd-evpn-load"
 version = "0.13.4"
 dependencies = [
