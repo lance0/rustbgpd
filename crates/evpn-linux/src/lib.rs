@@ -51,16 +51,20 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod backoff;
 pub mod dataplane;
 pub mod diff;
 pub mod error;
 pub mod in_memory;
+pub mod reconcile;
 pub mod snapshot;
 
+pub use backoff::{BACKOFF_CAP, BACKOFF_FACTOR, BACKOFF_INITIAL, RetrySchedule};
 pub use dataplane::{Dataplane, DataplaneOp, KernelEvent};
 pub use diff::{Plan, compute_diff};
 pub use error::{DataplaneError, FailureClass};
-pub use in_memory::InMemoryDataplane;
+pub use in_memory::{InMemoryDataplane, InMemoryHandle};
+pub use reconcile::{ReconcileActor, ReconcileActorConfig};
 pub use snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
     OwnedEntry, OwnedSet,

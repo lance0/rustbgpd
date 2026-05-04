@@ -66,3 +66,9 @@ pub use mac::{
     RemoteMacTableBuilder, RemoteMacTableBuilderError,
 };
 pub use route_target::{RouteTarget, RouteTargetParseError};
+
+// Re-export the wire `RouteDistinguisher` so consumers of this crate
+// (including `crates/evpn-linux` and the daemon's projection layer)
+// can name the type without taking a direct `rustbgpd-wire` dep just
+// to construct an `EvpnInstance`.
+pub use rustbgpd_wire::RouteDistinguisher;
