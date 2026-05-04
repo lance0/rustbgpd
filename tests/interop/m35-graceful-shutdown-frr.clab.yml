@@ -1,0 +1,57 @@
+# Containerlab topology: rustbgpd ↔ FRR (M35 — RFC 8326 Graceful Shutdown)
+#
+# Validates both legs of RFC 8326:
+#
+#   * Receiver leg (rustbgpd inbound honor): rustbgpd is configured
+#     with `[global] honor_graceful_shutdown = true`. FRR re-advertises
+#     192.168.1.0/24 with the GRACEFUL_SHUTDOWN community (65535:0)
+#     attached via an outbound route-map. The implicit head-of-import-
+#     chain rule must surface the route in rustbgpd's RIB with
+#     `local_pref = 0`.
+#
+#   * Initiator leg (rustbgpd outbound advertise): the gRPC
+#     SetGracefulShutdown / `rustbgpctl gshut --peer 10.0.0.2` toggle
+#     attaches the GRACEFUL_SHUTDOWN community to outbound updates.
+#     FRR's `show ip bgp <prefix>` output for the rustbgpd-originated
+#     prefix must subsequently carry the community.
+#
+# rustbgpd (AS 65001) advertises: 172.16.0.0/24 (static, originated).
+# FRR (AS 65002) advertises:      192.168.1.0/24, 192.168.2.0/24.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m35-graceful-shutdown-frr.clab.yml
+#   bash tests/interop/scripts/test-m35-graceful-shutdown-frr.sh
+#   containerlab destroy -t tests/interop/m35-graceful-shutdown-frr.clab.yml --cleanup
+
+name: m35-graceful-shutdown-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m35-graceful-shutdown.toml:/etc/rustbgpd/config.initial.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - cp /etc/rustbgpd/config.initial.toml /etc/rustbgpd/config.toml
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m35-graceful-shutdown.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR (10.0.0.2, AS 65002)

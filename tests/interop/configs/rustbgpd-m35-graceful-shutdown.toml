@@ -1,0 +1,36 @@
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+# Receiver leg: routes carrying GRACEFUL_SHUTDOWN get an implicit
+# head-of-import-chain rule that sets local_pref = 0. EBGP-only
+# (this peer is EBGP — remote_asn 65002).
+honor_graceful_shutdown = true
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+description = "frr-m35"
+hold_time = 90
+# Permit-all import — the implicit head-of-chain GShut rule from the
+# global knob composes with this. Permit-all export so the prefix the
+# test script injects via InjectionService.AddPath gets advertised
+# to FRR; the gRPC SetGracefulShutdown toggle is what attaches the
+# community to that outbound advertise on the initiator leg.
+
+[[neighbors.import_policy]]
+match_prefix = "0.0.0.0/0"
+match_prefix_ge = 0
+action = "permit"
+
+[[neighbors.export_policy]]
+match_prefix = "0.0.0.0/0"
+match_prefix_ge = 0
+action = "permit"
