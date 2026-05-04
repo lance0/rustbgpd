@@ -421,6 +421,74 @@ async fn not_ready_instance_emits_status_no_ops() {
     h.shutdown().await;
 }
 
+// 8. Permanent failure suppresses re-apply until the next intent
+//    generation. Inject a permanent-class error (KernelTooOld) and
+//    verify apply_count stops growing on subsequent reconciles for
+//    that key.
+#[tokio::test(start_paused = true)]
+async fn permanent_failure_is_suppressed_until_next_intent_generation() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // KernelTooOld classifies as Permanent; once the actor sees it
+    // for (vni 100, mac 1), it moves into the suppression set.
+    let target = DataplaneOp::AddRemoteFdb {
+        vni: vni(100),
+        mac: mac(1),
+        dst: ipa("10.0.0.2"),
+    };
+    h.handle.inject_failure_kernel_too_old(Some(target));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.build()))
+        .unwrap();
+
+    // First reconcile: hits the permanent failure.
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+    let after_first = h.handle.apply_count();
+    assert!(
+        after_first >= 1,
+        "first apply did not run; got count={after_first}"
+    );
+
+    // Trigger several extra reconciles via periodic dump and watch
+    // notifications. None should re-apply the suppressed key.
+    for _ in 0..3 {
+        tokio::time::advance(Duration::from_secs(61)).await;
+        tokio::task::yield_now().await;
+    }
+    let _ = h.try_drain_reports().await;
+    assert_eq!(
+        h.handle.apply_count(),
+        after_first,
+        "suppressed key was re-applied: count went from {after_first} to {}",
+        h.handle.apply_count()
+    );
+
+    // Bump intent generation: suppression clears, op re-runs (and
+    // succeeds this time because the FIFO injection was already
+    // consumed on the first attempt).
+    let mut macs2 = RemoteMacTable::builder();
+    macs2
+        .insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    h.intent_tx.send(intent(2, inst, macs2.build())).unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(20)).await;
+    tokio::task::yield_now().await;
+
+    assert!(
+        h.handle.apply_count() > after_first,
+        "intent gen=2 did not clear suppression; count stuck at {after_first}"
+    );
+    h.shutdown().await;
+}
+
 #[allow(dead_code)]
 fn _starts_anchor() -> Instant {
     Instant::now()

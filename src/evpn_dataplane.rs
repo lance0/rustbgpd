@@ -73,10 +73,15 @@ impl Default for SupervisorConfig {
     }
 }
 
-/// Handle returned to the daemon for shutdown coordination. Holding
-/// this type alive keeps both the supervisor and the reconcile actor
-/// running; dropping it (or calling [`Self::shutdown`]) tears both
-/// down within the configured drain timeout.
+/// Handle returned to the daemon for shutdown coordination.
+///
+/// Holding this type alive keeps both the supervisor and the
+/// reconcile actor running. Call [`Self::shutdown`] from the
+/// daemon's coordinated shutdown path to cancel the actor and await
+/// its bounded drain — *dropping* the handle does not run async
+/// code, so a plain `drop()` would detach the tasks rather than
+/// drain. The daemon binary moves the handle into the coordinated-
+/// shutdown block in `main.rs` and calls `shutdown().await` there.
 #[derive(Debug)]
 pub struct EvpnDataplaneHandle {
     pub(crate) shutdown: CancellationToken,
@@ -87,8 +92,10 @@ pub struct EvpnDataplaneHandle {
 impl EvpnDataplaneHandle {
     /// Cancel the shutdown token, which causes the reconcile actor to
     /// drain owned remote FDB entries and exit. The supervisor
-    /// follows once the watch sender is dropped. Awaits both tasks.
-    #[allow(dead_code)] // Reserved for the daemon's coordinated shutdown sweep
+    /// follows once the watch sender is dropped. Awaits both tasks
+    /// under a bounded 10 s timeout — longer than the actor's
+    /// internal 5 s drain (ADR-0054 §7) but short enough that a
+    /// stuck task can't wedge the daemon's exit.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
         // Bound the wait — the actor's drain timeout is internal, but

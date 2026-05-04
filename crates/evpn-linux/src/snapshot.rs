@@ -44,15 +44,22 @@ pub struct KernelLinkInfo {
 /// the instance as Ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KernelVxlanInfo {
+    /// Kernel ifindex of the VXLAN port itself (not the bridge). The
+    /// FDB program path targets this ifindex with `NTF_MASTER` so the
+    /// bridge owns the entry — `bridge fdb add MAC dev vxlanX master
+    /// dst REMOTE` shape.
+    pub ifindex: u32,
     /// Configured VNI on the VXLAN port. The probe checks this matches
     /// the instance VNI.
     pub vni: u32,
     /// Local source IP the VXLAN port encapsulates from. The probe
     /// checks this matches `EvpnInstance::local_vtep_ip`.
     pub local_ip: IpAddr,
-    /// `true` if the VXLAN port has kernel learning *disabled*. EVPN
-    /// requires `nolearning` so the control plane owns the FDB.
-    pub learning_disabled: bool,
+    /// Whether `IFLA_VXLAN_LEARNING` was observed in the netlink dump
+    /// at all. `None` means the kernel didn't report it (older kernel
+    /// or unusual driver) — the probe must fail closed in that case
+    /// rather than assume `nolearning`.
+    pub learning_disabled: Option<bool>,
 }
 
 /// One bridge FDB entry as observed in the kernel.

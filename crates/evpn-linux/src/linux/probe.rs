@@ -48,11 +48,20 @@ fn probe_one(inst: &EvpnInstance, cache: &LinkCache) -> InstanceProbe {
             ),
         };
     }
+    if bridge.vxlan_attach_count != 1 {
+        return InstanceProbe::NotReady {
+            reason: format!(
+                "bridge {bridge_name} has {} VXLAN ports attached \
+                 (require exactly 1)",
+                bridge.vxlan_attach_count
+            ),
+        };
+    }
     let Some(vxlan) = &bridge.vxlan else {
         return InstanceProbe::NotReady {
             reason: format!(
-                "bridge {bridge_name} has no single attached VXLAN port \
-                 (zero or ambiguous)"
+                "bridge {bridge_name} has a single VXLAN port but \
+                 inventory missed its attributes"
             ),
         };
     };
@@ -73,13 +82,27 @@ fn probe_one(inst: &EvpnInstance, cache: &LinkCache) -> InstanceProbe {
             ),
         };
     }
-    if !vxlan.learning_disabled {
-        return InstanceProbe::NotReady {
-            reason: format!(
-                "VXLAN port on bridge {bridge_name} has learning enabled; \
-                 EVPN requires `nolearning`"
-            ),
-        };
+    match vxlan.learning_disabled {
+        Some(true) => {}
+        Some(false) => {
+            return InstanceProbe::NotReady {
+                reason: format!(
+                    "VXLAN port on bridge {bridge_name} has learning enabled; \
+                     EVPN requires `nolearning`"
+                ),
+            };
+        }
+        None => {
+            // Fail closed: kernel didn't report `IFLA_VXLAN_LEARNING`.
+            // Older kernel or non-vanilla driver — surface explicitly
+            // rather than silently programming.
+            return InstanceProbe::NotReady {
+                reason: format!(
+                    "VXLAN port on bridge {bridge_name} did not report \
+                     IFLA_VXLAN_LEARNING; cannot verify nolearning"
+                ),
+            };
+        }
     }
     InstanceProbe::Ready
 }
@@ -124,12 +147,14 @@ mod tests {
 
     fn cache_with(name: &str, link: BridgeLink) -> LinkCache {
         let mut bridges = HashMap::new();
-        let mut idx_to_name = HashMap::new();
-        idx_to_name.insert(link.ifindex, name.to_string());
+        let mut vxlan_to_vni = HashMap::new();
+        if let Some(v) = &link.vxlan {
+            vxlan_to_vni.insert(v.ifindex, v.vni);
+        }
         bridges.insert(name.to_string(), link);
         LinkCache {
             bridges,
-            bridge_ifindex_to_name: idx_to_name,
+            vxlan_ifindex_to_vni: vxlan_to_vni,
         }
     }
 
@@ -137,10 +162,12 @@ mod tests {
         BridgeLink {
             ifindex: 100,
             vlan_filtering: false,
+            vxlan_attach_count: 1,
             vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
                 vni,
                 local_ip: ipa(local),
-                learning_disabled: true,
+                learning_disabled: Some(true),
             }),
         }
     }
@@ -206,11 +233,42 @@ mod tests {
         let inst = instance(100, Some("br100"), "10.0.0.1");
         let mut link = ready_link(100, "10.0.0.1");
         if let Some(v) = link.vxlan.as_mut() {
-            v.learning_disabled = false;
+            v.learning_disabled = Some(false);
         }
         let cache = cache_with("br100", link);
         match probe_one(&inst, &cache) {
             InstanceProbe::NotReady { reason } => assert!(reason.contains("learning")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_learning_attribute_missing() {
+        let inst = instance(100, Some("br100"), "10.0.0.1");
+        let mut link = ready_link(100, "10.0.0.1");
+        if let Some(v) = link.vxlan.as_mut() {
+            v.learning_disabled = None;
+        }
+        let cache = cache_with("br100", link);
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("IFLA_VXLAN_LEARNING"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn not_ready_when_two_vxlan_ports_attached() {
+        let inst = instance(100, Some("br100"), "10.0.0.1");
+        let mut link = ready_link(100, "10.0.0.1");
+        link.vxlan_attach_count = 2;
+        link.vxlan = None;
+        let cache = cache_with("br100", link);
+        match probe_one(&inst, &cache) {
+            InstanceProbe::NotReady { reason } => {
+                assert!(reason.contains("2 VXLAN"));
+            }
             other => panic!("{other:?}"),
         }
     }

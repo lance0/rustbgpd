@@ -1024,11 +1024,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
 
     // EVPN Linux dataplane reconciler (Gate 7b). Returns None when
     // [[evpn_instances]] is empty — RR-only deployments don't open a
-    // netlink socket and don't spawn the actor. The handle is held
-    // for the daemon's lifetime; dropping it cancels the reconcile
-    // actor's drain path.
+    // netlink socket and don't spawn the actor. The handle is moved
+    // into the coordinated shutdown block at the bottom of main where
+    // we await its bounded drain.
     let evpn_dataplane_shutdown = tokio_util::sync::CancellationToken::new();
-    let _evpn_dataplane_handle = evpn_dataplane::spawn(
+    let evpn_dataplane_handle = evpn_dataplane::spawn(
         evpn_dataplane::SupervisorConfig::default(),
         &evpn_instances,
         rib_tx.clone(),
@@ -1300,6 +1300,16 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // 2. Wait for PeerManager to finish draining all peers
     if let Err(e) = peer_mgr_handle.await {
         error!(error = %e, "peer manager task panicked");
+    }
+
+    // 2.5 Drain the EVPN Linux dataplane reconciler. The actor
+    // withdraws every owned remote-MAC FDB entry under a bounded
+    // 5 s drain (ADR-0054 §7) and exits; foreign entries
+    // (kernel-learned local MACs, operator-static FDB entries) are
+    // structurally untouched by the diff loop and survive the drain.
+    if let Some(handle) = evpn_dataplane_handle {
+        info!("draining EVPN dataplane");
+        handle.shutdown().await;
     }
 
     // 3. Shut down BMP subsystem (send explicit shutdown and await bounded drain)

@@ -49,24 +49,55 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `crates/evpn-linux::linux::LinuxDataplane` (rtnetlink 0.14 +
     netlink-packet-route 0.19). Three submodules: `links.rs` walks
     `LinkHandle::get` and stitches VXLAN ports onto their master
-    bridges; `fdb.rs` programs entries via `RTM_NEWNEIGH` with
-    `NTF_EXT_LEARNED` + `NUD_NOARP` + `.replace()` for idempotency,
-    and dumps the bridge FDB with NTF/NUD flag classification;
+    bridges (counting attaches per bridge so 2+ VXLAN ports report
+    `NotReady`, not the alternating-clear bug an early prototype
+    had); `fdb.rs` programs entries through the
+    `bridge fdb add MAC dev vxlanX master dst REMOTE` shape on the
+    wire — i.e., `RTM_NEWNEIGH` targeting the **VXLAN port ifindex**
+    (not the bridge) with `NTF_MASTER | NTF_EXT_LEARNED` and
+    `NUD_NOARP`; the FDB dump path resolves VNI from the VXLAN port
+    ifindex via the link cache's `vxlan_ifindex_to_vni` map.
     `probe.rs` enforces the ADR §4 five-point readiness check
     (bridge exists, exactly one VXLAN port, VNI matches,
-    `local_vtep_ip` matches, learning disabled, not VLAN-aware).
-    `connect()` failures (no `CAP_NET_ADMIN`) surface as
-    `DataplaneError::Io` and the daemon spawn path logs `warn!`
-    rather than crashing — running without privileges becomes a
-    no-op for EVPN instead of fatal.
+    `local_vtep_ip` matches, `IFLA_VXLAN_LEARNING` reports
+    `nolearning` — fail-closed if the attribute is missing — and the
+    bridge is not VLAN-aware). The netlink error classifier maps
+    EPERM/EACCES and EOPNOTSUPP to `DataplaneError::KernelTooOld`
+    (permanent) and EINVAL to `InvalidArgument` (also permanent), so
+    permission/kernel-version failures stop retrying instead of
+    looping forever.
   - **Privileged netns integration test** at
     `crates/evpn-linux/tests/netns_dataplane.rs`, gated on
     `EVPN_LINUX_NETNS=1`. Creates a bridge + VXLAN port inside a
-    Linux namespace, programs a remote-MAC entry through the real
-    dataplane, asserts `bridge fdb show` reports it with
-    `extern_learn`, withdraws it, and verifies a pre-loaded foreign
-    static FDB entry survives the drain (validates ADR-0054 §5/§7
-    foreign-entry preservation end-to-end).
+    Linux namespace, runs the real `probe()` to populate the link
+    cache, programs a remote-MAC entry through `apply()`, asserts
+    `bridge fdb show` reports it with `extern_learn`, withdraws it,
+    and verifies a pre-loaded foreign static FDB entry survives the
+    drain (validates ADR-0054 §5/§7 foreign-entry preservation
+    end-to-end).
+  - **Per-op retry/backoff is enforced**, not just recorded.
+    `apply_plan` skips ops whose `(VNI, MAC)` key is in the retry
+    schedule and not yet due, and a separate permanent-failure set
+    suppresses ops that hit `EPERM` / `EOPNOTSUPP` / `EINVAL` until
+    the next intent generation arrives. The actor's outer
+    `tokio::select!` re-fires on the retry timer, so deferred ops
+    run as soon as their backoff elapses instead of waiting for the
+    next 60 s periodic dump. Permanent-suppression test added
+    (`reconcile_actor.rs::permanent_failure_is_suppressed_until_next_intent_generation`).
+  - **Self-originated Type 2 routes are filtered from projection.**
+    `project_evpn_routes` now drops routes whose `next_hop` matches
+    the local instance `local_vtep_ip` — programming such a route as
+    a remote FDB entry would point traffic at ourselves. Two new
+    projection tests cover the single-instance and multi-instance
+    cases.
+  - **EVPN dataplane shutdown drain wired into coordinated shutdown.**
+    The daemon's coordinated shutdown block now calls
+    `EvpnDataplaneHandle::shutdown().await` after PeerManager drains
+    and before BMP — the handle was previously held but never used,
+    leaving the actor's drain path dead. The 5 s drain runs the
+    actor's bounded delete pass on owned remote FDB entries
+    (foreign entries survive), and a 10 s outer timeout prevents a
+    stuck task from wedging daemon exit.
   - **Daemon supervisor** at `src/evpn_dataplane.rs`: polling loop
     queries the RIB's existing `QueryEvpnRoutes` channel every 5 s
     (configurable), projects best-path Type 2 routes into a
@@ -79,13 +110,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Tests
 
-- 50 new tests across the EVPN dataplane stack: 12 domain-type
+- 55 new tests across the EVPN dataplane stack: 12 domain-type
   unit tests in `crates/evpn`, 11 `compute_diff` cases plus a
   key-grounding cross-check, 14 actor + backoff + in-memory fake
-  tests, 1 LinuxDataplane connect-doesnt-panic smoke + 8 probe.rs
-  rejection-leg tests, 10 projection tests, 5 supervisor / daemon-
-  wiring tests, and 1 binary-spawn RR-only invariant test. Workspace
-  count climbs from ~1406 (v0.13.4 baseline) to 1474.
+  tests, 1 LinuxDataplane connect-doesnt-panic smoke + 10 probe.rs
+  rejection-leg tests (including missing-`IFLA_VXLAN_LEARNING` and
+  multi-VXLAN-port cases), 12 projection tests (incl. self-VTEP
+  filter), 5 supervisor / daemon-wiring tests, 1 actor permanent-
+  suppression test, and 1 binary-spawn RR-only invariant test.
+  Workspace count climbs from ~1406 (v0.13.4 baseline) to 1479.
 
 ### Packaging
 

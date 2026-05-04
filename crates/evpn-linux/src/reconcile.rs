@@ -43,6 +43,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
 use tokio_util::sync::CancellationToken;
 
+use std::collections::BTreeSet;
+
+use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
+
 use crate::backoff::RetrySchedule;
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::diff::{Plan, compute_diff};
@@ -120,6 +124,18 @@ pub struct ReconcileActor<D: Dataplane> {
 struct ActorState {
     owned: OwnedSet,
     retry: RetrySchedule,
+    /// `(VNI, MAC)` keys that hit a permanent failure. Suppressed
+    /// from apply until the intent/probe context that contains them
+    /// changes; the [`Self::clear_permanent_on_intent_change`] hook
+    /// runs on every fresh `DataplaneIntent` to drop these keys so
+    /// operator fixes (kernel upgrade, bridge rebind) re-enable
+    /// retry on the next pass.
+    permanent_failures: BTreeSet<(EvpnInstanceId, MacAddress)>,
+    /// `intent_generation` of the most recent intent that contributed
+    /// to `permanent_failures`. When the daemon publishes a newer
+    /// generation we drop the suppressions so the operator's fix
+    /// actually runs.
+    permanent_anchor_generation: u64,
     /// Last `intent_generation` we successfully reconciled against.
     /// Reports echo this so the daemon can correlate.
     last_intent_generation: u64,
@@ -136,6 +152,8 @@ impl ActorState {
         Self {
             owned: OwnedSet::new(),
             retry: RetrySchedule::new(),
+            permanent_failures: BTreeSet::new(),
+            permanent_anchor_generation: 0,
             last_intent_generation: 0,
             reconcile_generation: 0,
             epoch: Instant::now(),
@@ -265,6 +283,13 @@ impl<D: Dataplane> ReconcileActor<D> {
         // Snapshot the current intent (via `borrow_and_update` so the
         // next `changed()` fires only on subsequent publishes).
         let intent: Arc<DataplaneIntent> = self.intent_rx.borrow_and_update().clone();
+        // If a fresh intent generation arrived, drop permanent-
+        // failure suppressions so an operator fix (e.g., bumping
+        // mobility seq via a re-injection) actually runs.
+        if intent.generation != self.state.permanent_anchor_generation {
+            self.state.permanent_failures.clear();
+            self.state.permanent_anchor_generation = intent.generation;
+        }
         self.state.last_intent_generation = intent.generation;
 
         let probes = self.dataplane.probe(&intent.instances).await;
@@ -298,6 +323,14 @@ impl<D: Dataplane> ReconcileActor<D> {
     /// Apply each op in the plan, recording successes in `owned` and
     /// failures in the retry schedule. Returns `(applied, failed)` for
     /// inclusion in the report.
+    ///
+    /// The schedule actually gates apply: ops whose `(VNI, MAC)` key
+    /// is in `permanent_failures` are suppressed entirely (until the
+    /// next intent generation clears them); ops with a transient
+    /// failure recently are skipped until their retry deadline
+    /// passes. The reconcile actor's outer select! re-fires on the
+    /// retry timer so a deferred op runs as soon as it's due, not on
+    /// the next 60 s periodic dump.
     async fn apply_plan(
         &mut self,
         plan: &Plan,
@@ -308,6 +341,27 @@ impl<D: Dataplane> ReconcileActor<D> {
         let now_ms = self.state.now_ms();
 
         for op in &plan.ops {
+            let key = (op_vni(op), op_mac(op));
+
+            // Permanent suppression — wait for an intent generation
+            // bump (operator fix).
+            if self.state.permanent_failures.contains(&key) {
+                tracing::trace!(?op, "suppressed (permanent failure)");
+                continue;
+            }
+
+            // Transient retry gating — skip until the per-op
+            // exponential-backoff deadline passes. The retry timer
+            // in run() will wake us when the next due time arrives.
+            if let Some(next_due_ms) = self.state.retry.next_due_for(key.0, key.1)
+                && next_due_ms > now_ms
+            {
+                let retry_in_ms =
+                    u32::try_from(next_due_ms.saturating_sub(now_ms)).unwrap_or(u32::MAX);
+                tracing::trace!(?op, retry_in_ms, "deferred (backoff not elapsed)");
+                continue;
+            }
+
             let res = self.dataplane.apply(op).await;
             match res {
                 Ok(()) => {
@@ -316,36 +370,46 @@ impl<D: Dataplane> ReconcileActor<D> {
                 }
                 Err(err) => {
                     let class = err.class();
-                    let next_due_ms = match class {
-                        FailureClass::Transient | FailureClass::Conflict => self
-                            .state
-                            .retry
-                            .record_failure(op_vni(op), op_mac(op), now_ms),
-                        FailureClass::Permanent => {
-                            // Don't re-attempt; the next intent /
-                            // event will reset the schedule when the
-                            // operator fixes the underlying state.
-                            // Record it for visibility.
-                            self.state
-                                .retry
-                                .record_failure(op_vni(op), op_mac(op), now_ms)
+                    match class {
+                        FailureClass::Transient | FailureClass::Conflict => {
+                            let next_due_ms = self.state.retry.record_failure(key.0, key.1, now_ms);
+                            let retry_in_ms = u32::try_from(next_due_ms.saturating_sub(now_ms))
+                                .unwrap_or(u32::MAX);
+                            failed.push(FailedOp {
+                                vni: key.0,
+                                kind: op_to_kind(op),
+                                error: err.to_string(),
+                                retry_in_ms,
+                            });
+                            tracing::debug!(
+                                ?class,
+                                retry_in_ms,
+                                ?op,
+                                error = %err,
+                                "dataplane op failed; will retry"
+                            );
                         }
-                    };
-                    let retry_in_ms =
-                        u32::try_from(next_due_ms.saturating_sub(now_ms)).unwrap_or(u32::MAX);
-                    failed.push(FailedOp {
-                        vni: op_vni(op),
-                        kind: op_to_kind(op),
-                        error: err.to_string(),
-                        retry_in_ms,
-                    });
-                    tracing::debug!(
-                        ?class,
-                        retry_in_ms,
-                        ?op,
-                        error = %err,
-                        "dataplane op failed"
-                    );
+                        FailureClass::Permanent => {
+                            // Move into the permanent set; clear from
+                            // the transient retry schedule so we
+                            // don't double-tick. The op will only
+                            // re-attempt when the next intent
+                            // generation arrives.
+                            self.state.retry.record_success(key.0, key.1);
+                            self.state.permanent_failures.insert(key);
+                            failed.push(FailedOp {
+                                vni: key.0,
+                                kind: op_to_kind(op),
+                                error: err.to_string(),
+                                retry_in_ms: 0,
+                            });
+                            tracing::warn!(
+                                ?op,
+                                error = %err,
+                                "dataplane op failed permanently; suppressed until next intent generation"
+                            );
+                        }
+                    }
                 }
             }
         }

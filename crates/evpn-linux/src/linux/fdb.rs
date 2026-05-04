@@ -1,13 +1,27 @@
 //! Bridge FDB program / withdraw / dump via netlink `RTM_NEWNEIGH` /
 //! `RTM_DELNEIGH` / `RTM_GETNEIGH`.
 //!
-//! Programs entries through the bridge/master path with
-//! `NTF_EXT_LEARNED` so kernel-learned entries (which lack the flag)
-//! are visible to the diff loop as foreign and never deleted by
-//! mistake. Static-permanent state (`NUD_NOARP | NUD_PERMANENT`)
-//! prevents the kernel from auto-aging entries we own.
+//! ## Wire shape
+//!
+//! Linux EVPN remote MACs are programmed with the
+//! `bridge fdb add MAC dev vxlanX master dst REMOTE_VTEP` shape on
+//! the wire — i.e., the netlink message's `ifindex` field is the
+//! **VXLAN port** ifindex (not the bridge), and the entry carries
+//! `NTF_MASTER` so the bridge owns the entry. We program with
+//! `NTF_EXT_LEARNED | NTF_MASTER` and `NUD_NOARP` so kernel-learned
+//! entries (which lack `NTF_EXT_LEARNED`) remain visible to the diff
+//! loop as foreign and never deleted by mistake.
+//!
+//! ## VNI resolution on dump
+//!
+//! Bridge FDB messages carry the VXLAN ifindex in `header.ifindex`.
+//! The link-cache's `vxlan_ifindex_to_vni` map turns that back into
+//! an `EvpnInstanceId`; entries whose ifindex isn't indexed (a
+//! non-EVPN VXLAN, or a stale entry on a since-removed port) are
+//! silently dropped from the snapshot.
 
 use std::collections::HashMap;
+use std::io;
 
 use futures::stream::TryStreamExt;
 use netlink_packet_route::AddressFamily;
@@ -27,18 +41,15 @@ use super::links::LinkCache;
 /// Dump every bridge FDB entry in the kernel and key them by
 /// `(EvpnInstanceId, MacAddress)`.
 ///
-/// VNI assignment goes through the link cache: each FDB entry's
-/// `master` ifindex points at the bridge that owns it; we look up
-/// that bridge in the cache, find its attached VXLAN port, and pull
-/// the VNI off the VXLAN attributes. Entries whose bridge isn't
-/// indexed (e.g., a non-EVPN bridge on the same host) are silently
-/// dropped.
+/// Each FDB entry's `header.ifindex` points at the **VXLAN port** for
+/// bridge-family neighbours. We map that ifindex back to a VNI via
+/// the link cache's `vxlan_ifindex_to_vni` table; entries on VXLAN
+/// ports outside the EVPN inventory drop out silently.
 pub(crate) async fn dump_fdb(
     handle: &Handle,
     cache: &LinkCache,
 ) -> Result<HashMap<(EvpnInstanceId, MacAddress), KernelFdbEntry>, DataplaneError> {
     let mut out = HashMap::new();
-    // Bridge address-family dump returns FDB entries.
     let mut req = handle.neighbours().get();
     req.message_mut().header.family = AddressFamily::Bridge;
     let mut stream = req.execute();
@@ -62,10 +73,12 @@ fn parse_fdb_entry(
     if msg.header.family != AddressFamily::Bridge {
         return None;
     }
-    let bridge_idx = msg.header.ifindex;
-    let bridge_name = cache.bridge_ifindex_to_name.get(&bridge_idx)?;
-    let bridge = cache.bridges.get(bridge_name)?;
-    let vni_raw = bridge.vxlan.as_ref()?.vni;
+    // Bridge-family FDB header.ifindex points at the VXLAN port, not
+    // the bridge. (For non-VXLAN bridge ports it's the slave ifindex,
+    // but those aren't EVPN-managed so we drop them via the lookup
+    // miss on `vxlan_ifindex_to_vni` below.)
+    let port_ifindex = msg.header.ifindex;
+    let vni_raw = *cache.vxlan_ifindex_to_vni.get(&port_ifindex)?;
     let vni = EvpnInstanceId::new(vni_raw).ok()?;
 
     let mut mac: Option<MacAddress> = None;
@@ -92,15 +105,12 @@ fn parse_fdb_entry(
         match f {
             NeighbourFlag::ExtLearned => flags.extern_learn = true,
             NeighbourFlag::Own => flags.self_flag = true,
+            // `NeighbourFlag::Controller` is the netlink-packet-route
+            // 0.19 spelling for `NTF_MASTER` — the bit set by
+            // `bridge fdb add ... master`.
+            NeighbourFlag::Controller => flags.master = true,
             _ => {}
         }
-    }
-    // Bridge FDB entries don't explicitly carry NTF_MASTER on the
-    // wire — the absence of NTF_SELF implies master. We mark
-    // NTF_MASTER so the diff loop can distinguish the two paths if
-    // future code wants to.
-    if !flags.self_flag {
-        flags.master = true;
     }
     match msg.header.state {
         NeighbourState::Permanent => flags.permanent = true,
@@ -114,9 +124,9 @@ fn parse_fdb_entry(
 /// Apply one [`DataplaneOp`] against the kernel.
 ///
 /// Add / Update use `RTM_NEWNEIGH` with `NLM_F_REPLACE` so the call
-/// is idempotent; Delete uses `RTM_DELNEIGH`. Both are scoped to the
-/// bridge ifindex looked up from the link cache by the instance VNI
-/// (resolved via the bridge's attached VXLAN port).
+/// is idempotent; Delete uses `RTM_DELNEIGH`. Both target the
+/// instance VNI's VXLAN port ifindex (resolved through the link
+/// cache) with `NTF_MASTER | NTF_EXT_LEARNED` and `NUD_NOARP`.
 pub(crate) async fn apply_op(
     handle: &Handle,
     cache: &LinkCache,
@@ -128,31 +138,37 @@ pub(crate) async fn apply_op(
         | DataplaneOp::RemoveRemoteFdb { vni, mac } => (*vni, *mac),
     };
 
-    let bridge_ifindex =
-        bridge_ifindex_for_vni(cache, vni).ok_or_else(|| DataplaneError::LinkNotFound {
-            name: format!("bridge for VNI {vni}"),
+    let vxlan_ifindex =
+        vxlan_ifindex_for_vni(cache, vni).ok_or_else(|| DataplaneError::LinkNotFound {
+            name: format!("VXLAN port for VNI {vni}"),
         })?;
 
     match op {
         DataplaneOp::AddRemoteFdb { dst, .. } | DataplaneOp::UpdateRemoteFdb { dst, .. } => {
             handle
                 .neighbours()
-                .add_bridge(bridge_ifindex, &mac.octets())
+                .add_bridge(vxlan_ifindex, &mac.octets())
                 .destination(*dst)
                 .state(NeighbourState::Noarp)
-                .flags(vec![NeighbourFlag::ExtLearned])
+                // NTF_MASTER + NTF_EXT_LEARNED. Master makes the
+                // bridge own the entry (so switchdev offload
+                // applies); ExtLearned distinguishes our entries
+                // from kernel-learned ones at FDB dump time.
+                .flags(vec![NeighbourFlag::Controller, NeighbourFlag::ExtLearned])
                 .replace()
                 .execute()
                 .await
-                .map_err(|e| classify_apply_error(e, vni))?;
+                .map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
         DataplaneOp::RemoveRemoteFdb { .. } => {
-            // Build a NeighbourMessage targeting the bridge entry.
+            // Build a NeighbourMessage targeting the bridge entry on
+            // the VXLAN port.
             let mut msg = NeighbourMessage::default();
             msg.header.family = AddressFamily::Bridge;
-            msg.header.ifindex = bridge_ifindex;
+            msg.header.ifindex = vxlan_ifindex;
             msg.header.kind = RouteType::Unspec;
+            msg.header.flags = vec![NeighbourFlag::Controller];
             msg.attributes
                 .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
             handle
@@ -160,33 +176,57 @@ pub(crate) async fn apply_op(
                 .del(msg)
                 .execute()
                 .await
-                .map_err(|e| classify_apply_error(e, vni))?;
+                .map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
     }
 }
 
-fn bridge_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> {
+fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> {
     let raw = vni.as_u32();
     cache
         .bridges
         .values()
-        .find(|b| b.vxlan.as_ref().is_some_and(|v| v.vni == raw))
-        .map(|b| b.ifindex)
+        .filter(|b| b.vxlan_attach_count == 1)
+        .find_map(|b| b.vxlan.as_ref().filter(|v| v.vni == raw).map(|v| v.ifindex))
 }
 
-fn classify_apply_error(err: rtnetlink::Error, _vni: EvpnInstanceId) -> DataplaneError {
-    use std::io;
+/// Classify a netlink error into the right [`DataplaneError`] variant.
+///
+/// EPERM / EACCES are mapped to [`DataplaneError::KernelTooOld`]
+/// rather than [`DataplaneError::Io`] so the actor's
+/// [`crate::FailureClass::Permanent`] classifier kicks in and the
+/// reconciler stops retrying. EINVAL maps to
+/// [`DataplaneError::InvalidArgument`] — the kernel rejected our
+/// flags / message shape, also permanent. Everything else stays
+/// transient and gets exponential backoff.
+fn classify_apply_error(err: &rtnetlink::Error) -> DataplaneError {
+    let rendered = format!("{err:?}");
     match err {
-        rtnetlink::Error::NetlinkError(nlerr) => {
-            // ErrorMessage::raw_code() may be negative in netlink
-            // semantics (errno-style); stringify is enough for the
-            // operator.
-            DataplaneError::Other(format!("netlink: {nlerr:?}"))
+        rtnetlink::Error::NetlinkError(_) => {
+            if rendered.contains("EPERM")
+                || rendered.contains("EACCES")
+                || rendered.contains("Permission denied")
+            {
+                // Permission errors are *permanent* from the actor's
+                // point of view — retrying a missing capability
+                // doesn't fix it. The FailureClass::Permanent path
+                // moves the key into the suppression set so we stop
+                // hammering netlink.
+                DataplaneError::KernelTooOld
+            } else if rendered.contains("EINVAL") || rendered.contains("Invalid argument") {
+                DataplaneError::InvalidArgument(rendered)
+            } else if rendered.contains("EOPNOTSUPP")
+                || rendered.contains("Operation not supported")
+            {
+                DataplaneError::KernelTooOld
+            } else {
+                DataplaneError::Other(format!("netlink: {rendered}"))
+            }
         }
         rtnetlink::Error::RequestFailed => {
             DataplaneError::Io(io::Error::other("rtnetlink request failed"))
         }
-        other => DataplaneError::Other(format!("rtnetlink: {other:?}")),
+        _ => DataplaneError::Other(format!("rtnetlink: {rendered}")),
     }
 }

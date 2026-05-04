@@ -118,6 +118,16 @@ impl RetrySchedule {
         self.entries.values().map(|s| s.next_due_ms).min()
     }
 
+    /// `Some(next_due_ms)` if `(vni, mac)` is currently in the retry
+    /// schedule, `None` otherwise. The reconcile actor reads this in
+    /// the apply path to skip ops whose backoff hasn't elapsed; the
+    /// outer `tokio::select!` re-fires on the retry timer when the
+    /// deadline arrives.
+    #[must_use]
+    pub fn next_due_for(&self, vni: EvpnInstanceId, mac: MacAddress) -> Option<u64> {
+        self.entries.get(&(vni, mac)).map(|s| s.next_due_ms)
+    }
+
     /// Keys whose retry is due at or before `now_ms`.
     #[must_use]
     pub fn keys_due(&self, now_ms: u64) -> Vec<(EvpnInstanceId, MacAddress)> {

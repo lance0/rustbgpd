@@ -30,8 +30,10 @@
 use std::net::IpAddr;
 use std::process::Command;
 
-use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
-use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, LinuxDataplane};
+use rustbgpd_evpn::{
+    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress, RouteDistinguisher, RouteTarget,
+};
+use rustbgpd_evpn_linux::{Dataplane, DataplaneOp, InstanceProbe, LinuxDataplane};
 
 fn netns_gate() -> bool {
     std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1")
@@ -189,6 +191,39 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
 
     // ── inner: actually open netlink and program FDB. ──
     let mut dp = LinuxDataplane::connect().expect("netlink connect inside netns");
+
+    // Build an EvpnInstanceTable matching the topology we created
+    // and run probe() first. probe() refreshes the LinuxDataplane's
+    // internal link cache, which apply() reads to resolve
+    // (VNI -> VXLAN ifindex). Without this, apply() would hit
+    // LinkNotFound because the cache is empty at startup.
+    let mut bytes = [0u8; 8];
+    bytes[2..4].copy_from_slice(&65001u16.to_be_bytes());
+    bytes[4..8].copy_from_slice(&vni().as_u32().to_be_bytes());
+    let mut table = EvpnInstanceTable::new();
+    table
+        .insert(
+            EvpnInstance::new(
+                vni(),
+                RouteDistinguisher::new(bytes),
+                vec![RouteTarget::TwoOctetAs {
+                    asn: 65001,
+                    value: vni().as_u32(),
+                }],
+                local_ip.parse::<IpAddr>().unwrap(),
+                Some(bridge.to_string()),
+                false,
+            )
+            .expect("EvpnInstance"),
+        )
+        .expect("insert");
+
+    let probes = dp.probe(&table).await;
+    match probes.get(vni()) {
+        Some(InstanceProbe::Ready) => {}
+        Some(other) => panic!("instance not Ready in real netns: {other:?}"),
+        None => panic!("probe returned no result for VNI"),
+    }
 
     let test_mac = mac(0x42);
     let dst: IpAddr = remote_ip.parse().unwrap();

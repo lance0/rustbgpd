@@ -25,7 +25,10 @@ use crate::snapshot::KernelVxlanInfo;
 /// One bridge link the inventory cared about.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BridgeLink {
-    /// Kernel ifindex of the bridge.
+    /// Kernel ifindex of the bridge. Reserved for future probe
+    /// extensions (e.g., reading bridge aging time) — current
+    /// reconcile path targets the VXLAN port, not the bridge.
+    #[allow(dead_code)]
     pub ifindex: u32,
     /// `true` when the bridge has `vlan_filtering=1`. ADR-0054 §4
     /// rejects VLAN-aware bridges in Gate 7b — `probe` reports such
@@ -34,8 +37,15 @@ pub(crate) struct BridgeLink {
     /// VXLAN port attached to this bridge whose VNI matches the
     /// instance, if exactly one exists. `None` indicates either no
     /// VXLAN port or multiple competing ports — `probe` reports the
-    /// instance `NotReady` in that case.
+    /// instance `NotReady` in that case. The presence of multiple
+    /// ports is detected by [`vxlan_attach_count`], not by
+    /// [`Option<KernelVxlanInfo>`] alone.
     pub vxlan: Option<KernelVxlanInfo>,
+    /// Number of VXLAN ports attached to this bridge. `1` is the
+    /// only legal value for an EVPN-managed bridge; `0` means
+    /// missing topology, `>=2` means ambiguous and reports
+    /// `NotReady`.
+    pub vxlan_attach_count: u32,
 }
 
 /// Per-VXLAN port slice, before being attached to a bridge.
@@ -56,10 +66,11 @@ struct VxlanPort {
 pub(crate) struct LinkCache {
     /// Bridges by name. Empty if no bridges exist on the host.
     pub bridges: HashMap<String, BridgeLink>,
-    /// Bridge ifindex -> bridge name back-reference. Used by `dump_fdb`
-    /// to turn an FDB entry's `master` ifindex into the EVPN VNI by
-    /// looking up the bridge's attached VXLAN port.
-    pub bridge_ifindex_to_name: HashMap<u32, String>,
+    /// VXLAN ifindex -> EVPN VNI back-reference. Populated alongside
+    /// the bridge inventory so the FDB dump can derive the VNI of an
+    /// FDB entry from `msg.header.ifindex` (which is the *VXLAN*
+    /// ifindex for bridge FDB entries, not the bridge itself).
+    pub vxlan_ifindex_to_vni: HashMap<u32, u32>,
 }
 
 /// Walk every netlink-reported link and build the inventory cache.
@@ -92,6 +103,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                             ifindex,
                             vlan_filtering,
                             vxlan: None,
+                            vxlan_attach_count: 0,
                         },
                     );
                     bridge_ifindex_to_name.insert(ifindex, name);
@@ -106,6 +118,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
         }
     }
 
+    let mut vxlan_ifindex_to_vni: HashMap<u32, u32> = HashMap::new();
     for vxlan in vxlans {
         let Some(master_idx) = vxlan.master else {
             continue;
@@ -114,22 +127,28 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
             continue;
         };
         if let Some(bridge) = bridges.get_mut(bridge_name) {
-            // If a bridge already has one VXLAN port and we see
-            // another, surface the ambiguity by clearing the slot —
-            // probe will read None and report NotReady. ADR-0054 §4
-            // explicitly requires "exactly one VXLAN port for the
-            // instance VNI".
-            if bridge.vxlan.is_some() {
-                bridge.vxlan = None;
-            } else {
+            bridge.vxlan_attach_count = bridge.vxlan_attach_count.saturating_add(1);
+            // Only record the VXLAN port at attach-count 1; subsequent
+            // attaches just bump the counter so probe can detect the
+            // ambiguity. We never re-set the slot to `Some` once it's
+            // been cleared, regardless of count parity.
+            if bridge.vxlan_attach_count == 1 {
+                vxlan_ifindex_to_vni.insert(vxlan.info.ifindex, vxlan.info.vni);
                 bridge.vxlan = Some(vxlan.info);
+            } else {
+                // ADR-0054 §4 requires "exactly one VXLAN port for
+                // the instance VNI". Clear the slot so probe sees
+                // None and reports NotReady.
+                if let Some(prev) = bridge.vxlan.take() {
+                    vxlan_ifindex_to_vni.remove(&prev.ifindex);
+                }
             }
         }
     }
 
     Ok(LinkCache {
         bridges,
-        bridge_ifindex_to_name,
+        vxlan_ifindex_to_vni,
     })
 }
 
@@ -174,7 +193,10 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
     let mut master = None;
     let mut vni: Option<u32> = None;
     let mut local: Option<IpAddr> = None;
-    let mut learning_disabled = true;
+    // None until we observe IFLA_VXLAN_LEARNING. Probe fails closed
+    // on `None` so a kernel that omits the attribute doesn't quietly
+    // pass the readiness check.
+    let mut learning_disabled: Option<bool> = None;
 
     for attr in &msg.attributes {
         match attr {
@@ -195,7 +217,7 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
                                     arr.copy_from_slice(bytes);
                                     local = Some(IpAddr::from(arr));
                                 }
-                                InfoVxlan::Learning(b) => learning_disabled = !*b,
+                                InfoVxlan::Learning(b) => learning_disabled = Some(!*b),
                                 _ => {}
                             }
                         }
@@ -206,12 +228,12 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
         }
     }
 
-    let _ = ifindex;
     let vni = vni?;
     let local = local?;
     Some(VxlanPort {
         master,
         info: KernelVxlanInfo {
+            ifindex,
             vni,
             local_ip: local,
             learning_disabled,

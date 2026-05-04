@@ -95,7 +95,16 @@ where
         let Some(vni) = vni_from_label(route.label1) else {
             continue;
         };
-        if instances.get(vni).is_none() {
+        let Some(local_inst) = instances.get(vni) else {
+            continue;
+        };
+
+        // Skip self-originated Type 2 routes — a route whose next-hop
+        // matches our own local VTEP IP for this instance is one we
+        // emitted (or will emit) outbound; programming it as a
+        // *remote* FDB entry would point traffic for that MAC at
+        // ourselves, creating a black hole.
+        if route.next_hop == local_inst.local_vtep_ip {
             continue;
         }
 
@@ -326,6 +335,32 @@ mod tests {
         ];
         let table = project_evpn_routes(&t, routes);
         assert_eq!(table.len(), 2);
+    }
+
+    #[test]
+    fn self_originated_route_is_dropped() {
+        // local instance VTEP IP is 10.0.0.1; a route whose next-hop
+        // matches our own VTEP must not be programmed as a remote
+        // FDB entry (would black-hole traffic for that MAC).
+        let table = project_evpn_routes(&one_local(100), vec![route(100, 1, "10.0.0.1", None)]);
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn self_filter_does_not_affect_other_vnis_with_same_vtep() {
+        // Same MAC+VTEP across two instances; both are local, so both
+        // routes drop. Verifies the filter is per-instance.
+        let mut t = EvpnInstanceTable::new();
+        t.insert(local_instance(100)).unwrap();
+        t.insert(local_instance(200)).unwrap();
+        let table = project_evpn_routes(
+            &t,
+            vec![
+                route(100, 1, "10.0.0.1", None),
+                route(200, 2, "10.0.0.1", None),
+            ],
+        );
+        assert!(table.is_empty());
     }
 
     #[test]
