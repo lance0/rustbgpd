@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.13.3] — 2026-05-04
+
 ### Added
 
 - **RFC 8326 BGP Graceful Shutdown — well-known `GRACEFUL_SHUTDOWN`
