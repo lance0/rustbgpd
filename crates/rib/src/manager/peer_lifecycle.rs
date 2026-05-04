@@ -204,6 +204,7 @@ impl RibManager {
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
+                    false, // initial dump — equality check is correct
                 );
             } else {
                 Self::distribute_single_best_prefix(
@@ -222,6 +223,7 @@ impl RibManager {
                     &mut announce,
                     &mut withdraw,
                     &mut nh_override_flags,
+                    false, // initial dump — equality check is correct
                 );
             }
         }
@@ -275,6 +277,7 @@ impl RibManager {
                 export_pol.as_ref(),
                 &mut evpn_announce,
                 &mut evpn_withdraw,
+                false, // initial dump — equality check is correct
             );
         }
 

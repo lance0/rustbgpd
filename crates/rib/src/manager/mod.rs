@@ -54,6 +54,19 @@ pub struct RibManager {
     cluster_id: Option<Ipv4Addr>,
     /// Peers that failed a `try_send()` and need a full export resync.
     dirty_peers: HashSet<IpAddr>,
+    /// Peers whose next `distribute_changes` pass must bypass the
+    /// `AdjRibOut`-already-matches suppression for currently-
+    /// advertised routes. Used by `RibUpdate::RefreshPeerOutbound`
+    /// when an *outbound attribute surface* changes that the RIB
+    /// itself cannot see — RFC 8326 `GShut` community attach toggle
+    /// is the canonical case: the toggle lives on `PeerSession` and
+    /// gets applied in transport's `attach_graceful_shutdown_if_enabled`,
+    /// AFTER the RIB-side equality check, so the diff sees no change
+    /// and would otherwise skip re-emit. The set is consumed (cleared
+    /// per peer) at the end of each `distribute_changes` pass so the
+    /// force is one-shot and doesn't leak into unrelated subsequent
+    /// passes.
+    force_outbound_peers: HashSet<IpAddr>,
     /// `EoR` markers that failed to enqueue and must be retried.
     pending_eor: HashMap<IpAddr, HashSet<(Afi, Safi)>>,
     /// Families with an outstanding enhanced route refresh response retry.
@@ -292,6 +305,7 @@ impl RibManager {
             peer_is_rr_client: HashMap::new(),
             cluster_id,
             dirty_peers: HashSet::new(),
+            force_outbound_peers: HashSet::new(),
             pending_eor: HashMap::new(),
             pending_refresh: HashMap::new(),
             refresh_in_progress: HashMap::new(),
