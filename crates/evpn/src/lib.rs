@@ -52,6 +52,7 @@
 pub mod dataplane;
 pub mod instance;
 pub mod mac;
+pub mod projection;
 pub mod route_target;
 
 pub use dataplane::{
@@ -65,6 +66,7 @@ pub use mac::{
     LocalMacObservation, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
     RemoteMacTableBuilder, RemoteMacTableBuilderError,
 };
+pub use projection::{ProjectedEvpnRoute, project_evpn_routes};
 pub use route_target::{RouteTarget, RouteTargetParseError};
 
 // Re-export the wire `RouteDistinguisher` so consumers of this crate
