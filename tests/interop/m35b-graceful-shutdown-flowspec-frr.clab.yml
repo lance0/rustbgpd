@@ -1,0 +1,44 @@
+# Containerlab topology: rustbgpd ↔ FRR
+# (M35b — RFC 8326 Graceful Shutdown on FlowSpec outbound updates)
+#
+# Validates that the runtime SetGracefulShutdown toggle attaches and
+# clears the GRACEFUL_SHUTDOWN community on IPv4 FlowSpec MP_REACH
+# advertisements that were already present in Adj-RIB-Out. M35 covers
+# IPv4 unicast; this pins the FlowSpec-specific outbound emission path.
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m35b-graceful-shutdown-flowspec-frr.clab.yml
+#   bash tests/interop/scripts/test-m35b-graceful-shutdown-flowspec-frr.sh
+#   containerlab destroy -t tests/interop/m35b-graceful-shutdown-flowspec-frr.clab.yml --cleanup
+
+name: m35b-graceful-shutdown-flowspec-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m35b-graceful-shutdown-flowspec.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m35b-graceful-shutdown-flowspec.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR (10.0.0.2, AS 65002)

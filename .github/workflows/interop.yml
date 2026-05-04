@@ -58,6 +58,10 @@ name: Interop
 #     Route Refresh and re-imports against the new policy. Guards
 #     the auto-fire path inside `PeerManager::update_runtime_policies`
 #     introduced post-v0.11.0. Plain BGP + IPv4 unicast.
+#   - M35/M35b/M35c (~30 s each): RFC 8326 Graceful Shutdown receiver
+#     and initiator behavior. M35 covers IPv4 unicast, M35b FlowSpec,
+#     M35c L2VPN/EVPN so all outbound attach sites are exercised
+#     against FRR.
 #
 # M30b/M31/M32/M33 stay manual: M30b needs the missing `vrf` module
 # for L3VNI binding (RFC 9136 Type 5); M32 needs a bond ES; M33 needs
@@ -629,3 +633,90 @@ jobs:
         if: always()
         run: |
           sudo containerlab destroy -t tests/interop/m35-graceful-shutdown-frr.clab.yml --cleanup || true
+
+  m35b:
+    name: M35b — RFC 8326 GShut FlowSpec (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl + jq
+        # jq parses FRR's `show bgp ipv4 flowspec json` output for
+        # the community-presence assertion.
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M35b topology
+        run: sudo containerlab deploy -t tests/interop/m35b-graceful-shutdown-flowspec-frr.clab.yml
+
+      - name: Run M35b test
+        run: bash tests/interop/scripts/test-m35b-graceful-shutdown-flowspec-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m35b-graceful-shutdown-flowspec-frr.clab.yml --cleanup || true
+
+  m35c:
+    name: M35c — RFC 8326 GShut EVPN (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl + jq
+        # jq pretty-prints EVPN diagnostics and parses grpcurl JSON.
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M35c topology
+        run: sudo containerlab deploy -t tests/interop/m35c-graceful-shutdown-evpn-frr.clab.yml
+
+      - name: Run M35c test
+        run: bash tests/interop/scripts/test-m35c-graceful-shutdown-evpn-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m35c-graceful-shutdown-evpn-frr.clab.yml --cleanup || true

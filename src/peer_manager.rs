@@ -130,10 +130,14 @@ struct DynamicRange {
 /// that was mid-`pending_refresh` would silently drop the unfired Route
 /// Refresh / export-apply — same correctness risk that
 /// `ManagedPeer::pending_refresh` / `pending_export_apply` exist to close.
+/// The RFC 8326 initiator toggle lives here too: dynamic auto-removal drops
+/// the whole `ManagedPeer`, so this side table is the only place to preserve
+/// an operator's maintenance-window `GShut` toggle across re-establishment.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct DeadLetteredPending {
     refresh: bool,
     export_apply: bool,
+    graceful_shutdown: bool,
 }
 
 /// Manages the lifecycle of all peer sessions.
@@ -166,9 +170,9 @@ pub struct PeerManager {
     dynamic_peer_count: usize,
     /// Maximum dynamic peers allowed. Default 100.
     dynamic_neighbor_limit: u32,
-    /// Dead-lettered hot-apply / Route Refresh intent from dynamic peers
-    /// auto-removed by `BackToIdle`. Restored on the next inbound from
-    /// the same address. Bounded at `dynamic_neighbor_limit` so a
+    /// Dead-lettered hot-apply / Route Refresh / `GShut` intent from dynamic
+    /// peers auto-removed by `BackToIdle`. Restored on the next inbound
+    /// from the same address. Bounded at `dynamic_neighbor_limit` so a
     /// pathological churn pattern can't grow it without bound; an over-
     /// cap insert evicts an arbitrary existing entry with a `warn!`.
     dead_lettered_pending: HashMap<IpAddr, DeadLetteredPending>,
@@ -1064,6 +1068,134 @@ impl PeerManager {
         Ok(())
     }
 
+    fn policy_resolution_neighbor(
+        config: &Config,
+        address: IpAddr,
+        managed: &ManagedPeer,
+    ) -> crate::config::Neighbor {
+        config
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.address == address.to_string())
+            .cloned()
+            .unwrap_or_else(|| crate::config::Neighbor {
+                address: address.to_string(),
+                remote_asn: managed.remote_asn,
+                description: None,
+                peer_group: managed.peer_group.clone(),
+                hold_time: None,
+                max_prefixes: None,
+                md5_password: None,
+                ttl_security: None,
+                families: Vec::new(),
+                graceful_restart: None,
+                gr_restart_time: None,
+                gr_stale_routes_time: None,
+                llgr_stale_time: None,
+                local_ipv6_nexthop: None,
+                route_reflector_client: None,
+                route_server_client: None,
+                remove_private_as: None,
+                add_path: None,
+                log_level: None,
+                import_policy: Vec::new(),
+                export_policy: Vec::new(),
+                import_policy_chain: Vec::new(),
+                export_policy_chain: Vec::new(),
+            })
+    }
+
+    async fn set_honor_graceful_shutdown(&mut self, enabled: bool) -> Result<(), String> {
+        if self.current_config.global.honor_graceful_shutdown == enabled {
+            return Ok(());
+        }
+
+        // Best-effort fan-out: precompute every EBGP peer's resolved chains
+        // against the *new* snapshot, advance the snapshot unconditionally,
+        // then iterate applying. A failure on peer B must not leave peer A
+        // running with the new effective policy while `current_config`
+        // still shows the old knob value — that drift is what the prior
+        // `?`-shortcircuit shape produced and is hard to debug
+        // operationally. Failed peers will pick up the stale state on
+        // their next `update_runtime_policies` call thanks to the
+        // existing bail-and-carry plumbing (`pending_refresh` /
+        // `pending_export_apply` flags retry on the next policy edit).
+        //
+        // Resolution failures are also non-fatal at the per-peer scope:
+        // if a single neighbor's effective chain can't be resolved
+        // (e.g. peer-group reference broken mid-flight), other peers
+        // shouldn't be punished for it.
+        let mut next_config = self.current_config.clone();
+        next_config.global.honor_graceful_shutdown = enabled;
+
+        let targets: Vec<IpAddr> = self
+            .peers
+            .iter()
+            .filter_map(|(&address, managed)| {
+                (managed.remote_asn != self.local_asn).then_some(address)
+            })
+            .collect();
+
+        let mut failures: Vec<String> = Vec::new();
+        for address in targets {
+            let Some(managed) = self.peers.get(&address) else {
+                continue;
+            };
+            let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
+            let chains = next_config.effective_policy_chains_for_neighbor(&neighbor);
+            let (import_policy, export_policy) = match chains {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        %address,
+                        error = %e,
+                        "honor_graceful_shutdown: failed to resolve effective chain — skipping peer"
+                    );
+                    failures.push(format!("{address}: chain-resolve: {e}"));
+                    continue;
+                }
+            };
+            if let Err(e) = self
+                .update_runtime_policies(address, import_policy, export_policy)
+                .await
+            {
+                warn!(
+                    %address,
+                    error = %e,
+                    "honor_graceful_shutdown: failed to hot-apply on peer — desired snapshot \
+                     advances anyway; bail-and-carry will retry on next policy edit"
+                );
+                failures.push(format!("{address}: hot-apply: {e}"));
+            }
+        }
+
+        // Snapshot advances regardless of per-peer outcomes — the
+        // authoritative knob value matches the operator's intent. The
+        // alternative (shortcircuit on first failure with no rollback)
+        // leaves successfully-updated peers running ahead of the
+        // snapshot, which is the worse drift.
+        self.current_config = next_config;
+
+        if failures.is_empty() {
+            info!(
+                enabled,
+                "hot-applied [global] honor_graceful_shutdown to EBGP peers"
+            );
+            Ok(())
+        } else {
+            Err(format!(
+                "honor_graceful_shutdown applied with {} of {} EBGP peers failing \
+                 (snapshot advanced anyway): {}",
+                failures.len(),
+                self.peers
+                    .values()
+                    .filter(|m| m.remote_asn != self.local_asn)
+                    .count(),
+                failures.join("; ")
+            ))
+        }
+    }
+
     fn peer_manager_config_from_resolved(
         resolved: crate::config::ResolvedNeighbor,
         gr_restart_eligible: bool,
@@ -1229,6 +1361,10 @@ impl PeerManager {
                 let transport = self.build_transport_config(&cfg);
                 let import_policy = cfg.import_policy.clone();
                 let export_policy = cfg.export_policy.clone();
+                let advertise_graceful_shutdown = self
+                    .dead_lettered_pending
+                    .get(&peer_addr)
+                    .is_some_and(|pending| pending.graceful_shutdown);
 
                 let handle = PeerHandle::spawn_inbound(
                     transport.clone(),
@@ -1240,7 +1376,7 @@ impl PeerManager {
                     Some(self.session_notify_tx.clone()),
                     self.bmp_tx.clone(),
                     self.validation_rx.clone(),
-                    false, // dynamic peer starts without GShut advertise
+                    advertise_graceful_shutdown,
                 );
 
                 if let Err(e) = handle.start().await {
@@ -1263,7 +1399,7 @@ impl PeerManager {
                     is_dynamic: true,
                     pending_refresh: false,
                     pending_export_apply: false,
-                    advertise_graceful_shutdown: false,
+                    advertise_graceful_shutdown,
                 };
                 self.peers.insert(peer_addr, managed);
                 self.dynamic_peer_count += 1;
@@ -1352,12 +1488,16 @@ impl PeerManager {
         let Some(managed) = self.peers.get(&peer_addr) else {
             return;
         };
-        if !managed.pending_refresh && !managed.pending_export_apply {
+        if !managed.pending_refresh
+            && !managed.pending_export_apply
+            && !managed.advertise_graceful_shutdown
+        {
             return;
         }
         let entry = DeadLetteredPending {
             refresh: managed.pending_refresh,
             export_apply: managed.pending_export_apply,
+            graceful_shutdown: managed.advertise_graceful_shutdown,
         };
         let cap = self.dynamic_neighbor_limit as usize;
         if cap > 0
@@ -1389,10 +1529,12 @@ impl PeerManager {
         };
         managed.pending_refresh = prev.refresh;
         managed.pending_export_apply = prev.export_apply;
+        managed.advertise_graceful_shutdown = prev.graceful_shutdown;
         info!(
             %peer_addr,
             pending_refresh = prev.refresh,
             pending_export_apply = prev.export_apply,
+            advertise_graceful_shutdown = prev.graceful_shutdown,
             "restored dead-lettered hot-apply intent on dynamic peer re-establishment"
         );
     }
@@ -1823,6 +1965,10 @@ impl PeerManager {
                             ).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply } => {
+                            let result = self.set_honor_graceful_shutdown(enabled).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
                             let _ = reply.send(neighbor_policy_chains_from_config(&self.current_config, address));
                         }
@@ -2019,6 +2165,84 @@ mod tests {
             mrt: None,
             file_path: None,
             evpn_instances: Vec::new(),
+        }
+    }
+
+    fn deny_policy_chain() -> PolicyChain {
+        use rustbgpd_policy::{Policy, PolicyAction};
+
+        PolicyChain::new(vec![Policy {
+            entries: Vec::new(),
+            default_action: PolicyAction::Deny,
+        }])
+    }
+
+    fn insert_test_managed_peer(
+        mgr: &mut PeerManager,
+        addr: IpAddr,
+        handle: PeerHandle,
+        pending_refresh: bool,
+    ) {
+        insert_test_managed_peer_with_asn(mgr, addr, 65002, handle, pending_refresh);
+    }
+
+    fn insert_test_managed_peer_with_asn(
+        mgr: &mut PeerManager,
+        addr: IpAddr,
+        remote_asn: u32,
+        handle: PeerHandle,
+        pending_refresh: bool,
+    ) {
+        let peer_config = make_config(addr, remote_asn);
+        let transport = mgr.build_transport_config(&peer_config);
+        let hold = transport.peer.hold_time;
+        mgr.peers.insert(
+            addr,
+            ManagedPeer {
+                handle,
+                remote_asn,
+                description: "test".to_string(),
+                peer_group: None,
+                enabled: true,
+                hold_time: Some(hold),
+                max_prefixes: None,
+                transport_config: transport,
+                import_policy: None,
+                export_policy: None,
+                pending_inbound: None,
+                is_dynamic: false,
+                pending_refresh,
+                pending_export_apply: false,
+                advertise_graceful_shutdown: false,
+            },
+        );
+    }
+
+    fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
+        crate::config::Neighbor {
+            address: addr.to_string(),
+            remote_asn,
+            description: None,
+            peer_group: None,
+            hold_time: None,
+            max_prefixes: None,
+            md5_password: None,
+            ttl_security: None,
+            families: Vec::new(),
+            graceful_restart: None,
+            gr_restart_time: None,
+            gr_stale_routes_time: None,
+            llgr_stale_time: None,
+            local_ipv6_nexthop: None,
+            route_reflector_client: None,
+            route_server_client: None,
+            remove_private_as: None,
+            add_path: None,
+            log_level: None,
+            import_policy: Vec::new(),
+            export_policy: Vec::new(),
+            import_policy_chain: Vec::new(),
+            export_policy_chain: Vec::new(),
         }
     }
 
@@ -2537,6 +2761,402 @@ mod tests {
              refresh would leave routes in AdjRibIn flowing under the prior policy until \
              an operator manually reissues SetPolicy."
         );
+    }
+
+    #[tokio::test]
+    async fn channel_full_policy_update_bails_and_preserves_pending_refresh() {
+        use rustbgpd_transport::PeerCommand;
+
+        let (session_tx, session_rx) = mpsc::channel::<PeerCommand>(1);
+        let (queued_reply, _queued_rx) = oneshot::channel();
+        assert!(
+            session_tx
+                .try_send(PeerCommand::QueryState {
+                    reply: queued_reply,
+                })
+                .is_ok(),
+            "pre-fill the session command channel so policy hot-apply send blocks"
+        );
+        let (finish_tx, finish_rx) = oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _session_rx = session_rx;
+            let _ = finish_rx.await;
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(session_tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+        let result = mgr
+            .update_runtime_policies(addr, Some(deny_policy_chain()), None)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "full session command channel must surface as a failed hot-apply, not a \
+             silent policy success. Got: {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("timed out") && err.contains("import:"),
+            "error should preserve the channel-full timeout detail: {err}"
+        );
+        let managed = mgr.peers.get(&addr).expect("peer remains managed");
+        assert!(
+            managed.pending_refresh,
+            "pending_refresh must be set so a later policy update retries after the \
+             session command channel drains"
+        );
+        assert!(
+            managed.import_policy.is_none(),
+            "daemon bookkeeping must not advance when the session command never accepted \
+             the import-policy update"
+        );
+
+        let _ = finish_tx.send(());
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn back_to_back_updates_do_not_lose_pending_refresh() {
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+        let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+        let established = Arc::new(AtomicBool::new(false));
+        let refresh_calls = Arc::new(AtomicU32::new(0));
+        let established_in_task = established.clone();
+        let refresh_calls_in_task = refresh_calls.clone();
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. }
+                    | PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let state = if established_in_task.load(Ordering::SeqCst) {
+                            SessionState::Established
+                        } else {
+                            SessionState::Idle
+                        };
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: state,
+                            peer_ip: addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: Some(90),
+                            four_octet_as: Some(true),
+                            remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: u64::from(state == SessionState::Established),
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::SendRouteRefresh { reply, .. } => {
+                        refresh_calls_in_task.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(session_tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let rib_drainer = tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        insert_test_managed_peer(&mut mgr, addr, handle, true);
+
+        let first = mgr.update_runtime_policies(addr, None, None).await;
+        assert!(
+            first.is_ok(),
+            "first update should re-arm the pending refresh while the peer is idle: {first:?}"
+        );
+        assert!(
+            mgr.peers.get(&addr).unwrap().pending_refresh,
+            "pending_refresh must survive the first back-to-back update while the peer is idle"
+        );
+        assert_eq!(
+            refresh_calls.load(Ordering::SeqCst),
+            0,
+            "idle peer must not receive route refresh yet"
+        );
+
+        established.store(true, Ordering::SeqCst);
+        let second = mgr.update_runtime_policies(addr, None, None).await;
+        assert!(
+            second.is_ok(),
+            "second update should consume the carried refresh once the peer is Established: {second:?}"
+        );
+        assert!(
+            !mgr.peers.get(&addr).unwrap().pending_refresh,
+            "pending_refresh must clear after the retry successfully sends Route Refresh"
+        );
+        assert_eq!(
+            refresh_calls.load(Ordering::SeqCst),
+            1,
+            "second update must fire the previously carried Route Refresh exactly once"
+        );
+
+        mgr.delete_peer(addr, false).await.unwrap();
+        drop(mgr);
+        let _ = rib_drainer.await;
+    }
+
+    #[tokio::test]
+    async fn peer_deletion_after_failed_update_drops_pending_retry_cleanly() {
+        use rustbgpd_transport::PeerCommand;
+
+        let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+        let addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    PeerCommand::UpdateImportPolicy { reply, .. } => {
+                        drop(reply);
+                    }
+                    PeerCommand::UpdateExportPolicy { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: SessionState::Established,
+                            peer_ip: addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: Some(90),
+                            four_octet_as: Some(true),
+                            remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: 1,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::Shutdown => break,
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        let handle = PeerHandle::from_parts(session_tx, task);
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+        insert_test_managed_peer(&mut mgr, addr, handle, false);
+
+        let failed = mgr
+            .update_runtime_policies(addr, Some(deny_policy_chain()), None)
+            .await;
+        assert!(
+            failed.is_err(),
+            "first update should fail and leave pending retry intent: {failed:?}"
+        );
+        assert!(
+            mgr.peers.get(&addr).unwrap().pending_refresh,
+            "failed update must set pending_refresh before deletion"
+        );
+
+        mgr.delete_peer(addr, false)
+            .await
+            .expect("peer deletion after failed update must complete");
+        assert!(
+            mgr.peers.is_empty(),
+            "deleting the peer must drop the ManagedPeer that held pending retry state"
+        );
+
+        let retry_after_delete = mgr
+            .update_runtime_policies(addr, Some(deny_policy_chain()), None)
+            .await;
+        assert!(
+            retry_after_delete.is_ok(),
+            "a queued or follow-up policy update for a peer deleted during the failure window \
+             must no-op cleanly, not resurrect stale pending state: {retry_after_delete:?}"
+        );
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[tokio::test]
+    async fn honor_graceful_shutdown_hot_apply_targets_ebgp_only() {
+        use rustbgpd_transport::PeerCommand;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        fn fake_established_peer(
+            addr: IpAddr,
+            import_updates: Arc<AtomicU32>,
+            refresh_calls: Arc<AtomicU32>,
+        ) -> PeerHandle {
+            let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+            let task = tokio::spawn(async move {
+                while let Some(cmd) = session_rx.recv().await {
+                    match cmd {
+                        PeerCommand::UpdateImportPolicy { reply, .. } => {
+                            import_updates.fetch_add(1, Ordering::SeqCst);
+                            let _ = reply.send(Ok(()));
+                        }
+                        PeerCommand::UpdateExportPolicy { reply, .. } => {
+                            let _ = reply.send(Ok(()));
+                        }
+                        PeerCommand::QueryState { reply } => {
+                            let _ = reply.send(PeerSessionState {
+                                fsm_state: SessionState::Established,
+                                peer_ip: addr,
+                                prefix_count: 0,
+                                negotiated_hold_time: Some(90),
+                                four_octet_as: Some(true),
+                                remote_router_id: Some(Ipv4Addr::new(10, 0, 0, 2)),
+                                updates_received: 0,
+                                updates_sent: 0,
+                                notifications_received: 0,
+                                notifications_sent: 0,
+                                flap_count: 0,
+                                uptime_secs: 1,
+                                last_error: String::new(),
+                            });
+                        }
+                        PeerCommand::SendRouteRefresh { reply, .. } => {
+                            refresh_calls.fetch_add(1, Ordering::SeqCst);
+                            let _ = reply.send(Ok(()));
+                        }
+                        PeerCommand::Shutdown => break,
+                        _ => {}
+                    }
+                }
+                Ok(())
+            });
+            PeerHandle::from_parts(session_tx, task)
+        }
+
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(64);
+        let rib_drainer = tokio::spawn(async move {
+            while let Some(update) = rib_rx.recv().await {
+                if let RibUpdate::ReplacePeerExportPolicy { reply, .. } = update {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            BgpMetrics::new(),
+            rib_tx,
+            None,
+        );
+
+        let ebgp = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let ibgp = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+        mgr.current_config.neighbors =
+            vec![config_neighbor(ebgp, 65002), config_neighbor(ibgp, 65001)];
+
+        let ebgp_import_updates = Arc::new(AtomicU32::new(0));
+        let ebgp_refresh_calls = Arc::new(AtomicU32::new(0));
+        let ibgp_import_updates = Arc::new(AtomicU32::new(0));
+        let ibgp_refresh_calls = Arc::new(AtomicU32::new(0));
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            ebgp,
+            65002,
+            fake_established_peer(
+                ebgp,
+                ebgp_import_updates.clone(),
+                ebgp_refresh_calls.clone(),
+            ),
+            false,
+        );
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            ibgp,
+            65001,
+            fake_established_peer(
+                ibgp,
+                ibgp_import_updates.clone(),
+                ibgp_refresh_calls.clone(),
+            ),
+            false,
+        );
+
+        let result = mgr.set_honor_graceful_shutdown(true).await;
+        assert!(result.is_ok(), "hot-apply must succeed: {result:?}");
+        assert!(mgr.current_config.global.honor_graceful_shutdown);
+        assert_eq!(
+            ebgp_import_updates.load(Ordering::SeqCst),
+            1,
+            "EBGP peer must receive recomputed import policy with the implicit GShut rule"
+        );
+        assert_eq!(
+            ebgp_refresh_calls.load(Ordering::SeqCst),
+            1,
+            "Established EBGP peer must get route refresh after the import chain changes"
+        );
+        assert_eq!(
+            ibgp_import_updates.load(Ordering::SeqCst),
+            0,
+            "iBGP peer must be exempt from RFC 8326 receiver hot-apply"
+        );
+        assert_eq!(
+            ibgp_refresh_calls.load(Ordering::SeqCst),
+            0,
+            "iBGP exemption also means no route refresh"
+        );
+
+        mgr.delete_peer(ebgp, false).await.unwrap();
+        mgr.delete_peer(ibgp, false).await.unwrap();
+        drop(mgr);
+        let _ = rib_drainer.await;
     }
 
     /// Regression for a high-severity gap in the prior code: when
@@ -3882,6 +4502,85 @@ mod tests {
         assert!(
             managed2.pending_export_apply,
             "new ManagedPeer must inherit pending_export_apply from dead-letter table"
+        );
+        assert!(
+            !mgr.dead_lettered_pending.contains_key(&peer_addr2),
+            "dead-letter entry must drain on restore"
+        );
+        drop(next_client_stream);
+    }
+
+    #[tokio::test]
+    async fn dead_lettered_gshut_survives_dynamic_peer_auto_removal_and_re_establish() {
+        let (_tx, rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new_with_config(
+            rx,
+            mpsc::unbounded_channel().1,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+            None,
+            make_dynamic_manager_config(),
+        );
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move { TcpStream::connect(listener_addr).await.unwrap() });
+        let (server_stream, remote_addr) = listener.accept().await.unwrap();
+        let client_stream = client.await.unwrap();
+        let peer_addr = remote_addr.ip();
+
+        mgr.handle_inbound(server_stream, peer_addr).await;
+        assert_eq!(mgr.dynamic_peer_count, 1);
+        mgr.peers
+            .get_mut(&peer_addr)
+            .expect("dynamic peer present")
+            .advertise_graceful_shutdown = true;
+
+        mgr.handle_session_notification(SessionNotification::BackToIdle { peer_addr })
+            .await;
+        assert!(mgr.peers.is_empty());
+        let dead = mgr
+            .dead_lettered_pending
+            .get(&peer_addr)
+            .copied()
+            .expect("GShut-only dead-letter entry should be preserved");
+        assert!(
+            dead.graceful_shutdown,
+            "GShut toggle should be carried even when no pending policy flags exist"
+        );
+        assert!(!dead.refresh);
+        assert!(!dead.export_apply);
+        drop(client_stream);
+
+        let next_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let next_listener_addr = next_listener.local_addr().unwrap();
+        let next_client =
+            tokio::spawn(async move { TcpStream::connect(next_listener_addr).await.unwrap() });
+        let (server2, remote_addr2) = next_listener.accept().await.unwrap();
+        let next_client_stream = next_client.await.unwrap();
+        let peer_addr2 = remote_addr2.ip();
+        assert_eq!(
+            peer_addr2, peer_addr,
+            "test relies on both incarnations sharing an IpAddr key"
+        );
+
+        mgr.handle_inbound(server2, peer_addr2).await;
+
+        let managed2 = mgr.peers.get(&peer_addr2).expect("re-established");
+        assert!(
+            managed2.advertise_graceful_shutdown,
+            "new dynamic ManagedPeer must inherit advertise_graceful_shutdown"
+        );
+        assert!(
+            !managed2.pending_refresh && !managed2.pending_export_apply,
+            "GShut-only restore must not synthesize policy retry flags"
         );
         assert!(
             !mgr.dead_lettered_pending.contains_key(&peer_addr2),

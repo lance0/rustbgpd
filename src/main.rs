@@ -1514,15 +1514,16 @@ async fn apply_reload_outcome(
 ///    global chain references — additions and edits first so later
 ///    referrers resolve cleanly.
 /// 2. Reconcile `[[neighbors]]` (existing path).
-/// 3. Remove obsolete peer groups, named policies, and neighbor sets
+/// 3. Hot-apply `[global] honor_graceful_shutdown` if it changed.
+/// 4. Remove obsolete peer groups, named policies, and neighbor sets
 ///    in reverse-dependency order so a `still referenced` rejection
 ///    doesn't fire transiently.
 ///
-/// `[global]`, `[rpki]`, `[bmp]`, `[mrt]`, and `[global.telemetry.grpc_*]`
-/// sections still require a full restart; this function logs them and
-/// pins the in-memory snapshot back to the live listener state for the
-/// gRPC sections (so the next reload keeps comparing against what the
-/// listener actually serves).
+/// Most `[global]` fields, `[rpki]`, `[bmp]`, `[mrt]`, and
+/// `[global.telemetry.grpc_*]` sections still require a full restart;
+/// this function logs them and pins the in-memory snapshot back to the
+/// live listener state for the gRPC sections (so the next reload keeps
+/// comparing against what the listener actually serves).
 ///
 /// Inline `policy.import` / `policy.export` statements (the
 /// non-named global-fallback statements) are detected and warned but
@@ -1547,8 +1548,16 @@ async fn reload_config(
         }
     };
 
-    // Warn about sections that require restart
-    if new_config.global != current.global {
+    let honor_graceful_shutdown_changed =
+        new_config.global.honor_graceful_shutdown != current.global.honor_graceful_shutdown;
+
+    // Warn about sections that require restart. The RFC 8326 honor
+    // knob is hot-applied below, so ignore it for this broad restart
+    // warning.
+    let mut restart_new_global = new_config.global.clone();
+    let restart_current_global = current.global.clone();
+    restart_new_global.honor_graceful_shutdown = restart_current_global.honor_graceful_shutdown;
+    if restart_new_global != restart_current_global {
         warn!("[global] changed — requires full restart to take effect");
     }
     if new_config.rpki != current.rpki {
@@ -1616,28 +1625,6 @@ async fn reload_config(
             .clone_from(&current.evpn_instances);
     }
 
-    // [global] honor_graceful_shutdown follows the same pin pattern.
-    // The implicit chain-tail rule it injects is composed by
-    // `effective_policy_chains_for_neighbor` at session-spawn / policy-
-    // update time and isn't propagated through SIGHUP's policy diff
-    // engine: a flip from `false` to `true` (or vice versa) does not
-    // automatically run `update_runtime_policies` on every EBGP peer,
-    // so the effective import chain on already-Established sessions
-    // would not change. Without pinning, the in-memory snapshot would
-    // silently advance and the operator would believe the new value
-    // is live. Pin back to current so drift is loud and the operator
-    // is told to restart.
-    if new_config.global.honor_graceful_shutdown != current.global.honor_graceful_shutdown {
-        error!(
-            "[global] honor_graceful_shutdown differs from the live \
-             config: the implicit RFC 8326 chain-tail rule is composed \
-             at session-spawn / policy-update time, not on SIGHUP. \
-             Restart rustbgpd to apply this change. (Hot-apply on \
-             reload is tracked in ROADMAP.)"
-        );
-        new_config.global.honor_graceful_shutdown = current.global.honor_graceful_shutdown;
-    }
-
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
     let peer_group_diff = config::diff_peer_groups(&current.peer_groups, &new_config.peer_groups);
     let diff = config::diff_neighbors(&current.neighbors, &new_config.neighbors);
@@ -1647,7 +1634,11 @@ async fn reload_config(
     let peer_groups_unchanged = peer_group_diff.added.is_empty()
         && peer_group_diff.removed.is_empty()
         && peer_group_diff.changed.is_empty();
-    if !policy_diff.has_changes() && peer_groups_unchanged && neighbors_unchanged {
+    if !policy_diff.has_changes()
+        && peer_groups_unchanged
+        && neighbors_unchanged
+        && !honor_graceful_shutdown_changed
+    {
         info!("config reloaded — no neighbor / policy / peer-group changes detected");
         return Some(new_config);
     }
@@ -2125,7 +2116,53 @@ async fn reload_config(
         }
     }
 
-    // 6. Removals in reverse-dependency order so `still referenced`
+    // 6. Hot-apply RFC 8326 receiver behavior. This must run after
+    //    policy/peer-group/global-chain edits and neighbor reconcile
+    //    so the peer manager recomputes effective chains from the
+    //    same live snapshot the rest of this reload has just shaped.
+    if honor_graceful_shutdown_changed {
+        let enabled = new_config.global.honor_graceful_shutdown;
+        match send_pm_step(peer_mgr_tx, |reply| {
+            PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }
+        })
+        .await
+        {
+            Ok(()) => {
+                working_config.global.honor_graceful_shutdown = enabled;
+                info!(
+                    enabled,
+                    "reload: [global] honor_graceful_shutdown hot-applied"
+                );
+            }
+            Err(error) => {
+                // `set_honor_graceful_shutdown` is intentionally best-
+                // effort: on the peer-manager side it advances its own
+                // `current_config` *unconditionally* and applies to as
+                // many EBGP peers as it can, returning Err only to
+                // surface which peers failed. Halting the reload here
+                // would roll the daemon's `working_config` back to the
+                // old value while the peer manager's snapshot stays
+                // advanced — the same hard-to-debug drift the
+                // best-effort design exists to avoid. Mirror the
+                // peer-manager's snapshot advance in the daemon view,
+                // and surface the failure list as a warn rather than
+                // a halt. Failed peers retry on their next
+                // `update_runtime_policies` call via the existing
+                // bail-and-carry plumbing (`pending_refresh` /
+                // `pending_export_apply`).
+                warn!(
+                    enabled,
+                    error,
+                    "reload: [global] honor_graceful_shutdown partial-apply — snapshot \
+                     advanced anyway; bail-and-carry will retry failed peers on next \
+                     policy edit"
+                );
+                working_config.global.honor_graceful_shutdown = enabled;
+            }
+        }
+    }
+
+    // 7. Removals in reverse-dependency order so `still referenced`
     //    rejections don't fire transiently. Peer-group deletes have
     //    to happen after neighbor reconcile if any obsolete neighbors
     //    were members; same for policy / neighbor-set deletes vs
@@ -2538,17 +2575,9 @@ local_vtep_ip = "10.0.0.1"
         std::fs::remove_file(&path).ok();
     }
 
-    /// SIGHUP that flips `[global] honor_graceful_shutdown` must NOT
-    /// advance the in-memory config's value — the implicit
-    /// chain-tail RFC 8326 rule is composed at session-spawn /
-    /// policy-update time and `reload_config` doesn't propagate this
-    /// field's diff to already-Established sessions. Without pinning,
-    /// a `false → true` flip would silently land in the snapshot
-    /// without firing on any peer, and operators would believe the
-    /// rule was active when it wasn't.
     #[tokio::test]
-    async fn reload_pins_honor_graceful_shutdown_to_live_snapshot() {
-        let path = unique_temp_path("reload-honor-gshut-pin");
+    async fn reload_hot_applies_honor_graceful_shutdown() {
+        let path = unique_temp_path("reload-honor-gshut-hot-apply");
 
         // Initial: honor knob OFF (default).
         std::fs::write(
@@ -2574,8 +2603,10 @@ hold_time = 90
         let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
         assert!(!initial.global.honor_graceful_shutdown);
 
-        // Operator rewrites: turns the knob ON. Reload must surface
-        // the drift but NOT advance the field — restart-required.
+        // Operator rewrites: turns the knob ON. Reload must advance
+        // the runtime snapshot and ask the peer manager to recompute
+        // EBGP runtime policies so the implicit chain-tail rule lands
+        // on already-running sessions.
         std::fs::write(
             &path,
             r#"
@@ -2596,7 +2627,16 @@ hold_time = 90
         )
         .unwrap();
 
-        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            match peer_mgr_rx.recv().await {
+                Some(PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }) => {
+                    let _ = reply.send(Ok(()));
+                    enabled
+                }
+                _ => panic!("expected SetHonorGracefulShutdown command"),
+            }
+        });
         let returned = reload_config(
             path.to_str().unwrap(),
             &initial,
@@ -2605,13 +2645,15 @@ hold_time = 90
             &peer_mgr_tx,
         )
         .await
-        .expect("reload should return a config even when only honor_graceful_shutdown drifts");
+        .expect("reload should hot-apply honor_graceful_shutdown");
 
         assert!(
-            !returned.global.honor_graceful_shutdown,
-            "reload must pin honor_graceful_shutdown to the live (false) value until the daemon \
-             restarts; otherwise an operator would believe the implicit chain-tail rule is \
-             firing while it actually composes only at session-spawn / policy-update time"
+            returned.global.honor_graceful_shutdown,
+            "reload must advance honor_graceful_shutdown after peer manager hot-apply succeeds"
+        );
+        assert!(
+            peer_mgr.await.unwrap(),
+            "peer manager command must carry enabled=true"
         );
 
         std::fs::remove_file(&path).ok();

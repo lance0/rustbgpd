@@ -73,13 +73,22 @@ tracked in `KNOWN_ISSUES.md` as a follow-up.
 Off by default — the operator opt-in is deliberate, RFC 8326 §4 says receivers
 SHOULD apply this, not MUST.
 
-**SIGHUP is restart-required for this field.** Reload pins
-`honor_graceful_shutdown` back to the live value with an `error!` log if
-operators try to flip it via SIGHUP — the implicit rule is composed at
-session-spawn / policy-update time and the reload path doesn't currently
-propagate the diff to already-Established sessions. Restart the daemon to
-apply a `false → true` (or vice versa) flip. Hot-apply on reload is tracked
-in ROADMAP.
+SIGHUP hot-applies this field. When the value flips, rustbgpd recomputes
+runtime policies for every EBGP peer and forces a policy refresh so
+already-Established sessions see (or stop seeing) the implicit chain-tail
+rule without a daemon restart. iBGP peers are skipped — the rule never
+applied to them in the first place.
+
+Hot-apply is **best-effort with partial-apply semantics**: the daemon's
+working config and the peer manager's current config both advance to the
+new value even if the refresh fan-out fails for some peers (channel-full,
+session wedged, etc.). The value reported by `rustbgpd --diff` and
+`rustbgpd --check` therefore always matches what the daemon believes it is
+running.
+Peers that failed the immediate refresh retry on their next policy edit
+through the same `pending_refresh` / `pending_export_apply` carry-forward
+plumbing used elsewhere in the reload path; transient failures surface as
+`warn!` log lines rather than aborting the whole reload.
 
 The matching initiator-side toggle (`rustbgpctl gshut`) is a runtime gRPC
 operation, not a config field; see `docs/OPERATIONS.md` for the operator

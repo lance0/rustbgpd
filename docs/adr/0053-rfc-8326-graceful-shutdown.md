@@ -93,6 +93,23 @@ implicit rule (e.g. they're already running it at a different layer
 like a route server) can leave the knob off and the resolved chain
 stays untouched.
 
+**Hot-applied via SIGHUP (v0.13.4).** Originally `[global]
+honor_graceful_shutdown` required a daemon restart for a flip to
+take effect — the field was read once at startup and not re-checked
+on reload. v0.13.4 closes that limitation: SIGHUP routes the new
+value through `PeerManagerCommand::SetHonorGracefulShutdown`, which
+recomputes every EBGP peer's effective import chain against the new
+snapshot and fans the resolved chains through the existing
+`update_runtime_policies` path. The hot-apply is best-effort —
+`PeerManager::current_config` (and the daemon's mirrored
+`working_config`) advance unconditionally; per-peer failures
+aggregate into an `Err` that the reload path logs as a `warn!`
+rather than halting. Failed peers retry on their next policy edit
+via the existing `pending_refresh` / `pending_export_apply`
+bail-and-carry plumbing, so partial application converges rather
+than drifts. See `PeerManager::set_honor_graceful_shutdown` and the
+SIGHUP step in `src/main.rs`.
+
 ### 4. Initiator behavior: operator-runtime toggle, not policy
 
 The runtime side is a per-peer **bool**, not a policy edit:
@@ -120,9 +137,19 @@ per-`PeerSession` bool. Three reasons this matters:
   and the existing session is replaced, `replace_with_inbound`
   passes the existing `ManagedPeer`'s toggle into the new session.
 - **Survives dynamic-peer auto-removal.** Dynamic peers are tracked
-  separately; the dead-letter side table (ADR-0042) does not track
-  GShut state today — this is a known limitation. Operators should
-  re-issue `rustbgpctl gshut` after dynamic peers re-establish.
+  separately: `BackToIdle` drops the whole `ManagedPeer`, so the
+  toggle would be lost across the auto-remove / re-establish cycle
+  if it lived only on `ManagedPeer`. v0.13.4 closes this by
+  extending the per-IP dead-letter side table on `PeerManager` (the
+  same one that already carries `pending_refresh` /
+  `pending_export_apply` across `BackToIdle`) with an
+  `advertise_graceful_shutdown` field. `dead_letter_pending_for`
+  captures the toggle before `peers.remove`; the inbound handler
+  for the same address replays it via `restore_dead_lettered_pending`
+  before the new session is wired up. Operators no longer need to
+  re-issue `rustbgpctl gshut` after a dynamic-peer flap during a
+  maintenance window. The replay is covered by
+  `dead_lettered_pending_survives_dynamic_peer_auto_removal_and_re_establish`.
 
 ### 6. Toggle triggers a dedicated RIB refresh, not a no-op policy
 
@@ -186,9 +213,17 @@ dispatch failure or aggregated broadcast partial — maps to gRPC
 - `src/config/mod.rs` — `effective_policy_chains_for_neighbor` +
   `build_implicit_gshut_policy`.
 - `src/config/schema.rs` — `Global.honor_graceful_shutdown`.
-- `src/peer_manager.rs` — `ManagedPeer.advertise_graceful_shutdown` +
-  `PeerManager::set_graceful_shutdown`.
-- `crates/api/src/peer_types.rs` — `SetGshutError`.
+- `src/peer_manager.rs` — `ManagedPeer.advertise_graceful_shutdown`,
+  `PeerManager::set_graceful_shutdown`,
+  `PeerManager::set_honor_graceful_shutdown` (v0.13.4 hot-apply
+  fan-out), `DeadLetteredPending` (v0.13.4 carries
+  `graceful_shutdown` alongside `refresh` / `export_apply`),
+  `dead_letter_pending_for` / `restore_dead_lettered_pending`.
+- `crates/api/src/peer_types.rs` — `SetGshutError`,
+  `PeerManagerCommand::SetHonorGracefulShutdown` (v0.13.4).
+- `src/main.rs` — SIGHUP reload step that hot-applies
+  `[global] honor_graceful_shutdown` via
+  `PeerManagerCommand::SetHonorGracefulShutdown` (v0.13.4).
 - `crates/api/src/neighbor_service.rs` — `set_graceful_shutdown` gRPC
   handler.
 - `crates/transport/src/handle.rs`,
@@ -203,6 +238,11 @@ dispatch failure or aggregated broadcast partial — maps to gRPC
 - `tests/interop/m35-graceful-shutdown-frr.clab.yml` +
   `tests/interop/scripts/test-m35-graceful-shutdown-frr.sh` — both
   legs against FRR 10.3.1.
+- v0.13.4 M35b (FlowSpec) + M35c (EVPN) interop tests — assert the
+  GShut attach helper fires on FlowSpec and EVPN outbound advertise
+  sites. The capture parser does per-flow TCP stream reassembly so
+  BGP messages split across TCP segments are recovered before
+  attribute scan.
 
 ## References
 

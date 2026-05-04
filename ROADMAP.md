@@ -199,7 +199,7 @@ this document is reference / long-tail.
   EVPN branch, plus a paired `mp_reach_evpn_rejects_32byte_next_hop`
   that asserts `NH-Len=32` for L2VPN/EVPN is rejected (RFC 7432 §7.5
   vs RFC 2545 unicast). Closes the validate-side audit gap.
-- [ ] **Tighten test failure-mode coverage.** All four hot-apply
+- [x] **Tighten test failure-mode coverage.** All four hot-apply
   failure tests inject the same shape (drop the reply oneshot).
   Production paths can also fail with channel-full / channel-
   closed / actual timeout. If the bail logic ever conditioned on
@@ -247,29 +247,28 @@ this document is reference / long-tail.
   for the traditional EBGP/iBGP topology rustbgpd supports today;
   this becomes load-bearing only when confederations land. Tracked
   in `KNOWN_ISSUES.md`.
-- [ ] **RFC 8326 dynamic-peer GShut replay.** Static + collision-
+- [x] **RFC 8326 dynamic-peer GShut replay.** Static + collision-
   replaced + static-reconcile-rebuilt sessions inherit
   `advertise_graceful_shutdown` from `ManagedPeer` on spawn.
-  Dynamic peers auto-removed when their session goes Idle lose the
-  entire `ManagedPeer` record; a fresh session at the same address
-  starts with the toggle off. Either extend the dead-letter side
-  table from ADR-0042 to track GShut state, or document the
-  operator workaround (re-issue `rustbgpctl gshut`) as the
-  supported path. ~30 LOC if we extend the side table.
-- [ ] **RFC 8326 honor knob hot-reload.** SIGHUP currently can't
-  flip `[global] honor_graceful_shutdown` — the implicit chain-tail
-  rule is composed at session-spawn / policy-update time and the
-  reload path doesn't propagate the diff. Pinned with `error!` log
-  today; tracked here for the eventual hot-apply (likely calling
-  `update_runtime_policies` on every EBGP peer when this field
-  flips, equivalent to a forced policy refresh).
-- [ ] **M35 FlowSpec + EVPN initiator-leg coverage.** The outbound
+  Dynamic peers now inherit it too: the per-peer dead-letter side
+  table on `PeerManager` (introduced in v0.13.2 for `pending_refresh`
+  / `pending_export_apply`) snapshots `advertise_graceful_shutdown`
+  before `BackToIdle` auto-removal and replays it into the new
+  `ManagedPeer` / inbound session when the peer re-establishes at the
+  same address.
+- [x] **RFC 8326 honor knob hot-reload.** SIGHUP flips of
+  `[global] honor_graceful_shutdown` now hot-apply through the peer
+  manager: the live config snapshot advances, every EBGP peer
+  recomputes its effective import/export chains, and any established
+  peer with changed import policy gets the existing route-refresh
+  retry semantics.
+- [x] **M35 FlowSpec + EVPN initiator-leg coverage.** The outbound
   attach helper `attach_graceful_shutdown_if_enabled` is wired at
-  all three outbound sites (unicast, FlowSpec, EVPN) but M35 only
-  exercises the IPv4 unicast path. Add per-family interop tests
-  (e.g. M35b for FlowSpec, M35c for EVPN) to validate the helper
-  is hit on the right family-specific outbound emission paths. ~80
-  LOC of additional clab + scripts per family.
+  all three outbound sites (unicast, FlowSpec, EVPN); CI now exercises
+  each family-specific outbound emission path against FRR. M35 covers
+  IPv4 unicast, M35b injects FlowSpec and toggles GShut without route
+  churn, and M35c injects an EVPN Type 2 route and toggles GShut
+  without route churn.
 - [ ] **RFC 7999 BLACKHOLE community.** Natural sibling to RFC 8326
   GShut. Well-known `BLACKHOLE` community (`65535:666`) signals
   "drop traffic to this prefix" for DDoS mitigation. Different
@@ -375,6 +374,7 @@ this document is reference / long-tail.
 - [x] **Tier-1 post-release cleanup bundle** (v0.13.1) — three small operational items: prometheus 0.13 → 0.14 (clears RUSTSEC-2024-0437; protobuf 3.x API migration in 4 internal/test files); M34 SIGHUP-policy interop test now reads rustbgpd's own `flapCount` + `uptimeSeconds` instead of FRR's `bgpTimerUpEstablishedEpoch` (cross-checked monotonicity catches handle replacement that flapCount alone would miss); EVPN MP_REACH IPv6 next-hop roundtrip + 32-byte rejection tests close the validate-side audit gap from v0.11.0.
 - [x] **Tier-2 patch bundle** (v0.13.2) — four operational-debt fixes: dead-letter side table on `PeerManager` so dynamic peers don't lose `pending_refresh` / `pending_export_apply` across `BackToIdle` auto-removal; gRPC `ConfigEvent` → persister bridge no longer holds a stale snapshot across SIGHUP (replacement now routes through the bridge so subsequent gRPC mutations don't overwrite the persisted file with `stale_pre_reload + one_mutation`); `apply_reload_outcome` helper tightens post-reload sync ordering with named failure stages; `reload_config` runs on a dedicated tokio task so SIGINT/SIGTERM observation is no longer blocked by an in-flight reload. Stale RUSTSEC-2024-0437 ignore dropped from `.cargo/audit.toml`.
 - [x] **RFC 8326 BGP Graceful Shutdown** (v0.13.3) — well-known `GRACEFUL_SHUTDOWN` community (`65535:0` / `0xFFFF_0000`) end-to-end. Wire constant in `crates/wire`, policy alias on match + set sides, opt-in `[global] honor_graceful_shutdown = true` knob that appends an implicit chain-tail rule (`match GRACEFUL_SHUTDOWN → set local_pref = 0`) to EBGP imports — running at the chain tail rather than head guarantees the demotion wins last-writer accumulation against operator policies that also set `LOCAL_PREF`. Initiator side: gRPC `NeighborService.SetGracefulShutdown` + `rustbgpctl gshut [--peer X] [--clear]` toggle. Desired state lives on `ManagedPeer` and replays into freshly spawned sessions on collision-replace / inbound-accept; new `RibUpdate::RefreshPeerOutbound` forces re-emission of `AdjRibOut` routes so the toggle is visible on the wire immediately. Typed `SetGshutError::PeerNotFound` / `Internal` distinguishes operator-typo from session/RIB failures at the gRPC layer. New `Route.local_pref_attr` proto field surfaces the explicit-vs-default `LOCAL_PREF` distinction. M35 interop validates both legs (FRR → rustbgpd inbound honor + rustbgpd → FRR outbound advertise + clear) end-to-end against FRR 10.3.1. ADR-0053. Confederation gating + cross-restart persistence + dynamic-peer replay tracked as follow-ups.
+- [x] **Tier-3 patch bundle** (v0.13.4) — closes RFC 8326's three known limitations plus the long-deferred test-failure-mode coverage gap. `[global] honor_graceful_shutdown` now hot-applies on SIGHUP via a best-effort `set_honor_graceful_shutdown` on `PeerManager` that precomputes every EBGP peer's effective chain against the new snapshot, advances `current_config` unconditionally, and accumulates per-peer failures so a partial apply doesn't drift the live snapshot from `working_config` (the reload path absorbs the partial-apply `Err` as a `warn!` and aligns `working_config.global.honor_graceful_shutdown` to the peer manager's view). The per-peer dead-letter side table on `PeerManager` (introduced in v0.13.2) now also snapshots `advertise_graceful_shutdown` alongside `pending_refresh` / `pending_export_apply` before `BackToIdle`'s `peers.remove`, so dynamic peers re-establishing at the same address inherit the toggle instead of restarting at `false`. M35b (FlowSpec) and M35c (L2VPN/EVPN) containerlab tests validate `attach_graceful_shutdown_if_enabled` on the family-specific outbound emission paths, with per-flow TCP-reassembly capture parsers and a `wait_for_capture` polling helper so segmentation and re-emit timing don't flake under CI load. Three new `peer_manager` unit tests cover channel-full policy update, back-to-back hot-apply update, and peer-deletion-mid-retry shapes. No wire-crate change — `rustbgpd-wire` stays at `0.8.5`.
 
 ### P0–P2.5 — Complete
 

@@ -15,7 +15,7 @@ control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-a workspace test suite, fuzz targets, and 31 automated interop suites against
+a workspace test suite, fuzz targets, and 33 automated interop suites against
 FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR — 12 of those interop
 tests run on every PR; the rest are gated locally for runtime or kernel
 reasons.
@@ -256,7 +256,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
-| Interop suites | 31 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR (12 gated on every PR; remainder run locally) |
+| Interop suites | 33 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR (12 gated on every PR; remainder run locally) |
 | Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
@@ -284,13 +284,13 @@ control-plane deployments where you are comfortable with an evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.13.3) |
+| **Maturity** | Public alpha (v0.13.4) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration, EVPN VTEP kernel reconciliation (Gate 7b — RR + Phase-2 declarative foundation work), VPNv4/v6, Confederation, TCP-AO |
-| **Tests** | Workspace test suite, fuzz targets, 32 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (13 interop tests gated on every PR) |
+| **Tests** | Workspace test suite, fuzz targets, 34 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (13 interop tests gated on every PR) |
 
 ## Documentation
 
