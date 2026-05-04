@@ -195,7 +195,7 @@ fn is_unicast_vtep_ip(ip: IpAddr) -> bool {
 /// `insert` is all-or-nothing: a rejected instance leaves both indexes
 /// unchanged, so operators can resolve the collision and retry without
 /// half-applied state.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EvpnInstanceTable {
     by_vni: HashMap<EvpnInstanceId, EvpnInstance>,
     rds: HashMap<RouteDistinguisher, EvpnInstanceId>,
