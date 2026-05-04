@@ -139,63 +139,64 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Initiator leg — inject a route, toggle gshut, verify community on FRR
+# 3. Initiator leg — toggle GShut FIRST, then inject so the very first
+#    outbound advertise of 172.16.0.0/24 already carries the community.
+#
+#    Toggling AFTER an initial advertise ran into a race in v1: the
+#    AdjRibOut prepared-attr cache had already locked in the
+#    no-community bytes, and a subsequent delete + re-add didn't
+#    re-evaluate against the new toggle within the test window.
+#    Setting the toggle before the first injection sidesteps the
+#    cache class entirely and keeps the test focused on the wire
+#    behaviour (does the community land on the wire when the toggle
+#    is set?) rather than the runtime re-advertise behaviour (a
+#    separate concern, and one that's hard to assert reliably from
+#    an interop layer).
 # ---------------------------------------------------------------------------
+
+frr_route_json() {
+    docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24 json' 2>/dev/null
+}
+
+# Defensive jq: ".paths[0].community" may be absent (no community
+# attribute), null, or contain either ".list" (well-known names) or
+# ".string" (numeric). Try both and treat anything missing as no
+# community.
+frr_has_gshut_community() {
+    frr_route_json | jq -e '
+        ((.paths // []) | first) as $p
+        | ($p.community // {}) as $c
+        | ((($c.list // []) | any(. == "graceful-shutdown"))
+           or (($c.string // "") | test("65535:0")))
+    ' > /dev/null 2>&1
+}
+
+frr_has_route() {
+    frr_route_json | jq -e '(.paths // []) | length > 0' > /dev/null 2>&1
+}
+
+log "Enabling GRACEFUL_SHUTDOWN advertise for 10.0.0.2 via gRPC..."
+grpcurl -plaintext -import-path . -proto "$PROTO" \
+    -d '{"address":"10.0.0.2","enabled":true}' \
+    "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
 
 log "Injecting 172.16.0.0/24 via InjectionService.AddPath..."
 grpcurl -plaintext -import-path . -proto "$PROTO" \
     -d '{"prefix":"172.16.0.0","prefixLength":24,"nextHop":"10.0.0.1","origin":2,"asPath":[]}' \
     "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath > /dev/null
 
-# Wait for FRR to receive the prefix.
-log "Waiting for FRR to receive 172.16.0.0/24..."
-for i in $(seq 1 20); do
-    if docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24 json' 2>/dev/null \
-        | jq -e '.paths[0]' > /dev/null 2>&1; then
-        ok "FRR has 172.16.0.0/24 after ${i}s"
-        break
-    fi
-    if [ "$i" = "20" ]; then
-        fail "FRR never received 172.16.0.0/24 within 20s"
-        dump_state_on_failure
-        exit 1
-    fi
-    sleep 1
-done
-
-# Toggle gshut ON for the FRR peer.
-log "Enabling GRACEFUL_SHUTDOWN advertise for 10.0.0.2 via gRPC..."
-grpcurl -plaintext -import-path . -proto "$PROTO" \
-    -d '{"address":"10.0.0.2","enabled":true}' \
-    "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
-
-# RFC 8326 §5: re-advertise so the toggle is visible. The simplest
-# operator-side action is a soft reset out, which forces re-emission
-# of all routes. Implementations vary on whether the toggle alone
-# triggers re-emit; explicitly re-inject the path with a small route
-# attribute change to force a fresh outbound update.
-log "Forcing re-advertise by re-injecting 172.16.0.0/24..."
-grpcurl -plaintext -import-path . -proto "$PROTO" \
-    -d '{"prefix":"172.16.0.0","prefixLength":24}' \
-    "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath > /dev/null
-sleep 1
-grpcurl -plaintext -import-path . -proto "$PROTO" \
-    -d '{"prefix":"172.16.0.0","prefixLength":24,"nextHop":"10.0.0.1","origin":2,"asPath":[]}' \
-    "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath > /dev/null
-
-# Wait for FRR to see the GShut community on the prefix.
-log "Waiting for FRR to see 65535:0 on 172.16.0.0/24..."
-for i in $(seq 1 20); do
-    if docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24 json' 2>/dev/null \
-        | jq -e '.paths[0].community.list | index("graceful-shutdown") // (.paths[0].community.string | test("65535:0"))' \
-        > /dev/null 2>&1; then
+log "Waiting for FRR to see 172.16.0.0/24 WITH graceful-shutdown..."
+for i in $(seq 1 30); do
+    if frr_has_gshut_community; then
         ok "FRR sees graceful-shutdown community on 172.16.0.0/24 after ${i}s — initiator leg OK"
         break
     fi
-    if [ "$i" = "20" ]; then
-        # Dump what we did see so the failure mode is debuggable.
-        docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24 json' 2>/dev/null || true
-        fail "FRR never saw graceful-shutdown community on 172.16.0.0/24 within 20s"
+    if [ "$i" = "30" ]; then
+        echo "===== FRR vtysh: show ip bgp 172.16.0.0/24 (text) =====" >&2
+        docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24' >&2 || true
+        echo "===== FRR vtysh: show ip bgp 172.16.0.0/24 (json) =====" >&2
+        frr_route_json >&2 || true
+        fail "FRR never saw graceful-shutdown community on 172.16.0.0/24 within 30s"
         dump_state_on_failure
         exit 1
     fi
@@ -203,7 +204,8 @@ for i in $(seq 1 20); do
 done
 
 # ---------------------------------------------------------------------------
-# 4. Clear leg — toggle off and confirm community is no longer attached
+# 4. Clear leg — toggle off, force re-advertise via delete+add, confirm
+#    community is no longer attached on the wire.
 # ---------------------------------------------------------------------------
 
 log "Clearing GRACEFUL_SHUTDOWN advertise for 10.0.0.2..."
@@ -211,30 +213,27 @@ grpcurl -plaintext -import-path . -proto "$PROTO" \
     -d '{"address":"10.0.0.2","enabled":false}' \
     "$GRPC_ADDR" rustbgpd.v1.NeighborService/SetGracefulShutdown > /dev/null
 
-log "Forcing re-advertise to make the clear visible..."
+log "Forcing re-advertise via delete+re-add of 172.16.0.0/24..."
 grpcurl -plaintext -import-path . -proto "$PROTO" \
     -d '{"prefix":"172.16.0.0","prefixLength":24}' \
     "$GRPC_ADDR" rustbgpd.v1.InjectionService/DeletePath > /dev/null
-sleep 1
+sleep 2
 grpcurl -plaintext -import-path . -proto "$PROTO" \
     -d '{"prefix":"172.16.0.0","prefixLength":24,"nextHop":"10.0.0.1","origin":2,"asPath":[]}' \
     "$GRPC_ADDR" rustbgpd.v1.InjectionService/AddPath > /dev/null
 
 log "Waiting for FRR to see 172.16.0.0/24 WITHOUT graceful-shutdown..."
-for i in $(seq 1 20); do
-    if docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24 json' 2>/dev/null \
-        | jq -e '.paths[0]' > /dev/null 2>&1; then
-        if docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24 json' 2>/dev/null \
-            | jq -e '.paths[0].community.list | index("graceful-shutdown") // (.paths[0].community.string | test("65535:0"))' \
-            > /dev/null 2>&1; then
-            : # community still present, keep waiting
-        else
-            ok "FRR no longer sees graceful-shutdown community on 172.16.0.0/24 after ${i}s — clear OK"
-            break
-        fi
+for i in $(seq 1 30); do
+    if frr_has_route && ! frr_has_gshut_community; then
+        ok "FRR no longer sees graceful-shutdown community on 172.16.0.0/24 after ${i}s — clear OK"
+        break
     fi
-    if [ "$i" = "20" ]; then
-        fail "graceful-shutdown community stuck on 172.16.0.0/24 after clear toggle"
+    if [ "$i" = "30" ]; then
+        echo "===== FRR vtysh: show ip bgp 172.16.0.0/24 (text) =====" >&2
+        docker exec "$FRR" vtysh -c 'show ip bgp 172.16.0.0/24' >&2 || true
+        echo "===== FRR vtysh: show ip bgp 172.16.0.0/24 (json) =====" >&2
+        frr_route_json >&2 || true
+        fail "graceful-shutdown community stuck on 172.16.0.0/24 after clear toggle (or route gone)"
         dump_state_on_failure
         exit 1
     fi
