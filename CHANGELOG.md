@@ -45,6 +45,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     failed-apply retry, foreign-entry-preservation through shutdown
     drain, periodic-dump cadence, kernel-event-triggered reconcile,
     and NotReady-instance status emission.
+  - **M36 real-VTEP smoke** (`tests/interop/m36-evpn-vtep-smoke.clab.yml`)
+    proves the full path against a real Linux kernel via
+    containerlab: rustbgpd brings up bridge+VXLAN in its container
+    netns, peers with FRR over iBGP L2VPN/EVPN, FRR originates a
+    Type 2 for a static MAC, rustbgpd programs the kernel FDB with
+    both the NTF_MASTER bridge row and the NTF_SELF+dst VXLAN-encap
+    row (matching iproute2's wire shape, verified via strace), the
+    test asserts `bridge fdb show` reports the MAC with
+    `extern_learn` AND the correct remote-VTEP `dst`, then
+    withdraws and asserts cleanup. A foreign-static FDB entry
+    pre-loaded into rustbgpd's bridge survives both program and
+    withdraw cycles. 6/6 PASS locally.
   - **`LinuxDataplane` real rtnetlink integration** at
     `crates/evpn-linux::linux::LinuxDataplane` (rtnetlink 0.14 +
     netlink-packet-route 0.19). Three submodules: `links.rs` walks

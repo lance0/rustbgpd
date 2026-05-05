@@ -1,0 +1,69 @@
+# Containerlab topology: rustbgpd as EVPN VTEP ↔ FRR originator
+# (M36 — Gate 7b real-VTEP smoke)
+#
+# Validates the Gate 7b dataplane reconciler against a real Linux
+# kernel: rustbgpd creates bridge + VXLAN port in its own netns,
+# peers with FRR, FRR originates a Type 2 route for a static MAC,
+# and rustbgpd's `LinuxDataplane` programs the kernel FDB. The
+# smoke asserts:
+#
+# 1. rustbgpd ↔ FRR L2VPN/EVPN session reaches Established.
+# 2. After FRR injects MAC X on its bridge, rustbgpd's
+#    `bridge fdb show dev vxlan100` lists MAC X with `extern_learn`
+#    and dst pointing at FRR's loopback.
+# 3. After FRR withdraws MAC X, rustbgpd's bridge FDB drops it
+#    within ~10s.
+# 4. A foreign-static FDB entry pre-loaded into rustbgpd's bridge
+#    survives both the program and withdraw cycles
+#    (foreign-entry preservation, ADR-0054 §5/§7).
+#
+# Topology:
+#   rustbgpd VTEP (10.0.0.1, AS 65000) ── eBGP L2VPN/EVPN ── FRR (10.0.0.2, AS 65001)
+#
+# Both nodes run with `nolearning` on the VXLAN port so EVPN owns
+# the FDB. The data plane is not exercised — only control-plane
+# programming is verified.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
+#   bash tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
+#   sudo containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
+
+name: m36-evpn-vtep-smoke
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m36-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-vtep.sh 10.0.0.1 100
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+        VTEP_LOOPBACK: 10.0.0.1
+        VTEP_VNI: "100"
+
+    originator:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m36-originator.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep.sh:/usr/local/bin/start-frr-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep.sh 10.0.0.2 100
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "originator:eth1"]

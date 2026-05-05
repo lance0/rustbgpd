@@ -246,6 +246,14 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
         after_add.contains("extern_learn") || after_add.contains("offload"),
         "programmed MAC lacks extern_learn flag:\n{after_add}"
     );
+    // The kernel must produce both the bridge-master row and the
+    // VXLAN-self+dst encap row from one RTM_NEWNEIGH (matching
+    // iproute2's `master dst R self extern_learn` shape). The
+    // remote_ip must appear in the dst column of the self row.
+    assert!(
+        after_add.contains(remote_ip),
+        "programmed MAC missing dst={remote_ip} (no VXLAN-encap row):\n{after_add}"
+    );
 
     dp.apply(&DataplaneOp::RemoveRemoteFdb {
         vni: vni(),

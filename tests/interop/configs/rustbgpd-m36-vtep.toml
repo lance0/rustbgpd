@@ -1,0 +1,29 @@
+# M36 smoke: rustbgpd as EVPN VTEP, peering with FRR originator
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Single EVPN instance bound to br100 / vxlan100 — the start script
+# pre-creates the topology in this container's netns. Probe must
+# pass against this matching layout.
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "originator-frr"
+hold_time = 30
+families = ["l2vpn_evpn"]
