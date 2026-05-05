@@ -61,11 +61,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     (bridge exists, exactly one VXLAN port, VNI matches,
     `local_vtep_ip` matches, `IFLA_VXLAN_LEARNING` reports
     `nolearning` — fail-closed if the attribute is missing — and the
-    bridge is not VLAN-aware). The netlink error classifier maps
-    EPERM/EACCES and EOPNOTSUPP to `DataplaneError::KernelTooOld`
-    (permanent) and EINVAL to `InvalidArgument` (also permanent), so
-    permission/kernel-version failures stop retrying instead of
-    looping forever.
+    bridge is not VLAN-aware). The netlink error classifier reads
+    `ErrorMessage::raw_code()` and maps `EPERM` / `EACCES` →
+    `DataplaneError::PermissionDenied` (permanent), `EOPNOTSUPP` →
+    `KernelTooOld` (permanent), `EINVAL` → `InvalidArgument`
+    (permanent); other errno values stay transient. Permission and
+    kernel-version failures stop retrying instead of looping
+    forever, and the operator-facing message correctly distinguishes
+    "missing CAP_NET_ADMIN" from "kernel too old".
   - **Privileged netns integration test** at
     `crates/evpn-linux/tests/netns_dataplane.rs`, gated on
     `EVPN_LINUX_NETNS=1`. Creates a bridge + VXLAN port inside a
@@ -77,17 +80,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     end-to-end).
   - **Per-op retry/backoff is enforced**, not just recorded.
     `apply_plan` skips ops whose `(VNI, MAC)` key is in the retry
-    schedule and not yet due, and a separate permanent-failure set
-    suppresses ops that hit `EPERM` / `EOPNOTSUPP` / `EINVAL` until
-    the daemon supervisor publishes a *semantically different*
-    `RemoteMacTable` (the supervisor compares the projected table to
-    the previous publish and only bumps the intent generation on
-    change — without that check, a 5 s poll cycle would clear the
-    suppression set every tick, defeating the whole mechanism). The
-    actor's outer `tokio::select!` re-fires on the retry timer, so
-    deferred ops run as soon as their backoff elapses instead of
-    waiting for the next 60 s periodic dump. Two suppression tests
-    locked: `reconcile_actor.rs::permanent_failure_is_suppressed_until_next_intent_generation`
+    schedule and not yet due. Permanent failures
+    (`PermissionDenied` / `KernelTooOld` / `InvalidArgument`) are
+    suppressed by **per-op-fingerprint**: the failed
+    [`DataplaneOp`] is recorded under its `(VNI, MAC)` key, and the
+    actor only suppresses subsequent passes whose op shape equals
+    the recorded one. A mobility move (different remote VTEP) or an
+    add↔remove transition for the same key clears the stale
+    suppression inline. Cross-key isolation is structural —
+    unrelated `RemoteMacTable` churn never touches another key's
+    suppression, and generation churn alone (e.g., a daemon-side
+    re-projection that produced an identical table) doesn't clear
+    anything. The supervisor compares the projected table to the
+    previous publish and only bumps the intent generation on
+    semantic change as a separate optimization to avoid pointless
+    `watch::send` calls. The actor's outer `tokio::select!` re-fires
+    on the retry timer, so deferred ops run as soon as their backoff
+    elapses instead of waiting for the next 60 s periodic dump.
+    Three suppression tests lock the contract:
+    `reconcile_actor.rs::permanent_failure_suppression_is_per_op_fingerprint`,
+    `reconcile_actor.rs::permanent_failure_does_not_leak_across_keys`,
     and `evpn_dataplane.rs::supervisor_does_not_bump_generation_on_stable_table`.
   - **Errno-based netlink classification.**
     `errno_to_dataplane_error` reads the kernel's `errno` from

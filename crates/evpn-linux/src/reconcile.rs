@@ -43,7 +43,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 
@@ -124,18 +124,20 @@ pub struct ReconcileActor<D: Dataplane> {
 struct ActorState {
     owned: OwnedSet,
     retry: RetrySchedule,
-    /// `(VNI, MAC)` keys that hit a permanent failure. Suppressed
-    /// from apply until the intent/probe context that contains them
-    /// changes; the [`Self::clear_permanent_on_intent_change`] hook
-    /// runs on every fresh `DataplaneIntent` to drop these keys so
-    /// operator fixes (kernel upgrade, bridge rebind) re-enable
-    /// retry on the next pass.
-    permanent_failures: BTreeSet<(EvpnInstanceId, MacAddress)>,
-    /// `intent_generation` of the most recent intent that contributed
-    /// to `permanent_failures`. When the daemon publishes a newer
-    /// generation we drop the suppressions so the operator's fix
-    /// actually runs.
-    permanent_anchor_generation: u64,
+    /// Per-op-fingerprint suppression for permanent failures. Keyed
+    /// by `(VNI, MAC)`; the value is the exact [`DataplaneOp`] that
+    /// hit the permanent failure (e.g., `AddRemoteFdb { dst: X }`).
+    ///
+    /// The actor consults this in apply: if the *current* op for
+    /// `(VNI, MAC)` equals the recorded op, suppress the apply.
+    /// When the operator changes the route — different remote VTEP
+    /// after MAC mobility, different op kind because the entry
+    /// transitioned add→update→remove — the equality fails and the
+    /// op is re-attempted. This is per-key, fingerprint-based: an
+    /// unrelated `RemoteMacTable` change for *other* keys does not
+    /// clear suppression on the failed key, which is what
+    /// generation-wide clearing would do.
+    permanent_failures: BTreeMap<(EvpnInstanceId, MacAddress), DataplaneOp>,
     /// Last `intent_generation` we successfully reconciled against.
     /// Reports echo this so the daemon can correlate.
     last_intent_generation: u64,
@@ -152,8 +154,7 @@ impl ActorState {
         Self {
             owned: OwnedSet::new(),
             retry: RetrySchedule::new(),
-            permanent_failures: BTreeSet::new(),
-            permanent_anchor_generation: 0,
+            permanent_failures: BTreeMap::new(),
             last_intent_generation: 0,
             reconcile_generation: 0,
             epoch: Instant::now(),
@@ -282,14 +283,12 @@ impl<D: Dataplane> ReconcileActor<D> {
 
         // Snapshot the current intent (via `borrow_and_update` so the
         // next `changed()` fires only on subsequent publishes).
+        // Permanent-failure suppression is per-op-fingerprint and
+        // cleared lazily in apply_plan when the op shape for a
+        // suppressed key changes — there's no generation-wide clear
+        // here because that would let unrelated RemoteMacTable
+        // churn re-arm permanent failures on other keys.
         let intent: Arc<DataplaneIntent> = self.intent_rx.borrow_and_update().clone();
-        // If a fresh intent generation arrived, drop permanent-
-        // failure suppressions so an operator fix (e.g., bumping
-        // mobility seq via a re-injection) actually runs.
-        if intent.generation != self.state.permanent_anchor_generation {
-            self.state.permanent_failures.clear();
-            self.state.permanent_anchor_generation = intent.generation;
-        }
         self.state.last_intent_generation = intent.generation;
 
         let probes = self.dataplane.probe(&intent.instances).await;
@@ -324,13 +323,20 @@ impl<D: Dataplane> ReconcileActor<D> {
     /// failures in the retry schedule. Returns `(applied, failed)` for
     /// inclusion in the report.
     ///
-    /// The schedule actually gates apply: ops whose `(VNI, MAC)` key
-    /// is in `permanent_failures` are suppressed entirely (until the
-    /// next intent generation clears them); ops with a transient
-    /// failure recently are skipped until their retry deadline
-    /// passes. The reconcile actor's outer select! re-fires on the
-    /// retry timer so a deferred op runs as soon as it's due, not on
-    /// the next 60 s periodic dump.
+    /// Two gating layers run before each apply:
+    ///
+    /// 1. **Per-op-fingerprint permanent suppression.** If the
+    ///    current op for `(VNI, MAC)` equals the op recorded in
+    ///    `permanent_failures` for that key, skip — repeating a
+    ///    permanent failure (`PermissionDenied` / `KernelTooOld` /
+    ///    `InvalidArgument`) won't help. If the op shape *differs*
+    ///    (e.g., the operator changed the remote VTEP after MAC
+    ///    mobility, or transitioned add → remove), the suppression
+    ///    is cleared inline and the op runs.
+    /// 2. **Per-op transient backoff.** Ops whose `(VNI, MAC)` key
+    ///    is in the retry schedule and not yet due are skipped; the
+    ///    actor's outer `tokio::select!` re-fires on the retry timer
+    ///    so a deferred op runs as soon as its backoff elapses.
     async fn apply_plan(
         &mut self,
         plan: &Plan,
@@ -343,11 +349,22 @@ impl<D: Dataplane> ReconcileActor<D> {
         for op in &plan.ops {
             let key = (op_vni(op), op_mac(op));
 
-            // Permanent suppression — wait for an intent generation
-            // bump (operator fix).
-            if self.state.permanent_failures.contains(&key) {
-                tracing::trace!(?op, "suppressed (permanent failure)");
-                continue;
+            // Per-op permanent suppression. Compare current op shape
+            // to the recorded one; if they match, skip. If the op
+            // shape changed (operator did a mobility move, or the
+            // entry transitioned add→update→remove), drop the stale
+            // suppression so the new op gets a fresh shot.
+            if let Some(recorded) = self.state.permanent_failures.get(&key) {
+                if recorded == op {
+                    tracing::trace!(?op, "suppressed (permanent failure, op shape unchanged)");
+                    continue;
+                }
+                tracing::debug!(
+                    ?op,
+                    recorded = ?recorded,
+                    "op shape changed since permanent failure; clearing suppression"
+                );
+                self.state.permanent_failures.remove(&key);
             }
 
             // Transient retry gating — skip until the per-op
@@ -390,13 +407,15 @@ impl<D: Dataplane> ReconcileActor<D> {
                             );
                         }
                         FailureClass::Permanent => {
-                            // Move into the permanent set; clear from
-                            // the transient retry schedule so we
-                            // don't double-tick. The op will only
-                            // re-attempt when the next intent
-                            // generation arrives.
+                            // Record the *exact op shape* under the
+                            // (VNI, MAC) key. Subsequent passes
+                            // suppress only when the shape matches;
+                            // a mobility move (different dst) or
+                            // op-kind change clears the suppression
+                            // automatically. Drop from the transient
+                            // retry schedule so we don't double-tick.
                             self.state.retry.record_success(key.0, key.1);
-                            self.state.permanent_failures.insert(key);
+                            self.state.permanent_failures.insert(key, op.clone());
                             failed.push(FailedOp {
                                 vni: key.0,
                                 kind: op_to_kind(op),

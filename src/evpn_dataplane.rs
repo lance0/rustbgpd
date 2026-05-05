@@ -120,9 +120,10 @@ impl EvpnDataplaneHandle {
 ///    [`RemoteMacTable`], and publishes a [`DataplaneIntent`].
 /// 2. The [`ReconcileActor`] consuming intents, driving the
 ///    [`rustbgpd_evpn_linux::Dataplane`] implementation. On Linux
-///    this is the real `LinuxDataplane` (currently the Phase 4 stub
-///    pending the netlink integration); on other platforms the
-///    function returns `None` because the dataplane is meaningless.
+///    this is the real `LinuxDataplane` (rtnetlink-backed FDB
+///    program/withdraw against the bridge/master path); on other
+///    platforms the function returns `None` because the dataplane
+///    is meaningless.
 #[must_use = "drop the handle to shut down the EVPN dataplane stack"]
 pub fn spawn(
     config: SupervisorConfig,

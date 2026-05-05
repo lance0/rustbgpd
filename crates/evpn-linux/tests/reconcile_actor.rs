@@ -421,17 +421,15 @@ async fn not_ready_instance_emits_status_no_ops() {
     h.shutdown().await;
 }
 
-// 8. Permanent failure suppresses re-apply until the next intent
-//    generation. Inject a permanent-class error (KernelTooOld) and
-//    verify apply_count stops growing on subsequent reconciles for
-//    that key.
+// 8. Permanent suppression is per-op-fingerprint. Generation churn
+//    on the same op shape MUST NOT clear suppression — only when the
+//    op shape itself changes (mobility move, add↔remove transition)
+//    does the actor retry.
 #[tokio::test(start_paused = true)]
-async fn permanent_failure_is_suppressed_until_next_intent_generation() {
+async fn permanent_failure_suppression_is_per_op_fingerprint() {
     let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
     h.handle.set_probe(vni(100), InstanceProbe::Ready);
 
-    // KernelTooOld classifies as Permanent; once the actor sees it
-    // for (vni 100, mac 1), it moves into the suppression set.
     let target = DataplaneOp::AddRemoteFdb {
         vni: vni(100),
         mac: mac(1),
@@ -447,7 +445,8 @@ async fn permanent_failure_is_suppressed_until_next_intent_generation() {
         .send(intent(1, inst.clone(), macs.build()))
         .unwrap();
 
-    // First reconcile: hits the permanent failure.
+    // First reconcile records the permanent failure with the
+    // current op shape.
     tokio::task::yield_now().await;
     let _ = h.try_drain_reports().await;
     let after_first = h.handle.apply_count();
@@ -456,8 +455,7 @@ async fn permanent_failure_is_suppressed_until_next_intent_generation() {
         "first apply did not run; got count={after_first}"
     );
 
-    // Trigger several extra reconciles via periodic dump and watch
-    // notifications. None should re-apply the suppressed key.
+    // Periodic dumps must not retry while the op shape is unchanged.
     for _ in 0..3 {
         tokio::time::advance(Duration::from_secs(61)).await;
         tokio::task::yield_now().await;
@@ -466,26 +464,90 @@ async fn permanent_failure_is_suppressed_until_next_intent_generation() {
     assert_eq!(
         h.handle.apply_count(),
         after_first,
-        "suppressed key was re-applied: count went from {after_first} to {}",
+        "suppressed op shape was re-applied (count {after_first} -> {})",
         h.handle.apply_count()
     );
 
-    // Bump intent generation: suppression clears, op re-runs (and
-    // succeeds this time because the FIFO injection was already
-    // consumed on the first attempt).
-    let mut macs2 = RemoteMacTable::builder();
-    macs2
+    // Publish a fresh intent generation with the SAME op shape
+    // (still 10.0.0.2, no mobility seq). Per-op-fingerprint
+    // suppression must hold — generation churn alone does NOT clear.
+    let mut macs_same = RemoteMacTable::builder();
+    macs_same
         .insert(vni(100), mac(1), entry("10.0.0.2", None))
         .unwrap();
-    h.intent_tx.send(intent(2, inst, macs2.build())).unwrap();
+    h.intent_tx
+        .send(intent(2, inst.clone(), macs_same.build()))
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(20)).await;
+    tokio::task::yield_now().await;
+    let after_same_gen = h.handle.apply_count();
+    assert_eq!(
+        after_same_gen, after_first,
+        "generation bump alone re-applied a suppressed op (count {after_first} -> {after_same_gen}); \
+         suppression must be per-op-fingerprint, not generation-wide"
+    );
+
+    // Now publish an intent where the op shape DOES change — same
+    // (VNI, MAC), different remote VTEP. This is the operator's
+    // mobility move; the new op shape must execute.
+    let mut macs_moved = RemoteMacTable::builder();
+    macs_moved
+        .insert(vni(100), mac(1), entry("10.0.0.5", None))
+        .unwrap();
+    h.intent_tx
+        .send(intent(3, inst, macs_moved.build()))
+        .unwrap();
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(20)).await;
     tokio::task::yield_now().await;
 
     assert!(
-        h.handle.apply_count() > after_first,
-        "intent gen=2 did not clear suppression; count stuck at {after_first}"
+        h.handle.apply_count() > after_same_gen,
+        "op shape change (mobility move) did not clear suppression; \
+         count stuck at {after_same_gen}"
     );
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(1)));
+    h.shutdown().await;
+}
+
+// 9. Cross-key isolation: a permanent failure on (VNI, MAC=1) MUST
+//    NOT block a separate (VNI, MAC=2) from being applied. Earlier
+//    generation-wide suppression had cross-key bleed via the
+//    "any RemoteMacTable change clears the whole set" semantics;
+//    per-op-fingerprint isolates each (VNI, MAC) cleanly.
+#[tokio::test(start_paused = true)]
+async fn permanent_failure_does_not_leak_across_keys() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Permanent-fail Add for mac(1); leave mac(2) alone.
+    let target = DataplaneOp::AddRemoteFdb {
+        vni: vni(100),
+        mac: mac(1),
+        dst: ipa("10.0.0.2"),
+    };
+    h.handle.inject_failure_kernel_too_old(Some(target));
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    macs.insert(vni(100), mac(2), entry("10.0.0.3", None))
+        .unwrap();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs.build())).unwrap();
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(20)).await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(2)),
+        "unrelated key was blocked by another key's permanent failure"
+    );
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(1)));
+
     h.shutdown().await;
 }
 
