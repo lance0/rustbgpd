@@ -192,8 +192,10 @@ pub enum InstanceProbe {
 }
 
 /// Snapshot of every kernel FDB entry the dataplane is interested in,
-/// keyed by `(VNI, MAC)`. Phase 4 derives the VNI from the FDB entry's
-/// `master` ifindex via the link inventory.
+/// keyed by `(VNI, MAC)`. The Linux netlink dump derives the VNI from
+/// the FDB entry's **VXLAN-port** ifindex (which is what bridge-family
+/// `RTM_NEWNEIGH` messages carry in `header.ifindex`) by looking it
+/// up in the link cache's `vxlan_ifindex_to_vni` table.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KernelSnapshot {
     fdb: BTreeMap<(EvpnInstanceId, MacAddress), KernelFdbEntry>,

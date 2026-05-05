@@ -30,6 +30,7 @@ netlink-packet-core = "0.7"
 netlink-packet-utils = "0.5"
 netlink-sys = { version = "0.8", features = ["tokio_socket"] }
 futures = "0.3"
+libc.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

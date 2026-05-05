@@ -193,40 +193,88 @@ fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> 
 
 /// Classify a netlink error into the right [`DataplaneError`] variant.
 ///
-/// EPERM / EACCES are mapped to [`DataplaneError::KernelTooOld`]
-/// rather than [`DataplaneError::Io`] so the actor's
-/// [`crate::FailureClass::Permanent`] classifier kicks in and the
-/// reconciler stops retrying. EINVAL maps to
-/// [`DataplaneError::InvalidArgument`] — the kernel rejected our
-/// flags / message shape, also permanent. Everything else stays
-/// transient and gets exponential backoff.
+/// Reads the `ErrorMessage::raw_code()` (an errno-style negative
+/// integer) and delegates to [`errno_to_dataplane_error`] for the
+/// per-errno mapping.
 fn classify_apply_error(err: &rtnetlink::Error) -> DataplaneError {
-    let rendered = format!("{err:?}");
-    match err {
-        rtnetlink::Error::NetlinkError(_) => {
-            if rendered.contains("EPERM")
-                || rendered.contains("EACCES")
-                || rendered.contains("Permission denied")
-            {
-                // Permission errors are *permanent* from the actor's
-                // point of view — retrying a missing capability
-                // doesn't fix it. The FailureClass::Permanent path
-                // moves the key into the suppression set so we stop
-                // hammering netlink.
-                DataplaneError::KernelTooOld
-            } else if rendered.contains("EINVAL") || rendered.contains("Invalid argument") {
-                DataplaneError::InvalidArgument(rendered)
-            } else if rendered.contains("EOPNOTSUPP")
-                || rendered.contains("Operation not supported")
-            {
-                DataplaneError::KernelTooOld
-            } else {
-                DataplaneError::Other(format!("netlink: {rendered}"))
-            }
-        }
-        rtnetlink::Error::RequestFailed => {
-            DataplaneError::Io(io::Error::other("rtnetlink request failed"))
-        }
-        _ => DataplaneError::Other(format!("rtnetlink: {rendered}")),
+    if let rtnetlink::Error::NetlinkError(msg) = err {
+        // raw_code() is the errno-style integer the kernel sent
+        // back, negative-encoded per netlink convention. Take the
+        // absolute value to get the standard errno.
+        let errno = i32::try_from(msg.raw_code().unsigned_abs()).unwrap_or(0);
+        let detail = msg.to_io().to_string();
+        return errno_to_dataplane_error(errno, &detail);
+    }
+    if matches!(err, rtnetlink::Error::RequestFailed) {
+        return DataplaneError::Io(io::Error::other("rtnetlink request failed"));
+    }
+    DataplaneError::Other(format!("rtnetlink: {err:?}"))
+}
+
+/// Pure-function map from a positive errno to a [`DataplaneError`].
+///
+/// Split out from [`classify_apply_error`] so unit tests can exercise
+/// the per-errno mapping without forging an `ErrorMessage`
+/// (`#[non_exhaustive]`, no public constructor).
+///
+/// - `EPERM` / `EACCES` → [`DataplaneError::PermissionDenied`]
+///   (Permanent — retrying without privilege change can't help).
+/// - `EOPNOTSUPP` → [`DataplaneError::KernelTooOld`] (Permanent —
+///   kernel doesn't support the flag/feature).
+/// - `EINVAL` → [`DataplaneError::InvalidArgument`] (Permanent — our
+///   message shape is wrong; retrying same shape just retries the
+///   error).
+/// - Anything else → [`DataplaneError::Other`] (Transient — backoff
+///   schedule retries).
+fn errno_to_dataplane_error(errno: i32, detail: &str) -> DataplaneError {
+    match errno {
+        libc::EPERM | libc::EACCES => DataplaneError::PermissionDenied(detail.to_owned()),
+        libc::EOPNOTSUPP => DataplaneError::KernelTooOld,
+        libc::EINVAL => DataplaneError::InvalidArgument(detail.to_owned()),
+        _ => DataplaneError::Other(format!("netlink errno {errno}: {detail}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FailureClass;
+
+    #[test]
+    fn errno_eperm_is_permission_denied_permanent() {
+        let dp_err = errno_to_dataplane_error(libc::EPERM, "Operation not permitted (os error 1)");
+        assert!(
+            matches!(dp_err, DataplaneError::PermissionDenied(_)),
+            "got {dp_err:?}"
+        );
+        assert_eq!(dp_err.class(), FailureClass::Permanent);
+    }
+
+    #[test]
+    fn errno_eacces_is_permission_denied_permanent() {
+        let dp_err = errno_to_dataplane_error(libc::EACCES, "Permission denied");
+        assert!(matches!(dp_err, DataplaneError::PermissionDenied(_)));
+        assert_eq!(dp_err.class(), FailureClass::Permanent);
+    }
+
+    #[test]
+    fn errno_einval_is_invalid_argument_permanent() {
+        let dp_err = errno_to_dataplane_error(libc::EINVAL, "Invalid argument");
+        assert!(matches!(dp_err, DataplaneError::InvalidArgument(_)));
+        assert_eq!(dp_err.class(), FailureClass::Permanent);
+    }
+
+    #[test]
+    fn errno_eopnotsupp_is_kernel_too_old_permanent() {
+        let dp_err = errno_to_dataplane_error(libc::EOPNOTSUPP, "Operation not supported");
+        assert!(matches!(dp_err, DataplaneError::KernelTooOld));
+        assert_eq!(dp_err.class(), FailureClass::Permanent);
+    }
+
+    #[test]
+    fn errno_unknown_stays_transient() {
+        let dp_err = errno_to_dataplane_error(libc::ENOSPC, "No space left on device");
+        assert!(matches!(dp_err, DataplaneError::Other(_)));
+        assert_eq!(dp_err.class(), FailureClass::Transient);
     }
 }

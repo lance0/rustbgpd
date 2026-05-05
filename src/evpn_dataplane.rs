@@ -235,6 +235,17 @@ where
 }
 
 /// Periodic supervisor loop: query the RIB, project, publish.
+///
+/// Generation only advances when the projected `RemoteMacTable`
+/// actually differs from the previously-published one. The
+/// reconcile actor uses the generation as the trigger to clear its
+/// permanent-failure suppression set (so an EPERM on op N stops
+/// retrying); incrementing on every poll regardless of content
+/// change would defeat that suppression and cause the actor to
+/// hammer the kernel every 5 s. The instance table is pinned at
+/// startup (ADR-0052), so equality on `RemoteMacTable` alone is
+/// sufficient — if the instance set ever becomes mutable here,
+/// extend the comparison.
 async fn supervisor_loop(
     poll_interval: Duration,
     instances: Arc<EvpnInstanceTable>,
@@ -243,6 +254,7 @@ async fn supervisor_loop(
     shutdown: CancellationToken,
 ) {
     let mut generation: u64 = 0;
+    let mut last_table = RemoteMacTable::new();
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -261,7 +273,18 @@ async fn supervisor_loop(
                         continue;
                     }
                 };
+                if table == last_table && generation > 0 {
+                    // No semantic change since the last publish.
+                    // Skipping the `intent_tx.send` here keeps the
+                    // reconcile actor's permanent-suppression set
+                    // alive across periodic polls, so an EPERM /
+                    // EOPNOTSUPP on op N doesn't get retried every
+                    // 5 s tick — it stays suppressed until the
+                    // operator's RIB really changes.
+                    continue;
+                }
                 generation = generation.saturating_add(1);
+                last_table = table.clone();
                 let intent = Arc::new(DataplaneIntent {
                     generation,
                     instances: instances.clone(),
@@ -515,5 +538,71 @@ mod tests {
         );
 
         h.shutdown().await;
+    }
+
+    /// The supervisor must NOT bump the intent generation on every
+    /// poll when the projected `RemoteMacTable` is unchanged. The
+    /// reconcile actor uses the generation to clear permanent-
+    /// failure suppression; bumping every 5 s would let an `EPERM` /
+    /// `EOPNOTSUPP` keep retrying indefinitely.
+    #[tokio::test]
+    async fn supervisor_does_not_bump_generation_on_stable_table() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let shutdown = CancellationToken::new();
+
+        // Stub RIB responder: every QueryEvpnRoutes returns the
+        // same single route. The projection result is therefore
+        // identical across polls.
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let route = evpn_macip_route(100, 1, "10.0.0.2", Some(1));
+                    let _ = reply.send(vec![route]);
+                }
+            }
+        });
+
+        // Use the watch directly so we can count actual sends. The
+        // actor isn't spawned for this test — we only validate the
+        // supervisor's deduplication logic.
+        let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let supervisor_shutdown = shutdown.clone();
+        let join = tokio::spawn(super::supervisor_loop(
+            Duration::from_millis(15),
+            instances,
+            rib_tx,
+            intent_tx,
+            supervisor_shutdown,
+        ));
+
+        // Let the supervisor poll several times. Watch only fires
+        // `changed()` when the value is replaced, so we count
+        // changed-events.
+        let mut observed_generations: Vec<u64> = Vec::new();
+        // Capture the cold-start (gen=0).
+        observed_generations.push(intent_rx.borrow().generation);
+        for _ in 0..6 {
+            if tokio::time::timeout(Duration::from_millis(80), intent_rx.changed())
+                .await
+                .is_ok()
+            {
+                let g = intent_rx.borrow_and_update().generation;
+                if observed_generations.last().is_none_or(|&prev| prev != g) {
+                    observed_generations.push(g);
+                }
+            }
+        }
+
+        shutdown.cancel();
+        let _ = tokio::time::timeout(Duration::from_millis(200), join).await;
+
+        // We expect at most: gen=0 (cold-start) + gen=1 (first
+        // publish on stable table). A second publish would mean the
+        // supervisor bumped generation despite an unchanged table.
+        assert!(
+            observed_generations.len() <= 2,
+            "supervisor bumped generation on stable table: {observed_generations:?}"
+        );
     }
 }

@@ -79,11 +79,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `apply_plan` skips ops whose `(VNI, MAC)` key is in the retry
     schedule and not yet due, and a separate permanent-failure set
     suppresses ops that hit `EPERM` / `EOPNOTSUPP` / `EINVAL` until
-    the next intent generation arrives. The actor's outer
-    `tokio::select!` re-fires on the retry timer, so deferred ops
-    run as soon as their backoff elapses instead of waiting for the
-    next 60 s periodic dump. Permanent-suppression test added
-    (`reconcile_actor.rs::permanent_failure_is_suppressed_until_next_intent_generation`).
+    the daemon supervisor publishes a *semantically different*
+    `RemoteMacTable` (the supervisor compares the projected table to
+    the previous publish and only bumps the intent generation on
+    change — without that check, a 5 s poll cycle would clear the
+    suppression set every tick, defeating the whole mechanism). The
+    actor's outer `tokio::select!` re-fires on the retry timer, so
+    deferred ops run as soon as their backoff elapses instead of
+    waiting for the next 60 s periodic dump. Two suppression tests
+    locked: `reconcile_actor.rs::permanent_failure_is_suppressed_until_next_intent_generation`
+    and `evpn_dataplane.rs::supervisor_does_not_bump_generation_on_stable_table`.
+  - **Errno-based netlink classification.**
+    `errno_to_dataplane_error` reads the kernel's `errno` from
+    `ErrorMessage::raw_code()` and maps it to a typed
+    [`DataplaneError`] variant: `EPERM` / `EACCES` →
+    `PermissionDenied` (new variant; permanent), `EOPNOTSUPP` →
+    `KernelTooOld` (permanent), `EINVAL` → `InvalidArgument`
+    (permanent), anything else → `Other` (transient). Operator-
+    facing messages now correctly distinguish "missing
+    `CAP_NET_ADMIN`" from "kernel too old", and the classifier no
+    longer string-matches the rtnetlink `Debug` rendering.
   - **Self-originated Type 2 routes are filtered from projection.**
     `project_evpn_routes` now drops routes whose `next_hop` matches
     the local instance `local_vtep_ip` — programming such a route as
@@ -110,15 +125,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Tests
 
-- 55 new tests across the EVPN dataplane stack: 12 domain-type
+- 62 new tests across the EVPN dataplane stack: 12 domain-type
   unit tests in `crates/evpn`, 11 `compute_diff` cases plus a
   key-grounding cross-check, 14 actor + backoff + in-memory fake
   tests, 1 LinuxDataplane connect-doesnt-panic smoke + 10 probe.rs
   rejection-leg tests (including missing-`IFLA_VXLAN_LEARNING` and
-  multi-VXLAN-port cases), 12 projection tests (incl. self-VTEP
-  filter), 5 supervisor / daemon-wiring tests, 1 actor permanent-
-  suppression test, and 1 binary-spawn RR-only invariant test.
-  Workspace count climbs from ~1406 (v0.13.4 baseline) to 1479.
+  multi-VXLAN-port cases), 5 errno-classification tests in
+  `linux/fdb.rs`, 12 projection tests (incl. self-VTEP filter), 6
+  supervisor / daemon-wiring tests (incl. the
+  generation-stability check), 1 actor permanent-suppression test,
+  and 1 binary-spawn RR-only invariant test. Workspace count climbs
+  from ~1406 (v0.13.4 baseline) to 1486.
 
 ### Packaging
 

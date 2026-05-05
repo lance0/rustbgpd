@@ -37,6 +37,14 @@ pub enum DataplaneError {
     #[error("kernel too old: NTF_EXT_LEARNED not supported (Linux ≥4.18 required)")]
     KernelTooOld,
 
+    /// The kernel rejected the operation with `EPERM` / `EACCES` —
+    /// the daemon process lacks `CAP_NET_ADMIN` (or some other
+    /// privilege), or an LSM (`SELinux`, `AppArmor`) is denying the
+    /// netlink call. Permanent class — retrying without an
+    /// out-of-band privilege fix would just hammer the kernel.
+    #[error("permission denied: {0} (CAP_NET_ADMIN missing or LSM-blocked)")]
+    PermissionDenied(String),
+
     /// A remote-MAC entry conflicts with a kernel-learned local entry
     /// for the same `(VNI, MAC)`. The diff loop logs and skips; this
     /// variant exists for the [`InMemoryDataplane`] fake to emit
@@ -78,6 +86,7 @@ impl DataplaneError {
             Self::InvalidArgument(_)
             | Self::LinkNotFound { .. }
             | Self::KernelTooOld
+            | Self::PermissionDenied(_)
             | Self::UnsupportedVtepDestination { .. } => FailureClass::Permanent,
             Self::LocalMacConflict { .. } => FailureClass::Conflict,
         }
@@ -123,5 +132,11 @@ mod tests {
             mac: MacAddress::new([1; 6]),
         };
         assert_eq!(err.class(), FailureClass::Conflict);
+    }
+
+    #[test]
+    fn permission_denied_classifies_permanent() {
+        let err = DataplaneError::PermissionDenied("EPERM (Operation not permitted)".into());
+        assert_eq!(err.class(), FailureClass::Permanent);
     }
 }
