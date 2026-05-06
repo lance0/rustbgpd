@@ -247,8 +247,12 @@ impl<D: Dataplane> ReconcileActor<D> {
                         // Implementation closed its event stream.
                         // Fall through to periodic + retry only.
                     }
-                    // Other event variants (LocalMacObservation) are
-                    // not consumed here yet; Phase 5 routes them up.
+                    // `LocalMacObservation` flows on the dedicated
+                    // channel surfaced by [`Dataplane::take_local_mac_rx`]
+                    // — it bypasses this actor entirely. Keeping the
+                    // two upward flows split avoids coupling the
+                    // reconcile actor's lifetime to the originator's
+                    // channel layout (ADR-0054 §1).
                 }
                 _ = periodic.tick() => {
                     self.reconcile_once().await;

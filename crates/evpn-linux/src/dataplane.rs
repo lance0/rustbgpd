@@ -28,7 +28,8 @@
 
 use std::net::IpAddr;
 
-use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
+use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, MacAddress};
+use tokio::sync::mpsc;
 
 use crate::error::DataplaneError;
 use crate::snapshot::{InstanceProbes, KernelSnapshot};
@@ -125,4 +126,33 @@ pub trait Dataplane: Send {
     /// closed). The actor falls back to its periodic dump cadence in
     /// that case.
     fn next_event(&mut self) -> impl Future<Output = Option<KernelEvent>> + Send;
+
+    /// Take ownership of the upward `LocalMacObservation` channel
+    /// receiver, if the implementation surfaces one.
+    ///
+    /// Called **once** at construction time by the daemon; subsequent
+    /// calls return `None`. The originator (`src/evpn_originator.rs`)
+    /// owns the receiver for its lifetime, running its own
+    /// `tokio::select!` loop on it independently of the reconcile
+    /// actor's `next_event()` loop.
+    ///
+    /// A dedicated channel is intentionally **not** routed through
+    /// [`KernelEvent::LocalMacObservation`] + the reconcile actor —
+    /// that path would couple the originator's channel layout to the
+    /// reconcile actor and force the actor to outlive the originator.
+    /// Splitting the upward observation flow at the trait boundary
+    /// keeps the two consumers independent (ADR-0054 §1's "narrow
+    /// interface" rule).
+    ///
+    /// Implementations that do not surface local MAC observations
+    /// (e.g., `LinuxDataplane` until `RTNLGRP_NEIGH` subscription
+    /// lands in Phase D-real) return `None`. The originator treats
+    /// `None` as "no live observation feed available" and stays
+    /// quiescent.
+    fn take_local_mac_rx(&mut self) -> Option<mpsc::Receiver<LocalMacObservation>> {
+        // Default impl returns None — implementations override only
+        // when they actually surface observations. This keeps the
+        // trait extension non-breaking for downstream impls.
+        None
+    }
 }

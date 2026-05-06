@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, MacAddress};
+use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, MacAddress};
 use tokio::sync::mpsc;
 
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
@@ -37,6 +37,15 @@ pub struct InMemoryDataplane {
     state: Arc<Mutex<State>>,
     events_rx: mpsc::Receiver<KernelEvent>,
     events_tx: mpsc::Sender<KernelEvent>,
+    /// Upward `LocalMacObservation` channel — handed to the daemon's
+    /// originator via [`Dataplane::take_local_mac_rx`]. Held as
+    /// `Option` so the take-once semantic surfaces cleanly: returns
+    /// `Some(rx)` on the first call, `None` thereafter.
+    local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
+    /// Sender side — kept alive on the dataplane so the test handle's
+    /// `inject_local_mac_observation` can publish even after the
+    /// originator has taken the receiver.
+    local_mac_tx: mpsc::Sender<LocalMacObservation>,
 }
 
 #[derive(Debug)]
@@ -85,6 +94,10 @@ impl InMemoryDataplane {
     #[must_use]
     pub fn new() -> Self {
         let (events_tx, events_rx) = mpsc::channel(64);
+        // 1024-slot upward observation buffer matches the bound the
+        // originator advertises (see `src/evpn_originator.rs`); tests
+        // can fill it to exercise overflow handling.
+        let (local_mac_tx, local_mac_rx) = mpsc::channel(1024);
         Self {
             state: Arc::new(Mutex::new(State {
                 kernel: KernelSnapshot::new(),
@@ -94,6 +107,8 @@ impl InMemoryDataplane {
             })),
             events_rx,
             events_tx,
+            local_mac_rx: Some(local_mac_rx),
+            local_mac_tx,
         }
     }
 
@@ -106,6 +121,7 @@ impl InMemoryDataplane {
         InMemoryHandle {
             state: Arc::clone(&self.state),
             events_tx: self.events_tx.clone(),
+            local_mac_tx: self.local_mac_tx.clone(),
         }
     }
 }
@@ -145,6 +161,10 @@ impl Dataplane for InMemoryDataplane {
         // of the await. tokio::sync::mpsc::Receiver::recv takes &mut
         // self so this is exactly the borrow shape we want.
         self.events_rx.recv()
+    }
+
+    fn take_local_mac_rx(&mut self) -> Option<mpsc::Receiver<LocalMacObservation>> {
+        self.local_mac_rx.take()
     }
 }
 
@@ -194,6 +214,7 @@ impl InMemoryDataplane {
 pub struct InMemoryHandle {
     state: Arc<Mutex<State>>,
     events_tx: mpsc::Sender<KernelEvent>,
+    local_mac_tx: mpsc::Sender<LocalMacObservation>,
 }
 
 // Every method panics only on Mutex lock-poisoning, which is
@@ -261,6 +282,30 @@ impl InMemoryHandle {
         // Sending to a closed channel just means the actor already
         // tore down; tests treat that as harmless.
         let _ = self.events_tx.send(event).await;
+    }
+
+    /// Inject an upward `LocalMacObservation` for the daemon-side
+    /// originator to consume.
+    ///
+    /// Tests typically:
+    /// 1. Call `Dataplane::take_local_mac_rx` to hand the receiver to
+    ///    the originator under test;
+    /// 2. Call this method to push synthetic Learn / Aged events.
+    pub async fn inject_local_mac_observation(&self, obs: LocalMacObservation) {
+        let _ = self.local_mac_tx.send(obs).await;
+    }
+
+    /// Synchronous, non-async variant — `try_send` returns
+    /// `Err(TrySendError::Full)` if the buffer is full. Used by the
+    /// overflow-handling tests.
+    ///
+    /// # Errors
+    /// Forwards the underlying [`mpsc::error::TrySendError`].
+    pub fn try_inject_local_mac_observation(
+        &self,
+        obs: LocalMacObservation,
+    ) -> Result<(), mpsc::error::TrySendError<LocalMacObservation>> {
+        self.local_mac_tx.try_send(obs)
     }
 
     /// Total apply attempts recorded so far.
@@ -389,5 +434,61 @@ mod tests {
         );
         let snap = dp.dump_snapshot().await.unwrap();
         assert!(snap.find_fdb(vni(100), mac(9)).is_some());
+    }
+
+    #[tokio::test]
+    async fn local_mac_observation_round_trip() {
+        let mut dp = InMemoryDataplane::new();
+        let h = dp.handle();
+        let mut rx = dp
+            .take_local_mac_rx()
+            .expect("first take returns the receiver");
+        // Subsequent take returns None (single-take semantic).
+        assert!(dp.take_local_mac_rx().is_none());
+
+        h.inject_local_mac_observation(LocalMacObservation::Learned {
+            vni: vni(100),
+            mac: mac(1),
+            ifindex: 42,
+        })
+        .await;
+        h.inject_local_mac_observation(LocalMacObservation::Aged {
+            vni: vni(100),
+            mac: mac(1),
+        })
+        .await;
+
+        let learned = rx.recv().await.unwrap();
+        assert!(matches!(learned, LocalMacObservation::Learned { .. }));
+        let aged = rx.recv().await.unwrap();
+        assert!(matches!(aged, LocalMacObservation::Aged { .. }));
+    }
+
+    #[tokio::test]
+    async fn local_mac_observation_buffer_overflow_surfaces_full() {
+        // Channel capacity is 1024 — fill it without draining and the
+        // next try_send must surface `Full`.
+        let mut dp = InMemoryDataplane::new();
+        let h = dp.handle();
+        // Holding the rx alive without recv'ing keeps the buffer full.
+        let _rx = dp.take_local_mac_rx().expect("rx");
+
+        for i in 0..1024u32 {
+            h.try_inject_local_mac_observation(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: MacAddress::new([(i & 0xff) as u8; 6]),
+                ifindex: i,
+            })
+            .expect("buffer not yet full");
+        }
+        // Slot 1025 must error.
+        let err = h
+            .try_inject_local_mac_observation(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xff),
+                ifindex: 9999,
+            })
+            .expect_err("buffer should be full");
+        assert!(matches!(err, mpsc::error::TrySendError::Full(_)));
     }
 }
