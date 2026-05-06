@@ -257,28 +257,27 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
     //   2. VXLAN-self+dst row: shows `self` and `dst <remote>`. Without
     //      this row the VXLAN driver has no encap target for the MAC.
     //
-    // Both rows must carry `extern_learn` so the diff loop can
-    // distinguish them from kernel-learned and operator-static
-    // entries.
-    let has_master_row = mac_rows.iter().any(|l| l.contains("master"));
-    let has_self_dst_row = mac_rows
+    // Both rows must independently carry `extern_learn` (the kernel
+    // propagates `NTF_EXT_LEARNED` to both legs of the combined-flag
+    // RTM_NEWNEIGH). Asserting per-row rather than "any row" catches
+    // regressions where extern_learn would be set on one leg only —
+    // which would let kernel-learned entries spuriously match
+    // rustbgpd-owned entries in the diff loop's classification.
+    let extern_learn_or_offload = |l: &&str| l.contains("extern_learn") || l.contains("offload");
+    let has_master_row_with_extern_learn = mac_rows
         .iter()
-        .any(|l| l.contains("self") && l.contains(remote_ip));
-    let any_extern_learn = mac_rows
+        .any(|l| l.contains("master") && extern_learn_or_offload(l));
+    let has_self_dst_row_with_extern_learn = mac_rows
         .iter()
-        .any(|l| l.contains("extern_learn") || l.contains("offload"));
+        .any(|l| l.contains("self") && l.contains(remote_ip) && extern_learn_or_offload(l));
 
     assert!(
-        has_master_row,
-        "programmed MAC missing the bridge-master row:\n{after_add}"
+        has_master_row_with_extern_learn,
+        "programmed MAC missing the bridge-master row with extern_learn:\n{after_add}"
     );
     assert!(
-        has_self_dst_row,
-        "programmed MAC missing the VXLAN-self+dst row (dst={remote_ip}):\n{after_add}"
-    );
-    assert!(
-        any_extern_learn,
-        "no row for the programmed MAC carries extern_learn:\n{after_add}"
+        has_self_dst_row_with_extern_learn,
+        "programmed MAC missing the VXLAN-self+dst row with extern_learn (dst={remote_ip}):\n{after_add}"
     );
 
     dp.apply(&DataplaneOp::RemoveRemoteFdb {

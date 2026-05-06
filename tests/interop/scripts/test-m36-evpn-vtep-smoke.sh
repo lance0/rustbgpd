@@ -63,21 +63,27 @@ rb_fdb_dst_for_mac() {
     rb_fdb | awk -v m="$mac" 'tolower($1) == tolower(m) { for (i=1; i<NF; i++) if ($i == "dst") print $(i+1) }' | head -1
 }
 
-# Both rows are required for a correct EVPN VTEP entry:
-#   - bridge-master row: shows `master <bridge>` (no dst). Without
-#     this row the bridge floods unicast frames instead of sending
-#     them through the VXLAN tunnel.
-#   - VXLAN-self+dst row: shows `self` and `dst <remote>`. Without
-#     this row the VXLAN driver doesn't know where to encap.
+# Both rows are required for a correct EVPN VTEP entry, and BOTH
+# must carry extern_learn — the kernel propagates NTF_EXT_LEARNED
+# to both legs of the combined-flag RTM_NEWNEIGH, so testing
+# per-row catches regressions where extern_learn ends up on one
+# leg only:
+#   - bridge-master row: shows `master <bridge>` + extern_learn
+#     (no dst). Without this row the bridge floods unicast frames
+#     instead of sending them through the VXLAN tunnel.
+#   - VXLAN-self+dst row: shows `self` + `dst <remote>` +
+#     extern_learn. Without this row the VXLAN driver doesn't know
+#     where to encap.
 rb_fdb_has_bridge_master_row() {
     local mac=${1:?}
-    rb_fdb | grep -iF "$mac" | grep -q 'master '
+    rb_fdb | grep -iF "$mac" | grep 'master ' | grep -qE 'extern_learn|offload'
 }
 
 rb_fdb_has_vxlan_self_dst_row() {
     local mac=${1:?}
     local want_dst=${2:?}
-    rb_fdb | grep -iF "$mac" | grep "dst $want_dst" | grep -q 'self'
+    rb_fdb | grep -iF "$mac" | grep "dst $want_dst" \
+        | grep 'self' | grep -qE 'extern_learn|offload'
 }
 
 # Inject / withdraw a static MAC on the FRR side. Zebra
