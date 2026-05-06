@@ -63,6 +63,23 @@ rb_fdb_dst_for_mac() {
     rb_fdb | awk -v m="$mac" 'tolower($1) == tolower(m) { for (i=1; i<NF; i++) if ($i == "dst") print $(i+1) }' | head -1
 }
 
+# Both rows are required for a correct EVPN VTEP entry:
+#   - bridge-master row: shows `master <bridge>` (no dst). Without
+#     this row the bridge floods unicast frames instead of sending
+#     them through the VXLAN tunnel.
+#   - VXLAN-self+dst row: shows `self` and `dst <remote>`. Without
+#     this row the VXLAN driver doesn't know where to encap.
+rb_fdb_has_bridge_master_row() {
+    local mac=${1:?}
+    rb_fdb | grep -iF "$mac" | grep -q 'master '
+}
+
+rb_fdb_has_vxlan_self_dst_row() {
+    local mac=${1:?}
+    local want_dst=${2:?}
+    rb_fdb | grep -iF "$mac" | grep "dst $want_dst" | grep -q 'self'
+}
+
 # Inject / withdraw a static MAC on the FRR side. Zebra
 # auto-detects the bridge FDB change and originates / withdraws a
 # Type 2 route.
@@ -143,6 +160,24 @@ if [ "$got_program" -eq 1 ]; then
         ok "rustbgpd programmed $TEST_MAC dst=$dst with extern_learn"
     else
         fail "MAC $TEST_MAC programmed but dst is '$dst' (want $ORIGINATOR_IP)"
+        rb_fdb >&2
+    fi
+
+    # Both rows must be present — the bridge-master row plumbs
+    # bridge forwarding via vxlan100, the VXLAN-self+dst row gives
+    # the driver the encap target. A passing extern_learn+dst check
+    # alone wouldn't catch a missing bridge-master row, which would
+    # leave forwarding wrong (flood instead of unicast).
+    if rb_fdb_has_bridge_master_row "$TEST_MAC"; then
+        ok "bridge-master row present for $TEST_MAC"
+    else
+        fail "bridge-master row missing for $TEST_MAC (data plane would flood)"
+        rb_fdb >&2
+    fi
+    if rb_fdb_has_vxlan_self_dst_row "$TEST_MAC" "$ORIGINATOR_IP"; then
+        ok "VXLAN-self+dst row present for $TEST_MAC -> $ORIGINATOR_IP"
+    else
+        fail "VXLAN-self+dst row missing for $TEST_MAC (no encap target)"
         rb_fdb >&2
     fi
 else

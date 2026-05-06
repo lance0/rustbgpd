@@ -18,7 +18,12 @@
 #    (foreign-entry preservation, ADR-0054 §5/§7).
 #
 # Topology:
-#   rustbgpd VTEP (10.0.0.1, AS 65000) ── eBGP L2VPN/EVPN ── FRR (10.0.0.2, AS 65001)
+#   rustbgpd VTEP (10.0.0.1, AS 65000) ── iBGP L2VPN/EVPN ── FRR (10.0.0.2, AS 65000)
+#
+# iBGP rather than eBGP because FRR's default export policy across
+# AS boundaries doesn't advertise EVPN; iBGP keeps the test focused
+# on Gate 7b's kernel programming, not FRR export-policy quirks.
+# eBGP coverage is a separate FRR-interop concern.
 #
 # Both nodes run with `nolearning` on the VXLAN port so EVPN owns
 # the FDB. The data plane is not exercised — only control-plane

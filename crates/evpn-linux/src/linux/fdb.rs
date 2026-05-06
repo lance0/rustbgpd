@@ -38,6 +38,18 @@ use crate::snapshot::{KernelFdbEntry, KernelFdbFlags};
 
 use super::links::LinkCache;
 
+/// `NUD_NOARP` (no-arp) — neighbor entries in this state do not
+/// participate in ARP resolution.
+const NUD_NOARP: u16 = 0x40;
+/// `NUD_PERMANENT` — entry never auto-ages.
+const NUD_PERMANENT: u16 = 0x80;
+/// `NUD_NOARP | NUD_PERMANENT` — the entry-state bitmask Linux uses
+/// for non-expiring control-plane-owned FDB entries (matching what
+/// iproute2's `bridge fdb add ... extern_learn` sends on the wire).
+/// Centralized here so both [`apply_op`] and the dump-side decoder
+/// use the same constant.
+const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
+
 /// Dump every bridge FDB entry in the kernel and key them by
 /// `(EvpnInstanceId, MacAddress)`.
 ///
@@ -45,11 +57,27 @@ use super::links::LinkCache;
 /// bridge-family neighbours. We map that ifindex back to a VNI via
 /// the link cache's `vxlan_ifindex_to_vni` table; entries on VXLAN
 /// ports outside the EVPN inventory drop out silently.
+///
+/// ## Multi-row merge
+///
+/// A single rustbgpd-programmed `(VNI, MAC)` produces *two* rows on
+/// the kernel side: a `NTF_SELF` row carrying `dst` (the VXLAN-encap
+/// entry on vxlanX), and a `NTF_MASTER` row carrying no `dst` (the
+/// bridge-FDB entry on br100). Both rows have `header.ifindex ==
+/// vxlan_ifindex` and `LinkLocalAddress == MAC`, so they collide on
+/// the same map key. If we let the second row overwrite the first
+/// blindly, whichever leg the kernel emits last wins — and if it's
+/// the master leg, [`KernelFdbEntry::dst`] becomes `None` and the
+/// next [`crate::compute_diff`] pass would emit a redundant
+/// `UpdateRemoteFdb` (because `desired.dst != None != kernel.dst`)
+/// every reconcile. [`merge_fdb_rows`] folds the two rows into one:
+/// `dst` is preserved if any contributing row had it, flags OR
+/// together, and the state bitmask covers all observed NUD bits.
 pub(crate) async fn dump_fdb(
     handle: &Handle,
     cache: &LinkCache,
 ) -> Result<HashMap<(EvpnInstanceId, MacAddress), KernelFdbEntry>, DataplaneError> {
-    let mut out = HashMap::new();
+    let mut out: HashMap<(EvpnInstanceId, MacAddress), KernelFdbEntry> = HashMap::new();
     let mut req = handle.neighbours().get();
     req.message_mut().header.family = AddressFamily::Bridge;
     let mut stream = req.execute();
@@ -58,12 +86,35 @@ pub(crate) async fn dump_fdb(
         .await
         .map_err(|e| DataplaneError::Other(format!("fdb dump: {e}")))?
     {
-        let Some(entry) = parse_fdb_entry(&msg, cache) else {
+        let Some((key, entry)) = parse_fdb_entry(&msg, cache) else {
             continue;
         };
-        out.insert(entry.0, entry.1);
+        match out.get_mut(&key) {
+            None => {
+                out.insert(key, entry);
+            }
+            Some(existing) => merge_fdb_rows(existing, &entry),
+        }
     }
     Ok(out)
+}
+
+/// Fold `incoming` into `existing` for the same `(VNI, MAC)` key.
+///
+/// `dst` is preserved if either row has one (the VXLAN-self row
+/// carries it, the bridge-master row doesn't); flag bools OR
+/// together so an entry that has both `extern_learn` (set by
+/// rustbgpd) and `master` (set by the bridge-FDB plumbing) reads
+/// correctly downstream. Pure helper kept testable in isolation.
+fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
+    if existing.dst.is_none() && incoming.dst.is_some() {
+        existing.dst = incoming.dst;
+    }
+    existing.flags.extern_learn |= incoming.flags.extern_learn;
+    existing.flags.permanent |= incoming.flags.permanent;
+    existing.flags.noarp |= incoming.flags.noarp;
+    existing.flags.master |= incoming.flags.master;
+    existing.flags.self_flag |= incoming.flags.self_flag;
 }
 
 fn parse_fdb_entry(
@@ -112,39 +163,62 @@ fn parse_fdb_entry(
             _ => {}
         }
     }
-    match msg.header.state {
-        NeighbourState::Permanent => flags.permanent = true,
-        NeighbourState::Noarp => flags.noarp = true,
-        _ => {}
-    }
+    decode_state(msg.header.state, &mut flags);
 
     Some(((vni, mac), KernelFdbEntry { mac, dst, flags }))
+}
+
+/// Decode an `ndm_state` value into the flag fields we care about.
+///
+/// The crate's [`NeighbourState`] enum has separate `Noarp` and
+/// `Permanent` variants, but iproute2 sends the combined bitmask
+/// `NUD_NOARP | NUD_PERMANENT` for control-plane-owned entries
+/// (which is what we send too — see [`apply_op`]). Newer kernels
+/// also emit the same combined state in dump replies. We use the
+/// `Other(bits)` escape hatch to capture both bits in one pass so a
+/// "permanent `extern_learn`" entry surfaces with both
+/// [`KernelFdbFlags::permanent`] and [`KernelFdbFlags::noarp`] set.
+fn decode_state(state: NeighbourState, flags: &mut KernelFdbFlags) {
+    match state {
+        NeighbourState::Permanent => flags.permanent = true,
+        NeighbourState::Noarp => flags.noarp = true,
+        NeighbourState::Other(bits) => {
+            if bits & NUD_PERMANENT != 0 {
+                flags.permanent = true;
+            }
+            if bits & NUD_NOARP != 0 {
+                flags.noarp = true;
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Apply one [`DataplaneOp`] against the kernel.
 ///
 /// Mirrors the iproute2 `bridge fdb add MAC dev vxlanX master dst
-/// REMOTE` shape, which is what FRR uses for EVPN-programmed remote
-/// MACs. iproute2 expands that command into TWO `RTM_NEWNEIGH`
-/// messages, and so do we — for each Add/Update we send:
+/// REMOTE self extern_learn` shape, verified via `strace` on
+/// iproute2 itself. iproute2 sends a single `RTM_NEWNEIGH`
+/// carrying `NTF_SELF | NTF_MASTER | NTF_EXT_LEARNED` flags +
+/// `NDA_DST` + `ndm_state = NUD_NOARP | NUD_PERMANENT`; the kernel
+/// programs both rows from that one message:
 ///
-/// 1. **`NTF_SELF` + `dst`** on the VXLAN port — the VXLAN-encap
-///    entry that tells the VXLAN driver "for this MAC, tunnel to
-///    REMOTE". Without this row the data plane can't encap; the
-///    bridge would forward the frame to vxlanX but vxlanX wouldn't
-///    know where to send it.
-/// 2. **`NTF_MASTER`** on the VXLAN port (no dst) — the bridge-FDB
-///    entry that tells br100 "this MAC is reachable via vxlanX".
-///    Without this row the bridge forwards by flood instead of
-///    direct unicast through the tunnel.
+/// 1. The **VXLAN-self+dst row** on the VXLAN port — tells the
+///    VXLAN driver "for this MAC, tunnel to REMOTE". Without this
+///    row the data plane can't encap; the bridge would forward the
+///    frame to vxlanX but vxlanX wouldn't know where to send it.
+/// 2. The **bridge-master row** on br100 — tells the bridge "this
+///    MAC is reachable via vxlanX". Without this row the bridge
+///    forwards by flood instead of direct unicast through the
+///    tunnel.
 ///
-/// Both rows carry `NTF_EXT_LEARNED` so the dump path can
-/// distinguish rustbgpd-programmed entries from kernel-learned and
-/// operator-static ones; `NUD_NOARP` keeps the entry from auto-aging.
+/// `NTF_EXT_LEARNED` distinguishes rustbgpd-programmed entries
+/// from kernel-learned and operator-static ones at dump time;
+/// `NUD_NOARP | NUD_PERMANENT` keeps the entry from auto-aging.
 /// `.replace()` makes Add/Update idempotent.
 ///
-/// `Remove` symmetrically sends two `RTM_DELNEIGH` messages so we
-/// clean up both sides of the entry.
+/// `Remove` symmetrically sends one `RTM_DELNEIGH` with
+/// `NTF_SELF | NTF_MASTER`; the kernel cleans up both rows.
 pub(crate) async fn apply_op(
     handle: &Handle,
     cache: &LinkCache,
@@ -176,11 +250,11 @@ pub(crate) async fn apply_op(
             // - NTF_EXT_LEARNED → distinguishes our entries from
             //   kernel-learned ones at FDB dump time.
             //
-            // ndm_state must carry both NUD_NOARP (0x40) and
-            // NUD_PERMANENT (0x80) so the entry is non-expiring. The
-            // crate's NeighbourState enum doesn't represent the
-            // combined bitmask, so we use the `Other` escape hatch.
-            const NUD_NOARP_PERMANENT: u16 = 0x40 | 0x80;
+            // ndm_state must carry both NUD_NOARP and NUD_PERMANENT
+            // so the entry is non-expiring. The crate's
+            // NeighbourState enum doesn't represent the combined
+            // bitmask, so we use the `Other` escape hatch with the
+            // shared NUD_NOARP_PERMANENT constant.
             handle
                 .neighbours()
                 .add_bridge(vxlan_ifindex, &mac.octets())
@@ -274,8 +348,168 @@ fn errno_to_dataplane_error(errno: i32, detail: &str) -> DataplaneError {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
     use crate::FailureClass;
+
+    fn ipa(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    /// Bit-flag bundle used by the merge tests. Centralizes the
+    /// "permanent + noarp share the NUD bitmask" relationship so
+    /// each test reads as one assertion rather than four bool
+    /// fields.
+    #[allow(clippy::struct_excessive_bools)]
+    #[derive(Debug, Clone, Copy, Default)]
+    struct FlagSet {
+        extern_learn: bool,
+        master: bool,
+        self_flag: bool,
+        permanent: bool,
+    }
+
+    fn flags(set: FlagSet) -> KernelFdbFlags {
+        KernelFdbFlags {
+            extern_learn: set.extern_learn,
+            master: set.master,
+            self_flag: set.self_flag,
+            permanent: set.permanent,
+            noarp: set.permanent, // shared NUD_NOARP|NUD_PERMANENT case
+        }
+    }
+
+    fn fdb_row(dst: Option<&str>, f: KernelFdbFlags) -> KernelFdbEntry {
+        KernelFdbEntry {
+            mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            dst: dst.map(ipa),
+            flags: f,
+        }
+    }
+
+    // ── merge_fdb_rows: kernel emits both rows for one (VNI, MAC) ──
+
+    #[test]
+    fn merge_self_then_master_keeps_dst_and_ors_flags() {
+        // First seen: NTF_SELF + dst (VXLAN-encap row).
+        let mut acc = fdb_row(
+            Some("10.0.0.2"),
+            flags(FlagSet {
+                extern_learn: true,
+                self_flag: true,
+                permanent: true,
+                ..FlagSet::default()
+            }),
+        );
+        // Then seen: NTF_MASTER, no dst (bridge-FDB row).
+        let master_row = fdb_row(
+            None,
+            flags(FlagSet {
+                extern_learn: true,
+                master: true,
+                permanent: true,
+                ..FlagSet::default()
+            }),
+        );
+        merge_fdb_rows(&mut acc, &master_row);
+
+        assert_eq!(
+            acc.dst,
+            Some(ipa("10.0.0.2")),
+            "dst from self row preserved"
+        );
+        assert!(acc.flags.master, "master OR'd in");
+        assert!(acc.flags.self_flag, "self_flag preserved");
+        assert!(acc.flags.extern_learn);
+        assert!(acc.flags.permanent);
+        assert!(acc.flags.noarp);
+    }
+
+    #[test]
+    fn merge_master_then_self_still_recovers_dst() {
+        // Reverse arrival order — the bug we're fixing. Without the
+        // merge helper, the master-row insert overwrites the
+        // self+dst row and `dst` collapses to None, which would make
+        // compute_diff emit redundant UpdateRemoteFdb every reconcile.
+        let mut acc = fdb_row(
+            None,
+            flags(FlagSet {
+                extern_learn: true,
+                master: true,
+                permanent: true,
+                ..FlagSet::default()
+            }),
+        );
+        let self_row = fdb_row(
+            Some("10.0.0.2"),
+            flags(FlagSet {
+                extern_learn: true,
+                self_flag: true,
+                permanent: true,
+                ..FlagSet::default()
+            }),
+        );
+        merge_fdb_rows(&mut acc, &self_row);
+
+        assert_eq!(
+            acc.dst,
+            Some(ipa("10.0.0.2")),
+            "dst recovered from later self row"
+        );
+        assert!(acc.flags.master);
+        assert!(acc.flags.self_flag);
+    }
+
+    #[test]
+    fn merge_does_not_overwrite_dst_when_already_present() {
+        // Two self+dst rows with different dst (shouldn't happen in
+        // practice, but we don't want a silent dst flip): the merge
+        // keeps the first one. compute_diff handles real changes via
+        // UpdateRemoteFdb on the *next* reconcile, after our owned
+        // set updates.
+        let one = FlagSet {
+            extern_learn: true,
+            self_flag: true,
+            permanent: true,
+            ..FlagSet::default()
+        };
+        let mut acc = fdb_row(Some("10.0.0.2"), flags(one));
+        let other = fdb_row(Some("10.0.0.3"), flags(one));
+        merge_fdb_rows(&mut acc, &other);
+        assert_eq!(acc.dst, Some(ipa("10.0.0.2")));
+    }
+
+    // ── decode_state: combined NUD bitmask ──
+
+    #[test]
+    fn decode_state_handles_combined_noarp_permanent_bitmask() {
+        let mut f = KernelFdbFlags::default();
+        decode_state(NeighbourState::Other(NUD_NOARP_PERMANENT), &mut f);
+        assert!(f.permanent, "NUD_PERMANENT bit decoded");
+        assert!(f.noarp, "NUD_NOARP bit decoded");
+    }
+
+    #[test]
+    fn decode_state_individual_variants_still_work() {
+        let mut f = KernelFdbFlags::default();
+        decode_state(NeighbourState::Permanent, &mut f);
+        assert!(f.permanent && !f.noarp);
+
+        let mut f = KernelFdbFlags::default();
+        decode_state(NeighbourState::Noarp, &mut f);
+        assert!(f.noarp && !f.permanent);
+    }
+
+    #[test]
+    fn decode_state_other_with_irrelevant_bits_is_noop() {
+        let mut f = KernelFdbFlags::default();
+        decode_state(NeighbourState::Other(0x01), &mut f); // NUD_INCOMPLETE
+        assert!(!f.permanent);
+        assert!(!f.noarp);
+    }
+
+    // ── errno classification ──
 
     #[test]
     fn errno_eperm_is_permission_denied_permanent() {
