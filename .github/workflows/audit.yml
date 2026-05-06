@@ -38,6 +38,17 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # rustsec/audit-check posts findings as a check-run via the
+    # GitHub Checks API. Default GITHUB_TOKEN permissions on
+    # push-to-main are read-only since GitHub's 2023 default-token
+    # change, so the action got `Resource not accessible by
+    # integration` and failed the job whenever there was at least
+    # one finding to post — even an informational `unmaintained`
+    # warning. Granting `checks: write` here lets the action post
+    # the check-run cleanly; everything else stays read-only.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v6
 

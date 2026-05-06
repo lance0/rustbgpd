@@ -24,4 +24,14 @@ ignore = [
     # rand. Tracked in ROADMAP.md under "Resolve open cargo audit
     # findings."
     "RUSTSEC-2026-0097",
+    # RUSTSEC-2024-0436 — `paste` 1.0.15 unmaintained (the upstream
+    # author archived the repo). Informational, no security
+    # vulnerability. Transitive via netlink-packet-utils → rtnetlink
+    # → rustbgpd-evpn-linux (Gate 7b dataplane reconciler, v0.14.0).
+    # Cannot replace until netlink-packet-utils swaps `paste` for
+    # `pastey` or the equivalent. We accept this surface because the
+    # paste invocation in netlink-packet-utils is a `nla_get_*` /
+    # `nla_put_*` macro generator — pure proc-macro, no runtime
+    # behavior to worry about. Tracked in ROADMAP.md.
+    "RUSTSEC-2024-0436",
 ]

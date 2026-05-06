@@ -317,9 +317,17 @@ this document is reference / long-tail.
   meaningfully gated on FIB integration; the wire + policy alias
   parts can ship now and unblock operators who hand-write the
   receiver action.
-- [x] **Resolve open `cargo audit` findings** (v0.13.2) —
+- [x] **Resolve open `cargo audit` findings** (v0.13.2 / v0.14.0) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
-  unreachable in v0.13.2:
+  unreachable in v0.13.2; v0.14.0 follow-up granted `checks: write`
+  to the audit workflow (the rustsec/audit-check action posts
+  findings via the GitHub Checks API; default GITHUB_TOKEN is
+  read-only on push-to-main since GitHub's 2023 default-token
+  change, so the action got "Resource not accessible by
+  integration" once Gate 7b's `paste` transitive dep gave it a
+  finding to post) and accepted RUSTSEC-2024-0436 (paste 1.0.15
+  unmaintained, transitive via `netlink-packet-utils → rtnetlink`,
+  no replacement until upstream swaps to `pastey`):
     - [x] **RUSTSEC-2024-0437** (protobuf 2.28.0, "Crash due to
       uncontrolled recursion") — pulled in via `prometheus 0.13.4`.
       Cleared in **v0.13.1** by bumping `prometheus 0.13 → 0.14`;
@@ -340,6 +348,16 @@ this document is reference / long-tail.
       unsoundness condition is not reachable. Documented in
       `.cargo/audit.toml` with the rationale; revisit on the next
       ratatui-termwiz release.
+    - [x] **RUSTSEC-2024-0436** (paste 1.0.15, "no longer
+      maintained" — the upstream author archived the repo) —
+      accepted in **v0.14.0**. Informational, no security
+      vulnerability. Transitive via `netlink-packet-utils →
+      rtnetlink → rustbgpd-evpn-linux` (Gate 7b). The paste
+      invocation upstream is a `nla_get_*` / `nla_put_*` macro
+      generator — pure proc-macro, no runtime behavior.
+      Documented in `.cargo/audit.toml` with rationale; revisit
+      when netlink-packet-utils swaps `paste` for `pastey` or
+      equivalent.
 - [x] **Spawn `reload_config` onto its own task** (v0.13.2) —
   `reload_config` now runs on a dedicated tokio task tracked as
   `Option<JoinHandle<...>>`. Main `select!` polls the completion
