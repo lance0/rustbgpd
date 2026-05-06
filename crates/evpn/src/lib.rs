@@ -52,6 +52,7 @@
 pub mod dataplane;
 pub mod instance;
 pub mod mac;
+pub mod origination;
 pub mod projection;
 pub mod route_target;
 
@@ -66,6 +67,7 @@ pub use mac::{
     LocalMacObservation, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
     RemoteMacTableBuilder, RemoteMacTableBuilderError,
 };
+pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};
 pub use projection::{ProjectedEvpnRoute, project_evpn_routes};
 pub use route_target::{RouteTarget, RouteTargetParseError};
 
