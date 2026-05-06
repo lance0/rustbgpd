@@ -42,9 +42,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_evpn::{
-    DataplaneIntent, EvpnInstanceTable, ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes,
+    DataplaneIntent, EvpnInstanceTable, LocalMacObservation, ProjectedEvpnRoute, RemoteMacTable,
+    project_evpn_routes,
 };
-use rustbgpd_evpn_linux::{ReconcileActor, ReconcileActorConfig};
+use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
 use rustbgpd_wire::{EvpnRoute, ExtendedCommunity, PathAttribute};
 use tokio::sync::{mpsc, watch};
@@ -87,6 +88,12 @@ pub struct EvpnDataplaneHandle {
     pub(crate) shutdown: CancellationToken,
     pub(crate) supervisor_join: tokio::task::JoinHandle<()>,
     pub(crate) actor_join: tokio::task::JoinHandle<()>,
+    /// Upward `LocalMacObservation` receiver, taken once from the
+    /// dataplane at construction time. Phase E moves this into the
+    /// originator actor; if the daemon never spawns the originator
+    /// (e.g., during testing) it can drop the receiver and observations
+    /// will fall on the floor.
+    pub local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
 }
 
 impl EvpnDataplaneHandle {
@@ -139,13 +146,18 @@ pub fn spawn(
     #[cfg(target_os = "linux")]
     {
         match rustbgpd_evpn_linux::LinuxDataplane::connect() {
-            Ok(dataplane) => Some(spawn_with_dataplane(
-                config,
-                evpn_instances,
-                rib_tx,
-                daemon_shutdown,
-                dataplane,
-            )),
+            Ok(mut dataplane) => {
+                let local_mac_rx = dataplane.take_local_mac_rx();
+                let mut handle = spawn_with_dataplane(
+                    config,
+                    evpn_instances,
+                    rib_tx,
+                    daemon_shutdown,
+                    dataplane,
+                );
+                handle.local_mac_rx = local_mac_rx;
+                Some(handle)
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
@@ -171,6 +183,14 @@ pub fn spawn(
 
 /// Generic spawn shared by the production path and the integration
 /// tests (which inject [`rustbgpd_evpn_linux::InMemoryDataplane`]).
+///
+/// On the production path, [`spawn`] takes ownership of the dataplane,
+/// extracts the local-MAC observation receiver via
+/// [`rustbgpd_evpn_linux::Dataplane::take_local_mac_rx`], and stamps
+/// it onto the returned handle. Tests calling this function directly
+/// receive a handle with `local_mac_rx = None`; tests that need
+/// observations should call `take_local_mac_rx` themselves before
+/// passing the dataplane in.
 pub fn spawn_with_dataplane<D>(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
@@ -179,7 +199,7 @@ pub fn spawn_with_dataplane<D>(
     dataplane: D,
 ) -> EvpnDataplaneHandle
 where
-    D: rustbgpd_evpn_linux::Dataplane + Send + Sync + 'static,
+    D: Dataplane + Send + Sync + 'static,
 {
     let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
     let (report_tx, report_rx) = mpsc::channel(64);
@@ -232,6 +252,7 @@ where
         shutdown: daemon_shutdown,
         supervisor_join,
         actor_join,
+        local_mac_rx: None,
     }
 }
 

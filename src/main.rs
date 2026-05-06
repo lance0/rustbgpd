@@ -20,6 +20,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod config;
 mod config_persister;
 mod evpn_dataplane;
+mod evpn_originator;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -1028,12 +1029,32 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // into the coordinated shutdown block at the bottom of main where
     // we await its bounded drain.
     let evpn_dataplane_shutdown = tokio_util::sync::CancellationToken::new();
-    let evpn_dataplane_handle = evpn_dataplane::spawn(
+    let mut evpn_dataplane_handle = evpn_dataplane::spawn(
         evpn_dataplane::SupervisorConfig::default(),
         &evpn_instances,
         rib_tx.clone(),
         evpn_dataplane_shutdown.clone(),
     );
+
+    // EVPN local-MAC originator (Gate 7b+1). Spawned alongside the
+    // dataplane supervisor under the same `[[evpn_instances]]` gate.
+    // Consumes the upward `LocalMacObservation` channel surfaced by
+    // the dataplane (Phase D); kernel-learned MACs become BGP EVPN
+    // Type 2 originations per RFC 7432 §15.1. RR-only deployments
+    // skip this entirely — `evpn_dataplane::spawn` returned `None`
+    // and `local_mac_rx` is therefore `None`.
+    let evpn_originator_shutdown = tokio_util::sync::CancellationToken::new();
+    let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {
+        evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &evpn_instances,
+            rib_tx.clone(),
+            handle.local_mac_rx.take(),
+            evpn_originator_shutdown.clone(),
+        )
+    } else {
+        None
+    };
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
@@ -1300,6 +1321,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // 2. Wait for PeerManager to finish draining all peers
     if let Err(e) = peer_mgr_handle.await {
         error!(error = %e, "peer manager task panicked");
+    }
+
+    // 2.5a Drain the EVPN local-MAC originator first so its final
+    // Withdraws land in the RIB before the dataplane reconciler stops
+    // accepting work. Bounded 5 s drain.
+    if let Some(handle) = evpn_originator_handle {
+        info!("draining EVPN originator");
+        handle.shutdown().await;
     }
 
     // 2.5 Drain the EVPN Linux dataplane reconciler. The actor
