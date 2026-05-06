@@ -14,7 +14,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **EVPN VTEP Linux dataplane reconciler — Gate 7b foundation
   (ADR-0054).** The daemon now consumes selected EVPN Type 2
   best-paths from the RIB and reconciles them through a level-
-  triggered actor against a portable [`Dataplane`] trait. Six commits
+  triggered actor against a portable [`Dataplane`] trait. Landed
   across the new `crates/evpn-linux` workspace member, the existing
   `crates/evpn` domain crate, and `src/`:
   - **Domain types** in `crates/evpn`: `DataplaneIntent`,
@@ -56,7 +56,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `extern_learn` AND the correct remote-VTEP `dst`, then
     withdraws and asserts cleanup. A foreign-static FDB entry
     pre-loaded into rustbgpd's bridge survives both program and
-    withdraw cycles. 6/6 PASS locally.
+    withdraw cycles. 8/8 PASS locally against Linux 6.17 + FRR
+    10.3.1 (rustbgpd-as-VTEP, FRR-as-originator, iBGP/AS65000).
   - **`LinuxDataplane` real rtnetlink integration** at
     `crates/evpn-linux::linux::LinuxDataplane` (rtnetlink 0.14 +
     netlink-packet-route 0.19). Three submodules: `links.rs` walks
@@ -65,31 +66,42 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `NotReady`, not the alternating-clear bug an early prototype
     had); `fdb.rs` programs entries through the
     `bridge fdb add MAC dev vxlanX master dst REMOTE` shape on the
-    wire — i.e., `RTM_NEWNEIGH` targeting the **VXLAN port ifindex**
-    (not the bridge) with `NTF_MASTER | NTF_EXT_LEARNED` and
-    `NUD_NOARP`; the FDB dump path resolves VNI from the VXLAN port
-    ifindex via the link cache's `vxlan_ifindex_to_vni` map.
-    `probe.rs` enforces the ADR §4 five-point readiness check
-    (bridge exists, exactly one VXLAN port, VNI matches,
-    `local_vtep_ip` matches, `IFLA_VXLAN_LEARNING` reports
-    `nolearning` — fail-closed if the attribute is missing — and the
-    bridge is not VLAN-aware). The netlink error classifier reads
-    `ErrorMessage::raw_code()` and maps `EPERM` / `EACCES` →
-    `DataplaneError::PermissionDenied` (permanent), `EOPNOTSUPP` →
-    `KernelTooOld` (permanent), `EINVAL` → `InvalidArgument`
-    (permanent); other errno values stay transient. Permission and
-    kernel-version failures stop retrying instead of looping
-    forever, and the operator-facing message correctly distinguishes
-    "missing CAP_NET_ADMIN" from "kernel too old".
+    wire — a single `RTM_NEWNEIGH` targeting the **VXLAN port
+    ifindex** (not the bridge) with combined
+    `NTF_SELF | NTF_MASTER | NTF_EXT_LEARNED` flags and
+    `ndm_state = NUD_NOARP | NUD_PERMANENT`, matching iproute2's
+    wire shape (verified via strace) so the kernel materializes both
+    the bridge-FDB row and the VXLAN-self encap row from one
+    message. The FDB dump path merges the resulting `NTF_SELF`
+    (carrying `dst`) and `NTF_MASTER` (no `dst`) rows the kernel
+    returns for the same `(VNI, MAC)` so `dst` doesn't collapse to
+    `None`, and resolves VNI from the VXLAN port ifindex via the
+    link cache's `vxlan_ifindex_to_vni` map. `probe.rs` enforces
+    the ADR §4 five-point readiness check (bridge exists, exactly
+    one VXLAN port, VNI matches, `local_vtep_ip` matches,
+    `IFLA_VXLAN_LEARNING` reports `nolearning` — fail-closed if the
+    attribute is missing — and the bridge is not VLAN-aware). The
+    netlink error classifier reads `ErrorMessage::raw_code()` and
+    maps `EPERM` / `EACCES` → `DataplaneError::PermissionDenied`
+    (permanent), `EOPNOTSUPP` → `KernelTooOld` (permanent),
+    `EINVAL` → `InvalidArgument` (permanent); other errno values
+    stay transient. Permission and kernel-version failures stop
+    retrying instead of looping forever, and the operator-facing
+    message correctly distinguishes "missing CAP_NET_ADMIN" from
+    "kernel too old".
   - **Privileged netns integration test** at
     `crates/evpn-linux/tests/netns_dataplane.rs`, gated on
-    `EVPN_LINUX_NETNS=1`. Creates a bridge + VXLAN port inside a
+    `EVPN_LINUX_NETNS=1` (not in CI yet — privileged runner job is
+    a deferred follow-up). Creates a bridge + VXLAN port inside a
     Linux namespace, runs the real `probe()` to populate the link
     cache, programs a remote-MAC entry through `apply()`, asserts
-    `bridge fdb show` reports it with `extern_learn`, withdraws it,
-    and verifies a pre-loaded foreign static FDB entry survives the
-    drain (validates ADR-0054 §5/§7 foreign-entry preservation
-    end-to-end).
+    per-row that both the `NTF_MASTER` bridge row and the
+    `NTF_SELF + dst` VXLAN-encap row carry `extern_learn`,
+    withdraws it, and verifies a pre-loaded foreign static FDB
+    entry survives the drain (validates ADR-0054 §5/§7 foreign-
+    entry preservation end-to-end). The M36 containerlab smoke
+    carries the same per-row assertion against a real Linux
+    kernel.
   - **Per-op retry/backoff is enforced**, not just recorded.
     `apply_plan` skips ops whose `(VNI, MAC)` key is in the retry
     schedule and not yet due. Permanent failures
@@ -149,17 +161,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Tests
 
-- 62 new tests across the EVPN dataplane stack: 12 domain-type
-  unit tests in `crates/evpn`, 11 `compute_diff` cases plus a
-  key-grounding cross-check, 14 actor + backoff + in-memory fake
-  tests, 1 LinuxDataplane connect-doesnt-panic smoke + 10 probe.rs
-  rejection-leg tests (including missing-`IFLA_VXLAN_LEARNING` and
-  multi-VXLAN-port cases), 5 errno-classification tests in
-  `linux/fdb.rs`, 12 projection tests (incl. self-VTEP filter), 6
-  supervisor / daemon-wiring tests (incl. the
-  generation-stability check), 1 actor permanent-suppression test,
-  and 1 binary-spawn RR-only invariant test. Workspace count climbs
-  from ~1406 (v0.13.4 baseline) to 1486.
+- 87 net new tests across the EVPN dataplane stack: domain-type
+  unit tests in `crates/evpn`, `compute_diff` cases plus a key-
+  grounding cross-check, actor + backoff + in-memory fake tests,
+  the LinuxDataplane connect-doesnt-panic smoke + probe.rs
+  rejection legs (including missing-`IFLA_VXLAN_LEARNING` and
+  multi-VXLAN-port cases), errno-classification tests in
+  `linux/fdb.rs`, projection tests (incl. self-VTEP filter),
+  supervisor / daemon-wiring tests (incl. the generation-
+  stability check), per-op-fingerprint suppression tests, and the
+  binary-spawn RR-only invariant test. Workspace count climbs
+  from 1406 (v0.13.4 baseline) to 1493.
 
 ### Packaging
 

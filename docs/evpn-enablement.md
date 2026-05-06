@@ -347,28 +347,43 @@ later phases consume:
 
 #### Gate 7b — Kernel reconciliation + origination
 
-Status: queued · Blockers: Gate 7a
+Status: in flight on PR #34 (`feat/evpn-linux-dataplane`) · Blockers: Gate 7a (closed)
 
 Why gated on demand: SONiC/FRR leaves do this well today. Rustbgpd
 competing with FRR for the VTEP role is a meaningful strategic expansion,
 not a tactical feature. Only worth it if there's a specific use case
 (pure-Rust leaf, better API story, etc.) that justifies the scope.
 
-**Land first, before kernel work begins** — these are the
-groundwork items that make everything else easier to validate, not
-optional polish:
+**Groundwork (landed):**
+
+| Task | File / location | Status |
+|------|----------------|--------|
+| Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
+| Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
+| Swap surface for the `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work. | `crates/api/src/evpn_service.rs`, daemon wiring | landed |
+
+**FDB reconciler (PR #34):**
+
+| Task | File / location | Status |
+|------|----------------|--------|
+| `crates/evpn-linux` crate skeleton, `Dataplane` trait, `InMemoryDataplane` fake | `crates/evpn-linux/` | landed (PR #34) |
+| Diff loop: desired `RemoteMacTable` + `KernelSnapshot` + `OwnedSet` → idempotent `DataplaneOp` plan | `crates/evpn-linux/src/diff.rs` | landed (PR #34) |
+| Reconcile actor: per-op-fingerprint permanent-failure suppression, exponential backoff, 60 s periodic full dump, level-triggered re-reconcile | `crates/evpn-linux/src/reconcile.rs` | landed (PR #34) |
+| Linux netlink backend: bridge/VXLAN link inventory + bridge FDB dump + `RTM_NEWNEIGH` program/withdraw with `NTF_SELF \| NTF_MASTER \| NTF_EXT_LEARNED` and `NUD_NOARP \| NUD_PERMANENT` (single-message wire shape, verified via strace on iproute2) | `crates/evpn-linux/src/linux/` | landed (PR #34) |
+| Errno classification (EPERM/EACCES → `PermissionDenied`; EOPNOTSUPP → `KernelTooOld`; EINVAL → `InvalidArgument`) | `crates/evpn-linux/src/linux/fdb.rs` | landed (PR #34) |
+| EVPN supervisor: project RIB EVPN routes → `RemoteMacTable`, publish `DataplaneIntent` only on semantic change (no per-poll generation churn) | `src/evpn_dataplane.rs` | landed (PR #34) |
+| M36 containerlab smoke: rustbgpd-as-VTEP + FRR-as-originator (iBGP, AS 65000); verifies bridge-master row + VXLAN-self+dst row both carry `extern_learn`, foreign-static survives, withdraw cleans up. 8/8 PASS. | `tests/interop/scripts/test-m36-evpn-vtep-smoke.sh` | landed (PR #34) |
+| Privileged netns dataplane test (gated on `EVPN_LINUX_NETNS=1`, runs nightly outside PR-CI) | `crates/evpn-linux/tests/netns_dataplane.rs` | landed (PR #34) |
+
+`RTNLGRP_NEIGH` / `RTNLGRP_LINK` subscription is explicitly deferred —
+the level-triggered reconcile design tolerates the gap because the
+60 s periodic dump structurally repairs drift; subscriptions are a
+latency optimization, not a correctness requirement.
+
+**Still ahead in Gate 7b:**
 
 | Task | File / location |
 |------|----------------|
-| Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic — pin it before mutation, swap surfaces, kernel state, or origination land. | `tests/evpn_instances_binary.rs` |
-| Dataplane-boundary ADR — what `crates/evpn-linux` (or equivalent) consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` |
-| Swap surface for the `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work; doesn't reduce to LOC | `crates/api/src/evpn_service.rs`, daemon wiring |
-
-Scope sketch:
-
-| Task | File / location |
-|------|----------------|
-| Netlink client for kernel FDB monitoring | new crate? `crates/netlink/` |
 | Local MAC table (MAC → next-hop + VNI + sequence) — domain types in `crates/evpn`, not by overloading `wire::EvpnRoute` | `crates/evpn/src/mac.rs` (new) |
 | Type 2 origination on MAC learn (consumes `EvpnInstanceTable`) | RibManager handler |
 | Type 2 withdrawal on MAC age-out | RibManager handler |
@@ -377,6 +392,7 @@ Scope sketch:
 | Anti-spoofing, MAC move sequence management | — |
 | `advertise_svi_mac` flag wired through to Type 2 origination | — |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
+| `RTNLGRP_NEIGH` / `RTNLGRP_LINK` subscription (latency optimization on top of periodic dump) | `crates/evpn-linux/src/linux/mod.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
 ---
