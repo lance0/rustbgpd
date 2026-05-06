@@ -554,6 +554,9 @@ pub enum PathAttribute {
     MpReachNlri(MpReachNlri),
     /// RFC 4760 `MP_UNREACH_NLRI`.
     MpUnreachNlri(MpUnreachNlri),
+    /// RFC 6514 §5 `PMSI Tunnel` — used by EVPN Type 3 IMET for
+    /// ingress-replication BUM forwarding.
+    PmsiTunnel(crate::pmsi::PmsiTunnel),
     /// Unknown or unrecognized attribute, preserved for re-advertisement.
     Unknown(RawAttribute),
 }
@@ -575,6 +578,7 @@ impl PathAttribute {
             Self::LargeCommunities(_) => attr_type::LARGE_COMMUNITIES,
             Self::MpReachNlri(_) => attr_type::MP_REACH_NLRI,
             Self::MpUnreachNlri(_) => attr_type::MP_UNREACH_NLRI,
+            Self::PmsiTunnel(_) => attr_type::PMSI_TUNNEL,
             Self::Unknown(raw) => raw.type_code,
         }
     }
@@ -591,9 +595,10 @@ impl PathAttribute {
             | Self::ClusterList(_)
             | Self::MpReachNlri(_)
             | Self::MpUnreachNlri(_) => attr_flags::OPTIONAL,
-            Self::Communities(_) | Self::ExtendedCommunities(_) | Self::LargeCommunities(_) => {
-                attr_flags::OPTIONAL | attr_flags::TRANSITIVE
-            }
+            Self::Communities(_)
+            | Self::ExtendedCommunities(_)
+            | Self::LargeCommunities(_)
+            | Self::PmsiTunnel(_) => attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
             Self::Unknown(raw) => raw.flags,
         }
     }
@@ -869,6 +874,11 @@ fn decode_attribute_value(
 
         attr_type::MP_REACH_NLRI => decode_mp_reach_nlri(value, add_path_families),
         attr_type::MP_UNREACH_NLRI => decode_mp_unreach_nlri(value, add_path_families),
+
+        attr_type::PMSI_TUNNEL => {
+            let pmsi = crate::pmsi::PmsiTunnel::decode(value)?;
+            Ok(PathAttribute::PmsiTunnel(pmsi))
+        }
 
         // ATOMIC_AGGREGATE, AGGREGATOR, and any unknown type → RawAttribute
         _ => Ok(PathAttribute::Unknown(RawAttribute {
@@ -1299,7 +1309,8 @@ fn expected_flags(type_code: u8) -> Option<u8> {
         attr_type::AGGREGATOR
         | attr_type::COMMUNITIES
         | attr_type::EXTENDED_COMMUNITIES
-        | attr_type::LARGE_COMMUNITIES => Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
+        | attr_type::LARGE_COMMUNITIES
+        | attr_type::PMSI_TUNNEL => Some(attr_flags::OPTIONAL | attr_flags::TRANSITIVE),
         _ => None,
     }
 }
@@ -1311,6 +1322,10 @@ fn expected_flags(type_code: u8) -> Option<u8> {
 ///
 /// When `add_path_mp` is true, `MP_REACH_NLRI` and `MP_UNREACH_NLRI` NLRI
 /// entries include 4-byte path IDs per RFC 7911.
+#[expect(
+    clippy::too_many_lines,
+    reason = "dispatch arms are inherently O(variants); each new path attribute adds a small block"
+)]
 pub fn encode_path_attributes(
     attrs: &[PathAttribute],
     buf: &mut Vec<u8>,
@@ -1392,6 +1407,14 @@ pub fn encode_path_attributes(
                 flags = attr_flags::OPTIONAL;
                 type_code = attr_type::MP_UNREACH_NLRI;
                 encode_mp_unreach_nlri(mp, &mut value, add_path_mp);
+            }
+            PathAttribute::PmsiTunnel(pmsi) => {
+                // RFC 6514 §5: Optional + Transitive.
+                (flags, type_code) = (
+                    attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+                    attr_type::PMSI_TUNNEL,
+                );
+                pmsi.encode(&mut value);
             }
             PathAttribute::Unknown(raw) => {
                 // RFC 4271 §5: unrecognized *optional* transitive attributes
@@ -3177,5 +3200,55 @@ mod tests {
             }
             other => panic!("expected MalformedField, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pmsi_tunnel_path_attribute_round_trips_through_dispatch() {
+        // Encode a multi-attribute payload that includes a PMSI Tunnel
+        // alongside the typical path attribute set so the dispatcher
+        // (and extended-length / flags / type-code paths) is exercised
+        // end-to-end.
+        let pmsi =
+            crate::pmsi::PmsiTunnel::for_evpn_ingress_replication(100, "10.0.0.1".parse().unwrap());
+        let attrs = vec![
+            PathAttribute::Origin(Origin::Igp),
+            PathAttribute::AsPath(AsPath { segments: vec![] }),
+            PathAttribute::LocalPref(100),
+            PathAttribute::PmsiTunnel(pmsi.clone()),
+        ];
+
+        let mut buf = Vec::new();
+        encode_path_attributes(&attrs, &mut buf, true, false);
+        let decoded = decode_path_attributes(&buf, true, &[]).unwrap();
+
+        assert_eq!(decoded, attrs);
+
+        // Verify the encoded PMSI uses Optional+Transitive flags
+        // (RFC 6514 §5) and type code 22.
+        let pmsi_decoded = decoded
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::PmsiTunnel(p) => Some(p),
+                _ => None,
+            })
+            .expect("PMSI present");
+        assert_eq!(pmsi_decoded, &pmsi);
+        assert_eq!(
+            PathAttribute::PmsiTunnel(pmsi).flags(),
+            attr_flags::OPTIONAL | attr_flags::TRANSITIVE,
+        );
+    }
+
+    #[test]
+    fn pmsi_tunnel_decode_attribute_with_truncated_value_is_malformed() {
+        // 4 bytes of value (need ≥5: flags+type+3-octet label).
+        let buf = [
+            0xC0, // optional + transitive
+            22,   // PMSI Tunnel type code
+            0x04, // length = 4
+            0x00, 0x06, 0x00, 0x00,
+        ];
+        let err = decode_path_attributes(&buf, true, &[]).unwrap_err();
+        assert!(matches!(err, DecodeError::MalformedField { .. }));
     }
 }
