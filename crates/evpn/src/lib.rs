@@ -36,6 +36,10 @@
 //! - [`EvpnInstanceTable`] — uniqueness-enforcing collection, indexed
 //!   by VNI, with a parallel RD index that surfaces collisions
 //!   between two instances using the same Route Distinguisher.
+//! - [`RemoteMacTable`] / [`DataplaneIntent`] / [`DataplaneReport`] —
+//!   Gate 7b dataplane boundary types per ADR-0054. Portable domain
+//!   surface consumed by `crates/evpn-linux`. The kernel-side
+//!   reconciler lives there; this crate stays kernel-free.
 //!
 //! Mutation surface, kernel reconciliation, and Type 2/3/5
 //! origination are explicit follow-up work tracked in
@@ -45,10 +49,28 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod dataplane;
 pub mod instance;
+pub mod mac;
+pub mod projection;
 pub mod route_target;
 
+pub use dataplane::{
+    AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, FailedOp,
+    InstanceDataplaneStatus, InstanceState,
+};
 pub use instance::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError,
 };
+pub use mac::{
+    LocalMacObservation, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
+    RemoteMacTableBuilder, RemoteMacTableBuilderError,
+};
+pub use projection::{ProjectedEvpnRoute, project_evpn_routes};
 pub use route_target::{RouteTarget, RouteTargetParseError};
+
+// Re-export the wire `RouteDistinguisher` so consumers of this crate
+// (including `crates/evpn-linux` and the daemon's projection layer)
+// can name the type without taking a direct `rustbgpd-wire` dep just
+// to construct an `EvpnInstance`.
+pub use rustbgpd_wire::RouteDistinguisher;

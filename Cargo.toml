@@ -12,6 +12,7 @@ members = [
     "crates/bmp",
     "crates/mrt",
     "crates/evpn",
+    "crates/evpn-linux",
     "bench/evpn-load",
 ]
 resolver = "2"
@@ -38,6 +39,7 @@ rustbgpd-rpki = { path = "crates/rpki", version = "0.13.4" }
 rustbgpd-bmp = { path = "crates/bmp", version = "0.13.4" }
 rustbgpd-mrt = { path = "crates/mrt", version = "0.13.4" }
 rustbgpd-evpn = { path = "crates/evpn", version = "0.13.4" }
+rustbgpd-evpn-linux = { path = "crates/evpn-linux", version = "0.13.4" }
 
 # External dependencies — pinned across workspace
 bytes = "1"
@@ -97,6 +99,7 @@ rustbgpd-rpki.workspace = true
 rustbgpd-bmp.workspace = true
 rustbgpd-mrt.workspace = true
 rustbgpd-evpn.workspace = true
+rustbgpd-evpn-linux.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -109,6 +112,7 @@ bytes.workspace = true
 serde_json.workspace = true
 owo-colors.workspace = true
 axum.workspace = true
+tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3"

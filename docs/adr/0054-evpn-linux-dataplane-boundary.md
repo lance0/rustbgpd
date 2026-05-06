@@ -1,6 +1,6 @@
 # ADR-0054: EVPN Linux Dataplane Boundary
 
-**Status:** Accepted
+**Status:** Accepted (implementation in PR #34, branch `feat/evpn-linux-dataplane`)
 **Date:** 2026-05-04
 
 ## Context
@@ -200,16 +200,26 @@ Remote MAC programming flows the opposite direction. Once the control
 plane selects a remote EVPN Type 2 as installed for `(VNI, MAC)`, the
 daemon provides a remote-MAC intent to `crates/evpn-linux`. The Linux
 crate reconciles that intent into VXLAN FDB entries pointing at the
-remote VTEP IP. Remote entries are marked as rustbgpd-owned in the
-internal snapshot and should use kernel ownership flags such as
-`extern_learn` where supported so they are distinguishable from
-kernel-learned local entries.
+remote VTEP IP. Remote entries are marked as rustbgpd-owned via
+`NTF_EXT_LEARNED` in the internal snapshot so they are distinguishable
+from kernel-learned local entries; `NTF_EXT_LEARNED` is required for
+correctness on both observed kernel rows.
 
-Remote FDB entries are programmed through the bridge/master path by
-default so the bridge owns the entry and switchdev-capable drivers can
-offload it. Device-local `self` programming is reserved for explicit
-cases where bridge mediation is not desired; it is not the default
-Gate 7b behavior.
+The wire shape, verified via `strace` on iproute2's
+`bridge fdb add MAC dev vxlanX master dst REMOTE self extern_learn`,
+is a **single** `RTM_NEWNEIGH` carrying
+`NTF_SELF | NTF_MASTER | NTF_EXT_LEARNED` flags + `NDA_DST` with state
+`NUD_NOARP | NUD_PERMANENT`. The kernel programs both forwarding rows
+from that one message: the VXLAN-self+dst row on the VXLAN port (which
+gives the VXLAN driver the tunnel encap target) and the bridge-master
+row on the bridge (which makes the MAC reachable via the VXLAN port
+instead of being flooded). Both rows carry `NTF_EXT_LEARNED` after the
+kernel propagates the flag, and the diff/dump path requires it on both
+to classify the entry as rustbgpd-owned. Switchdev-capable drivers can
+offload the bridge-master row through the master path. Device-local
+`self`-only programming without bridge participation is reserved for
+explicit cases where bridge mediation is not desired; it is not the
+default Gate 7b behavior.
 
 ### 6. Reconcile-on-event plus periodic full resync
 
@@ -249,6 +259,29 @@ Default timer policy:
   5 second cap, with jitter;
 - any new desired snapshot or netlink event resets the sleep and
   schedules reconcile immediately.
+
+Implementation note: `RTNLGRP_NEIGH` / `RTNLGRP_LINK` subscription is
+deferred past PR #34 — `Dataplane::next_event` returns `pending()` in
+the first slice. The level-triggered reconcile design tolerates the
+gap because the 60 s periodic dump structurally repairs any drift; the
+follow-up that wires subscriptions is purely a latency optimization.
+
+Permanent-failure suppression is **per-op-fingerprint**, not
+generation-wide: if the kernel returns a permanent classification
+(`PermissionDenied`, `KernelTooOld`, `InvalidArgument`) for a specific
+`(VNI, MAC, dst)` op shape, that exact fingerprint is suppressed until
+the op shape changes or the fingerprint clears on next intent. A
+different op for the same key (e.g., a new dst on mobility) is
+re-attempted immediately. Generation-wide suppression would mask real
+churn.
+
+The supervisor publishes a new `DataplaneIntent` only when the
+projected `RemoteMacTable` differs semantically from the last
+publication. The 5 s polling cadence does not bump
+`DataplaneIntent::generation` if the projected table is unchanged —
+the reconcile actor uses the generation as the trigger to clear its
+permanent-failure suppression, so spurious bumps would defeat
+suppression and re-flap permanent errors.
 
 Deletes are conservative:
 
@@ -380,12 +413,40 @@ entries only.
 - Keep the Gate 7b runway binary-spawn integration test: start the real
   `rustbgpd` binary with `[[evpn_instances]]`, then query it through a
   real `rustbgpctl evpn instances` subprocess.
-- `crates/evpn-linux` must start with diff-loop unit tests over fake
+- `crates/evpn-linux` must carry diff-loop unit tests over fake
   desired/kernel snapshots: create, no-op, update, delete, foreign-entry
   preservation, and retry-after-failure.
-- Privileged netlink tests should live behind an explicit Linux
-  namespace/capability gate. They are valuable, but they are not a
-  substitute for pure diff tests.
+- Privileged netlink tests must live behind an explicit Linux
+  namespace/capability gate (`EVPN_LINUX_NETNS=1`). They are valuable,
+  but they are not a substitute for pure diff tests.
+
+What landed in PR #34:
+
+- **12 explicit diff cases** in `crates/evpn-linux/src/diff.rs` covering
+  create, no-op, update on VTEP change, delete on withdrawal, delete on
+  instance NotReady, foreign-static preservation, foreign kernel-learned
+  preservation, unbound instance, idempotency, mobility-sequence advance
+  triggering update (not recreate), already-gone owned entry, and a
+  grounding invariant that emitted keys come from inputs.
+- **`InMemoryDataplane`** fake (`crates/evpn-linux/src/in_memory.rs`)
+  for actor-level tests without netlink.
+- **6 merge-helper tests** in `crates/evpn-linux/src/linux/fdb.rs`
+  covering the two-row dump merge (`NTF_SELF`+dst row and `NTF_MASTER`
+  row collide on the same `(VNI, MAC)` key) and the combined
+  `NUD_NOARP | NUD_PERMANENT` state-bitmask decoder, plus
+  per-errno-class permanent-failure classification (EPERM/EACCES →
+  `PermissionDenied`, EINVAL → `InvalidArgument`, EOPNOTSUPP →
+  `KernelTooOld`, others stay transient).
+- **M36 containerlab smoke** (`tests/interop/scripts/test-m36-evpn-vtep-smoke.sh`)
+  with rustbgpd as VTEP and FRR as Type 2 originator over iBGP in
+  AS 65000. Verifies: bridge + VXLAN topology, foreign-static
+  pre-load survives, BGP Established, MAC programmed with the
+  bridge-master row + VXLAN-self+dst row both carrying `extern_learn`,
+  withdraw cleans up. 8/8 rows pass.
+- **Privileged netns dataplane test** (`crates/evpn-linux/tests/netns_dataplane.rs`)
+  gated on `EVPN_LINUX_NETNS=1`; runs nightly outside PR-CI.
+
+Total: 1493 workspace tests + 8/8 M36 smoke at the time of PR #34.
 
 ## Cross-References
 

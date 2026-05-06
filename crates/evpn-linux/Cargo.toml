@@ -1,0 +1,36 @@
+[package]
+publish = false
+name = "rustbgpd-evpn-linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Linux netlink dataplane reconciler for EVPN VTEP — observes bridge/VXLAN topology and programs remote-MAC FDB entries (RFC 7432 / RFC 8365)"
+
+[dependencies]
+rustbgpd-evpn.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing.workspace = true
+
+# Linux-only — real netlink. cfg-gated so the crate type-checks on
+# macOS dev builds. rtnetlink 0.14 pairs with netlink-packet-route
+# 0.19 (the older typed message API); newer 0.21+/0.30+ versions
+# moved to a different message shape that tonic-prost transitively
+# pulls in async-std incompatibly. Pinning the pair keeps the
+# workspace's existing tokio/tonic stack happy.
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+netlink-packet-core = "0.7"
+netlink-packet-utils = "0.5"
+netlink-sys = { version = "0.8", features = ["tokio_socket"] }
+futures = "0.3"
+libc.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

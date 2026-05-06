@@ -9,6 +9,182 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN VTEP Linux dataplane reconciler — Gate 7b foundation
+  (ADR-0054).** The daemon now consumes selected EVPN Type 2
+  best-paths from the RIB and reconciles them through a level-
+  triggered actor against a portable [`Dataplane`] trait. Landed
+  across the new `crates/evpn-linux` workspace member, the existing
+  `crates/evpn` domain crate, and `src/`:
+  - **Domain types** in `crates/evpn`: `DataplaneIntent`,
+    `DataplaneReport`, `RemoteMacTable` + builder with typed
+    duplicate-key error, `RemoteMacEntry`, `LocalMacObservation`,
+    `InstanceState` (Ready / NotReady / Unbound), `DataplaneOpKind`.
+    The intent surface lives in `crates/evpn` rather than
+    `crates/evpn-linux` so macOS dev builds keep compiling and a
+    future RR-only feature flag can drop the netlink crate cleanly.
+  - **Pure diff loop** in `crates/evpn-linux::diff::compute_diff`.
+    Foreign-entry preservation is structural: the delete pass
+    iterates `OwnedSet` (rustbgpd-programmed keys), never the kernel
+    snapshot, so kernel-learned local MACs and operator-static FDB
+    entries cannot be deleted by the algorithm. Mobility update is
+    triggered by destination-VTEP change; sequence number is
+    recorded on apply for stale-race detection. 11 explicit case
+    tests + key-grounding cross-check.
+  - **Reconcile actor** generic over `Dataplane`, with `tokio::select!`
+    over: new intent (`watch::Receiver`), kernel events (mpsc),
+    60 s periodic full dump (configurable), per-op exponential
+    backoff retry (100 ms → 5 s with ±25% deterministic jitter),
+    and a `CancellationToken` driving a 5 s bounded shutdown drain
+    that withdraws only owned remote FDB entries.
+  - **`InMemoryDataplane` fake** with a cloneable handle for test
+    state inspection and failure injection. The actor's full
+    lifecycle is end-to-end testable without netlink: 7 integration
+    tests cover initial reconcile, fast intent supersession,
+    failed-apply retry, foreign-entry-preservation through shutdown
+    drain, periodic-dump cadence, kernel-event-triggered reconcile,
+    and NotReady-instance status emission.
+  - **M36 real-VTEP smoke** (`tests/interop/m36-evpn-vtep-smoke.clab.yml`)
+    proves the full path against a real Linux kernel via
+    containerlab: rustbgpd brings up bridge+VXLAN in its container
+    netns, peers with FRR over iBGP L2VPN/EVPN, FRR originates a
+    Type 2 for a static MAC, rustbgpd programs the kernel FDB with
+    both the NTF_MASTER bridge row and the NTF_SELF+dst VXLAN-encap
+    row (matching iproute2's wire shape, verified via strace), the
+    test asserts `bridge fdb show` reports the MAC with
+    `extern_learn` AND the correct remote-VTEP `dst`, then
+    withdraws and asserts cleanup. A foreign-static FDB entry
+    pre-loaded into rustbgpd's bridge survives both program and
+    withdraw cycles. 8/8 PASS locally against Linux 6.17 + FRR
+    10.3.1 (rustbgpd-as-VTEP, FRR-as-originator, iBGP/AS65000).
+  - **`LinuxDataplane` real rtnetlink integration** at
+    `crates/evpn-linux::linux::LinuxDataplane` (rtnetlink 0.14 +
+    netlink-packet-route 0.19). Three submodules: `links.rs` walks
+    `LinkHandle::get` and stitches VXLAN ports onto their master
+    bridges (counting attaches per bridge so 2+ VXLAN ports report
+    `NotReady`, not the alternating-clear bug an early prototype
+    had); `fdb.rs` programs entries through the
+    `bridge fdb add MAC dev vxlanX master dst REMOTE` shape on the
+    wire — a single `RTM_NEWNEIGH` targeting the **VXLAN port
+    ifindex** (not the bridge) with combined
+    `NTF_SELF | NTF_MASTER | NTF_EXT_LEARNED` flags and
+    `ndm_state = NUD_NOARP | NUD_PERMANENT`, matching iproute2's
+    wire shape (verified via strace) so the kernel materializes both
+    the bridge-FDB row and the VXLAN-self encap row from one
+    message. The FDB dump path merges the resulting `NTF_SELF`
+    (carrying `dst`) and `NTF_MASTER` (no `dst`) rows the kernel
+    returns for the same `(VNI, MAC)` so `dst` doesn't collapse to
+    `None`, and resolves VNI from the VXLAN port ifindex via the
+    link cache's `vxlan_ifindex_to_vni` map. `probe.rs` enforces
+    the ADR §4 five-point readiness check (bridge exists, exactly
+    one VXLAN port, VNI matches, `local_vtep_ip` matches,
+    `IFLA_VXLAN_LEARNING` reports `nolearning` — fail-closed if the
+    attribute is missing — and the bridge is not VLAN-aware). The
+    netlink error classifier reads `ErrorMessage::raw_code()` and
+    maps `EPERM` / `EACCES` → `DataplaneError::PermissionDenied`
+    (permanent), `EOPNOTSUPP` → `KernelTooOld` (permanent),
+    `EINVAL` → `InvalidArgument` (permanent); other errno values
+    stay transient. Permission and kernel-version failures stop
+    retrying instead of looping forever, and the operator-facing
+    message correctly distinguishes "missing CAP_NET_ADMIN" from
+    "kernel too old".
+  - **Privileged netns integration test** at
+    `crates/evpn-linux/tests/netns_dataplane.rs`, gated on
+    `EVPN_LINUX_NETNS=1` (not in CI yet — privileged runner job is
+    a deferred follow-up). Creates a bridge + VXLAN port inside a
+    Linux namespace, runs the real `probe()` to populate the link
+    cache, programs a remote-MAC entry through `apply()`, asserts
+    per-row that both the `NTF_MASTER` bridge row and the
+    `NTF_SELF + dst` VXLAN-encap row carry `extern_learn`,
+    withdraws it, and verifies a pre-loaded foreign static FDB
+    entry survives the drain (validates ADR-0054 §5/§7 foreign-
+    entry preservation end-to-end). The M36 containerlab smoke
+    carries the same per-row assertion against a real Linux
+    kernel.
+  - **Per-op retry/backoff is enforced**, not just recorded.
+    `apply_plan` skips ops whose `(VNI, MAC)` key is in the retry
+    schedule and not yet due. Permanent failures
+    (`PermissionDenied` / `KernelTooOld` / `InvalidArgument`) are
+    suppressed by **per-op-fingerprint**: the failed
+    [`DataplaneOp`] is recorded under its `(VNI, MAC)` key, and the
+    actor only suppresses subsequent passes whose op shape equals
+    the recorded one. A mobility move (different remote VTEP) or an
+    add↔remove transition for the same key clears the stale
+    suppression inline. Cross-key isolation is structural —
+    unrelated `RemoteMacTable` churn never touches another key's
+    suppression, and generation churn alone (e.g., a daemon-side
+    re-projection that produced an identical table) doesn't clear
+    anything. The supervisor compares the projected table to the
+    previous publish and only bumps the intent generation on
+    semantic change as a separate optimization to avoid pointless
+    `watch::send` calls. The actor's outer `tokio::select!` re-fires
+    on the retry timer, so deferred ops run as soon as their backoff
+    elapses instead of waiting for the next 60 s periodic dump.
+    Three suppression tests lock the contract:
+    `reconcile_actor.rs::permanent_failure_suppression_is_per_op_fingerprint`,
+    `reconcile_actor.rs::permanent_failure_does_not_leak_across_keys`,
+    and `evpn_dataplane.rs::supervisor_does_not_bump_generation_on_stable_table`.
+  - **Errno-based netlink classification.**
+    `errno_to_dataplane_error` reads the kernel's `errno` from
+    `ErrorMessage::raw_code()` and maps it to a typed
+    [`DataplaneError`] variant: `EPERM` / `EACCES` →
+    `PermissionDenied` (new variant; permanent), `EOPNOTSUPP` →
+    `KernelTooOld` (permanent), `EINVAL` → `InvalidArgument`
+    (permanent), anything else → `Other` (transient). Operator-
+    facing messages now correctly distinguish "missing
+    `CAP_NET_ADMIN`" from "kernel too old", and the classifier no
+    longer string-matches the rtnetlink `Debug` rendering.
+  - **Self-originated Type 2 routes are filtered from projection.**
+    `project_evpn_routes` now drops routes whose `next_hop` matches
+    the local instance `local_vtep_ip` — programming such a route as
+    a remote FDB entry would point traffic at ourselves. Two new
+    projection tests cover the single-instance and multi-instance
+    cases.
+  - **EVPN dataplane shutdown drain wired into coordinated shutdown.**
+    The daemon's coordinated shutdown block now calls
+    `EvpnDataplaneHandle::shutdown().await` after PeerManager drains
+    and before BMP — the handle was previously held but never used,
+    leaving the actor's drain path dead. The 5 s drain runs the
+    actor's bounded delete pass on owned remote FDB entries
+    (foreign entries survive), and a 10 s outer timeout prevents a
+    stuck task from wedging daemon exit.
+  - **Daemon supervisor** at `src/evpn_dataplane.rs`: polling loop
+    queries the RIB's existing `QueryEvpnRoutes` channel every 5 s
+    (configurable), projects best-path Type 2 routes into a
+    `RemoteMacTable` via `rustbgpd_evpn::project_evpn_routes`,
+    publishes a `DataplaneIntent` with a monotonic generation
+    counter. Empty `[[evpn_instances]]` short-circuits the spawn so
+    route-reflector deployments incur zero dataplane cost (no
+    netlink socket, no background task — the architectural
+    invariant from ADR-0054 §1).
+
+### Tests
+
+- 87 net new tests across the EVPN dataplane stack: domain-type
+  unit tests in `crates/evpn`, `compute_diff` cases plus a key-
+  grounding cross-check, actor + backoff + in-memory fake tests,
+  the LinuxDataplane connect-doesnt-panic smoke + probe.rs
+  rejection legs (including missing-`IFLA_VXLAN_LEARNING` and
+  multi-VXLAN-port cases), errno-classification tests in
+  `linux/fdb.rs`, projection tests (incl. self-VTEP filter),
+  supervisor / daemon-wiring tests (incl. the generation-
+  stability check), per-op-fingerprint suppression tests, and the
+  binary-spawn RR-only invariant test. Workspace count climbs
+  from 1406 (v0.13.4 baseline) to 1493.
+
+### Packaging
+
+- New workspace member `crates/evpn-linux` (`publish = false`).
+  cfg-gated `target_os = "linux"` deps: rtnetlink 0.14, netlink-
+  packet-route 0.19, netlink-packet-core 0.7, netlink-packet-utils
+  0.5, netlink-sys 0.8 (with `tokio_socket`), futures 0.3. Pinned
+  to the 0.14/0.19 pair because the newer 0.21+/0.30+ releases
+  changed the message-shape ABI and pull async-std incompatibly
+  with the workspace's tokio/tonic stack. Daemon picks up
+  `tokio-util` 0.7 directly for `CancellationToken` (the
+  evpn-linux crate already uses it).
+
 ## [0.13.4] — 2026-05-04
 
 ### Fixed
