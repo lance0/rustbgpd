@@ -347,7 +347,7 @@ later phases consume:
 
 #### Gate 7b — Kernel reconciliation + origination
 
-Status: in flight on PR #34 (`feat/evpn-linux-dataplane`) · Blockers: Gate 7a (closed)
+Status: foundation landed in v0.14.0 (PR #34) · Blockers: Gate 7a (closed)
 
 Why gated on demand: SONiC/FRR leaves do this well today. Rustbgpd
 competing with FRR for the VTEP role is a meaningful strategic expansion,
