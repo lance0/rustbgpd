@@ -656,7 +656,7 @@ boundaries.
 
 | RPC | Description |
 |-----|-------------|
-| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, route_targets, local_vtep_ip, optional bridge, advertise_svi_mac flag) |
+| `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, route_targets, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count) |
 
 Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still out of
 scope. With the kernel reconciler and originator now live (Gates
@@ -684,6 +684,11 @@ Or via CLI:
 rustbgpctl evpn instances           # human format
 rustbgpctl evpn instances --json    # JSON output
 ```
+
+The human CLI includes `originated-local-macs=N` per instance. JSON and
+gRPC expose the same value as `originated_local_macs_count`; it counts
+MAC-only Type 2 routes currently originated by this daemon for the
+instance and accepted by the RIB.
 
 ---
 

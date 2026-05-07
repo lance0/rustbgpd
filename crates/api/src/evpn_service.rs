@@ -3,9 +3,10 @@
 //! This service exposes the daemon's resolved
 //! [`rustbgpd_evpn::EvpnInstanceTable`] so operators and SDN
 //! controllers can confirm which local EVIs are installed without
-//! parsing TOML themselves. It is *intentionally read-only* in the
-//! VTEP foundation slice — mutation, kernel reconciliation, and
-//! origination land in follow-on phases.
+//! parsing TOML themselves. It remains *intentionally read-only*:
+//! kernel reconciliation and local Type 2/3 origination consume the
+//! same resolved table through daemon-owned actors, while runtime EVI
+//! mutation is still a follow-on phase.
 //!
 //! The service holds an `Arc<EvpnInstanceTable>` rather than building
 //! a fresh table per call so the gRPC layer never re-parses config
@@ -19,16 +20,34 @@ use tonic::{Request, Response, Status};
 
 use crate::proto;
 
+/// Read-side hook for per-instance local-MAC origination counts.
+pub type OriginatedLocalMacCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'static>;
+
 /// Read-only EVPN service backed by a shared resolved instance table.
 pub struct EvpnService {
     instances: Arc<EvpnInstanceTable>,
+    originated_local_mac_count: OriginatedLocalMacCountFn,
 }
 
 impl EvpnService {
     /// Construct a service over the given resolved instance table.
     #[must_use]
     pub fn new(instances: Arc<EvpnInstanceTable>) -> Self {
-        Self { instances }
+        Self::with_originated_local_mac_count(instances, Arc::new(|_| 0))
+    }
+
+    /// Construct a service with a live local-MAC origination count
+    /// provider. The daemon passes a closure backed by the EVPN
+    /// originator's state; tests can inject deterministic counts.
+    #[must_use]
+    pub fn with_originated_local_mac_count(
+        instances: Arc<EvpnInstanceTable>,
+        originated_local_mac_count: OriginatedLocalMacCountFn,
+    ) -> Self {
+        Self {
+            instances,
+            originated_local_mac_count,
+        }
     }
 }
 
@@ -49,6 +68,7 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
                 local_vtep_ip: inst.local_vtep_ip.to_string(),
                 bridge: inst.bridge.clone().unwrap_or_default(),
                 advertise_svi_mac: inst.advertise_svi_mac,
+                originated_local_macs_count: (self.originated_local_mac_count)(inst.id.as_u32()),
             })
             .collect();
         Ok(Response::new(proto::ListEvpnInstancesResponse {
@@ -125,6 +145,7 @@ mod tests {
         assert_eq!(resp.instances[0].route_targets, vec!["65000:100"]);
         assert!(resp.instances[0].bridge.is_empty());
         assert!(!resp.instances[0].advertise_svi_mac);
+        assert_eq!(resp.instances[0].originated_local_macs_count, 0);
     }
 
     #[tokio::test]
@@ -151,5 +172,22 @@ mod tests {
         assert_eq!(row.bridge, "br100");
         assert!(row.advertise_svi_mac);
         assert_eq!(row.route_targets, vec!["65000:100", "65000:200"]);
+    }
+
+    #[tokio::test]
+    async fn list_surfaces_originated_local_mac_counts() {
+        let mut table = EvpnInstanceTable::new();
+        install(&mut table, 100, "65000:100", "10.0.0.1");
+        let svc = EvpnService::with_originated_local_mac_count(
+            Arc::new(table),
+            Arc::new(|vni| if vni == 100 { 7 } else { 0 }),
+        );
+
+        let resp = svc
+            .list_evpn_instances(Request::new(proto::ListEvpnInstancesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.instances[0].originated_local_macs_count, 7);
     }
 }

@@ -52,6 +52,8 @@ mod links;
 mod notify;
 mod probe;
 
+type ObservationDropHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
+
 /// Linux-only dataplane impl backed by `rtnetlink`.
 ///
 /// The struct holds the `rtnetlink::Handle` and a mutex-guarded link
@@ -85,6 +87,26 @@ impl LinuxDataplane {
     /// Returns [`DataplaneError::Io`] if `rtnetlink::new_connection`
     /// fails.
     pub async fn connect() -> Result<Self, DataplaneError> {
+        Self::connect_with_observation_drop_hook(|_| {}).await
+    }
+
+    /// Open a netlink socket and install a hook called whenever a
+    /// classified local-MAC observation cannot be forwarded to the
+    /// daemon originator.
+    ///
+    /// The hook keeps `rustbgpd-evpn-linux` independent of the
+    /// daemon's telemetry crate while still allowing the binary to
+    /// attach Prometheus accounting at the boundary.
+    ///
+    /// # Errors
+    /// Returns [`DataplaneError::Io`] if `rtnetlink::new_connection`
+    /// fails.
+    pub async fn connect_with_observation_drop_hook<F>(
+        on_observation_drop: F,
+    ) -> Result<Self, DataplaneError>
+    where
+        F: Fn(&'static str) + Send + Sync + 'static,
+    {
         let (mut connection, handle, messages) =
             rtnetlink::new_connection().map_err(DataplaneError::Io)?;
 
@@ -161,7 +183,13 @@ impl LinuxDataplane {
         // reconcile model recovers via the periodic dump cadence.
         let (local_mac_tx, local_mac_rx) = mpsc::channel(1024);
         let cache_for_notify = Arc::clone(&link_cache);
-        tokio::spawn(notify_loop(messages, cache_for_notify, local_mac_tx));
+        let on_observation_drop: ObservationDropHook = Arc::new(on_observation_drop);
+        tokio::spawn(notify_loop(
+            messages,
+            cache_for_notify,
+            local_mac_tx,
+            on_observation_drop,
+        ));
 
         Ok(Self {
             handle,
@@ -181,6 +209,7 @@ async fn notify_loop(
     )>,
     link_cache: Arc<Mutex<links::LinkCache>>,
     local_mac_tx: mpsc::Sender<LocalMacObservation>,
+    on_observation_drop: ObservationDropHook,
 ) {
     while let Some((msg, _src)) = messages.next().await {
         let NetlinkPayload::InnerMessage(payload) = msg.payload else {
@@ -195,11 +224,24 @@ async fn notify_loop(
         let Some(obs) = notify::classify_neigh(kind, &neigh, &cache) else {
             continue;
         };
-        if local_mac_tx.try_send(obs).is_err() {
-            // Receiver dropped or buffer full. The level-triggered
-            // reconcile model means the next periodic dump rebuilds
-            // the originator's view, so dropping here is harmless.
-            warn!("local-MAC observation buffer full or originator gone; dropped event");
+        forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
+    }
+}
+
+fn forward_observation_or_record_drop(
+    local_mac_tx: &mpsc::Sender<LocalMacObservation>,
+    obs: LocalMacObservation,
+    on_observation_drop: &ObservationDropHook,
+) {
+    match local_mac_tx.try_send(obs) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            on_observation_drop("channel_full");
+            warn!("local-MAC observation buffer full; dropped event");
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            on_observation_drop("channel_closed");
+            warn!("local-MAC observation originator gone; dropped event");
         }
     }
 }
@@ -290,6 +332,7 @@ impl Dataplane for LinuxDataplane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Constructing the dataplane via `connect()` must not panic on
     /// hosts where the netlink socket fails (e.g., container without
@@ -309,5 +352,37 @@ mod tests {
                 tracing::info!(error = %e, "connect failed (expected on CI)");
             }
         }
+    }
+
+    #[test]
+    fn local_mac_observation_try_send_failure_calls_drop_hook() {
+        let (tx, rx) = mpsc::channel(1);
+        let full_drops = Arc::new(AtomicUsize::new(0));
+        let closed_drops = Arc::new(AtomicUsize::new(0));
+        let full_drops_hook = Arc::clone(&full_drops);
+        let closed_drops_hook = Arc::clone(&closed_drops);
+        let hook: ObservationDropHook = Arc::new(move |reason| match reason {
+            "channel_full" => {
+                full_drops_hook.fetch_add(1, Ordering::Relaxed);
+            }
+            "channel_closed" => {
+                closed_drops_hook.fetch_add(1, Ordering::Relaxed);
+            }
+            other => panic!("unexpected drop reason {other}"),
+        });
+        let obs = LocalMacObservation::Aged {
+            vni: rustbgpd_evpn::EvpnInstanceId::new(100).unwrap(),
+            mac: rustbgpd_evpn::MacAddress::new([0xaa; 6]),
+        };
+
+        forward_observation_or_record_drop(&tx, obs.clone(), &hook);
+        forward_observation_or_record_drop(&tx, obs.clone(), &hook);
+        assert_eq!(full_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(closed_drops.load(Ordering::Relaxed), 0);
+
+        drop(rx);
+        forward_observation_or_record_drop(&tx, obs, &hook);
+        assert_eq!(full_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(closed_drops.load(Ordering::Relaxed), 1);
     }
 }

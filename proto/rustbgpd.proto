@@ -949,14 +949,16 @@ message TriggerMrtDumpResponse {
 }
 
 // ---------------------------------------------------------------------------
-// EvpnService — Local EVPN instance state (Phase 2 VTEP foundation).
+// EvpnService — Local EVPN instance state (Phase 2 VTEP alpha).
 //
 // Read-only in this slice. The daemon's local EVI/VNI state is the
 // declarative `[[evpn_instances]]` config plus the runtime resolved
-// `EvpnInstanceTable`. Mutation, kernel reconciliation, and Type 2/3/5
-// origination are explicit follow-ups (see docs/evpn-enablement.md
-// Gate 7+). Empty when the daemon is acting purely as an EVPN route
-// reflector — RR mode does not need local instance state.
+// `EvpnInstanceTable`. Linux kernel reconciliation and Type 2/3 local
+// origination consume that table through daemon actors; runtime
+// instance mutation and Type 5/local IRB origination remain follow-ups
+// (see docs/evpn-enablement.md Gate 7+). Empty when the daemon is
+// acting purely as an EVPN route reflector — RR mode does not need
+// local instance state.
 // ---------------------------------------------------------------------------
 
 service EvpnService {
@@ -989,4 +991,7 @@ message EvpnInstanceState {
   // RFC 9135 §6.1 SVI MAC origination flag. Reserved — always reflects
   // the configured value but does not yet drive Type 2 origination.
   bool advertise_svi_mac = 6;
+  // Number of MAC-only Type 2 routes currently locally originated by
+  // this daemon for the instance and accepted by the RIB.
+  uint64 originated_local_macs_count = 7;
 }

@@ -279,11 +279,21 @@ cache itself has stale data.
 | `evpn_local_originations_total{action="withdraw"}` | Locally aged / deleted MACs that the originator successfully handed to the RIB as Type 2 withdraws |
 | `evpn_local_origination_errors_total{action="inject"}` | Failed local Type 2 inject attempts: RIB channel closed, RIB rejected the inject, or the reply was dropped |
 | `evpn_local_origination_errors_total{action="withdraw"}` | Failed local Type 2 withdraw attempts: RIB channel closed, RIB rejected the withdraw, or the reply was dropped |
+| `evpn_local_observations_dropped_total{reason="channel_full"}` | Kernel local-MAC observations classified by the netlink notify loop but dropped because the originator channel was full |
+| `evpn_local_observations_dropped_total{reason="channel_closed"}` | Kernel local-MAC observations classified by the netlink notify loop after the originator receiver was gone |
+| `evpn_duplicate_mac_moves_total{vni,mac}` | Cross-VTEP MAC mobility contention events detected by the local originator; detection only, no quarantine action yet |
 
 During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
 should follow the `bridge fdb add` / `bridge fdb del` cadence. Any non-zero
-error counter means the kernel observation reached the originator but did not
-complete at the RIB boundary.
+observation-drop counter means the kernel event reached the notify loop but
+not the originator; any non-zero origination-error counter means the
+observation reached the originator but did not complete at the RIB boundary.
+`evpn_duplicate_mac_moves_total` is intentionally per `(VNI, MAC)`;
+alert on repeated increments for the same key rather than on one-off
+mobility during planned host moves.
+`rustbgpctl evpn instances` also reports `originated-local-macs=N` per
+instance, and `rustbgpctl evpn instances --json` exposes the same value as
+`originated_local_macs_count`.
 
 ---
 
@@ -556,8 +566,10 @@ session machinery:
 > `advertise_svi_mac` consumption, DF execution + multi-homing
 > (Gate 8), IRB / L3VNI (Gate 9). See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder
-> and [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
-> alpha-confidence checklist.
+> [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
+> alpha-confidence checklist, and
+> [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) for
+> the operator runbook.
 
 #### Per-neighbor knob
 
@@ -634,7 +646,9 @@ Two complementary origination paths exist:
   §7.7) are not displaced by non-sticky ones.
 
 For the full enablement story, gate ladder, and known limitations,
-see [docs/evpn-enablement.md](evpn-enablement.md).
+see [docs/evpn-enablement.md](evpn-enablement.md). For a step-by-step
+operator checklist, see
+[docs/evpn-vtep-troubleshooting.md](evpn-vtep-troubleshooting.md).
 
 #### Troubleshooting kernel-driven origination (Gate 7b+1)
 

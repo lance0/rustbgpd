@@ -47,6 +47,7 @@ use rustbgpd_evpn::{
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{EvpnRoute, ExtendedCommunity, PathAttribute};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -136,6 +137,7 @@ pub async fn spawn(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnDataplaneHandle> {
     if evpn_instances.is_empty() {
@@ -145,7 +147,14 @@ pub async fn spawn(
 
     #[cfg(target_os = "linux")]
     {
-        match rustbgpd_evpn_linux::LinuxDataplane::connect().await {
+        let observation_drop_metrics = metrics.clone();
+        match rustbgpd_evpn_linux::LinuxDataplane::connect_with_observation_drop_hook(
+            move |reason| {
+                observation_drop_metrics.record_evpn_local_observation_drop(reason);
+            },
+        )
+        .await
+        {
             Ok(mut dataplane) => {
                 let local_mac_rx = dataplane.take_local_mac_rx();
                 let mut handle = spawn_with_dataplane(
@@ -171,7 +180,7 @@ pub async fn spawn(
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (config, rib_tx, daemon_shutdown);
+        let _ = (config, rib_tx, metrics, daemon_shutdown);
         info!(
             target = std::env::consts::OS,
             "EVPN Linux dataplane not available on this platform; \
@@ -508,7 +517,14 @@ mod tests {
         let instances = Arc::new(EvpnInstanceTable::new());
         let (rib_tx, _rib_rx) = mpsc::channel(8);
         let shutdown = CancellationToken::new();
-        let h = spawn(SupervisorConfig::default(), &instances, rib_tx, shutdown).await;
+        let h = spawn(
+            SupervisorConfig::default(),
+            &instances,
+            rib_tx,
+            BgpMetrics::new(),
+            shutdown,
+        )
+        .await;
         assert!(h.is_none(), "RR-only path should not spawn the actor");
     }
 

@@ -54,9 +54,9 @@
 //!   load-bearing convergence mechanism)
 //! - RFC 7432 §15.1 (sequence rules; encoded in `crates/evpn`)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use rustbgpd_evpn::{
@@ -117,6 +117,55 @@ impl EvpnOriginatorHandle {
     }
 }
 
+/// Live read-side counts of locally-originated Type 2 MAC routes
+/// accepted by the RIB, keyed by VNI.
+#[derive(Debug, Clone, Default)]
+pub struct OriginatedLocalMacCounts {
+    inner: Arc<RwLock<BTreeMap<EvpnInstanceId, BTreeSet<MacAddress>>>>,
+}
+
+impl OriginatedLocalMacCounts {
+    /// Count currently-originated local MACs for one VNI.
+    #[must_use]
+    pub fn count(&self, vni: EvpnInstanceId) -> u64 {
+        self.inner
+            .read()
+            .expect("originated local MAC count lock poisoned")
+            .get(&vni)
+            .map_or(0, |keys| keys.len() as u64)
+    }
+
+    fn record_inject(&self, vni: EvpnInstanceId, mac: MacAddress) {
+        self.inner
+            .write()
+            .expect("originated local MAC count lock poisoned")
+            .entry(vni)
+            .or_default()
+            .insert(mac);
+    }
+
+    fn record_withdraw(&self, vni: EvpnInstanceId, mac: MacAddress) {
+        let mut guard = self
+            .inner
+            .write()
+            .expect("originated local MAC count lock poisoned");
+        if let Some(keys) = guard.get_mut(&vni) {
+            keys.remove(&mac);
+            if keys.is_empty() {
+                guard.remove(&vni);
+            }
+        }
+    }
+}
+
+struct OriginatorRuntime {
+    instances: Arc<EvpnInstanceTable>,
+    rib_tx: mpsc::Sender<RibUpdate>,
+    metrics: BgpMetrics,
+    originated_local_mac_counts: OriginatedLocalMacCounts,
+    shutdown: CancellationToken,
+}
+
 /// Spawn the originator. Returns `None` for RR-only deployments
 /// (empty `evpn_instances`).
 #[must_use = "drop the handle to shut down the originator"]
@@ -126,6 +175,7 @@ pub fn spawn(
     rib_tx: mpsc::Sender<RibUpdate>,
     local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
     metrics: BgpMetrics,
+    originated_local_mac_counts: OriginatedLocalMacCounts,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnOriginatorHandle> {
     if evpn_instances.is_empty() {
@@ -141,15 +191,14 @@ pub fn spawn(
     }
 
     let shutdown = daemon_shutdown;
-    let join = tokio::spawn(originator_loop(
-        config,
-        evpn_instances.clone(),
+    let runtime = OriginatorRuntime {
+        instances: evpn_instances.clone(),
         rib_tx,
-        local_mac_rx,
-        originators,
         metrics,
-        shutdown.clone(),
-    ));
+        originated_local_mac_counts,
+        shutdown: shutdown.clone(),
+    };
+    let join = tokio::spawn(originator_loop(config, runtime, local_mac_rx, originators));
 
     Some(EvpnOriginatorHandle { shutdown, join })
 }
@@ -161,12 +210,9 @@ type RemoteMacViewMap = BTreeMap<(EvpnInstanceId, MacAddress), RemoteMacView>;
 
 async fn originator_loop(
     config: OriginatorConfig,
-    instances: Arc<EvpnInstanceTable>,
-    rib_tx: mpsc::Sender<RibUpdate>,
+    runtime: OriginatorRuntime,
     mut local_mac_rx: mpsc::Receiver<LocalMacObservation>,
     mut originators: BTreeMap<EvpnInstanceId, LocalMacOriginator>,
-    metrics: BgpMetrics,
-    shutdown: CancellationToken,
 ) {
     let mut poll_tick = tokio::time::interval(config.poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -176,9 +222,15 @@ async fn originator_loop(
     loop {
         tokio::select! {
             biased;
-            () = shutdown.cancelled() => {
+            () = runtime.shutdown.cancelled() => {
                 debug!("EVPN originator shutting down");
-                drain_to_withdraws(&mut originators, &instances, &rib_tx, &metrics).await;
+                drain_to_withdraws(
+                    &mut originators,
+                    &runtime.instances,
+                    &runtime.rib_tx,
+                    &runtime.metrics,
+                    &runtime.originated_local_mac_counts,
+                ).await;
                 return;
             }
             obs = local_mac_rx.recv() => {
@@ -186,26 +238,34 @@ async fn originator_loop(
                     debug!("local-mac channel closed; originator idle");
                     // Don't exit — RIB polls still useful for telemetry / future
                     // observation reconnect. Park indefinitely on the other arms.
-                    park_until_shutdown(&shutdown).await;
-                    drain_to_withdraws(&mut originators, &instances, &rib_tx, &metrics).await;
+                    park_until_shutdown(&runtime.shutdown).await;
+                    drain_to_withdraws(
+                        &mut originators,
+                        &runtime.instances,
+                        &runtime.rib_tx,
+                        &runtime.metrics,
+                        &runtime.originated_local_mac_counts,
+                    ).await;
                     return;
                 };
                 handle_observation(
                     &obs,
                     &mut originators,
-                    &instances,
+                    &runtime.instances,
                     &remote_view,
-                    &rib_tx,
-                    &metrics,
+                    &runtime.rib_tx,
+                    &runtime.metrics,
+                    &runtime.originated_local_mac_counts,
                 ).await;
             }
             _ = poll_tick.tick() => {
                 if let Err(e) = repoll_rib(
-                    &instances,
-                    &rib_tx,
+                    &runtime.instances,
+                    &runtime.rib_tx,
                     &mut remote_view,
                     &mut originators,
-                    &metrics,
+                    &runtime.metrics,
+                    &runtime.originated_local_mac_counts,
                 ).await {
                     warn!(error = %e, "EVPN originator: RIB poll failed");
                 }
@@ -225,6 +285,7 @@ async fn handle_observation(
     remote_view: &RemoteMacViewMap,
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) {
     let (vni, actions) = match *obs {
         LocalMacObservation::Learned { vni, mac, ifindex } => {
@@ -240,6 +301,9 @@ async fn handle_observation(
             // Sticky bit comes from operator config in a future gate;
             // pass through false today.
             let actions = orig.on_local_learned(mac, ifindex, false, view);
+            if view.is_some() && !actions.is_empty() {
+                record_duplicate_mac_move(metrics, vni, mac);
+            }
             (vni, actions)
         }
         LocalMacObservation::Aged { vni, mac } => {
@@ -254,7 +318,7 @@ async fn handle_observation(
         // Should not happen — instance table is fixed at startup.
         return;
     };
-    apply_actions(actions, inst, rib_tx, metrics).await;
+    apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
 }
 
 /// Re-poll the RIB, build a fresh `RemoteMacViewMap`, diff against the
@@ -266,6 +330,7 @@ async fn repoll_rib(
     remote_view: &mut RemoteMacViewMap,
     originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
     metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) -> Result<(), RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
     let new_view = build_remote_view(instances, &routes);
@@ -292,10 +357,13 @@ async fn repoll_rib(
         if actions.is_empty() {
             continue;
         }
+        if view.is_some() {
+            record_duplicate_mac_move(metrics, vni, mac);
+        }
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx, metrics).await;
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
     }
 
     *remote_view = new_view;
@@ -308,6 +376,7 @@ async fn drain_to_withdraws(
     instances: &EvpnInstanceTable,
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) {
     for (vni, orig) in originators {
         let actions = orig.drain_to_withdraws();
@@ -317,7 +386,7 @@ async fn drain_to_withdraws(
         let Some(inst) = instances.get(*vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx, metrics).await;
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
     }
 }
 
@@ -328,6 +397,7 @@ async fn apply_actions(
     instance: &EvpnInstance,
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) {
     for action in actions {
         match action {
@@ -354,6 +424,7 @@ async fn apply_actions(
                 match reply_rx.await {
                     Ok(Ok(())) => {
                         metrics.record_evpn_local_origination(ACTION_INJECT);
+                        originated_local_mac_counts.record_inject(instance.id, mac);
                         debug!(?key, ?mobility_seq, "originated Type 2");
                     }
                     Ok(Err(e)) => {
@@ -366,7 +437,7 @@ async fn apply_actions(
                     }
                 }
             }
-            OriginationAction::Withdraw { key, .. } => {
+            OriginationAction::Withdraw { mac, key } => {
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 if rib_tx
                     .send(RibUpdate::WithdrawEvpn {
@@ -383,6 +454,7 @@ async fn apply_actions(
                 match reply_rx.await {
                     Ok(Ok(())) => {
                         metrics.record_evpn_local_origination(ACTION_WITHDRAW);
+                        originated_local_mac_counts.record_withdraw(instance.id, mac);
                         debug!(?key, "withdrew Type 2");
                     }
                     Ok(Err(e)) => {
@@ -460,6 +532,10 @@ fn build_originated_route(
         is_stale: false,
         is_llgr_stale: false,
     }
+}
+
+fn record_duplicate_mac_move(metrics: &BgpMetrics, vni: EvpnInstanceId, mac: MacAddress) {
+    metrics.record_evpn_duplicate_mac_move(vni.as_u32(), &mac.to_string());
 }
 
 /// Pull the optional host IP back out of the route key the state
@@ -761,6 +837,58 @@ mod tests {
         assert!(view.is_empty());
     }
 
+    #[tokio::test]
+    async fn local_learn_with_remote_contender_records_duplicate_mac_counter() {
+        let instances = instance_table(100);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut originators =
+            BTreeMap::from([(vni(100), LocalMacOriginator::new(vni(100), rd(65000, 100)))]);
+        let remote_view = BTreeMap::from([(
+            (vni(100), mac(0xAA)),
+            RemoteMacView {
+                mac: mac(0xAA),
+                mobility_sequence: Some(3),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        )]);
+
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::InjectEvpn { reply, .. } = msg {
+                    let _ = reply.send(Ok(()));
+                }
+            }
+        });
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut originators,
+            &instances,
+            &remote_view,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let text = gather_metrics_text(&metrics);
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_moves_total{mac=\"aa:aa:aa:aa:aa:aa\",vni=\"100\"} 1"
+            ) || text.contains(
+                "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"aa:aa:aa:aa:aa:aa\"} 1"
+            ),
+            "{text}"
+        );
+    }
+
     #[test]
     fn extract_mac_mobility_full_extracts_sticky_and_seq() {
         let attrs = vec![PathAttribute::ExtendedCommunities(vec![
@@ -865,6 +993,7 @@ mod tests {
             rib_tx,
             Some(local_rx),
             BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
             CancellationToken::new(),
         );
         assert!(h.is_none());
@@ -880,6 +1009,7 @@ mod tests {
             rib_tx,
             None,
             BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
             CancellationToken::new(),
         );
         assert!(h.is_none());
@@ -891,6 +1021,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let (local_tx, local_rx) = mpsc::channel(16);
         let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
         let shutdown = CancellationToken::new();
 
         // Auto-respond to QueryEvpnRoutes with empty so the polling
@@ -918,6 +1049,7 @@ mod tests {
             rib_tx,
             Some(local_rx),
             metrics,
+            counts,
             shutdown.clone(),
         )
         .expect("originator spawned");
@@ -948,6 +1080,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let (local_tx, local_rx) = mpsc::channel(16);
         let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
         let shutdown = CancellationToken::new();
 
         // Track injects + withdraws.
@@ -982,6 +1115,7 @@ mod tests {
             rib_tx,
             Some(local_rx),
             metrics.clone(),
+            counts.clone(),
             shutdown.clone(),
         )
         .expect("originator spawned");
@@ -1004,6 +1138,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(injects.lock().unwrap().len(), 3, "expected 3 injects");
+        assert_eq!(counts.count(vni(100)), 3);
 
         h.shutdown().await;
 
@@ -1018,6 +1153,7 @@ mod tests {
         let text = gather_metrics_text(&metrics);
         assert!(text.contains("evpn_local_originations_total{action=\"inject\"} 3"));
         assert!(text.contains("evpn_local_originations_total{action=\"withdraw\"} 3"));
+        assert_eq!(counts.count(vni(100)), 0);
     }
 
     #[tokio::test]
@@ -1026,6 +1162,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let (local_tx, local_rx) = mpsc::channel(16);
         let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
         let shutdown = CancellationToken::new();
 
         let _rib_responder = tokio::spawn(async move {
@@ -1050,6 +1187,7 @@ mod tests {
             rib_tx,
             Some(local_rx),
             metrics.clone(),
+            counts.clone(),
             shutdown.clone(),
         )
         .expect("originator spawned");
@@ -1066,6 +1204,7 @@ mod tests {
         for _ in 0..50 {
             let text = gather_metrics_text(&metrics);
             if text.contains("evpn_local_origination_errors_total{action=\"inject\"} 1") {
+                assert_eq!(counts.count(vni(100)), 0);
                 h.shutdown().await;
                 return;
             }
@@ -1096,6 +1235,7 @@ mod tests {
             rib_tx,
             Some(local_rx),
             BgpMetrics::new(),
+            OriginatedLocalMacCounts::default(),
             shutdown.clone(),
         )
         .expect("originator spawned");

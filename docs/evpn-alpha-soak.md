@@ -29,16 +29,24 @@ none of them block v0.15.0 release on their own.
   M37 or churn soak, inject and withdraw should track the synthetic
   `bridge fdb add` / `bridge fdb del` cadence, while the error
   counter should stay flat.
-- [ ] **`evpn_local_observations_dropped_total` Prometheus counter.**
-  Add telemetry for the `try_send`-failure branch in `notify_loop` so
-  operators can distinguish kernel-event loss before the originator
-  sees an observation from RIB-side origination failures.
-- [ ] **`ListEvpnInstances` exposes `originated_local_macs_count`
+- [x] **`evpn_local_observations_dropped_total` Prometheus counter.**
+  The `RTNLGRP_NEIGH` notify loop now records
+  `evpn_local_observations_dropped_total{reason="channel_full"}` and
+  `evpn_local_observations_dropped_total{reason="channel_closed"}`
+  when a classified kernel local-MAC observation cannot be forwarded
+  to the originator. This distinguishes kernel-event loss before the
+  originator sees an observation from RIB-side origination failures.
+- [x] **`ListEvpnInstances` exposes `originated_local_macs_count`
   per instance.** Gives operators a fast "is the loop alive?" view
-  via `rustbgpctl evpn instances` without scraping logs.
+  via `rustbgpctl evpn instances` without scraping logs. Human output
+  renders `originated-local-macs=N`; JSON and gRPC expose
+  `originated_local_macs_count`.
 - [ ] **24 h soak** of M37 with a synthetic MAC churn driver
   (`bridge fdb add` + `bridge fdb del` at ~10 Hz on a few thousand
-  MACs). Confirm RSS slope stays flat under the originator's
+  MACs). The local-only driver now lives at
+  `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`;
+  the remaining work is to run it long enough to confirm RSS slope
+  stays flat under the originator's
   `BTreeMap<MacAddress, LocalMacOriginationState>` retention model
   (entries are kept after Aged so the seq ratchet survives — we want
   to verify that doesn't compound badly under heavy churn).
@@ -64,10 +72,11 @@ none of them block v0.15.0 release on their own.
   IRB / L3VNI design (Gate 9) but the SVI-MAC slice can ship
   independently.
 - [ ] **RFC 7432 §15.1 duplicate-MAC quarantine** (M=180 s, N=5
-  moves). ADR-0055 §9 defers the action; detection counters
-  (per-(VNI, MAC) move count + first-move timestamp) can land
-  earlier and surface via gRPC. Operator-facing escalation channel
-  needs design.
+  moves). ADR-0055 §9 defers the action; the detection-only
+  `evpn_duplicate_mac_moves_total{vni,mac}` counter has landed so
+  operators can see repeated contention for a key. Still ahead:
+  first-move timestamp / window state, quarantine action, and the
+  operator-facing escalation channel.
 - [ ] **Static / sticky MAC anti-spoof config schema.** Wire codec
   for the sticky bit is plumbed; the operator-facing knob isn't.
   ADR-0055 §8. Schema question: per-MAC list on `EvpnInstance`,
@@ -102,17 +111,19 @@ visibility)
   targets in `docs/INTEROP.md`; landing one of them would close the
   "RFC 7432 §15 mobility actually interoperates" question
   empirically.
-- [ ] **Operational runbook** for the bidirectional VTEP path:
+- [x] **Operational runbook** for the bidirectional VTEP path:
   diagnostic flowchart for "MAC learned in kernel but Type 2 not on
   wire" / "remote Type 2 received but FDB not programmed" / "IMET
   drained early on shutdown". The MR debug logs are in place
   (cache-miss in the classifier, originator emit, IMET inject); the
-  runbook ties them to operator-actionable triage steps.
+  runbook at `docs/evpn-vtep-troubleshooting.md` ties them to
+  operator-actionable triage steps.
 
 ## Reference
 
 - ADR-0054 — Linux dataplane boundary (Gate 7b)
 - ADR-0055 — Local-MAC origination boundary (Gate 7b+1)
 - `docs/evpn-enablement.md` — gate ladder + still-ahead lists
+- `docs/evpn-vtep-troubleshooting.md` — bidirectional VTEP runbook
 - `docs/INTEROP.md` — M36, M37 test coverage
 - `KNOWN_ISSUES.md` — by-design alpha limitations

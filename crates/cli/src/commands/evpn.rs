@@ -256,6 +256,7 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
                     "local_vtep_ip": i.local_vtep_ip,
                     "bridge": i.bridge,
                     "advertise_svi_mac": i.advertise_svi_mac,
+                    "originated_local_macs_count": i.originated_local_macs_count,
                 })
             })
             .collect();
@@ -280,6 +281,10 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
             if inst.advertise_svi_mac {
                 detail.push("advertise-svi-mac".to_string());
             }
+            detail.push(format!(
+                "originated-local-macs={}",
+                inst.originated_local_macs_count
+            ));
             println!("{}", detail.join(" "));
         }
     }
@@ -453,12 +458,14 @@ mod tests {
         assert_eq!(row100.route_targets, vec!["65000:100"]);
         assert!(row100.bridge.is_empty(), "no bridge on minimal instance");
         assert!(!row100.advertise_svi_mac);
+        assert_eq!(row100.originated_local_macs_count, 0);
 
         let row200 = &resp.instances[1];
         assert_eq!(row200.vni, 200);
         assert_eq!(row200.rd, "65000:200");
         assert_eq!(row200.bridge, "br200");
         assert!(row200.advertise_svi_mac);
+        assert_eq!(row200.originated_local_macs_count, 0);
         // RTs preserved in the canonicalized order EvpnInstance::new
         // produces (sorted + deduped).
         assert_eq!(row200.route_targets, vec!["65000:200", "65000:201"]);

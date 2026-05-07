@@ -15,7 +15,7 @@ use tonic::{Request, Status};
 use tracing::{error, info, warn};
 
 use crate::control_service::{ControlService, MrtTriggerTx};
-use crate::evpn_service::EvpnService;
+use crate::evpn_service::{EvpnService, OriginatedLocalMacCountFn};
 use crate::global_service::GlobalService;
 use crate::injection_service::InjectionService;
 use crate::neighbor_service::NeighborService;
@@ -56,6 +56,9 @@ pub struct ServeConfig {
     /// table is built once at daemon start from `[[evpn_instances]]`
     /// and not swapped at runtime.
     pub evpn_instances: Arc<EvpnInstanceTable>,
+    /// Live count provider for locally-originated Type 2 MAC routes
+    /// accepted by the RIB, keyed by VNI.
+    pub evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
 }
 
 /// Resolved gRPC listener configuration.
@@ -232,6 +235,7 @@ async fn run_listener(
     let start_time = config.start_time;
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_instances = config.evpn_instances;
+    let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
 
     match listener.endpoint {
         ListenerEndpoint::Tcp(addr) => {
@@ -250,6 +254,7 @@ async fn run_listener(
                 start_time,
                 mrt_trigger_tx,
                 evpn_instances,
+                evpn_originated_local_mac_count,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -272,6 +277,7 @@ async fn run_listener(
                 start_time,
                 mrt_trigger_tx,
                 evpn_instances,
+                evpn_originated_local_mac_count,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -297,6 +303,7 @@ async fn run_tcp_listener(
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_instances: Arc<EvpnInstanceTable>,
+    evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -352,7 +359,10 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::new(evpn_instances),
+            EvpnService::with_originated_local_mac_count(
+                evpn_instances,
+                evpn_originated_local_mac_count,
+            ),
             interceptor.clone(),
         ))
         .add_service(ControlServiceServer::with_interceptor(
@@ -388,6 +398,7 @@ async fn run_uds_listener(
     start_time: tokio::time::Instant,
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_instances: Arc<EvpnInstanceTable>,
+    evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -433,7 +444,10 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::new(evpn_instances),
+            EvpnService::with_originated_local_mac_count(
+                evpn_instances,
+                evpn_originated_local_mac_count,
+            ),
             interceptor.clone(),
         ))
         .add_service(ControlServiceServer::with_interceptor(

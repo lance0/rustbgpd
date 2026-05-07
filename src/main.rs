@@ -30,6 +30,7 @@ mod policy_admin;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::process;
+use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH};
 
 use rustbgpd_rib::{RibManager, RibUpdate};
@@ -1034,6 +1035,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_dataplane::SupervisorConfig::default(),
         &evpn_instances,
         rib_tx.clone(),
+        metrics.clone(),
         evpn_dataplane_shutdown.clone(),
     )
     .await;
@@ -1046,6 +1048,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // skip this entirely — `evpn_dataplane::spawn` returned `None`
     // and `local_mac_rx` is therefore `None`.
     let evpn_originator_shutdown = tokio_util::sync::CancellationToken::new();
+    let evpn_originated_local_mac_counts = evpn_originator::OriginatedLocalMacCounts::default();
     let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {
         evpn_originator::spawn(
             evpn_originator::OriginatorConfig::default(),
@@ -1053,6 +1056,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             rib_tx.clone(),
             handle.local_mac_rx.take(),
             metrics.clone(),
+            evpn_originated_local_mac_counts.clone(),
             evpn_originator_shutdown.clone(),
         )
     } else {
@@ -1083,6 +1087,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         start_time,
         mrt_trigger_tx,
         evpn_instances,
+        evpn_originated_local_mac_count: {
+            let counts = evpn_originated_local_mac_counts.clone();
+            Arc::new(move |vni| {
+                rustbgpd_evpn::EvpnInstanceId::new(vni).map_or(0, |id| counts.count(id))
+            })
+        },
     };
     let mut grpc_handle = tokio::spawn(async move {
         rustbgpd_api::server::serve(

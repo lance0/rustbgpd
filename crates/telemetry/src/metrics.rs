@@ -57,6 +57,8 @@ pub struct BgpMetrics {
     // ── EVPN ───────────────────────────────────────────────────
     evpn_local_originations: IntCounterVec,
     evpn_local_origination_errors: IntCounterVec,
+    evpn_local_observations_dropped: IntCounterVec,
+    evpn_duplicate_mac_moves: IntCounterVec,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -268,6 +270,24 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_local_observations_dropped = IntCounterVec::new(
+            Opts::new(
+                "evpn_local_observations_dropped_total",
+                "Kernel local-MAC observations dropped before reaching the EVPN originator by reason",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_duplicate_mac_moves = IntCounterVec::new(
+            Opts::new(
+                "evpn_duplicate_mac_moves_total",
+                "EVPN MAC mobility contention events detected by VNI and MAC",
+            ),
+            &["vni", "mac"],
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -368,6 +388,12 @@ impl BgpMetrics {
             .register(Box::new(evpn_local_origination_errors.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_local_observations_dropped.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_duplicate_mac_moves.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -403,6 +429,8 @@ impl BgpMetrics {
             aspa_records_total,
             evpn_local_originations,
             evpn_local_origination_errors,
+            evpn_local_observations_dropped,
+            evpn_duplicate_mac_moves,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -548,6 +576,24 @@ impl BgpMetrics {
     pub fn record_evpn_local_origination_error(&self, action: &str) {
         self.evpn_local_origination_errors
             .with_label_values(&[action])
+            .inc();
+    }
+
+    /// Record a kernel local-MAC observation dropped before the
+    /// originator received it.
+    ///
+    /// `reason` is expected to be `channel_full` or `channel_closed`.
+    pub fn record_evpn_local_observation_drop(&self, reason: &str) {
+        self.evpn_local_observations_dropped
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// Record a detected EVPN duplicate-MAC / mobility contention
+    /// event for one `(VNI, MAC)`.
+    pub fn record_evpn_duplicate_mac_move(&self, vni: u32, mac: &str) {
+        self.evpn_duplicate_mac_moves
+            .with_label_values(&[&vni.to_string(), mac])
             .inc();
     }
 
@@ -785,6 +831,9 @@ mod tests {
         m.record_evpn_local_origination("withdraw");
         m.record_evpn_local_origination_error("inject");
         m.record_evpn_local_origination_error("withdraw");
+        m.record_evpn_local_observation_drop("channel_full");
+        m.record_evpn_local_observation_drop("channel_closed");
+        m.record_evpn_duplicate_mac_move(100, "02:aa:bb:cc:dd:01");
 
         assert_eq!(
             m.evpn_local_originations
@@ -807,6 +856,24 @@ mod tests {
         assert_eq!(
             m.evpn_local_origination_errors
                 .with_label_values(&["withdraw"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.evpn_local_observations_dropped
+                .with_label_values(&["channel_full"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.evpn_local_observations_dropped
+                .with_label_values(&["channel_closed"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.evpn_duplicate_mac_moves
+                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
                 .get(),
             1
         );
@@ -816,6 +883,17 @@ mod tests {
         assert!(text.contains("evpn_local_originations_total{action=\"withdraw\"} 1"));
         assert!(text.contains("evpn_local_origination_errors_total{action=\"inject\"} 1"));
         assert!(text.contains("evpn_local_origination_errors_total{action=\"withdraw\"} 1"));
+        assert!(text.contains("evpn_local_observations_dropped_total{reason=\"channel_full\"} 1"));
+        assert!(
+            text.contains("evpn_local_observations_dropped_total{reason=\"channel_closed\"} 1")
+        );
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_moves_total{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"} 1"
+            ) || text.contains(
+                "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 1"
+            )
+        );
     }
 
     #[test]
