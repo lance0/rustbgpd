@@ -245,14 +245,24 @@ the peer via MP-BGP capabilities. Supported values:
 - `"ipv6_unicast"` — IPv6 Unicast (AFI 2, SAFI 1)
 - `"ipv4_flowspec"` — IPv4 FlowSpec (AFI 1, SAFI 133, RFC 8955)
 - `"ipv6_flowspec"` — IPv6 FlowSpec (AFI 2, SAFI 133, RFC 8956)
-- `"l2vpn_evpn"` — L2VPN EVPN (AFI 25, SAFI 70, RFC 7432). Phase 1
-  Route Reflector role only — no local EVI / VRF / VNI state, no MAC
-  learning, no DF election. The RR reflects all five RFC 7432 route
-  types between iBGP-speaking VTEPs that are configured as
-  `route_reflector_client = true`. See [docs/USE_CASES.md](USE_CASES.md)
-  § "VXLAN-EVPN DC Fabric" for a worked example and
-  `examples/rr-evpn-fabric/config.toml` for a copy-paste-ready
-  starting point.
+- `"l2vpn_evpn"` — L2VPN EVPN (AFI 25, SAFI 70, RFC 7432). Two
+  deployment modes share the family:
+  - **RR mode (Phase 1):** the daemon reflects all five RFC 7432
+    route types between iBGP-speaking VTEPs configured as
+    `route_reflector_client = true`, with no local EVI state. Empty
+    `[[evpn_instances]]` selects this mode.
+  - **Bidirectional VTEP mode (Phase 2 — Gates 7a / 7b / 7b+1):**
+    populating `[[evpn_instances]]` (see § *EVPN VTEP instances*
+    below) makes the daemon program remote-MAC FDB entries from
+    received Type 2 routes (downward) AND originate local Type 2
+    routes from kernel-learned MACs + one Type 3 IMET per L2VNI
+    (upward). Linux-only; requires `CAP_NET_ADMIN` for the
+    rtnetlink subscription and FDB program path. Gate 7b+1 lands
+    in v0.15.0; ADR-0055 locks the boundary. DF election (Gate 8)
+    is still ahead.
+  See [docs/USE_CASES.md](USE_CASES.md) § "VXLAN-EVPN DC Fabric"
+  for a worked example and `examples/rr-evpn-fabric/config.toml`
+  for a copy-paste-ready starting point.
 
 **Defaults:** If `families` is omitted, the default depends on the neighbor
 address type:
@@ -1275,12 +1285,16 @@ statements), `[global]` ASN/router-id/families,
 surfaced under "Restart-required" in `rustbgpd --diff` and logged at
 reload time with a one-line migration hint to named definitions plus
 `import_chain` / `export_chain` where applicable. The `[[evpn_instances]]`
-case is the Phase-2 VTEP foundation slice (ADR-0052): the gRPC
-`EvpnService` shares the resolved instance table via an `Arc` built
-once at startup, and SIGHUP pins the in-memory snapshot back to that
-startup value so drift detection stays observable across every reload.
-Reload-time mutation lands with the kernel-reconciliation slice
-(Gate 7b — see `docs/evpn-enablement.md`).
+case is the Phase-2 VTEP slice (ADR-0052 + ADR-0054 + ADR-0055): the
+gRPC `EvpnService` shares the resolved instance table via an `Arc`
+built once at startup, the dataplane reconciler (Gate 7b) consumes
+that same `Arc` for downward FDB programming, and the originator +
+IMET tasks (Gate 7b+1) consume it for upward Type 2 / Type 3
+origination. SIGHUP pins the in-memory snapshot back to the startup
+value so drift detection stays observable across every reload.
+Reload-time mutation (`AddEvpnInstance` / `DeleteEvpnInstance` and
+SIGHUP delta application) is tracked as alpha-soak follow-up — see
+`docs/evpn-alpha-soak.md`.
 
 Reload failures are reported per-step with structured logging
 (bucket / target / error). The previous in-memory config snapshot

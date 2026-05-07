@@ -34,7 +34,8 @@ cli            (no internal deps — uses tonic codegen directly)
 | `rustbgpd-rpki` | RPKI origin validation: RTR client, VRP table, multi-cache aggregation. |
 | `rustbgpd-bmp` | BMP exporter: RFC 7854 codec, collector clients, manager fan-out. |
 | `rustbgpd-mrt` | MRT dump: RFC 6396 TABLE_DUMP_V2 codec, atomic writer, periodic manager. |
-| `rustbgpd-evpn` | EVPN local VTEP domain model: `EvpnInstance` / `EvpnInstanceTable` / `RouteTarget` (RFC 7432 / RFC 8365). Domain-only, kernel-free. See ADR-0052. |
+| `rustbgpd-evpn` | EVPN local VTEP domain model: `EvpnInstance` / `EvpnInstanceTable` / `RouteTarget` (RFC 7432 / RFC 8365). Plus the `LocalMacOriginator` state machine (RFC 7432 §15.1 mobility sequence rules) and the `DataplaneIntent` / `RemoteMacTable` snapshot types. Domain-only, kernel-free. See ADR-0052, ADR-0054, ADR-0055. |
+| `rustbgpd-evpn-linux` | Linux kernel dataplane for EVPN VTEP mode (`cfg(target_os = "linux")`). Reconciles remote-MAC FDB programming via rtnetlink and surfaces local-MAC observations from `RTNLGRP_NEIGH` upward. Consumes domain types from `rustbgpd-evpn`; never imports `rib` or `transport`. See ADR-0054, ADR-0055. |
 | `rustbgpd-api` | gRPC server (tonic). Eight services, proto codegen at build time. |
 | `rustbgpd-telemetry` | Prometheus metrics + structured tracing. |
 | `rustbgpctl` | CLI tool. Client-only gRPC stubs, no internal crate deps. |
@@ -45,7 +46,7 @@ cli            (no internal deps — uses tonic codegen directly)
 - `fsm` depends on `wire` types (message enums, capability structs) and nothing else. It never imports tokio, never touches a socket, never spawns a task.
 - `transport` is the only crate that owns BGP peer TCP session I/O and drives the FSM. Other crates (`api`, `bmp`, `rpki`, `mrt`) run their own async tasks for gRPC serving, collector connections, RTR sessions, and dump I/O respectively.
 - `rib` and `policy` are independent of transport and fsm — they consume route update events.
-- `evpn` is the local-VTEP domain crate (ADR-0052). It depends only on `wire`. It does **not** depend on `rib` or `transport`, and it never programs the kernel — kernel reconciliation belongs to the future `crates/evpn-linux` (or equivalent dataplane) crate. RR-only deployments (`rr-evpn-fabric`) must keep working with `crates/evpn` essentially unused.
+- `evpn` is the local-VTEP domain crate (ADR-0052, ADR-0055). It depends only on `wire`. It does **not** depend on `rib` or `transport`, and it never programs the kernel — kernel reconciliation lives in `crates/evpn-linux` (ADR-0054, shipped Gate 7b/7b+1). The bidirectional VTEP loop is wired in the daemon binary by `src/evpn_dataplane.rs` (downward: RIB best-path → kernel FDB) and `src/evpn_originator.rs` + `src/evpn_imet.rs` (upward: kernel local-MAC observations → BGP Type 2 / Type 3 originations). RR-only deployments (empty `[[evpn_instances]]`) spawn no background tasks for either direction.
 - `api` provides the gRPC server; the binary crate (`src/main.rs`) wires everything together.
 
 ---
@@ -198,7 +199,10 @@ gRPC request
 | RPKI / RTR | `crates/rpki/src/` |
 | BMP export | `crates/bmp/src/` |
 | MRT dump | `crates/mrt/src/` |
-| Local EVPN/VTEP domain | `crates/evpn/src/` — `instance.rs`, `route_target.rs` |
+| Local EVPN/VTEP domain | `crates/evpn/src/` — `instance.rs`, `route_target.rs`, `mac.rs` (LocalMacObservation, RemoteMacTable), `dataplane.rs` (DataplaneIntent / DataplaneReport), `origination.rs` (LocalMacOriginator state machine, RFC 7432 §15.1), `projection.rs` (RIB → RemoteMacTable) |
+| EVPN Linux kernel dataplane | `crates/evpn-linux/src/` — reconcile actor, in-memory fake, `linux/fdb.rs` (program/withdraw), `linux/links.rs` (bridge + VXLAN inventory), `linux/notify.rs` (RTNLGRP_NEIGH classifier), `linux/probe.rs` |
+| EVPN wire codec extras | `crates/wire/src/pmsi.rs` — RFC 6514 §5 PMSI Tunnel attribute (path attr type 22), used on Type 3 IMET routes |
+| EVPN daemon glue | `src/evpn_dataplane.rs` (RIB → reconciler supervisor), `src/evpn_originator.rs` (kernel local-MAC → Type 2 actor), `src/evpn_imet.rs` (Type 3 IMET startup-inject + shutdown-withdraw) |
 | CLI tool | `crates/cli/src/` |
 | Config loading + validation | `src/config/` |
 | Startup wiring | `src/main.rs` |

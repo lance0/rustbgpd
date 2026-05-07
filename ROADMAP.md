@@ -123,6 +123,17 @@ this document is reference / long-tail.
   verification land together. Closes the audit-prep item; UDS
   listeners are unchanged (file-system permissions remain their
   auth surface).
+- [ ] **EVPN VTEP alpha-soak slate.** With Gates 7a / 7b / 7b+1
+  landed, the bidirectional VTEP loop is functional but still
+  carries normal alpha-VTEP risk. `docs/evpn-alpha-soak.md` tracks
+  the residuals as a checklist: M37 on a privileged CI runner,
+  `evpn_local_originations_total` Prometheus counter, 24 h soak with
+  synthetic MAC churn, the 5 s RIB-poll convergence floor (Gate 7c),
+  MAC-with-IP origination (Gate 7b+2), `advertise_svi_mac`
+  consumption, RFC 7432 §15.1 duplicate-MAC quarantine, sticky-MAC
+  config schema, plus the larger Gate 8 / Gate 9 follow-ons. None of
+  these block v0.15.0 — they're the slope to v1.0-grade EVPN
+  confidence.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.

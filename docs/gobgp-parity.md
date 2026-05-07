@@ -14,7 +14,7 @@ Last updated: 2026-04-24
 | IPv6 Labeled Unicast | Yes | No | |
 | VPNv4 / VPNv6 (RFC 4364) | Yes | No | |
 | L2VPN VPLS (RFC 4761) | Yes | No | |
-| L2VPN EVPN (RFC 7432) | Yes | Partial (RR + VTEP foundation) | Route types 1-5 in RR mode with controller-injection gRPC for Type 2/3 (Gate 6, ADR-0050). VTEP foundation slice shipped (Gate 7a, ADR-0052): declarative `[[evpn_instances]]` schema + `EvpnService.ListEvpnInstances`. VTEP kernel reconciliation / Type 2/3 origination (Gate 7b) and Route Types 6-9 not yet implemented |
+| L2VPN EVPN (RFC 7432) | Yes | Partial (RR + bidirectional VTEP) | Route types 1-5 in RR mode with controller-injection gRPC for Type 2/3 (Gate 6, ADR-0050). Bidirectional VTEP shipped (Gates 7a/7b/7b+1, v0.13.0 + v0.14.0 + v0.15.0 candidate, ADR-0052/0054/0055): declarative `[[evpn_instances]]` schema, Linux kernel FDB programming from received Type 2 routes (downward), and local-MAC origination via `RTNLGRP_NEIGH` subscription with RFC 7432 §15.1 mobility sequencing + Type 3 IMET per L2VNI carrying PMSI Tunnel (RFC 6514 §5). Note that GoBGP's "Yes" here is the wire codec — GoBGP itself does not own kernel-side VTEP integration (it relies on FRR/SDN injection), so on the VTEP-mode dimension rustbgpd has functional parity-plus. Still ahead for full RFC 7432 daemon parity: MAC-with-IP origination via ARP/ND suppression (Gate 7b+2), DF election + multi-homing (Gate 8), IRB / L3VNI / Type 5 dataplane (Gate 9), Route Types 6-9 |
 | IPv4/IPv6 FlowSpec (RFC 8955) | Yes | Yes | SAFI 133, all 13 component types |
 | VPN FlowSpec | Yes | No | |
 | BGP-LS (RFC 7752) | Yes | No | |
@@ -200,7 +200,7 @@ The primary target deployment. Weighted toward what matters:
 
 Competing head-to-head with GoBGP for all use cases:
 
-- EVPN RR role present (Phase 1, ADR-0050); VTEP mode + Route Types 6-9 still missing
+- EVPN RR + bidirectional VTEP shipped (Phase 1 ADR-0050; Phase 2 ADR-0052/0054/0055 — local-MAC origination via `RTNLGRP_NEIGH` + Type 3 IMET land in v0.15.0); MAC-with-IP origination, DF election, IRB, and Route Types 6-9 still missing
 - VPNv4/v6 and labeled unicast missing
 - No confederation support limits SP deployments
 - gRPC API covers ~86% of GoBGP's RPC surface (no VRF; dynamic-neighbor query via `ListDynamicNeighbors`, runtime Add/Delete deferred)
@@ -220,7 +220,7 @@ Competing head-to-head with GoBGP for all use cases:
 - **Secure-by-default gRPC** — UDS default listener, optional token auth per listener, read-only/read-write split; GoBGP defaults to open TCP
 - **Rustc-style config diagnostics** — validation errors show TOML source lines with column markers; GoBGP prints plain-text errors
 - **Live TUI dashboard** — `rustbgpctl top` with session table, prefix counts, message rates, and route events; GoBGP has no built-in TUI
-- **EVPN RR via API-first model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, gRPC `ListEvpnRoutes`, and controller-driven `AddEvpnRoute` / `DeleteEvpnRoute` injection (Type 2/3) without requiring a CLI detour; validated end-to-end against FRR 10.3.1 and at 50k-route scale with churn (M30-M33); GoBGP has deeper EVPN coverage (VTEP, IRB, multi-homing execution) but a more CLI-oriented operational model
+- **EVPN RR + bidirectional VTEP via API-first + kernel-integrated model** — Phase 1 RR (ADR-0050) covers RFC 7432 Types 1-5 with MAC Mobility best-path, VXLAN encap community, gRPC `ListEvpnRoutes`, and controller-driven `AddEvpnRoute` / `DeleteEvpnRoute` injection (Type 2/3); validated end-to-end against FRR 10.3.1 and at 50k-route scale with churn (M30-M33). Phase 2 (Gates 7a/7b/7b+1, ADR-0052/0054/0055) adds the **bidirectional VTEP loop**: kernel FDB programming from received Type 2 routes (M36) and local-MAC origination via `RTNLGRP_NEIGH` with RFC 7432 §15.1 mobility sequencing + Type 3 IMET per L2VNI (M37). On the VTEP-mode dimension this is functional parity-plus over GoBGP — GoBGP exposes the EVPN wire codec but does not own kernel-side FDB integration. GoBGP retains the edge on multi-homing execution / DF election (Gate 8 work) and symmetric IRB (Gate 9, RFC 9135). rustbgpd's operational model stays API-first throughout
 
 ## Top Gaps by Use Case
 
@@ -251,7 +251,7 @@ These close the biggest gaps for broader adoption but are out of scope for
 the current alpha:
 
 1. **Confederation (RFC 5065)** — required for service provider deployments
-2. ~~**EVPN RR (RFC 7432)**~~ — Phase 1 RR role shipped; VTEP mode, IRB (RFC 9135), DF election (RFC 8584) are later phases
+2. ~~**EVPN RR + bidirectional VTEP (RFC 7432)**~~ — Phase 1 RR role shipped; **Phase 2 bidirectional VTEP shipped in v0.15.0 (Gates 7a/7b/7b+1, ADR-0052/0054/0055)** with kernel FDB program/learn loops; MAC-with-IP via ARP/ND suppression (Gate 7b+2), DF election (RFC 8584, Gate 8), and symmetric IRB (RFC 9135, Gate 9) are later phases
 3. **VPNv4/v6 (RFC 4364)** — enterprise/SP VPN deployments
 4. ~~**Dynamic neighbors (prefix-based)**~~ — shipped: `[[dynamic_neighbors]]` with peer group inheritance, `remote_asn=0`, auto-accept/remove
 5. **Zebra/FIB integration** — kernel route installation

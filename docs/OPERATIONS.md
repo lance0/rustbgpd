@@ -516,24 +516,33 @@ addr = "0.0.0.0:8080"
 Endpoints: `/status`, `/protocols/bgp`, `/routes/protocol/{id}`,
 `/routes/peer/{peer}`. Omit the section entirely to disable.
 
-### EVPN Route Reflector (Phase 1)
+### EVPN Route Reflector + Bidirectional VTEP
 
-rustbgpd's Phase 1 EVPN role is **Route Reflector only** — it reflects
-RFC 7432 routes between iBGP-speaking VTEPs but does not own any local
-EVI / VRF / VNI state, does not learn MACs from a kernel FDB, and does
-not run DF election. VTEPs (typically FRR on SONiC, or commercial NOS)
-handle local origination and forwarding; rustbgpd handles fan-out and
-attribute integrity in the middle.
+rustbgpd has two operational EVPN modes that share the same `l2vpn_evpn`
+session machinery:
 
-> **Phase-2 update (Gate 7a, ADR-0052):** the **declarative** half of
-> VTEP mode has shipped. Operators can configure local
-> `[[evpn_instances]]` (vni / rd / route_targets / local_vtep_ip /
-> optional bridge / advertise_svi_mac) and inspect the resolved table
-> via `EvpnService.ListEvpnInstances` and `rustbgpctl evpn instances`.
-> The kernel-reconciliation half — local MAC learning, Type 2/3
-> origination, MAC mobility, DF execution — remains queued as Gate 7b.
-> See `examples/evpn-vtep-leaf/` for the leaf-mode config shape and
-> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder.
+- **RR mode (Phase 1):** empty `[[evpn_instances]]`. The daemon
+  reflects RFC 7432 routes between iBGP-speaking VTEPs, owns no
+  kernel state, and runs no DF election. External VTEPs (FRR on
+  SONiC, commercial NOS) handle local origination + forwarding.
+- **Bidirectional VTEP mode (Phase 2 — Gates 7a / 7b / 7b+1):**
+  populated `[[evpn_instances]]`. The daemon **programs the kernel
+  bridge FDB** from received Type 2 routes (downward, ADR-0054) AND
+  **originates Type 2 + Type 3 IMET** from kernel-learned local MACs
+  (upward, ADR-0055). Linux-only. Gate 7b+1 ships in v0.15.0.
+
+> **Phase-2 status:** Gate 7a (declarative model, ADR-0052),
+> Gate 7b (kernel reconciliation downward, v0.14.0, ADR-0054), and
+> Gate 7b+1 (local-MAC origination upward + Type 3 IMET, v0.15.0
+> candidate, ADR-0055) have all shipped. The bidirectional VTEP
+> loop is verified end-to-end by M37 against FRR 10.3.1 on Linux
+> 6.17 (4/4 PASS, local-only / privileged smoke). Still ahead:
+> MAC-with-IP origination via ARP/ND suppression (Gate 7b+2),
+> `advertise_svi_mac` consumption, DF execution + multi-homing
+> (Gate 8), IRB / L3VNI (Gate 9). See
+> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder
+> and [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
+> alpha-confidence checklist.
 
 #### Per-neighbor knob
 
@@ -573,10 +582,22 @@ rustbgpctl evpn delete-mac-ip --rd 65000:100 \
   --mac 02:00:00:aa:bb:cc --ip 10.0.0.5
 ```
 
-Phase 1 supports Type 2 (MAC/IP) and Type 3 (IMET) injection.
-Type 5 IP-Prefix and Type 1/4 multi-homing origination are not
-exposed via the injection RPCs in Phase 1 (the RR still reflects them
-when a VTEP advertises them).
+Two complementary origination paths exist:
+
+1. **gRPC injection (Phase 1, Gate 6):** `EvpnService.AddEvpnRoute` /
+   `DeleteEvpnRoute` (the `rustbgpctl evpn add-mac-ip / add-imet /
+   delete-*` commands above). The controller decides what to
+   originate; rustbgpd reflects + distributes. Type 2 (MAC/IP) and
+   Type 3 (IMET) are exposed; Type 5 IP-Prefix and Type 1/4
+   multi-homing are still controller-originated only when a VTEP
+   advertises them.
+2. **Kernel-driven origination (Phase 2, Gate 7b+1):** with
+   `[[evpn_instances]]` populated, the daemon subscribes to
+   `RTNLGRP_NEIGH` (enum group id 3) and emits Type 2 routes for
+   MACs the kernel learns on non-VXLAN bridge ports, plus one
+   Type 3 IMET per L2VNI at startup. RFC 7432 §15.1 mobility
+   sequencing is automatic. Withdraws fire on FDB age-out / `bridge
+   fdb del` and on coordinated shutdown.
 
 #### Common operational signals
 
@@ -599,3 +620,38 @@ when a VTEP advertises them).
 
 For the full enablement story, gate ladder, and known limitations,
 see [docs/evpn-enablement.md](evpn-enablement.md).
+
+#### Troubleshooting kernel-driven origination (Gate 7b+1)
+
+- **Local MAC learned in kernel, but Type 2 not on the wire.** Check
+  in order: (a) `[[evpn_instances]]` is populated and the bridge
+  named there exists with a single VXLAN port (probe reports
+  `Ready` only when ADR-0054 §4's five-point check passes); (b) the
+  MAC was learned on a **non-VXLAN** bridge port — the classifier
+  intentionally drops VXLAN-port ifindexes (those are remote-MAC
+  echoes); (c) `RUST_LOG=rustbgpd_evpn_linux=debug` shows the
+  classifier hit (cache miss → `bridge_port_to_vni` doesn't yet
+  contain the slave ifindex; the supervisor's periodic dump should
+  populate it within 5 s); (d) the BGP session reached Established
+  before the originator emitted the Inject — pre-Established
+  Injects do reach the AdjRibOut and ride the initial dump, but a
+  collision-replace dance can occasionally lose the window.
+- **Type 3 IMET not visible on a peer.** IMET is emitted at startup
+  for every configured `EvpnInstance` regardless of dataplane
+  Ready/NotReady. If FRR's `show bgp l2vpn evpn route type
+  multicast` doesn't show it, check that the peer reached
+  Established and that the L2VPN/EVPN family was negotiated
+  (`families = ["l2vpn_evpn"]`).
+- **Type 2 / Type 3 not withdrawn cleanly on shutdown.** The
+  shutdown order is: (1) drain originator's outstanding Withdraws;
+  (2) withdraw IMET keys; (3) `PeerManagerCommand::Shutdown`. If
+  peers see stale routes after a clean exit, check the structured
+  log for the `draining EVPN originator` / `withdrawing EVPN Type 3
+  IMET routes` lines firing **before** any peer-session-shutdown
+  log lines.
+- **`could not subscribe to RTNLGRP_NEIGH; local-MAC observations
+  will be silent`** in the startup log. The daemon lacks
+  `CAP_NET_ADMIN`. Downward FDB programming also needs the
+  capability; if the dataplane reconciler is working but the
+  originator is silent, the cap is partially granted (rare). Check
+  `getcap` on the binary.

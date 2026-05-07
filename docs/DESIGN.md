@@ -30,9 +30,9 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN Route Reflector (VXLAN-EVPN DC fabric).** iBGP route reflector for Type 1-5 RFC 7432 routes between VTEPs; control plane only, VTEPs handle their own DF election and data-plane encapsulation. See ADR-0050.
 
-**EVPN VTEP foundation (declarative model, Phase 2 Gate 7a).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface. Operators declare local VTEP intent today; kernel reconciliation (netlink FDB monitor, Type 2/3 origination) lands with Gate 7b. See ADR-0052 for the domain model and ADR-0054 for the Linux dataplane boundary.
+**EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
-**Later:** EVPN VTEP kernel reconciliation + origination (Gate 7b), DF election execution, IRB semantics (RFC 9135), VPNv4/v6, MPLS-EVPN encap.
+**Later:** MAC-with-IP origination via ARP/ND suppression (Gate 7b+2), `advertise_svi_mac` consumption, sub-second mobility convergence (Gate 7c), DF election + multi-homing (Gate 8), IRB semantics + L3VNI / Type 5 dataplane (Gate 9, RFC 9135), VPNv4/v6, MPLS-EVPN encap.
 
 ---
 
@@ -446,8 +446,12 @@ end-to-end — FRR origination requires VLAN-aware bridge + SVI which is
 Phase 3 scope), scale validation (50k Type 2 + churn), and
 controller-driven injection for Type 2 / Type 3. What remains:
 
-- **VTEP mode:** local EVI / VRF / VNI state, kernel FDB MAC learning, local
-  route origination (Phase 2).
+- **VTEP mode:** local EVI / VRF / VNI state and kernel FDB MAC learning are
+  shipped (Gates 7a + 7b + 7b+1); the daemon now both programs remote MACs
+  into the kernel FDB and originates local Type 2 + Type 3 IMET routes from
+  kernel-learned MACs. **Still ahead in Phase 2:** MAC-with-IP origination
+  via ARP/ND suppression (Gate 7b+2), `advertise_svi_mac` consumption,
+  sub-second mobility convergence (Gate 7c).
 - **Multi-homing execution:** the RR already reflects Type 1 EAD + Type 4 ES
   unchanged (Gate 4); this is rustbgpd-as-VTEP DF election (RFC 7432 §8 +
   RFC 8584) and aliasing / backup-path resolution against locally-learned

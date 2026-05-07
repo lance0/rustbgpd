@@ -1,4 +1,4 @@
-# Milestone History (M0–M9)
+# Milestone History (M0–M9, M29–M37)
 
 Archived build orders, exit criteria, and design choices from the
 initial development phase. For the current feature roadmap, see
@@ -611,20 +611,45 @@ for the architectural record.
 
 ### Phase 2 progress and what's still deferred
 
-- **VTEP foundation (Gate 7a) — landed.** The declarative half of
-  VTEP mode shipped on `feat/evpn-vtep-linux-foundation`: new
-  `crates/evpn` domain crate (`EvpnInstance`, `EvpnInstanceTable`,
+- **VTEP foundation (Gate 7a, v0.13.0) — landed.** Declarative
+  domain in `crates/evpn` (`EvpnInstance`, `EvpnInstanceTable`,
   `RouteTarget`), `[[evpn_instances]]` TOML schema, read-only
-  `EvpnService.ListEvpnInstances` gRPC + `rustbgpctl evpn instances`,
+  `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`,
   wire-side `RouteDistinguisher::from_str`. ADR-0052 codifies the
   boundary: domain-only, kernel-free; RR-only deployments
   unchanged.
-- **VTEP kernel reconciliation (Gate 7b) — still deferred.** Local
-  MAC learning from kernel FDB (netlink monitor), Type 2/3
-  origination on MAC learn, Type 2 withdrawal on age-out,
-  anti-spoofing, MAC mobility sequencing. Wires the
-  `advertise_svi_mac` flag through and adds mutation RPCs
-  (`AddEvpnInstance` / `DeleteEvpnInstance`).
+- **VTEP kernel reconciliation (Gate 7b, v0.14.0) — landed.** New
+  `crates/evpn-linux` crate ships the level-triggered
+  `ReconcileActor<D: Dataplane>` programming remote-MAC FDB
+  entries via rtnetlink (single combined-flag `RTM_NEWNEIGH` with
+  `NTF_SELF | NTF_MASTER | NTF_EXT_LEARNED` and `NUD_NOARP |
+  NUD_PERMANENT`). Foreign-entry preservation is structural — the
+  delete pass iterates `OwnedSet`, never the kernel snapshot. M36
+  containerlab smoke validates 8/8 PASS against Linux 6.17 + FRR
+  10.3.1. ADR-0054 locks the boundary.
+- **VTEP local-MAC origination (Gate 7b+1, v0.15.0 candidate) —
+  landed (2026-05-07, PR #35).** `crates/evpn/src/origination.rs`
+  ships the deterministic `LocalMacOriginator` state machine
+  encoding RFC 7432 §15.1 sequence rules.
+  `crates/wire/src/pmsi.rs` adds `PathAttribute::PmsiTunnel`
+  (RFC 6514 §5, type 22) with EVPN-VXLAN convention per
+  RFC 8365 §5.1.3 (label = raw 24-bit VNI).
+  `crates/evpn-linux/src/linux/notify.rs` subscribes to
+  `RTNLGRP_NEIGH` (enum group id 3) and classifies bridge FDB
+  events. Daemon-side `src/evpn_originator.rs` + `src/evpn_imet.rs`
+  emit Type 2 routes per mobility sequencing + one Type 3 IMET
+  per L2VNI carrying PMSI Tunnel. Coordinated shutdown drains
+  EVPN originator + IMET keys before peer manager shutdown.
+  M37 containerlab smoke 4/4 PASS against Linux 6.17 + FRR 10.3.1.
+  ADR-0055 locks the boundary.
+- **Still deferred (alpha-soak follow-up):** MAC-with-IP
+  origination via ARP/ND suppression (Gate 7b+2),
+  `advertise_svi_mac` consumption, duplicate-MAC quarantine
+  (RFC 7432 §15.1 M=180 s/N=5), sticky / static MAC anti-spoof
+  config schema, sub-second mobility convergence (Gate 7c —
+  EVPN-keyed RouteEvent broadcast), runtime mutation RPCs
+  (`AddEvpnInstance` / `DeleteEvpnInstance`). Tracked in
+  [docs/evpn-alpha-soak.md](evpn-alpha-soak.md).
 - **DF election execution** (RFC 7432 §8 + RFC 8584) — still
   deferred. Phase 1 reflects the inputs unchanged so VTEPs run the
   election themselves.

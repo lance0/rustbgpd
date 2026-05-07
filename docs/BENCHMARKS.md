@@ -384,6 +384,18 @@ storage across RIB views or alternative data structures.
 
 ## EVPN RR Scale (M33)
 
+> **Scope note:** the M33 numbers in this section are
+> **RR-only** — empty `[[evpn_instances]]`, no kernel-side dataplane
+> reconciler, no local-MAC originator, no notify_loop draining
+> RTNLGRP_NEIGH. v0.14.0 (Gate 7b) added the FDB programmer and
+> v0.15.0 (Gate 7b+1) added the originator + IMET emitter +
+> `RTNLGRP_NEIGH` subscriber. VTEP-mode scale numbers (originator
+> emitting Type 2 from kernel learns, reconciler programming
+> remote MACs into the bridge FDB, all with mobility churn) are
+> tracked as alpha-soak follow-up — see
+> [`docs/evpn-alpha-soak.md`](evpn-alpha-soak.md). Don't read M33
+> numbers as a VTEP-mode baseline.
+
 Measured with the in-tree `bench/evpn-load` generator: two synthetic
 iBGP testers advertise Type 2 MAC/IP routes into a rustbgpd Route
 Reflector, which reflects them to a third peer (the monitor). Tester

@@ -547,7 +547,7 @@ implemented per ADR-0040.
 
 ---
 
-## RFC 7432 — EVPN (Phase 1: Route Reflector)
+## RFC 7432 — EVPN (Phase 1: Route Reflector + Phase 2: Bidirectional VTEP)
 
 - AFI 25 (L2VPN) / SAFI 70 (EVPN). Enum variants added to `Afi` and
   `Safi`; capability negotiation works automatically.
@@ -666,6 +666,83 @@ implemented per ADR-0040.
   entries. DF election itself runs on the VTEPs; the RR is
   path-transparent.
 - See ADR-0050.
+
+### Phase 2: Bidirectional VTEP (Gates 7a, 7b, 7b+1)
+
+- **Gate 7a (v0.13.0, ADR-0052):** declarative local-VTEP domain in
+  `crates/evpn` — `EvpnInstanceTable` + `[[evpn_instances]]` TOML
+  schema + read-only `EvpnService.ListEvpnInstances`. Empty by
+  default; RR-only deployments unchanged.
+- **Gate 7b (v0.14.0, ADR-0054):** Linux kernel reconciliation in
+  the new `crates/evpn-linux` crate. The `ReconcileActor<D: Dataplane>`
+  consumes a `tokio::sync::watch<Arc<DataplaneIntent>>` from a
+  daemon-side projection of the RIB's best-path Type 2 routes, and
+  programs/withdraws remote-MAC FDB entries via rtnetlink (single
+  combined-flag `RTM_NEWNEIGH` with `NTF_SELF | NTF_MASTER |
+  NTF_EXT_LEARNED` and `NUD_NOARP | NUD_PERMANENT`). Foreign-entry
+  preservation is structural — the delete pass iterates `OwnedSet`
+  (rustbgpd-programmed keys), never the kernel snapshot, so
+  kernel-learned local MACs and operator-static FDB entries cannot
+  be deleted by the algorithm.
+- **Gate 7b+1 (v0.15.0 candidate, ADR-0055):** local-MAC origination
+  closes the upward flow. New `crates/evpn/src/origination.rs` ships
+  the pure deterministic `LocalMacOriginator` state machine encoding
+  RFC 7432 §15.1 sequence rules: first-Learned-no-contender ⇒ seq=0
+  with no extcomm; first-Learned-vs-contender at R ⇒ R+1 with
+  extcomm; remote announces M ≥ N ⇒ bump to `max(M, N) + 1`;
+  aged-then-relearn preserves the seq ratchet so a stale peer never
+  wins contention. Local-port move on a previously-advertised MAC
+  bumps the seq AND wakes up the extcomm even without a contender,
+  so peers see the bumped seq on the wire (otherwise a later stale
+  remote at seq=0 would tie our hidden seq=1). The
+  `crates/evpn-linux/src/linux/notify.rs` classifier subscribes to
+  `RTNLGRP_NEIGH` (enum group id `3`, **not** the legacy bitmask
+  `RTMGRP_NEIGH = 4` — `Socket::add_membership` takes the enum
+  value), drops `NTF_EXT_LEARNED` echoes (we programmed those) and
+  VXLAN-port ifindexes (those are remote-MAC echoes), and resolves
+  bridge-port → VNI via a new `LinkCache::bridge_port_to_vni` map.
+  The daemon-side `src/evpn_originator.rs` actor mirrors the
+  dataplane supervisor on the upward flow and emits
+  `RibUpdate::InjectEvpn` / `WithdrawEvpn`. Self-NH routes are
+  filtered before reaching the state machine via the existing
+  `project_evpn_routes`, so the originator never sees its own
+  re-Inject as a contender.
+- **Type 3 IMET origination per L2VNI (Gate 7b+1):** `src/evpn_imet.rs`
+  emits one Type 3 per `EvpnInstance` at startup, withdrawn at
+  coordinated-shutdown. Lifecycle is decoupled from kernel
+  Ready/NotReady — IMET expresses BGP-level VNI membership, not
+  data-plane programmability. Carries the **PMSI Tunnel attribute**
+  (RFC 6514 §5, path attribute type 22) for ingress replication.
+- **PMSI Tunnel codec (RFC 6514 §5):** new `crates/wire/src/pmsi.rs`
+  defines `PathAttribute::PmsiTunnel(PmsiTunnel)` with typed
+  `PmsiTunnelType` (preserves unknown values for forward-compat per
+  RFC 7385) and `PmsiTunnelIdentifier` (Empty / Ipv4 / Ipv6 / Raw).
+  Wire layout: flags(1) | type(1) | label(3) | tunnel id(variable).
+  The `for_evpn_ingress_replication(vni, ip)` constructor encodes
+  the label field as the **raw 24-bit VNI per RFC 8365 §5.1.3** —
+  RFC 8365 redefines the field semantics for EVPN-VXLAN so the full
+  24 bits are the VNI, **not** the MPLS-style high-20-bits shift.
+  Matches FRR/Cumulus on the wire and stays consistent with
+  `EvpnMacIp.label1`. Tunnel identifier carries the originator IP.
+- **Coordinated shutdown ordering (Gate 7b+1):** the daemon drains
+  the EVPN originator (emits Type 2 Withdraws) and withdraws the
+  IMET keys **before** sending `PeerManagerCommand::Shutdown` so
+  Type 2 / Type 3 Withdraws ride still-open BGP sessions. The
+  dataplane reconciler drains afterward (FDB teardown doesn't need
+  active BGP).
+- **Bidirectional VTEP interop (M37):** validated end-to-end against
+  Linux 6.17 + FRR 10.3.1 via
+  `tests/interop/m37-evpn-local-origination.clab.yml`. rustbgpd as
+  VTEP originator, FRR as consumer. 4/4 PASS: Type 3 IMET originated
+  at startup, Type 2 originated within ~3 s of `bridge fdb add`,
+  Type 2 withdrawn within ~3 s of `bridge fdb del`, Type 3 IMET
+  drained on shutdown. Local-only / privileged smoke (not in
+  PR-CI); the Gate 7b downward path retains its M36 coverage.
+- **Deferred (tracked in ADR-0055 §7-§9 + `docs/evpn-alpha-soak.md`):**
+  MAC-with-IP origination via ARP/ND suppression (Gate 7b+2),
+  `advertise_svi_mac` consumption, sticky / static MAC anti-spoof
+  config schema, RFC 7432 §15.1 duplicate-MAC quarantine
+  (M=180 s/N=5), sub-second mobility convergence (Gate 7c).
 
 ---
 

@@ -134,6 +134,60 @@ Per-neighbor TCP MD5 authentication (RFC 2385) and GTSM / TTL security
 (RFC 5082) are supported on Linux via `md5_password` and `ttl_security`.
 These protect BGP transport sessions, not the gRPC management surface.
 
+## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
+
+Running rustbgpd in **EVPN VTEP mode** on Linux (a non-empty
+`[[evpn_instances]]` configuration) requires the daemon to hold
+`CAP_NET_ADMIN` (or run as root) for two distinct kernel-facing
+operations:
+
+1. **Bridge FDB program / withdraw** (Gate 7b, ADR-0054 — v0.14.0).
+   The `crates/evpn-linux` reconciler issues `RTM_NEWNEIGH` /
+   `RTM_DELNEIGH` netlink messages to install remote-MAC entries
+   into the kernel bridge FDB with `NTF_EXT_LEARNED`.
+2. **`RTNLGRP_NEIGH` multicast subscription** (Gate 7b+1,
+   ADR-0055 — v0.15.0). The originator's notify task calls
+   `Socket::add_membership(RTNLGRP_NEIGH)` on the rtnetlink socket
+   to receive unsolicited `RTM_NEWNEIGH` / `RTM_DELNEIGH` events
+   for kernel-learned local MACs. This is a kernel-side privilege
+   separate from gRPC management security.
+
+If `CAP_NET_ADMIN` is not granted:
+
+- `LinuxDataplane::connect()` may succeed but FDB program ops fail
+  with `EPERM`/`EACCES` → `DataplaneError::PermissionDenied`. The
+  reconcile actor's permanent-failure suppression then logs the
+  failure and stops retrying that op.
+- The notify task logs `could not subscribe to RTNLGRP_NEIGH;
+  local-MAC observations will be silent` at WARN. Downward
+  programming may still work; upward origination won't fire.
+
+**RR-only deployments** (empty `[[evpn_instances]]`) need none of
+this — no netlink socket is opened, no background reconciler or
+originator is spawned, and the daemon runs at the same privilege
+level as a pure control-plane speaker.
+
+Recommended deployment posture for EVPN VTEPs:
+
+```bash
+# Grant the binary CAP_NET_ADMIN without running as root
+setcap cap_net_admin=eip /usr/local/bin/rustbgpd
+getcap /usr/local/bin/rustbgpd  # verify
+```
+
+Or under systemd:
+
+```ini
+[Service]
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=true
+```
+
+This privilege scope is the minimum required for Linux EVPN VTEP
+mode; do not grant `CAP_NET_RAW` or `CAP_SYS_ADMIN` — neither is
+needed by rustbgpd.
+
 ## Deferred hardening
 
 The following security improvements are intentionally deferred and tracked in

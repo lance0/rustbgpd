@@ -635,17 +635,25 @@ measurement path.
 
 **Known gaps:**
 
-- VTEP role is partial — the **declarative foundation slice landed
-  (Gate 7a, ADR-0052)**: operators can declare local EVIs via
+- VTEP role is now bidirectional but not feature-complete — the
+  **declarative foundation slice landed (Gate 7a, ADR-0052)** with
   `[[evpn_instances]]` (vni / rd / route_targets / local_vtep_ip /
-  optional bridge / advertise_svi_mac) and inspect the resolved
-  table via `EvpnService.ListEvpnInstances` and `rustbgpctl evpn
-  instances`. **Kernel reconciliation is still Gate 7b**: rustbgpd
-  does not yet own kernel FDB learning, MAC mobility origination, or
-  Type 2/3 emission from local instances. VTEPs (SONiC / FRR leaves)
-  still handle those today. See Gate 7b in
-  [docs/evpn-enablement.md](evpn-enablement.md) for what's still
-  queued. DF election execution and symmetric IRB remain Gate 8 / 9.
+  optional bridge / advertise_svi_mac) and the read-only
+  `EvpnService.ListEvpnInstances` surface. **Kernel reconciliation
+  shipped in Gate 7b (v0.14.0, ADR-0054)** — rustbgpd programs
+  remote-MAC FDB entries from received Type 2 routes via rtnetlink.
+  **Local-MAC origination shipped in Gate 7b+1 (v0.15.0,
+  ADR-0055)** — rustbgpd subscribes to `RTNLGRP_NEIGH`, classifies
+  bridge FDB events, and originates Type 2 routes per RFC 7432 §15.1
+  with full mobility sequencing, plus one Type 3 IMET per L2VNI
+  carrying RFC 6514 §5 PMSI Tunnel. M37 validates the loop end-to-end
+  (4/4 PASS, FRR 10.3.1 on Linux 6.17). VTEPs (SONiC / FRR leaves)
+  still cover MAC-with-IP via ARP/ND suppression (Gate 7b+2 in
+  rustbgpd), DF election (Gate 8), and symmetric IRB / L3VNI
+  (Gate 9, RFC 9135). See [docs/evpn-enablement.md](evpn-enablement.md)
+  for the full gate ladder and
+  [docs/evpn-alpha-soak.md](evpn-alpha-soak.md) for the residual
+  alpha-confidence checklist.
 - Controller injection (Gate 6) covers Type 2 MAC/IP and Type 3 IMET
   via `InjectionService::AddEvpnRoute`; Type 5 IP-Prefix and Type 1/4
   multi-homing origination are deferred pending use-case signal.
@@ -715,12 +723,22 @@ Be honest about where rustbgpd isn't the right tool:
 
 - **Full router** — No FIB integration. Can't install routes into the Linux
   kernel. Use FRR or BIRD if you need a forwarding-plane router.
-- **EVPN VTEP role** — rustbgpd supports EVPN (RFC 7432) in **route-reflector
-  mode only** (Phase 1, ADR-0050). It does not yet act as a VTEP: no local
-  EVI / VRF / VNI state, no kernel FDB MAC learning, no DF election, no
-  symmetric IRB (RFC 9135). For VXLAN-EVPN fabrics where VTEPs are SONiC
-  or FRR leaves and rustbgpd is the RR, it's a fit today. For the VTEP
-  role itself, use FRR.
+- **EVPN VTEP role — partial (v0.15.0).** rustbgpd-as-RR has been
+  the supported deployment since Phase 1 (ADR-0050). Phase 2
+  (Gates 7a / 7b / 7b+1, ADR-0052 / 0054 / 0055) added the
+  **bidirectional VTEP loop**: kernel FDB programming from received
+  Type 2 routes plus local-MAC origination via `RTNLGRP_NEIGH` with
+  RFC 7432 §15.1 mobility sequencing + Type 3 IMET per L2VNI
+  carrying RFC 6514 §5 PMSI Tunnel for ingress-replication BUM. M37
+  validates the loop end-to-end (4/4 PASS against FRR 10.3.1 on
+  Linux 6.17). **Still missing for full VTEP parity:** MAC-with-IP
+  origination via ARP/ND suppression (Gate 7b+2),
+  `advertise_svi_mac` consumption (Gate 7b+2), DF election +
+  multi-homing execution (Gate 8), symmetric IRB (Gate 9, RFC 9135),
+  L3VNI / Type 5 dataplane (Gate 9). For a single-homed L2VNI
+  fabric where DF election and IRB aren't load-bearing, rustbgpd is
+  a fit today; for full FRR-equivalent VTEP coverage the gap closes
+  in upcoming gates.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

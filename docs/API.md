@@ -643,19 +643,29 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 
 Read-only view of local EVPN instances configured on this VTEP. Empty
 when the daemon is acting purely as an EVPN route reflector — RR mode
-does not declare local instances. See ADR-0052 for the boundary
-between this service (control-plane intent) and the future kernel-
-reconciliation slice (Gate 7b).
+does not declare local instances. The same `[[evpn_instances]]` table
+that this service exposes is the input to the Linux kernel
+reconciler (Gate 7b, ADR-0054 — programs remote-MAC FDB entries
+downward) and the local-MAC originator + Type 3 IMET emitter (Gate 7b+1,
+ADR-0055 — emits Type 2 / Type 3 routes upward from kernel-learned
+state). The originator and IMET emitter bypass this gRPC surface;
+they translate kernel events directly into `RibUpdate::InjectEvpn` /
+`WithdrawEvpn` against the RIB. See ADR-0052 for the original
+boundary, ADR-0054/ADR-0055 for the dataplane + origination
+boundaries.
 
 | RPC | Description |
 |-----|-------------|
 | `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, route_targets, local_vtep_ip, optional bridge, advertise_svi_mac flag) |
 
-Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is deliberately
-out of scope for the foundation slice — adding a runtime mutation
-RPC before the kernel can consume the change would ship a footgun.
-Lands with the kernel-reconciliation slice (see
-[`docs/evpn-enablement.md`](evpn-enablement.md) Gate 7b).
+Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still out of
+scope. With the kernel reconciler and originator now live (Gates
+7b / 7b+1), runtime mutation needs a swap surface (`ArcSwap` /
+`RwLock`) plus careful interaction with the per-VNI
+`LocalMacOriginator` state — delete must drain its outstanding
+Withdraws before the table swap to avoid leaking advertised MACs.
+Tracked as alpha-soak follow-up — see
+[`docs/evpn-alpha-soak.md`](evpn-alpha-soak.md).
 
 Operators configure instances via the `[[evpn_instances]]` TOML
 block; SIGHUP that edits any instance is restart-required (see

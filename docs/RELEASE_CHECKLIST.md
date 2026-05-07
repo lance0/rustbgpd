@@ -130,9 +130,12 @@ bash tests/interop/scripts/test-m16-llgr-frr.sh
 containerlab destroy -t tests/interop/m16-llgr-frr.clab.yml
 ```
 
-If the release includes EVPN changes (any commit touching `crates/wire/src/evpn.rs`,
-EVPN paths in `crates/rib/src/`, or the EVPN gRPC surface), run at least
-one of M29 (capability sanity) or M30 (real Type 2 reflection). Run M33
+If the release includes EVPN changes (any commit touching
+`crates/wire/src/evpn.rs`, `crates/wire/src/pmsi.rs`, EVPN paths in
+`crates/rib/src/`, the EVPN gRPC surface, `crates/evpn-linux/src/`,
+`crates/evpn/src/origination.rs`, `src/evpn_dataplane.rs`,
+`src/evpn_originator.rs`, or `src/evpn_imet.rs`), run at least one of
+M29 (capability sanity) or M30 (real Type 2 reflection). Run M33
 (scale) before any release that claims new performance numbers:
 
 ```bash
@@ -150,6 +153,32 @@ containerlab destroy -t tests/interop/m30-evpn-type2-frr.clab.yml
 containerlab deploy -t tests/interop/m33-evpn-scale.clab.yml
 bash tests/interop/scripts/test-m33-evpn-scale.sh
 containerlab destroy -t tests/interop/m33-evpn-scale.clab.yml --cleanup
+```
+
+If the release touches the **VTEP dataplane** (`crates/evpn-linux/`)
+or **local-MAC origination** (`crates/evpn/src/origination.rs`,
+`src/evpn_originator.rs`, `src/evpn_imet.rs`,
+`crates/wire/src/pmsi.rs`), additionally run M36 (downward, Gate 7b)
+and M37 (upward, Gate 7b+1) before tagging. Both are **local-only,
+privileged smokes** — they require `CAP_NET_ADMIN` or a privileged
+runner and are not in PR-CI:
+
+```bash
+# Build the daemon image (bidirectional VTEP needs CAP_NET_ADMIN)
+docker build -t rustbgpd:dev .
+
+# M36 — Gate 7b downward path: rustbgpd-as-VTEP, FRR-as-originator
+containerlab deploy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
+bash tests/interop/scripts/test-m36-evpn-vtep-smoke.sh
+containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
+
+# M37 — Gate 7b+1 upward path: rustbgpd-as-originator, FRR-as-consumer
+# Validates ADR-0055 §1-§6 end-to-end (RTNLGRP_NEIGH classifier,
+# Type 2 origination per RFC 7432 §15.1, Type 3 IMET with PMSI Tunnel
+# label = raw 24-bit VNI per RFC 8365 §5.1.3, shutdown drain ordering)
+containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
+bash tests/interop/scripts/test-m37-evpn-local-origination.sh
+containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml
 ```
 
 Also smoke the controller-injection path against a live RR (M30
