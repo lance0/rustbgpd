@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-07
+Last updated: 2026-05-07 (v0.16.0)
 
 ## Overview
 

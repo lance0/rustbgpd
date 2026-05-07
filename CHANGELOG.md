@@ -9,6 +9,96 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-05-07
+
+Operational polish on the v0.15.0 EVPN VTEP loop. No new feature
+gates; the bidirectional VTEP path stays as it shipped. Highlights:
+end-to-end Prometheus observability for the local-MAC origination
+flow, gRPC + CLI diagnostic surfaces (`originated_local_macs_count`,
+`evpn diagnose`), an operator runbook, a synthetic-churn soak
+driver, and an MSRV bump that puts the toolchain on a 6-month-behind-
+stable track (Tokio's policy) — gated in PR-CI so it doesn't drift.
+
+### Changed
+
+- **MSRV 1.88 → 1.92** for the workspace. The 1.88 floor was set in
+  June 2025 when let-chains stabilized — picked for a feature, not an
+  operator-facing constraint. 1.92 (Dec 2025) matches Tokio's
+  published rolling-6-month MSRV policy, modern enough to stop
+  tripping on rustc inference improvements that worked on stable but
+  not on the pinned Docker builder. Single workspace MSRV
+  intentionally; RFC 3537 / Cargo issue #14414 document the resolver
+  edge cases of mixed-MSRV workspaces. The wire crate stays at
+  0.9.0 (no source change since publish), but its published metadata
+  on crates.io continues to advertise the 1.88 floor it was published
+  with — a future wire bump will republish at 1.92.
+- **Dockerfile builder** `rust:1.88-bookworm` → `rust:1.92-bookworm`
+  to match the workspace MSRV.
+
+### Added
+
+- **EVPN local-origination Prometheus counters**
+  (`crates/telemetry/src/metrics.rs`):
+  - `evpn_local_originations_total{action="inject"|"withdraw"}` —
+    successful RIB-accepted Type 2 actions.
+  - `evpn_local_origination_errors_total{action="inject"|"withdraw"}`
+    — failed RIB handoff / rejection / reply-drop paths.
+  - `evpn_local_observations_dropped_total{reason="channel_full"|"channel_closed"}`
+    — `RTNLGRP_NEIGH` notify-loop drops, distinguishing pre-
+    originator kernel-event loss from RIB-side origination failures.
+  - `evpn_duplicate_mac_moves_total{vni,mac}` +
+    `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` —
+    detection-only counters for repeated `(VNI, MAC)` contention,
+    feeding the future RFC 7432 §15.1 M=180s/N=5 quarantine work.
+    The action remains deferred (ADR-0055 §9), but operators can
+    now see contention happening.
+- **`originated_local_macs_count` per EvpnInstance** in
+  `EvpnService.ListEvpnInstances` (gRPC) and `rustbgpctl evpn
+  instances` (human + JSON). Fast "is the loop alive?" view without
+  scraping logs.
+- **`rustbgpctl evpn diagnose`** — CLI subcommand surfacing the
+  bidirectional-VTEP signals an operator wants when triaging
+  ("MAC learned in kernel but Type 2 not on wire" / "originator
+  spawned but quiescent" / etc.) — instance status, originated-MAC
+  count, drop counters, and the relevant log-grep hints in one
+  output.
+- **Operator runbook** at `docs/evpn-vtep-troubleshooting.md`
+  cross-referencing the new metrics and the structured log lines
+  the daemon emits at the diagnostic seams (`notify::classify_neigh`
+  cache miss, originator emit, IMET inject, shutdown drain).
+- **M37 churn soak driver** at
+  `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`.
+  Synthetic `bridge fdb add` / `bridge fdb del` at ~10 Hz against a
+  configurable MAC set. `--smoke` runs a one-round, five-MAC pre-
+  release sanity check; the no-flag form is meant for the 24h soak
+  documented in `docs/evpn-alpha-soak.md`.
+- **MSRV gate job** in `.github/workflows/ci.yml`. New `msrv` job
+  pinned to `dtolnay/rust-toolchain@1.92` runs `cargo check
+  --workspace --all-targets` so MSRV breakage fails at PR time
+  rather than at Interop time. Hard-coded version so a deliberate
+  bump shows up in the workflow diff alongside `Cargo.toml` and
+  `Dockerfile`.
+
+### Fixed
+
+- **Telemetry metric label-types compile failure on MSRV.** A
+  `with_label_values(&[&vni, mac])` call where `vni: String` and
+  `mac: &str` mixed `&String` and `&str` in the array literal.
+  rustc 1.95 silently coerced via `Deref`; rustc 1.88 (Docker
+  builder MSRV at the time) didn't, so every Interop image build
+  failed with `expected &[&String], found &[&str; 2]` while PR-CI
+  on stable rustc passed clean. Fixed by making both elements
+  unambiguously `&str` via `vni.as_str()`. Underlying gap (no MSRV
+  gate at PR time) closed by the new `msrv` CI job above.
+- **Clippy 1.95 `duration_suboptimal_units` lint** sweep across
+  pre-existing code. `Duration::from_secs(60 / 120 / 300 / 86_400 /
+  86_400 * 365)` calls converted to `from_mins` / `from_hours`
+  equivalents at 8 sites in `crates/rib`, `crates/transport`,
+  `crates/rpki`, `crates/evpn-linux`, `bench/evpn-load`,
+  `src/main.rs`, `src/evpn_originator.rs`. `from_days` is still
+  feature-gated under `duration_constructors`; the year-long
+  placeholders use `from_hours(24 * 365)`.
+
 ## [0.15.0] — 2026-05-07
 
 ### Changed
