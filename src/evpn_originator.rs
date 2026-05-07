@@ -468,7 +468,10 @@ fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
 /// in the type byte (`0x00` 2-octet AS, `0x01` IPv4, `0x02` 4-octet
 /// AS) and the value-field width split. Subtype is always `0x02`
 /// (Route Target).
-fn route_target_to_extcomm(rt: rustbgpd_evpn::RouteTarget) -> ExtendedCommunity {
+///
+/// Shared with [`crate::evpn_imet`] which encodes the same RT set on
+/// Type 3 routes.
+pub(crate) fn route_target_to_extcomm(rt: rustbgpd_evpn::RouteTarget) -> ExtendedCommunity {
     use rustbgpd_evpn::RouteTarget;
     match rt {
         RouteTarget::TwoOctetAs { asn, value } => {

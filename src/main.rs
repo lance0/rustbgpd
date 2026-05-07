@@ -20,6 +20,7 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod config;
 mod config_persister;
 mod evpn_dataplane;
+mod evpn_imet;
 mod evpn_originator;
 mod looking_glass;
 mod metrics_server;
@@ -1056,6 +1057,18 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         None
     };
 
+    // EVPN Type 3 IMET origination (Gate 7b+1 phase F). One Type 3
+    // per L2VNI announcing this VTEP's BGP-level VNI membership; not
+    // conditioned on kernel readiness. Originated at startup, with
+    // the keys retained for shutdown-time withdraw. RR-only paths
+    // (empty `evpn_instances`) skip origination entirely — IMET
+    // requires a VTEP IP, which an RR doesn't have.
+    let evpn_imet_keys: Vec<rustbgpd_wire::EvpnRouteKey> = if evpn_instances.is_empty() {
+        Vec::new()
+    } else {
+        evpn_imet::originate_all(evpn_instances.iter().cloned().collect::<Vec<_>>(), &rib_tx).await
+    };
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1329,6 +1342,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     if let Some(handle) = evpn_originator_handle {
         info!("draining EVPN originator");
         handle.shutdown().await;
+    }
+
+    // 2.5b Withdraw the Type 3 IMET routes we originated at startup
+    // so peers cleanly remove us from their ingress-replication
+    // lists.
+    if !evpn_imet_keys.is_empty() {
+        info!(
+            count = evpn_imet_keys.len(),
+            "withdrawing EVPN Type 3 IMET routes"
+        );
+        evpn_imet::withdraw_all(evpn_imet_keys, &rib_tx).await;
     }
 
     // 2.5 Drain the EVPN Linux dataplane reconciler. The actor
