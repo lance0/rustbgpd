@@ -23,11 +23,14 @@
 //! - **Tunnel Type** — IANA registry, RFC 7385. Values 0–7 are well-
 //!   known; unknown values must round-trip without loss for forward
 //!   compatibility.
-//! - **MPLS Label** — 3 octets where the high-order 20 bits carry the
-//!   label value (RFC 6514 §5). For EVPN ingress replication over
-//!   VXLAN, the label field carries `VNI << 4` (RFC 8365 §5 maps the
-//!   24-bit VNI into the same wire-shifted form as a 20-bit MPLS
-//!   label). A label of 0 means "no label present".
+//! - **MPLS Label** — 3 octets. For pure-MPLS deployments the
+//!   high-order 20 bits carry the MPLS label value (RFC 6514 §5).
+//!   For EVPN-VXLAN deployments **the full 24-bit field is the VNI**,
+//!   not `VNI << 4` — RFC 8365 §5.1.3 explicitly redefines the field
+//!   semantics to "the VNI" when EVPN routes ride VXLAN encap. This
+//!   matches `EvpnMacIp.label1` (also a raw 24-bit VNI per RFC 8365)
+//!   and what FRR/Cumulus emit on the wire. A label of 0 still means
+//!   "no label present" in either case.
 //! - **Tunnel Identifier** — variable-length, semantics depend on
 //!   Tunnel Type. For Ingress Replication (type 6) it is the unicast
 //!   tunnel endpoint IP — 4 octets for IPv4, 16 octets for IPv6
@@ -47,7 +50,8 @@
 //! Only `PmsiTunnelType::IngressReplication` is exercised by rustbgpd
 //! origination today. Decode handles all variants; encode round-trips
 //! all variants. Phase F (Type 3 IMET) emits Ingress Replication with
-//! `mpls_label = vni << 4` and `tunnel_identifier = local_vtep_ip`.
+//! the raw 24-bit VNI in the label field (RFC 8365 §5.1.3) and the
+//! local VTEP IP as the tunnel identifier.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -134,12 +138,16 @@ pub struct PmsiTunnel {
     pub flags: u8,
     /// Tunnel type (RFC 7385 IANA registry).
     pub tunnel_type: PmsiTunnelType,
-    /// 24-bit MPLS Label field.
+    /// 24-bit Label field.
     ///
-    /// Stored in canonical wire form: low 24 bits hold the value, with
-    /// the high-order 20 bits being the label and the low 4 bits being
-    /// TC+S. For EVPN ingress replication over VXLAN, callers should
-    /// pass `vni << 4` (see [`Self::for_evpn_ingress_replication`]).
+    /// Stored in canonical wire form: low 24 bits hold the value.
+    /// **Field semantics depend on encap**:
+    /// - Pure MPLS (RFC 6514 §5): high-order 20 bits = label, low 4 = TC+S.
+    /// - EVPN-VXLAN (RFC 8365 §5.1.3): all 24 bits = VNI, no shift.
+    ///
+    /// For EVPN ingress replication, use
+    /// [`Self::for_evpn_ingress_replication`] which handles the VNI
+    /// width check and emits the field as a raw 24-bit VNI.
     pub mpls_label: u32,
     /// Tunnel Identifier — variable-length.
     pub tunnel_identifier: PmsiTunnelIdentifier,
@@ -147,10 +155,17 @@ pub struct PmsiTunnel {
 
 impl PmsiTunnel {
     /// Build a PMSI Tunnel attribute for EVPN ingress replication over
-    /// VXLAN (RFC 6514 §5 + RFC 8365 §5).
+    /// VXLAN (RFC 6514 §5 + RFC 8365 §5.1.3).
     ///
-    /// The MPLS Label field encodes the VNI shifted into the high-order
-    /// 20 bits; this matches `EvpnMacIp.label1` for Type 2 routes.
+    /// The label field carries the **full 24-bit VNI** unmodified —
+    /// RFC 8365 §5.1.3 redefines the field semantics for EVPN-VXLAN
+    /// (no MPLS-style high-20-bits shift). This matches
+    /// `EvpnMacIp.label1` for Type 2 routes and what FRR/Cumulus emit.
+    ///
+    /// `vni` is masked to 24 bits to defend against callers that pass
+    /// a value outside `EvpnInstanceId`'s valid range; in normal
+    /// operation `EvpnInstanceId::new` already rejects VNI > 0xFFFFFF
+    /// at config time, so the mask is purely belt-and-braces.
     #[must_use]
     pub fn for_evpn_ingress_replication(vni: u32, originator: IpAddr) -> Self {
         let tunnel_identifier = match originator {
@@ -160,7 +175,7 @@ impl PmsiTunnel {
         Self {
             flags: 0,
             tunnel_type: PmsiTunnelType::IngressReplication,
-            mpls_label: (vni & 0x00FF_FFFF) << 4,
+            mpls_label: vni & 0x00FF_FFFF,
             tunnel_identifier,
         }
     }
@@ -250,7 +265,9 @@ mod tests {
     fn ingress_replication_ipv4_roundtrip() {
         let t = PmsiTunnel::for_evpn_ingress_replication(100, "10.0.0.1".parse().unwrap());
         roundtrip(&t);
-        assert_eq!(t.mpls_label, 100 << 4);
+        // RFC 8365 §5.1.3: EVPN-VXLAN PMSI label is the raw 24-bit VNI,
+        // no MPLS-style high-20-bits shift.
+        assert_eq!(t.mpls_label, 100);
         assert_eq!(t.tunnel_type, PmsiTunnelType::IngressReplication);
         assert_eq!(
             t.tunnel_identifier,
@@ -262,14 +279,17 @@ mod tests {
     fn ingress_replication_ipv6_roundtrip() {
         let t = PmsiTunnel::for_evpn_ingress_replication(50, "2001:db8::1".parse().unwrap());
         roundtrip(&t);
-        assert_eq!(t.mpls_label, 50 << 4);
+        assert_eq!(t.mpls_label, 50);
     }
 
     #[test]
-    fn ingress_replication_ipv4_wire_bytes_match_rfc_6514() {
+    fn ingress_replication_ipv4_wire_bytes_match_rfc_8365() {
         // RFC 6514 §5 wire layout: flags(1) | type(1) | label(3) |
-        // tunnel id(variable). For EVPN ingress replication of vni=100
-        // from 10.0.0.1, label = 100<<4 = 0x000640 (3 octets).
+        // tunnel id(variable). For EVPN ingress replication of
+        // vni=100, RFC 8365 §5.1.3 says the label field is the raw
+        // 24-bit VNI: 100 = 0x000064. This matches FRR/Cumulus on the
+        // wire and stays consistent with `EvpnMacIp.label1` (also a
+        // raw 24-bit VNI per RFC 8365).
         let t = PmsiTunnel::for_evpn_ingress_replication(100, "10.0.0.1".parse().unwrap());
         let mut buf = Vec::new();
         t.encode(&mut buf);
@@ -278,7 +298,7 @@ mod tests {
             vec![
                 0x00, // flags
                 0x06, // tunnel type = Ingress Replication
-                0x00, 0x06, 0x40, // label (100 << 4)
+                0x00, 0x00, 0x64, // label = vni 100 (raw, no shift)
                 10, 0, 0, 1, // IPv4 originator
             ]
         );
@@ -403,16 +423,12 @@ mod tests {
     }
 
     #[test]
-    fn for_evpn_ingress_replication_truncates_vni_at_24_bits() {
-        // VNI must fit in 24 bits — caller passing a wider value must
-        // still produce a valid encoding (low 24 bits used). The wire
-        // label field is itself 24 bits; once the high-4 zero pad is
-        // applied, an over-24-bit VNI would not survive round-trip
-        // (top bits get masked away on encode), but rustbgpd does not
-        // emit such VNIs internally — `EvpnInstanceId::new` rejects
-        // VNI > 0xFFFFFF. This test pins the truncation behavior so a
-        // future refactor accidentally widening the field is loud.
+    fn for_evpn_ingress_replication_masks_vni_at_24_bits() {
+        // `EvpnInstanceId::new` rejects VNI > 0xFFFFFF at config time,
+        // so this defensive mask is purely belt-and-braces. RFC 8365
+        // §5.1.3 says the field IS the VNI directly (no shift), so a
+        // 24-bit-bounded raw value is the correct on-wire form.
         let t = PmsiTunnel::for_evpn_ingress_replication(0xFF00_1234, "10.0.0.1".parse().unwrap());
-        assert_eq!(t.mpls_label, 0x0001_2340);
+        assert_eq!(t.mpls_label, 0x0000_1234);
     }
 }

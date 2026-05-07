@@ -29,6 +29,7 @@
 use std::net::IpAddr;
 
 use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, MacAddress};
+#[cfg_attr(not(test), allow(unused_imports))]
 use tokio::sync::mpsc;
 
 use crate::error::DataplaneError;

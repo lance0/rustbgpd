@@ -575,13 +575,19 @@ thousands of VTEPs, and gives you structured observability.
 
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
-- **Local MAC learning** — VTEPs read from the kernel FDB and originate
-  Type 2 routes from locally-learned MAC addresses. rustbgpd does not
-  monitor a kernel FDB. (SDN controllers can inject Type 2 and Type 3
-  routes directly via `InjectionService::AddEvpnRoute` — see Gate 6 in
-  [docs/evpn-enablement.md](evpn-enablement.md) — but the typical
-  fabric operating model still has the VTEP originate from its local
-  MAC table.)
+- **MAC-with-IP origination (ARP/ND suppression)** — Gate 7b+1
+  (target v0.15.0) closed the bidirectional VTEP loop for **MAC-only**
+  Type 2: rustbgpd subscribes to `RTNLGRP_NEIGH AF_BRIDGE`, observes
+  kernel FDB learn/age events on non-VXLAN bridge ports, and originates
+  Type 2 routes per RFC 7432 §15.1 with full mobility-sequence
+  handling. One Type 3 IMET (RFC 7432 §7.3) per L2VNI carries the PMSI
+  Tunnel attribute (RFC 6514 §5) for ingress-replication BUM. **Still
+  missing:** MAC-with-IP origination (the IP form in `EvpnRouteKey::MacIp`)
+  requires an additional `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH`
+  subscription correlated by MAC — tracked as Gate 7b+2 in
+  [docs/evpn-enablement.md](evpn-enablement.md). SDN controllers can
+  still inject MAC-with-IP routes directly via
+  `InjectionService::AddEvpnRoute` (Gate 6).
 - **DF election** — with a shared ESI multi-homed to two VTEPs, the
   VTEPs run the election themselves. rustbgpd reflects Type 4 ES
   unchanged so the election still works on the inputs it needs;

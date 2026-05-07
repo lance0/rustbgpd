@@ -32,7 +32,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `crates/wire/src/pmsi.rs`. Typed `PmsiTunnelType` (preserves
     unknown values for forward-compat), `PmsiTunnelIdentifier` (IPv4 /
     IPv6 / Raw), `for_evpn_ingress_replication(vni, ip)` constructor
-    encoding `label = vni << 4` per RFC 8365 §5. 16 codec tests + an
+    encoding the label field as the raw 24-bit VNI per RFC 8365
+    §5.1.3 (no MPLS-style high-20-bits shift). 16 codec tests + an
     integration round-trip through the full `PathAttribute` dispatch.
   - **`EvpnOriginator` daemon actor** in `src/evpn_originator.rs`.
     `tokio::select!` over local-MAC channel, RIB poll (5s default),
@@ -48,7 +49,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     Ready/NotReady — IMET advertises BGP-level VNI membership, not
     data-plane programmability. Carries Origin/AsPath/NextHop, all
     configured RTs, and a PMSI Tunnel attribute (Ingress Replication,
-    label = vni << 4, tunnel id = local VTEP IP).
+    label = raw 24-bit VNI per RFC 8365 §5.1.3, tunnel id = local
+    VTEP IP).
   - **Upward `LocalMacObservation` channel surface** in
     `crates/evpn-linux/src/dataplane.rs`. New
     `Dataplane::take_local_mac_rx` trait method with a default

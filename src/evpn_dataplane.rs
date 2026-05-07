@@ -132,7 +132,7 @@ impl EvpnDataplaneHandle {
 ///    platforms the function returns `None` because the dataplane
 ///    is meaningless.
 #[must_use = "drop the handle to shut down the EVPN dataplane stack"]
-pub fn spawn(
+pub async fn spawn(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
@@ -145,7 +145,7 @@ pub fn spawn(
 
     #[cfg(target_os = "linux")]
     {
-        match rustbgpd_evpn_linux::LinuxDataplane::connect() {
+        match rustbgpd_evpn_linux::LinuxDataplane::connect().await {
             Ok(mut dataplane) => {
                 let local_mac_rx = dataplane.take_local_mac_rx();
                 let mut handle = spawn_with_dataplane(
@@ -508,7 +508,7 @@ mod tests {
         let instances = Arc::new(EvpnInstanceTable::new());
         let (rib_tx, _rib_rx) = mpsc::channel(8);
         let shutdown = CancellationToken::new();
-        let h = spawn(SupervisorConfig::default(), &instances, rib_tx, shutdown);
+        let h = spawn(SupervisorConfig::default(), &instances, rib_tx, shutdown).await;
         assert!(h.is_none(), "RR-only path should not spawn the actor");
     }
 

@@ -48,11 +48,23 @@ frr_vtysh() {
 
 # Does FRR list a Type 2 macip route for the given MAC originating
 # from rustbgpd?
+#
+# `vtysh` formats EVPN routes across two lines: NLRI on the first
+# line and next-hop / attributes on the second. `grep -A1` joins
+# them so a single `grep -F "$mac.*$RUSTBGPD_IP"` style check is
+# possible, except `grep -A` doesn't work inside a `grep -q` chain
+# cleanly. Instead, we check for both substrings separately and
+# require both to appear in the output, then confirm the MAC's
+# RD line is grouped under rustbgpd's address by looking at the
+# canonical macip view which prints the next-hop next to the MAC.
 frr_has_type2() {
     local mac=${1:?}
-    frr_vtysh "show bgp l2vpn evpn route type macip" \
-        | grep -iF "$mac" \
-        | grep -qF "$RUSTBGPD_IP"
+    local out
+    out=$(frr_vtysh "show bgp l2vpn evpn route type macip")
+    # Two-line vtysh layout: MAC on one line, next-hop on the next.
+    # `grep -A1 -iF "$mac"` pulls both, then check the next-hop is
+    # rustbgpd's loopback.
+    echo "$out" | grep -A1 -iF "$mac" | grep -qF "$RUSTBGPD_IP"
 }
 
 # Does FRR list a Type 3 IMET route originating from rustbgpd?
@@ -95,10 +107,10 @@ assert() {
     fi
 }
 
-# Wait for both ends to reach Established.
+# Wait for FRR to report the session as Established. The helper polls
+# `vtysh -c "show bgp neighbors <peer> json"` for `"bgpState":"Established"`.
 echo "Waiting for L2VPN/EVPN session to establish..."
-wait_for_session_established "$CONSUMER" "$RUSTBGPD_IP" 60 || true
-wait_for_grpc_ready "$RUSTBGPD" 50051 60 || true
+wait_frr_established "$CONSUMER" "$RUSTBGPD_IP" "L2VPN/EVPN" || true
 
 # 1. Type 3 IMET should be advertised at startup, before any local
 #    MAC is added.

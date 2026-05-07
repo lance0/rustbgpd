@@ -1,7 +1,8 @@
 //! `RTNLGRP_NEIGH` subscriber — Linux kernel local-MAC observation feed.
 //!
 //! Phase D-real of Gate 7b+1. Subscribes to multicast group
-//! `RTNLGRP_NEIGH` (group id 4 — `linux/rtnetlink.h`) on the daemon's
+//! `RTNLGRP_NEIGH` — enum group id `3` from `<linux/rtnetlink.h>`,
+//! **not** the legacy bitmask `RTMGRP_NEIGH = 4` — on the daemon's
 //! existing rtnetlink connection. Unsolicited `RTM_NEWNEIGH` /
 //! `RTM_DELNEIGH` messages with `family = AF_BRIDGE` are classified
 //! into [`rustbgpd_evpn::LocalMacObservation`] events that flow up
@@ -51,12 +52,22 @@ use netlink_packet_route::{
     neighbour::{NeighbourAttribute, NeighbourFlag, NeighbourMessage},
 };
 use rustbgpd_evpn::{EvpnInstanceId, LocalMacObservation, MacAddress};
+use tracing::debug;
 
 use super::links::LinkCache;
 
-/// Multicast group ID for neighbour-table changes (`RTNLGRP_NEIGH` from
-/// `<linux/rtnetlink.h>`).
-pub(crate) const RTNLGRP_NEIGH: u32 = 4;
+/// Multicast group ID for neighbour-table changes — enum value
+/// `RTNLGRP_NEIGH` from `<linux/rtnetlink.h>` (third entry in
+/// `enum rtnetlink_groups`, hence value `3`).
+///
+/// **Critical:** this is the **enum group id**, not the legacy bitmask
+/// `RTMGRP_NEIGH = 4` (`1 << RTNLGRP_NEIGH - 1`). `Socket::add_membership`
+/// takes the enum value directly via `NETLINK_ADD_MEMBERSHIP` — passing
+/// `4` here subscribes to `RTNLGRP_TC` (the next enum entry) and silently
+/// loses every neighbour notification. v0.14.x originally shipped the
+/// wrong value; the M37 origination smoke caught it. Cross-checked
+/// against rtnetlink 0.14's `examples/ip_monitor.rs`.
+pub(crate) const RTNLGRP_NEIGH: u32 = 3;
 
 /// Kind of `RTM_*NEIGH` message we received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +104,22 @@ pub(crate) fn classify_neigh(
     }
 
     // Step 4: resolve ifindex → VNI via the bridge-port map. Misses
-    // indicate the port isn't enslaved to an EVPN-managed bridge.
-    let vni_raw = *cache.bridge_port_to_vni.get(&ifindex)?;
+    // indicate either the port isn't enslaved to an EVPN-managed
+    // bridge (drop is correct) or the cache hasn't been primed yet
+    // (race window between connect and the first dump_links — the
+    // event is lost until the supervisor's next periodic dump).
+    // Logged at debug to make the latter diagnosable in field issues
+    // without spamming the happy path.
+    let Some(&vni_raw) = cache.bridge_port_to_vni.get(&ifindex) else {
+        debug!(
+            ifindex,
+            "RTNLGRP_NEIGH classifier: ifindex not in bridge_port_to_vni; \
+             event dropped (may be a race between netlink subscription \
+             and first link-cache prime, or the port simply isn't \
+             enslaved to an EVPN-managed bridge)"
+        );
+        return None;
+    };
     let vni = EvpnInstanceId::new(vni_raw).ok()?;
 
     // Step 5: extract MAC.
@@ -268,5 +293,15 @@ mod tests {
             Some(vec![0xaa; 4]), // not 6 bytes
         );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    /// Pins `RTNLGRP_NEIGH` to its `<linux/rtnetlink.h>` enum value `3`,
+    /// not the legacy `RTMGRP_NEIGH` bitmask `4`. v0.14.x shipped `4`
+    /// here, which subscribed to `RTNLGRP_TC` instead and silently lost
+    /// every neighbour notification (caught by the M37 origination
+    /// smoke). The constant pin guards against the same regression.
+    #[test]
+    fn rtnlgrp_neigh_constant_matches_kernel_enum_value() {
+        assert_eq!(RTNLGRP_NEIGH, 3);
     }
 }

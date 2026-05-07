@@ -1035,7 +1035,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         &evpn_instances,
         rib_tx.clone(),
         evpn_dataplane_shutdown.clone(),
-    );
+    )
+    .await;
 
     // EVPN local-MAC originator (Gate 7b+1). Spawned alongside the
     // dataplane supervisor under the same `[[evpn_instances]]` gate.
@@ -1329,24 +1330,26 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             "failed to clear GR restart marker"
         );
     }
-    let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
-
-    // 2. Wait for PeerManager to finish draining all peers
-    if let Err(e) = peer_mgr_handle.await {
-        error!(error = %e, "peer manager task panicked");
-    }
-
-    // 2.5a Drain the EVPN local-MAC originator first so its final
-    // Withdraws land in the RIB before the dataplane reconciler stops
-    // accepting work. Bounded 5 s drain.
+    // 1.9a Drain the EVPN local-MAC originator first — BEFORE the
+    // peer manager shutdown — so its Type 2 Withdraws ride the still-
+    // open BGP sessions to peers. `RibUpdate::WithdrawEvpn` recomputes
+    // and stages outbound updates before replying, so the transport
+    // path picks them up if (and only if) the peer sessions are still
+    // alive. Doing this after `PeerManagerCommand::Shutdown` would
+    // leave peers with stale Type 2 routes on their LocRib until our
+    // hold-timer expired on their side.
+    //
+    // Bounded 5 s drain — the originator's `drain_to_withdraws`
+    // emits one Withdraw per still-advertised MAC.
     if let Some(handle) = evpn_originator_handle {
         info!("draining EVPN originator");
         handle.shutdown().await;
     }
 
-    // 2.5b Withdraw the Type 3 IMET routes we originated at startup
+    // 1.9b Withdraw the Type 3 IMET routes we originated at startup
     // so peers cleanly remove us from their ingress-replication
-    // lists.
+    // lists. Same ordering rationale as the Type 2 drain — must land
+    // before peer sessions tear down.
     if !evpn_imet_keys.is_empty() {
         info!(
             count = evpn_imet_keys.len(),
@@ -1355,11 +1358,20 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_imet::withdraw_all(evpn_imet_keys, &rib_tx).await;
     }
 
+    let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
+
+    // 2. Wait for PeerManager to finish draining all peers
+    if let Err(e) = peer_mgr_handle.await {
+        error!(error = %e, "peer manager task panicked");
+    }
+
     // 2.5 Drain the EVPN Linux dataplane reconciler. The actor
     // withdraws every owned remote-MAC FDB entry under a bounded
     // 5 s drain (ADR-0054 §7) and exits; foreign entries
     // (kernel-learned local MACs, operator-static FDB entries) are
     // structurally untouched by the diff loop and survive the drain.
+    // This runs after the peer manager because the kernel-side FDB
+    // teardown does not need an active BGP session.
     if let Some(handle) = evpn_dataplane_handle {
         info!("draining EVPN dataplane");
         handle.shutdown().await;

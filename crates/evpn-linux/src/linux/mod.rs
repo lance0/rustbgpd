@@ -83,7 +83,7 @@ impl LinuxDataplane {
     /// # Errors
     /// Returns [`DataplaneError::Io`] if `rtnetlink::new_connection`
     /// fails.
-    pub fn connect() -> Result<Self, DataplaneError> {
+    pub async fn connect() -> Result<Self, DataplaneError> {
         let (mut connection, handle, messages) =
             rtnetlink::new_connection().map_err(DataplaneError::Io)?;
 
@@ -113,6 +113,46 @@ impl LinuxDataplane {
 
         let link_cache: Arc<Mutex<links::LinkCache>> =
             Arc::new(Mutex::new(links::LinkCache::default()));
+
+        // Prime the link cache with one synchronous dump_links pass
+        // BEFORE spawning the notify loop. The notify classifier
+        // resolves a bridge-port ifindex to a VNI via
+        // `LinkCache::bridge_port_to_vni`; if the cache is empty when
+        // an early RTM_NEWNEIGH arrives (which it is, by default —
+        // the supervisor's polling cycle is what would normally
+        // populate it), the event drops silently. A startup-time
+        // dump closes the race.
+        //
+        // **Bounded with a 2 s timeout**: this runs on the daemon's
+        // startup critical path before gRPC, listener, peers, etc.,
+        // so a stuck rtnetlink dump must not wedge the whole boot.
+        // The prime is best-effort — the supervisor's periodic dump
+        // will repopulate the cache within 5 s of the timeout, so
+        // the worst case is a brief window where early local-MAC
+        // events miss-and-drop.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            links::dump_links(&handle),
+        )
+        .await
+        {
+            Ok(Ok(cache)) => {
+                *link_cache.lock().await = cache;
+                tracing::debug!("primed link cache for RTNLGRP_NEIGH classifier");
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    error = %e,
+                    "initial link cache prime failed; early local-MAC events may drop until supervisor's first dump"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "initial link cache prime timed out after 2s; continuing startup — \
+                     supervisor's periodic dump will populate the cache shortly"
+                );
+            }
+        }
 
         // 1024-slot upward channel — matches the bound the daemon
         // originator advertises in its module docs. Overflow is
@@ -257,7 +297,7 @@ mod tests {
     /// catches.
     #[tokio::test]
     async fn connect_returns_ok_or_err_does_not_panic() {
-        match LinuxDataplane::connect() {
+        match LinuxDataplane::connect().await {
             Ok(_dp) => {
                 // Got a netlink socket — connection task spawned.
                 // Don't actually issue requests in PR-CI because

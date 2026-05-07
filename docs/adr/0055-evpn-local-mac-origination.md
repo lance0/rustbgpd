@@ -38,11 +38,15 @@ The relevant source constraints are:
   until a follow-up ADR defines the config schema.
 - **RFC 6514 §5** — PMSI Tunnel attribute (path attribute type 22),
   required on Type 3 IMET to advertise ingress-replication BUM.
-- **RFC 8365 §5** — VXLAN-EVPN encap convention; in particular the
-  `label = VNI << 4` form for the PMSI Tunnel MPLS Label field.
-- **Linux RTNLGRP_NEIGH** (`<linux/rtnetlink.h>`, group 4) — the
-  multicast group whose unsolicited `RTM_NEWNEIGH` / `RTM_DELNEIGH`
-  messages surface bridge FDB learn/age events.
+- **RFC 8365 §5.1.3** — VXLAN-EVPN encap convention; redefines the
+  PMSI Tunnel "MPLS Label" field semantics so the **full 24-bit field
+  is the VNI** (no high-20-bits MPLS shift). Matches `EvpnMacIp.label1`
+  for Type 2 routes.
+- **Linux RTNLGRP_NEIGH** (`<linux/rtnetlink.h>`, enum group id `3` —
+  third entry in `enum rtnetlink_groups`, **not** the legacy bitmask
+  `RTMGRP_NEIGH = 4`) — the multicast group whose unsolicited
+  `RTM_NEWNEIGH` / `RTM_DELNEIGH` messages surface bridge FDB learn/age
+  events. `Socket::add_membership` takes the enum group id directly.
 
 The constraints from ADR-0054 carry over unchanged:
 
@@ -163,8 +167,9 @@ The PMSI Tunnel attribute (path attribute type 22, RFC 6514 §5) is
 the only new wire-format addition. Its codec is in
 `crates/wire/src/pmsi.rs`. For ingress replication over VXLAN, the
 constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)`
-encodes `mpls_label = vni << 4` per RFC 8365 §5 and the Tunnel
-Identifier as the unicast originator IP.
+encodes the label field as the **raw 24-bit VNI** per RFC 8365 §5.1.3
+(no MPLS-style shift) and the Tunnel Identifier as the unicast
+originator IP.
 
 ### 7. Origination of MAC-with-IP Type 2 is deferred
 

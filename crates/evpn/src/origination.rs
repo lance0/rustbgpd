@@ -159,12 +159,23 @@ struct LocalMacOriginationState {
 impl LocalMacOriginationState {
     /// Should the rendered Inject carry a MAC Mobility extcomm?
     ///
-    /// RFC 7432 §15.1 + §7.7: the extcomm is mandatory once contention
-    /// has been observed (we must signal which side wins) or whenever
-    /// sticky is set (the sticky bit lives in the extcomm). Otherwise
-    /// the absent extcomm is semantically seq=0/sticky=false.
+    /// RFC 7432 §15.1 + §7.7: emit the extcomm whenever:
+    ///
+    /// 1. A remote contender has ever been observed, OR
+    /// 2. `sticky == true` (sticky bit lives in the extcomm), OR
+    /// 3. `our_seq > 0` (we've already advanced the ratchet — e.g.
+    ///    via a local-port move — and need peers to see the bumped
+    ///    seq so a subsequent stale-remote-seq=0 doesn't appear to
+    ///    win against us on their side).
+    ///
+    /// Without case (3), a local-port move that bumped `our_seq` from
+    /// 0 → 1 would still emit "no extcomm" on the wire, leaving peers
+    /// with the old absent-extcomm semantics (seq=0). A later stale
+    /// remote at seq=0 would tie with our hidden seq=1; neither
+    /// `on_remote_changed` (because `remote_seq < our_seq`) nor a fresh
+    /// re-Learn would correct the wire-visible state.
     fn rendered_seq(&self) -> Option<u32> {
-        if self.last_seen_remote_seq.is_some() || self.sticky {
+        if self.last_seen_remote_seq.is_some() || self.sticky || self.our_seq > 0 {
             Some(self.our_seq)
         } else {
             None
@@ -575,19 +586,19 @@ mod tests {
     }
 
     #[test]
-    fn local_port_move_bumps_seq_after_advertising() {
+    fn local_port_move_bumps_seq_and_emits_extcomm() {
         let mut o = fresh();
         // Initial learn on port 10.
         let _ = o.on_local_learned(mac(0xAA), 10, false, None);
         // Same MAC on port 11 — local move.
         let actions = o.on_local_learned(mac(0xAA), 11, false, None);
         assert_eq!(actions.len(), 1);
-        // No remote ever observed → still no extcomm; ratchet bumps to 1.
-        // But §15.1 demands the extcomm whenever contention is *signaled*.
-        // Since no remote was seen, the bump is purely defensive — we
-        // emit at seq=1, no extcomm. (When a remote later appears, the
-        // extcomm wakes up.)
-        assert_inject(&actions[0], None, false);
+        // The bump from seq=0 → seq=1 must wake up the MAC Mobility
+        // extcomm on the wire — otherwise peers still see absent-
+        // extcomm semantics (seq=0) and a later stale remote at seq=0
+        // would tie with our hidden seq=1, leaving neither side able
+        // to win cleanly. Defensive bump per FRR/Junos practice.
+        assert_inject(&actions[0], Some(1), false);
     }
 
     #[test]

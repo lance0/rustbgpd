@@ -9,8 +9,9 @@
 //!
 //! - **NLRI**: RD (per-EVI, per-VTEP), Ethernet Tag, Originator IP.
 //! - **PMSI Tunnel attribute** (RFC 6514 §5): tunnel type =
-//!   Ingress Replication (6), MPLS Label = `vni << 4`, Tunnel
-//!   Identifier = the VTEP's own loopback IP.
+//!   Ingress Replication (6), Label = raw 24-bit VNI (RFC 8365 §5.1.3
+//!   redefines the field semantics for EVPN-VXLAN), Tunnel Identifier
+//!   = the VTEP's own loopback IP.
 //! - **Route Target extended communities** matching the L2VNI's RT
 //!   set so importers route the membership advertisement into the
 //!   right EVI.
@@ -46,7 +47,8 @@
 //!
 //! - RFC 7432 §7.3 — Inclusive Multicast Ethernet Tag Route
 //! - RFC 6514 §5 — PMSI Tunnel attribute (Ingress Replication = 6)
-//! - RFC 8365 §5 — VXLAN encap convention (label = VNI << 4)
+//! - RFC 8365 §5.1.3 — VXLAN encap convention (label field = raw
+//!   24-bit VNI; the §5 MPLS-style high-20-bits shift does not apply)
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -144,8 +146,8 @@ pub async fn withdraw_all(keys: Vec<EvpnRouteKey>, rib_tx: &mpsc::Sender<RibUpda
 /// - empty `AsPath`
 /// - `NextHop` matching the VTEP IP
 /// - `ExtendedCommunities` carrying every configured Route Target
-/// - `PmsiTunnel` for Ingress Replication, label = `vni << 4`,
-///   tunnel id = the VTEP's loopback IP (RFC 6514 §5)
+/// - `PmsiTunnel` for Ingress Replication, label = raw 24-bit VNI
+///   (RFC 8365 §5.1.3), tunnel id = the VTEP's loopback IP
 fn build_imet_route(instance: &EvpnInstance) -> EvpnRibRoute {
     let imet = EvpnImet {
         rd: instance.rd,
@@ -248,8 +250,8 @@ mod tests {
             })
             .expect("PMSI Tunnel present");
         assert_eq!(pmsi.tunnel_type, PmsiTunnelType::IngressReplication);
-        // RFC 8365 §5: label = vni << 4.
-        assert_eq!(pmsi.mpls_label, 100 << 4);
+        // RFC 8365 §5.1.3: label = raw 24-bit VNI (no shift).
+        assert_eq!(pmsi.mpls_label, 100);
         match &pmsi.tunnel_identifier {
             PmsiTunnelIdentifier::Ipv4(v4) => {
                 assert_eq!(*v4, "10.0.0.1".parse::<std::net::Ipv4Addr>().unwrap());
