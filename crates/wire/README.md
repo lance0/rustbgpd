@@ -2,7 +2,8 @@
 
 BGP message codec for Rust. Encode and decode OPEN, UPDATE, KEEPALIVE,
 NOTIFICATION, and ROUTE-REFRESH messages per RFC 4271, with extensions for
-MP-BGP, EVPN, FlowSpec, Add-Path, Extended Messages, and more.
+MP-BGP, EVPN (including PMSI Tunnel for ingress-replication BUM), FlowSpec,
+Add-Path, Extended Messages, and more.
 
 This crate is the wire-protocol foundation of
 [rustbgpd](https://github.com/lance0/rustbgpd) but is designed for standalone
@@ -24,9 +25,11 @@ analyzers, test harnesses, MRT readers, etc.
 | 4724 | Graceful restart capability |
 | 4760 | MP-BGP: `MP_REACH_NLRI` / `MP_UNREACH_NLRI` |
 | 5492 | BGP capabilities |
+| 6514 §5 | PMSI Tunnel attribute (path attribute type 22): all 8 tunnel types from the IANA registry, with the EVPN-VXLAN ingress-replication form encoding the label field as the raw 24-bit VNI per RFC 8365 §5.1.3 |
 | 6793 | 4-octet AS numbers |
 | 7313 | Enhanced Route Refresh (BoRR / EoRR markers) |
-| 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) |
+| 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
+| 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including MAC Mobility extended community (§7.7) |
 | 7674 | Clarification of MP_REACH_NLRI next-hop encoding |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
 | 8092 | Large communities (3× u32) |
@@ -100,11 +103,12 @@ let bytes = encode_message(&Message::Open(open));
 
 - **`Message`** — top-level enum: `Open`, `Update`, `Keepalive`, `Notification`, `RouteRefresh`
 - **`UpdateMessage`** / **`ParsedUpdate`** — raw wire form and parsed routes + attributes
-- **`PathAttribute`** — 18+ attribute types including `AsPath`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`
+- **`PathAttribute`** — 13 typed variants plus `Unknown` pass-through, including `AsPath`, `NextHop`, `Communities`, `MpReachNlri`, `LargeCommunities`, and `PmsiTunnel` (RFC 6514)
 - **`Prefix`** — `V4(Ipv4Prefix)` / `V6(Ipv6Prefix)` enum
 - **`Capability`** — OPEN capabilities: multi-protocol, 4-octet AS, Add-Path, graceful restart, etc.
 - **`FlowSpecRule`** / **`FlowSpecComponent`** — FlowSpec NLRI with all 13 match types
 - **`EvpnRoute`** / **`EvpnRouteKey`** — typed EVPN routes (Types 1–5) with full payloads (RFC 7432, RFC 9136)
+- **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
 

@@ -576,7 +576,7 @@ thousands of VTEPs, and gives you structured observability.
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
 - **MAC-with-IP origination (ARP/ND suppression)** — Gate 7b+1
-  (target v0.15.0) closed the bidirectional VTEP loop for **MAC-only**
+  (v0.15.0) closed the bidirectional VTEP loop for **MAC-only**
   Type 2: rustbgpd subscribes to `RTNLGRP_NEIGH AF_BRIDGE`, observes
   kernel FDB learn/age events on non-VXLAN bridge ports, and originates
   Type 2 routes per RFC 7432 §15.1 with full mobility-sequence

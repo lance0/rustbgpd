@@ -143,7 +143,7 @@ resolved.
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
 - **EVPN Type 2 origination is MAC-only (no host IP).** Gate 7b+1
-  (`feat/evpn-local-origination`, target v0.15.0) emits Type 2 routes
+  (v0.15.0) emits Type 2 routes
   derived from `RTNLGRP_NEIGH AF_BRIDGE` events, which surface bridge
   FDB learns but not ARP/ND-suppression IP bindings. The wire codec
   already supports the MAC-with-IP form (`EvpnRouteKey::MacIp.ip` is

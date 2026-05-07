@@ -286,7 +286,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.14.0; v0.15.0 candidate on `feat/evpn-local-origination` — Gate 7b+1 closes the upward EVPN flow) |
+| **Maturity** | Public alpha (v0.15.0) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |

@@ -684,7 +684,7 @@ implemented per ADR-0040.
   (rustbgpd-programmed keys), never the kernel snapshot, so
   kernel-learned local MACs and operator-static FDB entries cannot
   be deleted by the algorithm.
-- **Gate 7b+1 (v0.15.0 candidate, ADR-0055):** local-MAC origination
+- **Gate 7b+1 (v0.15.0, ADR-0055):** local-MAC origination
   closes the upward flow. New `crates/evpn/src/origination.rs` ships
   the pure deterministic `LocalMacOriginator` state machine encoding
   RFC 7432 §15.1 sequence rules: first-Learned-no-contender ⇒ seq=0

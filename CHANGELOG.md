@@ -9,6 +9,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-05-07
+
+### Changed
+
+- **Breaking — `rustbgpd-wire` 0.8.5 → 0.9.0.** New
+  `PathAttribute::PmsiTunnel(PmsiTunnel)` variant added to the
+  non-`#[non_exhaustive]` `PathAttribute` enum. Downstream consumers
+  doing exhaustive matches on `PathAttribute` will need a new arm
+  (typically `PathAttribute::PmsiTunnel(_) => …` to forward or skip
+  the attribute). Also exports new types: `PmsiTunnel`,
+  `PmsiTunnelType`, `PmsiTunnelIdentifier`. Migration is a one-line
+  match-arm addition; the rest of the wire surface is unchanged.
+
 ### Added
 
 - **EVPN VTEP local-MAC origination — Gate 7b+1 (ADR-0055).**

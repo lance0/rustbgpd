@@ -32,7 +32,7 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   (downward FDB program reconciler) shipped in v0.13.x and v0.14.0.
   **Gate 7b+1** (upward Type 2 origination from kernel local-MAC
   observations + Type 3 IMET per L2VNI + RTNLGRP_NEIGH subscription)
-  on `feat/evpn-local-origination`, target v0.15.0 — closes the
+  on `feat/evpn-local-origination`, v0.15.0 — closes the
   bidirectional VTEP loop.
 - **Gates 8-9** expand into active-active multi-homing execution /
   IRB. Big investments gated by market demand, not technical
@@ -356,7 +356,7 @@ later phases consume:
 Status: bidirectional VTEP — Gate 7b (foundation, downward FDB
 program) shipped in v0.14.0; Gate 7b+1 (upward Type 2 / Type 3
 origination + RTNLGRP_NEIGH subscription) on
-`feat/evpn-local-origination`, target v0.15.0 · Blockers: Gate 7a (closed)
+`feat/evpn-local-origination`, v0.15.0 · Blockers: Gate 7a (closed)
 
 Why gated on demand: SONiC/FRR leaves do this well today. Rustbgpd
 competing with FRR for the VTEP role is a meaningful strategic expansion,

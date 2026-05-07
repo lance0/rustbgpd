@@ -627,7 +627,7 @@ for the architectural record.
   delete pass iterates `OwnedSet`, never the kernel snapshot. M36
   containerlab smoke validates 8/8 PASS against Linux 6.17 + FRR
   10.3.1. ADR-0054 locks the boundary.
-- **VTEP local-MAC origination (Gate 7b+1, v0.15.0 candidate) —
+- **VTEP local-MAC origination (Gate 7b+1, v0.15.0) —
   landed (2026-05-07, PR #35).** `crates/evpn/src/origination.rs`
   ships the deterministic `LocalMacOriginator` state machine
   encoding RFC 7432 §15.1 sequence rules.

@@ -1,7 +1,7 @@
 # EVPN VTEP alpha-soak checklist
 
 Post-merge confidence list for the bidirectional EVPN VTEP loop
-(Gates 7a + 7b + 7b+1, target v0.15.0). The branch landed the
+(Gates 7a + 7b + 7b+1, v0.15.0). The branch landed the
 control-plane and kernel paths; this file tracks what we still need
 to retire residual alpha-VTEP risk before claiming v1.0-grade
 production readiness.
