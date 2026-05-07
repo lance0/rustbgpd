@@ -2437,7 +2437,7 @@ mod tests {
     #[test]
     fn gr_restart_marker_round_trip() {
         let path = unique_temp_path("gr-restart-marker");
-        let expires_at = SystemTime::now() + Duration::from_secs(120);
+        let expires_at = SystemTime::now() + Duration::from_mins(2);
         write_gr_restart_marker(&path, expires_at).unwrap();
         let read_back = read_gr_restart_marker(&path).unwrap().unwrap();
         let diff = read_back

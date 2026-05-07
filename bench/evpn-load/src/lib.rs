@@ -217,7 +217,7 @@ pub async fn establish(cfg: PeerConfig) -> Result<PeerHandle, PeerError> {
             tokio::time::Instant::now() + hold_dur
         } else {
             // Far-future placeholder — never fires.
-            tokio::time::Instant::now() + Duration::from_secs(86_400 * 365)
+            tokio::time::Instant::now() + Duration::from_hours(24 * 365)
         };
         loop {
             let n = tokio::select! {

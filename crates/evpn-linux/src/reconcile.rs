@@ -77,7 +77,7 @@ impl ReconcileActorConfig {
     #[must_use]
     pub const fn production() -> Self {
         Self {
-            periodic_dump: Duration::from_secs(60),
+            periodic_dump: Duration::from_mins(1),
             coalesce_window: Duration::from_millis(50),
             drain_timeout: Duration::from_secs(5),
             skip_initial_dump: false,
@@ -89,7 +89,7 @@ impl ReconcileActorConfig {
     #[must_use]
     pub const fn for_tests() -> Self {
         Self {
-            periodic_dump: Duration::from_secs(60), // explicit advance in tests
+            periodic_dump: Duration::from_mins(1), // explicit advance in tests
             coalesce_window: Duration::from_millis(0),
             drain_timeout: Duration::from_secs(5),
             skip_initial_dump: false,

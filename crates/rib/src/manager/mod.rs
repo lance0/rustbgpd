@@ -749,16 +749,16 @@ impl RibManager {
         let mut query_rx_open = true;
 
         // GR stale sweep timer — reset each iteration to the nearest deadline.
-        let gr_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        let gr_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(gr_sleep);
 
         // LLGR stale sweep timer — reset each iteration to the nearest deadline.
-        let llgr_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        let llgr_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(llgr_sleep);
 
         // Enhanced route refresh timer — reset each iteration to the nearest
         // active refresh deadline.
-        let refresh_sleep = tokio::time::sleep(std::time::Duration::from_secs(86400));
+        let refresh_sleep = tokio::time::sleep(std::time::Duration::from_hours(24));
         tokio::pin!(refresh_sleep);
 
         loop {

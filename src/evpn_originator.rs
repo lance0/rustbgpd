@@ -1109,7 +1109,7 @@ mod tests {
 
         let h = spawn(
             OriginatorConfig {
-                poll_interval: Duration::from_secs(60),
+                poll_interval: Duration::from_mins(1),
             },
             &instances,
             rib_tx,
@@ -1181,7 +1181,7 @@ mod tests {
 
         let h = spawn(
             OriginatorConfig {
-                poll_interval: Duration::from_secs(60),
+                poll_interval: Duration::from_mins(1),
             },
             &instances,
             rib_tx,

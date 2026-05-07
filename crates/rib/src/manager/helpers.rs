@@ -13,7 +13,7 @@ pub(super) const DIRTY_RESYNC_INTERVAL: std::time::Duration = std::time::Duratio
 
 /// How long to wait for an inbound enhanced route refresh window to complete
 /// before sweeping unreplaced state.
-pub(super) const ERR_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+pub(super) const ERR_REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
 
 /// Per-peer LLGR configuration stored when `PeerGracefulRestart` is received.
 pub(super) struct LlgrPeerConfig {

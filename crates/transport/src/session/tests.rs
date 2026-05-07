@@ -237,7 +237,7 @@ async fn read_single_bgp_message(stream: &mut TcpStream) -> Message {
 async fn shutdown_aborts_inflight_connect_task() {
     let mut session = make_test_session(65001, 65002);
     session.connect_task = Some(tokio::spawn(async {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_mins(1)).await;
         unreachable!("connect task should have been aborted by shutdown");
     }));
 

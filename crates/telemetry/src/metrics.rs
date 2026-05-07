@@ -610,11 +610,11 @@ impl BgpMetrics {
     pub fn record_evpn_duplicate_mac_move(&self, vni: u32, mac: &str) {
         let vni = vni.to_string();
         self.evpn_duplicate_mac_moves
-            .with_label_values(&[&vni, mac])
+            .with_label_values(&[vni.as_str(), mac])
             .inc();
         let first_seen = self
             .evpn_duplicate_mac_first_move_timestamp
-            .with_label_values(&[&vni, mac]);
+            .with_label_values(&[vni.as_str(), mac]);
         if first_seen.get() == 0 {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)

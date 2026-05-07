@@ -361,7 +361,7 @@ impl RtrClient {
         let refresh_deadline = TokioInstant::now() + self.refresh_interval;
         let mut refresh_sleep = Box::pin(tokio::time::sleep_until(refresh_deadline));
         let has_expiry = self.data_expires_at.is_some();
-        let fallback_expiry = refresh_deadline + Duration::from_secs(365 * 24 * 60 * 60);
+        let fallback_expiry = refresh_deadline + Duration::from_hours(24 * 365);
         let mut expire_sleep = Box::pin(tokio::time::sleep_until(
             self.data_expires_at.unwrap_or(fallback_expiry),
         ));

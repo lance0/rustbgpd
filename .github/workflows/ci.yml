@@ -53,3 +53,31 @@ jobs:
             fi
             echo "wire bump + README touched — gate passed"
           fi
+
+  msrv:
+    # Build at the declared `rust-version` (`Cargo.toml`
+    # `[workspace.package] rust-version`).
+    #
+    # Without this, the `check` job above runs on `stable` and can
+    # quietly use newer rustc features that don't compile on MSRV.
+    # Interop then becomes the catch-net — slow (~5 min per failed
+    # Docker build × every M-tag) and only fires after PR merge if
+    # PR-CI didn't catch it. Pinning here surfaces MSRV breakage at
+    # PR time.
+    #
+    # Pinned literally to the Dockerfile's builder version
+    # (`rust:1.92-bookworm`) — keep them in lockstep when bumping.
+    # Bumping is a deliberate decision recorded in the diff of this
+    # file alongside `Cargo.toml` and `Dockerfile`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.92
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache key from the `check` job so MSRV builds don't
+          # share artifacts compiled by stable rustc.
+          key: msrv-1.92
+      - run: cargo check --workspace --all-targets
