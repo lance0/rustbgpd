@@ -1,12 +1,22 @@
 use crate::connection::Connection;
 use crate::error::CliError;
 use crate::output;
+use crate::proto::control_service_client::ControlServiceClient;
 use crate::proto::evpn_service_client::EvpnServiceClient;
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddEvpnRouteRequest, DeleteEvpnRouteRequest, ListEvpnInstancesRequest, ListEvpnRequest,
+    MetricsRequest,
 };
+
+const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
+    "evpn_local_originations_total",
+    "evpn_local_origination_errors_total",
+    "evpn_local_observations_dropped_total",
+    "evpn_duplicate_mac_moves_total",
+    "evpn_duplicate_mac_first_move_timestamp_seconds",
+];
 
 fn route_type_label(t: u32) -> &'static str {
     match t {
@@ -291,6 +301,113 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
     Ok(())
 }
 
+/// Read-only EVPN alpha health summary.
+pub async fn diagnose(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut evpn_client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let instances = evpn_client
+        .list_evpn_instances(ListEvpnInstancesRequest {})
+        .await?
+        .into_inner()
+        .instances;
+
+    let mut rib_client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let type2_routes = rib_client
+        .list_evpn_routes(ListEvpnRequest {
+            route_type_filter: 2,
+            peer_filter: String::new(),
+            rd_filter: String::new(),
+        })
+        .await?
+        .into_inner()
+        .routes;
+    let type3_routes = rib_client
+        .list_evpn_routes(ListEvpnRequest {
+            route_type_filter: 3,
+            peer_filter: String::new(),
+            rd_filter: String::new(),
+        })
+        .await?
+        .into_inner()
+        .routes;
+
+    let mut control_client =
+        ControlServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let metrics = control_client
+        .get_metrics(MetricsRequest {})
+        .await?
+        .into_inner()
+        .prometheus_text;
+    let key_metrics = extract_key_evpn_metric_lines(&metrics);
+
+    let originated_local_macs: u64 = instances
+        .iter()
+        .map(|i| i.originated_local_macs_count)
+        .sum();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "instance_count": instances.len(),
+                "originated_local_macs_count": originated_local_macs,
+                "type2_route_count": type2_routes.len(),
+                "type2_present": !type2_routes.is_empty(),
+                "type3_route_count": type3_routes.len(),
+                "type3_present": !type3_routes.is_empty(),
+                "key_metrics": key_metrics,
+            }))
+            .expect("failed to serialize EVPN diagnose output as JSON")
+        );
+    } else {
+        println!("EVPN diagnose");
+        println!("Instances: {}", instances.len());
+        println!("Originated local MACs: {originated_local_macs}");
+        println!(
+            "Type 2 routes: {} ({})",
+            type2_routes.len(),
+            if type2_routes.is_empty() {
+                "missing"
+            } else {
+                "present"
+            }
+        );
+        println!(
+            "Type 3 IMET routes: {} ({})",
+            type3_routes.len(),
+            if type3_routes.is_empty() {
+                "missing"
+            } else {
+                "present"
+            }
+        );
+        println!("Key EVPN metrics:");
+        if key_metrics.is_empty() {
+            println!("  none observed");
+        } else {
+            for line in key_metrics {
+                println!("  {line}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_key_evpn_metric_lines(prometheus_text: &str) -> Vec<String> {
+    prometheus_text
+        .lines()
+        .filter(|line| {
+            !line.starts_with('#')
+                && EVPN_DIAGNOSE_METRIC_PREFIXES
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     //! End-to-end integration tests for the EVPN VTEP foundation slice.
@@ -523,5 +640,39 @@ mod tests {
         super::list_instances(connection, false).await.unwrap();
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn diagnose_metric_filter_keeps_only_key_evpn_samples() {
+        let text = r#"
+# HELP evpn_local_originations_total help
+evpn_local_originations_total{action="inject"} 3
+bgp_messages_sent_total{peer="10.0.0.1",type="update"} 4
+evpn_duplicate_mac_first_move_timestamp_seconds{vni="100",mac="02:aa:bb:cc:dd:01"} 1778188000
+evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
+"#;
+
+        assert_eq!(
+            super::extract_key_evpn_metric_lines(text),
+            vec![
+                "evpn_local_originations_total{action=\"inject\"} 3",
+                "evpn_duplicate_mac_first_move_timestamp_seconds{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 1778188000",
+                "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 2",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnose_command_runs_against_real_mock_services() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::diagnose(connection, false).await.unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::diagnose(connection, true).await.unwrap();
     }
 }

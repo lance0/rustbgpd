@@ -282,15 +282,17 @@ cache itself has stale data.
 | `evpn_local_observations_dropped_total{reason="channel_full"}` | Kernel local-MAC observations classified by the netlink notify loop but dropped because the originator channel was full |
 | `evpn_local_observations_dropped_total{reason="channel_closed"}` | Kernel local-MAC observations classified by the netlink notify loop after the originator receiver was gone |
 | `evpn_duplicate_mac_moves_total{vni,mac}` | Cross-VTEP MAC mobility contention events detected by the local originator; detection only, no quarantine action yet |
+| `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` | Unix timestamp of the first observed duplicate-MAC / mobility contention event for that key |
 
 During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
 should follow the `bridge fdb add` / `bridge fdb del` cadence. Any non-zero
 observation-drop counter means the kernel event reached the notify loop but
 not the originator; any non-zero origination-error counter means the
 observation reached the originator but did not complete at the RIB boundary.
-`evpn_duplicate_mac_moves_total` is intentionally per `(VNI, MAC)`;
-alert on repeated increments for the same key rather than on one-off
-mobility during planned host moves.
+`evpn_duplicate_mac_moves_total` and
+`evpn_duplicate_mac_first_move_timestamp_seconds` are intentionally per
+`(VNI, MAC)`; alert on repeated increments within a short window rather
+than on one-off mobility during planned host moves.
 `rustbgpctl evpn instances` also reports `originated-local-macs=N` per
 instance, and `rustbgpctl evpn instances --json` exposes the same value as
 `originated_local_macs_count`.
@@ -565,7 +567,7 @@ session machinery:
 > MAC-with-IP origination via ARP/ND suppression (Gate 7b+2),
 > `advertise_svi_mac` consumption, DF execution + multi-homing
 > (Gate 8), IRB / L3VNI (Gate 9). See
-> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder
+> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
 > alpha-confidence checklist, and
 > [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) for
@@ -592,6 +594,7 @@ rustbgpctl evpn                             # all EVPN routes
 rustbgpctl evpn --route-type 2              # MAC/IP only
 rustbgpctl evpn --rd 65000:100              # filter by RD
 rustbgpctl evpn --peer 10.0.1.1             # filter by source peer
+rustbgpctl evpn diagnose                    # alpha VTEP summary
 ```
 
 `tunnel_type=8` in the output indicates the RFC 8365 VXLAN

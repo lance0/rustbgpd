@@ -44,9 +44,10 @@ none of them block v0.15.0 release on their own.
 - [ ] **24 h soak** of M37 with a synthetic MAC churn driver
   (`bridge fdb add` + `bridge fdb del` at ~10 Hz on a few thousand
   MACs). The local-only driver now lives at
-  `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`;
-  the remaining work is to run it long enough to confirm RSS slope
-  stays flat under the originator's
+  `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`.
+  Use `--smoke` for a one-round, five-MAC pre-release check; the
+  remaining work is to run the full driver long enough to confirm RSS
+  slope stays flat under the originator's
   `BTreeMap<MacAddress, LocalMacOriginationState>` retention model
   (entries are kept after Aged so the seq ratchet survives — we want
   to verify that doesn't compound badly under heavy churn).
@@ -73,10 +74,11 @@ none of them block v0.15.0 release on their own.
   independently.
 - [ ] **RFC 7432 §15.1 duplicate-MAC quarantine** (M=180 s, N=5
   moves). ADR-0055 §9 defers the action; the detection-only
-  `evpn_duplicate_mac_moves_total{vni,mac}` counter has landed so
-  operators can see repeated contention for a key. Still ahead:
-  first-move timestamp / window state, quarantine action, and the
-  operator-facing escalation channel.
+  `evpn_duplicate_mac_moves_total{vni,mac}` counter and
+  `evpn_duplicate_mac_first_move_timestamp_seconds{vni,mac}` gauge
+  have landed so operators can see repeated contention for a key and
+  when its current observation window began. Still ahead: quarantine
+  action and the operator-facing escalation channel.
 - [ ] **Static / sticky MAC anti-spoof config schema.** Wire codec
   for the sticky bit is plumbed; the operator-facing knob isn't.
   ADR-0055 §8. Schema question: per-MAC list on `EvpnInstance`,

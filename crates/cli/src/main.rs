@@ -394,6 +394,8 @@ enum EvpnAction {
     /// List local EVPN instances configured on this VTEP. Empty when
     /// the daemon is acting purely as an EVPN route reflector.
     Instances,
+    /// Summarize EVPN VTEP alpha state and key metrics.
+    Diagnose,
 }
 
 fn resolve_family(family: &Option<String>) -> Result<Option<i32>, CliError> {
@@ -739,6 +741,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 ip,
             }) => commands::evpn::delete_imet(connection, rd, ethernet_tag, ip, json).await,
             Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
+            Some(EvpnAction::Diagnose) => commands::evpn::diagnose(connection, json).await,
         },
 
         Command::Flowspec { action, family } => {
@@ -902,6 +905,18 @@ mod tests {
         } else {
             panic!("expected Rib Advertised explain command");
         }
+    }
+
+    #[test]
+    fn test_parse_evpn_diagnose() {
+        let cli = Cli::try_parse_from(["rustbgpctl", "evpn", "diagnose"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Evpn {
+                action: Some(EvpnAction::Diagnose),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -11,8 +11,28 @@
 #   sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
 #   M37_CHURN_MACS=1000 M37_CHURN_ROUNDS=60 \
 #     bash tests/interop/scripts/test-m37-evpn-local-origination-churn.sh
+#   bash tests/interop/scripts/test-m37-evpn-local-origination-churn.sh --smoke
 
 set -euo pipefail
+
+SMOKE=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --smoke)
+            SMOKE=1
+            shift
+            ;;
+        -h|--help)
+            sed -n '1,14p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            echo "Usage: $0 [--smoke]" >&2
+            exit 2
+            ;;
+    esac
+done
 
 TOPO="m37-evpn-local-origination"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -24,9 +44,18 @@ CONSUMER="clab-${TOPO}-consumer"
 RUSTBGPD_IP="10.0.0.1"
 VNI="${M37_CHURN_VNI:-100}"
 VETH_PORT="veth${VNI}a"
-MACS="${M37_CHURN_MACS:-250}"
-ROUNDS="${M37_CHURN_ROUNDS:-10}"
-SETTLE_SECONDS="${M37_CHURN_SETTLE_SECONDS:-3}"
+if [ "$SMOKE" = "1" ]; then
+    DEFAULT_MACS=5
+    DEFAULT_ROUNDS=1
+    DEFAULT_SETTLE_SECONDS=1
+else
+    DEFAULT_MACS=250
+    DEFAULT_ROUNDS=10
+    DEFAULT_SETTLE_SECONDS=3
+fi
+MACS="${M37_CHURN_MACS:-$DEFAULT_MACS}"
+ROUNDS="${M37_CHURN_ROUNDS:-$DEFAULT_ROUNDS}"
+SETTLE_SECONDS="${M37_CHURN_SETTLE_SECONDS:-$DEFAULT_SETTLE_SECONDS}"
 VERIFY_SAMPLES="${M37_CHURN_VERIFY_SAMPLES:-1}"
 
 format_mac() {
@@ -92,7 +121,11 @@ emit_metrics_snapshot() {
 log "Waiting for M37 L2VPN/EVPN session before churn..."
 wait_frr_established "$CONSUMER" "$RUSTBGPD_IP" "L2VPN/EVPN" || true
 
-log "Starting M37 churn: VNI=$VNI port=$VETH_PORT macs=$MACS rounds=$ROUNDS settle=${SETTLE_SECONDS}s"
+if [ "$SMOKE" = "1" ]; then
+    log "Starting M37 one-shot churn smoke: VNI=$VNI port=$VETH_PORT macs=$MACS rounds=$ROUNDS settle=${SETTLE_SECONDS}s"
+else
+    log "Starting M37 churn: VNI=$VNI port=$VETH_PORT macs=$MACS rounds=$ROUNDS settle=${SETTLE_SECONDS}s"
+fi
 
 for round in $(seq 1 "$ROUNDS"); do
     log "Round $round/$ROUNDS: add $MACS local MACs"

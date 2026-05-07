@@ -13,6 +13,7 @@ use tonic::{Request, Response, Status};
 
 use rustbgpd_api::proto as server_proto;
 use rustbgpd_api::proto::control_service_server::ControlServiceServer;
+use rustbgpd_api::proto::evpn_service_server::EvpnServiceServer;
 use rustbgpd_api::proto::global_service_server::GlobalServiceServer;
 use rustbgpd_api::proto::neighbor_service_server::NeighborServiceServer;
 use rustbgpd_api::proto::rib_service_server::RibServiceServer;
@@ -88,6 +89,7 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
     let rib = MockRibService {
         state: Arc::clone(&state),
     };
+    let evpn = MockEvpnService;
 
     tokio::spawn(async move {
         Server::builder()
@@ -104,6 +106,10 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
                 interceptor.clone(),
             ))
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
+            .add_service(EvpnServiceServer::with_interceptor(
+                evpn,
+                interceptor.clone(),
+            ))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                 let _ = shutdown_rx.await;
             })
@@ -144,6 +150,7 @@ pub(crate) async fn spawn_mock_uds_server(
     let rib = MockRibService {
         state: Arc::clone(&state),
     };
+    let evpn = MockEvpnService;
 
     tokio::spawn(async move {
         Server::builder()
@@ -160,6 +167,10 @@ pub(crate) async fn spawn_mock_uds_server(
                 interceptor.clone(),
             ))
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
+            .add_service(EvpnServiceServer::with_interceptor(
+                evpn,
+                interceptor.clone(),
+            ))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
                 let _ = shutdown_rx.await;
             })
@@ -225,7 +236,11 @@ impl rustbgpd_api::proto::control_service_server::ControlService for MockControl
         _request: Request<server_proto::MetricsRequest>,
     ) -> Result<Response<server_proto::MetricsResponse>, Status> {
         Ok(Response::new(server_proto::MetricsResponse {
-            prometheus_text: "# HELP test 1\n".to_string(),
+            prometheus_text: r#"# HELP test 1
+evpn_local_originations_total{action="inject"} 1
+evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
+"#
+            .to_string(),
         }))
     }
 
@@ -369,6 +384,28 @@ struct MockRibService {
     state: Arc<MockState>,
 }
 
+struct MockEvpnService;
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
+    async fn list_evpn_instances(
+        &self,
+        _request: Request<server_proto::ListEvpnInstancesRequest>,
+    ) -> Result<Response<server_proto::ListEvpnInstancesResponse>, Status> {
+        Ok(Response::new(server_proto::ListEvpnInstancesResponse {
+            instances: vec![server_proto::EvpnInstanceState {
+                vni: 100,
+                rd: "65000:100".to_string(),
+                route_targets: vec!["65000:100".to_string()],
+                local_vtep_ip: "10.0.0.1".to_string(),
+                bridge: "br100".to_string(),
+                advertise_svi_mac: false,
+                originated_local_macs_count: 2,
+            }],
+        }))
+    }
+}
+
 #[tonic::async_trait]
 impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
     type WatchRoutesStream =
@@ -473,10 +510,45 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
 
     async fn list_evpn_routes(
         &self,
-        _request: Request<server_proto::ListEvpnRequest>,
+        request: Request<server_proto::ListEvpnRequest>,
     ) -> Result<Response<server_proto::ListEvpnResponse>, Status> {
-        Ok(Response::new(server_proto::ListEvpnResponse {
-            routes: vec![],
-        }))
+        let filter = request.into_inner().route_type_filter;
+        let mut routes = Vec::new();
+        if filter == 0 || filter == 2 {
+            routes.push(mock_evpn_route(2));
+        }
+        if filter == 0 || filter == 3 {
+            routes.push(mock_evpn_route(3));
+        }
+        Ok(Response::new(server_proto::ListEvpnResponse { routes }))
+    }
+}
+
+fn mock_evpn_route(route_type: u32) -> server_proto::EvpnRouteEntry {
+    server_proto::EvpnRouteEntry {
+        route_type,
+        rd: "65000:100".to_string(),
+        esi: String::new(),
+        ethernet_tag: "0".to_string(),
+        mac: if route_type == 2 {
+            "02:aa:bb:cc:dd:01".to_string()
+        } else {
+            String::new()
+        },
+        ip: if route_type == 3 {
+            "10.0.0.1".to_string()
+        } else {
+            String::new()
+        },
+        prefix: String::new(),
+        gateway: String::new(),
+        label: 100,
+        label2: 0,
+        next_hop: "10.0.0.1".to_string(),
+        peer_address: "10.0.0.2".to_string(),
+        as_path: vec![],
+        communities: vec![],
+        extended_communities: vec![],
+        tunnel_type: 8,
     }
 }

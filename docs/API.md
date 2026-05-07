@@ -683,6 +683,7 @@ Or via CLI:
 ```bash
 rustbgpctl evpn instances           # human format
 rustbgpctl evpn instances --json    # JSON output
+rustbgpctl evpn diagnose            # instance / Type 2 / Type 3 / metric summary
 ```
 
 The human CLI includes `originated-local-macs=N` per instance. JSON and

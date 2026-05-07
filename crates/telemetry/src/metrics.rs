@@ -1,5 +1,7 @@
 //! Prometheus metrics for session, RIB, policy, EVPN, GR, and RPKI counters/gauges.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 
 /// Prometheus metrics for the BGP daemon.
@@ -59,6 +61,7 @@ pub struct BgpMetrics {
     evpn_local_origination_errors: IntCounterVec,
     evpn_local_observations_dropped: IntCounterVec,
     evpn_duplicate_mac_moves: IntCounterVec,
+    evpn_duplicate_mac_first_move_timestamp: IntGaugeVec,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -288,6 +291,15 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_duplicate_mac_first_move_timestamp = IntGaugeVec::new(
+            Opts::new(
+                "evpn_duplicate_mac_first_move_timestamp_seconds",
+                "Unix timestamp of the first EVPN MAC mobility contention event observed for a VNI and MAC",
+            ),
+            &["vni", "mac"],
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -394,6 +406,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_duplicate_mac_moves.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_duplicate_mac_first_move_timestamp.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -431,6 +446,7 @@ impl BgpMetrics {
             evpn_local_origination_errors,
             evpn_local_observations_dropped,
             evpn_duplicate_mac_moves,
+            evpn_duplicate_mac_first_move_timestamp,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -592,9 +608,19 @@ impl BgpMetrics {
     /// Record a detected EVPN duplicate-MAC / mobility contention
     /// event for one `(VNI, MAC)`.
     pub fn record_evpn_duplicate_mac_move(&self, vni: u32, mac: &str) {
+        let vni = vni.to_string();
         self.evpn_duplicate_mac_moves
-            .with_label_values(&[&vni.to_string(), mac])
+            .with_label_values(&[&vni, mac])
             .inc();
+        let first_seen = self
+            .evpn_duplicate_mac_first_move_timestamp
+            .with_label_values(&[&vni, mac]);
+        if first_seen.get() == 0 {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+            first_seen.set(now);
+        }
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
@@ -834,6 +860,11 @@ mod tests {
         m.record_evpn_local_observation_drop("channel_full");
         m.record_evpn_local_observation_drop("channel_closed");
         m.record_evpn_duplicate_mac_move(100, "02:aa:bb:cc:dd:01");
+        let first_move_timestamp = m
+            .evpn_duplicate_mac_first_move_timestamp
+            .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
+            .get();
+        m.record_evpn_duplicate_mac_move(100, "02:aa:bb:cc:dd:01");
 
         assert_eq!(
             m.evpn_local_originations
@@ -875,7 +906,18 @@ mod tests {
             m.evpn_duplicate_mac_moves
                 .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
                 .get(),
-            1
+            2
+        );
+        assert!(
+            first_move_timestamp > 0,
+            "first move timestamp should be set"
+        );
+        assert_eq!(
+            m.evpn_duplicate_mac_first_move_timestamp
+                .with_label_values(&["100", "02:aa:bb:cc:dd:01"])
+                .get(),
+            first_move_timestamp,
+            "first move timestamp should not change on later moves"
         );
 
         let text = gather_text(&m);
@@ -889,9 +931,16 @@ mod tests {
         );
         assert!(
             text.contains(
-                "evpn_duplicate_mac_moves_total{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"} 1"
+                "evpn_duplicate_mac_moves_total{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"} 2"
             ) || text.contains(
-                "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 1"
+                "evpn_duplicate_mac_moves_total{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"} 2"
+            )
+        );
+        assert!(
+            text.contains(
+                "evpn_duplicate_mac_first_move_timestamp_seconds{mac=\"02:aa:bb:cc:dd:01\",vni=\"100\"}"
+            ) || text.contains(
+                "evpn_duplicate_mac_first_move_timestamp_seconds{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"}"
             )
         );
     }

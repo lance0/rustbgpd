@@ -1,13 +1,9 @@
-# EVPN VTEP — Phase 2 foundation slice
+# EVPN VTEP — Phase 2 alpha leaf
 #
-# This example shows the *declarative* local EVPN state a leaf-mode
-# rustbgpd will eventually consume to originate Type 2/3/5 routes and
-# reconcile against the Linux kernel's VXLAN dataplane.
-#
-# Today's slice is the model only — no MAC learning, no kernel FDB
-# integration, no origination. The `[[evpn_instances]]` blocks parse
-# and validate; `rustbgpctl evpn instances` lists what's installed; the
-# next phase wires that table to the kernel.
+# This example shows the local EVPN state a leaf-mode rustbgpd consumes
+# for the Gate 7b/7b+1 bidirectional VTEP alpha path: received Type 2
+# routes program Linux bridge/VXLAN FDB entries, kernel-learned local
+# MACs originate Type 2 routes, and one Type 3 IMET is emitted per L2VNI.
 #
 # Compare with `examples/rr-evpn-fabric/config.toml` — that example has
 # *no* `[[evpn_instances]]` block. The route reflector role is
@@ -49,8 +45,8 @@ families = ["l2vpn_evpn"]
 # Optional:
 #   - bridge              : Linux bridge name to bind this EVI to
 #   - advertise_svi_mac   : originate Type 2 for the SVI's own MAC (RFC 9135)
-#                          (recognized today; wired through to origination
-#                           in a follow-on phase)
+#                          (recognized today; default-gateway/SVI-MAC
+#                           origination remains a follow-on phase)
 
 [[evpn_instances]]
 vni = 10100

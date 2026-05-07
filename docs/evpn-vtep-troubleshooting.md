@@ -31,6 +31,8 @@ Expected signals:
   `dst` pointing at the remote VTEP IP.
 - Prometheus shows flat `evpn_local_origination_errors_total` and
   `evpn_local_observations_dropped_total` counters during steady state.
+- `rustbgpctl evpn diagnose` summarizes instance count, Type 2/3 route
+  presence, and the key EVPN metrics from one command.
 
 ## Local MAC learned, but no Type 2 appears
 
@@ -104,7 +106,9 @@ Expected signals:
    Gate 7b requires an existing bridge, exactly one VXLAN port under the
    bridge, matching VNI, matching local VTEP IP, VXLAN learning disabled,
    and no VLAN-aware bridge mode. rustbgpd does not create bridge/VXLAN
-   netdevs in this gate.
+   netdevs in this gate. See
+   [`examples/evpn-vtep-leaf/README.md`](../examples/evpn-vtep-leaf/README.md)
+   for exact `ip link` pre-create commands.
 
 3. Confirm permissions:
 
@@ -155,12 +159,15 @@ detection:
 
 ```bash
 curl -s http://127.0.0.1:9179/metrics \
-  | grep evpn_duplicate_mac_moves_total
+  | grep -E 'evpn_duplicate_mac_(moves_total|first_move_timestamp_seconds)'
 ```
 
 Repeated increments for the same `(vni, mac)` indicate cross-VTEP
 contention and should be investigated as a loop, spoof, or host mobility
-event. One-off increments can be normal during planned host moves.
+event. The timestamp metric records the first observed contention for
+that key so a later RFC 7432 M/N quarantine window can be implemented
+without changing metric shape. One-off increments can be normal during
+planned host moves.
 
 ## Local smoke
 
@@ -176,6 +183,8 @@ sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml
 For churn, run the M37 topology and then use the local-only churn driver:
 
 ```bash
+bash tests/interop/scripts/test-m37-evpn-local-origination-churn.sh --smoke
+
 M37_CHURN_MACS=1000 M37_CHURN_ROUNDS=60 \
   bash tests/interop/scripts/test-m37-evpn-local-origination-churn.sh
 ```
