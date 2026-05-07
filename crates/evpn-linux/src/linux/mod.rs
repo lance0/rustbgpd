@@ -33,9 +33,14 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
+use netlink_packet_core::NetlinkPayload;
+use netlink_packet_route::RouteNetlinkMessage;
+use netlink_sys::AsyncSocket;
 use rtnetlink::Handle;
-use rustbgpd_evpn::EvpnInstanceTable;
-use tokio::sync::Mutex;
+use rustbgpd_evpn::{EvpnInstanceTable, LocalMacObservation};
+use tokio::sync::{Mutex, mpsc};
+use tracing::warn;
 
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::error::DataplaneError;
@@ -43,6 +48,7 @@ use crate::snapshot::{InstanceProbes, KernelSnapshot};
 
 mod fdb;
 mod links;
+mod notify;
 mod probe;
 
 /// Linux-only dataplane impl backed by `rtnetlink`.
@@ -59,6 +65,12 @@ pub struct LinuxDataplane {
     /// `dump_snapshot` both write here from the same actor task — the lock
     /// makes future concurrency easy if the actor ever splits.
     link_cache: Arc<Mutex<links::LinkCache>>,
+    /// Upward `LocalMacObservation` channel receiver, taken once via
+    /// [`Dataplane::take_local_mac_rx`] and handed to the daemon's
+    /// originator. `Some` while the dataplane owns it; `None` after
+    /// the daemon takes ownership. The matching sender is held by the
+    /// background notify task spawned in [`Self::connect`].
+    local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
 }
 
 impl LinuxDataplane {
@@ -71,18 +83,123 @@ impl LinuxDataplane {
     /// # Errors
     /// Returns [`DataplaneError::Io`] if `rtnetlink::new_connection`
     /// fails.
-    pub fn connect() -> Result<Self, DataplaneError> {
-        let (connection, handle, _messages) =
+    pub async fn connect() -> Result<Self, DataplaneError> {
+        let (mut connection, handle, messages) =
             rtnetlink::new_connection().map_err(DataplaneError::Io)?;
+
+        // Subscribe to RTNLGRP_NEIGH on the same socket that carries
+        // our solicited dump/program traffic. `add_membership` is a
+        // synchronous setsockopt call, so it must happen before we
+        // hand the connection to the runtime via `tokio::spawn`.
+        // Failure here is logged but non-fatal — the dataplane still
+        // works for downward FDB programming, just without a
+        // local-MAC observation feed.
+        if let Err(e) = connection
+            .socket_mut()
+            .socket_mut()
+            .add_membership(notify::RTNLGRP_NEIGH)
+        {
+            warn!(
+                error = %e,
+                "could not subscribe to RTNLGRP_NEIGH; local-MAC observations will be silent"
+            );
+        }
+
         // Spawn the netlink connection driver. rtnetlink's design has
         // the connection task read/write the netlink socket while the
         // Handle issues commands; both must run for any request to
         // make progress.
         tokio::spawn(connection);
+
+        let link_cache: Arc<Mutex<links::LinkCache>> =
+            Arc::new(Mutex::new(links::LinkCache::default()));
+
+        // Prime the link cache with one synchronous dump_links pass
+        // BEFORE spawning the notify loop. The notify classifier
+        // resolves a bridge-port ifindex to a VNI via
+        // `LinkCache::bridge_port_to_vni`; if the cache is empty when
+        // an early RTM_NEWNEIGH arrives (which it is, by default —
+        // the supervisor's polling cycle is what would normally
+        // populate it), the event drops silently. A startup-time
+        // dump closes the race.
+        //
+        // **Bounded with a 2 s timeout**: this runs on the daemon's
+        // startup critical path before gRPC, listener, peers, etc.,
+        // so a stuck rtnetlink dump must not wedge the whole boot.
+        // The prime is best-effort — the supervisor's periodic dump
+        // will repopulate the cache within 5 s of the timeout, so
+        // the worst case is a brief window where early local-MAC
+        // events miss-and-drop.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            links::dump_links(&handle),
+        )
+        .await
+        {
+            Ok(Ok(cache)) => {
+                *link_cache.lock().await = cache;
+                tracing::debug!("primed link cache for RTNLGRP_NEIGH classifier");
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    error = %e,
+                    "initial link cache prime failed; early local-MAC events may drop until supervisor's first dump"
+                );
+            }
+            Err(_) => {
+                warn!(
+                    "initial link cache prime timed out after 2s; continuing startup — \
+                     supervisor's periodic dump will populate the cache shortly"
+                );
+            }
+        }
+
+        // 1024-slot upward channel — matches the bound the daemon
+        // originator advertises in its module docs. Overflow is
+        // treated as harmless drop because the level-triggered
+        // reconcile model recovers via the periodic dump cadence.
+        let (local_mac_tx, local_mac_rx) = mpsc::channel(1024);
+        let cache_for_notify = Arc::clone(&link_cache);
+        tokio::spawn(notify_loop(messages, cache_for_notify, local_mac_tx));
+
         Ok(Self {
             handle,
-            link_cache: Arc::new(Mutex::new(links::LinkCache::default())),
+            link_cache,
+            local_mac_rx: Some(local_mac_rx),
         })
+    }
+}
+
+/// Drain the unsolicited multicast message stream and forward
+/// classified observations to the daemon. Exits when the upstream
+/// connection task closes the stream.
+async fn notify_loop(
+    mut messages: futures::channel::mpsc::UnboundedReceiver<(
+        netlink_packet_core::NetlinkMessage<RouteNetlinkMessage>,
+        netlink_sys::SocketAddr,
+    )>,
+    link_cache: Arc<Mutex<links::LinkCache>>,
+    local_mac_tx: mpsc::Sender<LocalMacObservation>,
+) {
+    while let Some((msg, _src)) = messages.next().await {
+        let NetlinkPayload::InnerMessage(payload) = msg.payload else {
+            continue;
+        };
+        let (kind, neigh) = match payload {
+            RouteNetlinkMessage::NewNeighbour(n) => (notify::NeighEventKind::New, n),
+            RouteNetlinkMessage::DelNeighbour(n) => (notify::NeighEventKind::Del, n),
+            _ => continue,
+        };
+        let cache = link_cache.lock().await.clone();
+        let Some(obs) = notify::classify_neigh(kind, &neigh, &cache) else {
+            continue;
+        };
+        if local_mac_tx.try_send(obs).is_err() {
+            // Receiver dropped or buffer full. The level-triggered
+            // reconcile model means the next periodic dump rebuilds
+            // the originator's view, so dropping here is harmless.
+            warn!("local-MAC observation buffer full or originator gone; dropped event");
+        }
     }
 }
 
@@ -154,11 +271,18 @@ impl Dataplane for LinuxDataplane {
     }
 
     fn next_event(&mut self) -> impl Future<Output = Option<KernelEvent>> + Send {
-        // ADR-0054 §6 makes events optional — the reconcile actor
-        // falls back to its periodic-dump cadence when this branch
-        // doesn't fire. RTNLGRP_NEIGH / RTNLGRP_LINK subscription is
-        // a follow-up; the level-triggered design tolerates the gap.
+        // RTNLGRP_LINK subscription is still a follow-up; we surface
+        // RTNLGRP_NEIGH messages through the dedicated `LocalMacObservation`
+        // channel rather than this `next_event` flow (see ADR-0054 §1's
+        // "narrow upward interface" rationale). The reconcile actor
+        // therefore relies on its 60s periodic dump cadence to catch
+        // link / FDB drift — the level-triggered design tolerates this
+        // gap.
         std::future::pending()
+    }
+
+    fn take_local_mac_rx(&mut self) -> Option<mpsc::Receiver<LocalMacObservation>> {
+        self.local_mac_rx.take()
     }
 }
 
@@ -173,7 +297,7 @@ mod tests {
     /// catches.
     #[tokio::test]
     async fn connect_returns_ok_or_err_does_not_panic() {
-        match LinuxDataplane::connect() {
+        match LinuxDataplane::connect().await {
             Ok(_dp) => {
                 // Got a netlink socket — connection task spawned.
                 // Don't actually issue requests in PR-CI because

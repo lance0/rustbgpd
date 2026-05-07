@@ -53,6 +53,9 @@ pub mod notification;
 pub mod notification_msg;
 /// OPEN message struct and codec.
 pub mod open;
+/// PMSI Tunnel path attribute (RFC 6514 §5) — used by EVPN Type 3 IMET
+/// for ingress-replication BUM.
+pub mod pmsi;
 /// ROUTE-REFRESH message struct and codec (RFC 2918 / RFC 7313).
 pub mod route_refresh;
 /// UPDATE message struct, codec, and builder.
@@ -163,6 +166,7 @@ pub use attribute::{
     PathAttribute, RawAttribute, is_private_asn,
 };
 pub use nlri::{Ipv4NlriEntry, Ipv4Prefix, Ipv6Prefix, NlriEntry, Prefix};
+pub use pmsi::{PmsiTunnel, PmsiTunnelIdentifier, PmsiTunnelType};
 pub use update::ParsedUpdate;
 pub use validate::{UpdateError, is_valid_ipv6_nexthop};
 

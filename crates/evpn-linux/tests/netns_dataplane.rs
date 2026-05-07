@@ -190,7 +190,9 @@ async fn linux_dataplane_programs_remote_mac_with_extern_learn() {
     }
 
     // ── inner: actually open netlink and program FDB. ──
-    let mut dp = LinuxDataplane::connect().expect("netlink connect inside netns");
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
 
     // Build an EvpnInstanceTable matching the topology we created
     // and run probe() first. probe() refreshes the LinuxDataplane's

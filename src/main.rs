@@ -20,6 +20,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod config;
 mod config_persister;
 mod evpn_dataplane;
+mod evpn_imet;
+mod evpn_originator;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -1028,12 +1030,45 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // into the coordinated shutdown block at the bottom of main where
     // we await its bounded drain.
     let evpn_dataplane_shutdown = tokio_util::sync::CancellationToken::new();
-    let evpn_dataplane_handle = evpn_dataplane::spawn(
+    let mut evpn_dataplane_handle = evpn_dataplane::spawn(
         evpn_dataplane::SupervisorConfig::default(),
         &evpn_instances,
         rib_tx.clone(),
         evpn_dataplane_shutdown.clone(),
-    );
+    )
+    .await;
+
+    // EVPN local-MAC originator (Gate 7b+1). Spawned alongside the
+    // dataplane supervisor under the same `[[evpn_instances]]` gate.
+    // Consumes the upward `LocalMacObservation` channel surfaced by
+    // the dataplane (Phase D); kernel-learned MACs become BGP EVPN
+    // Type 2 originations per RFC 7432 §15.1. RR-only deployments
+    // skip this entirely — `evpn_dataplane::spawn` returned `None`
+    // and `local_mac_rx` is therefore `None`.
+    let evpn_originator_shutdown = tokio_util::sync::CancellationToken::new();
+    let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {
+        evpn_originator::spawn(
+            evpn_originator::OriginatorConfig::default(),
+            &evpn_instances,
+            rib_tx.clone(),
+            handle.local_mac_rx.take(),
+            evpn_originator_shutdown.clone(),
+        )
+    } else {
+        None
+    };
+
+    // EVPN Type 3 IMET origination (Gate 7b+1 phase F). One Type 3
+    // per L2VNI announcing this VTEP's BGP-level VNI membership; not
+    // conditioned on kernel readiness. Originated at startup, with
+    // the keys retained for shutdown-time withdraw. RR-only paths
+    // (empty `evpn_instances`) skip origination entirely — IMET
+    // requires a VTEP IP, which an RR doesn't have.
+    let evpn_imet_keys: Vec<rustbgpd_wire::EvpnRouteKey> = if evpn_instances.is_empty() {
+        Vec::new()
+    } else {
+        evpn_imet::originate_all(evpn_instances.iter().cloned().collect::<Vec<_>>(), &rib_tx).await
+    };
 
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
@@ -1295,6 +1330,34 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             "failed to clear GR restart marker"
         );
     }
+    // 1.9a Drain the EVPN local-MAC originator first — BEFORE the
+    // peer manager shutdown — so its Type 2 Withdraws ride the still-
+    // open BGP sessions to peers. `RibUpdate::WithdrawEvpn` recomputes
+    // and stages outbound updates before replying, so the transport
+    // path picks them up if (and only if) the peer sessions are still
+    // alive. Doing this after `PeerManagerCommand::Shutdown` would
+    // leave peers with stale Type 2 routes on their LocRib until our
+    // hold-timer expired on their side.
+    //
+    // Bounded 5 s drain — the originator's `drain_to_withdraws`
+    // emits one Withdraw per still-advertised MAC.
+    if let Some(handle) = evpn_originator_handle {
+        info!("draining EVPN originator");
+        handle.shutdown().await;
+    }
+
+    // 1.9b Withdraw the Type 3 IMET routes we originated at startup
+    // so peers cleanly remove us from their ingress-replication
+    // lists. Same ordering rationale as the Type 2 drain — must land
+    // before peer sessions tear down.
+    if !evpn_imet_keys.is_empty() {
+        info!(
+            count = evpn_imet_keys.len(),
+            "withdrawing EVPN Type 3 IMET routes"
+        );
+        evpn_imet::withdraw_all(evpn_imet_keys, &rib_tx).await;
+    }
+
     let _ = peer_mgr_tx.send(PeerManagerCommand::Shutdown).await;
 
     // 2. Wait for PeerManager to finish draining all peers
@@ -1307,6 +1370,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // 5 s drain (ADR-0054 §7) and exits; foreign entries
     // (kernel-learned local MACs, operator-static FDB entries) are
     // structurally untouched by the diff loop and survive the drain.
+    // This runs after the peer manager because the kernel-side FDB
+    // teardown does not need an active BGP session.
     if let Some(handle) = evpn_dataplane_handle {
         info!("draining EVPN dataplane");
         handle.shutdown().await;

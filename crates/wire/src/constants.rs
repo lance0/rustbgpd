@@ -109,6 +109,9 @@ pub mod attr_type {
     pub const MP_REACH_NLRI: u8 = 14;
     /// RFC 4760: `MP_UNREACH_NLRI`.
     pub const MP_UNREACH_NLRI: u8 = 15;
+    /// RFC 6514 §5: PMSI Tunnel attribute (used by EVPN Type 3 IMET
+    /// for ingress-replication BUM).
+    pub const PMSI_TUNNEL: u8 = 22;
 }
 
 /// Path attribute flag bits (RFC 4271 §4.3).

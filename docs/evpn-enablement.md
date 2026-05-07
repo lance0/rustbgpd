@@ -28,9 +28,15 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   what gets exercised, not a third-party daemon's. The
   "production-ready RR at 10k+ MAC scale, SDN-integratable" bundle
   is now complete.
-- **Gates 7-9** expand into VTEP / active-active multi-homing
-  execution / IRB. Big investments gated by market demand, not
-  technical readiness.
+- **Gate 7a** (declarative EVI/VNI domain) and **Gate 7b**
+  (downward FDB program reconciler) shipped in v0.13.x and v0.14.0.
+  **Gate 7b+1** (upward Type 2 origination from kernel local-MAC
+  observations + Type 3 IMET per L2VNI + RTNLGRP_NEIGH subscription)
+  on `feat/evpn-local-origination`, target v0.15.0 — closes the
+  bidirectional VTEP loop.
+- **Gates 8-9** expand into active-active multi-homing execution /
+  IRB. Big investments gated by market demand, not technical
+  readiness.
 
 ## Current Position
 
@@ -347,7 +353,10 @@ later phases consume:
 
 #### Gate 7b — Kernel reconciliation + origination
 
-Status: foundation landed in v0.14.0 (PR #34) · Blockers: Gate 7a (closed)
+Status: bidirectional VTEP — Gate 7b (foundation, downward FDB
+program) shipped in v0.14.0; Gate 7b+1 (upward Type 2 / Type 3
+origination + RTNLGRP_NEIGH subscription) on
+`feat/evpn-local-origination`, target v0.15.0 · Blockers: Gate 7a (closed)
 
 Why gated on demand: SONiC/FRR leaves do this well today. Rustbgpd
 competing with FRR for the VTEP role is a meaningful strategic expansion,
@@ -375,25 +384,35 @@ not a tactical feature. Only worth it if there's a specific use case
 | M36 containerlab smoke: rustbgpd-as-VTEP + FRR-as-originator (iBGP, AS 65000); verifies bridge-master row + VXLAN-self+dst row both carry `extern_learn`, foreign-static survives, withdraw cleans up. 8/8 PASS. | `tests/interop/scripts/test-m36-evpn-vtep-smoke.sh` | landed (PR #34) |
 | Privileged netns dataplane test (gated on `EVPN_LINUX_NETNS=1`, runs nightly outside PR-CI) | `crates/evpn-linux/tests/netns_dataplane.rs` | landed (PR #34) |
 
-`RTNLGRP_NEIGH` / `RTNLGRP_LINK` subscription is explicitly deferred —
-the level-triggered reconcile design tolerates the gap because the
-60 s periodic dump structurally repairs drift; subscriptions are a
-latency optimization, not a correctness requirement.
+**Origination loop (Gate 7b+1, on `feat/evpn-local-origination`):**
 
-**Still ahead in Gate 7b:**
+ADR-0055 locks the boundary; the implementation closes the upward
+flow that Gate 7b's foundation left as a stub.
+
+| Task | File / location | Status |
+|------|----------------|--------|
+| `LocalMacOriginator` state machine — pure RFC 7432 §15.1 sequencer with proptest-style monotonic-ratchet invariant | `crates/evpn/src/origination.rs` | landed |
+| PMSI Tunnel path attribute (RFC 6514 §5, type 22) — decoder, encoder, `for_evpn_ingress_replication` constructor | `crates/wire/src/pmsi.rs` | landed |
+| `EvpnOriginator` daemon actor — `tokio::select!` over local-MAC channel + RIB poll + shutdown-drain; emits `RibUpdate::InjectEvpn` / `WithdrawEvpn` | `src/evpn_originator.rs` | landed |
+| Type 3 IMET origination per `EvpnInstance` — startup-inject + shutdown-withdraw helpers carrying PMSI Tunnel + RT extcomms | `src/evpn_imet.rs` | landed |
+| Upward `LocalMacObservation` channel — `Dataplane::take_local_mac_rx` trait method + `InMemoryDataplane` test surface | `crates/evpn-linux/src/dataplane.rs`, `crates/evpn-linux/src/in_memory.rs` | landed |
+| `RTNLGRP_NEIGH` subscription + classifier — `add_membership` on the rtnetlink socket, pure `classify_neigh` function with bridge-port → VNI lookup, drop on `NTF_EXT_LEARNED` echoes and VXLAN-port ifindexes | `crates/evpn-linux/src/linux/notify.rs` | landed |
+| Daemon main wiring — spawn originator alongside the reconciler under the same `[[evpn_instances]]` gate; coordinated-shutdown drain order | `src/main.rs` | landed |
+| ADR-0055 — Local-MAC origination boundary (sequence rules, channel surface, deferral list) | `docs/adr/0055-evpn-local-mac-origination.md` | landed |
+| M37 containerlab smoke — rustbgpd-as-VTEP originating Type 2 + IMET against FRR consumer | `tests/interop/m37-evpn-local-origination.clab.yml` | landed |
+
+**Still ahead in Gate 7b (deferred to follow-ups):**
 
 | Task | File / location |
 |------|----------------|
-| Local MAC table (MAC → next-hop + VNI + sequence) — domain types in `crates/evpn`, not by overloading `wire::EvpnRoute` | `crates/evpn/src/mac.rs` (new) |
-| Type 2 origination on MAC learn (consumes `EvpnInstanceTable`) | RibManager handler |
-| Type 2 withdrawal on MAC age-out | RibManager handler |
-| Type 3 IMET origination per L2VNI | — |
+| MAC-with-IP Type 2 origination (requires AF_INET / AF_INET6 NEIGH subscription correlated by MAC; ARP/ND suppression learning) | `crates/evpn-linux/src/linux/notify.rs` (extend) |
+| `advertise_svi_mac` consumption — read SVI MAC via RTM_GETLINK at instance-Ready, originate Type 2 for the gateway MAC | (Gate 7b+2; intersects IRB / L3VNI work) |
+| Sticky / static MAC anti-spoof config schema — wire codec is plumbed; the `static_macs` config field needs its own ADR | `crates/evpn/src/instance.rs` (extend) |
+| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine heuristic) | `crates/evpn/src/origination.rs` (extend) |
 | Type 5 IP Prefix origination per L3VNI | (deferred to Gate 9 — IP-VRF concept needed) |
-| Anti-spoofing, MAC move sequence management | — |
-| `advertise_svi_mac` flag wired through to Type 2 origination | — |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
-| `RTNLGRP_NEIGH` / `RTNLGRP_LINK` subscription (latency optimization on top of periodic dump) | `crates/evpn-linux/src/linux/mod.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
+| `RTNLGRP_LINK` subscription + sub-second convergence (Gate 7c) — reduces poll cadence dependency for mobility races | `crates/evpn-linux/src/linux/notify.rs`, RIB EVPN-event broadcast |
 
 ---
 
