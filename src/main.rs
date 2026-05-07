@@ -1052,6 +1052,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             &evpn_instances,
             rib_tx.clone(),
             handle.local_mac_rx.take(),
+            metrics.clone(),
             evpn_originator_shutdown.clone(),
         )
     } else {

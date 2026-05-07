@@ -271,6 +271,20 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 A sudden drop in VRP count likely means a cache connection was lost or the
 cache itself has stale data.
 
+### EVPN VTEP alpha
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `evpn_local_originations_total{action="inject"}` | Locally learned MACs that the originator successfully handed to the RIB as Type 2 advertisements |
+| `evpn_local_originations_total{action="withdraw"}` | Locally aged / deleted MACs that the originator successfully handed to the RIB as Type 2 withdraws |
+| `evpn_local_origination_errors_total{action="inject"}` | Failed local Type 2 inject attempts: RIB channel closed, RIB rejected the inject, or the reply was dropped |
+| `evpn_local_origination_errors_total{action="withdraw"}` | Failed local Type 2 withdraw attempts: RIB channel closed, RIB rejected the withdraw, or the reply was dropped |
+
+During M37 or a synthetic MAC-churn soak, the inject and withdraw counters
+should follow the `bridge fdb add` / `bridge fdb del` cadence. Any non-zero
+error counter means the kernel observation reached the originator but did not
+complete at the RIB boundary.
+
 ---
 
 ## Key log messages

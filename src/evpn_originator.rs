@@ -36,8 +36,8 @@
 //! ## RR-only deployments
 //!
 //! When `[[evpn_instances]]` is empty, [`spawn`] returns `None`. No
-//! background task is created and the metric
-//! `evpn_local_originations_total` is never registered.
+//! background task is created; the EVPN originator counters remain at
+//! zero-label-vector state until an originator action is observed.
 //!
 //! ## Self-origination filter
 //!
@@ -64,6 +64,7 @@ use rustbgpd_evpn::{
     MacAddress, OriginationAction, ProjectedEvpnRoute, RemoteMacView, project_evpn_routes,
 };
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
+use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, EvpnRouteKey,
     ExtendedCommunity, MplsLabel, Origin, PathAttribute,
@@ -77,6 +78,8 @@ use tracing::{debug, info, warn};
 /// IP; setting `EvpnRibRoute.peer` to the same value keeps the route
 /// recognizable as locally-originated downstream of the inject path.
 const LOCAL_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+const ACTION_INJECT: &str = "inject";
+const ACTION_WITHDRAW: &str = "withdraw";
 
 /// Defaults for the originator actor.
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +125,7 @@ pub fn spawn(
     evpn_instances: &Arc<EvpnInstanceTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
+    metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnOriginatorHandle> {
     if evpn_instances.is_empty() {
@@ -143,6 +147,7 @@ pub fn spawn(
         rib_tx,
         local_mac_rx,
         originators,
+        metrics,
         shutdown.clone(),
     ));
 
@@ -160,6 +165,7 @@ async fn originator_loop(
     rib_tx: mpsc::Sender<RibUpdate>,
     mut local_mac_rx: mpsc::Receiver<LocalMacObservation>,
     mut originators: BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    metrics: BgpMetrics,
     shutdown: CancellationToken,
 ) {
     let mut poll_tick = tokio::time::interval(config.poll_interval);
@@ -172,7 +178,7 @@ async fn originator_loop(
             biased;
             () = shutdown.cancelled() => {
                 debug!("EVPN originator shutting down");
-                drain_to_withdraws(&mut originators, &instances, &rib_tx).await;
+                drain_to_withdraws(&mut originators, &instances, &rib_tx, &metrics).await;
                 return;
             }
             obs = local_mac_rx.recv() => {
@@ -181,7 +187,7 @@ async fn originator_loop(
                     // Don't exit — RIB polls still useful for telemetry / future
                     // observation reconnect. Park indefinitely on the other arms.
                     park_until_shutdown(&shutdown).await;
-                    drain_to_withdraws(&mut originators, &instances, &rib_tx).await;
+                    drain_to_withdraws(&mut originators, &instances, &rib_tx, &metrics).await;
                     return;
                 };
                 handle_observation(
@@ -190,6 +196,7 @@ async fn originator_loop(
                     &instances,
                     &remote_view,
                     &rib_tx,
+                    &metrics,
                 ).await;
             }
             _ = poll_tick.tick() => {
@@ -198,6 +205,7 @@ async fn originator_loop(
                     &rib_tx,
                     &mut remote_view,
                     &mut originators,
+                    &metrics,
                 ).await {
                     warn!(error = %e, "EVPN originator: RIB poll failed");
                 }
@@ -216,6 +224,7 @@ async fn handle_observation(
     instances: &Arc<EvpnInstanceTable>,
     remote_view: &RemoteMacViewMap,
     rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
 ) {
     let (vni, actions) = match *obs {
         LocalMacObservation::Learned { vni, mac, ifindex } => {
@@ -245,7 +254,7 @@ async fn handle_observation(
         // Should not happen — instance table is fixed at startup.
         return;
     };
-    apply_actions(actions, inst, rib_tx).await;
+    apply_actions(actions, inst, rib_tx, metrics).await;
 }
 
 /// Re-poll the RIB, build a fresh `RemoteMacViewMap`, diff against the
@@ -256,6 +265,7 @@ async fn repoll_rib(
     rib_tx: &mpsc::Sender<RibUpdate>,
     remote_view: &mut RemoteMacViewMap,
     originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    metrics: &BgpMetrics,
 ) -> Result<(), RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
     let new_view = build_remote_view(instances, &routes);
@@ -285,7 +295,7 @@ async fn repoll_rib(
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx).await;
+        apply_actions(actions, inst, rib_tx, metrics).await;
     }
 
     *remote_view = new_view;
@@ -297,6 +307,7 @@ async fn drain_to_withdraws(
     originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
     instances: &EvpnInstanceTable,
     rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
 ) {
     for (vni, orig) in originators {
         let actions = orig.drain_to_withdraws();
@@ -306,7 +317,7 @@ async fn drain_to_withdraws(
         let Some(inst) = instances.get(*vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx).await;
+        apply_actions(actions, inst, rib_tx, metrics).await;
     }
 }
 
@@ -316,6 +327,7 @@ async fn apply_actions(
     actions: Vec<OriginationAction>,
     instance: &EvpnInstance,
     rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
 ) {
     for action in actions {
         match action {
@@ -335,17 +347,21 @@ async fn apply_actions(
                     .await
                     .is_err()
                 {
+                    metrics.record_evpn_local_origination_error(ACTION_INJECT);
                     warn!("RIB channel closed; cannot inject EVPN Type 2");
                     return;
                 }
                 match reply_rx.await {
                     Ok(Ok(())) => {
+                        metrics.record_evpn_local_origination(ACTION_INJECT);
                         debug!(?key, ?mobility_seq, "originated Type 2");
                     }
                     Ok(Err(e)) => {
+                        metrics.record_evpn_local_origination_error(ACTION_INJECT);
                         warn!(?key, error = %e, "RIB rejected Type 2 inject");
                     }
                     Err(_) => {
+                        metrics.record_evpn_local_origination_error(ACTION_INJECT);
                         warn!(?key, "RIB inject reply dropped");
                     }
                 }
@@ -360,19 +376,23 @@ async fn apply_actions(
                     .await
                     .is_err()
                 {
+                    metrics.record_evpn_local_origination_error(ACTION_WITHDRAW);
                     warn!("RIB channel closed; cannot withdraw EVPN Type 2");
                     return;
                 }
                 match reply_rx.await {
                     Ok(Ok(())) => {
+                        metrics.record_evpn_local_origination(ACTION_WITHDRAW);
                         debug!(?key, "withdrew Type 2");
                     }
                     Ok(Err(e)) => {
+                        metrics.record_evpn_local_origination_error(ACTION_WITHDRAW);
                         // Withdraws for unknown keys can race with
                         // in-flight inject failures; log at debug.
                         debug!(?key, error = %e, "RIB withdraw declined");
                     }
                     Err(_) => {
+                        metrics.record_evpn_local_origination_error(ACTION_WITHDRAW);
                         warn!(?key, "RIB withdraw reply dropped");
                     }
                 }
@@ -597,9 +617,18 @@ enum RibQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prometheus::Encoder;
     use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable, RouteTarget};
     use rustbgpd_rib::route::RouteOrigin;
     use rustbgpd_wire::{EvpnImet, EvpnMacIp, RouteDistinguisher};
+
+    fn gather_metrics_text(metrics: &BgpMetrics) -> String {
+        let encoder = prometheus::TextEncoder::new();
+        let families = metrics.registry().gather();
+        let mut buf = Vec::new();
+        encoder.encode(&families, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
 
     fn vni(n: u32) -> EvpnInstanceId {
         EvpnInstanceId::new(n).unwrap()
@@ -835,6 +864,7 @@ mod tests {
             &instances,
             rib_tx,
             Some(local_rx),
+            BgpMetrics::new(),
             CancellationToken::new(),
         );
         assert!(h.is_none());
@@ -849,6 +879,7 @@ mod tests {
             &instances,
             rib_tx,
             None,
+            BgpMetrics::new(),
             CancellationToken::new(),
         );
         assert!(h.is_none());
@@ -859,6 +890,7 @@ mod tests {
         let instances = instance_table(100);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let (local_tx, local_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
         let shutdown = CancellationToken::new();
 
         // Auto-respond to QueryEvpnRoutes with empty so the polling
@@ -885,6 +917,7 @@ mod tests {
             &instances,
             rib_tx,
             Some(local_rx),
+            metrics,
             shutdown.clone(),
         )
         .expect("originator spawned");
@@ -914,6 +947,7 @@ mod tests {
         let instances = instance_table(100);
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
         let (local_tx, local_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
         let shutdown = CancellationToken::new();
 
         // Track injects + withdraws.
@@ -947,6 +981,7 @@ mod tests {
             &instances,
             rib_tx,
             Some(local_rx),
+            metrics.clone(),
             shutdown.clone(),
         )
         .expect("originator spawned");
@@ -979,6 +1014,65 @@ mod tests {
             3,
             "expected 3 withdraws on shutdown"
         );
+
+        let text = gather_metrics_text(&metrics);
+        assert!(text.contains("evpn_local_originations_total{action=\"inject\"} 3"));
+        assert!(text.contains("evpn_local_originations_total{action=\"withdraw\"} 3"));
+    }
+
+    #[tokio::test]
+    async fn rib_rejection_increments_evpn_local_origination_error_counter() {
+        let instances = instance_table(100);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
+        let shutdown = CancellationToken::new();
+
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { reply, .. } => {
+                        let _ = reply.send(Err("synthetic rejection".to_string()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_secs(60),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            metrics.clone(),
+            shutdown.clone(),
+        )
+        .expect("originator spawned");
+
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+
+        for _ in 0..50 {
+            let text = gather_metrics_text(&metrics);
+            if text.contains("evpn_local_origination_errors_total{action=\"inject\"} 1") {
+                h.shutdown().await;
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        h.shutdown().await;
+        panic!("expected inject error counter to increment");
     }
 
     #[tokio::test]
@@ -1001,6 +1095,7 @@ mod tests {
             &instances,
             rib_tx,
             Some(local_rx),
+            BgpMetrics::new(),
             shutdown.clone(),
         )
         .expect("originator spawned");

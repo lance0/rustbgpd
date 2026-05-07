@@ -1,4 +1,4 @@
-//! Prometheus metrics for session, RIB, policy, GR, and RPKI counters/gauges.
+//! Prometheus metrics for session, RIB, policy, EVPN, GR, and RPKI counters/gauges.
 
 use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 
@@ -53,6 +53,10 @@ pub struct BgpMetrics {
 
     // ── ASPA ───────────────────────────────────────────────────
     aspa_records_total: IntGauge,
+
+    // ── EVPN ───────────────────────────────────────────────────
+    evpn_local_originations: IntCounterVec,
+    evpn_local_origination_errors: IntCounterVec,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -246,6 +250,24 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_local_originations = IntCounterVec::new(
+            Opts::new(
+                "evpn_local_originations_total",
+                "Successful locally-originated EVPN Type 2 route actions by action (inject, withdraw)",
+            ),
+            &["action"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_local_origination_errors = IntCounterVec::new(
+            Opts::new(
+                "evpn_local_origination_errors_total",
+                "Failed locally-originated EVPN Type 2 route actions by action (inject, withdraw)",
+            ),
+            &["action"],
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -340,6 +362,12 @@ impl BgpMetrics {
             .register(Box::new(aspa_records_total.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_local_originations.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_local_origination_errors.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -373,6 +401,8 @@ impl BgpMetrics {
             gr_timer_expired,
             rpki_vrp_count,
             aspa_records_total,
+            evpn_local_originations,
+            evpn_local_origination_errors,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -501,6 +531,24 @@ impl BgpMetrics {
     /// Set ASPA record count.
     pub fn set_aspa_records_total(&self, count: i64) {
         self.aspa_records_total.set(count);
+    }
+
+    /// Record a successful locally-originated EVPN Type 2 action.
+    ///
+    /// `action` is expected to be `inject` or `withdraw`.
+    pub fn record_evpn_local_origination(&self, action: &str) {
+        self.evpn_local_originations
+            .with_label_values(&[action])
+            .inc();
+    }
+
+    /// Record a failed locally-originated EVPN Type 2 action.
+    ///
+    /// `action` is expected to be `inject` or `withdraw`.
+    pub fn record_evpn_local_origination_error(&self, action: &str) {
+        self.evpn_local_origination_errors
+            .with_label_values(&[action])
+            .inc();
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
@@ -728,6 +776,46 @@ mod tests {
         assert!(text.contains("bgp_session_state_transitions_total"));
         assert!(text.contains("bgp_messages_sent_total"));
         assert!(text.contains("10.0.0.1"));
+    }
+
+    #[test]
+    fn evpn_local_origination_counters_are_exported() {
+        let m = BgpMetrics::new();
+        m.record_evpn_local_origination("inject");
+        m.record_evpn_local_origination("withdraw");
+        m.record_evpn_local_origination_error("inject");
+        m.record_evpn_local_origination_error("withdraw");
+
+        assert_eq!(
+            m.evpn_local_originations
+                .with_label_values(&["inject"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.evpn_local_originations
+                .with_label_values(&["withdraw"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.evpn_local_origination_errors
+                .with_label_values(&["inject"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.evpn_local_origination_errors
+                .with_label_values(&["withdraw"])
+                .get(),
+            1
+        );
+
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_local_originations_total{action=\"inject\"} 1"));
+        assert!(text.contains("evpn_local_originations_total{action=\"withdraw\"} 1"));
+        assert!(text.contains("evpn_local_origination_errors_total{action=\"inject\"} 1"));
+        assert!(text.contains("evpn_local_origination_errors_total{action=\"withdraw\"} 1"));
     }
 
     #[test]

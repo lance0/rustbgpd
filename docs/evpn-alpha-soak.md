@@ -19,13 +19,20 @@ none of them block v0.15.0 release on their own.
   `LinkCache::bridge_port_to_vni`, or the originator's path-
   attribute construction surfaces on PR-CI rather than in the field.
   Tracked in `docs/INTEROP.md` "Not in CI" footnote on the M37 row.
-- [ ] **`evpn_local_originations_total` Prometheus counter.** The
-  originator emits Inject / Withdraw via `RibUpdate::InjectEvpn` /
-  `WithdrawEvpn` but does not currently bump a counter. Add one (and
-  a `evpn_local_observations_dropped_total` for the
-  `try_send`-failure branch in `notify_loop`) so operators can graph
-  origination rate alongside the existing `evpn_dataplane_*`
-  metrics.
+- [x] **EVPN local-origination Prometheus counters.** The originator
+  now records successful RIB-accepted Type 2 actions in
+  `evpn_local_originations_total{action="inject"}` and
+  `evpn_local_originations_total{action="withdraw"}`, and failed RIB
+  handoff / rejection / reply-drop paths in
+  `evpn_local_origination_errors_total{action="inject"}` and
+  `evpn_local_origination_errors_total{action="withdraw"}`. During
+  M37 or churn soak, inject and withdraw should track the synthetic
+  `bridge fdb add` / `bridge fdb del` cadence, while the error
+  counter should stay flat.
+- [ ] **`evpn_local_observations_dropped_total` Prometheus counter.**
+  Add telemetry for the `try_send`-failure branch in `notify_loop` so
+  operators can distinguish kernel-event loss before the originator
+  sees an observation from RIB-side origination failures.
 - [ ] **`ListEvpnInstances` exposes `originated_local_macs_count`
   per instance.** Gives operators a fast "is the loop alive?" view
   via `rustbgpctl evpn instances` without scraping logs.
