@@ -155,6 +155,7 @@ mod tests {
         LinkCache {
             bridges,
             vxlan_ifindex_to_vni: vxlan_to_vni,
+            bridge_port_to_vni: HashMap::new(),
         }
     }
 
