@@ -9,6 +9,83 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN VTEP local-MAC origination — Gate 7b+1 (ADR-0055).**
+  Closes the upward EVPN flow that Gate 7b's foundation left as a
+  stub. rustbgpd-as-VTEP is now bidirectional: kernel-learned local
+  MACs flow up through `RTNLGRP_NEIGH` and become BGP EVPN Type 2
+  originations per RFC 7432 §15.1; one Type 3 IMET (RFC 7432 §7.3)
+  is emitted per L2VNI carrying the PMSI Tunnel attribute
+  (RFC 6514 §5) for ingress-replication BUM. Landed across
+  `crates/evpn`, `crates/wire`, `crates/evpn-linux`, and `src/`:
+  - **`LocalMacOriginator` state machine** in
+    `crates/evpn/src/origination.rs`. Pure deterministic per-VNI
+    sequencer encoding RFC 7432 §15.1 explicitly: first-Learned-no-
+    contender ⇒ seq=0 / no extcomm; first-Learned-vs-contender at R
+    ⇒ R+1 with extcomm; remote announces M ≥ N ⇒ bump to
+    `max(M, N) + 1`. Aged-then-re-Learn preserves the seq ratchet so
+    a stale peer can never win contention against us. 17 in-module
+    tests including a monotonicity invariant across mixed-handler
+    sequences.
+  - **PMSI Tunnel path attribute** (RFC 6514 §5, type 22) in new
+    `crates/wire/src/pmsi.rs`. Typed `PmsiTunnelType` (preserves
+    unknown values for forward-compat), `PmsiTunnelIdentifier` (IPv4 /
+    IPv6 / Raw), `for_evpn_ingress_replication(vni, ip)` constructor
+    encoding `label = vni << 4` per RFC 8365 §5. 16 codec tests + an
+    integration round-trip through the full `PathAttribute` dispatch.
+  - **`EvpnOriginator` daemon actor** in `src/evpn_originator.rs`.
+    `tokio::select!` over local-MAC channel, RIB poll (5s default),
+    and shutdown drain. Per-instance `LocalMacOriginator`s share an
+    `Arc<EvpnInstanceTable>` and the daemon's `rib_tx`. Self-NH
+    routes are filtered before reaching the state machine via the
+    existing `project_evpn_routes` so we never see our own re-Inject
+    as a contender. Shutdown emits Withdraws for every still-
+    advertising MAC under a 5s bound.
+  - **Type 3 IMET origination** in `src/evpn_imet.rs`. One Type 3
+    per `EvpnInstance` originated at startup, withdrawn at
+    coordinated-shutdown. Lifecycle is decoupled from kernel
+    Ready/NotReady — IMET advertises BGP-level VNI membership, not
+    data-plane programmability. Carries Origin/AsPath/NextHop, all
+    configured RTs, and a PMSI Tunnel attribute (Ingress Replication,
+    label = vni << 4, tunnel id = local VTEP IP).
+  - **Upward `LocalMacObservation` channel surface** in
+    `crates/evpn-linux/src/dataplane.rs`. New
+    `Dataplane::take_local_mac_rx` trait method with a default
+    `None` impl. `InMemoryDataplane` exposes a parallel inject hook
+    for tests. Channel is intentionally separate from the existing
+    `KernelEvent::LocalMacObservation` reconcile-actor flow to keep
+    actor lifetimes decoupled (ADR-0054 §1's "narrow upward
+    interface" rule).
+  - **`RTNLGRP_NEIGH` subscription** in
+    `crates/evpn-linux/src/linux/notify.rs`. `LinuxDataplane::connect`
+    now calls `add_membership(RTNLGRP_NEIGH)` on the rtnetlink
+    socket and spawns a worker task that classifies unsolicited
+    `RTM_NEWNEIGH` / `RTM_DELNEIGH` messages with `family = AF_BRIDGE`
+    via a pure `classify_neigh` function. Drops `NTF_EXT_LEARNED`
+    echoes (we programmed those), drops VXLAN-port ifindexes (those
+    are remote MAC echoes), and resolves `header.ifindex` → VNI via a
+    new `LinkCache::bridge_port_to_vni` map. 8 unit tests cover the
+    happy path + every drop branch.
+  - **Daemon main wiring**: spawns the originator alongside the
+    reconciler under the same `[[evpn_instances]]` gate; coordinated
+    shutdown drains the originator first (so its final Withdraws
+    land before the reconciler stops accepting work), then withdraws
+    the IMET keys, then drains the reconciler.
+
+  RR-only deployments (empty `[[evpn_instances]]`) still spawn no
+  background tasks. macOS dev builds still build cleanly — the
+  Linux-only `RTNLGRP_NEIGH` subscription is gated by
+  `cfg(target_os = "linux")` via the existing dataplane spawn path.
+
+  M37 containerlab interop smoke validates rustbgpd as a Type 2 +
+  Type 3 originator against an FRR consumer
+  (`tests/interop/m37-evpn-local-origination.clab.yml`).
+
+  ADR-0055 documents the boundary, sequence rules, and explicit
+  deferrals (MAC-with-IP origination, sticky-MAC config schema,
+  duplicate-MAC quarantine heuristic, sub-second mobility convergence).
+
 ## [0.14.0] — 2026-05-06
 
 ### Added

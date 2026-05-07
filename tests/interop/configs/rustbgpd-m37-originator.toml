@@ -1,0 +1,30 @@
+# M37 smoke: rustbgpd as EVPN VTEP originator, peering with an FRR consumer.
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Single EVPN instance bound to br100 / vxlan100 — the start script
+# pre-creates the bridge + VXLAN port + a non-VXLAN bridge port
+# (veth pair) so RTNLGRP_NEIGH events from `bridge fdb add` on the
+# non-VXLAN port surface upward through the originator.
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "consumer-frr"
+hold_time = 30
+families = ["l2vpn_evpn"]

@@ -286,13 +286,13 @@ control-plane deployments where you are comfortable with an evolving API.**
 | Dimension | Current state |
 |-----------|---------------|
 | **Target use case** | IXP route servers, programmable BGP control planes, lab/test environments |
-| **Maturity** | Public alpha (v0.14.0) |
+| **Maturity** | Public alpha (v0.14.0; v0.15.0 candidate on `feat/evpn-local-origination` — Gate 7b+1 closes the upward EVPN flow) |
 | **Supported OS** | Linux (primary target). Requires `CAP_NET_BIND_SERVICE` for port 179. |
 | **Runtime** | Rust 1.88+, single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | Kernel FIB integration (unicast), EVPN local MAC origination / Type 3 IMET origination / DF election / IRB / L3VNI / Type 5 dataplane / multi-homing (out of Gate 7b scope), VPNv4/v6, Confederation, TCP-AO |
-| **Tests** | Workspace test suite, fuzz targets, 34 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (13 interop tests gated on every PR) |
+| **Not yet supported** | Kernel FIB integration (unicast), EVPN MAC-with-IP origination (ARP/ND suppression learning) / DF election / IRB / L3VNI / Type 5 dataplane / multi-homing (out of Gate 7b+1 scope), VPNv4/v6, Confederation, TCP-AO |
+| **Tests** | Workspace test suite, fuzz targets, 35 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (13 interop tests gated on every PR; M36/M37 run locally with privileged kernel access) |
 
 ## Documentation
 

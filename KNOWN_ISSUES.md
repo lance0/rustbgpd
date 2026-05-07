@@ -142,6 +142,32 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
+- **EVPN Type 2 origination is MAC-only (no host IP).** Gate 7b+1
+  (`feat/evpn-local-origination`, target v0.15.0) emits Type 2 routes
+  derived from `RTNLGRP_NEIGH AF_BRIDGE` events, which surface bridge
+  FDB learns but not ARP/ND-suppression IP bindings. The wire codec
+  already supports the MAC-with-IP form (`EvpnRouteKey::MacIp.ip` is
+  `Option<IpAddr>`); only the consumer is deferred. Lighting it up
+  requires a separate `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH`
+  subscription correlated by MAC. Tracked as Gate 7b+2 in
+  `docs/evpn-enablement.md`. ADR-0055 §7 documents the deferral.
+- **EVPN sticky / static MAC anti-spoof config is wire-plumbed but
+  not operator-facing.** The wire codec for the MAC Mobility sticky
+  bit (RFC 7432 §15.4) is in scope for Gate 7b+1 — the state machine
+  and `OriginationAction::Inject` carry a `sticky: bool` field, the
+  daemon encodes it in the extended community when set. The
+  operator-facing config field (e.g., a `static_macs: BTreeSet<
+  MacAddress>` on `EvpnInstance`) is **not** yet defined; the daemon
+  always passes `sticky = false` until a follow-up ADR settles the
+  schema (per-MAC vs per-port? imported from sysctl? gRPC mutation?).
+  ADR-0055 §8.
+- **EVPN MAC-mobility convergence is poll-bounded (5s).** The
+  originator polls the RIB on a 5s cadence to detect remote
+  contention; sub-second mobility detection requires an EVPN-specific
+  `RouteEvent` broadcast that the existing `Prefix`-keyed broadcast
+  doesn't supply. RFC 7432 doesn't impose a tighter bound, so this is
+  a convergence-latency optimization rather than a correctness issue.
+  Tracked as Gate 7c in `docs/evpn-enablement.md`.
 - **Family scope is still limited.** MP-BGP supports AFI/SAFI negotiation,
   but rustbgpd currently implements IPv4/IPv6 unicast (AFI 1/2, SAFI 1),
   IPv4/IPv6 FlowSpec (AFI 1/2, SAFI 133), and L2VPN/EVPN (AFI 25, SAFI

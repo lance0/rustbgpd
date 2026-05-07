@@ -1,0 +1,79 @@
+# Containerlab topology: rustbgpd as EVPN VTEP originator ↔ FRR consumer
+# (M37 — Gate 7b+1 real-VTEP origination smoke)
+#
+# Inverts the M36 roles. rustbgpd creates a bridge + VXLAN port +
+# non-VXLAN bridge port (eth1/eth2 split below), then a `bridge fdb add
+# MAC dev eth-local master static` triggers an RTM_NEWNEIGH event on
+# the kernel's RTNLGRP_NEIGH multicast group. rustbgpd's notify task
+# classifies it (AF_BRIDGE, !ext_learned, ifindex ∈ bridge_port_to_vni)
+# and routes the LocalMacObservation up to the originator, which emits
+# a BGP EVPN Type 2 UPDATE per RFC 7432 §15.1. rustbgpd also originates
+# one Type 3 IMET (RFC 7432 §7.3) for the L2VNI at startup, carrying
+# the PMSI Tunnel attribute (RFC 6514 §5, Ingress Replication).
+#
+# Asserts:
+#   1. Both peers reach Established with L2VPN/EVPN negotiated.
+#   2. FRR's `show bgp l2vpn evpn route type macip` lists the
+#      injected MAC with originator = rustbgpd's local_vtep_ip.
+#   3. FRR's `show bgp l2vpn evpn route type multicast` lists one
+#      Type 3 IMET per configured EvpnInstance, with PMSI Tunnel =
+#      Ingress Replication, label = vni << 4, originator = local_vtep_ip.
+#   4. After the static FDB entry is removed, rustbgpd withdraws the
+#      Type 2 within ~10s and FRR no longer lists it.
+#   5. After rustbgpd shuts down, FRR loses the Type 3 too (shutdown
+#      drain emits the Withdraw before the daemon exits).
+#
+# Topology:
+#   rustbgpd VTEP (10.0.0.1, AS 65000) ── iBGP L2VPN/EVPN ── FRR consumer (10.0.0.2, AS 65000)
+#
+# iBGP rather than eBGP for the same reason as M36: focuses the test
+# on the local-MAC origination path without fighting FRR's default
+# eBGP export policy for EVPN.
+#
+# rustbgpd brings up two interfaces: eth1 carries the iBGP session,
+# eth2 is enslaved to br100 to surface RTNLGRP_NEIGH events. FRR
+# configures peering only — no VXLAN port on its side, since this
+# smoke is control-plane focused (asserting Type 2 / Type 3 visibility
+# via `vtysh`, not VXLAN data-plane forwarding).
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
+#   bash tests/interop/scripts/test-m37-evpn-local-origination.sh
+#   sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml
+
+name: m37-evpn-local-origination
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m37-originator.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-originator.sh:/usr/local/bin/start-rustbgpd-originator.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-originator.sh 10.0.0.1 100
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_originator=debug,rustbgpd::evpn_imet=debug
+        VTEP_LOOPBACK: 10.0.0.1
+        VTEP_VNI: "100"
+
+    consumer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m37-consumer.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/lib/frr/frrinit.sh start
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "consumer:eth1"]
