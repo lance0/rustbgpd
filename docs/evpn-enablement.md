@@ -1,6 +1,6 @@
 # EVPN Enablement Roadmap
 
-Last updated: 2026-04-23
+Last updated: 2026-05-07
 
 Gate-by-gate plan for turning rustbgpd's Phase 1 EVPN Route Reflector into a
 production-ready control plane and, eventually, a VTEP-capable daemon.
@@ -28,12 +28,12 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   what gets exercised, not a third-party daemon's. The
   "production-ready RR at 10k+ MAC scale, SDN-integratable" bundle
   is now complete.
-- **Gate 7a** (declarative EVI/VNI domain) and **Gate 7b**
-  (downward FDB program reconciler) shipped in v0.13.x and v0.14.0.
-  **Gate 7b+1** (upward Type 2 origination from kernel local-MAC
-  observations + Type 3 IMET per L2VNI + RTNLGRP_NEIGH subscription)
-  on `feat/evpn-local-origination`, v0.15.0 — closes the
-  bidirectional VTEP loop.
+- **Gate 7a** (declarative EVI/VNI domain), **Gate 7b** (downward
+  FDB program reconciler), and **Gate 7b+1** (upward Type 2
+  origination from kernel local-MAC observations + Type 3 IMET per
+  L2VNI + RTNLGRP_NEIGH subscription) have shipped in v0.13.0,
+  v0.14.0, and v0.15.0. Together they close the bidirectional
+  single-homed L2VNI VTEP alpha loop.
 - **Gates 8-9** expand into active-active multi-homing execution /
   IRB. Big investments gated by market demand, not technical
   readiness.
@@ -326,18 +326,19 @@ Validation coverage:
 
 ### Gate 7 — VTEP mode (Phase 2)
 
-Status: foundation in flight · Estimate: ~3-5 weeks remaining · Blockers: Gates 1-6 (closed)
+Status: Gates 7a / 7b / 7b+1 landed · Alpha-soak and post-Gate follow-ups remain · Blockers: Gates 1-6 (closed)
 
 Unlocks: rustbgpd running on a leaf itself — local EVI/VRF/VNI config,
 MAC learning from the kernel FDB (netlink monitor), local route
 origination, local withdrawal on MAC aging.
 
-Landing as **two slices** (see ADR-0052) so the durable state model
-locks down before kernel reconciliation lands on top of it:
+Landed as **three slices** (see ADR-0052 / ADR-0054 / ADR-0055) so the
+durable state model locked down before kernel reconciliation and
+local-origination semantics landed on top of it:
 
 #### Gate 7a — Foundation: declarative EVI/VNI domain model
 
-Status: in flight on `feat/evpn-vtep-linux-foundation`
+Status: landed in v0.13.0
 
 Unlocks the operator-facing surface and the typed runtime model that
 later phases consume:
@@ -353,10 +354,10 @@ later phases consume:
 
 #### Gate 7b — Kernel reconciliation + origination
 
-Status: bidirectional VTEP — Gate 7b (foundation, downward FDB
+Status: bidirectional VTEP alpha — Gate 7b (foundation, downward FDB
 program) shipped in v0.14.0; Gate 7b+1 (upward Type 2 / Type 3
-origination + RTNLGRP_NEIGH subscription) on
-`feat/evpn-local-origination`, v0.15.0 · Blockers: Gate 7a (closed)
+origination + RTNLGRP_NEIGH subscription) merged in PR #35 on
+2026-05-07 and shipped in v0.15.0 · Blockers: Gate 7a (closed)
 
 Why gated on demand: SONiC/FRR leaves do this well today. Rustbgpd
 competing with FRR for the VTEP role is a meaningful strategic expansion,
@@ -369,7 +370,7 @@ not a tactical feature. Only worth it if there's a specific use case
 |------|----------------|--------|
 | Daemon-level integration test booting with `[[evpn_instances]]` and round-tripping through `EvpnService.ListEvpnInstances` + `rustbgpctl evpn instances`. The tripwire that proves config → daemon → gRPC → CLI still works while internals get more dynamic. | `tests/evpn_instances_binary.rs` | landed |
 | Dataplane-boundary ADR — what `crates/evpn-linux` consumes from `crates/evpn`, what it observes from the kernel, what it returns. Diff loop semantics (push / pull / reconcile-on-event). Failure surfacing back to the domain layer. | `docs/adr/0054-evpn-linux-dataplane-boundary.md` | landed |
-| Swap surface for the `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work. | `crates/api/src/evpn_service.rs`, daemon wiring | landed |
+| Runtime mutation surface for the startup-pinned `Arc<EvpnInstanceTable>` (`ArcSwap` or `RwLock`) — small refactor, but mutation *semantics* (delete behavior with active learned MACs, instance redefinition during MAC mobility, etc.) is the real work. | `crates/api/src/evpn_service.rs`, daemon wiring | deferred to alpha-soak / post-v0.15 |
 
 **FDB reconciler (PR #34):**
 
@@ -384,7 +385,7 @@ not a tactical feature. Only worth it if there's a specific use case
 | M36 containerlab smoke: rustbgpd-as-VTEP + FRR-as-originator (iBGP, AS 65000); verifies bridge-master row + VXLAN-self+dst row both carry `extern_learn`, foreign-static survives, withdraw cleans up. 8/8 PASS. | `tests/interop/scripts/test-m36-evpn-vtep-smoke.sh` | landed (PR #34) |
 | Privileged netns dataplane test (gated on `EVPN_LINUX_NETNS=1`, runs nightly outside PR-CI) | `crates/evpn-linux/tests/netns_dataplane.rs` | landed (PR #34) |
 
-**Origination loop (Gate 7b+1, on `feat/evpn-local-origination`):**
+**Origination loop (Gate 7b+1, v0.15.0):**
 
 ADR-0055 locks the boundary; the implementation closes the upward
 flow that Gate 7b's foundation left as a stub.
@@ -401,7 +402,7 @@ flow that Gate 7b's foundation left as a stub.
 | ADR-0055 — Local-MAC origination boundary (sequence rules, channel surface, deferral list) | `docs/adr/0055-evpn-local-mac-origination.md` | landed |
 | M37 containerlab smoke — rustbgpd-as-VTEP originating Type 2 + IMET against FRR consumer | `tests/interop/m37-evpn-local-origination.clab.yml` | landed |
 
-**Still ahead in Gate 7b (deferred to follow-ups):**
+**Post-Gate 7b / 7b+1 alpha-soak follow-ups:**
 
 | Task | File / location |
 |------|----------------|

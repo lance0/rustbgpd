@@ -18,9 +18,9 @@
 //!
 //! ## Public surface
 //!
-//! - [`Dataplane`] — abstract trait. The Phase 2 build ships only the
-//!   [`InMemoryDataplane`] fake; the real `LinuxDataplane` lands in
-//!   Phase 4 behind `#[cfg(target_os = "linux")]`.
+//! - [`Dataplane`] — abstract trait. The crate ships the
+//!   [`InMemoryDataplane`] fake for deterministic tests plus the real
+//!   `LinuxDataplane` on Linux behind `#[cfg(target_os = "linux")]`.
 //! - [`KernelSnapshot`], [`KernelFdbEntry`], [`KernelLinkInfo`],
 //!   [`OwnedSet`], [`InstanceProbes`] — the actor's view of kernel /
 //!   per-instance state.
@@ -35,9 +35,11 @@
 //! - Creating or deleting bridge / VXLAN netdevs (ADR-0054 §4).
 //! - VLAN-aware bridges (ADR-0054 §4 — needs schema extension).
 //! - L3VNI / IRB / Type 5 dataplane.
-//! - Local-MAC origination policy (this crate emits *observations* via
-//!   [`rustbgpd_evpn::LocalMacObservation`]; the domain layer decides
-//!   RFC 7432 mobility outcomes in a follow-up).
+//! - Local-MAC origination policy knobs. This crate emits *observations*
+//!   via [`rustbgpd_evpn::LocalMacObservation`]; the daemon/domain
+//!   originator consumes them for MAC-only Type 2 mobility. Sticky/static
+//!   MAC config, MAC-with-IP correlation, and anti-spoof policy remain
+//!   follow-ups.
 //!
 //! ## Reference
 //!

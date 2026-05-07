@@ -10,13 +10,14 @@ not "someone tried it once."
 
 ### CI coverage
 
-12 of the 31 interop tests are gated on every PR. Per-tier breakdown
+15 of the 35 automated interop milestone scripts are gated on every PR. Per-tier breakdown
 mirrors `.github/workflows/interop.yml`:
 
 - **Foundation** — wire-protocol + core RIB / refresh / policy: **M1**, **M13**, **M15**.
 - **Address-family + topology** — MP-BGP, RR, multi-path: **M10**, **M14**, **M17**.
 - **Operational + security** — BMP, transport security, FlowSpec: **M22**, **M24**, **M25**.
 - **EVPN + SIGHUP** — control-plane sanity, MAC reflection, policy soft-reset: **M29**, **M30**, **M34**.
+- **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
 
 The other 19 tests are gated locally — either because they need
 kernel features missing on the GitHub runner image (`vrf` for L3VNI,

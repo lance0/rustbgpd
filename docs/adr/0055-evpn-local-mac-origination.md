@@ -1,6 +1,6 @@
 # ADR-0055: EVPN Local-MAC Origination Boundary
 
-**Status:** Accepted (implementation on `feat/evpn-local-origination`)
+**Status:** Accepted; implemented in PR #35 and merged on 2026-05-07
 **Date:** 2026-05-06
 
 ## Context

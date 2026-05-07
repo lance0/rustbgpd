@@ -26,7 +26,7 @@ Last updated: 2026-05-07
 | IPv6 Labeled Unicast | No | Yes | No | Yes | No |
 | VPNv4 (RFC 4364) | No | Yes | Yes | Yes | Yes |
 | VPNv6 | No | Yes | Yes | Yes | Yes |
-| L2VPN EVPN (RFC 7432) | Partial (RR + bidirectional VTEP: Types 1-5 reflection, Type 2 + Type 3 origination from kernel FDB; multi-homing/IRB still ahead) | Yes | Yes | Yes | No |
+| L2VPN EVPN (RFC 7432) | Partial (RR + bidirectional VTEP: Types 1-5 reflection, Type 2 local-MAC origination from kernel FDB, Type 3 IMET per configured L2VNI; local VTEP multi-homing/IRB still ahead) | Yes | Yes | Yes | No |
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
 | IPv6 FlowSpec | Yes | Yes | Yes | Yes | Yes |

@@ -1,6 +1,6 @@
 # ADR-0054: EVPN Linux Dataplane Boundary
 
-**Status:** Accepted (implementation in PR #34, branch `feat/evpn-linux-dataplane`)
+**Status:** Accepted; implemented in PR #34 and merged on 2026-05-06
 **Date:** 2026-05-04
 
 ## Context
@@ -260,11 +260,14 @@ Default timer policy:
 - any new desired snapshot or netlink event resets the sleep and
   schedules reconcile immediately.
 
-Implementation note: `RTNLGRP_NEIGH` / `RTNLGRP_LINK` subscription is
-deferred past PR #34 — `Dataplane::next_event` returns `pending()` in
-the first slice. The level-triggered reconcile design tolerates the
-gap because the 60 s periodic dump structurally repairs any drift; the
-follow-up that wires subscriptions is purely a latency optimization.
+Implementation note: PR #34 deferred both `RTNLGRP_NEIGH` and
+`RTNLGRP_LINK`; PR #35 later wired `RTNLGRP_NEIGH` for local-MAC
+observations through the dedicated `Dataplane::take_local_mac_rx`
+channel. `Dataplane::next_event` still returns `pending()` for
+reconcile-trigger events, so `RTNLGRP_LINK` and kernel-drift wakeups
+remain follow-up latency optimizations. The level-triggered reconcile
+design tolerates that gap because the 60 s periodic dump structurally
+repairs drift.
 
 Permanent-failure suppression is **per-op-fingerprint**, not
 generation-wide: if the kernel returns a permanent classification

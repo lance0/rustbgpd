@@ -528,8 +528,9 @@ session machinery:
 - **Bidirectional VTEP mode (Phase 2 — Gates 7a / 7b / 7b+1):**
   populated `[[evpn_instances]]`. The daemon **programs the kernel
   bridge FDB** from received Type 2 routes (downward, ADR-0054) AND
-  **originates Type 2 + Type 3 IMET** from kernel-learned local MACs
-  (upward, ADR-0055). Linux-only. Gate 7b+1 ships in v0.15.0.
+  **originates Type 2 from kernel-learned local MACs plus one Type 3
+  IMET per configured L2VNI** (upward, ADR-0055). Linux-only. Gate
+  7b+1 ships in v0.15.0.
 
 > **Phase-2 status:** Gate 7a (declarative model, ADR-0052),
 > Gate 7b (kernel reconciliation downward, v0.14.0, ADR-0054), and

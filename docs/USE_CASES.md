@@ -546,9 +546,9 @@ thousands of VTEPs, and gives you structured observability.
   RFC 4456 ORIGINATOR_ID + CLUSTER_LIST so downstream VTEPs run DF
   election independently over the same inputs. Validated via M32
   (two FRR VTEPs sharing an ESI + observer). Type 1 EAD-per-EVI
-  reflection is exercised on the wire codec but not gated end-to-end
-  in Phase 1 — FRR origination needs a VLAN-aware bridge + SVI
-  setup that's part of Phase 3 (rustbgpd-as-VTEP).
+  reflection is validated via M32 and the synthetic M32b sibling;
+  rustbgpd still does not execute DF election or originate
+  multi-homing state as a local VTEP.
 - **GR / LLGR for EVPN** — VTEP restart no longer flaps the rest of
   the fabric: routes are marked stale on `PeerGracefulRestart`,
   promoted to `LLGR_STALE` on GR timer expiry per RFC 9494, and
@@ -591,9 +591,8 @@ thousands of VTEPs, and gives you structured observability.
 - **DF election** — with a shared ESI multi-homed to two VTEPs, the
   VTEPs run the election themselves. rustbgpd reflects Type 4 ES
   unchanged so the election still works on the inputs it needs;
-  Type 1 EAD-per-EVI reflection is exercised in the wire codec but
-  not gated end-to-end in Phase 1 (FRR origination needs a VLAN-
-  aware bridge + SVI deferred to Phase 3).
+  Type 1 EAD-per-EVI reflection is covered by M32/M32b. Local VTEP
+  DF execution and multi-homing origination are deferred to Gate 8.
 - **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
   VTEP's job.
 - **IRB semantics** — rustbgpd preserves Type 2 `label2` and the Router

@@ -13,12 +13,13 @@
 //!   [`crate::InstanceProbe::Ready`] only when the operator-built
 //!   topology matches the [`rustbgpd_evpn::EvpnInstance`] expectations.
 //!
-//! The trait's `next_event` returns `pending()` in this slice; the
-//! reconcile actor falls back to its 60 s periodic dump cadence, so
-//! kernel drift is repaired structurally rather than through edge-
-//! triggered notifications. `RTNLGRP_NEIGH` / `RTNLGRP_LINK`
-//! subscription is a follow-up commit on the same branch — the
-//! level-triggered reconcile design tolerates the gap.
+//! The trait's `next_event` still returns `pending()` for reconcile-
+//! trigger events; the reconcile actor falls back to its 60 s periodic
+//! dump cadence, so kernel drift is repaired structurally rather than
+//! through edge-triggered notifications. `RTNLGRP_NEIGH` is active for
+//! local-MAC observations through the dedicated
+//! [`crate::Dataplane::take_local_mac_rx`] channel. `RTNLGRP_LINK` and
+//! reconcile-trigger subscriptions remain follow-up work.
 //!
 //! ## Failure semantics
 //!
