@@ -64,7 +64,7 @@ const NUD_NOARP_PERMANENT: u16 = NUD_NOARP | NUD_PERMANENT;
 /// the kernel side: a `NTF_SELF` row carrying `dst` (the VXLAN-encap
 /// entry on vxlanX), and a `NTF_MASTER` row carrying no `dst` (the
 /// bridge-FDB entry on br100). Both rows have `header.ifindex ==
-/// vxlan_ifindex` and `LinkLocalAddress == MAC`, so they collide on
+/// vxlan_ifindex` and `LinkLayerAddress == MAC`, so they collide on
 /// the same map key. If we let the second row overwrite the first
 /// blindly, whichever leg the kernel emits last wins — and if it's
 /// the master leg, [`KernelFdbEntry::dst`] becomes `None` and the

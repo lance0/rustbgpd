@@ -28,7 +28,7 @@
 //!    `LinkCache::bridge_port_to_vni`. A miss means the port is not
 //!    enslaved to any EVPN-managed bridge and the observation is
 //!    dropped silently.
-//! 4. **Extract MAC** from the `LinkLocalAddress` attribute.
+//! 4. **Extract MAC** from the `LinkLayerAddress` attribute (`NDA_LLADDR`).
 //! 5. **Emit `LocalMacObservation::Learned { vni, mac, ifindex }`**.
 //!
 //! `DELNEIGH` is symmetric: drop on `NTF_EXT_LEARNED`, resolve VNI,

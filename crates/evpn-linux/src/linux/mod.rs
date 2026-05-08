@@ -1,7 +1,8 @@
 //! Linux netlink dataplane implementation — Gate 7b.
 //!
-//! Implements the [`crate::Dataplane`] trait against `rtnetlink` 0.14
-//! and `netlink-packet-route` 0.19. Three private submodules:
+//! Implements the [`crate::Dataplane`] trait against the `rtnetlink`
+//! and `netlink-packet-route` crates (versions pinned in
+//! `crates/evpn-linux/Cargo.toml`). Three private submodules:
 //!
 //! - `fdb` — bridge FDB dump + program/withdraw via `RTM_NEWNEIGH` /
 //!   `RTM_DELNEIGH` with `NTF_EXT_LEARNED` and `NUD_NOARP` /
