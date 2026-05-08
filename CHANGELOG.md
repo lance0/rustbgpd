@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN sticky-MAC operator config (ADR-0056 — RFC 7432 §15.4).**
+  New `sticky_macs` field on `[[evpn_instances]]` entries — a list
+  of MAC addresses (`aa:bb:cc:dd:ee:ff` form) that, when learned by
+  the local kernel, are originated as Type 2 routes with the MAC
+  Mobility extended community's sticky bit set. **Not** a static FDB:
+  rustbgpd does not synthesize routes for these MACs, it only marks
+  them on origination. Empty by default. Restart-required (changes
+  surface as `evpn_instances_changed` in `rustbgpd --diff`). Path:
+  `src/config/schema.rs`, `src/config/mod.rs`,
+  `crates/evpn/src/instance.rs`, `src/evpn_originator.rs`,
+  `examples/evpn-vtep-leaf/config.toml`, ADR-0056.
 - **EVPN best-path push notifications (Gate 7c — sub-second mobility
   convergence).** New `EvpnRouteEvent` broadcast in `crates/rib`,
   keyed by `EvpnRouteKey` and carrying the full `Option<EvpnRibRoute>`

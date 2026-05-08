@@ -3,7 +3,7 @@ mod parse;
 mod schema;
 mod validation;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -15,8 +15,8 @@ use rustbgpd_policy::{
 };
 use rustbgpd_transport::{RemovePrivateAs, TransportConfig};
 use rustbgpd_wire::{
-    Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, Prefix, RouteDistinguisher,
-    Safi,
+    Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, MacAddress, Prefix,
+    RouteDistinguisher, Safi,
 };
 
 pub use schema::*;
@@ -1463,7 +1463,22 @@ fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigE
         });
     }
 
-    EvpnInstance::new(
+    let mut sticky_macs: BTreeSet<MacAddress> = BTreeSet::new();
+    for raw in &cfg.sticky_macs {
+        let mac = parse_mac_address(raw).map_err(|e| ConfigError::InvalidEvpnInstance {
+            reason: format!("vni {}: invalid sticky_mac {raw:?}: {e}", cfg.vni),
+        })?;
+        if !sticky_macs.insert(mac) {
+            return Err(ConfigError::InvalidEvpnInstance {
+                reason: format!(
+                    "vni {}: duplicate sticky_mac {raw:?} (sticky_macs entries must be unique within an instance)",
+                    cfg.vni
+                ),
+            });
+        }
+    }
+
+    let inst = EvpnInstance::new(
         id,
         rd,
         rts,
@@ -1473,7 +1488,27 @@ fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigE
     )
     .map_err(|e| ConfigError::InvalidEvpnInstance {
         reason: format!("vni {}: {e}", cfg.vni),
-    })
+    })?;
+    Ok(inst.with_sticky_macs(sticky_macs))
+}
+
+/// Parse a `aa:bb:cc:dd:ee:ff` MAC string into a [`MacAddress`]. The
+/// wire crate intentionally does not implement `FromStr` on
+/// `MacAddress` (RFC 7432 NLRI uses raw bytes, not the operator
+/// notation), so the daemon owns this parse.
+fn parse_mac_address(raw: &str) -> Result<MacAddress, &'static str> {
+    let parts: Vec<&str> = raw.split(':').collect();
+    if parts.len() != 6 {
+        return Err("expected 6 colon-separated octets");
+    }
+    let mut bytes = [0u8; 6];
+    for (i, octet) in parts.iter().enumerate() {
+        if octet.len() != 2 {
+            return Err("each octet must be exactly 2 hex digits");
+        }
+        bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
+    }
+    Ok(MacAddress::new(bytes))
 }
 
 #[cfg(test)]

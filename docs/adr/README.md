@@ -62,6 +62,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0052](0052-evpn-vtep-foundation.md) | EVPN VTEP Foundation — Local EVI/VNI Domain Model | Accepted | 2026-05-01 |
 | [0053](0053-rfc-8326-graceful-shutdown.md) | RFC 8326 BGP Graceful Shutdown | Accepted | 2026-05-04 |
 | [0054](0054-evpn-linux-dataplane-boundary.md) | EVPN Linux Dataplane Boundary | Accepted | 2026-05-04 |
+| [0055](0055-evpn-local-mac-origination.md) | EVPN Local-MAC Origination Boundary | Accepted | 2026-05-06 |
+| [0056](0056-evpn-sticky-macs.md) | EVPN sticky-MAC operator config | Accepted | 2026-05-08 |
 
 ## Template
 

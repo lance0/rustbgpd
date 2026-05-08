@@ -484,6 +484,12 @@ pub struct AsPathPrependConfig {
 /// - `advertise_svi_mac` — toggle for Type 2 origination of the SVI's
 ///   own MAC address (RFC 9135 §6.1). Off by default. Wired through to
 ///   origination once Type 2 origination lands.
+/// - `sticky_macs` — list of MAC addresses (`aa:bb:cc:dd:ee:ff` form)
+///   that, when learned by the local kernel, are originated with the
+///   RFC 7432 §15.4 "sticky" bit set in the MAC Mobility extended
+///   community. **Not** a static FDB: rustbgpd does not synthesize
+///   Type 2s for these MACs; the flag only marks them on origination.
+///   Empty by default. See ADR-0056.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvpnInstanceConfig {
@@ -504,6 +510,11 @@ pub struct EvpnInstanceConfig {
     /// Off by default.
     #[serde(default)]
     pub advertise_svi_mac: bool,
+    /// MACs to be originated with the RFC 7432 §15.4 sticky bit when
+    /// the local kernel learns them. Textual form: `aa:bb:cc:dd:ee:ff`
+    /// (lowercase hex, six octets). Empty by default. See ADR-0056.
+    #[serde(default)]
+    pub sticky_macs: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]

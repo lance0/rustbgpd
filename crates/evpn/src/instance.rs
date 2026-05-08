@@ -14,10 +14,10 @@
 //! with a clear error rather than silently colliding when the
 //! origination path lights up later.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
 
-use rustbgpd_wire::RouteDistinguisher;
+use rustbgpd_wire::{MacAddress, RouteDistinguisher};
 
 use crate::route_target::RouteTarget;
 
@@ -103,6 +103,13 @@ pub struct EvpnInstance {
     /// lands; persisted on the domain type so the operator-facing
     /// config doesn't churn between phases.
     pub advertise_svi_mac: bool,
+    /// MACs operator wants pinned with the RFC 7432 §15.4 "sticky"
+    /// MAC Mobility extended community when this VTEP originates a
+    /// Type 2 for them. The flag is not a static FDB — rustbgpd does
+    /// not synthesize routes for these MACs, it only sets the sticky
+    /// bit on Type 2s emitted as a result of normal kernel learning.
+    /// See ADR-0056 for the schema choice and naming rationale.
+    pub sticky_macs: BTreeSet<MacAddress>,
 }
 
 impl EvpnInstance {
@@ -139,7 +146,17 @@ impl EvpnInstance {
             local_vtep_ip,
             bridge,
             advertise_svi_mac,
+            sticky_macs: BTreeSet::new(),
         })
+    }
+
+    /// Replace the sticky-MAC set on this instance. Used by the config
+    /// layer to install the operator's `sticky_macs` list after the
+    /// rest of the instance has been validated by [`Self::new`].
+    #[must_use]
+    pub fn with_sticky_macs(mut self, sticky_macs: BTreeSet<MacAddress>) -> Self {
+        self.sticky_macs = sticky_macs;
+        self
     }
 }
 
