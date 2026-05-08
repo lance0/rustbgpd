@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Gate 7b+2 domain state machine — `LocalMacIpOriginator`.**
+  Parallel to `LocalMacOriginator` but keyed on `(MAC, IP)` rather
+  than `MAC` alone. Pure deterministic state machine with no I/O,
+  no tokio, no path-attribute encoding — same shape as the
+  MAC-only originator. Implements RFC 7432 §15.1 mobility
+  sequencing per-`(MAC, IP)` (independent ratchets from the
+  MAC-only chain — chosen because RFC 9135 §4.4 treats MAC-only
+  and MAC+IP as independent advertisements; we do not claim §15.1
+  is keyed by full NLRI). New API: `on_local_ip_learned`,
+  `on_local_ip_aged`, `on_local_mac_aged` (cascade hook —
+  withdraws every `(MAC, *)` IP route at once so the daemon
+  doesn't keep its own reverse index), `on_remote_ip_changed`
+  (handles `view = None` for remote-disappeared without
+  resetting the ratchet), `drain_to_withdraws`, `outstanding_keys`.
+  Diverges from `LocalMacOriginator` on sticky-bit changes —
+  re-emits at the same sequence rather than bumping, since for
+  MAC+IP the sticky bit is closer to an ARP/ND-suppression hint
+  than a mobility signal. The daemon-side wiring lands in slice 3.
 - **Gate 7b+2 wire layer — `AF_INET` / `AF_INET6` neighbour
   classification.** The existing `RTNLGRP_NEIGH` subscriber now
   splits the message stream into two paths: `AF_BRIDGE` continues to
