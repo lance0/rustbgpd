@@ -742,12 +742,16 @@ implemented per ADR-0040.
   consumption (origination of the bridge's own MAC on
   instance-Ready via `InstanceDataplaneStatus.bridge_mac`),
   `sticky_macs` config schema (ADR-0056 — listed MACs originated
-  with the RFC 7432 §15.4 sticky bit), and sub-second mobility
+  with the RFC 7432 §15.4 sticky bit), sub-second mobility
   convergence (Gate 7c — EVPN-keyed `EvpnRouteEvent` broadcast in
   `crates/rib`; the 5 s poll stays as `Lagged` / cold-start
-  backstop).
-- **Deferred (tracked in ADR-0055 §7 / §9 + `docs/evpn-alpha-soak.md`):**
-  MAC-with-IP origination via ARP/ND suppression (Gate 7b+2) and
+  backstop), and MAC-with-IP Type 2 origination via ARP/ND
+  suppression (Gate 7b+2 — `AF_INET` / `AF_INET6` classifier in
+  `crates/evpn-linux`, `LocalMacIpOriginator` in `crates/evpn`,
+  daemon correlation under the FRR-style replace model per
+  RFC 9135 §7.2.3 in `src/evpn_originator.rs`. Operator
+  prerequisite: bridge `neigh_suppress on`).
+- **Deferred (tracked in ADR-0055 §9 + `docs/evpn-alpha-soak.md`):**
   RFC 7432 §15.1 duplicate-MAC quarantine action (M=180 s/N=5;
   detection counters shipped — the operator-facing escalation
   channel is the deferred half).

@@ -169,15 +169,64 @@ that key so a later RFC 7432 M/N quarantine window can be implemented
 without changing metric shape. One-off increments can be normal during
 planned host moves.
 
+## MAC+IP routes not appearing
+
+Gate 7b+2 origination requires the operator to enable per-VXLAN-port
+neighbour suppression on the bridge so the kernel routes ARP/ND
+bindings into the bridge's neighbour table. Without it, no
+`IpAdded` events reach the daemon and only MAC-only Type 2 routes
+get advertised. Verify in this order:
+
+```bash
+# 1. neigh_suppress on the VXLAN port?
+bridge -d link show dev vxlan100 | grep neigh_suppress
+#    Expect: neigh_suppress on
+
+# 2. Does the kernel have an (IP, MAC) binding on the *bridge*?
+ip neigh show dev br100
+#    Expect: <ip> dev br100 lladdr <mac> ... REACHABLE/STALE/PERMANENT
+
+# 3. Is the daemon receiving the IpAdded event?
+RUST_LOG=rustbgpd::evpn_originator=debug rustbgpd ...
+#    Expect: the FRR-style replace-flow Inject/Withdraw pair in the
+#    originator log when the binding lands.
+```
+
+Common gotchas:
+
+- **`neigh_suppress` set on the bridge instead of the VXLAN port.**
+  The flag is per-port and only meaningful on the VXLAN port —
+  setting it on the bridge itself is silently ignored. Use
+  `bridge link set dev vxlan<vni> neigh_suppress on`, not
+  `bridge link set dev br<vni>`.
+- **Entry in `INCOMPLETE` / `FAILED` / `DELAY` / `PROBE` state.**
+  The daemon's classifier deliberately drops these per RFC §15
+  spirit — acting on them mid-revalidation produces origination
+  thrash. Wait for the kernel to confirm the binding (`REACHABLE`)
+  or use `ip neigh replace ... nud reachable` to force it.
+- **Address-shape filter dropped the IP.** Multicast, link-local,
+  loopback, broadcast, and unspecified addresses are filtered at
+  the classifier per ADR-0054 §1. A `192.0.2.10` works; a
+  `fe80::1` is dropped. See `crates/evpn-linux/src/linux/notify.rs`
+  for the full filter.
+
 ## Local smoke
 
-The current real-VTEP smoke is M37:
+The current real-VTEP smokes are M37 (MAC-only origination) and
+M37+IP (MAC+IP origination via ARP/ND suppression):
 
 ```bash
 docker build -t rustbgpd:dev .
+
+# MAC-only path (Gate 7b+1)
 sudo containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
 bash tests/interop/scripts/test-m37-evpn-local-origination.sh
 sudo containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml
+
+# MAC+IP path (Gate 7b+2 — requires bridge neigh_suppress on)
+sudo containerlab deploy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
+bash tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
+sudo containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
 ```
 
 For churn, run the M37 topology and then use the local-only churn driver:

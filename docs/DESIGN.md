@@ -30,9 +30,9 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN Route Reflector (VXLAN-EVPN DC fabric).** iBGP route reflector for Type 1-5 RFC 7432 routes between VTEPs; control plane only, VTEPs handle their own DF election and data-plane encapsulation. See ADR-0050.
 
-**EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1 + 7c).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (Gate 7c). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
+**EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1 + 7b+2 + 7c).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. Gate 7b+2 closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (Gate 7c). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
-**Later:** MAC-with-IP origination via ARP/ND suppression (Gate 7b+2), duplicate-MAC quarantine action (ADR-0055 §9), DF election + multi-homing (Gate 8), IRB semantics + L3VNI / Type 5 dataplane (Gate 9, RFC 9135), VPNv4/v6, MPLS-EVPN encap.
+**Later:** Duplicate-MAC quarantine action (ADR-0055 §9), DF election + multi-homing (Gate 8), IRB semantics + L3VNI / Type 5 dataplane (Gate 9, RFC 9135), VPNv4/v6, MPLS-EVPN encap.
 
 ---
 
@@ -447,14 +447,17 @@ Phase 3 scope), scale validation (50k Type 2 + churn), and
 controller-driven injection for Type 2 / Type 3. What remains:
 
 - **VTEP mode:** local EVI / VRF / VNI state and kernel FDB MAC learning are
-  shipped (Gates 7a + 7b + 7b+1 + 7c); the daemon now both programs remote
-  MACs into the kernel FDB and originates local Type 2 + Type 3 IMET routes
-  from kernel-learned MACs. `advertise_svi_mac` originates the bridge's own
-  MAC on instance-Ready, `sticky_macs` (ADR-0056) marks origination with
-  the RFC 7432 §15.4 sticky bit, and Gate 7c switches the originator from
-  a 5 s poll to a push-notified RIB broadcast for sub-second mobility
-  convergence. **Still ahead in Phase 2:** MAC-with-IP origination via
-  ARP/ND suppression (Gate 7b+2), duplicate-MAC quarantine action.
+  shipped (Gates 7a + 7b + 7b+1 + 7b+2 + 7c); the daemon now both
+  programs remote MACs into the kernel FDB and originates local
+  Type 2 + Type 3 IMET routes from kernel-learned MACs.
+  `advertise_svi_mac` originates the bridge's own MAC on
+  instance-Ready, `sticky_macs` (ADR-0056) marks origination with
+  the RFC 7432 §15.4 sticky bit, Gate 7b+2 adds MAC+IP Type 2
+  origination via ARP/ND suppression under the FRR replace model
+  (requires `bridge neigh_suppress on`), and Gate 7c switches the
+  originator from a 5 s poll to a push-notified RIB broadcast for
+  sub-second mobility convergence. **Still ahead in Phase 2:**
+  duplicate-MAC quarantine action.
 - **Multi-homing execution:** the RR already reflects Type 1 EAD + Type 4 ES
   unchanged (Gate 4); this is rustbgpd-as-VTEP DF election (RFC 7432 §8 +
   RFC 8584) and aliasing / backup-path resolution against locally-learned

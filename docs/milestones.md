@@ -644,12 +644,15 @@ for the architectural record.
   ADR-0055 locks the boundary.
 - **Closed in `[Unreleased]` post-v0.16.0:**
   `advertise_svi_mac` consumption (`src/evpn_svi.rs`),
-  `sticky_macs` config schema (ADR-0056), and sub-second mobility
+  `sticky_macs` config schema (ADR-0056), sub-second mobility
   convergence (Gate 7c — EVPN-keyed `EvpnRouteEvent` broadcast in
   `crates/rib`; the 5 s poll stays as `Lagged` / cold-start
-  backstop).
-- **Still deferred (alpha-soak follow-up):** MAC-with-IP
-  origination via ARP/ND suppression (Gate 7b+2), duplicate-MAC
+  backstop), and MAC-with-IP Type 2 origination via ARP/ND
+  suppression (Gate 7b+2 — `AF_INET` / `AF_INET6` classifier,
+  `LocalMacIpOriginator` state machine, daemon correlation under
+  the FRR-style replace model per RFC 9135 §7.2.3. Operator
+  prerequisite: bridge `neigh_suppress on`).
+- **Still deferred (alpha-soak follow-up):** duplicate-MAC
   quarantine action (RFC 7432 §15.1 M=180 s/N=5; detection
   counters shipped, action deferred per ADR-0055 §9), runtime
   mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`).
