@@ -64,8 +64,9 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use rustbgpd_evpn::{
-    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, LocalMacOriginator,
-    MacAddress, OriginationAction, ProjectedEvpnRoute, RemoteMacView, project_evpn_routes,
+    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalMacIpOriginator, LocalMacObservation,
+    LocalMacOriginator, MacAddress, OriginationAction, ProjectedEvpnRoute, RemoteMacIpView,
+    RemoteMacView, project_evpn_routes,
 };
 use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
@@ -188,11 +189,7 @@ pub fn spawn(
     }
     let local_mac_rx = local_mac_rx?;
 
-    // Build a per-instance LocalMacOriginator, keyed by VNI.
-    let mut originators: BTreeMap<EvpnInstanceId, LocalMacOriginator> = BTreeMap::new();
-    for inst in evpn_instances.iter() {
-        originators.insert(inst.id, LocalMacOriginator::new(inst.id, inst.rd));
-    }
+    let state = OriginatorState::new(evpn_instances);
 
     let shutdown = daemon_shutdown;
     let runtime = OriginatorRuntime {
@@ -202,7 +199,7 @@ pub fn spawn(
         originated_local_mac_counts,
         shutdown: shutdown.clone(),
     };
-    let join = tokio::spawn(originator_loop(config, runtime, local_mac_rx, originators));
+    let join = tokio::spawn(originator_loop(config, runtime, local_mac_rx, state));
 
     Some(EvpnOriginatorHandle { shutdown, join })
 }
@@ -212,16 +209,91 @@ pub fn spawn(
 /// snapshot drive `on_remote_changed` callbacks.
 type RemoteMacViewMap = BTreeMap<(EvpnInstanceId, MacAddress), RemoteMacView>;
 
+/// Same shape as [`RemoteMacViewMap`] but for MAC+IP Type 2 routes —
+/// keyed by `(VNI, MAC, IP)` because RFC 9135 §7.2.3 makes MAC-only
+/// and MAC+IP independent advertisements with their own contention
+/// resolution. The daemon builds both maps from the same
+/// `query_evpn_routes` snapshot during repoll.
+type RemoteMacIpViewMap = BTreeMap<(EvpnInstanceId, MacAddress, IpAddr), RemoteMacIpView>;
+
+/// Per-daemon-task bundle of MAC + MAC+IP originator state.
+///
+/// Slice 3 (Gate 7b+2) added the MAC+IP path. The earlier
+/// `originators: BTreeMap<EvpnInstanceId, LocalMacOriginator>` argument
+/// got bundled here alongside its MAC+IP sibling, the local-FDB
+/// presence cache, the pending-IP-bindings cache, and the live
+/// `(MAC, IP)` cache. Bundling avoids threading 7+ params through
+/// every handler.
+struct OriginatorState {
+    /// MAC-only origination state, one per VNI.
+    mac_originators: BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    /// MAC+IP origination state, one per VNI. Pairs with
+    /// `mac_originators` — the daemon coordinates which originator is
+    /// "current" for each MAC under the FRR-style replace model.
+    mac_ip_originators: BTreeMap<EvpnInstanceId, LocalMacIpOriginator>,
+    /// Per-VNI: MACs currently locally learned, with their last-seen
+    /// bridge-port ifindex. The ifindex is retained so a downgrade
+    /// from MAC+IP back to MAC-only can replay it into
+    /// `LocalMacOriginator::on_local_learned` — without it the
+    /// originator's port-move detection would see a synthetic
+    /// `0 → real_ifindex` transition the next time a real port
+    /// change came in.
+    local_macs: BTreeMap<EvpnInstanceId, BTreeMap<MacAddress, u32>>,
+    /// Per-`(VNI, MAC)`: IPs observed via ARP/ND on a bridge whose
+    /// MAC has not yet appeared in the `AF_BRIDGE` FDB feed. Kernel
+    /// can reorder the two edges (e.g., bridge FDB repopulating
+    /// while the ARP table already holds entries from before
+    /// `neigh_suppress` flipped on). Drained on `Learned`.
+    pending_ip_bindings: BTreeMap<(EvpnInstanceId, MacAddress), BTreeSet<IpAddr>>,
+    /// Per-VNI: which `(MAC, IP)` pairs we currently advertise as
+    /// MAC+IP. Tracks the upgrade/downgrade boundary: a MAC with at
+    /// least one entry here is currently MAC+IP-advertising; a MAC
+    /// with zero entries (but present in `local_macs`) is MAC-only-
+    /// advertising.
+    live_mac_ip: BTreeMap<EvpnInstanceId, BTreeMap<MacAddress, BTreeSet<IpAddr>>>,
+    /// Cached MAC-only contender map.
+    remote_mac_view: RemoteMacViewMap,
+    /// Cached MAC+IP contender map.
+    remote_mac_ip_view: RemoteMacIpViewMap,
+}
+
+impl OriginatorState {
+    /// Build a fresh state bundle for a given instance set.
+    fn new(instances: &EvpnInstanceTable) -> Self {
+        let mut mac_originators = BTreeMap::new();
+        let mut mac_ip_originators = BTreeMap::new();
+        for inst in instances.iter() {
+            mac_originators.insert(inst.id, LocalMacOriginator::new(inst.id, inst.rd));
+            mac_ip_originators.insert(inst.id, LocalMacIpOriginator::new(inst.id, inst.rd));
+        }
+        Self {
+            mac_originators,
+            mac_ip_originators,
+            local_macs: BTreeMap::new(),
+            pending_ip_bindings: BTreeMap::new(),
+            live_mac_ip: BTreeMap::new(),
+            remote_mac_view: BTreeMap::new(),
+            remote_mac_ip_view: BTreeMap::new(),
+        }
+    }
+
+    /// Whether this MAC currently has any MAC+IP route advertising.
+    fn is_mac_ip_advertising(&self, vni: EvpnInstanceId, mac: MacAddress) -> bool {
+        self.live_mac_ip
+            .get(&vni)
+            .and_then(|m| m.get(&mac))
+            .is_some_and(|s| !s.is_empty())
+    }
+}
+
 async fn originator_loop(
     config: OriginatorConfig,
     runtime: OriginatorRuntime,
     mut local_mac_rx: mpsc::Receiver<LocalMacObservation>,
-    mut originators: BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    mut state: OriginatorState,
 ) {
     let mut poll_tick = tokio::time::interval(config.poll_interval);
     poll_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    let mut remote_view: RemoteMacViewMap = BTreeMap::new();
 
     // Subscribe to the RIB's EVPN best-path broadcast. A failure here
     // is non-fatal: the 5 s poll fallback is the same convergence
@@ -240,7 +312,7 @@ async fn originator_loop(
             () = runtime.shutdown.cancelled() => {
                 debug!("EVPN originator shutting down");
                 drain_to_withdraws(
-                    &mut originators,
+                    &mut state,
                     &runtime.instances,
                     &runtime.rib_tx,
                     &runtime.metrics,
@@ -255,7 +327,7 @@ async fn originator_loop(
                     // observation reconnect. Park indefinitely on the other arms.
                     park_until_shutdown(&runtime.shutdown).await;
                     drain_to_withdraws(
-                        &mut originators,
+                        &mut state,
                         &runtime.instances,
                         &runtime.rib_tx,
                         &runtime.metrics,
@@ -265,9 +337,8 @@ async fn originator_loop(
                 };
                 handle_observation(
                     &obs,
-                    &mut originators,
+                    &mut state,
                     &runtime.instances,
-                    &remote_view,
                     &runtime.rib_tx,
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
@@ -278,8 +349,7 @@ async fn originator_loop(
                     handle_evpn_event(
                         &ev,
                         &runtime.instances,
-                        &mut remote_view,
-                        &mut originators,
+                        &mut state,
                         &runtime.rib_tx,
                         &runtime.metrics,
                         &runtime.originated_local_mac_counts,
@@ -293,8 +363,7 @@ async fn originator_loop(
                     if let Err(e) = repoll_rib(
                         &runtime.instances,
                         &runtime.rib_tx,
-                        &mut remote_view,
-                        &mut originators,
+                        &mut state,
                         &runtime.metrics,
                         &runtime.originated_local_mac_counts,
                     ).await {
@@ -310,8 +379,7 @@ async fn originator_loop(
                 if let Err(e) = repoll_rib(
                     &runtime.instances,
                     &runtime.rib_tx,
-                    &mut remote_view,
-                    &mut originators,
+                    &mut state,
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
                 ).await {
@@ -352,107 +420,361 @@ async fn park_until_shutdown(shutdown: &CancellationToken) {
     shutdown.cancelled().await;
 }
 
+/// Dispatch a single observation from the kernel observation feed.
+///
+/// Implements the FRR-style **replace model** for MAC vs MAC+IP
+/// (Gate 7b+2): at any time at most one of `(MAC-only, MAC+IP)` is
+/// advertising for a given MAC. Receiving an `IpAdded` for a MAC
+/// that's currently MAC-only-advertising **withdraws** the MAC-only
+/// route and emits a MAC+IP route in its place. Receiving the last
+/// `IpRemoved` for a MAC drops it back to MAC-only.
+///
+/// See `docs/RFC_NOTES.md` for the RFC 9135 §7.2.3 framing and the
+/// FRR mailing-list bugs that motivated this model.
 async fn handle_observation(
     obs: &LocalMacObservation,
-    originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    state: &mut OriginatorState,
     instances: &Arc<EvpnInstanceTable>,
-    remote_view: &RemoteMacViewMap,
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) {
-    let (vni, actions) = match *obs {
+    match *obs {
         LocalMacObservation::Learned { vni, mac, ifindex } => {
-            let Some(orig) = originators.get_mut(&vni) else {
-                debug!(
-                    ?vni,
-                    ?mac,
-                    "local MAC observation for unknown VNI — dropping"
-                );
-                return;
-            };
-            let view = remote_view.get(&(vni, mac));
-            // Sticky bit (RFC 7432 §15.4) is set when the operator has
-            // pinned this MAC via `[[evpn_instances]].sticky_macs` —
-            // see ADR-0056. Otherwise default to non-sticky.
-            let sticky = instances
-                .get(vni)
-                .is_some_and(|inst| inst.sticky_macs.contains(&mac));
-            let actions = orig.on_local_learned(mac, ifindex, sticky, view);
+            handle_learned(
+                vni,
+                mac,
+                ifindex,
+                state,
+                instances,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+            )
+            .await;
+        }
+        LocalMacObservation::Aged { vni, mac } => {
+            handle_aged(
+                vni,
+                mac,
+                state,
+                instances,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+            )
+            .await;
+        }
+        LocalMacObservation::IpAdded { vni, mac, ip } => {
+            handle_ip_added(
+                vni,
+                mac,
+                ip,
+                state,
+                instances,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+            )
+            .await;
+        }
+        LocalMacObservation::IpRemoved { vni, mac, ip } => {
+            handle_ip_removed(
+                vni,
+                mac,
+                ip,
+                state,
+                instances,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+            )
+            .await;
+        }
+    }
+}
+
+/// Resolve the sticky bit for `(vni, mac)` per ADR-0056. Returns
+/// `false` if the instance is unknown — caller treats that as the
+/// safe default.
+fn sticky_for(instances: &EvpnInstanceTable, vni: EvpnInstanceId, mac: MacAddress) -> bool {
+    instances
+        .get(vni)
+        .is_some_and(|inst| inst.sticky_macs.contains(&mac))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_learned(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    ifindex: u32,
+    state: &mut OriginatorState,
+    instances: &Arc<EvpnInstanceTable>,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+) {
+    let Some(inst) = instances.get(vni) else {
+        debug!(?vni, ?mac, "Learned for unknown VNI — dropping");
+        return;
+    };
+    state
+        .local_macs
+        .entry(vni)
+        .or_default()
+        .insert(mac, ifindex);
+    let sticky = sticky_for(instances, vni, mac);
+
+    // Drain any pending IP bindings for this MAC. Their presence
+    // bypasses the MAC-only inject — we go straight to MAC+IP per
+    // the FRR replace model.
+    let pending_ips: Vec<IpAddr> = state
+        .pending_ip_bindings
+        .remove(&(vni, mac))
+        .map(|s| s.into_iter().collect())
+        .unwrap_or_default();
+
+    if pending_ips.is_empty() {
+        // No IP bindings yet — emit MAC-only.
+        let Some(orig) = state.mac_originators.get_mut(&vni) else {
+            return;
+        };
+        let view = state.remote_mac_view.get(&(vni, mac));
+        let actions = orig.on_local_learned(mac, ifindex, sticky, view);
+        if view.is_some() && !actions.is_empty() {
+            record_duplicate_mac_move(metrics, vni, mac);
+        }
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    } else {
+        // Pending IPs exist — go straight to MAC+IP. Drop any stale
+        // MAC-only from the originator state (idempotent if we never
+        // advertised MAC-only).
+        let Some(mac_orig) = state.mac_originators.get_mut(&vni) else {
+            return;
+        };
+        let mac_only_actions = mac_orig.on_local_aged(mac);
+        apply_actions(
+            mac_only_actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+        )
+        .await;
+
+        let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
+            return;
+        };
+        for ip in pending_ips {
+            let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
+            let actions = mac_ip_orig.on_local_ip_learned(mac, ip, sticky, view);
             if view.is_some() && !actions.is_empty() {
                 record_duplicate_mac_move(metrics, vni, mac);
             }
-            (vni, actions)
+            apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+            state
+                .live_mac_ip
+                .entry(vni)
+                .or_default()
+                .entry(mac)
+                .or_default()
+                .insert(ip);
         }
-        LocalMacObservation::Aged { vni, mac } => {
-            let Some(orig) = originators.get_mut(&vni) else {
-                return;
-            };
-            (vni, orig.on_local_aged(mac))
-        }
-        // Gate 7b+2 slice 2 — extend the originator's state machine
-        // for per-(MAC, IP) origination. The wire layer (this slice)
-        // already classifies and surfaces these events; the daemon
-        // logs them at debug for now and otherwise no-ops.
-        LocalMacObservation::IpAdded { vni, mac, ip } => {
-            debug!(
-                ?vni,
-                ?mac,
-                ?ip,
-                "ARP/ND binding observed; MAC+IP origination not yet wired"
-            );
-            return;
-        }
-        LocalMacObservation::IpRemoved { vni, mac, ip } => {
-            debug!(
-                ?vni,
-                ?mac,
-                ?ip,
-                "ARP/ND binding cleared; MAC+IP origination not yet wired"
-            );
-            return;
-        }
-    };
-
-    let Some(inst) = instances.get(vni) else {
-        // Should not happen — instance table is fixed at startup.
-        return;
-    };
-    apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    }
 }
 
-/// Re-poll the RIB, build a fresh `RemoteMacViewMap`, diff against the
-/// cached one, and fire `on_remote_changed` for any tracked MAC whose
-/// view changed. Then update the cache.
+async fn handle_aged(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    state: &mut OriginatorState,
+    instances: &Arc<EvpnInstanceTable>,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+) {
+    let Some(inst) = instances.get(vni) else {
+        return;
+    };
+    if let Some(per_vni) = state.local_macs.get_mut(&vni) {
+        per_vni.remove(&mac);
+    }
+    state.pending_ip_bindings.remove(&(vni, mac));
+    if let Some(per_vni) = state.live_mac_ip.get_mut(&vni) {
+        per_vni.remove(&mac);
+    }
+
+    // Withdraw both MAC-only and any MAC+IP routes for this MAC.
+    // At most one set is non-empty under the replace model, but
+    // cascading both is safe (each emits empty if not advertising).
+    if let Some(mac_orig) = state.mac_originators.get_mut(&vni) {
+        let actions = mac_orig.on_local_aged(mac);
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    }
+    if let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) {
+        let actions = mac_ip_orig.on_local_mac_aged(mac);
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_ip_added(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    ip: IpAddr,
+    state: &mut OriginatorState,
+    instances: &Arc<EvpnInstanceTable>,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+) {
+    let Some(inst) = instances.get(vni) else {
+        return;
+    };
+    let mac_is_local = state
+        .local_macs
+        .get(&vni)
+        .is_some_and(|m| m.contains_key(&mac));
+    if !mac_is_local {
+        // Park until the MAC surfaces. AF_INET / AF_INET6 NEIGH
+        // can race AF_BRIDGE FDB during cold start.
+        debug!(
+            ?vni,
+            ?mac,
+            ?ip,
+            "IpAdded for MAC not yet locally learned — parking in pending_ip_bindings"
+        );
+        state
+            .pending_ip_bindings
+            .entry((vni, mac))
+            .or_default()
+            .insert(ip);
+        return;
+    }
+
+    let sticky = sticky_for(instances, vni, mac);
+    let was_mac_only = !state.is_mac_ip_advertising(vni, mac);
+
+    // Replace model: if MAC-only is currently advertising, withdraw
+    // it before emitting MAC+IP. on_local_aged is idempotent if not
+    // advertising.
+    if was_mac_only && let Some(mac_orig) = state.mac_originators.get_mut(&vni) {
+        let actions = mac_orig.on_local_aged(mac);
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    }
+
+    // Emit MAC+IP route.
+    let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
+        return;
+    };
+    let view = state.remote_mac_ip_view.get(&(vni, mac, ip));
+    let actions = mac_ip_orig.on_local_ip_learned(mac, ip, sticky, view);
+    if view.is_some() && !actions.is_empty() {
+        record_duplicate_mac_move(metrics, vni, mac);
+    }
+    apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    state
+        .live_mac_ip
+        .entry(vni)
+        .or_default()
+        .entry(mac)
+        .or_default()
+        .insert(ip);
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_ip_removed(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    ip: IpAddr,
+    state: &mut OriginatorState,
+    instances: &Arc<EvpnInstanceTable>,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+) {
+    let Some(inst) = instances.get(vni) else {
+        return;
+    };
+
+    // Drop pending entry if the MAC never surfaced — there's no
+    // route to withdraw.
+    if let Some(set) = state.pending_ip_bindings.get_mut(&(vni, mac)) {
+        set.remove(&ip);
+        if set.is_empty() {
+            state.pending_ip_bindings.remove(&(vni, mac));
+        }
+    }
+
+    // Withdraw the MAC+IP route for this specific (mac, ip).
+    let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) else {
+        return;
+    };
+    let actions = mac_ip_orig.on_local_ip_aged(mac, ip);
+    apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+
+    // Update live cache. If this was the last IP for the MAC AND the
+    // MAC is still locally learned, downgrade back to MAC-only by
+    // re-emitting via the MAC-only originator.
+    let mut empty_after = false;
+    if let Some(per_vni) = state.live_mac_ip.get_mut(&vni)
+        && let Some(ips) = per_vni.get_mut(&mac)
+    {
+        ips.remove(&ip);
+        if ips.is_empty() {
+            per_vni.remove(&mac);
+            empty_after = true;
+        }
+    }
+
+    let ifindex_for_mac = state
+        .local_macs
+        .get(&vni)
+        .and_then(|m| m.get(&mac).copied());
+    if empty_after && let Some(ifindex) = ifindex_for_mac {
+        let sticky = sticky_for(instances, vni, mac);
+        let Some(mac_orig) = state.mac_originators.get_mut(&vni) else {
+            return;
+        };
+        let view = state.remote_mac_view.get(&(vni, mac));
+        // Replay the original ifindex so MAC-only's port-move
+        // detection stays anchored to the real bridge port —
+        // a downgrade isn't a port move and shouldn't ratchet up.
+        let actions = mac_orig.on_local_learned(mac, ifindex, sticky, view);
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    }
+}
+
+/// Re-poll the RIB, build fresh contender views (both MAC-only and
+/// MAC+IP), diff against the cached state, and fire
+/// `on_remote_changed` / `on_remote_ip_changed` for any tracked
+/// `(MAC)` or `(MAC, IP)` whose view changed.
 async fn repoll_rib(
     instances: &EvpnInstanceTable,
     rib_tx: &mpsc::Sender<RibUpdate>,
-    remote_view: &mut RemoteMacViewMap,
-    originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    state: &mut OriginatorState,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) -> Result<(), RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
-    let new_view = build_remote_view(instances, &routes);
+    let (new_mac_view, new_mac_ip_view) = build_remote_views(instances, &routes);
 
-    // Detect adds + changes + removes by union of keys.
-    let mut affected: Vec<(EvpnInstanceId, MacAddress)> = Vec::new();
-    for k in new_view.keys() {
-        if remote_view.get(k) != new_view.get(k) {
-            affected.push(*k);
+    // --- MAC-only contender diff ---
+    let mut mac_affected: Vec<(EvpnInstanceId, MacAddress)> = Vec::new();
+    for k in new_mac_view.keys() {
+        if state.remote_mac_view.get(k) != new_mac_view.get(k) {
+            mac_affected.push(*k);
         }
     }
-    for k in remote_view.keys() {
-        if !new_view.contains_key(k) {
-            affected.push(*k);
+    for k in state.remote_mac_view.keys() {
+        if !new_mac_view.contains_key(k) {
+            mac_affected.push(*k);
         }
     }
-
-    for (vni, mac) in affected {
-        let Some(orig) = originators.get_mut(&vni) else {
+    for (vni, mac) in mac_affected {
+        let Some(orig) = state.mac_originators.get_mut(&vni) else {
             continue;
         };
-        let view = new_view.get(&(vni, mac));
+        let view = new_mac_view.get(&(vni, mac));
         let actions = orig.on_remote_changed(mac, view);
         if actions.is_empty() {
             continue;
@@ -466,7 +788,38 @@ async fn repoll_rib(
         apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
     }
 
-    *remote_view = new_view;
+    // --- MAC+IP contender diff ---
+    let mut mac_ip_affected: Vec<(EvpnInstanceId, MacAddress, IpAddr)> = Vec::new();
+    for k in new_mac_ip_view.keys() {
+        if state.remote_mac_ip_view.get(k) != new_mac_ip_view.get(k) {
+            mac_ip_affected.push(*k);
+        }
+    }
+    for k in state.remote_mac_ip_view.keys() {
+        if !new_mac_ip_view.contains_key(k) {
+            mac_ip_affected.push(*k);
+        }
+    }
+    for (vni, mac, ip) in mac_ip_affected {
+        let Some(orig) = state.mac_ip_originators.get_mut(&vni) else {
+            continue;
+        };
+        let view = new_mac_ip_view.get(&(vni, mac, ip));
+        let actions = orig.on_remote_ip_changed(mac, ip, view);
+        if actions.is_empty() {
+            continue;
+        }
+        if view.is_some() {
+            record_duplicate_mac_move(metrics, vni, mac);
+        }
+        let Some(inst) = instances.get(vni) else {
+            continue;
+        };
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    }
+
+    state.remote_mac_view = new_mac_view;
+    state.remote_mac_ip_view = new_mac_ip_view;
     Ok(())
 }
 
@@ -508,8 +861,7 @@ async fn repoll_rib(
 async fn handle_evpn_event(
     event: &EvpnRouteEvent,
     instances: &EvpnInstanceTable,
-    remote_view: &mut RemoteMacViewMap,
-    originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    state: &mut OriginatorState,
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
@@ -520,8 +872,7 @@ async fn handle_evpn_event(
     if let Err(e) = repoll_rib(
         instances,
         rib_tx,
-        remote_view,
-        originators,
+        state,
         metrics,
         originated_local_mac_counts,
     )
@@ -531,15 +882,29 @@ async fn handle_evpn_event(
     }
 }
 
-/// Drain on shutdown: emit Withdraws for every still-advertised MAC.
+/// Drain on shutdown: emit Withdraws for every still-advertised
+/// route across both originators. MAC+IP first so peer state
+/// converges from the most-specific NLRIs down — same pattern the
+/// daemon's coordinated shutdown uses for SVI then originator then
+/// IMET.
 async fn drain_to_withdraws(
-    originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    state: &mut OriginatorState,
     instances: &EvpnInstanceTable,
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) {
-    for (vni, orig) in originators {
+    for (vni, orig) in &mut state.mac_ip_originators {
+        let actions = orig.drain_to_withdraws();
+        if actions.is_empty() {
+            continue;
+        }
+        let Some(inst) = instances.get(*vni) else {
+            continue;
+        };
+        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    }
+    for (vni, orig) in &mut state.mac_originators {
         let actions = orig.drain_to_withdraws();
         if actions.is_empty() {
             continue;
@@ -755,14 +1120,23 @@ pub(crate) fn route_target_to_extcomm(rt: rustbgpd_evpn::RouteTarget) -> Extende
     }
 }
 
-/// Build the `RemoteMacViewMap` from a flat set of best-path
+/// Build both contender maps from a flat set of best-path
 /// `EvpnRibRoute`s. Drops self-NH routes per the module-level
 /// "self-origination filter" rule.
-fn build_remote_view(instances: &EvpnInstanceTable, routes: &[EvpnRibRoute]) -> RemoteMacViewMap {
-    // Reuse the supervisor's projection input shape for self-NH
-    // filtering and (VNI, MAC) tie-breaking, but extend with the
-    // `RemoteMacView` carrying the sticky bit (which the supervisor's
-    // projection drops).
+///
+/// MAC-only and MAC+IP are independent advertisements per RFC 9135
+/// §7.2.3, so the two maps are constructed independently:
+///
+/// - `RemoteMacViewMap` — the existing per-`(VNI, MAC)` view; reuses
+///   `project_evpn_routes` which collapses by `(VNI, MAC)`.
+/// - `RemoteMacIpViewMap` — per-`(VNI, MAC, IP)` view for MAC+IP
+///   contention; built inline because `project_evpn_routes`
+///   intentionally drops the IP. Same self-NH filter, same RFC §15.1
+///   tiebreak (higher seq → lower `next_hop` on ties).
+fn build_remote_views(
+    instances: &EvpnInstanceTable,
+    routes: &[EvpnRibRoute],
+) -> (RemoteMacViewMap, RemoteMacIpViewMap) {
     let projected: Vec<(ProjectedEvpnRoute, bool)> = routes
         .iter()
         .filter_map(|r| {
@@ -784,18 +1158,10 @@ fn build_remote_view(instances: &EvpnInstanceTable, routes: &[EvpnRibRoute]) -> 
         })
         .collect();
 
-    // First pass: drop self-NH routes per project_evpn_routes.
+    // --- MAC-only map (collapses to per-(VNI, MAC) winner) ---
     let table = project_evpn_routes(instances, projected.iter().map(|(p, _)| p.clone()));
-    // Build the typed view by joining the post-projection table with
-    // the captured sticky bits. Both keyed on (VNI, MAC); the table
-    // is the authority on the winner.
-    let mut view: RemoteMacViewMap = BTreeMap::new();
+    let mut mac_view: RemoteMacViewMap = BTreeMap::new();
     for ((vni, mac), entry) in table.iter() {
-        // Recover the sticky bit by looking up any of the captured
-        // routes whose (mac, next_hop, mobility_sequence) match the
-        // table entry. This is a small linear scan; the input
-        // collection is bounded by the number of best-path Type 2
-        // routes per (VNI, MAC) which is ~1 in steady state.
         let sticky = projected
             .iter()
             .find(|(p, _)| {
@@ -804,7 +1170,7 @@ fn build_remote_view(instances: &EvpnInstanceTable, routes: &[EvpnRibRoute]) -> 
                     && p.mobility_sequence == entry.mobility_sequence
             })
             .is_some_and(|(_, s)| *s);
-        view.insert(
+        mac_view.insert(
             (*vni, *mac),
             RemoteMacView {
                 mac: *mac,
@@ -814,7 +1180,74 @@ fn build_remote_view(instances: &EvpnInstanceTable, routes: &[EvpnRibRoute]) -> 
             },
         );
     }
-    view
+
+    // --- MAC+IP map (per-(VNI, MAC, IP) winner) ---
+    //
+    // Walk the projected set, drop self-NH and IP-less rows, group
+    // by (VNI, MAC, IP), keep the contender with the highest
+    // mobility seq (None < Some(0); ties broken by lower next_hop).
+    let mut staged: BTreeMap<(EvpnInstanceId, MacAddress, IpAddr), &(ProjectedEvpnRoute, bool)> =
+        BTreeMap::new();
+    for tup in &projected {
+        let p = &tup.0;
+        let Some(ip) = p.host_ip else {
+            continue;
+        };
+        let raw_vni = p.label1.as_vni();
+        if raw_vni == 0 {
+            continue;
+        }
+        let Ok(vni) = rustbgpd_evpn::EvpnInstanceId::new(raw_vni) else {
+            continue;
+        };
+        let Some(local_inst) = instances.get(vni) else {
+            continue;
+        };
+        if p.next_hop == local_inst.local_vtep_ip {
+            continue;
+        }
+        let key = (vni, p.mac, ip);
+        match staged.get(&key) {
+            None => {
+                staged.insert(key, tup);
+            }
+            Some(existing) => {
+                if prefer_mac_ip_new(p, &existing.0) {
+                    staged.insert(key, tup);
+                }
+            }
+        }
+    }
+
+    let mut mac_ip_view: RemoteMacIpViewMap = BTreeMap::new();
+    for ((vni, mac, ip), tup) in staged {
+        let p = &tup.0;
+        let sticky = tup.1;
+        mac_ip_view.insert(
+            (vni, mac, ip),
+            RemoteMacIpView {
+                mac,
+                ip,
+                mobility_sequence: p.mobility_sequence,
+                sticky,
+                next_hop: p.next_hop,
+            },
+        );
+    }
+
+    (mac_view, mac_ip_view)
+}
+
+/// MAC+IP contender tiebreak — same shape as
+/// `crates/evpn::projection::prefer_new`: higher mobility seq wins,
+/// then lower `next_hop`. Inlined here because that function is
+/// crate-private to `rustbgpd-evpn`.
+fn prefer_mac_ip_new(new: &ProjectedEvpnRoute, existing: &ProjectedEvpnRoute) -> bool {
+    match new.mobility_sequence.cmp(&existing.mobility_sequence) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => new.next_hop < existing.next_hop,
+    }
 }
 
 /// Extract `(sticky, mobility_seq)` from a route's path attributes.
@@ -952,7 +1385,7 @@ mod tests {
             evpn_macip_route(100, 0xAA, "10.0.0.2", Some(5), false),
             evpn_macip_route(100, 0xAA, "10.0.0.1", Some(10), false), // self-NH
         ];
-        let view = build_remote_view(&t, &routes);
+        let (view, _) = build_remote_views(&t, &routes);
         let v = view.get(&(vni(100), mac(0xAA))).expect("view present");
         assert_eq!(v.next_hop, ipa("10.0.0.2"));
         assert_eq!(v.mobility_sequence, Some(5));
@@ -969,7 +1402,7 @@ mod tests {
             Some(3),
             /* sticky */ true,
         )];
-        let view = build_remote_view(&t, &routes);
+        let (view, _) = build_remote_views(&t, &routes);
         let v = view.get(&(vni(100), mac(0xAA))).expect("view present");
         assert!(v.sticky);
     }
@@ -994,8 +1427,9 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         };
-        let view = build_remote_view(&t, &[imet]);
+        let (view, mac_ip_view) = build_remote_views(&t, &[imet]);
         assert!(view.is_empty());
+        assert!(mac_ip_view.is_empty());
     }
 
     #[tokio::test]
@@ -1004,9 +1438,8 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut originators =
-            BTreeMap::from([(vni(100), LocalMacOriginator::new(vni(100), rd(65000, 100)))]);
-        let remote_view = BTreeMap::from([(
+        let mut state = OriginatorState::new(&instances);
+        state.remote_mac_view.insert(
             (vni(100), mac(0xAA)),
             RemoteMacView {
                 mac: mac(0xAA),
@@ -1014,7 +1447,7 @@ mod tests {
                 sticky: false,
                 next_hop: ipa("10.0.0.2"),
             },
-        )]);
+        );
 
         let _rib_responder = tokio::spawn(async move {
             while let Some(msg) = rib_rx.recv().await {
@@ -1030,9 +1463,8 @@ mod tests {
                 mac: mac(0xAA),
                 ifindex: 10,
             },
-            &mut originators,
+            &mut state,
             &instances,
-            &remote_view,
             &rib_tx,
             &metrics,
             &counts,
@@ -1472,8 +1904,7 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut originators = BTreeMap::new();
-        let mut remote_view: RemoteMacViewMap = BTreeMap::new();
+        let mut state = OriginatorState::new(&instances);
 
         // RIB has one Type 2 from 10.0.0.2; the responder returns it
         // for every QueryEvpnRoutes.
@@ -1490,18 +1921,10 @@ mod tests {
             None,
         );
 
-        handle_evpn_event(
-            &event,
-            &instances,
-            &mut remote_view,
-            &mut originators,
-            &rib_tx,
-            &metrics,
-            &counts,
-        )
-        .await;
+        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
 
-        let view = remote_view
+        let view = state
+            .remote_mac_view
             .get(&(vni(100), mac(0xAA)))
             .expect("event-triggered repoll must populate remote_view");
         assert_eq!(view.next_hop, ipa("10.0.0.2"));
@@ -1520,8 +1943,7 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut originators = BTreeMap::new();
-        let mut remote_view: RemoteMacViewMap = BTreeMap::new();
+        let mut state = OriginatorState::new(&instances);
 
         // Two routes for the same (VNI, MAC) under different RDs.
         // PE-A wins on mobility seq (10 > 1).
@@ -1547,18 +1969,10 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(
-            &event,
-            &instances,
-            &mut remote_view,
-            &mut originators,
-            &rib_tx,
-            &metrics,
-            &counts,
-        )
-        .await;
+        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
 
-        let view = remote_view
+        let view = state
+            .remote_mac_view
             .get(&(vni(100), mac(0xAA)))
             .expect("projection must select PE-A even when PE-B's event triggered the repoll");
         assert_eq!(
@@ -1578,8 +1992,8 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut originators = BTreeMap::new();
-        let mut remote_view: RemoteMacViewMap = BTreeMap::from([(
+        let mut state = OriginatorState::new(&instances);
+        state.remote_mac_view.insert(
             (vni(100), mac(0xAA)),
             RemoteMacView {
                 mac: mac(0xAA),
@@ -1587,7 +2001,7 @@ mod tests {
                 sticky: false,
                 next_hop: ipa("10.0.0.2"),
             },
-        )]);
+        );
 
         // The losing PE-B is withdrawn — the RIB still returns PE-A.
         let mut pe_a = evpn_macip_route(100, 0xAA, "10.0.0.2", Some(10), false);
@@ -1611,18 +2025,10 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(
-            &event,
-            &instances,
-            &mut remote_view,
-            &mut originators,
-            &rib_tx,
-            &metrics,
-            &counts,
-        )
-        .await;
+        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
 
-        let view = remote_view
+        let view = state
+            .remote_mac_view
             .get(&(vni(100), mac(0xAA)))
             .expect("losing PE's withdrawal must NOT clear the winning view");
         assert_eq!(view.next_hop, ipa("10.0.0.2"));
@@ -1638,8 +2044,7 @@ mod tests {
         let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut originators = BTreeMap::new();
-        let mut remote_view: RemoteMacViewMap = BTreeMap::new();
+        let mut state = OriginatorState::new(&instances);
 
         let query_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let qc = query_count.clone();
@@ -1668,16 +2073,7 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(
-            &event,
-            &instances,
-            &mut remote_view,
-            &mut originators,
-            &rib_tx,
-            &metrics,
-            &counts,
-        )
-        .await;
+        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
 
         assert_eq!(
             query_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -1782,8 +2178,8 @@ mod tests {
         let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(4);
         let metrics = BgpMetrics::new();
         let counts = OriginatedLocalMacCounts::default();
-        let mut originators = BTreeMap::new();
-        let mut remote_view: RemoteMacViewMap = BTreeMap::from([(
+        let mut state = OriginatorState::new(&instances);
+        state.remote_mac_view.insert(
             (vni(100), mac(0xCC)),
             RemoteMacView {
                 mac: mac(0xCC),
@@ -1791,7 +2187,7 @@ mod tests {
                 sticky: false,
                 next_hop: ipa("10.0.0.2"),
             },
-        )]);
+        );
 
         // RIB is empty — the route is gone.
         let _responder = rib_query_responder(rib_rx, vec![]);
@@ -1807,20 +2203,527 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(
-            &event,
+        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
+
+        assert!(
+            !state.remote_mac_view.contains_key(&(vni(100), mac(0xCC))),
+            "Withdrawn with empty RIB must clear the cached remote_view entry"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Gate 7b+2 slice 3 — MAC+IP correlation tests (replace model)
+    // -----------------------------------------------------------------
+
+    /// Capture an ordered log of `(InjectEvpn | WithdrawEvpn)` actions
+    /// the daemon emits to the RIB. Returns the captured-actions
+    /// handle; the responder ack's every Inject/Withdraw with `Ok(())`.
+    fn rib_capture_responder(
+        mut rib_rx: mpsc::Receiver<RibUpdate>,
+    ) -> (
+        Arc<tokio::sync::Mutex<Vec<RibAction>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let log_clone = log.clone();
+        let join = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        log_clone.lock().await.push(RibAction::Inject(route.key()));
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { key, reply } => {
+                        log_clone.lock().await.push(RibAction::Withdraw(key));
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (log, join)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum RibAction {
+        Inject(EvpnRouteKey),
+        Withdraw(EvpnRouteKey),
+    }
+
+    fn macip_key_with(rd_v: u32, mac_b: u8, ip_str: Option<&str>) -> EvpnRouteKey {
+        EvpnRouteKey::MacIp {
+            rd: rd(65000, rd_v),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(mac_b),
+            ip: ip_str.map(ipa),
+        }
+    }
+
+    /// Slice 3 core flow: `Learned` then `IpAdded` produces a
+    /// MAC-only Inject, then a MAC-only Withdraw (replacing it),
+    /// then a MAC+IP Inject. The replace boundary is the load-bearing
+    /// invariant — peers see the upgrade as an explicit handoff.
+    #[tokio::test]
+    async fn learned_then_ip_added_replaces_mac_only_with_mac_ip() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
             &instances,
-            &mut remote_view,
-            &mut originators,
             &rib_tx,
             &metrics,
             &counts,
         )
         .await;
 
+        handle_observation(
+            &LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        assert_eq!(
+            actions,
+            vec![
+                RibAction::Inject(macip_key_with(100, 0xAA, None)),
+                RibAction::Withdraw(macip_key_with(100, 0xAA, None)),
+                RibAction::Inject(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+            ],
+            "expected MAC-only Inject → MAC-only Withdraw → MAC+IP Inject"
+        );
+    }
+
+    /// `IpAdded` before `Learned` parks the IP and emits no RIB action.
+    /// The kernel can reorder these edges during cold start.
+    #[tokio::test]
+    async fn ip_added_before_learned_parks_pending_no_rib_action() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        assert!(log.lock().await.is_empty());
         assert!(
-            !remote_view.contains_key(&(vni(100), mac(0xCC))),
-            "Withdrawn with empty RIB must clear the cached remote_view entry"
+            state
+                .pending_ip_bindings
+                .get(&(vni(100), mac(0xAA)))
+                .is_some_and(|s| s.contains(&ipa("192.0.2.10"))),
+            "pending IP binding must be parked"
+        );
+    }
+
+    /// When `Learned` arrives after pending IPs were parked, the
+    /// daemon goes straight to MAC+IP — no MAC-only Inject is emitted
+    /// at all (no transient L2-only window).
+    #[tokio::test]
+    async fn learned_after_pending_ip_skips_mac_only_inject() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        // IpAdded first (parked).
+        handle_observation(
+            &LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        // Then Learned drains the pending IP and emits MAC+IP directly.
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        // Should be exactly one Inject for the MAC+IP route. No
+        // MAC-only Inject; the on_local_aged on a never-advertised
+        // MAC is a no-op so it doesn't appear either.
+        assert_eq!(
+            actions,
+            vec![RibAction::Inject(macip_key_with(
+                100,
+                0xAA,
+                Some("192.0.2.10")
+            ))],
+            "Learned after pending IP must skip MAC-only and emit MAC+IP only"
+        );
+        assert!(
+            !state
+                .pending_ip_bindings
+                .contains_key(&(vni(100), mac(0xAA))),
+            "pending bindings drained on Learned"
+        );
+    }
+
+    /// `IpRemoved` of the **last** IP for a MAC downgrades back to
+    /// MAC-only — withdraws the MAC+IP route and re-emits the MAC.
+    #[tokio::test]
+    async fn last_ip_removed_downgrades_to_mac_only() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        handle_observation(
+            &LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        // Clear the log to focus on the IpRemoved phase.
+        log.lock().await.clear();
+
+        handle_observation(
+            &LocalMacObservation::IpRemoved {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        assert_eq!(
+            actions,
+            vec![
+                RibAction::Withdraw(macip_key_with(100, 0xAA, Some("192.0.2.10"))),
+                RibAction::Inject(macip_key_with(100, 0xAA, None)),
+            ],
+            "expected MAC+IP Withdraw → MAC-only re-Inject"
+        );
+    }
+
+    /// `IpRemoved` of a **non-last** IP withdraws only the MAC+IP for
+    /// that key. MAC-only stays absent because other IPs still drive
+    /// MAC+IP advertising for the same MAC.
+    #[tokio::test]
+    async fn non_last_ip_removed_keeps_mac_in_mac_ip_regime() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        for ip in ["192.0.2.10", "192.0.2.11"] {
+            handle_observation(
+                &LocalMacObservation::IpAdded {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                    ip: ipa(ip),
+                },
+                &mut state,
+                &instances,
+                &rib_tx,
+                &metrics,
+                &counts,
+            )
+            .await;
+        }
+        log.lock().await.clear();
+
+        handle_observation(
+            &LocalMacObservation::IpRemoved {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        assert_eq!(
+            actions,
+            vec![RibAction::Withdraw(macip_key_with(
+                100,
+                0xAA,
+                Some("192.0.2.10")
+            ))],
+            "non-last IP removal must NOT downgrade to MAC-only"
+        );
+    }
+
+    /// `Aged` while multiple IPs are live cascades MAC+IP withdraws
+    /// for every IP and clears the live cache. No MAC-only Withdraw
+    /// fires because we were in MAC+IP regime.
+    #[tokio::test]
+    async fn aged_with_live_ips_cascades_mac_ip_withdraws() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        for ip in ["192.0.2.10", "2001:db8::1"] {
+            handle_observation(
+                &LocalMacObservation::IpAdded {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                    ip: ipa(ip),
+                },
+                &mut state,
+                &instances,
+                &rib_tx,
+                &metrics,
+                &counts,
+            )
+            .await;
+        }
+        log.lock().await.clear();
+
+        handle_observation(
+            &LocalMacObservation::Aged {
+                vni: vni(100),
+                mac: mac(0xAA),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let actions = log.lock().await.clone();
+        // Two MAC+IP Withdraws (order depends on BTreeMap iteration —
+        // both must be present, no MAC-only Inject/Withdraw).
+        assert_eq!(
+            actions.len(),
+            2,
+            "expected 2 cascade MAC+IP withdraws: {actions:?}"
+        );
+        for a in &actions {
+            assert!(
+                matches!(
+                    a,
+                    RibAction::Withdraw(EvpnRouteKey::MacIp { ip: Some(_), .. })
+                ),
+                "every cascade action must be a MAC+IP Withdraw: {a:?}"
+            );
+        }
+        assert!(
+            !state
+                .live_mac_ip
+                .get(&vni(100))
+                .is_some_and(|m| m.contains_key(&mac(0xAA))),
+            "live cache cleared on Aged"
+        );
+        assert!(
+            !state
+                .local_macs
+                .get(&vni(100))
+                .is_some_and(|m| m.contains_key(&mac(0xAA))),
+            "local_macs cleared on Aged"
+        );
+    }
+
+    /// Sticky pass-through to MAC+IP: a MAC listed in
+    /// `[[evpn_instances]].sticky_macs` originates the MAC+IP Type 2
+    /// with the RFC 7432 §15.4 sticky bit set on its MAC Mobility
+    /// extcomm. ADR-0056's promise must hold for both NLRI shapes.
+    #[tokio::test]
+    async fn sticky_macs_propagates_to_mac_ip_route() {
+        // Instance with one sticky MAC.
+        let mut t = EvpnInstanceTable::new();
+        let inst = local_instance(100).with_sticky_macs(BTreeSet::from([mac(0xAA)]));
+        t.insert(inst).unwrap();
+        let instances = Arc::new(t);
+
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+
+        // Capture the first MAC+IP Inject for inspection.
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel::<EvpnRibRoute>();
+        let mut captured_tx = Some(captured_tx);
+        let _responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        if matches!(route.route, EvpnRoute::MacIp(EvpnMacIp { ip: Some(_), .. }))
+                            && let Some(tx) = captured_tx.take()
+                        {
+                            let _ = tx.send(route.clone());
+                        }
+                        let _ = reply.send(Ok(()));
+                    }
+                    RibUpdate::WithdrawEvpn { reply, .. } => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        handle_observation(
+            &LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let route = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("MAC+IP Inject must arrive within 2s")
+            .expect("captured_tx not dropped");
+
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v),
+                _ => None,
+            })
+            .expect("originated MAC+IP route must carry ExtendedCommunities");
+        let mobility = extcomms
+            .iter()
+            .find_map(|ec| ec.as_mac_mobility())
+            .expect("sticky_macs MAC must emit a MAC Mobility extcomm");
+        assert!(
+            mobility.0,
+            "sticky bit must propagate from sticky_macs to MAC+IP route"
         );
     }
 }
