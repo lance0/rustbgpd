@@ -642,14 +642,18 @@ for the architectural record.
   EVPN originator + IMET keys before peer manager shutdown.
   M37 containerlab smoke 4/4 PASS against Linux 6.17 + FRR 10.3.1.
   ADR-0055 locks the boundary.
+- **Closed in `[Unreleased]` post-v0.16.0:**
+  `advertise_svi_mac` consumption (`src/evpn_svi.rs`),
+  `sticky_macs` config schema (ADR-0056), and sub-second mobility
+  convergence (Gate 7c — EVPN-keyed `EvpnRouteEvent` broadcast in
+  `crates/rib`; the 5 s poll stays as `Lagged` / cold-start
+  backstop).
 - **Still deferred (alpha-soak follow-up):** MAC-with-IP
-  origination via ARP/ND suppression (Gate 7b+2),
-  `advertise_svi_mac` consumption, duplicate-MAC quarantine
-  (RFC 7432 §15.1 M=180 s/N=5), sticky / static MAC anti-spoof
-  config schema, sub-second mobility convergence (Gate 7c —
-  EVPN-keyed RouteEvent broadcast), runtime mutation RPCs
-  (`AddEvpnInstance` / `DeleteEvpnInstance`). Tracked in
-  [docs/evpn-alpha-soak.md](evpn-alpha-soak.md).
+  origination via ARP/ND suppression (Gate 7b+2), duplicate-MAC
+  quarantine action (RFC 7432 §15.1 M=180 s/N=5; detection
+  counters shipped, action deferred per ADR-0055 §9), runtime
+  mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`).
+  Tracked in [docs/evpn-alpha-soak.md](evpn-alpha-soak.md).
 - **DF election execution** (RFC 7432 §8 + RFC 8584) — still
   deferred. Phase 1 reflects the inputs unchanged so VTEPs run the
   election themselves.

@@ -11,19 +11,39 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Gate 7c: events used as wakeup, not as projection deltas.** The
+  original handler computed `RemoteMacView` directly from one event's
+  `best` field and applied it as a delta to the
+  `(VNI, MAC)`-keyed `remote_view` cache. That doesn't match the
+  RIB ↔ projection model: `EvpnRouteEvent` is keyed by full
+  `EvpnRouteKey` (with RD), but `crates/evpn::project_evpn_routes`
+  picks the per-`(VNI, MAC)` winner across **all** RDs by mobility
+  sequence + next-hop (RFC 7432 §15.1, §7.9.5). Two failure modes
+  the original code silently hit:
+  - Lower-seq Added under a different RD overwriting a higher-seq
+    winner with the worse candidate.
+  - A non-winning Withdrawn clearing the cache while a winning RD
+    still existed in the RIB.
+  Fix: the event is now used purely as a wakeup signal — any Type 2
+  event triggers a full `repoll_rib`, which re-runs the projection
+  from scratch via `build_remote_view` → `project_evpn_routes`.
+  Sub-second wakeup is preserved; the projection is now correct
+  under multi-RD contention. Two regression tests pin the failure
+  modes; an additional test verifies non-Type-2 events do not
+  trigger a repoll.
 - **EVPN Withdrawn events now reliably clear the originator's
-  `remote_view`.** The Gate 7c push notification originally tried to
-  recover the VNI for `Withdrawn` events by scanning local
-  `EvpnInstance.rd` against the route key's RD; that's wrong because
-  RFC 7432 §7.9.5 lets each PE pick its own RD, so a remote-imported
-  Type 2 carries the **remote**'s RD, which won't match any local
-  instance. `EvpnRouteEvent` now carries `previous_best:
-  Option<EvpnRibRoute>` alongside `best`, populated from the prior
-  Loc-RIB state captured before `recompute_evpn`. The originator
-  recovers VNI from `event.best.label1` for Added/BestChanged and
-  from `event.previous_best.label1` for Withdrawn — eliminating the
-  RD-scan fallback that silently broke remote-MAC withdrawals.
-  Regression test pins this with a remote-RD shape.
+  `remote_view`.** The earlier per-event delta path tried to recover
+  VNI for `Withdrawn` events by scanning local `EvpnInstance.rd`
+  against the route key's RD; that's wrong because RFC 7432 §7.9.5
+  lets each PE pick its own RD, so a remote-imported Type 2 carries
+  the **remote**'s RD, which won't match any local instance.
+  `EvpnRouteEvent` now carries `previous_best: Option<EvpnRibRoute>`
+  alongside `best`, populated from the prior Loc-RIB state captured
+  before `recompute_evpn`. (Under the wakeup-only model above, the
+  originator no longer reads `previous_best` directly — the field
+  remains on the event for other consumers, e.g. BMP-style
+  observers, who want the prior next-hop without a back-channel
+  query.)
 - **SVI-MAC origination honors `sticky_macs`.** Per ADR-0056, an
   operator listing the bridge MAC in `[[evpn_instances]].sticky_macs`
   expected the originated SVI Type 2 to carry the RFC 7432 §15.4
@@ -34,9 +54,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Documentation pass for the three follow-on slices in
-  `[Unreleased]`: README maturity row, `docs/DESIGN.md` Phase 2
-  description, `docs/evpn-alpha-soak.md` checklist, and the
-  `examples/evpn-vtep-leaf/config.toml` field comments are all
+  `[Unreleased]`: README maturity row + Rust 1.92 MSRV references
+  (badge, install prereqs, runtime row), `docs/DESIGN.md` Phase 2
+  description, `docs/evpn-enablement.md` follow-up table,
+  `docs/RFC_NOTES.md` deferred list, `docs/milestones.md` Phase 2
+  status, `docs/evpn-alpha-soak.md` checklist, and the
+  `examples/evpn-vtep-leaf/config.toml` field comments — all
   updated so they no longer describe these features as deferred.
 
 ### Added

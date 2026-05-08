@@ -402,18 +402,23 @@ flow that Gate 7b's foundation left as a stub.
 | ADR-0055 — Local-MAC origination boundary (sequence rules, channel surface, deferral list) | `docs/adr/0055-evpn-local-mac-origination.md` | landed |
 | M37 containerlab smoke — rustbgpd-as-VTEP originating Type 2 + IMET against FRR consumer | `tests/interop/m37-evpn-local-origination.clab.yml` | landed |
 
-**Post-Gate 7b / 7b+1 alpha-soak follow-ups:**
+**Post-Gate 7b / 7b+1 / 7c alpha-soak follow-ups:**
 
 | Task | File / location |
 |------|----------------|
 | MAC-with-IP Type 2 origination (requires AF_INET / AF_INET6 NEIGH subscription correlated by MAC; ARP/ND suppression learning) | `crates/evpn-linux/src/linux/notify.rs` (extend) |
-| `advertise_svi_mac` consumption — read SVI MAC via RTM_GETLINK at instance-Ready, originate Type 2 for the gateway MAC | (Gate 7b+2; intersects IRB / L3VNI work) |
-| Sticky / static MAC anti-spoof config schema — wire codec is plumbed; the `static_macs` config field needs its own ADR | `crates/evpn/src/instance.rs` (extend) |
-| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine heuristic) | `crates/evpn/src/origination.rs` (extend) |
+| MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine action) — detection counters shipped; the operator-facing escalation channel and quarantine action are deferred per ADR-0055 §9 | `crates/evpn/src/origination.rs` (extend) |
 | Type 5 IP Prefix origination per L3VNI | (deferred to Gate 9 — IP-VRF concept needed) |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
-| `RTNLGRP_LINK` subscription + sub-second convergence (Gate 7c) — reduces poll cadence dependency for mobility races | `crates/evpn-linux/src/linux/notify.rs`, RIB EVPN-event broadcast |
+
+**Closed by post-v0.16.0 follow-ups (in `[Unreleased]`):**
+
+| Item | Where it landed |
+|------|-----------------|
+| `advertise_svi_mac` consumption | `src/evpn_svi.rs` + `InstanceDataplaneStatus.bridge_mac` |
+| Sticky-MAC config schema (`sticky_macs`) | ADR-0056, `EvpnInstance.sticky_macs` |
+| Sub-second mobility convergence (Gate 7c) | `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s poll stays as `Lagged` / cold-start backstop |
 
 ---
 

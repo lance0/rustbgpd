@@ -447,11 +447,14 @@ Phase 3 scope), scale validation (50k Type 2 + churn), and
 controller-driven injection for Type 2 / Type 3. What remains:
 
 - **VTEP mode:** local EVI / VRF / VNI state and kernel FDB MAC learning are
-  shipped (Gates 7a + 7b + 7b+1); the daemon now both programs remote MACs
-  into the kernel FDB and originates local Type 2 + Type 3 IMET routes from
-  kernel-learned MACs. **Still ahead in Phase 2:** MAC-with-IP origination
-  via ARP/ND suppression (Gate 7b+2), `advertise_svi_mac` consumption,
-  sub-second mobility convergence (Gate 7c).
+  shipped (Gates 7a + 7b + 7b+1 + 7c); the daemon now both programs remote
+  MACs into the kernel FDB and originates local Type 2 + Type 3 IMET routes
+  from kernel-learned MACs. `advertise_svi_mac` originates the bridge's own
+  MAC on instance-Ready, `sticky_macs` (ADR-0056) marks origination with
+  the RFC 7432 §15.4 sticky bit, and Gate 7c switches the originator from
+  a 5 s poll to a push-notified RIB broadcast for sub-second mobility
+  convergence. **Still ahead in Phase 2:** MAC-with-IP origination via
+  ARP/ND suppression (Gate 7b+2), duplicate-MAC quarantine action.
 - **Multi-homing execution:** the RR already reflects Type 1 EAD + Type 4 ES
   unchanged (Gate 4); this is rustbgpd-as-VTEP DF election (RFC 7432 §8 +
   RFC 8584) and aliasing / backup-path resolution against locally-learned
