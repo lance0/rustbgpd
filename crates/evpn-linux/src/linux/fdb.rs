@@ -26,7 +26,7 @@ use std::io;
 use futures::stream::TryStreamExt;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
-    NeighbourAddress, NeighbourAttribute, NeighbourFlag, NeighbourMessage, NeighbourState,
+    NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
 };
 use netlink_packet_route::route::RouteType;
 use rtnetlink::Handle;
@@ -136,7 +136,7 @@ fn parse_fdb_entry(
     let mut dst: Option<std::net::IpAddr> = None;
     for attr in &msg.attributes {
         match attr {
-            NeighbourAttribute::LinkLocalAddress(bytes) if bytes.len() == 6 => {
+            NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
                 let mut arr = [0u8; 6];
                 arr.copy_from_slice(bytes);
                 mac = Some(MacAddress::new(arr));
@@ -152,16 +152,18 @@ fn parse_fdb_entry(
     let mac = mac?;
 
     let mut flags = KernelFdbFlags::default();
-    for f in &msg.header.flags {
-        match f {
-            NeighbourFlag::ExtLearned => flags.extern_learn = true,
-            NeighbourFlag::Own => flags.self_flag = true,
-            // `NeighbourFlag::Controller` is the netlink-packet-route
-            // 0.19 spelling for `NTF_MASTER` — the bit set by
-            // `bridge fdb add ... master`.
-            NeighbourFlag::Controller => flags.master = true,
-            _ => {}
-        }
+    let hf = msg.header.flags;
+    if hf.contains(NeighbourFlags::ExtLearned) {
+        flags.extern_learn = true;
+    }
+    if hf.contains(NeighbourFlags::Own) {
+        flags.self_flag = true;
+    }
+    // `NeighbourFlags::Controller` is the netlink-packet-route
+    // spelling for `NTF_MASTER` — the bit set by `bridge fdb add
+    // ... master`.
+    if hf.contains(NeighbourFlags::Controller) {
+        flags.master = true;
     }
     decode_state(msg.header.state, &mut flags);
 
@@ -260,11 +262,9 @@ pub(crate) async fn apply_op(
                 .add_bridge(vxlan_ifindex, &mac.octets())
                 .destination(*dst)
                 .state(NeighbourState::Other(NUD_NOARP_PERMANENT))
-                .flags(vec![
-                    NeighbourFlag::Own,
-                    NeighbourFlag::Controller,
-                    NeighbourFlag::ExtLearned,
-                ])
+                .flags(
+                    NeighbourFlags::Own | NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
+                )
                 .replace()
                 .execute()
                 .await
@@ -279,9 +279,9 @@ pub(crate) async fn apply_op(
             msg.header.family = AddressFamily::Bridge;
             msg.header.ifindex = vxlan_ifindex;
             msg.header.kind = RouteType::Unspec;
-            msg.header.flags = vec![NeighbourFlag::Own, NeighbourFlag::Controller];
+            msg.header.flags = NeighbourFlags::Own | NeighbourFlags::Controller;
             msg.attributes
-                .push(NeighbourAttribute::LinkLocalAddress(mac.octets().to_vec()));
+                .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
             handle
                 .neighbours()
                 .del(msg)
