@@ -1,0 +1,67 @@
+# Containerlab topology: rustbgpd as EVPN VTEP originator with
+# ARP/ND suppression on the bridge ↔ FRR consumer
+# (M37+IP — Gate 7b+2 MAC+IP origination smoke)
+#
+# Sibling of m37-evpn-local-origination.clab.yml. The only material
+# difference is the originator's bridge: this topology starts it
+# with `neigh_suppress on` per-VXLAN-port, which makes the kernel
+# populate the bridge's neighbour table from ARP/ND traffic and
+# emit AF_INET / AF_INET6 RTM_NEWNEIGH messages on the bridge
+# ifindex.
+#
+# Asserts the FRR-style replace-on-IP-discovery model:
+#   1. Add a static MAC in the FDB → rustbgpd originates a MAC-only
+#      Type 2.
+#   2. Add an `ip neigh` entry tying that MAC to an IP on the
+#      bridge → rustbgpd **withdraws** the MAC-only and emits a
+#      MAC+IP Type 2 (with the IP carried in the NLRI).
+#   3. Delete the neighbour → rustbgpd withdraws the MAC+IP and
+#      re-emits the MAC-only.
+#   4. Delete the FDB entry → rustbgpd withdraws the MAC-only.
+#   5. Shutdown drains.
+#
+# Topology mirrors M37 — single rustbgpd ↔ single FRR consumer
+# over iBGP L2VPN/EVPN. No VXLAN data-plane on the FRR side; the
+# test asserts control-plane Type 2 visibility via `vtysh`.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
+#   bash tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
+#   sudo containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
+
+name: m37-evpn-mac-ip-origination
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m37-originator.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-originator-mac-ip.sh:/usr/local/bin/start-rustbgpd-originator-mac-ip.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-originator-mac-ip.sh 10.0.0.1 100
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug,rustbgpd::evpn_originator=debug
+        VTEP_LOOPBACK: 10.0.0.1
+        VTEP_VNI: "100"
+
+    consumer:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m37-consumer.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/lib/frr/frrinit.sh start
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "consumer:eth1"]
