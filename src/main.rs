@@ -22,6 +22,7 @@ mod config_persister;
 mod evpn_dataplane;
 mod evpn_imet;
 mod evpn_originator;
+mod evpn_svi;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -1075,6 +1076,26 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_imet::originate_all(evpn_instances.iter().cloned().collect::<Vec<_>>(), &rib_tx).await
     };
 
+    // EVPN SVI-MAC origination (RFC 9135 §6.1) — gated on any
+    // instance setting `advertise_svi_mac = true`. Subscribes to the
+    // dataplane handle's report broadcast and originates a Type 2
+    // for each Ready bridge's own MAC. `evpn_svi::spawn` returns
+    // `None` when no instance opts in, so RR-only and SVI-MAC-off
+    // deployments incur zero cost.
+    let evpn_svi_shutdown = tokio_util::sync::CancellationToken::new();
+    let evpn_svi_handle = if let Some(handle) = evpn_dataplane_handle.as_ref() {
+        evpn_svi::spawn(
+            &evpn_instances,
+            rib_tx.clone(),
+            handle.subscribe_reports(),
+            metrics.clone(),
+            evpn_originated_local_mac_counts.clone(),
+            evpn_svi_shutdown.clone(),
+        )
+    } else {
+        None
+    };
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1354,6 +1375,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // emits one Withdraw per still-advertised MAC.
     if let Some(handle) = evpn_originator_handle {
         info!("draining EVPN originator");
+        handle.shutdown().await;
+    }
+
+    // 1.9a' Drain the SVI-MAC originator first — same ordering
+    // rationale as the local-MAC originator: SVI Type 2 withdraws
+    // must land while peer sessions are still up.
+    if let Some(handle) = evpn_svi_handle {
+        info!("draining EVPN SVI-MAC originator");
         handle.shutdown().await;
     }
 

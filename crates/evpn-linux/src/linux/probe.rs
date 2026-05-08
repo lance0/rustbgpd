@@ -27,6 +27,16 @@ pub(crate) fn probe_instances(instances: &EvpnInstanceTable, cache: &LinkCache) 
     let mut probes = InstanceProbes::new();
     for inst in instances.iter() {
         probes.insert(inst.id, probe_one(inst, cache));
+        // Surface the bridge MAC alongside the probe outcome when
+        // the kernel reported one. SVI-MAC origination consumes this
+        // via `InstanceDataplaneStatus.bridge_mac` rather than
+        // re-walking the LinkCache itself (ADR-0054 §1).
+        if let Some(bridge_name) = inst.bridge.as_deref()
+            && let Some(bridge) = cache.bridges.get(bridge_name)
+            && let Some(mac) = bridge.mac
+        {
+            probes.set_bridge_mac(inst.id, mac);
+        }
     }
     probes
 }
@@ -162,6 +172,7 @@ mod tests {
     fn ready_link(vni: u32, local: &str) -> BridgeLink {
         BridgeLink {
             ifindex: 100,
+            mac: None,
             vlan_filtering: false,
             vxlan_attach_count: 1,
             vxlan: Some(KernelVxlanInfo {

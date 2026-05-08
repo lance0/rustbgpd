@@ -19,6 +19,8 @@ use netlink_packet_route::link::{
 };
 use rtnetlink::Handle;
 
+use rustbgpd_evpn::MacAddress;
+
 use crate::error::DataplaneError;
 use crate::snapshot::KernelVxlanInfo;
 
@@ -30,6 +32,12 @@ pub(crate) struct BridgeLink {
     /// reconcile path targets the VXLAN port, not the bridge.
     #[allow(dead_code)]
     pub ifindex: u32,
+    /// Bridge link-layer (MAC) address, when the kernel reports one.
+    /// Captured for SVI-MAC origination (RFC 9135 §6.1) — the daemon
+    /// surfaces this on `InstanceDataplaneStatus.bridge_mac` so the
+    /// SVI task can originate Type 2 routes for the bridge's own
+    /// address without reaching back into this internal cache.
+    pub mac: Option<MacAddress>,
     /// `true` when the bridge has `vlan_filtering=1`. ADR-0054 §4
     /// rejects VLAN-aware bridges in Gate 7b — `probe` reports such
     /// instances `NotReady` rather than guessing a VNI-to-VLAN map.
@@ -114,10 +122,12 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
             Some(InfoKind::Bridge) => {
                 if let Some(name) = name {
                     let vlan_filtering = bridge_vlan_filtering(&msg);
+                    let mac = extract_link_mac(&msg);
                     bridges.insert(
                         name.clone(),
                         BridgeLink {
                             ifindex,
+                            mac,
                             vlan_filtering,
                             vxlan: None,
                             vxlan_attach_count: 0,
@@ -197,6 +207,22 @@ fn extract_controller(msg: &LinkMessage) -> Option<u32> {
     for attr in &msg.attributes {
         if let LinkAttribute::Controller(idx) = attr {
             return Some(*idx);
+        }
+    }
+    None
+}
+
+/// Extract the link-layer (MAC) address attribute, if the kernel
+/// reports one and it is exactly six octets. Other lengths (Infiniband
+/// LL is 20 bytes, IP-over-IP tunnels report empty) are silently
+/// dropped — the bridge will simply have no `bridge_mac` on its
+/// status row.
+fn extract_link_mac(msg: &LinkMessage) -> Option<MacAddress> {
+    for attr in &msg.attributes {
+        if let LinkAttribute::Address(bytes) = attr
+            && let Ok(arr) = <[u8; 6]>::try_from(bytes.as_slice())
+        {
+            return Some(MacAddress::new(arr));
         }
     }
     None
@@ -289,4 +315,41 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
             learning_disabled,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netlink_packet_route::link::LinkMessage;
+
+    fn synthesize_link_msg(addr: Vec<u8>) -> LinkMessage {
+        let mut msg = LinkMessage::default();
+        msg.attributes.push(LinkAttribute::Address(addr));
+        msg
+    }
+
+    #[test]
+    fn extract_link_mac_captures_six_octet_address() {
+        let bytes = vec![0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+        let msg = synthesize_link_msg(bytes.clone());
+        let mac = extract_link_mac(&msg).expect("six-octet address must yield Some");
+        assert_eq!(mac.octets(), [0x52, 0x54, 0x00, 0x12, 0x34, 0x56]);
+    }
+
+    #[test]
+    fn extract_link_mac_drops_non_six_octet_addresses() {
+        // Infiniband-shaped 20-byte LL address — silently ignored
+        // rather than half-decoded.
+        let msg = synthesize_link_msg(vec![0u8; 20]);
+        assert!(extract_link_mac(&msg).is_none());
+        // Empty address (some IP-over-IP tunnels) — also dropped.
+        let msg = synthesize_link_msg(vec![]);
+        assert!(extract_link_mac(&msg).is_none());
+    }
+
+    #[test]
+    fn extract_link_mac_returns_none_when_no_address_attribute() {
+        let msg = LinkMessage::default();
+        assert!(extract_link_mac(&msg).is_none());
+    }
 }

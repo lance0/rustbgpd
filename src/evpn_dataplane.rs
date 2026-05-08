@@ -13,18 +13,23 @@
 //! ## Polling vs. push
 //!
 //! Phase 5b uses a fixed-cadence polling supervisor that re-projects
-//! every [`SupervisorConfig::poll_interval`] (default 5 s). This is intentionally
-//! simple — adding a broadcast channel of EVPN best-path changes into
-//! `crates/rib` is a deeper invasive change that the operator-driven
-//! `[[evpn_instances]]` flow can do without. The reconcile actor's
-//! 60 s periodic dump backstop and the 100ms→5s op retry already
-//! handle kernel drift at finer granularity.
+//! every [`SupervisorConfig::poll_interval`] (default 5 s). The
+//! reconcile actor's 60 s periodic dump backstop and the
+//! 100ms→5s op retry already handle kernel drift at finer
+//! granularity. The Gate 7c push notification (`EvpnRouteEvent`
+//! broadcast added in v0.17, see `crates/rib`) is consumed by the
+//! local-MAC originator only; the dataplane supervisor stays
+//! poll-driven because 5 s is acceptable for FDB programming, while
+//! the originator's mobility window must be sub-second.
 //!
-//! When operator demand pushes for sub-second MAC convergence, the
-//! follow-up is to add a `tokio::sync::Notify` that the RIB's EVPN
-//! best-path apply path pings, and have this supervisor `select!` on
-//! the notify in addition to the periodic timer. That landing point
-//! is documented in `docs/evpn-enablement.md` Gate 7c.
+//! ## Report broadcast
+//!
+//! Each [`DataplaneReport`] from the reconcile actor is forwarded
+//! through a [`broadcast::Sender<DataplaneReport>`] so multiple
+//! daemon-side subscribers can react to the same stream without
+//! contending. The existing log-only consumer is one such
+//! subscriber; the SVI-MAC origination task added by
+//! `advertise_svi_mac` is another.
 //!
 //! ## RR-only deployments
 //!
@@ -42,14 +47,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_evpn::{
-    DataplaneIntent, EvpnInstanceTable, LocalMacObservation, ProjectedEvpnRoute, RemoteMacTable,
-    project_evpn_routes,
+    DataplaneIntent, DataplaneReport, EvpnInstanceTable, LocalMacObservation, ProjectedEvpnRoute,
+    RemoteMacTable, project_evpn_routes,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{EvpnRoute, ExtendedCommunity, PathAttribute};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -95,9 +100,26 @@ pub struct EvpnDataplaneHandle {
     /// (e.g., during testing) it can drop the receiver and observations
     /// will fall on the floor.
     pub local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
+    /// Broadcast handle for [`DataplaneReport`] subscribers. The
+    /// log-only consumer attached at spawn time is one subscriber;
+    /// the SVI-MAC origination task gated by `advertise_svi_mac` is
+    /// another. Late subscribers do not see historical reports — the
+    /// reconcile actor re-emits a fresh `instance_status` row on
+    /// every report (including no-op passes), so a fresh subscriber
+    /// converges on the next reconcile pass without missed state.
+    pub(crate) report_tx: broadcast::Sender<DataplaneReport>,
 }
 
 impl EvpnDataplaneHandle {
+    /// Subscribe to the [`DataplaneReport`] broadcast. Returns a
+    /// receiver that will yield every future report from the
+    /// reconcile actor, plus a `Lagged` error if the subscriber falls
+    /// behind the broadcast's bounded buffer.
+    #[must_use]
+    pub fn subscribe_reports(&self) -> broadcast::Receiver<DataplaneReport> {
+        self.report_tx.subscribe()
+    }
+
     /// Cancel the shutdown token, which causes the reconcile actor to
     /// drain owned remote FDB entries and exit. The supervisor
     /// follows once the watch sender is dropped. Awaits both tasks
@@ -211,15 +233,25 @@ where
     D: Dataplane + Send + Sync + 'static,
 {
     let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
-    let (report_tx, report_rx) = mpsc::channel(64);
 
-    // Status logger task: drain reports + log failure summaries.
-    // Phase 6 extends this to surface status via gRPC; Phase 5b just
-    // logs.
+    // Reconcile actor sends reports through a bounded mpsc; a
+    // forwarder task drains it and republishes through a broadcast
+    // channel so multiple daemon-side subscribers (logger, SVI-MAC
+    // origination, future BMP exporter) can react in parallel without
+    // contending. Capacity 64 matches the previous mpsc bound — the
+    // reconcile actor emits at most one report per pass (5 s default
+    // poll), so 64 buffers ~5 minutes of unread reports per
+    // subscriber.
+    let (report_mpsc_tx, mut report_mpsc_rx) = mpsc::channel::<DataplaneReport>(64);
+    let (report_broadcast_tx, _) = broadcast::channel::<DataplaneReport>(64);
+
+    // Forwarder task: mpsc -> broadcast + structured log. Replaces
+    // the previous log-only consumer; logging stays here so the
+    // existing operator-visible warn/debug surface is unchanged.
     {
-        let mut report_rx: mpsc::Receiver<rustbgpd_evpn::DataplaneReport> = report_rx;
+        let report_tx = report_broadcast_tx.clone();
         tokio::spawn(async move {
-            while let Some(report) = report_rx.recv().await {
+            while let Some(report) = report_mpsc_rx.recv().await {
                 if !report.failed.is_empty() {
                     warn!(
                         intent_generation = report.intent_generation,
@@ -234,6 +266,10 @@ where
                         "EVPN dataplane reconcile applied"
                     );
                 }
+                // `send` returns Err only when there are no
+                // subscribers — common at startup, harmless. Not a
+                // signal to log.
+                let _ = report_tx.send(report);
             }
         });
     }
@@ -252,7 +288,7 @@ where
         config.actor_config,
         dataplane,
         intent_rx,
-        report_tx,
+        report_mpsc_tx,
         daemon_shutdown.clone(),
     );
     let actor_join = tokio::spawn(actor.run());
@@ -262,6 +298,7 @@ where
         supervisor_join,
         actor_join,
         local_mac_rx: None,
+        report_tx: report_broadcast_tx,
     }
 }
 
