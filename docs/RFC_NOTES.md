@@ -738,11 +738,19 @@ implemented per ADR-0040.
   Type 2 withdrawn within ~3 s of `bridge fdb del`, Type 3 IMET
   drained on shutdown. Local-only / privileged smoke (not in
   PR-CI); the Gate 7b downward path retains its M36 coverage.
-- **Deferred (tracked in ADR-0055 §7-§9 + `docs/evpn-alpha-soak.md`):**
-  MAC-with-IP origination via ARP/ND suppression (Gate 7b+2),
-  `advertise_svi_mac` consumption, sticky / static MAC anti-spoof
-  config schema, RFC 7432 §15.1 duplicate-MAC quarantine
-  (M=180 s/N=5), sub-second mobility convergence (Gate 7c).
+- **Closed in `[Unreleased]` post-v0.16.0:** `advertise_svi_mac`
+  consumption (origination of the bridge's own MAC on
+  instance-Ready via `InstanceDataplaneStatus.bridge_mac`),
+  `sticky_macs` config schema (ADR-0056 — listed MACs originated
+  with the RFC 7432 §15.4 sticky bit), and sub-second mobility
+  convergence (Gate 7c — EVPN-keyed `EvpnRouteEvent` broadcast in
+  `crates/rib`; the 5 s poll stays as `Lagged` / cold-start
+  backstop).
+- **Deferred (tracked in ADR-0055 §7 / §9 + `docs/evpn-alpha-soak.md`):**
+  MAC-with-IP origination via ARP/ND suppression (Gate 7b+2) and
+  RFC 7432 §15.1 duplicate-MAC quarantine action (M=180 s/N=5;
+  detection counters shipped — the operator-facing escalation
+  channel is the deferred half).
 
 ---
 
