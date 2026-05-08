@@ -165,6 +165,7 @@ mod tests {
             "br100".to_string(),
             BridgeLink {
                 ifindex: 99,
+                mac: None,
                 vlan_filtering: false,
                 vxlan: Some(KernelVxlanInfo {
                     ifindex: vxlan_ifindex,

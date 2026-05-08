@@ -139,7 +139,7 @@ impl OriginatedLocalMacCounts {
             .map_or(0, |keys| keys.len() as u64)
     }
 
-    fn record_inject(&self, vni: EvpnInstanceId, mac: MacAddress) {
+    pub(crate) fn record_inject(&self, vni: EvpnInstanceId, mac: MacAddress) {
         self.inner
             .write()
             .expect("originated local MAC count lock poisoned")
@@ -148,7 +148,7 @@ impl OriginatedLocalMacCounts {
             .insert(mac);
     }
 
-    fn record_withdraw(&self, vni: EvpnInstanceId, mac: MacAddress) {
+    pub(crate) fn record_withdraw(&self, vni: EvpnInstanceId, mac: MacAddress) {
         let mut guard = self
             .inner
             .write()
@@ -655,7 +655,7 @@ async fn apply_actions(
 }
 
 /// Construct the wire-shaped `EvpnRibRoute` for a Type 2 origination.
-fn build_originated_route(
+pub(crate) fn build_originated_route(
     instance: &EvpnInstance,
     mac: MacAddress,
     mobility_seq: Option<u32>,

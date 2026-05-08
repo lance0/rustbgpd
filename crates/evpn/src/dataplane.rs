@@ -95,6 +95,14 @@ pub struct InstanceDataplaneStatus {
     /// Optional human-readable explanation. Populated for `NotReady`
     /// states; empty for `Ready` and `Unbound`.
     pub message: Option<String>,
+    /// Linux bridge MAC address if known. `Some` only when the
+    /// dataplane has observed a `Ready` bridge with a captured
+    /// MAC; `None` for `NotReady` / `Unbound` rows or when the
+    /// bridge has no link-layer address attached. Surfaced through
+    /// the report (rather than reaching into the dataplane's
+    /// `LinkCache`) so the SVI-MAC origination path stays on the
+    /// ADR-0054 §1 boundary — Linux observes, daemon decides.
+    pub bridge_mac: Option<MacAddress>,
 }
 
 /// Coarse-grained per-instance dataplane state.
@@ -199,6 +207,26 @@ mod tests {
         assert_ne!(add, upd);
         assert_ne!(add, rem);
         assert_ne!(upd, rem);
+    }
+
+    #[test]
+    fn instance_dataplane_status_round_trips_bridge_mac() {
+        // ADR-0054 §1: bridge MAC surfaces from the Linux dataplane
+        // through `InstanceDataplaneStatus.bridge_mac` rather than via
+        // a back-channel into the dataplane crate's LinkCache.
+        let mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xAB]);
+        let status = InstanceDataplaneStatus {
+            vni: EvpnInstanceId::new(100).unwrap(),
+            state: InstanceState::Ready,
+            message: None,
+            bridge_mac: Some(mac),
+        };
+        // Equality comparison preserves the field — the daemon's SVI
+        // task will memcmp full status rows when deciding whether a
+        // re-emission is a no-op.
+        let clone = status.clone();
+        assert_eq!(status, clone);
+        assert_eq!(status.bridge_mac, Some(mac));
     }
 
     #[test]

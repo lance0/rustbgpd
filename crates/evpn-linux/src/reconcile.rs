@@ -552,10 +552,21 @@ fn build_instance_status(
                     }
                 }
             };
+            // Bridge MAC is only meaningful when the bridge is Ready
+            // and the kernel reported a six-octet link-layer address.
+            // For NotReady / Unbound rows, leave it `None` — the SVI
+            // task uses `state == Ready && bridge_mac == Some(_)` as
+            // the precondition for origination.
+            let bridge_mac = if matches!(state, InstanceState::Ready) {
+                probes.bridge_mac(inst.id)
+            } else {
+                None
+            };
             InstanceDataplaneStatus {
                 vni: inst.id,
                 state,
                 message,
+                bridge_mac,
             }
         })
         .collect();

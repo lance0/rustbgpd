@@ -11,6 +11,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN SVI-MAC origination (RFC 9135 §6.1).** The
+  `advertise_svi_mac = true` flag on `[[evpn_instances]]` was
+  previously parsed but inert; it now drives Type 2 origination of
+  the bridge's own MAC address. The Linux dataplane captures bridge
+  link-layer addresses during link inventory, surfaces them on
+  `InstanceDataplaneStatus.bridge_mac` (rather than reaching back
+  into the dataplane's `LinkCache`, which would break ADR-0054 §1),
+  and the daemon's new SVI task subscribes to the
+  `DataplaneReport` broadcast to originate / withdraw on
+  `Ready` ↔ `NotReady` transitions and on bridge MAC changes.
+  `OriginatedLocalMacCounts` participates so
+  `originated_local_macs_count` accounts for SVI MACs alongside
+  kernel-learned ones. Path: `crates/evpn/src/dataplane.rs`,
+  `crates/evpn-linux/src/{linux/links,linux/probe,reconcile}.rs`,
+  `crates/evpn-linux/src/snapshot.rs`, `src/evpn_dataplane.rs`,
+  `src/evpn_svi.rs`, `src/main.rs`.
+- **`DataplaneReport` mpsc → broadcast refactor.** The reconcile
+  actor still emits reports through its bounded mpsc, but the
+  daemon-side glue now forwards each report to a
+  `broadcast::Sender<DataplaneReport>` so multiple subscribers
+  (existing log-only consumer; new SVI task; future BMP exporter
+  / dashboards) can react in parallel without contending. Backstop
+  for late subscribers: the actor re-emits a fresh
+  `instance_status` row on every reconcile pass, so a fresh
+  subscriber converges on the next pass without missed state.
 - **EVPN sticky-MAC operator config (ADR-0056 — RFC 7432 §15.4).**
   New `sticky_macs` field on `[[evpn_instances]]` entries — a list
   of MAC addresses (`aa:bb:cc:dd:ee:ff` form) that, when learned by

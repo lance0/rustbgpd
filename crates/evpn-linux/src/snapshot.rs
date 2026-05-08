@@ -142,6 +142,7 @@ impl KernelFdbFlags {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InstanceProbes {
     by_vni: BTreeMap<EvpnInstanceId, InstanceProbe>,
+    bridge_macs: BTreeMap<EvpnInstanceId, MacAddress>,
 }
 
 impl InstanceProbes {
@@ -156,6 +157,14 @@ impl InstanceProbes {
         self.by_vni.insert(vni, probe);
     }
 
+    /// Record the kernel-reported bridge MAC for one instance. Surfaced
+    /// to the daemon on `InstanceDataplaneStatus.bridge_mac` for the
+    /// SVI-MAC origination path (RFC 9135 §6.1) — Linux observes,
+    /// daemon decides whether to originate.
+    pub fn set_bridge_mac(&mut self, vni: EvpnInstanceId, mac: MacAddress) {
+        self.bridge_macs.insert(vni, mac);
+    }
+
     /// `true` if the instance has been probed and passed all checks.
     #[must_use]
     pub fn is_ready(&self, vni: EvpnInstanceId) -> bool {
@@ -166,6 +175,13 @@ impl InstanceProbes {
     #[must_use]
     pub fn get(&self, vni: EvpnInstanceId) -> Option<&InstanceProbe> {
         self.by_vni.get(&vni)
+    }
+
+    /// Look up the bridge MAC for one instance, if the dataplane saw
+    /// a six-octet link-layer address on the bridge.
+    #[must_use]
+    pub fn bridge_mac(&self, vni: EvpnInstanceId) -> Option<MacAddress> {
+        self.bridge_macs.get(&vni).copied()
     }
 
     /// Iterate probe results in deterministic VNI ascending order.
