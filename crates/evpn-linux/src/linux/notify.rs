@@ -82,20 +82,29 @@ use tracing::debug;
 use super::links::LinkCache;
 
 /// `NUD_*` bits used by the bitmask side of [`is_ip_neighbour_valid`].
-/// `NUD_FAILED` is the explicit "kernel gave up" state; we drop on
-/// it. The reachable / stale / noarp / permanent bits surface as
-/// typed [`NeighbourState`] variants, so we only need the raw masks
-/// for the [`NeighbourState::Other`] fallthrough.
+/// The reachable / stale / noarp / permanent bits surface as typed
+/// [`NeighbourState`] variants, so we only need the raw masks for the
+/// [`NeighbourState::Other`] fallthrough where the kernel returns a
+/// combined bitmask (e.g., `NUD_NOARP | NUD_PERMANENT` for our own
+/// programmed entries).
+const NUD_INCOMPLETE: u16 = 0x01;
+const NUD_REACHABLE: u16 = 0x02;
+const NUD_STALE: u16 = 0x04;
+const NUD_DELAY: u16 = 0x08;
+const NUD_PROBE: u16 = 0x10;
 const NUD_FAILED: u16 = 0x20;
 const NUD_NOARP: u16 = 0x40;
 const NUD_PERMANENT: u16 = 0x80;
-const NUD_REACHABLE: u16 = 0x02;
-const NUD_STALE: u16 = 0x04;
-/// Mask of states that represent a usable IP/MAC binding. Excludes
-/// `NUD_INCOMPLETE` (still probing), `NUD_FAILED` (gave up),
-/// `NUD_DELAY` / `NUD_PROBE` (mid-revalidation, no fresh
-/// confirmation yet).
+/// Bits that represent a confirmed `(IP, MAC)` binding.
 const NUD_VALID_MASK: u16 = NUD_REACHABLE | NUD_STALE | NUD_NOARP | NUD_PERMANENT;
+/// Bits that disqualify a binding regardless of what else is set.
+/// `INCOMPLETE` (still probing), `DELAY` / `PROBE` (mid-revalidation,
+/// no fresh confirmation), and `FAILED` (kernel gave up) are all
+/// transient or negative states. Acting on them — even when combined
+/// with a "valid" bit like `STALE` — would mean acting on the
+/// kernel's *previous* belief while it's actively re-probing, which
+/// produces origination thrash.
+const NUD_INVALID_MASK: u16 = NUD_INCOMPLETE | NUD_DELAY | NUD_PROBE | NUD_FAILED;
 
 /// Multicast group ID for neighbour-table changes — enum value
 /// `RTNLGRP_NEIGH` from `<linux/rtnetlink.h>` (third entry in
@@ -229,7 +238,14 @@ fn is_ip_neighbour_valid(state: NeighbourState) -> bool {
         | NeighbourState::Stale
         | NeighbourState::Noarp
         | NeighbourState::Permanent => true,
-        NeighbourState::Other(bits) => (bits & NUD_VALID_MASK) != 0 && (bits & NUD_FAILED) == 0,
+        NeighbourState::Other(bits) => {
+            // Require at least one valid bit AND no invalid bits.
+            // Combined states like `NUD_STALE | NUD_PROBE` (kernel
+            // re-probing a stale entry) intentionally fail this check
+            // — acting on the stale half while the kernel is mid-
+            // revalidation produces origination thrash.
+            (bits & NUD_VALID_MASK) != 0 && (bits & NUD_INVALID_MASK) == 0
+        }
         _ => false,
     }
 }
@@ -542,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_inet_accepts_extern_learned_combined_state() {
+    fn classify_inet_accepts_noarp_permanent_combined_state() {
         // EVPN-suppression entries land with NUD_NOARP | NUD_PERMANENT
         // (the same combined bitmask we use for our own AF_BRIDGE
         // programming). Comes through as NeighbourState::Other(0xC0).
@@ -560,6 +576,45 @@ mod tests {
             classify_neigh(NeighEventKind::New, &msg, &cache),
             Some(LocalMacObservation::IpAdded { .. })
         ));
+    }
+
+    /// Regression: `NUD_STALE | NUD_PROBE` represents the kernel
+    /// actively re-probing a stale entry — the binding is not
+    /// freshly confirmed, just the kernel's previous belief. Acting
+    /// on it would produce origination thrash. Earlier validity
+    /// check accepted this combination because at least one valid
+    /// bit was set; the explicit invalid mask rejects it.
+    #[test]
+    fn classify_inet_drops_stale_with_probe_bit() {
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Other(NUD_STALE | NUD_PROBE),
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(v4),
+        );
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    /// Regression: same shape — `NUD_REACHABLE | NUD_DELAY` means
+    /// the kernel has scheduled revalidation against a previously-
+    /// reachable entry. Drop until the next steady state.
+    #[test]
+    fn classify_inet_drops_reachable_with_delay_bit() {
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Other(NUD_REACHABLE | NUD_DELAY),
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(v4),
+        );
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
     #[test]
