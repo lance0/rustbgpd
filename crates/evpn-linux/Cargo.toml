@@ -24,7 +24,7 @@ tracing.workspace = true
 # pulls in async-std incompatibly. Pinning the pair keeps the
 # workspace's existing tokio/tonic stack happy.
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.14"
+rtnetlink = "0.21"
 netlink-packet-route = "0.19"
 netlink-packet-core = "0.7"
 netlink-packet-utils = "0.6"
