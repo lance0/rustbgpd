@@ -43,6 +43,15 @@ pub struct RouteEvent {
 /// allocation-free: path attributes are already `Arc`-shared, so the
 /// per-subscriber broadcast clone copies a `~120` B struct plus a
 /// pointer increment.
+///
+/// Both `best` and `previous_best` are carried so consumers can derive
+/// per-VNI context (the RFC 8365 §5 raw-24-bit VNI lives in
+/// `EvpnMacIp.label1`, not in the route key) on **every** event,
+/// including `Withdrawn`. Mapping the key's RD back to a configured
+/// instance is unreliable: remote PEs advertise Type 2 routes under
+/// **their** RD per RFC 7432 §7.9.5, not the local importer's, so an
+/// RD-keyed scan over `EvpnInstanceTable` will usually miss for
+/// withdrawn remote routes.
 #[derive(Debug, Clone)]
 pub struct EvpnRouteEvent {
     /// The kind of route change.
@@ -53,6 +62,13 @@ pub struct EvpnRouteEvent {
     /// for `Withdrawn`. Originator builds `RemoteMacView` directly
     /// from this — no follow-up RIB query needed.
     pub best: Option<EvpnRibRoute>,
+    /// Best path immediately before this change. `Some` for
+    /// `Withdrawn` / `BestChanged`; `None` for `Added`. Carrying it
+    /// lets consumers recover per-VNI context (`EvpnMacIp.label1`)
+    /// for `Withdrawn` events without an unreliable RD-to-instance
+    /// scan, and lets BMP-style observers report the prior next-hop
+    /// without a back-channel query.
+    pub previous_best: Option<EvpnRibRoute>,
     /// Peer that holds the new best (`None` for `Withdrawn`).
     pub peer: Option<IpAddr>,
     /// Peer that previously held best (`None` for `Added`).

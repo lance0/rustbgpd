@@ -44,9 +44,12 @@ families = ["l2vpn_evpn"]
 #
 # Optional:
 #   - bridge              : Linux bridge name to bind this EVI to
-#   - advertise_svi_mac   : originate Type 2 for the SVI's own MAC (RFC 9135)
-#                          (recognized today; default-gateway/SVI-MAC
-#                           origination remains a follow-on phase)
+#   - advertise_svi_mac   : originate a Type 2 for the bridge's own MAC
+#                          (RFC 9135 §6.1). Off by default; when set,
+#                          the daemon emits one Type 2 per Ready
+#                          bridge whose link-layer address the kernel
+#                          reports, and withdraws on bridge-MAC change
+#                          or NotReady transition.
 #   - sticky_macs         : MACs to mark with the RFC 7432 §15.4 sticky
 #                           bit when this VTEP originates a Type 2 for
 #                           them. NOT a static FDB — the daemon does

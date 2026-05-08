@@ -8732,6 +8732,10 @@ async fn evpn_route_event_best_changed_on_higher_mobility() {
     assert_eq!(event.previous_peer, Some(IpAddr::V4(original_peer)));
     let best = event.best.expect("BestChanged must carry a best path");
     assert_eq!(best.peer, IpAddr::V4(new_peer));
+    let prior = event
+        .previous_best
+        .expect("BestChanged must carry the prior best path");
+    assert_eq!(prior.peer, IpAddr::V4(original_peer));
 
     drop(tx);
     handle.await.unwrap();
@@ -8788,6 +8792,10 @@ async fn evpn_route_event_withdrawn_on_last_removed() {
     assert!(event.peer.is_none());
     assert_eq!(event.previous_peer, Some(peer));
     assert!(event.best.is_none(), "Withdrawn must not carry a best");
+    let prior = event
+        .previous_best
+        .expect("Withdrawn must carry the prior best so consumers recover VNI");
+    assert_eq!(prior.peer, peer);
 
     drop(tx);
     handle.await.unwrap();
