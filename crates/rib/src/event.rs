@@ -1,7 +1,9 @@
 use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rustbgpd_wire::Prefix;
+use rustbgpd_wire::{EvpnRouteKey, Prefix};
+
+use crate::route::EvpnRibRoute;
 
 /// Type of route change event emitted by the RIB manager.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +31,34 @@ pub struct RouteEvent {
     pub timestamp: String,
     /// Add-Path path identifier (RFC 7911). 0 = no Add-Path.
     pub path_id: u32,
+}
+
+/// EVPN best-path change event published on the EVPN broadcast.
+///
+/// Distinct from [`RouteEvent`] because EVPN routes are keyed by
+/// [`EvpnRouteKey`] (not [`Prefix`]) and consumers — most notably the
+/// daemon's local-MAC originator — need the full new best to build a
+/// `RemoteMacView` without a follow-up RIB query. Carrying the full
+/// [`EvpnRibRoute`] on the event side keeps the consumer's hot path
+/// allocation-free: path attributes are already `Arc`-shared, so the
+/// per-subscriber broadcast clone copies a `~120` B struct plus a
+/// pointer increment.
+#[derive(Debug, Clone)]
+pub struct EvpnRouteEvent {
+    /// The kind of route change.
+    pub event_type: RouteEventType,
+    /// The affected EVPN route key.
+    pub key: EvpnRouteKey,
+    /// Current best path. `Some` for `Added` / `BestChanged`; `None`
+    /// for `Withdrawn`. Originator builds `RemoteMacView` directly
+    /// from this — no follow-up RIB query needed.
+    pub best: Option<EvpnRibRoute>,
+    /// Peer that holds the new best (`None` for `Withdrawn`).
+    pub peer: Option<IpAddr>,
+    /// Peer that previously held best (`None` for `Added`).
+    pub previous_peer: Option<IpAddr>,
+    /// Unix epoch timestamp as a string.
+    pub timestamp: String,
 }
 
 /// Returns the current Unix epoch time as a string.

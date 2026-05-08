@@ -7,7 +7,7 @@ use rustbgpd_wire::{Afi, EvpnRouteKey, FlowSpecRule, Prefix, RouteRefreshSubtype
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::best_path::BestPathReason;
-use crate::event::RouteEvent;
+use crate::event::{EvpnRouteEvent, RouteEvent};
 use crate::route::{EvpnRibRoute, FlowSpecRoute, Route};
 
 /// Routes to be sent outbound to a peer.
@@ -209,6 +209,16 @@ pub enum RibUpdate {
     SubscribeRouteEvents {
         /// Response channel carrying the broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
+    },
+    /// Subscribe to EVPN best-path change events. Distinct from
+    /// `SubscribeRouteEvents` because EVPN routes are keyed by
+    /// `EvpnRouteKey`, not `Prefix`, and the event payload carries
+    /// the full new best path so subscribers (e.g., the daemon's
+    /// local-MAC originator) don't need a follow-up RIB query to
+    /// build a `RemoteMacView`.
+    SubscribeEvpnRouteEvents {
+        /// Response channel carrying the broadcast receiver.
+        reply: oneshot::Sender<broadcast::Receiver<EvpnRouteEvent>>,
     },
     /// End-of-RIB marker received from a peer for a given address family.
     EndOfRib {

@@ -26,7 +26,7 @@ pub mod route;
 pub mod update;
 
 pub use best_path::{BestPathReason, best_path_cmp};
-pub use event::{RouteEvent, RouteEventType};
+pub use event::{EvpnRouteEvent, RouteEvent, RouteEventType};
 pub use loc_rib::LocRib;
 pub use manager::RibManager;
 pub use route::{EvpnRibRoute, FlowSpecRoute, Route, RouteOrigin};
