@@ -24,26 +24,43 @@
 //! already round-trips Ethernet-Tag in every route type, so adding
 //! that mode later is purely a domain-model expansion.
 //!
-//! ## What ships in this slice
+//! ## What lives here
+//!
+//! Configuration / domain types:
 //!
 //! - [`EvpnInstanceId`] — a validated 24-bit VNI (RFC 8365 §5).
-//! - [`RouteTarget`] — typed RFC 4360 RT covering the three encodings
-//!   ([`RouteTarget::TwoOctetAs`], [`RouteTarget::Ipv4`],
+//! - [`RouteTarget`] — typed RFC 4360 RT covering the three
+//!   encodings ([`RouteTarget::TwoOctetAs`], [`RouteTarget::Ipv4`],
 //!   [`RouteTarget::FourOctetAs`]).
 //! - [`EvpnInstance`] — one local EVI's resolved configuration: VNI,
-//!   route distinguisher, route targets, local VTEP source IP, optional
-//!   Linux bridge name, and the `advertise_svi_mac` flag.
-//! - [`EvpnInstanceTable`] — uniqueness-enforcing collection, indexed
-//!   by VNI, with a parallel RD index that surfaces collisions
-//!   between two instances using the same Route Distinguisher.
-//! - [`RemoteMacTable`] / [`DataplaneIntent`] / [`DataplaneReport`] —
-//!   Gate 7b dataplane boundary types per ADR-0054. Portable domain
-//!   surface consumed by `crates/evpn-linux`. The kernel-side
-//!   reconciler lives there; this crate stays kernel-free.
+//!   route distinguisher, route targets, local VTEP source IP,
+//!   optional Linux bridge name, `advertise_svi_mac`, `sticky_macs`.
+//! - [`EvpnInstanceTable`] — uniqueness-enforcing collection,
+//!   indexed by VNI, with a parallel RD index that surfaces
+//!   collisions between two instances using the same Route
+//!   Distinguisher.
 //!
-//! Mutation surface, kernel reconciliation, and Type 2/3/5
-//! origination are explicit follow-up work tracked in
-//! `docs/evpn-enablement.md` Gate 7+.
+//! Dataplane boundary (consumed by `crates/evpn-linux` per
+//! ADR-0054):
+//!
+//! - [`RemoteMacTable`] / [`DataplaneIntent`] / [`DataplaneReport`].
+//!   Portable domain surface; the kernel-side reconciler lives in
+//!   `crates/evpn-linux`. This crate stays kernel-free.
+//!
+//! Origination state machines (pure deterministic, RFC 7432 §15.1
+//! mobility sequencing):
+//!
+//! - [`LocalMacOriginator`] — MAC-only Type 2 (Gate 7b+1).
+//! - [`LocalMacIpOriginator`] — MAC+IP Type 2 (Gate 7b+2 slice 2),
+//!   keyed on `(MAC, IP)` with independent sequence chains per
+//!   RFC 9135 §4.4 coexistence.
+//!
+//! Type 1 (EAD), Type 4 (ES), Type 5 (IP-Prefix) origination are
+//! tracked in `docs/evpn-enablement.md` and remain follow-up
+//! work. Type 3 IMET origination is implemented in the daemon
+//! binary (`src/evpn_imet.rs`) rather than here because it
+//! depends on the wire encoder; the domain shape is captured by
+//! [`EvpnInstance`] alone.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]

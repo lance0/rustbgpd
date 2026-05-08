@@ -51,12 +51,18 @@
 //!
 //! ## Sticky bit
 //!
-//! Same input shape as [`crate::origination::LocalMacOriginator`]: the daemon decides per
-//! MAC (via ADR-0056 `sticky_macs`) and passes the same `sticky` to
-//! both originators. A change in `sticky` re-emits at the same
-//! sequence with the bit updated — mirrors the MAC-only flow even
-//! though `sticky_macs` is restart-required today, so a future
-//! hot-apply doesn't get a weird edge case.
+//! Same **input shape** as [`crate::origination::LocalMacOriginator`]
+//! — the daemon decides per MAC (via ADR-0056 `sticky_macs`) and
+//! passes the same `sticky` to both originators. The **behavior**
+//! deliberately diverges: a sticky-bit change re-emits at the same
+//! sequence with the bit updated, *not* at `prior_seq + 1`.
+//! `LocalMacOriginator` bumps on `sticky_changed` because for
+//! MAC-only routes a sticky flip is a meaningful L2 mobility
+//! signal. For MAC+IP, sticky is closer to an ARP/ND-suppression
+//! hint than to mobility, so a flip without an actual binding
+//! change shouldn't ratchet up. ADR-0056 makes `sticky_macs`
+//! restart-required so the divergence is moot in practice today;
+//! it's documented for the future hot-apply path.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
