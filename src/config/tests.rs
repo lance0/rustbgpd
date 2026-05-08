@@ -3510,3 +3510,126 @@ local_vtep_ip = "2001:db8::1"
         std::net::IpAddr::V6("2001:db8::1".parse().unwrap())
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0056 — sticky_macs schema. Validates parse, dedupe, and the
+// restart-required diff path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evpn_sticky_macs_default_empty() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let table = parse(&toml).unwrap().resolve_evpn_instances().unwrap();
+    let inst = table.get(EvpnInstanceId::new(100).unwrap()).unwrap();
+    assert!(inst.sticky_macs.is_empty());
+}
+
+#[test]
+fn evpn_sticky_macs_round_trip() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+sticky_macs = ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:02"]
+"#,
+    );
+    let table = parse(&toml).unwrap().resolve_evpn_instances().unwrap();
+    let inst = table.get(EvpnInstanceId::new(100).unwrap()).unwrap();
+    assert_eq!(inst.sticky_macs.len(), 2);
+    let want_a = rustbgpd_wire::MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
+    let want_b = rustbgpd_wire::MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x02]);
+    assert!(inst.sticky_macs.contains(&want_a));
+    assert!(inst.sticky_macs.contains(&want_b));
+}
+
+#[test]
+fn evpn_sticky_macs_rejects_malformed() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+sticky_macs = ["not-a-mac"]
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "expected InvalidEvpnInstance, got {msg}"
+    );
+    assert!(msg.contains("sticky_mac"), "msg must explain why: {msg}");
+}
+
+#[test]
+fn evpn_sticky_macs_rejects_duplicate_within_instance() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+sticky_macs = ["aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:01"]
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEvpnInstance { .. }),
+        "expected InvalidEvpnInstance, got {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("duplicate"),
+        "msg must call out duplicate: {msg}"
+    );
+}
+
+#[test]
+fn evpn_sticky_macs_diff_marks_restart_required() {
+    // Adding sticky_macs to an existing instance must flip
+    // evpn_instances_changed (restart-required bucket per ADR-0056).
+    let base = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+"#,
+    );
+    let with_sticky = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+sticky_macs = ["aa:bb:cc:dd:ee:01"]
+"#,
+    );
+    let old = parse(&base).unwrap();
+    let new = parse(&with_sticky).unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(
+        diff.evpn_instances_changed,
+        "adding sticky_macs must flip evpn_instances_changed"
+    );
+    assert!(
+        diff.has_restart_required_changes(),
+        "evpn_instances_changed must surface as restart-required"
+    );
+}

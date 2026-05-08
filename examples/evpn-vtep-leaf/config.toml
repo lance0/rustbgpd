@@ -47,6 +47,12 @@ families = ["l2vpn_evpn"]
 #   - advertise_svi_mac   : originate Type 2 for the SVI's own MAC (RFC 9135)
 #                          (recognized today; default-gateway/SVI-MAC
 #                           origination remains a follow-on phase)
+#   - sticky_macs         : MACs to mark with the RFC 7432 §15.4 sticky
+#                           bit when this VTEP originates a Type 2 for
+#                           them. NOT a static FDB — the daemon does
+#                           not synthesize routes for these MACs; it
+#                           only sets the sticky bit when the local
+#                           kernel learns one. See ADR-0056.
 
 [[evpn_instances]]
 vni = 10100
@@ -54,6 +60,15 @@ rd = "10.0.0.10:10100"
 route_targets = ["65000:10100"]
 local_vtep_ip = "10.0.0.10"
 bridge = "br100"
+# Pin two anycast-gateway MACs sticky on origination. Misbehaving
+# peers that try to win best-path with a higher mobility seq for
+# these MACs are still preferred at the RIB level (RFC 7432 §15.1
+# sequence rules) — this only affects what *we* originate. Pair with
+# the duplicate-MAC-move counter to catch contention early.
+sticky_macs = [
+  "aa:bb:cc:dd:ee:01",
+  "aa:bb:cc:dd:ee:02",
+]
 
 [[evpn_instances]]
 vni = 10200

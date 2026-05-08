@@ -372,9 +372,13 @@ async fn handle_observation(
                 return;
             };
             let view = remote_view.get(&(vni, mac));
-            // Sticky bit comes from operator config in a future gate;
-            // pass through false today.
-            let actions = orig.on_local_learned(mac, ifindex, false, view);
+            // Sticky bit (RFC 7432 §15.4) is set when the operator has
+            // pinned this MAC via `[[evpn_instances]].sticky_macs` —
+            // see ADR-0056. Otherwise default to non-sticky.
+            let sticky = instances
+                .get(vni)
+                .is_some_and(|inst| inst.sticky_macs.contains(&mac));
+            let actions = orig.on_local_learned(mac, ifindex, sticky, view);
             if view.is_some() && !actions.is_empty() {
                 record_duplicate_mac_move(metrics, vni, mac);
             }
@@ -1543,6 +1547,93 @@ mod tests {
             !remote_view.contains_key(&(vni(100), mac(0xBB))),
             "self-NH event must not populate remote_view"
         );
+    }
+
+    /// ADR-0056: a `Learned` observation for a MAC in the instance's
+    /// `sticky_macs` set must produce an `InjectEvpn` whose route
+    /// carries the RFC 7432 §15.4 MAC Mobility extended community with
+    /// `sticky = true`. Locks the only behavioral effect of the
+    /// `sticky_macs` config schema end-to-end.
+    #[tokio::test]
+    async fn sticky_mac_observation_emits_inject_with_sticky_extcomm() {
+        // Instance with one MAC marked sticky.
+        let mut t = EvpnInstanceTable::new();
+        let inst = local_instance(100).with_sticky_macs(BTreeSet::from([mac(0xAA)]));
+        t.insert(inst).unwrap();
+        let instances = Arc::new(t);
+
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (local_tx, local_rx) = mpsc::channel(16);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let shutdown = CancellationToken::new();
+
+        // Capture the first InjectEvpn so we can inspect its extcomms.
+        let (captured_tx, captured_rx) =
+            tokio::sync::oneshot::channel::<rustbgpd_rib::route::EvpnRibRoute>();
+        let mut captured_tx = Some(captured_tx);
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                match msg {
+                    RibUpdate::QueryEvpnRoutes { reply } => {
+                        let _ = reply.send(vec![]);
+                    }
+                    RibUpdate::InjectEvpn { route, reply } => {
+                        if let Some(tx) = captured_tx.take() {
+                            let _ = tx.send(route);
+                        }
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let h = spawn(
+            OriginatorConfig {
+                poll_interval: Duration::from_mins(1),
+            },
+            &instances,
+            rib_tx,
+            Some(local_rx),
+            metrics,
+            counts,
+            shutdown.clone(),
+        )
+        .expect("originator spawned");
+
+        local_tx
+            .send(LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            })
+            .await
+            .unwrap();
+
+        let route = tokio::time::timeout(Duration::from_secs(2), captured_rx)
+            .await
+            .expect("InjectEvpn must arrive within 2s")
+            .expect("captured_tx not dropped");
+
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v),
+                _ => None,
+            })
+            .expect("originated route must carry an ExtendedCommunities attribute");
+        let mobility = extcomms
+            .iter()
+            .find_map(|ec| ec.as_mac_mobility())
+            .expect("sticky_macs MAC must emit a MAC Mobility extcomm at seq=0");
+        assert!(
+            mobility.0,
+            "MAC Mobility extcomm sticky bit must be set for sticky_macs MAC"
+        );
+
+        h.shutdown().await;
     }
 
     /// A Withdrawn event clears the cached `RemoteMacView` for its
