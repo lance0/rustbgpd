@@ -254,7 +254,7 @@ fn bridge_vlan_filtering(msg: &LinkMessage) -> bool {
                 if let LinkInfo::Data(InfoData::Bridge(brs)) = info {
                     for br in brs {
                         if let InfoBridge::VlanFiltering(v) = br {
-                            return *v != 0;
+                            return *v;
                         }
                     }
                 }
@@ -283,15 +283,11 @@ fn parse_vxlan_port(msg: &LinkMessage) -> Option<VxlanPort> {
                         for item in items {
                             match item {
                                 InfoVxlan::Id(v) => vni = Some(*v),
-                                InfoVxlan::Local(bytes) if bytes.len() == 4 => {
-                                    local = Some(IpAddr::from([
-                                        bytes[0], bytes[1], bytes[2], bytes[3],
-                                    ]));
+                                InfoVxlan::Local(addr) => {
+                                    local = Some(IpAddr::V4(*addr));
                                 }
-                                InfoVxlan::Local6(bytes) if bytes.len() == 16 => {
-                                    let mut arr = [0u8; 16];
-                                    arr.copy_from_slice(bytes);
-                                    local = Some(IpAddr::from(arr));
+                                InfoVxlan::Local6(addr) => {
+                                    local = Some(IpAddr::V6(*addr));
                                 }
                                 InfoVxlan::Learning(b) => learning_disabled = Some(!*b),
                                 _ => {}

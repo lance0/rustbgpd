@@ -49,7 +49,7 @@
 
 use netlink_packet_route::{
     AddressFamily,
-    neighbour::{NeighbourAttribute, NeighbourFlag, NeighbourMessage},
+    neighbour::{NeighbourAttribute, NeighbourFlags, NeighbourMessage},
 };
 use rustbgpd_evpn::{EvpnInstanceId, LocalMacObservation, MacAddress};
 use tracing::debug;
@@ -92,7 +92,7 @@ pub(crate) fn classify_neigh(
     }
 
     // Step 2: drop our own programming.
-    if msg.header.flags.contains(&NeighbourFlag::ExtLearned) {
+    if msg.header.flags.contains(NeighbourFlags::ExtLearned) {
         return None;
     }
 
@@ -133,7 +133,7 @@ pub(crate) fn classify_neigh(
 
 fn extract_mac(msg: &NeighbourMessage) -> Option<MacAddress> {
     for attr in &msg.attributes {
-        if let NeighbourAttribute::LinkLocalAddress(bytes) = attr
+        if let NeighbourAttribute::LinkLayerAddress(bytes) = attr
             && bytes.len() == 6
         {
             return Some(MacAddress::new([
@@ -151,7 +151,7 @@ mod tests {
     use netlink_packet_route::{
         AddressFamily,
         neighbour::{
-            NeighbourAttribute, NeighbourFlag, NeighbourHeader, NeighbourMessage, NeighbourState,
+            NeighbourAttribute, NeighbourFlags, NeighbourHeader, NeighbourMessage, NeighbourState,
         },
     };
 
@@ -190,7 +190,7 @@ mod tests {
     fn neigh_msg(
         family: AddressFamily,
         ifindex: u32,
-        flags: Vec<NeighbourFlag>,
+        flags: NeighbourFlags,
         mac_attr: Option<Vec<u8>>,
     ) -> NeighbourMessage {
         let mut msg = NeighbourMessage::default();
@@ -203,7 +203,7 @@ mod tests {
         };
         if let Some(bytes) = mac_attr {
             msg.attributes
-                .push(NeighbourAttribute::LinkLocalAddress(bytes));
+                .push(NeighbourAttribute::LinkLayerAddress(bytes));
         }
         msg
     }
@@ -214,7 +214,7 @@ mod tests {
         let msg = neigh_msg(
             AddressFamily::Bridge,
             22,
-            vec![NeighbourFlag::Controller],
+            NeighbourFlags::Controller,
             Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
         );
         let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
@@ -234,7 +234,7 @@ mod tests {
         let msg = neigh_msg(
             AddressFamily::Bridge,
             22,
-            vec![NeighbourFlag::Controller],
+            NeighbourFlags::Controller,
             Some(vec![0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
         );
         let obs = classify_neigh(NeighEventKind::Del, &msg, &cache).expect("emit");
@@ -247,7 +247,7 @@ mod tests {
         let msg = neigh_msg(
             AddressFamily::Bridge,
             22,
-            vec![NeighbourFlag::Controller, NeighbourFlag::ExtLearned],
+            NeighbourFlags::Controller | NeighbourFlags::ExtLearned,
             Some(vec![0xaa; 6]),
         );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
@@ -258,7 +258,12 @@ mod tests {
         // Same ifindex as the cached VXLAN port — message is a remote
         // MAC echo, not a local learn.
         let cache = cache_for(100, /* vxlan */ 11, 22);
-        let msg = neigh_msg(AddressFamily::Bridge, 11, vec![], Some(vec![0xaa; 6]));
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            11,
+            NeighbourFlags::empty(),
+            Some(vec![0xaa; 6]),
+        );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
@@ -266,21 +271,31 @@ mod tests {
     fn classify_drops_ifindex_outside_known_bridges() {
         let cache = cache_for(100, 11, 22);
         // ifindex 99 isn't in either map.
-        let msg = neigh_msg(AddressFamily::Bridge, 99, vec![], Some(vec![0xaa; 6]));
+        let msg = neigh_msg(
+            AddressFamily::Bridge,
+            99,
+            NeighbourFlags::empty(),
+            Some(vec![0xaa; 6]),
+        );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
     #[test]
     fn classify_drops_non_bridge_family() {
         let cache = cache_for(100, 11, 22);
-        let msg = neigh_msg(AddressFamily::Inet, 22, vec![], Some(vec![0xaa; 6]));
+        let msg = neigh_msg(
+            AddressFamily::Inet,
+            22,
+            NeighbourFlags::empty(),
+            Some(vec![0xaa; 6]),
+        );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
     #[test]
     fn classify_drops_message_without_mac_attribute() {
         let cache = cache_for(100, 11, 22);
-        let msg = neigh_msg(AddressFamily::Bridge, 22, vec![], None);
+        let msg = neigh_msg(AddressFamily::Bridge, 22, NeighbourFlags::empty(), None);
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
@@ -290,7 +305,7 @@ mod tests {
         let msg = neigh_msg(
             AddressFamily::Bridge,
             22,
-            vec![],
+            NeighbourFlags::empty(),
             Some(vec![0xaa; 4]), // not 6 bytes
         );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
