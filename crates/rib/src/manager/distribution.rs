@@ -1814,7 +1814,39 @@ impl RibManager {
                 .values()
                 .flat_map(|rib| rib.iter_evpn().filter(|r| r.key() == *key))
                 .collect();
-            if self.loc_rib.recompute_evpn(*key, candidates.into_iter()) {
+            // Capture old state BEFORE recompute_evpn so the event-type
+            // derivation below distinguishes Added / Withdrawn /
+            // BestChanged precisely. Inferring from the `did_change`
+            // bool alone collapses Added and BestChanged into one
+            // signal — Gate 7c subscribers (the daemon originator)
+            // need to know the difference to update their `last_seen
+            // _remote_seq` ratchets correctly.
+            let previous_best: Option<EvpnRibRoute> = self.loc_rib.get_evpn(key).cloned();
+            let did_change = self.loc_rib.recompute_evpn(*key, candidates.into_iter());
+            if did_change {
+                let new_best: Option<EvpnRibRoute> = self.loc_rib.get_evpn(key).cloned();
+                let event_type = match (&previous_best, &new_best) {
+                    (None, Some(_)) => crate::event::RouteEventType::Added,
+                    (Some(_), None) => crate::event::RouteEventType::Withdrawn,
+                    (Some(_), Some(_)) => crate::event::RouteEventType::BestChanged,
+                    // recompute returned `did_change=true` so at least
+                    // one side is `Some`. (None, None) shouldn't fire
+                    // — guard with debug_assert and skip silently.
+                    (None, None) => {
+                        debug_assert!(false, "recompute_evpn returned changed but both sides None");
+                        continue;
+                    }
+                };
+                let previous_peer = previous_best.as_ref().map(|r| r.peer);
+                let peer = new_best.as_ref().map(|r| r.peer);
+                let _ = self.evpn_events_tx.send(crate::event::EvpnRouteEvent {
+                    event_type,
+                    key: *key,
+                    best: new_best,
+                    peer,
+                    previous_peer,
+                    timestamp: crate::event::unix_timestamp_now(),
+                });
                 changed_keys.insert(*key);
             }
         }

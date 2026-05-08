@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN best-path push notifications (Gate 7c — sub-second mobility
+  convergence).** New `EvpnRouteEvent` broadcast in `crates/rib`,
+  keyed by `EvpnRouteKey` and carrying the full `Option<EvpnRibRoute>`
+  best path so subscribers can build `RemoteMacView`s without a
+  follow-up `QueryEvpnRoutes` round-trip. The daemon's local-MAC
+  originator subscribes at startup and reacts to each best-path
+  change synchronously; the existing 5 s `QueryEvpnRoutes` poll is
+  retained as a backstop for `Lagged` subscribers and for cold-start
+  cache population (the broadcast is edge-triggered and does not
+  replay history). Path: `crates/rib/src/event.rs`,
+  `crates/rib/src/manager/distribution.rs`,
+  `crates/rib/src/manager/mod.rs`, `crates/rib/src/update.rs`,
+  `src/evpn_originator.rs`.
+
 ## [0.16.0] — 2026-05-07
 
 Operational polish on the v0.15.0 EVPN VTEP loop. No new feature

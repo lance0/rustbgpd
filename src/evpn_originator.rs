@@ -20,18 +20,22 @@
 //! state machine), the same allowance ADR-0054 §1 grants
 //! `src/evpn_dataplane.rs`.
 //!
-//! ## Why polling instead of broadcast subscription
+//! ## Convergence — push notification + periodic backstop
 //!
-//! The RIB's existing `RouteEvent` broadcast (`crates/rib/src/event.rs`)
-//! is keyed by `Prefix` and is therefore unicast-only — EVPN best-path
-//! changes do not surface there. The dataplane supervisor already
-//! polls `RibUpdate::QueryEvpnRoutes` on a fixed cadence (5s default)
-//! for the same reason. Adding an EVPN-specific broadcast is a deeper
-//! invasive change tracked in `docs/evpn-enablement.md` Gate 7c; until
-//! then the originator polls on the same cadence and reuses the
-//! supervisor's projection (`rustbgpd_evpn::project_evpn_routes`) to
-//! turn raw `EvpnRibRoute`s into `RemoteMacView`s the state machine
-//! consumes.
+//! The originator subscribes to the RIB's [`EvpnRouteEvent`] broadcast
+//! (added by Gate 7c) and reacts to each best-path change synchronously,
+//! driving `on_remote_changed` from the event payload's `best` field
+//! directly — no follow-up `QueryEvpnRoutes` round-trip needed. The
+//! 5 s `poll_tick` is retained as a backstop for two narrow cases:
+//!   1. The broadcast subscriber lagged (capacity 4096 dropped events);
+//!      a full repoll re-establishes the cache.
+//!   2. The originator started after the RIB had already converged —
+//!      the broadcast is edge-triggered and won't replay history, so
+//!      the first poll is what populates `remote_view` initially.
+//!
+//! Self-NH filtering (skip routes whose next-hop matches our local
+//! VTEP IP) is applied per-event the same way `repoll_rib` applies it
+//! during a full sweep.
 //!
 //! ## RR-only deployments
 //!
@@ -63,13 +67,13 @@ use rustbgpd_evpn::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, LocalMacOriginator,
     MacAddress, OriginationAction, ProjectedEvpnRoute, RemoteMacView, project_evpn_routes,
 };
-use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
+use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, EvpnRouteKey,
-    ExtendedCommunity, MplsLabel, Origin, PathAttribute,
+    ExtendedCommunity, MplsLabel, Origin, PathAttribute, RouteDistinguisher,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -219,6 +223,17 @@ async fn originator_loop(
 
     let mut remote_view: RemoteMacViewMap = BTreeMap::new();
 
+    // Subscribe to the RIB's EVPN best-path broadcast. A failure here
+    // is non-fatal: the 5 s poll fallback is the same convergence
+    // mechanism that ran before Gate 7c, so the originator stays
+    // correct (just slower) without the broadcast.
+    let mut evpn_event_rx = subscribe_evpn_events(&runtime.rib_tx).await;
+    if evpn_event_rx.is_none() {
+        warn!(
+            "EVPN originator: failed to subscribe to RIB event broadcast; running in poll-only mode"
+        );
+    }
+
     loop {
         tokio::select! {
             biased;
@@ -258,6 +273,39 @@ async fn originator_loop(
                     &runtime.originated_local_mac_counts,
                 ).await;
             }
+            event = recv_evpn_event(&mut evpn_event_rx) => match event {
+                Ok(ev) => {
+                    handle_evpn_event(
+                        &ev,
+                        &runtime.instances,
+                        &mut remote_view,
+                        &mut originators,
+                        &runtime.rib_tx,
+                        &runtime.metrics,
+                        &runtime.originated_local_mac_counts,
+                    ).await;
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        skipped,
+                        "EVPN originator: event broadcast lagged; falling back to full repoll"
+                    );
+                    if let Err(e) = repoll_rib(
+                        &runtime.instances,
+                        &runtime.rib_tx,
+                        &mut remote_view,
+                        &mut originators,
+                        &runtime.metrics,
+                        &runtime.originated_local_mac_counts,
+                    ).await {
+                        warn!(error = %e, "EVPN originator: lag-recovery repoll failed");
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    warn!("EVPN originator: RIB event broadcast closed; reverting to poll-only");
+                    evpn_event_rx = None;
+                }
+            },
             _ = poll_tick.tick() => {
                 if let Err(e) = repoll_rib(
                     &runtime.instances,
@@ -271,6 +319,32 @@ async fn originator_loop(
                 }
             }
         }
+    }
+}
+
+/// Subscribe to the RIB's EVPN route-event broadcast. Returns `None`
+/// if the RIB channel is full / closed or if the reply was dropped —
+/// the originator's 5 s poll backstop covers both cases.
+async fn subscribe_evpn_events(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+) -> Option<broadcast::Receiver<EvpnRouteEvent>> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    rib_tx
+        .send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
+        .await
+        .ok()?;
+    reply_rx.await.ok()
+}
+
+/// Receive next event, or park forever if we never got a subscription
+/// (poll-only mode). Parking on `pending` lets the surrounding
+/// `tokio::select!` continue to service the other arms.
+async fn recv_evpn_event(
+    rx: &mut Option<broadcast::Receiver<EvpnRouteEvent>>,
+) -> Result<EvpnRouteEvent, broadcast::error::RecvError> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -368,6 +442,109 @@ async fn repoll_rib(
 
     *remote_view = new_view;
     Ok(())
+}
+
+/// Apply a single push-notified EVPN best-path change. Equivalent to
+/// the per-key slice of [`repoll_rib`] but without a follow-up
+/// `QueryEvpnRoutes` round-trip — the event payload's `best` field
+/// already carries everything needed to build [`RemoteMacView`].
+///
+/// Only Type 2 (`MacIp`) events are acted on; the originator does not
+/// react to Type 1/3/4/5 best-path changes today (Gate 7c scope).
+///
+/// Self-NH filter is applied per-event the same way `project_evpn_routes`
+/// applies it during a full sweep: a route whose next-hop matches our
+/// own `local_vtep_ip` is treated as "no remote view" so the originator
+/// never sees its own re-Inject as a contender.
+async fn handle_evpn_event(
+    event: &EvpnRouteEvent,
+    instances: &EvpnInstanceTable,
+    remote_view: &mut RemoteMacViewMap,
+    originators: &mut BTreeMap<EvpnInstanceId, LocalMacOriginator>,
+    rib_tx: &mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
+    originated_local_mac_counts: &OriginatedLocalMacCounts,
+) {
+    let EvpnRouteKey::MacIp { rd, mac, .. } = event.key else {
+        return;
+    };
+
+    // VNI lookup: prefer the new best's `label1` (RFC 8365 §5 raw
+    // 24-bit VNI in the EVPN MPLS label) when available; fall back to
+    // an RD-keyed scan for Withdrawn events whose `best` is `None`.
+    let vni = if let Some(label) = event.best.as_ref().and_then(macip_label) {
+        match EvpnInstanceId::new(label.as_vni()) {
+            Ok(v) => v,
+            Err(_) => return,
+        }
+    } else {
+        let Some(v) = vni_from_rd(instances, rd) else {
+            return;
+        };
+        v
+    };
+
+    let Some(inst) = instances.get(vni) else {
+        return;
+    };
+
+    let new_view: Option<RemoteMacView> = match event.best.as_ref() {
+        Some(route) if route.next_hop != inst.local_vtep_ip => {
+            let (sticky, mobility_sequence) = extract_mac_mobility_full(&route.attributes);
+            Some(RemoteMacView {
+                mac,
+                mobility_sequence,
+                sticky,
+                next_hop: route.next_hop,
+            })
+        }
+        _ => None,
+    };
+
+    let key = (vni, mac);
+    let prior = remote_view.get(&key);
+    if prior == new_view.as_ref() {
+        return;
+    }
+
+    match &new_view {
+        Some(v) => {
+            remote_view.insert(key, v.clone());
+        }
+        None => {
+            remote_view.remove(&key);
+        }
+    }
+
+    let Some(orig) = originators.get_mut(&vni) else {
+        return;
+    };
+    let actions = orig.on_remote_changed(mac, new_view.as_ref());
+    if actions.is_empty() {
+        return;
+    }
+    if new_view.is_some() {
+        record_duplicate_mac_move(metrics, vni, mac);
+    }
+    apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+}
+
+/// Pull the MPLS label out of a Type 2 best path. Returns `None` for
+/// non-MacIp routes (defensive — the caller already keyed on
+/// `EvpnRouteKey::MacIp`, so a mismatch indicates a logic bug
+/// elsewhere).
+fn macip_label(best: &EvpnRibRoute) -> Option<MplsLabel> {
+    match &best.route {
+        EvpnRoute::MacIp(macip) => Some(macip.label1),
+        _ => None,
+    }
+}
+
+/// Map a Route Distinguisher to the configured EVPN instance VNI, if
+/// any. O(N) over instances; the table is bounded by operator config
+/// (typically <1000).
+fn vni_from_rd(instances: &EvpnInstanceTable, rd: RouteDistinguisher) -> Option<EvpnInstanceId> {
+    instances.iter().find(|i| i.rd == rd).map(|i| i.id)
 }
 
 /// Drain on shutdown: emit Withdraws for every still-advertised MAC.
@@ -1254,5 +1431,171 @@ mod tests {
         h.shutdown().await;
         // No assertions — the test passes if shutdown didn't hang or
         // crash from the unknown-VNI observation.
+    }
+
+    /// Build an `EvpnRouteEvent` for a Type 2 best-path with the given
+    /// peer / mac / seq, using the same RD shape as `local_instance`.
+    fn evpn_event_macip(
+        v: u32,
+        m: u8,
+        peer_addr: &str,
+        seq: Option<u32>,
+        sticky: bool,
+        event_type: rustbgpd_rib::RouteEventType,
+        previous_peer: Option<IpAddr>,
+    ) -> EvpnRouteEvent {
+        let route = evpn_macip_route(v, m, peer_addr, seq, sticky);
+        EvpnRouteEvent {
+            event_type,
+            key: route.key(),
+            best: Some(route.clone()),
+            peer: Some(ipa(peer_addr)),
+            previous_peer,
+            timestamp: "0".to_string(),
+        }
+    }
+
+    /// Gate 7c: a push-notified Added event populates the originator's
+    /// `remote_view` cache without any RIB poll having fired. This is
+    /// the load-bearing assertion for the convergence improvement —
+    /// `handle_evpn_event` is what makes mobility sub-second.
+    #[tokio::test]
+    async fn handle_evpn_event_added_populates_remote_view_without_polling() {
+        let instances = instance_table(100);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut originators = BTreeMap::new();
+        let mut remote_view: RemoteMacViewMap = BTreeMap::new();
+
+        // Drain any RIB traffic so the channel never fills under the
+        // paused clock.
+        let _drainer = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+
+        let event = evpn_event_macip(
+            100,
+            0xAA,
+            "10.0.0.2",
+            Some(5),
+            false,
+            rustbgpd_rib::RouteEventType::Added,
+            None,
+        );
+
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut remote_view,
+            &mut originators,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let view = remote_view
+            .get(&(vni(100), mac(0xAA)))
+            .expect("Added event must populate the remote_view cache");
+        assert_eq!(view.next_hop, ipa("10.0.0.2"));
+        assert_eq!(view.mobility_sequence, Some(5));
+        assert!(!view.sticky);
+    }
+
+    /// Self-NH guard: a best-path event whose next-hop matches our own
+    /// `local_vtep_ip` must not register as a remote view (otherwise
+    /// the originator would defend against its own re-Inject and bump
+    /// the mobility sequence forever). Mirrors `project_evpn_routes`'s
+    /// self-NH filter applied during a full repoll.
+    #[tokio::test]
+    async fn handle_evpn_event_filters_self_nh_routes() {
+        let instances = instance_table(100); // local_vtep_ip = 10.0.0.1
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut originators = BTreeMap::new();
+        let mut remote_view: RemoteMacViewMap = BTreeMap::new();
+
+        let _drainer = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+
+        // Self-originated route: next_hop == 10.0.0.1.
+        let event = evpn_event_macip(
+            100,
+            0xBB,
+            "10.0.0.1",
+            Some(0),
+            false,
+            rustbgpd_rib::RouteEventType::Added,
+            None,
+        );
+
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut remote_view,
+            &mut originators,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        assert!(
+            !remote_view.contains_key(&(vni(100), mac(0xBB))),
+            "self-NH event must not populate remote_view"
+        );
+    }
+
+    /// A Withdrawn event clears the cached `RemoteMacView` for its
+    /// `(VNI, MAC)`, even though the event's `best` is `None` — the
+    /// VNI has to be recovered from the key's RD instead.
+    #[tokio::test]
+    async fn handle_evpn_event_withdrawn_clears_remote_view() {
+        let instances = instance_table(100);
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut originators = BTreeMap::new();
+        let mut remote_view: RemoteMacViewMap = BTreeMap::from([(
+            (vni(100), mac(0xCC)),
+            RemoteMacView {
+                mac: mac(0xCC),
+                mobility_sequence: Some(7),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        )]);
+
+        let _drainer = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+
+        let key = rustbgpd_wire::EvpnRouteKey::MacIp {
+            rd: rd(65000, 100),
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xCC),
+            ip: None,
+        };
+        let event = EvpnRouteEvent {
+            event_type: rustbgpd_rib::RouteEventType::Withdrawn,
+            key,
+            best: None,
+            peer: None,
+            previous_peer: Some(ipa("10.0.0.2")),
+            timestamp: "0".to_string(),
+        };
+
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut remote_view,
+            &mut originators,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        assert!(
+            !remote_view.contains_key(&(vni(100), mac(0xCC))),
+            "Withdrawn event must clear the cached remote_view entry"
+        );
     }
 }

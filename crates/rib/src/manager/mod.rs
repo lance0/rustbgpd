@@ -111,6 +111,12 @@ pub struct RibManager {
     /// Current ASPA table for upstream path verification. `None` = no ASPA data.
     aspa_table: Option<Arc<rustbgpd_rpki::AspaTable>>,
     route_events_tx: broadcast::Sender<RouteEvent>,
+    /// EVPN best-path change broadcast. Separate from
+    /// `route_events_tx` because `RouteEvent` is keyed by `Prefix`
+    /// (unicast-only) and EVPN consumers (the daemon's local-MAC
+    /// originator) need an `EvpnRouteKey`-shaped event with the full
+    /// new best path attached. ADR-0055 §5 — Gate 7c.
+    evpn_events_tx: broadcast::Sender<crate::event::EvpnRouteEvent>,
     metrics: BgpMetrics,
     rx: mpsc::Receiver<RibUpdate>,
     /// Priority channel for read-only queries (gRPC).
@@ -293,6 +299,13 @@ impl RibManager {
         metrics: BgpMetrics,
     ) -> Self {
         let (route_events_tx, _) = broadcast::channel(4096);
+        // EVPN broadcast — same capacity as the unicast channel.
+        // Slow EVPN subscribers receive `Lagged(_)`; the daemon's
+        // originator falls back to `repoll_rib` per ADR-0054 §6's
+        // level-triggered model. Capacity here only needs to ride
+        // through transient bursts (mobility storms, FRR-side
+        // re-advertisement on session up).
+        let (evpn_events_tx, _) = broadcast::channel(4096);
         Self {
             ribs: HashMap::new(),
             loc_rib: LocRib::new(),
@@ -327,6 +340,7 @@ impl RibManager {
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
+            evpn_events_tx,
             metrics,
             rx,
             query_rx,
@@ -473,6 +487,9 @@ impl RibManager {
             } => self.handle_explain_advertised_route(peer, prefix, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
+            }
+            RibUpdate::SubscribeEvpnRouteEvents { reply } => {
+                self.handle_subscribe_evpn_route_events(reply);
             }
             RibUpdate::QueryLocRibCount { reply } => self.handle_query_loc_rib_count(reply),
             RibUpdate::QueryAdvertisedCount { peer, reply } => {
@@ -665,6 +682,14 @@ impl RibManager {
         reply: tokio::sync::oneshot::Sender<broadcast::Receiver<RouteEvent>>,
     ) {
         let rx = self.route_events_tx.subscribe();
+        let _ = reply.send(rx);
+    }
+
+    fn handle_subscribe_evpn_route_events(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<broadcast::Receiver<crate::event::EvpnRouteEvent>>,
+    ) {
+        let rx = self.evpn_events_tx.subscribe();
         let _ = reply.send(rx);
     }
 

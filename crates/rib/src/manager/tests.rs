@@ -3,9 +3,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_wire::{
-    Afi, AsPath, AsPathSegment, EthernetTagId, EvpnImet, EvpnRoute, FlowSpecComponent,
-    FlowSpecPrefix, FlowSpecRule, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, Prefix,
-    RouteDistinguisher, RpkiValidation, Safi,
+    Afi, AsPath, AsPathSegment, EthernetSegmentIdentifier, EthernetTagId, EvpnImet, EvpnMacIp,
+    EvpnRoute, ExtendedCommunity, FlowSpecComponent, FlowSpecPrefix, FlowSpecRule, Ipv4Prefix,
+    Ipv6Prefix, MacAddress, MplsLabel, Origin, PathAttribute, Prefix, RouteDistinguisher,
+    RpkiValidation, Safi,
 };
 use tokio::sync::oneshot;
 
@@ -8580,4 +8581,214 @@ fn pending_routes_received_drains_full_evpn_withdraw_batch() {
     }
     assert_eq!(drained, total);
     assert!(!pending.has_more());
+}
+
+// --- EVPN route event streaming tests (Gate 7c) ---
+
+/// Build a Type 2 (`MacIp`) `EvpnRibRoute` carrying an optional MAC
+/// Mobility extended community. Tests use this to simulate received
+/// routes with varying mobility sequences.
+fn make_evpn_macip(
+    peer: Ipv4Addr,
+    mac: [u8; 6],
+    mobility_seq: Option<u32>,
+    sticky: bool,
+) -> EvpnRibRoute {
+    let route = EvpnRoute::MacIp(EvpnMacIp {
+        rd: RouteDistinguisher([0, 0, 0xFD, 0xE8, 0, 0, 0, 100]),
+        esi: EthernetSegmentIdentifier::ZERO,
+        ethernet_tag: EthernetTagId(100),
+        mac: MacAddress::new(mac),
+        ip: None,
+        label1: MplsLabel::new(100),
+        label2: None,
+    });
+
+    let mut attrs: Vec<PathAttribute> = vec![
+        PathAttribute::Origin(Origin::Igp),
+        PathAttribute::AsPath(AsPath { segments: vec![] }),
+        PathAttribute::NextHop(peer),
+    ];
+    if let Some(seq) = mobility_seq {
+        attrs.push(PathAttribute::ExtendedCommunities(vec![
+            ExtendedCommunity::mac_mobility(sticky, seq),
+        ]));
+    }
+
+    EvpnRibRoute {
+        route,
+        next_hop: IpAddr::V4(peer),
+        link_local_next_hop: None,
+        peer: IpAddr::V4(peer),
+        attributes: Arc::new(attrs),
+        received_at: Instant::now(),
+        origin_type: crate::route::RouteOrigin::Ibgp,
+        peer_router_id: peer,
+        is_stale: false,
+        is_llgr_stale: false,
+    }
+}
+
+async fn subscribe_evpn_events(
+    tx: &mpsc::Sender<RibUpdate>,
+) -> tokio::sync::broadcast::Receiver<crate::event::EvpnRouteEvent> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::SubscribeEvpnRouteEvents { reply: reply_tx })
+        .await
+        .unwrap();
+    reply_rx.await.unwrap()
+}
+
+#[tokio::test]
+async fn evpn_route_event_added_on_new_best() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let mut events_rx = subscribe_evpn_events(&tx).await;
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 1);
+    let peer = IpAddr::V4(peer_addr);
+    let route = make_evpn_macip(
+        peer_addr,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        Some(0),
+        false,
+    );
+    let key = route.key();
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![route],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
+        .await
+        .expect("EVPN broadcast should deliver event within 2s")
+        .expect("broadcast not closed");
+    assert_eq!(event.event_type, crate::event::RouteEventType::Added);
+    assert_eq!(event.key, key);
+    assert_eq!(event.peer, Some(peer));
+    assert!(event.previous_peer.is_none());
+    assert!(event.best.is_some(), "Added must carry a best path");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_route_event_best_changed_on_higher_mobility() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let mac = [0xAA, 0xBB, 0xCC, 0x00, 0x00, 0x01];
+    let original_peer = Ipv4Addr::new(10, 0, 0, 1);
+    let new_peer = Ipv4Addr::new(10, 0, 0, 2);
+
+    // First peer originates with seq=0.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(original_peer),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![make_evpn_macip(original_peer, mac, Some(0), false)],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    // Subscribe after the initial Added event so the next event we
+    // observe is the contended best-path move.
+    let mut events_rx = subscribe_evpn_events(&tx).await;
+
+    // Second peer originates the same MAC with a higher mobility seq.
+    // Best-path tiebreak (RFC 7432 §15.1) prefers the higher seq.
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(new_peer),
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![make_evpn_macip(new_peer, mac, Some(1), false)],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
+        .await
+        .expect("EVPN broadcast should deliver event within 2s")
+        .expect("broadcast not closed");
+    assert_eq!(event.event_type, crate::event::RouteEventType::BestChanged);
+    assert_eq!(event.peer, Some(IpAddr::V4(new_peer)));
+    assert_eq!(event.previous_peer, Some(IpAddr::V4(original_peer)));
+    let best = event.best.expect("BestChanged must carry a best path");
+    assert_eq!(best.peer, IpAddr::V4(new_peer));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn evpn_route_event_withdrawn_on_last_removed() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer_addr = Ipv4Addr::new(10, 0, 0, 3);
+    let peer = IpAddr::V4(peer_addr);
+    let route = make_evpn_macip(
+        peer_addr,
+        [0x00, 0x11, 0x22, 0x33, 0x44, 0x66],
+        Some(0),
+        false,
+    );
+    let key = route.key();
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![route],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let mut events_rx = subscribe_evpn_events(&tx).await;
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![key],
+    })
+    .await
+    .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(2), events_rx.recv())
+        .await
+        .expect("EVPN broadcast should deliver event within 2s")
+        .expect("broadcast not closed");
+    assert_eq!(event.event_type, crate::event::RouteEventType::Withdrawn);
+    assert_eq!(event.key, key);
+    assert!(event.peer.is_none());
+    assert_eq!(event.previous_peer, Some(peer));
+    assert!(event.best.is_none(), "Withdrawn must not carry a best");
+
+    drop(tx);
+    handle.await.unwrap();
 }
