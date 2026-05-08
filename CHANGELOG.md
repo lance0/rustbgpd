@@ -11,6 +11,67 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **MAC-with-IP Type 2 origination via ARP/ND suppression
+  (Gate 7b+2 — alpha supported, three slices).** The
+  `advertise_svi_mac` flag and `sticky_macs` config (already
+  shipped) handled the MAC-only path; this closes the long-deferred
+  MAC+IP path. RFC 7432 §7.2 permits a Type 2 NLRI to carry an IP
+  alongside the MAC; RFC 9135 §7.2.3 frames MAC-only as
+  *supplementary*, and FRR's actual operator-facing behavior is
+  the **replace model** — at any time at most one of `{MAC-only,
+  MAC+IP}` is advertising for a given MAC. The daemon mirrors that:
+  an `IpAdded` event withdraws the MAC-only route and emits a
+  MAC+IP route in its place; the last `IpRemoved` for a MAC
+  downgrades back to MAC-only.
+
+  **Operator prerequisite**: the bridge must have
+  `bridge link set dev vxlan<vni> neigh_suppress on` per VXLAN
+  port — that's what makes the kernel snoop ARP/ND traffic into
+  the bridge's neighbour table and emit
+  `AF_INET` / `AF_INET6` `RTM_NEWNEIGH` messages on the bridge
+  ifindex. Without it, no `IpAdded` events reach the daemon and
+  only MAC-only Type 2s get advertised. See
+  `docs/evpn-vtep-troubleshooting.md` for verification steps.
+
+  Implementation:
+  - **Wire layer** (slice 1): the existing `RTNLGRP_NEIGH`
+    classifier now splits the message stream by family. `AF_BRIDGE`
+    drives MAC-only as before; `AF_INET` / `AF_INET6` on bridge
+    ifindexes drives the new `LocalMacObservation::{IpAdded,
+    IpRemoved}` variants. Validity gate drops `NUD_INCOMPLETE` /
+    `NUD_DELAY` / `NUD_PROBE` / `NUD_FAILED` (including combined
+    bitmasks like `NUD_STALE | NUD_PROBE`) so kernel re-probe
+    thrash never reaches origination. Address-shape filter rejects
+    unspecified, multicast, broadcast, IPv4 link-local (APIPA),
+    IPv6 link-local (`fe80::/10`), and loopback bindings on both
+    add and remove edges. Path:
+    `crates/evpn-linux/src/linux/notify.rs`,
+    `crates/evpn/src/mac.rs`.
+  - **State machine** (slice 2): `LocalMacIpOriginator` parallels
+    `LocalMacOriginator` but keyed on `(MAC, IP)` with independent
+    RFC 7432 §15.1 mobility ratchets per RFC 9135 §7.2.3
+    coexistence. New `on_local_mac_aged(mac)` cascade hook
+    withdraws every `(MAC, *)` IP route at once. Diverges from
+    MAC-only on sticky-bit changes — re-emits at the same
+    sequence rather than bumping, since for MAC+IP the sticky bit
+    is closer to an ARP/ND-suppression hint than a mobility
+    signal. Path: `crates/evpn/src/origination_macip.rs`.
+  - **Daemon correlation** (slice 3): `OriginatorState` bundles
+    the per-VNI MAC + MAC+IP originators, a `local_macs` cache
+    (with retained ifindex for downgrade replay), pending IP
+    bindings (handles cold-start ordering between `AF_BRIDGE` and
+    `AF_INET[6]` feeds), and a live `(MAC, IP)` cache. RIB
+    projection extended to build both `RemoteMacViewMap` and
+    `RemoteMacIpViewMap` from one `QueryEvpnRoutes` snapshot;
+    `repoll_rib` diffs both. Shutdown drains MAC+IP first, then
+    MAC-only. Path: `src/evpn_originator.rs`.
+
+  Tested end-to-end against FRR via the new M37+IP containerlab
+  smoke (`tests/interop/m37-evpn-mac-ip-origination.clab.yml`,
+  operator-run / privileged); 28 unit tests in
+  `src/evpn_originator.rs#tests` cover the replace flow, the
+  cold-start ordering edge, the downgrade path, sticky pass-
+  through, and the MAC-aged cascade.
 - **Gate 7b+2 domain state machine — `LocalMacIpOriginator`.**
   Parallel to `LocalMacOriginator` but keyed on `(MAC, IP)` rather
   than `MAC` alone. Pure deterministic state machine with no I/O,

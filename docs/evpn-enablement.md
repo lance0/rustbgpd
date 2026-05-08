@@ -402,11 +402,10 @@ flow that Gate 7b's foundation left as a stub.
 | ADR-0055 — Local-MAC origination boundary (sequence rules, channel surface, deferral list) | `docs/adr/0055-evpn-local-mac-origination.md` | landed |
 | M37 containerlab smoke — rustbgpd-as-VTEP originating Type 2 + IMET against FRR consumer | `tests/interop/m37-evpn-local-origination.clab.yml` | landed |
 
-**Post-Gate 7b / 7b+1 / 7c alpha-soak follow-ups:**
+**Post-Gate 7b / 7b+1 / 7b+2 / 7c alpha-soak follow-ups:**
 
 | Task | File / location |
 |------|----------------|
-| MAC-with-IP Type 2 origination (requires AF_INET / AF_INET6 NEIGH subscription correlated by MAC; ARP/ND suppression learning) | `crates/evpn-linux/src/linux/notify.rs` (extend) |
 | MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine action) — detection counters shipped; the operator-facing escalation channel and quarantine action are deferred per ADR-0055 §9 | `crates/evpn/src/origination.rs` (extend) |
 | Type 5 IP Prefix origination per L3VNI | (deferred to Gate 9 — IP-VRF concept needed) |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
@@ -419,6 +418,7 @@ flow that Gate 7b's foundation left as a stub.
 | `advertise_svi_mac` consumption | `src/evpn_svi.rs` + `InstanceDataplaneStatus.bridge_mac` |
 | Sticky-MAC config schema (`sticky_macs`) | ADR-0056, `EvpnInstance.sticky_macs` |
 | Sub-second mobility convergence (Gate 7c) | `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s poll stays as `Lagged` / cold-start backstop |
+| MAC-with-IP Type 2 origination (Gate 7b+2) | `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH` classifier in `crates/evpn-linux/src/linux/notify.rs`, `LocalMacIpOriginator` state machine in `crates/evpn/src/origination_macip.rs`, daemon correlation under FRR-style replace model in `src/evpn_originator.rs`. Operator prerequisite: bridge `neigh_suppress on`. |
 
 ---
 

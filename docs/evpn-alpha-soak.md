@@ -60,12 +60,20 @@ none of them block v0.15.0 release on their own.
   consumes it synchronously. The 5 s `QueryEvpnRoutes` poll stays
   as a backstop for `Lagged` subscribers and cold-start cache
   population.
-- [ ] **MAC-with-IP (Type 2 with host IP) origination.** Gate 7b+2.
-  Requires a separate `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH`
-  subscription correlated by MAC against the bridge's ARP/ND-
-  suppression table. ADR-0055 §7. The wire codec already supports
-  `EvpnRouteKey::MacIp.ip = Some(...)`; only the consumer is
-  deferred.
+- [x] **MAC-with-IP (Type 2 with host IP) origination.** Closed by
+  Gate 7b+2 — three slices on top of v0.16.0. Slice 1 extended the
+  existing `RTNLGRP_NEIGH` classifier to recognize `AF_INET` /
+  `AF_INET6` neighbours on bridge ifindexes. Slice 2 added
+  `LocalMacIpOriginator`, a parallel state machine to
+  `LocalMacOriginator` keyed on `(MAC, IP)` with independent
+  RFC 7432 §15.1 mobility sequencing. Slice 3 wired the daemon
+  correlation under the FRR-style **replace model**: at any time
+  at most one of `{MAC-only, MAC+IP}` is advertising for a given
+  MAC. Operator prerequisite: the bridge must have
+  `neigh_suppress on` per-VXLAN-port so the kernel routes ARP/ND
+  bindings into the bridge's neighbour table. M37+IP
+  containerlab smoke (operator-run, privileged) covers the
+  end-to-end FRR replace flow.
 - [x] **`advertise_svi_mac` consumption.** Closed — the Linux
   dataplane captures the bridge link-layer address during link
   inventory, surfaces it on `InstanceDataplaneStatus.bridge_mac`,
