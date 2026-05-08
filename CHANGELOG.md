@@ -22,10 +22,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   origination (RFC 7432 §7.2 with non-empty IP, RFC 9135 §4.4
   permits MAC-only and MAC+IP routes for the same MAC to coexist).
   Validity gate drops `NUD_INCOMPLETE` / `NUD_FAILED` /
-  `NUD_DELAY` / `NUD_PROBE` so probe thrash doesn't reach origination.
-  The daemon-side originator currently logs at debug and no-ops on
-  the new variants — Gate 7b+2 slice 2 will wire the `(MAC, IP)`
-  state machine.
+  `NUD_DELAY` / `NUD_PROBE` (including combined bitmasks like
+  `NUD_STALE | NUD_PROBE`) so kernel re-probe thrash doesn't reach
+  origination. Address-shape filter rejects unspecified, multicast,
+  broadcast, IPv4 link-local (APIPA), IPv6 link-local (`fe80::/10`),
+  and loopback bindings on both add and remove edges so the EVPN
+  domain layer never sees an IP it shouldn't advertise. The
+  daemon-side originator currently logs at debug and no-ops on the
+  new variants — Gate 7b+2 slice 2 will wire the `(MAC, IP)` state
+  machine.
 
 ### Fixed
 
