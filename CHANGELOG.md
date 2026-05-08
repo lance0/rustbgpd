@@ -9,6 +9,36 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **EVPN Withdrawn events now reliably clear the originator's
+  `remote_view`.** The Gate 7c push notification originally tried to
+  recover the VNI for `Withdrawn` events by scanning local
+  `EvpnInstance.rd` against the route key's RD; that's wrong because
+  RFC 7432 §7.9.5 lets each PE pick its own RD, so a remote-imported
+  Type 2 carries the **remote**'s RD, which won't match any local
+  instance. `EvpnRouteEvent` now carries `previous_best:
+  Option<EvpnRibRoute>` alongside `best`, populated from the prior
+  Loc-RIB state captured before `recompute_evpn`. The originator
+  recovers VNI from `event.best.label1` for Added/BestChanged and
+  from `event.previous_best.label1` for Withdrawn — eliminating the
+  RD-scan fallback that silently broke remote-MAC withdrawals.
+  Regression test pins this with a remote-RD shape.
+- **SVI-MAC origination honors `sticky_macs`.** Per ADR-0056, an
+  operator listing the bridge MAC in `[[evpn_instances]].sticky_macs`
+  expected the originated SVI Type 2 to carry the RFC 7432 §15.4
+  sticky bit. The previous wiring hardcoded `false`. Fix: SVI
+  origination now consults `inst.sticky_macs.contains(&mac)` on
+  Inject.
+
+### Changed
+
+- Documentation pass for the three follow-on slices in
+  `[Unreleased]`: README maturity row, `docs/DESIGN.md` Phase 2
+  description, `docs/evpn-alpha-soak.md` checklist, and the
+  `examples/evpn-vtep-leaf/config.toml` field comments are all
+  updated so they no longer describe these features as deferred.
+
 ### Added
 
 - **EVPN SVI-MAC origination (RFC 9135 §6.1).** The

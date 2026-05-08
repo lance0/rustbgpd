@@ -54,24 +54,26 @@ none of them block v0.15.0 release on their own.
 
 ## Convergence + correctness slices
 
-- [ ] **5 s RIB-poll floor for remote-best-path mobility.** The
-  originator polls `RibUpdate::QueryEvpnRoutes` every 5 s to detect
-  remote contention; the existing `RouteEvent` broadcast is keyed
-  by `Prefix` and is unicast-only. ADR-0055 §5 defers sub-second
-  convergence to Gate 7c. Path forward: either add an EVPN-keyed
-  broadcast in `crates/rib/src/event.rs` or a `tokio::sync::Notify`
-  the EVPN best-path apply pings. Both are ~150-250 LOC.
+- [x] **5 s RIB-poll floor for remote-best-path mobility.** Closed
+  by Gate 7c — `crates/rib/src/event.rs` exposes an
+  EVPN-keyed `EvpnRouteEvent` broadcast and the originator
+  consumes it synchronously. The 5 s `QueryEvpnRoutes` poll stays
+  as a backstop for `Lagged` subscribers and cold-start cache
+  population.
 - [ ] **MAC-with-IP (Type 2 with host IP) origination.** Gate 7b+2.
   Requires a separate `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH`
   subscription correlated by MAC against the bridge's ARP/ND-
   suppression table. ADR-0055 §7. The wire codec already supports
   `EvpnRouteKey::MacIp.ip = Some(...)`; only the consumer is
   deferred.
-- [ ] **`advertise_svi_mac` consumption.** The flag is parsed and
-  ignored today. Plug `RTM_GETLINK` on the bridge at instance-Ready
-  to read the SVI MAC, then originate a Type 2 for it. Intersects
-  IRB / L3VNI design (Gate 9) but the SVI-MAC slice can ship
-  independently.
+- [x] **`advertise_svi_mac` consumption.** Closed — the Linux
+  dataplane captures the bridge link-layer address during link
+  inventory, surfaces it on `InstanceDataplaneStatus.bridge_mac`,
+  and the daemon's `src/evpn_svi.rs` task subscribes to the
+  `DataplaneReport` broadcast to originate / withdraw the Type 2
+  on `Ready` ↔ `NotReady` transitions and bridge MAC drift. Pairs
+  with `sticky_macs` (ADR-0056) — listing the bridge MAC there
+  marks the originated SVI Type 2 sticky.
 - [ ] **RFC 7432 §15.1 duplicate-MAC quarantine** (M=180 s, N=5
   moves). ADR-0055 §9 defers the action; the detection-only
   `evpn_duplicate_mac_moves_total{vni,mac}` counter and
@@ -79,10 +81,14 @@ none of them block v0.15.0 release on their own.
   have landed so operators can see repeated contention for a key and
   when its current observation window began. Still ahead: quarantine
   action and the operator-facing escalation channel.
-- [ ] **Static / sticky MAC anti-spoof config schema.** Wire codec
-  for the sticky bit is plumbed; the operator-facing knob isn't.
-  ADR-0055 §8. Schema question: per-MAC list on `EvpnInstance`,
-  per-port, or imported from sysctl? Needs its own ADR.
+- [x] **Sticky MAC anti-spoof config schema.** Closed by ADR-0056
+  — `[[evpn_instances]].sticky_macs` lists MACs to mark with the
+  RFC 7432 §15.4 sticky bit on origination. **Not** a static FDB:
+  the daemon does not synthesize routes for these MACs, only marks
+  Type 2s emitted as a result of normal kernel learning (or
+  SVI-MAC origination when `advertise_svi_mac = true`). Quarantine
+  action remains deferred — sticky-bit origination ships without
+  any automatic detect-and-defend behavior on top of it.
 
 ## Larger follow-on gates (out of v0.15.0 scope, tracked here for
 visibility)

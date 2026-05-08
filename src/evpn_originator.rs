@@ -71,7 +71,7 @@ use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
 use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, EvpnRouteKey,
-    ExtendedCommunity, MplsLabel, Origin, PathAttribute, RouteDistinguisher,
+    ExtendedCommunity, MplsLabel, Origin, PathAttribute,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -469,23 +469,27 @@ async fn handle_evpn_event(
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
 ) {
-    let EvpnRouteKey::MacIp { rd, mac, .. } = event.key else {
+    let EvpnRouteKey::MacIp { mac, .. } = event.key else {
         return;
     };
 
-    // VNI lookup: prefer the new best's `label1` (RFC 8365 §5 raw
-    // 24-bit VNI in the EVPN MPLS label) when available; fall back to
-    // an RD-keyed scan for Withdrawn events whose `best` is `None`.
-    let vni = if let Some(label) = event.best.as_ref().and_then(macip_label) {
-        match EvpnInstanceId::new(label.as_vni()) {
-            Ok(v) => v,
-            Err(_) => return,
-        }
-    } else {
-        let Some(v) = vni_from_rd(instances, rd) else {
-            return;
-        };
-        v
+    // VNI lookup: extract the RFC 8365 §5 raw 24-bit VNI from
+    // `EvpnMacIp.label1`. The new best is the obvious source for
+    // Added / BestChanged; for Withdrawn the new best is `None`, so
+    // we fall back to `previous_best`. The route's RD is **not** a
+    // reliable second source — RFC 7432 §7.9.5 lets each PE pick its
+    // own RD, so a remote-originated Type 2 carries the remote's RD,
+    // which won't match any local `EvpnInstance.rd`.
+    let label = event
+        .best
+        .as_ref()
+        .and_then(macip_label)
+        .or_else(|| event.previous_best.as_ref().and_then(macip_label));
+    let Some(label) = label else {
+        return;
+    };
+    let Ok(vni) = EvpnInstanceId::new(label.as_vni()) else {
+        return;
     };
 
     let Some(inst) = instances.get(vni) else {
@@ -542,13 +546,6 @@ fn macip_label(best: &EvpnRibRoute) -> Option<MplsLabel> {
         EvpnRoute::MacIp(macip) => Some(macip.label1),
         _ => None,
     }
-}
-
-/// Map a Route Distinguisher to the configured EVPN instance VNI, if
-/// any. O(N) over instances; the table is bounded by operator config
-/// (typically <1000).
-fn vni_from_rd(instances: &EvpnInstanceTable, rd: RouteDistinguisher) -> Option<EvpnInstanceId> {
-    instances.iter().find(|i| i.rd == rd).map(|i| i.id)
 }
 
 /// Drain on shutdown: emit Withdraws for every still-advertised MAC.
@@ -1453,6 +1450,7 @@ mod tests {
             event_type,
             key: route.key(),
             best: Some(route.clone()),
+            previous_best: None,
             peer: Some(ipa(peer_addr)),
             previous_peer,
             timestamp: "0".to_string(),
@@ -1637,8 +1635,11 @@ mod tests {
     }
 
     /// A Withdrawn event clears the cached `RemoteMacView` for its
-    /// `(VNI, MAC)`, even though the event's `best` is `None` — the
-    /// VNI has to be recovered from the key's RD instead.
+    /// `(VNI, MAC)`. The originator recovers the VNI from
+    /// `event.previous_best.label1` because the new best is `None`
+    /// and the route's RD is the **remote** PE's RD (RFC 7432 §7.9.5
+    /// permits each PE to pick its own), so a local RD scan would
+    /// miss.
     #[tokio::test]
     async fn handle_evpn_event_withdrawn_clears_remote_view() {
         let instances = instance_table(100);
@@ -1658,16 +1659,15 @@ mod tests {
 
         let _drainer = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
 
-        let key = rustbgpd_wire::EvpnRouteKey::MacIp {
-            rd: rd(65000, 100),
-            ethernet_tag: EthernetTagId(0),
-            mac: mac(0xCC),
-            ip: None,
-        };
+        // Prior best — the Type 2 we're withdrawing. label1 carries
+        // the VNI per RFC 8365 §5; that's how the originator recovers
+        // VNI when `best` is `None`.
+        let prior = evpn_macip_route(100, 0xCC, "10.0.0.2", Some(7), false);
         let event = EvpnRouteEvent {
             event_type: rustbgpd_rib::RouteEventType::Withdrawn,
-            key,
+            key: prior.key(),
             best: None,
+            previous_best: Some(prior),
             peer: None,
             previous_peer: Some(ipa("10.0.0.2")),
             timestamp: "0".to_string(),
@@ -1687,6 +1687,72 @@ mod tests {
         assert!(
             !remote_view.contains_key(&(vni(100), mac(0xCC))),
             "Withdrawn event must clear the cached remote_view entry"
+        );
+    }
+
+    /// Regression for the original bug: a Withdrawn event whose
+    /// route key carries a **remote** PE's RD (which won't match any
+    /// local `EvpnInstance.rd`) must still clear the cached view —
+    /// VNI must come from `previous_best.label1`, not an RD scan.
+    /// RFC 7432 §7.9.5 permits each PE to pick its own RD.
+    #[tokio::test]
+    async fn handle_evpn_event_withdrawn_with_remote_rd_clears_remote_view() {
+        let instances = instance_table(100); // local RD = rd(65000, 100)
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(4);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut originators = BTreeMap::new();
+        let mut remote_view: RemoteMacViewMap = BTreeMap::from([(
+            (vni(100), mac(0xDD)),
+            RemoteMacView {
+                mac: mac(0xDD),
+                mobility_sequence: Some(0),
+                sticky: false,
+                next_hop: ipa("10.0.0.2"),
+            },
+        )]);
+
+        let _drainer = tokio::spawn(async move { while rib_rx.recv().await.is_some() {} });
+
+        // Build a prior-best route whose RD is the **remote** PE's
+        // (different from any local instance), but whose label1
+        // carries the local VNI 100 — that's the realistic shape of
+        // a remote-originated Type 2 imported via matching RT.
+        let mut prior = evpn_macip_route(100, 0xDD, "10.0.0.2", Some(0), false);
+        let remote_rd = rd(65001, 999);
+        prior.route = EvpnRoute::MacIp(EvpnMacIp {
+            rd: remote_rd,
+            esi: EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xDD),
+            ip: None,
+            label1: MplsLabel::new(100),
+            label2: None,
+        });
+        let event = EvpnRouteEvent {
+            event_type: rustbgpd_rib::RouteEventType::Withdrawn,
+            key: prior.key(),
+            best: None,
+            previous_best: Some(prior),
+            peer: None,
+            previous_peer: Some(ipa("10.0.0.2")),
+            timestamp: "0".to_string(),
+        };
+
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut remote_view,
+            &mut originators,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        assert!(
+            !remote_view.contains_key(&(vni(100), mac(0xDD))),
+            "Withdrawn with foreign RD must still clear via previous_best.label1"
         );
     }
 }

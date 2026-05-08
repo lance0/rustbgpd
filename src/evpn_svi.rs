@@ -227,10 +227,14 @@ async fn inject_svi_mac(
     runtime: &SviRuntime,
 ) -> Option<EvpnRouteKey> {
     let key = svi_mac_key(inst.rd, mac);
-    // SVI MAC origination uses no mobility seq and non-sticky:
-    // there's no contender to defend against, and the operator can
-    // mark sticky via `sticky_macs` (ADR-0056) if they need it.
-    let route = build_originated_route(inst, mac, None, false, key);
+    // SVI MAC origination uses no mobility seq (no contender to
+    // defend against — this is a steady-state advertisement of the
+    // bridge's own MAC). The sticky bit (RFC 7432 §15.4) is set
+    // when the operator listed the bridge MAC in `sticky_macs` —
+    // ADR-0056 is explicit that this is the supported way to mark
+    // an SVI MAC sticky on origination.
+    let sticky = inst.sticky_macs.contains(&mac);
+    let route = build_originated_route(inst, mac, None, sticky, key);
     let (reply_tx, reply_rx) = oneshot::channel();
     if runtime
         .rib_tx
@@ -619,5 +623,66 @@ mod tests {
         )
         .await;
         assert_eq!(counts.count(vni(100)), 0, "counter must clear on Withdraw");
+    }
+
+    /// ADR-0056: when the bridge MAC is listed in
+    /// `[[evpn_instances]].sticky_macs`, the originated SVI Type 2
+    /// must carry the RFC 7432 §15.4 MAC Mobility extended community
+    /// with `sticky=true`. Without this, the ADR's "operators can
+    /// mark the SVI MAC sticky via `sticky_macs`" guarantee is a lie.
+    #[tokio::test]
+    async fn sticky_macs_marks_originated_svi_mac() {
+        use std::collections::BTreeSet;
+
+        use rustbgpd_wire::PathAttribute;
+
+        let svi_mac = MacAddress::new([0x02, 0xab, 0xcd, 0xef, 0x00, 0x01]);
+        // Single instance with advertise_svi_mac=true AND the bridge
+        // MAC pinned sticky.
+        let inst = instance(100, true).with_sticky_macs(BTreeSet::from([svi_mac]));
+        let mut t = EvpnInstanceTable::new();
+        t.insert(inst).unwrap();
+        let instances = Arc::new(t);
+
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = drain_responder(rib_rx, captured.clone(), withdraws.clone());
+
+        let runtime = SviRuntime {
+            instances,
+            rib_tx,
+            metrics: BgpMetrics::new(),
+            originated_local_mac_counts: OriginatedLocalMacCounts::default(),
+            shutdown: CancellationToken::new(),
+        };
+        let mut originated = OriginatedSet::new();
+
+        apply_report(
+            &report_with(100, InstanceState::Ready, Some(svi_mac)),
+            &mut originated,
+            &runtime,
+        )
+        .await;
+
+        let injects = captured.lock().await;
+        let route = injects.first().expect("Inject must fire on first Ready");
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v),
+                _ => None,
+            })
+            .expect("originated SVI route must carry ExtendedCommunities");
+        let mobility = extcomms
+            .iter()
+            .find_map(|ec| ec.as_mac_mobility())
+            .expect("sticky SVI MAC must emit a MAC Mobility extcomm");
+        assert!(
+            mobility.0,
+            "sticky_macs entry must propagate to MAC Mobility sticky bit"
+        );
+        assert_eq!(mobility.1, 0, "no contender — seq must stay at 0");
     }
 }

@@ -1843,6 +1843,7 @@ impl RibManager {
                     event_type,
                     key: *key,
                     best: new_best,
+                    previous_best,
                     peer,
                     previous_peer,
                     timestamp: crate::event::unix_timestamp_now(),
