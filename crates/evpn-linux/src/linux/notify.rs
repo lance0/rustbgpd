@@ -226,10 +226,61 @@ fn classify_ip_neighbour(
     let mac = extract_mac(msg)?;
     let ip = extract_ip(msg)?;
 
+    // Drop addresses that aren't valid EVPN MAC+IP advertisement
+    // candidates (multicast, unspecified, link-local, loopback, etc.).
+    // Filter both add and remove edges — if the domain shouldn't see
+    // it as a candidate, the domain shouldn't see either edge.
+    if !is_advertisable_ip(ip) {
+        return None;
+    }
+
     Some(match kind {
         NeighEventKind::New => LocalMacObservation::IpAdded { vni, mac, ip },
         NeighEventKind::Del => LocalMacObservation::IpRemoved { vni, mac, ip },
     })
+}
+
+/// Whether `ip` is eligible to ride on an EVPN MAC+IP Type 2
+/// advertisement.
+///
+/// An EVPN MAC+IP route describes a host's `(IP, MAC)` binding; the
+/// IP half must be a unicast host address that remote VTEPs can
+/// usefully reach via VXLAN encap. Several kernel-side neighbour
+/// rows are not that:
+///
+/// - **Unspecified** (`0.0.0.0`, `::`) — placeholder, no host.
+/// - **Multicast** (`224.0.0.0/4`, `ff00::/8`) — group destinations,
+///   not host bindings.
+/// - **Broadcast** (`255.255.255.255`) — defunct on a bridge but
+///   dropped defensively.
+/// - **IPv4 link-local** (`169.254.0.0/16`) — APIPA self-assigned;
+///   meaningless across VTEPs.
+/// - **IPv6 link-local** (`fe80::/10`) — kernel ND populates these
+///   from neighbour discovery; they don't survive VXLAN encap to a
+///   remote VTEP and would mislead an L3 consumer.
+/// - **Loopback** (`127.0.0.0/8`, `::1`) — local-only; defensive.
+fn is_advertisable_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            !v4.is_unspecified()
+                && !v4.is_multicast()
+                && !v4.is_broadcast()
+                && !v4.is_link_local()
+                && !v4.is_loopback()
+        }
+        IpAddr::V6(v6) => {
+            !v6.is_unspecified()
+                && !v6.is_multicast()
+                && !v6.is_loopback()
+                && !is_ipv6_link_local(v6)
+        }
+    }
+}
+
+/// `fe80::/10` per RFC 4291 §2.5.6. `Ipv6Addr::is_unicast_link_local`
+/// is unstable, so check the high-10-bits prefix manually.
+fn is_ipv6_link_local(addr: std::net::Ipv6Addr) -> bool {
+    addr.segments()[0] & 0xffc0 == 0xfe80
 }
 
 fn is_ip_neighbour_valid(state: NeighbourState) -> bool {
@@ -677,6 +728,116 @@ mod tests {
             Some(v4),
         );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    // --- IP advertisability filter ---
+    //
+    // Per ADR-0054 §1, the classifier is the boundary that decides
+    // what shape of (IP, MAC) binding becomes an EVPN candidate.
+    // These tests pin which IPs the filter accepts and rejects.
+
+    /// Helper — runs an `AF_INET` / `AF_INET6` classifier message
+    /// with the given IP and asserts whether the classifier emits or
+    /// drops.
+    fn assert_classify_inet(ip_str: &str, expect_emitted: bool) {
+        let cache = cache_for(100, 11, 22);
+        let ip: IpAddr = ip_str.parse().unwrap();
+        let family = match ip {
+            IpAddr::V4(_) => AddressFamily::Inet,
+            IpAddr::V6(_) => AddressFamily::Inet6,
+        };
+        let msg = ip_neigh_msg(
+            family,
+            99,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(ip),
+        );
+        let got = classify_neigh(NeighEventKind::New, &msg, &cache);
+        if expect_emitted {
+            assert!(
+                matches!(got, Some(LocalMacObservation::IpAdded { .. })),
+                "expected IpAdded for {ip_str}, got {got:?}"
+            );
+        } else {
+            assert!(got.is_none(), "expected drop for {ip_str}, got {got:?}");
+        }
+    }
+
+    #[test]
+    fn classify_accepts_ipv4_global_unicast() {
+        assert_classify_inet("192.0.2.10", true);
+    }
+
+    #[test]
+    fn classify_drops_ipv4_unspecified() {
+        assert_classify_inet("0.0.0.0", false);
+    }
+
+    #[test]
+    fn classify_drops_ipv4_multicast() {
+        assert_classify_inet("224.0.0.1", false);
+    }
+
+    #[test]
+    fn classify_drops_ipv4_broadcast() {
+        assert_classify_inet("255.255.255.255", false);
+    }
+
+    #[test]
+    fn classify_drops_ipv4_link_local_apipa() {
+        assert_classify_inet("169.254.1.1", false);
+    }
+
+    #[test]
+    fn classify_drops_ipv4_loopback() {
+        assert_classify_inet("127.0.0.1", false);
+    }
+
+    #[test]
+    fn classify_accepts_ipv6_global_unicast() {
+        assert_classify_inet("2001:db8::1", true);
+    }
+
+    #[test]
+    fn classify_drops_ipv6_unspecified() {
+        assert_classify_inet("::", false);
+    }
+
+    #[test]
+    fn classify_drops_ipv6_loopback() {
+        assert_classify_inet("::1", false);
+    }
+
+    #[test]
+    fn classify_drops_ipv6_multicast() {
+        assert_classify_inet("ff02::1", false);
+    }
+
+    #[test]
+    fn classify_drops_ipv6_link_local() {
+        assert_classify_inet("fe80::1", false);
+    }
+
+    /// Filter applies on the delete edge too — if the domain
+    /// shouldn't see an `IpAdded` for a non-advertisable IP, it
+    /// shouldn't see an `IpRemoved` either. Otherwise a domain
+    /// layer that filtered `IpAdded` would still get spurious
+    /// `IpRemoved` events for IPs it never registered.
+    #[test]
+    fn classify_drops_non_advertisable_ip_on_delete() {
+        let cache = cache_for(100, 11, 22);
+        let bad: IpAddr = "fe80::1".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet6,
+            99,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(bad),
+        );
+        assert!(classify_neigh(NeighEventKind::Del, &msg, &cache).is_none());
     }
 
     /// Pins `RTNLGRP_NEIGH` to its `<linux/rtnetlink.h>` enum value `3`,
