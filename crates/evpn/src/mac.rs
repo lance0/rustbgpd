@@ -188,12 +188,27 @@ pub enum RemoteMacTableBuilderError {
     },
 }
 
-/// Upward-flowing event from the Linux dataplane: a kernel-learned MAC
-/// on a non-VXLAN bridge port appeared or aged out.
+/// Upward-flowing event from the Linux dataplane describing local
+/// kernel state changes that may turn into Type 2 originations.
 ///
-/// Gate 7b emits the event but does not act on it. Consumption (deciding
-/// whether to originate Type 2 / withdraw Type 2 / advance mobility
-/// sequence) is a follow-up.
+/// Two flavors share the channel because they originate from the
+/// same `RTNLGRP_NEIGH` subscription, just on different families:
+///
+/// - **MAC observations** (`Learned` / `Aged`) come from `AF_BRIDGE`
+///   FDB notifications — kernel learning a MAC on a non-VXLAN bridge
+///   port. These drive **MAC-only** Type 2 origination per Gate
+///   7b+1.
+/// - **IP observations** (`IpAdded` / `IpRemoved`) come from
+///   `AF_INET` / `AF_INET6` neighbour notifications on the bridge
+///   ifindex itself — kernel observing an `(IP, MAC)` binding via
+///   ARP / ND. These pair with a known MAC to produce **MAC+IP**
+///   Type 2 origination per Gate 7b+2 (RFC 7432 §7.2; RFC 9135 §4.4
+///   permits MAC-only and MAC+IP routes for the same MAC to coexist).
+///
+/// The classifier in `crates/evpn-linux::linux::notify` is the single
+/// place that maps raw `RTM_NEWNEIGH` / `RTM_DELNEIGH` messages to
+/// these typed variants; the daemon-side originator decides what to
+/// do with each.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalMacObservation {
     /// Kernel learned a new local MAC on a bridge port belonging to
@@ -213,6 +228,32 @@ pub enum LocalMacObservation {
         vni: EvpnInstanceId,
         /// MAC that disappeared.
         mac: MacAddress,
+    },
+    /// Kernel learned an `(IP, MAC)` binding for a host on this
+    /// bridge — the result of ARP (IPv4) or ND (IPv6) snooping when
+    /// the bridge has `neigh_suppress on`. Pairs with a `Learned`
+    /// MAC observation to drive a MAC+IP Type 2 origination.
+    IpAdded {
+        /// VNI of the bridge whose neighbour table the binding
+        /// appeared in.
+        vni: EvpnInstanceId,
+        /// MAC half of the binding.
+        mac: MacAddress,
+        /// IP half of the binding (IPv4 or IPv6).
+        ip: IpAddr,
+    },
+    /// Previously-observed `(IP, MAC)` binding aged out or was
+    /// deleted. Triggers withdrawal of the MAC+IP Type 2 origination
+    /// while leaving the MAC-only origination (if any) intact —
+    /// per RFC 9135 §4.4 they're independent advertisements.
+    IpRemoved {
+        /// VNI of the bridge whose neighbour table the binding was
+        /// in.
+        vni: EvpnInstanceId,
+        /// MAC half of the binding that disappeared.
+        mac: MacAddress,
+        /// IP half of the binding that disappeared.
+        ip: IpAddr,
     },
 }
 

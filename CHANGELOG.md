@@ -9,6 +9,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Gate 7b+2 wire layer — `AF_INET` / `AF_INET6` neighbour
+  classification.** The existing `RTNLGRP_NEIGH` subscriber now
+  splits the message stream into two paths: `AF_BRIDGE` continues to
+  produce MAC-only `LocalMacObservation::Learned` / `Aged` events
+  (Gate 7b+1), and `AF_INET` / `AF_INET6` neighbour notifications on
+  bridge ifindexes produce new `IpAdded` / `IpRemoved` variants
+  carrying `(vni, mac, ip)`. These surface ARP / ND snooping output
+  from bridges with `neigh_suppress on` for future MAC+IP Type 2
+  origination (RFC 7432 §7.2 with non-empty IP, RFC 9135 §4.4
+  permits MAC-only and MAC+IP routes for the same MAC to coexist).
+  Validity gate drops `NUD_INCOMPLETE` / `NUD_FAILED` /
+  `NUD_DELAY` / `NUD_PROBE` so probe thrash doesn't reach origination.
+  The daemon-side originator currently logs at debug and no-ops on
+  the new variants — Gate 7b+2 slice 2 will wire the `(MAC, IP)`
+  state machine.
+
 ### Fixed
 
 - **Gate 7c: events used as wakeup, not as projection deltas.** The
