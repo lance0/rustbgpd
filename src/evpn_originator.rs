@@ -390,6 +390,28 @@ async fn handle_observation(
             };
             (vni, orig.on_local_aged(mac))
         }
+        // Gate 7b+2 slice 2 — extend the originator's state machine
+        // for per-(MAC, IP) origination. The wire layer (this slice)
+        // already classifies and surfaces these events; the daemon
+        // logs them at debug for now and otherwise no-ops.
+        LocalMacObservation::IpAdded { vni, mac, ip } => {
+            debug!(
+                ?vni,
+                ?mac,
+                ?ip,
+                "ARP/ND binding observed; MAC+IP origination not yet wired"
+            );
+            return;
+        }
+        LocalMacObservation::IpRemoved { vni, mac, ip } => {
+            debug!(
+                ?vni,
+                ?mac,
+                ?ip,
+                "ARP/ND binding cleared; MAC+IP origination not yet wired"
+            );
+            return;
+        }
     };
 
     let Some(inst) = instances.get(vni) else {

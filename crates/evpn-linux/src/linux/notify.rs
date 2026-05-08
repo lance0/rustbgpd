@@ -1,38 +1,59 @@
-//! `RTNLGRP_NEIGH` subscriber — Linux kernel local-MAC observation feed.
+//! `RTNLGRP_NEIGH` subscriber — Linux kernel local-MAC + IP/MAC
+//! observation feed.
 //!
-//! Phase D-real of Gate 7b+1. Subscribes to multicast group
-//! `RTNLGRP_NEIGH` — enum group id `3` from `<linux/rtnetlink.h>`,
-//! **not** the legacy bitmask `RTMGRP_NEIGH = 4` — on the daemon's
-//! existing rtnetlink connection. Unsolicited `RTM_NEWNEIGH` /
-//! `RTM_DELNEIGH` messages with `family = AF_BRIDGE` are classified
-//! into [`rustbgpd_evpn::LocalMacObservation`] events that flow up
-//! the dedicated channel surfaced by
-//! [`crate::Dataplane::take_local_mac_rx`].
+//! Subscribes to multicast group `RTNLGRP_NEIGH` — enum group id `3`
+//! from `<linux/rtnetlink.h>`, **not** the legacy bitmask
+//! `RTMGRP_NEIGH = 4` — on the daemon's existing rtnetlink
+//! connection. The single subscription receives unsolicited
+//! `RTM_NEWNEIGH` / `RTM_DELNEIGH` for every address family; the
+//! classifier here splits them into two distinct origination paths:
 //!
-//! # Classification rules (matches existing fdb.rs invariants)
+//! - **`AF_BRIDGE`** messages are bridge-FDB events on a local
+//!   non-VXLAN port. They produce `LocalMacObservation::Learned` /
+//!   `Aged`, the input to MAC-only Type 2 origination (Gate 7b+1).
+//! - **`AF_INET` / `AF_INET6`** messages on a bridge ifindex are
+//!   `(IP, MAC)` bindings populated by ARP/ND snooping when the
+//!   bridge has `neigh_suppress on`. They produce
+//!   `LocalMacObservation::IpAdded` / `IpRemoved`, the input to
+//!   MAC+IP Type 2 origination (Gate 7b+2).
 //!
-//! For each `NEWNEIGH` `AF_BRIDGE` message:
+//! # Classification rules
 //!
-//! 1. **Drop if `NTF_EXT_LEARNED` is set** — those entries are routes
-//!    we ourselves programmed via [`crate::linux::fdb::apply_op`]; the
-//!    kernel echoes them back through the multicast group as a side
-//!    effect of the write. Reflecting them upward as "local" learns
-//!    would short-circuit the bridge into thinking its own remotes
-//!    are local.
-//! 2. **Drop if `header.ifindex` is a VXLAN port** — those are
-//!    bridge-fdb echoes for remote MACs (the `header.ifindex == VXLAN`
-//!    convention from RFC 8365 / `bridge fdb` design), not local
-//!    observations. The link cache's `vxlan_ifindex_to_vni` map gives
-//!    us the lookup.
-//! 3. **Resolve `header.ifindex` → VNI** via
-//!    `LinkCache::bridge_port_to_vni`. A miss means the port is not
-//!    enslaved to any EVPN-managed bridge and the observation is
-//!    dropped silently.
-//! 4. **Extract MAC** from the `LinkLayerAddress` attribute (`NDA_LLADDR`).
-//! 5. **Emit `LocalMacObservation::Learned { vni, mac, ifindex }`**.
+//! `AF_BRIDGE` (matches existing `fdb.rs` invariants):
 //!
-//! `DELNEIGH` is symmetric: drop on `NTF_EXT_LEARNED`, resolve VNI,
-//! extract MAC, emit `Aged`.
+//! 1. Drop if `NTF_EXT_LEARNED` — kernel echo of our own programmed
+//!    remote-MAC entries (`crate::linux::fdb::apply_op`). Reflecting
+//!    these upward would short-circuit the bridge into thinking its
+//!    own remotes are local.
+//! 2. Drop if `header.ifindex` is a VXLAN port — those are
+//!    bridge-FDB echoes for remote MACs (`header.ifindex == VXLAN`
+//!    per RFC 8365 / `bridge fdb` design), not local observations.
+//! 3. Resolve `header.ifindex` → VNI via
+//!    `LinkCache::bridge_port_to_vni`. A miss means the port isn't
+//!    enslaved to any EVPN-managed bridge.
+//! 4. Extract MAC from the `LinkLayerAddress` attribute
+//!    (`NDA_LLADDR`).
+//! 5. Emit `Learned { vni, mac, ifindex }` (or `Aged` on
+//!    `RTM_DELNEIGH`).
+//!
+//! `AF_INET` / `AF_INET6`:
+//!
+//! 1. Drop if `NTF_EXT_LEARNED` — kernel echo of routes we ourselves
+//!    will program in a future slice (today there's no programmer for
+//!    these, but the guard keeps the contract consistent with the
+//!    `AF_BRIDGE` path).
+//! 2. Drop if `header.state` doesn't include a "valid" NUD bit
+//!    (`NUD_REACHABLE` / `NUD_STALE` / `NUD_PERMANENT` / `NUD_NOARP`).
+//!    Kernel emits transient probe states (`NUD_INCOMPLETE`,
+//!    `NUD_FAILED`) that don't represent a usable binding — those
+//!    would just produce origination thrash if we acted on them.
+//! 3. Resolve `header.ifindex` → VNI via `LinkCache::bridges` —
+//!    `AF_INET` / `AF_INET6` neighbours sit on the **bridge** itself,
+//!    not on a bridge port, so the `bridge_port_to_vni` map doesn't
+//!    apply.
+//! 4. Extract MAC (`NDA_LLADDR`) and IP (`NDA_DST`).
+//! 5. Emit `IpAdded { vni, mac, ip }` (or `IpRemoved` on
+//!    `RTM_DELNEIGH`).
 //!
 //! # Why classification is a pure function
 //!
@@ -47,14 +68,34 @@
 //! Real-kernel verification lives in `tests/netns_dataplane.rs` under
 //! `EVPN_LINUX_NETNS=1` (Gate 7b's existing privileged test file).
 
+use std::net::IpAddr;
+
 use netlink_packet_route::{
     AddressFamily,
-    neighbour::{NeighbourAttribute, NeighbourFlags, NeighbourMessage},
+    neighbour::{
+        NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
+    },
 };
 use rustbgpd_evpn::{EvpnInstanceId, LocalMacObservation, MacAddress};
 use tracing::debug;
 
 use super::links::LinkCache;
+
+/// `NUD_*` bits used by the bitmask side of [`is_ip_neighbour_valid`].
+/// `NUD_FAILED` is the explicit "kernel gave up" state; we drop on
+/// it. The reachable / stale / noarp / permanent bits surface as
+/// typed [`NeighbourState`] variants, so we only need the raw masks
+/// for the [`NeighbourState::Other`] fallthrough.
+const NUD_FAILED: u16 = 0x20;
+const NUD_NOARP: u16 = 0x40;
+const NUD_PERMANENT: u16 = 0x80;
+const NUD_REACHABLE: u16 = 0x02;
+const NUD_STALE: u16 = 0x04;
+/// Mask of states that represent a usable IP/MAC binding. Excludes
+/// `NUD_INCOMPLETE` (still probing), `NUD_FAILED` (gave up),
+/// `NUD_DELAY` / `NUD_PROBE` (mid-revalidation, no fresh
+/// confirmation yet).
+const NUD_VALID_MASK: u16 = NUD_REACHABLE | NUD_STALE | NUD_NOARP | NUD_PERMANENT;
 
 /// Multicast group ID for neighbour-table changes — enum value
 /// `RTNLGRP_NEIGH` from `<linux/rtnetlink.h>` (third entry in
@@ -86,49 +127,111 @@ pub(crate) fn classify_neigh(
     msg: &NeighbourMessage,
     cache: &LinkCache,
 ) -> Option<LocalMacObservation> {
-    // Step 1: AF_BRIDGE only.
-    if msg.header.family != AddressFamily::Bridge {
-        return None;
-    }
-
-    // Step 2: drop our own programming.
+    // Drop our own programming. Same guard for both families.
     if msg.header.flags.contains(NeighbourFlags::ExtLearned) {
         return None;
     }
 
-    // Step 3: drop VXLAN-port echoes (those are remote MACs, not
-    // local observations).
+    match msg.header.family {
+        AddressFamily::Bridge => classify_bridge_fdb(kind, msg, cache),
+        AddressFamily::Inet | AddressFamily::Inet6 => classify_ip_neighbour(kind, msg, cache),
+        _ => None,
+    }
+}
+
+/// `AF_BRIDGE` classifier — kernel learns / ages a MAC on a bridge
+/// port. See module-level docs for the full pipeline.
+fn classify_bridge_fdb(
+    kind: NeighEventKind,
+    msg: &NeighbourMessage,
+    cache: &LinkCache,
+) -> Option<LocalMacObservation> {
+    // Drop VXLAN-port echoes (those are remote MACs, not local
+    // observations).
     let ifindex = msg.header.ifindex;
     if cache.vxlan_ifindex_to_vni.contains_key(&ifindex) {
         return None;
     }
 
-    // Step 4: resolve ifindex → VNI via the bridge-port map. Misses
-    // indicate either the port isn't enslaved to an EVPN-managed
-    // bridge (drop is correct) or the cache hasn't been primed yet
-    // (race window between connect and the first dump_links — the
-    // event is lost until the supervisor's next periodic dump).
-    // Logged at debug to make the latter diagnosable in field issues
-    // without spamming the happy path.
+    // Resolve ifindex → VNI via the bridge-port map. Misses indicate
+    // either the port isn't enslaved to an EVPN-managed bridge (drop
+    // is correct) or the cache hasn't been primed yet (race window
+    // between connect and the first dump_links — the event is lost
+    // until the supervisor's next periodic dump). Logged at debug to
+    // make the latter diagnosable in field issues without spamming
+    // the happy path.
     let Some(&vni_raw) = cache.bridge_port_to_vni.get(&ifindex) else {
         debug!(
             ifindex,
-            "RTNLGRP_NEIGH classifier: ifindex not in bridge_port_to_vni; \
-             event dropped (may be a race between netlink subscription \
-             and first link-cache prime, or the port simply isn't \
-             enslaved to an EVPN-managed bridge)"
+            "RTNLGRP_NEIGH AF_BRIDGE classifier: ifindex not in bridge_port_to_vni; \
+             event dropped"
         );
         return None;
     };
     let vni = EvpnInstanceId::new(vni_raw).ok()?;
-
-    // Step 5: extract MAC.
     let mac = extract_mac(msg)?;
 
     Some(match kind {
         NeighEventKind::New => LocalMacObservation::Learned { vni, mac, ifindex },
         NeighEventKind::Del => LocalMacObservation::Aged { vni, mac },
     })
+}
+
+/// `AF_INET` / `AF_INET6` classifier — kernel learns an `(IP, MAC)`
+/// binding via ARP / ND on the bridge itself, surfaced for MAC+IP
+/// Type 2 origination (Gate 7b+2).
+fn classify_ip_neighbour(
+    kind: NeighEventKind,
+    msg: &NeighbourMessage,
+    cache: &LinkCache,
+) -> Option<LocalMacObservation> {
+    // Resolve ifindex → VNI by matching the bridge ifindex against
+    // the inventory. AF_INET / AF_INET6 neighbours sit on the bridge
+    // itself (the kernel's ARP/ND-suppression table is per-bridge);
+    // bridge_port_to_vni is the wrong map for this family.
+    let ifindex = msg.header.ifindex;
+    let Some(vni_raw) = cache.bridges.values().find_map(|b| {
+        if b.ifindex == ifindex {
+            b.vxlan.as_ref().map(|v| v.vni)
+        } else {
+            None
+        }
+    }) else {
+        debug!(
+            ifindex,
+            "RTNLGRP_NEIGH AF_INET[6] classifier: ifindex not a known EVPN bridge; \
+             event dropped"
+        );
+        return None;
+    };
+    let vni = EvpnInstanceId::new(vni_raw).ok()?;
+
+    // For RTM_NEWNEIGH, require a usable NUD state — a probe in
+    // NUD_INCOMPLETE / NUD_FAILED isn't a binding worth originating.
+    // RTM_DELNEIGH skips the check: a deletion is meaningful even if
+    // the entry was in a transient state.
+    if matches!(kind, NeighEventKind::New) && !is_ip_neighbour_valid(msg.header.state) {
+        return None;
+    }
+
+    let mac = extract_mac(msg)?;
+    let ip = extract_ip(msg)?;
+
+    Some(match kind {
+        NeighEventKind::New => LocalMacObservation::IpAdded { vni, mac, ip },
+        NeighEventKind::Del => LocalMacObservation::IpRemoved { vni, mac, ip },
+    })
+}
+
+fn is_ip_neighbour_valid(state: NeighbourState) -> bool {
+    match state {
+        NeighbourState::Reachable
+        | NeighbourState::Stale
+        | NeighbourState::Noarp
+        | NeighbourState::Permanent => true,
+        NeighbourState::Other(bits) => (bits & NUD_VALID_MASK) != 0 && (bits & NUD_FAILED) == 0,
+        _ => false,
+    }
 }
 
 fn extract_mac(msg: &NeighbourMessage) -> Option<MacAddress> {
@@ -139,6 +242,19 @@ fn extract_mac(msg: &NeighbourMessage) -> Option<MacAddress> {
             return Some(MacAddress::new([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
             ]));
+        }
+    }
+    None
+}
+
+fn extract_ip(msg: &NeighbourMessage) -> Option<IpAddr> {
+    for attr in &msg.attributes {
+        if let NeighbourAttribute::Destination(addr) = attr {
+            return match addr {
+                NeighbourAddress::Inet(v4) => Some(IpAddr::V4(*v4)),
+                NeighbourAddress::Inet6(v6) => Some(IpAddr::V6(*v6)),
+                _ => None,
+            };
         }
     }
     None
@@ -224,7 +340,7 @@ mod tests {
                 assert_eq!(mac.octets(), [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
                 assert_eq!(ifindex, 22);
             }
-            LocalMacObservation::Aged { .. } => panic!("expected Learned, got Aged"),
+            other => panic!("expected Learned, got {other:?}"),
         }
     }
 
@@ -281,10 +397,14 @@ mod tests {
     }
 
     #[test]
-    fn classify_drops_non_bridge_family() {
+    fn classify_drops_unhandled_family() {
+        // Anything that isn't Bridge / Inet / Inet6 must drop. AF_PACKET
+        // (raw socket family) is a representative non-handled case the
+        // kernel does not normally use for RTM_NEWNEIGH but a buggy
+        // kernel-side change shouldn't cause us to mis-classify.
         let cache = cache_for(100, 11, 22);
         let msg = neigh_msg(
-            AddressFamily::Inet,
+            AddressFamily::Packet,
             22,
             NeighbourFlags::empty(),
             Some(vec![0xaa; 6]),
@@ -293,20 +413,213 @@ mod tests {
     }
 
     #[test]
-    fn classify_drops_message_without_mac_attribute() {
+    fn classify_drops_bridge_message_without_mac_attribute() {
         let cache = cache_for(100, 11, 22);
         let msg = neigh_msg(AddressFamily::Bridge, 22, NeighbourFlags::empty(), None);
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
 
     #[test]
-    fn classify_drops_mac_attribute_with_wrong_length() {
+    fn classify_drops_bridge_mac_attribute_with_wrong_length() {
         let cache = cache_for(100, 11, 22);
         let msg = neigh_msg(
             AddressFamily::Bridge,
             22,
             NeighbourFlags::empty(),
             Some(vec![0xaa; 4]), // not 6 bytes
+        );
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    // --- Gate 7b+2: AF_INET / AF_INET6 IP-neighbour classifier ---
+
+    /// Build a synthetic `AF_INET` / `AF_INET6` `RTM_NEWNEIGH` for
+    /// ARP/ND snooping tests. `bridge_ifindex` must match the bridge
+    /// stored in the cache (not a bridge port — `AF_INET` /
+    /// `AF_INET6` neighbours sit on the bridge itself).
+    fn ip_neigh_msg(
+        family: AddressFamily,
+        bridge_ifindex: u32,
+        state: NeighbourState,
+        flags: NeighbourFlags,
+        mac: Option<[u8; 6]>,
+        ip: Option<IpAddr>,
+    ) -> NeighbourMessage {
+        let mut msg = NeighbourMessage::default();
+        msg.header = NeighbourHeader {
+            family,
+            ifindex: bridge_ifindex,
+            state,
+            flags,
+            kind: netlink_packet_route::route::RouteType::Unspec,
+        };
+        if let Some(bytes) = mac {
+            msg.attributes
+                .push(NeighbourAttribute::LinkLayerAddress(bytes.to_vec()));
+        }
+        if let Some(addr) = ip {
+            let na = match addr {
+                IpAddr::V4(v4) => NeighbourAddress::Inet(v4),
+                IpAddr::V6(v6) => NeighbourAddress::Inet6(v6),
+            };
+            msg.attributes.push(NeighbourAttribute::Destination(na));
+        }
+        msg
+    }
+
+    #[test]
+    fn classify_inet_emits_ip_added_for_known_bridge() {
+        // cache_for builds br100 with bridge ifindex 99.
+        let cache = cache_for(100, /* vxlan */ 11, /* port */ 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]),
+            Some(v4),
+        );
+        let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
+        match obs {
+            LocalMacObservation::IpAdded { vni, mac, ip } => {
+                assert_eq!(vni.as_u32(), 100);
+                assert_eq!(mac.octets(), [0x02, 0x00, 0x00, 0x00, 0x00, 0xAA]);
+                assert_eq!(ip, v4);
+            }
+            other => panic!("expected IpAdded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_inet6_emits_ip_added() {
+        let cache = cache_for(100, 11, 22);
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet6,
+            99,
+            NeighbourState::Stale,
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(v6),
+        );
+        let obs = classify_neigh(NeighEventKind::New, &msg, &cache).expect("emit");
+        assert!(matches!(obs, LocalMacObservation::IpAdded { ip, .. } if ip == v6));
+    }
+
+    #[test]
+    fn classify_inet_del_emits_ip_removed_regardless_of_state() {
+        // A deletion is meaningful even if the entry was in a
+        // transient state — RTM_DELNEIGH skips the validity check.
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Other(NUD_FAILED),
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(v4),
+        );
+        let obs = classify_neigh(NeighEventKind::Del, &msg, &cache).expect("emit");
+        assert!(matches!(obs, LocalMacObservation::IpRemoved { .. }));
+    }
+
+    #[test]
+    fn classify_inet_drops_incomplete_state() {
+        // NUD_INCOMPLETE = 0x01, not in NUD_VALID_MASK.
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Other(0x01),
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(v4),
+        );
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    #[test]
+    fn classify_inet_accepts_extern_learned_combined_state() {
+        // EVPN-suppression entries land with NUD_NOARP | NUD_PERMANENT
+        // (the same combined bitmask we use for our own AF_BRIDGE
+        // programming). Comes through as NeighbourState::Other(0xC0).
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Other(NUD_NOARP | NUD_PERMANENT),
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(v4),
+        );
+        assert!(matches!(
+            classify_neigh(NeighEventKind::New, &msg, &cache),
+            Some(LocalMacObservation::IpAdded { .. })
+        ));
+    }
+
+    #[test]
+    fn classify_inet_drops_ext_learned_echo() {
+        // NTF_EXT_LEARNED guard applies to all families — kernel echo
+        // of routes we ourselves programmed must not surface upward.
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Reachable,
+            NeighbourFlags::ExtLearned,
+            Some([0xAA; 6]),
+            Some(v4),
+        );
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    #[test]
+    fn classify_inet_drops_unknown_bridge_ifindex() {
+        // ifindex 555 is neither a known bridge nor port.
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            555,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            Some(v4),
+        );
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    #[test]
+    fn classify_inet_drops_message_without_destination() {
+        let cache = cache_for(100, 11, 22);
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            Some([0xAA; 6]),
+            None,
+        );
+        assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
+    }
+
+    #[test]
+    fn classify_inet_drops_message_without_mac() {
+        let cache = cache_for(100, 11, 22);
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let msg = ip_neigh_msg(
+            AddressFamily::Inet,
+            99,
+            NeighbourState::Reachable,
+            NeighbourFlags::empty(),
+            None,
+            Some(v4),
         );
         assert!(classify_neigh(NeighEventKind::New, &msg, &cache).is_none());
     }
