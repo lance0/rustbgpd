@@ -1,0 +1,67 @@
+# Containerlab topology: 2-PE rustbgpd Ethernet Segment with
+# observable DF election (M38 — Gate 8 slice 4 smoke).
+#
+# Two rustbgpd PEs share the same ESI for VNI 100 and peer iBGP
+# L2VPN/EVPN. RFC 7432 §8.5 service carving with `vni mod n` (100
+# mod 2 = 0 → slot 0) elects the lower-IP candidate as DF. PE1
+# (10.0.0.1) should be DF; PE2 (10.0.0.2) should be NonDF.
+#
+# Asserts:
+#   1. Both peers reach Established with L2VPN/EVPN negotiated.
+#   2. Within ~15 s, PE1's Prometheus surface reports
+#      `evpn_df_role{esi="00:...:01",vni="100",role="df"} 1`.
+#   3. Within ~15 s, PE2's Prometheus surface reports
+#      `evpn_df_role{esi="00:...:01",vni="100",role="nondf"} 1`.
+#   4. After PE1 shuts down, PE2 promotes to DF — its
+#      `evpn_df_role{...,role="df"}` flips to 1 and
+#      `evpn_df_role_changes_total{...}` increments.
+#
+# Topology:
+#   PE1 (10.0.0.1, AS 65000) ── iBGP L2VPN/EVPN ── PE2 (10.0.0.2, AS 65000)
+#
+# Both PEs configure `[[ethernet_segments]]` with the same ESI and
+# member_vnis = [100]. The minimal startup script creates the br100
+# bridge so the EVPN instance reaches Ready — this smoke is
+# control-plane focused (Type 4 visibility + Prometheus surface),
+# no VXLAN data-plane forwarding.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/interop/m38-evpn-df-election.clab.yml
+#   bash tests/interop/scripts/test-m38-evpn-df-election.sh
+#   sudo containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml
+
+name: m38-evpn-df-election
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m38-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-segment.sh 100
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
+
+    pe2:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m38-pe2.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-segment.sh:/usr/local/bin/start-rustbgpd-segment.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-segment.sh 100
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd_evpn::df_election=debug
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]

@@ -422,15 +422,44 @@ flow that Gate 7b's foundation left as a stub.
 
 ---
 
-### Gate 8 — Multi-homing execution, DF election
+### Gate 8 — Multi-homing foundation, observable DF election
 
-Status: after Gate 7 · Estimate: ~3-4 weeks · Blockers: Gate 7
+Status: ✅ alpha-supported (slice 1+2+3+4) · Tracked: M38 smoke ·
+Blockers cleared.
 
-Unlocks: rustbgpd as an active-active VTEP. DF election (RFC 7432 §8 +
-RFC 8584), aliasing via Type 1 EAD-per-EVI, split-horizon using the
-ESI Label extended community, backup-path selection.
+Ships:
 
-Ties directly into Gate 7 — no value without local VTEP state.
+- `[[ethernet_segments]]` config block with ESI, member VNIs,
+  `df_preference`, `df_algorithm`, originator IP. Single-homed and
+  RR deployments take the empty-config early return and pay zero
+  runtime cost.
+- Pure DF election state machine (`crates/evpn/src/df_election.rs`)
+  — RFC 7432 §8.5 service carving + RFC 8584 §3 algorithm
+  negotiation, callable from a unit test.
+- Three Type 1/4 origination state machines
+  (`crates/evpn/src/origination_es.rs`) — Type 4 ES, Type 1
+  EAD-per-ES (with MAX_ET marker), Type 1 EAD-per-EVI (role-aware).
+- Daemon orchestrator (`src/evpn_segment.rs`) wiring all of the
+  above off the EVPN best-path broadcast (Gate 7c).
+- Observable Prometheus surface — `evpn_df_role{esi,vni,role}`
+  gauge and `evpn_df_role_changes_total{esi,vni}` counter.
+- ADR-0057 records the observation/enforcement carve-out.
+
+### Gate 8b — Multi-homing enforcement (deferred)
+
+Status: scoped, not started · Estimate: ~3-4 weeks · Blockers:
+Gate 8 (cleared).
+
+Adds the forwarding half: ESI Label extcomm (RFC 7432 §7.5)
+allocator, split-horizon enforcement on the Linux dataplane,
+ES-Import RT (§7.6), aliasing via Type 1 EAD-per-EVI (§14),
+mass-withdraw on `AS_PATH` change (§8.6), DF-role-aware MAC
+origination.
+
+**Operator note:** Gate 8 origination enables peers to *observe*
+the segment without enabling segment forwarding. Do not configure
+`[[ethernet_segments]]` for production multihoming until Gate 8b
+ships — segment BUM will duplicate toward the CE in a 2-PE setup.
 
 ---
 
@@ -459,8 +488,9 @@ Gate 4 (multi-homing, M32)      ── ✅ done
 Gate 5 (scale, M33)             ── ✅ done
 Gate 6 (controller inject)      ── ✅ done   << full Phase 1 RR bundle complete
 ───────────── decision point ─────────────
-Gate 7 (VTEP mode)               ── big strategic expansion
-Gate 8 (multi-homing execution)  ── depends on Gate 7
+Gate 7 (VTEP mode)               ── ✅ done
+Gate 8 (multi-homing foundation) ── ✅ done   << observable DF election, M38 smoke
+Gate 8b (multi-homing enforcement) ── deferred (split-horizon + ESI Label)
 Gate 9 (IRB, MVPN, PBB, MPLS)    ── furthest horizon
 ```
 

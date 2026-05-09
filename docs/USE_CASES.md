@@ -591,11 +591,16 @@ thousands of VTEPs, and gives you structured observability.
 
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
-- **DF election** — with a shared ESI multi-homed to two VTEPs, the
-  VTEPs run the election themselves. rustbgpd reflects Type 4 ES
-  unchanged so the election still works on the inputs it needs;
-  Type 1 EAD-per-EVI reflection is covered by M32/M32b. Local VTEP
-  DF execution and multi-homing origination are deferred to Gate 8.
+- **DF forwarding enforcement** — Gate 8 (`[Unreleased]`, ADR-0057)
+  shipped the **observation half** of multi-homing: rustbgpd
+  originates Type 4 ES + Type 1 EAD-per-ES + Type 1 EAD-per-EVI for
+  configured `[[ethernet_segments]]`, runs RFC 7432 §8.5 service
+  carving + RFC 8584 §3 algorithm negotiation, and exposes the
+  result via Prometheus (`evpn_df_role{esi,vni,role}` +
+  `evpn_df_role_changes_total`). Forwarding enforcement (split-horizon
+  via the ESI Label extcomm, ES-Import RT, aliasing, mass-withdraw)
+  is Gate 8b — until it ships, do not configure
+  `[[ethernet_segments]]` for production multi-homing.
 - **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
   VTEP's job.
 - **IRB semantics** — rustbgpd preserves Type 2 `label2` and the Router
@@ -651,8 +656,11 @@ measurement path.
   carrying RFC 6514 §5 PMSI Tunnel. M37 validates the loop end-to-end
   (4/4 PASS, FRR 10.3.1 on Linux 6.17). VTEPs (SONiC / FRR leaves)
   still cover MAC-with-IP via ARP/ND suppression (Gate 7b+2 in
-  rustbgpd), DF election (Gate 8), and symmetric IRB / L3VNI
-  (Gate 9, RFC 9135). See [docs/evpn-enablement.md](evpn-enablement.md)
+  rustbgpd; alpha-supported under the FRR-style replace model),
+  observable DF election + Type 1/4 origination (Gate 8 — ADR-0057;
+  shipped in `[Unreleased]`), DF forwarding enforcement (Gate 8b,
+  deferred), and symmetric IRB / L3VNI (Gate 9, RFC 9135). See
+  [docs/evpn-enablement.md](evpn-enablement.md)
   for the full gate ladder and
   [docs/evpn-alpha-soak.md](evpn-alpha-soak.md) for the residual
   alpha-confidence checklist.
@@ -740,13 +748,16 @@ Be honest about where rustbgpd isn't the right tool:
   under the FRR-style replace model (Gate 7b+2 — requires
   `bridge link set dev vxlan<vni> neigh_suppress on`). M37 and
   M37+IP smokes validate the MAC-only and MAC+IP loops against
-  FRR 10.3.1. **Still missing for full VTEP parity:** DF election
-  + multi-homing execution (Gate 8), symmetric IRB (Gate 9,
-  RFC 9135), L3VNI / Type 5 dataplane (Gate 9), duplicate-MAC
-  quarantine action (ADR-0055 §9). For a single-homed L2VNI fabric
-  where DF election and IRB aren't load-bearing, rustbgpd is a fit
-  today; for full FRR-equivalent VTEP coverage the gap closes in
-  Gates 8 / 9.
+  FRR 10.3.1. Multi-homing **foundation** (observable DF election
+  + Type 1/4 origination) shipped in Gate 8 (`[Unreleased]`,
+  ADR-0057), validated by M38. **Still missing for full VTEP
+  parity:** multi-homing forwarding enforcement (Gate 8b —
+  split-horizon via ESI Label, aliasing, mass-withdraw), symmetric
+  IRB (Gate 9, RFC 9135), L3VNI / Type 5 dataplane (Gate 9),
+  duplicate-MAC quarantine action (ADR-0055 §9). For a single-homed
+  L2VNI fabric where DF enforcement and IRB aren't load-bearing,
+  rustbgpd is a fit today; for full FRR-equivalent VTEP coverage
+  the gap closes in Gates 8b / 9.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

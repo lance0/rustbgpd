@@ -101,10 +101,16 @@ none of them block v0.15.0 release on their own.
 ## Larger follow-on gates (out of v0.15.0 scope, tracked here for
 visibility)
 
-- [ ] **Gate 8 — multi-homing execution + DF election.** Type 1
-  EAD-per-EVI origination from a shared ESI, RFC 7432 §8 / RFC 8584
-  DF election, ESI Label extended community for split-horizon,
-  backup-path selection. ~3-4 weeks.
+- [x] **Gate 8 — multi-homing foundation + observable DF election.**
+  Type 4 ES + Type 1 EAD-per-ES + Type 1 EAD-per-EVI origination,
+  RFC 7432 §8.5 service carving, RFC 8584 §3 algorithm negotiation,
+  Prometheus `evpn_df_role` surface + `evpn_df_role_changes_total`
+  counter, M38 smoke topology. **Forwarding enforcement deferred to
+  Gate 8b** — see ADR-0057 for the carve-out.
+- [ ] **Gate 8b — multi-homing enforcement.** ESI Label extcomm
+  allocator + split-horizon enforcement on the Linux dataplane,
+  ES-Import RT, aliasing via Type 1 EAD-per-EVI, mass-withdraw on
+  AS_PATH change, DF-role-aware MAC origination. ~3-4 weeks.
 - [ ] **Gate 9 — symmetric IRB (RFC 9135) + L3VNI / Type 5
   dataplane.** Per-VRF IP routes via Type 5, MAC-VRF + IP-VRF
   separation, Router MAC extended community lifecycle, the
