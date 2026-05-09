@@ -9,6 +9,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-05-09
+
+EVPN VTEP polish on top of v0.16.0. Five operator-facing slices:
+Gate 7c sub-second mobility convergence (RIB push notifications
+replacing the 5 s poll), `sticky_macs` operator config (ADR-0056)
+for RFC 7432 §15.4 sticky-bit origination, `advertise_svi_mac`
+consumption (originates the bridge's own MAC on instance-Ready),
+Gate 7b+2 MAC-with-IP origination via ARP/ND suppression under
+the FRR replace model, and a coordinated bump of the netlink
+ecosystem (`rtnetlink 0.21`, `netlink-packet-route 0.30`,
+`netlink-packet-core 0.8`). The wire crate stays at 0.9.0
+(unchanged source).
+
 ### Added
 
 - **MAC-with-IP Type 2 origination via ARP/ND suppression
