@@ -58,7 +58,7 @@
 //!   load-bearing convergence mechanism)
 //! - RFC 7432 §15.1 (sequence rules; encoded in `crates/evpn`)
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -122,43 +122,63 @@ impl EvpnOriginatorHandle {
     }
 }
 
+/// Per-MAC set of outstanding `EvpnRouteKey`s — one MAC may be
+/// advertising multiple Type 2 NLRIs simultaneously (MAC-only +
+/// MAC+IP, or multiple MAC+IP for a dual-stack host).
+type MacRouteSet = BTreeMap<MacAddress, HashSet<EvpnRouteKey>>;
+
 /// Live read-side counts of locally-originated Type 2 MAC routes
 /// accepted by the RIB, keyed by VNI.
+///
+/// Tracks **per-`EvpnRouteKey`** rather than per-MAC so a MAC with
+/// multiple live MAC+IP routes (e.g., dual-stack host with v4 and
+/// v6 bindings, or a future second IP) doesn't get prematurely
+/// removed from the count when only one of its `(MAC, IP)` keys
+/// withdraws. `count()` returns the number of MACs with at least
+/// one live key.
 #[derive(Debug, Clone, Default)]
 pub struct OriginatedLocalMacCounts {
-    inner: Arc<RwLock<BTreeMap<EvpnInstanceId, BTreeSet<MacAddress>>>>,
+    inner: Arc<RwLock<BTreeMap<EvpnInstanceId, MacRouteSet>>>,
 }
 
 impl OriginatedLocalMacCounts {
-    /// Count currently-originated local MACs for one VNI.
+    /// Count MACs with at least one outstanding route for one VNI.
     #[must_use]
     pub fn count(&self, vni: EvpnInstanceId) -> u64 {
         self.inner
             .read()
             .expect("originated local MAC count lock poisoned")
             .get(&vni)
-            .map_or(0, |keys| keys.len() as u64)
+            .map_or(0, |per_mac| per_mac.len() as u64)
     }
 
-    pub(crate) fn record_inject(&self, vni: EvpnInstanceId, mac: MacAddress) {
+    pub(crate) fn record_inject(&self, vni: EvpnInstanceId, mac: MacAddress, key: EvpnRouteKey) {
         self.inner
             .write()
             .expect("originated local MAC count lock poisoned")
             .entry(vni)
             .or_default()
-            .insert(mac);
+            .entry(mac)
+            .or_default()
+            .insert(key);
     }
 
-    pub(crate) fn record_withdraw(&self, vni: EvpnInstanceId, mac: MacAddress) {
+    pub(crate) fn record_withdraw(&self, vni: EvpnInstanceId, mac: MacAddress, key: EvpnRouteKey) {
         let mut guard = self
             .inner
             .write()
             .expect("originated local MAC count lock poisoned");
-        if let Some(keys) = guard.get_mut(&vni) {
-            keys.remove(&mac);
+        let Some(per_mac) = guard.get_mut(&vni) else {
+            return;
+        };
+        if let Some(keys) = per_mac.get_mut(&mac) {
+            keys.remove(&key);
             if keys.is_empty() {
-                guard.remove(&vni);
+                per_mac.remove(&mac);
             }
+        }
+        if per_mac.is_empty() {
+            guard.remove(&vni);
         }
     }
 }
@@ -535,7 +555,23 @@ async fn handle_learned(
         .unwrap_or_default();
 
     if pending_ips.is_empty() {
-        // No IP bindings yet — emit MAC-only.
+        // No IP bindings yet. Two sub-cases:
+        //
+        //   1. MAC was previously MAC-only (or never advertised) —
+        //      re-emit MAC-only via the originator. `on_local_learned`
+        //      is idempotent on identity and handles the port-move
+        //      ratchet bump if `ifindex` differs from the prior call.
+        //   2. MAC is currently MAC+IP-advertising (live_mac_ip has
+        //      entries for this mac). The kernel re-emit is just
+        //      AF_BRIDGE FDB churn; emitting a MAC-only Inject would
+        //      re-introduce the route the IpAdded handler explicitly
+        //      withdrew, breaking the replace invariant ("at any time
+        //      at most one of {MAC-only, MAC+IP} is advertising").
+        //      The `local_macs[vni][mac] = ifindex` update above is
+        //      what matters — a future downgrade replays it.
+        if state.is_mac_ip_advertising(vni, mac) {
+            return;
+        }
         let Some(orig) = state.mac_originators.get_mut(&vni) else {
             return;
         };
@@ -950,7 +986,7 @@ async fn apply_actions(
                 match reply_rx.await {
                     Ok(Ok(())) => {
                         metrics.record_evpn_local_origination(ACTION_INJECT);
-                        originated_local_mac_counts.record_inject(instance.id, mac);
+                        originated_local_mac_counts.record_inject(instance.id, mac, key);
                         debug!(?key, ?mobility_seq, "originated Type 2");
                     }
                     Ok(Err(e)) => {
@@ -980,7 +1016,7 @@ async fn apply_actions(
                 match reply_rx.await {
                     Ok(Ok(())) => {
                         metrics.record_evpn_local_origination(ACTION_WITHDRAW);
-                        originated_local_mac_counts.record_withdraw(instance.id, mac);
+                        originated_local_mac_counts.record_withdraw(instance.id, mac, key);
                         debug!(?key, "withdrew Type 2");
                     }
                     Ok(Err(e)) => {
@@ -2631,6 +2667,181 @@ mod tests {
                 .get(&vni(100))
                 .is_some_and(|m| m.contains_key(&mac(0xAA))),
             "local_macs cleared on Aged"
+        );
+    }
+
+    /// Counter regression: a non-last `IpRemoved` must NOT decrement
+    /// `OriginatedLocalMacCounts` to zero for the MAC. Two MAC+IP
+    /// routes for the same MAC each register a distinct
+    /// `EvpnRouteKey`; withdrawing one removes only that key, leaving
+    /// the MAC's count steady. Operator-visible — the gRPC
+    /// `originated_local_macs_count` field would otherwise blink to
+    /// zero under dual-stack hosts.
+    #[tokio::test]
+    async fn non_last_ip_removed_keeps_originated_count_stable() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (_log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        for ip in ["192.0.2.10", "2001:db8::1"] {
+            handle_observation(
+                &LocalMacObservation::IpAdded {
+                    vni: vni(100),
+                    mac: mac(0xAA),
+                    ip: ipa(ip),
+                },
+                &mut state,
+                &instances,
+                &rib_tx,
+                &metrics,
+                &counts,
+            )
+            .await;
+        }
+
+        assert_eq!(counts.count(vni(100)), 1, "one MAC has two live keys");
+
+        // Withdraw one of the two MAC+IP routes — the MAC still has
+        // its second route live, so the count must NOT drop.
+        handle_observation(
+            &LocalMacObservation::IpRemoved {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        assert_eq!(
+            counts.count(vni(100)),
+            1,
+            "non-last IpRemoved must NOT decrement the MAC's count"
+        );
+
+        // Withdrawing the last IP downgrades to MAC-only (re-Inject).
+        // The MAC retains a single live key — the MAC-only NLRI.
+        handle_observation(
+            &LocalMacObservation::IpRemoved {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("2001:db8::1"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        assert_eq!(
+            counts.count(vni(100)),
+            1,
+            "downgrade to MAC-only keeps the MAC counted"
+        );
+
+        // Aged drains the last route — count drops.
+        handle_observation(
+            &LocalMacObservation::Aged {
+                vni: vni(100),
+                mac: mac(0xAA),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        assert_eq!(counts.count(vni(100)), 0, "Aged clears the count");
+    }
+
+    /// Replace-invariant regression: a `Learned` re-emit while MAC+IP
+    /// is already advertising must NOT produce another MAC-only
+    /// Inject. The kernel can re-emit `RTM_NEWNEIGH AF_BRIDGE` for an
+    /// already-known MAC (e.g., after a port flap or a state
+    /// transition); emitting a MAC-only Type 2 then would put us in
+    /// a "both advertising" state that the replace model forbids.
+    #[tokio::test]
+    async fn relearn_while_mac_ip_live_does_not_re_emit_mac_only() {
+        let instances = instance_table(100);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let (log, _responder) = rib_capture_responder(rib_rx);
+        let metrics = BgpMetrics::new();
+        let counts = OriginatedLocalMacCounts::default();
+        let mut state = OriginatorState::new(&instances);
+
+        // Drive the MAC into MAC+IP regime: Learned then IpAdded.
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        handle_observation(
+            &LocalMacObservation::IpAdded {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ip: ipa("192.0.2.10"),
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+        // Snapshot the action log: should be exactly the upgrade
+        // sequence (MAC-only Inject, MAC-only Withdraw, MAC+IP Inject).
+        let initial = log.lock().await.clone();
+        assert_eq!(initial.len(), 3, "expected upgrade sequence: {initial:?}");
+
+        // Now the kernel re-emits a Learned for the same MAC.
+        handle_observation(
+            &LocalMacObservation::Learned {
+                vni: vni(100),
+                mac: mac(0xAA),
+                ifindex: 10,
+            },
+            &mut state,
+            &instances,
+            &rib_tx,
+            &metrics,
+            &counts,
+        )
+        .await;
+
+        let after = log.lock().await.clone();
+        assert_eq!(
+            after, initial,
+            "Learned while MAC+IP is live must NOT add a MAC-only Inject \
+             (replace invariant): {after:?}"
         );
     }
 

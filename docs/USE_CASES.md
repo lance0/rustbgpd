@@ -573,21 +573,24 @@ thousands of VTEPs, and gives you structured observability.
   prefix in the policy `RouteContext` so prefix-based clauses work
   on Type 5 too.
 
+**What rustbgpd does for VTEP-mode operators:**
+
+- **MAC-only Type 2 origination** — Gate 7b+1 (v0.15.0):
+  `RTNLGRP_NEIGH AF_BRIDGE` subscription drives Type 2 origination
+  per RFC 7432 §15.1 with full mobility-sequence handling. One
+  Type 3 IMET (RFC 7432 §7.3) per L2VNI carries the PMSI Tunnel
+  attribute (RFC 6514 §5) for ingress-replication BUM.
+- **MAC-with-IP Type 2 origination via ARP/ND suppression** — Gate
+  7b+2 ([Unreleased]): with `bridge link set dev vxlan<vni>
+  neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the
+  bridge's neighbour table drive MAC+IP Type 2 origination under
+  the FRR-style replace model (one Type 2 per MAC at any time —
+  `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved`
+  downgrades back). SDN controllers can still inject MAC-with-IP
+  routes directly via `InjectionService::AddEvpnRoute` (Gate 6).
+
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
-- **MAC-with-IP origination (ARP/ND suppression)** — Gate 7b+1
-  (v0.15.0) closed the bidirectional VTEP loop for **MAC-only**
-  Type 2: rustbgpd subscribes to `RTNLGRP_NEIGH AF_BRIDGE`, observes
-  kernel FDB learn/age events on non-VXLAN bridge ports, and originates
-  Type 2 routes per RFC 7432 §15.1 with full mobility-sequence
-  handling. One Type 3 IMET (RFC 7432 §7.3) per L2VNI carries the PMSI
-  Tunnel attribute (RFC 6514 §5) for ingress-replication BUM. **Still
-  missing:** MAC-with-IP origination (the IP form in `EvpnRouteKey::MacIp`)
-  requires an additional `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH`
-  subscription correlated by MAC — tracked as Gate 7b+2 in
-  [docs/evpn-enablement.md](evpn-enablement.md). SDN controllers can
-  still inject MAC-with-IP routes directly via
-  `InjectionService::AddEvpnRoute` (Gate 6).
 - **DF election** — with a shared ESI multi-homed to two VTEPs, the
   VTEPs run the election themselves. rustbgpd reflects Type 4 ES
   unchanged so the election still works on the inputs it needs;
@@ -724,20 +727,26 @@ Be honest about where rustbgpd isn't the right tool:
   kernel. Use FRR or BIRD if you need a forwarding-plane router.
 - **EVPN VTEP role — partial (v0.15.0).** rustbgpd-as-RR has been
   the supported deployment since Phase 1 (ADR-0050). Phase 2
-  (Gates 7a / 7b / 7b+1, ADR-0052 / 0054 / 0055) added the
-  **bidirectional VTEP loop**: kernel FDB programming from received
-  Type 2 routes plus local-MAC origination via `RTNLGRP_NEIGH` with
-  RFC 7432 §15.1 mobility sequencing + Type 3 IMET per L2VNI
-  carrying RFC 6514 §5 PMSI Tunnel for ingress-replication BUM. M37
-  validates the loop end-to-end (4/4 PASS against FRR 10.3.1 on
-  Linux 6.17). **Still missing for full VTEP parity:** MAC-with-IP
-  origination via ARP/ND suppression (Gate 7b+2),
-  `advertise_svi_mac` consumption (Gate 7b+2), DF election +
-  multi-homing execution (Gate 8), symmetric IRB (Gate 9, RFC 9135),
-  L3VNI / Type 5 dataplane (Gate 9). For a single-homed L2VNI
-  fabric where DF election and IRB aren't load-bearing, rustbgpd is
-  a fit today; for full FRR-equivalent VTEP coverage the gap closes
-  in upcoming gates.
+  (Gates 7a / 7b / 7b+1 / 7b+2 / 7c, ADR-0052 / 0054 / 0055 /
+  0056) added the **bidirectional VTEP loop**: kernel FDB
+  programming from received Type 2 routes; local-MAC origination
+  via `RTNLGRP_NEIGH` with RFC 7432 §15.1 mobility sequencing;
+  Type 3 IMET per L2VNI carrying RFC 6514 §5 PMSI Tunnel for
+  ingress-replication BUM; `advertise_svi_mac` originates the
+  bridge's own MAC; `sticky_macs` (ADR-0056) marks origination
+  with the RFC 7432 §15.4 sticky bit; sub-second mobility
+  convergence via the EVPN-keyed `EvpnRouteEvent` broadcast (Gate
+  7c); and MAC-with-IP Type 2 origination via ARP/ND suppression
+  under the FRR-style replace model (Gate 7b+2 — requires
+  `bridge link set dev vxlan<vni> neigh_suppress on`). M37 and
+  M37+IP smokes validate the MAC-only and MAC+IP loops against
+  FRR 10.3.1. **Still missing for full VTEP parity:** DF election
+  + multi-homing execution (Gate 8), symmetric IRB (Gate 9,
+  RFC 9135), L3VNI / Type 5 dataplane (Gate 9), duplicate-MAC
+  quarantine action (ADR-0055 §9). For a single-homed L2VNI fabric
+  where DF election and IRB aren't load-bearing, rustbgpd is a fit
+  today; for full FRR-equivalent VTEP coverage the gap closes in
+  Gates 8 / 9.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

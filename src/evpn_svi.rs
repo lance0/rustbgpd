@@ -206,7 +206,7 @@ async fn apply_report(
                 withdraw_svi_mac(inst, old_key, runtime).await;
                 runtime
                     .originated_local_mac_counts
-                    .record_withdraw(inst.id, old_mac);
+                    .record_withdraw(inst.id, old_mac, old_key);
                 if let Some(new_key) = inject_svi_mac(inst, new_mac, runtime).await {
                     originated.insert(status.vni, (new_key, new_mac));
                 } else {
@@ -256,7 +256,7 @@ async fn inject_svi_mac(
             runtime.metrics.record_evpn_local_origination("svi_inject");
             runtime
                 .originated_local_mac_counts
-                .record_inject(inst.id, mac);
+                .record_inject(inst.id, mac, key);
             debug!(vni = inst.id.as_u32(), ?mac, "originated SVI MAC");
             Some(key)
         }
@@ -312,7 +312,7 @@ async fn withdraw_svi_mac(inst: &EvpnInstance, key: EvpnRouteKey, runtime: &SviR
             if let Some(mac) = mac_from_macip_key(&key) {
                 runtime
                     .originated_local_mac_counts
-                    .record_withdraw(inst.id, mac);
+                    .record_withdraw(inst.id, mac, key);
             }
             debug!(vni = inst.id.as_u32(), "withdrew SVI MAC");
         }
@@ -365,7 +365,7 @@ async fn drain_to_withdraws(originated: &mut OriginatedSet, runtime: &SviRuntime
         withdraw_svi_mac(inst, key, runtime).await;
         runtime
             .originated_local_mac_counts
-            .record_withdraw(vni, mac);
+            .record_withdraw(vni, mac, key);
     }
 }
 
