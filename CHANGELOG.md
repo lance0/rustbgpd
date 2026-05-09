@@ -72,44 +72,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `src/evpn_originator.rs#tests` cover the replace flow, the
   cold-start ordering edge, the downgrade path, sticky pass-
   through, and the MAC-aged cascade.
-- **Gate 7b+2 domain state machine — `LocalMacIpOriginator`.**
-  Parallel to `LocalMacOriginator` but keyed on `(MAC, IP)` rather
-  than `MAC` alone. Pure deterministic state machine with no I/O,
-  no tokio, no path-attribute encoding — same shape as the
-  MAC-only originator. Implements RFC 7432 §15.1 mobility
-  sequencing per-`(MAC, IP)` (independent ratchets from the
-  MAC-only chain — chosen because RFC 9135 §4.4 treats MAC-only
-  and MAC+IP as independent advertisements; we do not claim §15.1
-  is keyed by full NLRI). New API: `on_local_ip_learned`,
-  `on_local_ip_aged`, `on_local_mac_aged` (cascade hook —
-  withdraws every `(MAC, *)` IP route at once so the daemon
-  doesn't keep its own reverse index), `on_remote_ip_changed`
-  (handles `view = None` for remote-disappeared without
-  resetting the ratchet), `drain_to_withdraws`, `outstanding_keys`.
-  Diverges from `LocalMacOriginator` on sticky-bit changes —
-  re-emits at the same sequence rather than bumping, since for
-  MAC+IP the sticky bit is closer to an ARP/ND-suppression hint
-  than a mobility signal. The daemon-side wiring lands in slice 3.
-- **Gate 7b+2 wire layer — `AF_INET` / `AF_INET6` neighbour
-  classification.** The existing `RTNLGRP_NEIGH` subscriber now
-  splits the message stream into two paths: `AF_BRIDGE` continues to
-  produce MAC-only `LocalMacObservation::Learned` / `Aged` events
-  (Gate 7b+1), and `AF_INET` / `AF_INET6` neighbour notifications on
-  bridge ifindexes produce new `IpAdded` / `IpRemoved` variants
-  carrying `(vni, mac, ip)`. These surface ARP / ND snooping output
-  from bridges with `neigh_suppress on` for future MAC+IP Type 2
-  origination (RFC 7432 §7.2 with non-empty IP, RFC 9135 §4.4
-  permits MAC-only and MAC+IP routes for the same MAC to coexist).
-  Validity gate drops `NUD_INCOMPLETE` / `NUD_FAILED` /
-  `NUD_DELAY` / `NUD_PROBE` (including combined bitmasks like
-  `NUD_STALE | NUD_PROBE`) so kernel re-probe thrash doesn't reach
-  origination. Address-shape filter rejects unspecified, multicast,
-  broadcast, IPv4 link-local (APIPA), IPv6 link-local (`fe80::/10`),
-  and loopback bindings on both add and remove edges so the EVPN
-  domain layer never sees an IP it shouldn't advertise. The
-  daemon-side originator currently logs at debug and no-ops on the
-  new variants — Gate 7b+2 slice 2 will wire the `(MAC, IP)` state
-  machine.
+  (The earlier `[Unreleased]` entries that announced the slice 1
+  wire-layer and slice 2 state-machine in isolation are now
+  superseded by this aggregate; their text described the work as
+  "daemon no-ops, slice 2/3 will wire" which no longer reflects
+  the shipped behavior.)
 
 ### Fixed
 
