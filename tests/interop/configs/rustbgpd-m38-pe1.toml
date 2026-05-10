@@ -11,6 +11,9 @@ listen_port = 179
 log_format = "json"
 prometheus_addr = "0.0.0.0:9179"
 
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
 [[evpn_instances]]
 vni = 100
 rd = "10.0.0.1:100"

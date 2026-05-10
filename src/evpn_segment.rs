@@ -554,67 +554,109 @@ async fn apply_with_instance(
 
 /// Build the wire-shaped `EvpnRibRoute` for a Type 1/4 origination.
 ///
-/// Gate 8 ships a minimal path-attribute set: Origin, empty `AsPath`,
-/// `NextHop`, RT extcomms from the instance's configured `route_targets`.
-/// The ES-Import RT (RFC 7432 §7.6) and the ESI Label extcomm
-/// (RFC 7432 §7.5) are intentionally **not** emitted — they're load-
-/// bearing for split-horizon enforcement, which is Gate 8b. Peers
-/// will see the routes via reflection but won't import them via RT
-/// match. ADR-0057 records the gap.
+/// Path attributes: Origin, empty `AsPath`, `NextHop`, plus the
+/// instance's configured RT extcomms. Per RFC 7432, Gate 8b prep
+/// also attaches:
+///
+/// - **Type 4 ES**: ES-Import RT extcomm (§7.6) auto-derived from
+///   ESI bytes [1..7]. Peers can now correlate the segment via RT
+///   match without preconfiguration.
+/// - **Type 1 EAD-per-ES**: ESI Label extcomm (§7.5) carrying the
+///   synthesized ESI label with `single_active = false`. Peers wire
+///   the label into their split-horizon filter tables; Gate 8b adds
+///   the dataplane drops on non-DF receivers.
+/// - **Type 1 EAD-per-EVI**: no extra extcomms (the per-EVI label
+///   lives in the route's MPLS label field; aliasing extcomms are
+///   Gate 8b territory).
 fn build_es_route(instance: &EvpnInstance, key: &EvpnRouteKey) -> EvpnRibRoute {
-    let route = match key {
-        EvpnRouteKey::Es {
-            rd,
-            esi,
-            originator_ip,
-        } => EvpnRoute::Es(EvpnEs {
-            rd: *rd,
-            esi: *esi,
-            originator_ip: *originator_ip,
-        }),
-        EvpnRouteKey::EadPerEs {
-            rd,
-            esi,
-            ethernet_tag,
-        } => EvpnRoute::EadPerEs(EvpnEadPerEs {
-            rd: *rd,
-            esi: *esi,
-            ethernet_tag: *ethernet_tag,
-            label: synthesize_esi_label(*esi),
-        }),
-        EvpnRouteKey::EadPerEvi {
-            rd,
-            esi,
-            ethernet_tag,
-        } => EvpnRoute::EadPerEvi(EvpnEadPerEvi {
-            rd: *rd,
-            esi: *esi,
-            ethernet_tag: *ethernet_tag,
-            label: MplsLabel::new(ethernet_tag.0),
-        }),
-        // Other key shapes shouldn't reach this builder — Type 1/4
-        // originators only emit the three above.
-        other => {
-            warn!(
-                ?other,
-                "EVPN segment: unexpected key shape passed to ES route builder"
-            );
-            // Synthesize a degenerate Type 4 to avoid panicking in
-            // production; callers will see the warn-level log.
-            EvpnRoute::Es(EvpnEs {
-                rd: instance.rd,
-                esi: EthernetSegmentIdentifier::ZERO,
-                originator_ip: instance.local_vtep_ip,
-            })
-        }
-    };
+    let (route, key_specific_extcomms): (EvpnRoute, Vec<rustbgpd_wire::ExtendedCommunity>) =
+        match key {
+            EvpnRouteKey::Es {
+                rd,
+                esi,
+                originator_ip,
+            } => (
+                EvpnRoute::Es(EvpnEs {
+                    rd: *rd,
+                    esi: *esi,
+                    originator_ip: *originator_ip,
+                }),
+                // RFC 7432 §7.6: ES-Import RT is the high-order 6
+                // octets of the ESI Value (= ESI bytes [1..7] of the
+                // 10-byte wire encoding). Peers that filter Type 4
+                // imports on this RT can correlate the segment back
+                // to the ESI without RT preconfiguration.
+                vec![rustbgpd_wire::ExtendedCommunity::es_import_rt(
+                    es_import_rt_from_esi(*esi),
+                )],
+            ),
+            EvpnRouteKey::EadPerEs {
+                rd,
+                esi,
+                ethernet_tag,
+            } => (
+                EvpnRoute::EadPerEs(EvpnEadPerEs {
+                    rd: *rd,
+                    esi: *esi,
+                    ethernet_tag: *ethernet_tag,
+                    label: synthesize_esi_label(*esi),
+                }),
+                // RFC 7432 §7.5: ESI Label extcomm carries the label
+                // peers will match against the inner VXLAN/MPLS label
+                // for split-horizon enforcement. Gate 8 publishes the
+                // value so peers can wire up their import + filter
+                // tables; Gate 8b adds the dataplane drops on
+                // non-DF receivers. `single_active = false` for the
+                // all-active default mode.
+                vec![rustbgpd_wire::ExtendedCommunity::esi_label(
+                    false,
+                    synthesize_esi_label(*esi).value(),
+                )],
+            ),
+            EvpnRouteKey::EadPerEvi {
+                rd,
+                esi,
+                ethernet_tag,
+            } => (
+                EvpnRoute::EadPerEvi(EvpnEadPerEvi {
+                    rd: *rd,
+                    esi: *esi,
+                    ethernet_tag: *ethernet_tag,
+                    label: MplsLabel::new(ethernet_tag.0),
+                }),
+                // RFC 7432 §14: EAD-per-EVI carries no ESI Label —
+                // the per-EVI label comes from the route's own MPLS
+                // label field. The aliasing extcomms (single-active
+                // backup signaling) land in Gate 8b.
+                Vec::new(),
+            ),
+            // Other key shapes shouldn't reach this builder — Type 1/4
+            // originators only emit the three above.
+            other => {
+                warn!(
+                    ?other,
+                    "EVPN segment: unexpected key shape passed to ES route builder"
+                );
+                // Synthesize a degenerate Type 4 to avoid panicking in
+                // production; callers will see the warn-level log.
+                (
+                    EvpnRoute::Es(EvpnEs {
+                        rd: instance.rd,
+                        esi: EthernetSegmentIdentifier::ZERO,
+                        originator_ip: instance.local_vtep_ip,
+                    }),
+                    Vec::new(),
+                )
+            }
+        };
 
-    let ext_communities: Vec<rustbgpd_wire::ExtendedCommunity> = instance
+    let mut ext_communities: Vec<rustbgpd_wire::ExtendedCommunity> = instance
         .route_targets
         .iter()
         .copied()
         .map(route_target_to_extcomm)
         .collect();
+    ext_communities.extend(key_specific_extcomms);
 
     let attributes: Vec<PathAttribute> = vec![
         PathAttribute::Origin(Origin::Igp),
@@ -642,6 +684,17 @@ fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
         IpAddr::V4(v4) => PathAttribute::NextHop(v4),
         IpAddr::V6(_) => PathAttribute::NextHop(std::net::Ipv4Addr::UNSPECIFIED),
     }
+}
+
+/// Derive the ES-Import Route Target MAC from an ESI per
+/// RFC 7432 §7.6: the high-order 6 octets of the 9-byte ESI Value
+/// (i.e. bytes [1..7] of the 10-byte wire encoding). All ESI types
+/// share this rule; for Type 0/1/2 system-MAC-derived ESIs the
+/// resulting RT happens to encode that system MAC, which is what
+/// FRR / Junos / Cumulus already filter on.
+fn es_import_rt_from_esi(esi: EthernetSegmentIdentifier) -> [u8; 6] {
+    let o = esi.octets();
+    [o[1], o[2], o[3], o[4], o[5], o[6]]
 }
 
 /// Synthesize a deterministic ESI label from the ESI bytes. Gate 8
@@ -809,6 +862,106 @@ mod tests {
         let (pref, alg) = decode_df_election_extcomm(&attrs).unwrap();
         assert_eq!(pref, 32_768);
         assert_eq!(alg, DfAlgorithm::HighestRandomWeight);
+    }
+
+    #[test]
+    fn es_import_rt_derives_from_esi_value_high_six_octets() {
+        // RFC 7432 §7.6: bytes [1..7] of the 10-byte ESI.
+        let id = EthernetSegmentIdentifier::new([
+            0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01,
+        ]);
+        assert_eq!(
+            es_import_rt_from_esi(id),
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]
+        );
+    }
+
+    #[test]
+    fn type_4_es_route_carries_es_import_rt_extcomm() {
+        let inst = instance(100);
+        let id = EthernetSegmentIdentifier::new([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x00, 0x00, 0x01,
+        ]);
+        let key = EvpnRouteKey::Es {
+            rd: rd(65000, 100),
+            esi: id,
+            originator_ip: ipa("10.0.0.1"),
+        };
+        let route = build_es_route(&inst, &key);
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        let derived = extcomms
+            .iter()
+            .copied()
+            .find_map(ExtendedCommunity::as_es_import_rt)
+            .expect("ES-Import RT extcomm attached");
+        assert_eq!(derived, [0x11, 0x22, 0x33, 0x44, 0x55, 0x66]);
+    }
+
+    #[test]
+    fn type_1_ead_per_es_carries_esi_label_extcomm() {
+        let inst = instance(100);
+        let id = esi(7);
+        let key = EvpnRouteKey::EadPerEs {
+            rd: rd(65000, 100),
+            esi: id,
+            ethernet_tag: EthernetTagId::MAX_ET,
+        };
+        let route = build_es_route(&inst, &key);
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        let (single_active, label) = extcomms
+            .iter()
+            .copied()
+            .find_map(ExtendedCommunity::as_esi_label)
+            .expect("ESI Label extcomm attached");
+        assert!(!single_active, "Gate 8 default is all-active");
+        assert_eq!(label, synthesize_esi_label(id).value());
+    }
+
+    #[test]
+    fn type_1_ead_per_evi_does_not_carry_esi_label_extcomm() {
+        let inst = instance(100);
+        let key = EvpnRouteKey::EadPerEvi {
+            rd: rd(65000, 100),
+            esi: esi(1),
+            ethernet_tag: EthernetTagId(100),
+        };
+        let route = build_es_route(&inst, &key);
+        let extcomms = route
+            .attributes
+            .iter()
+            .find_map(|a| match a {
+                PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+                _ => None,
+            })
+            .expect("ExtendedCommunities attribute present");
+        assert!(
+            extcomms
+                .iter()
+                .copied()
+                .all(|ec| ec.as_esi_label().is_none()),
+            "EAD-per-EVI must not carry ESI Label (RFC 7432 §14)"
+        );
+        assert!(
+            extcomms
+                .iter()
+                .copied()
+                .all(|ec| ec.as_es_import_rt().is_none()),
+            "EAD-per-EVI must not carry ES-Import RT (Type 4 only)"
+        );
     }
 
     #[tokio::test]

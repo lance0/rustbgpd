@@ -7,6 +7,10 @@
 #   2. PE2 reports DF=0 / NonDF=1 for the same key within ~30s.
 #   3. After PE1 shuts down, PE2 promotes to DF (DF=1) and
 #      `evpn_df_role_changes_total{esi=...,vni="100"}` increments.
+#   4. PE2's RIB shows the reflected Type 4 ES route from PE1 carrying
+#      the auto-derived ES-Import RT extcomm (RFC 7432 §7.6).
+#   5. PE2's RIB shows the reflected Type 1 EAD-per-ES route from PE1
+#      carrying the ESI Label extcomm (RFC 7432 §7.5).
 #
 # Usage:
 #   docker build -t rustbgpd:dev .
@@ -21,6 +25,14 @@ PE1="clab-${TOPO}-pe1"
 PE2="clab-${TOPO}-pe2"
 ESI="00:00:00:00:00:00:00:00:00:01"
 VNI="100"
+PROTO="proto/rustbgpd.proto"
+
+# Type 0x06 / Subtype 0x02 = ES-Import RT (RFC 7432 §7.6).
+# Type 0x06 / Subtype 0x01 = ESI Label (RFC 7432 §7.5).
+# We match on the high 16 bits of the raw u64, which lets the test
+# stay correct across changes to the ESI value or synthesized label.
+ES_IMPORT_RT_TYPESUB="0x0602"
+ESI_LABEL_TYPESUB="0x0601"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,6 +62,59 @@ prom_df_role() {
                 exit
             }
         '
+}
+
+resolve_ip() {
+    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$1" 2>/dev/null
+}
+
+# List the EVPN routes a PE currently has best-pathed for the given
+# route_type (4 = ES, 1 = EAD-per-ES / EAD-per-EVI). Returns raw JSON.
+grpc_list_evpn() {
+    local container=${1:?}
+    local route_type=${2:?}
+    local ip
+    ip=$(resolve_ip "$container")
+    [ -z "$ip" ] && return 1
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d "{\"route_type_filter\": $route_type}" \
+        "${ip}:50051" rustbgpd.v1.RibService/ListEvpnRoutes 2>/dev/null
+}
+
+# True iff at least one EVPN route in the PE's RIB at the given
+# route_type carries an extended community whose high 16 bits match
+# $type_sub (e.g. 0x0602 for ES-Import RT, 0x0601 for ESI Label).
+has_extcomm_typesub() {
+    local container=${1:?}
+    local route_type=${2:?}
+    local type_sub=${3:?}
+    local json
+    json=$(grpc_list_evpn "$container" "$route_type") || return 1
+    [ -z "$json" ] && return 1
+    printf '%s' "$json" | python3 -c '
+import json, sys
+type_sub = int(sys.argv[1], 16)
+data = json.load(sys.stdin)
+for route in data.get("routes", []):
+    for raw in route.get("extendedCommunities", []) or []:
+        if (int(raw) >> 48) & 0xFFFF == type_sub:
+            sys.exit(0)
+sys.exit(1)
+' "$type_sub"
+}
+
+wait_for_extcomm() {
+    local container=${1:?}
+    local route_type=${2:?}
+    local type_sub=${3:?}
+    local timeout=${4:-30}
+    for _ in $(seq 1 "$timeout"); do
+        if has_extcomm_typesub "$container" "$route_type" "$type_sub"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
 }
 
 prom_df_role_changes() {
@@ -115,6 +180,26 @@ assert "PE2 reports DF=0 for (esi=$ESI, vni=$VNI)" \
 
 assert "PE2 reports NonDF=1 for the same key" \
     '[ "$(prom_df_role "$PE2" nondf)" = "1" ]'
+
+# Gate 8b prep: ES-Import RT extcomm (RFC 7432 §7.6) on Type 4 routes
+# and ESI Label extcomm (RFC 7432 §7.5) on Type 1 EAD-per-ES routes.
+# Each PE should both see them in its own LocRib (originated locally)
+# and in routes received from the other PE (reflected via iBGP).
+echo "Waiting up to 30s for ES-Import RT (Type 4) on PE1..."
+assert "PE1 LocRib has Type 4 ES with ES-Import RT extcomm" \
+    'wait_for_extcomm "$PE1" 4 "$ES_IMPORT_RT_TYPESUB" 30'
+
+echo "Waiting up to 30s for ES-Import RT (Type 4) on PE2..."
+assert "PE2 LocRib has Type 4 ES with ES-Import RT extcomm" \
+    'wait_for_extcomm "$PE2" 4 "$ES_IMPORT_RT_TYPESUB" 30'
+
+echo "Waiting up to 30s for ESI Label (Type 1) on PE1..."
+assert "PE1 LocRib has Type 1 EAD-per-ES with ESI Label extcomm" \
+    'wait_for_extcomm "$PE1" 1 "$ESI_LABEL_TYPESUB" 30'
+
+echo "Waiting up to 30s for ESI Label (Type 1) on PE2..."
+assert "PE2 LocRib has Type 1 EAD-per-ES with ESI Label extcomm" \
+    'wait_for_extcomm "$PE2" 1 "$ESI_LABEL_TYPESUB" 30'
 
 # Capture PE2's transition counter before forcing the flip.
 PE2_BEFORE=$(prom_df_role_changes "$PE2")
