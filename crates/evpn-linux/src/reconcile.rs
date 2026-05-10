@@ -22,9 +22,9 @@
 //! ## Generic over the dataplane
 //!
 //! The actor is generic over `D: Dataplane` so the same code drives
-//! both the [`crate::InMemoryDataplane`] fake (used by Phase 3 tests)
-//! and the future `LinuxDataplane` real impl (Phase 4). The trait's
-//! native `async fn` means no `dyn Dataplane` boxing.
+//! both the [`crate::InMemoryDataplane`] fake and the `LinuxDataplane`
+//! real impl. The trait's native `async fn` means no `dyn Dataplane`
+//! boxing.
 //!
 //! ## Reference
 //!
@@ -173,8 +173,10 @@ struct ActorState {
     /// failed port keeps its prior value and the next reconcile pass
     /// re-emits the op via `diff_flag_plans`. With
     /// `apply_bum_enforcement = false` the map tracks the
-    /// last-resolved plan as the "would-have-applied" baseline so a
-    /// later flip to `true` picks up the right diff.
+    /// last-resolved plan as the observe-only baseline so repeated
+    /// reports do not emit would-have-applied diffs. Enabling kernel
+    /// mutation is restart-required; a fresh actor starts with an
+    /// empty baseline.
     last_bum_plan: BTreeMap<u32, crate::bum_filter::BumPortFlags>,
 }
 
@@ -390,8 +392,8 @@ impl<D: Dataplane> ReconcileActor<D> {
 
         // Update the last-applied BUM plan **per port**:
         // - With `apply_bum_enforcement = false` no kernel mutation
-        //   happens; record `new_bum_plan` directly so a later flip
-        //   to `true` picks up the right diff baseline.
+        //   happens; record `new_bum_plan` directly as the
+        //   observe-only baseline.
         // - With apply enabled, only update the entry for ports
         //   whose op succeeded. Failed ports keep their prior
         //   recorded state so the next reconcile pass re-runs the
@@ -425,8 +427,10 @@ impl<D: Dataplane> ReconcileActor<D> {
             }
         } else {
             // Observe-only mode: record the would-have-applied plan
-            // verbatim. Future flag flip computes its first diff
-            // against the right baseline.
+            // verbatim so repeated reports remain stable. Runtime
+            // apply-mode flips are restart-required; the next daemon
+            // start builds a fresh actor with an empty applied-state
+            // baseline.
             self.state.last_bum_plan = new_bum_plan.iter().map(|p| (p.ifindex, p.flags)).collect();
         }
 
@@ -596,7 +600,7 @@ impl<D: Dataplane> ReconcileActor<D> {
                             tracing::warn!(
                                 ?op,
                                 error = %err,
-                                "dataplane op failed permanently; suppressed until next intent generation"
+                                "dataplane op failed permanently; suppressed until op shape changes"
                             );
                         }
                     }
@@ -662,15 +666,51 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
     }
 
-    /// Shutdown drain (ADR-0054 §7). Withdraw every owned remote FDB
-    /// entry within `drain_timeout`; if the timeout fires, exit
-    /// without finishing — the next startup's reconcile cleans up.
+    /// Shutdown drain (ADR-0054 §7). Restore every BUM-suppressed CE
+    /// port to `allow_all` and withdraw every owned remote FDB entry
+    /// within `drain_timeout`; if the timeout fires, exit without
+    /// finishing — the next startup's reconcile cleans up stale FDB
+    /// entries. BUM restoration is best-effort because leaving a CE
+    /// port suppressed after the daemon exits is more operator-hostile
+    /// than a redundant allow-all write.
     async fn drain(&mut self) {
-        if self.state.owned.is_empty() {
+        let bum_restore_ops: Vec<_> = if self.config.apply_bum_enforcement {
+            self.state
+                .last_bum_plan
+                .iter()
+                .filter_map(|(&ifindex, &flags)| {
+                    (flags != crate::bum_filter::BumPortFlags::allow_all()).then_some(
+                        DataplaneOp::SetBumPortFlags {
+                            ifindex,
+                            flags: crate::bum_filter::BumPortFlags::allow_all(),
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        if self.state.owned.is_empty() && bum_restore_ops.is_empty() {
             return;
         }
 
         let drain_fut = async {
+            for op in bum_restore_ops {
+                let DataplaneOp::SetBumPortFlags { ifindex, .. } = op else {
+                    unreachable!("BUM restore ops are always SetBumPortFlags")
+                };
+                if let Err(e) = self.dataplane.apply(&op).await {
+                    tracing::debug!(error = %e, ?op, "BUM restore during drain failed");
+                    // Best-effort — keep going so one stale ifindex
+                    // doesn't prevent FDB drain.
+                } else {
+                    self.state.last_bum_plan.remove(&ifindex);
+                    self.state.bum_retry.record_success(ifindex);
+                    self.state.bum_permanent_failures.remove(&ifindex);
+                }
+            }
+
             let owned_keys: Vec<_> = self.state.owned.keys().into_iter().collect();
             for (vni, mac) in owned_keys {
                 let op = DataplaneOp::RemoveRemoteFdb { vni, mac };
@@ -752,38 +792,31 @@ fn build_instance_status(
 }
 
 /// VNI carried by an FDB op. BUM ops have no VNI surface — the
-/// caller must dispatch on op shape before reaching this helper.
+/// operator-facing key for BUM reports is the `kind` field, which
+/// carries the ifindex. The placeholder VNI is only present because
+/// `AppliedOp` / `FailedOp` predate BUM-port operations.
 fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
     match op {
         DataplaneOp::AddRemoteFdb { vni, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, .. } => *vni,
         DataplaneOp::SetBumPortFlags { .. } => {
-            // BUM ops route through the ifindex-keyed retry/permanent
-            // maps and never hit this helper; the apply loop dispatches
-            // on op shape first. Use VNI 0 as a placeholder for the
-            // `FailedOp.vni` field on a permanent BUM failure — the
-            // operator-facing key for that report is `kind` (which
-            // carries the ifindex), not `vni`.
+            // VNI 0 is invalid in the domain type, so VNI 1 is the
+            // harmless report placeholder.
             rustbgpd_evpn::EvpnInstanceId::new(1).expect("VNI 1 is always valid")
         }
     }
 }
 
 /// MAC carried by an FDB op. BUM ops have no MAC surface — the
-/// caller must dispatch on op shape before reaching this helper.
+/// report placeholder keeps the legacy `DataplaneOpKind` shape
+/// harmless for BUM rows.
 fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
     match op {
         DataplaneOp::AddRemoteFdb { mac, .. }
         | DataplaneOp::UpdateRemoteFdb { mac, .. }
         | DataplaneOp::RemoveRemoteFdb { mac, .. } => *mac,
-        DataplaneOp::SetBumPortFlags { .. } => {
-            // Same rationale as `fdb_op_vni`: BUM ops never hit
-            // this helper. Returning the zero MAC keeps the
-            // `FailedOp.kind` constructor's MAC field harmless if
-            // it's ever read for a BUM-shaped FailedOp.
-            rustbgpd_evpn::MacAddress::new([0; 6])
-        }
+        DataplaneOp::SetBumPortFlags { .. } => rustbgpd_evpn::MacAddress::new([0; 6]),
     }
 }
 

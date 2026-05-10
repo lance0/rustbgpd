@@ -43,7 +43,7 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # Build only when the Dockerfile is newer than the cached image, or
-# the image is missing. Saves ~30s on hot iterations. Set
+# the image is missing. Saves rebuild time on hot iterations. Set
 # `SKIP_BUILD=1` to assert the image already exists and bail out
 # rather than rebuild — used by CI where a sibling step pre-builds
 # via GHA layer cache and the local Dockerfile mtime would otherwise

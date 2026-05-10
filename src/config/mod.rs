@@ -944,6 +944,15 @@ pub struct ConfigDiff {
     /// reconciliation. Flagging here ensures `--diff` operators don't
     /// silently miss schema edits.
     pub evpn_instances_changed: bool,
+    /// `[[ethernet_segments]]` blocks added/removed/modified between
+    /// old and new. The segment orchestrator resolves this table once
+    /// at startup, so edits are restart-required until a runtime swap
+    /// surface exists.
+    pub ethernet_segments_changed: bool,
+    /// Top-level Gate 8b kernel-enforcement opt-in changed. The
+    /// dataplane actor reads this once at startup, so SIGHUP must not
+    /// silently advance the in-memory snapshot.
+    pub apply_bum_enforcement_changed: bool,
 }
 
 /// Per-neighbor impact derived from inheritance / chain resolution.
@@ -1035,6 +1044,8 @@ impl ConfigDiff {
             || self.policy.import_changed
             || self.policy.export_changed
             || self.evpn_instances_changed
+            || self.ethernet_segments_changed
+            || self.apply_bum_enforcement_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -1131,6 +1142,8 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         bmp_changed: old.bmp != new.bmp,
         mrt_changed: old.mrt != new.mrt,
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
+        ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
+        apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
     }
 }
 

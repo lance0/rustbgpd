@@ -302,7 +302,67 @@ async fn reconcile_emits_set_bum_port_flags_when_apply_enabled() {
     h.shutdown().await;
 }
 
-// 1c. Transiently-failed BUM ops must be re-emitted on the next
+// 1c. Shutdown must restore any CE-facing ports the actor suppressed
+// even when there are no rustbgpd-owned FDB entries to drain. Without
+// this, a daemon exit that races before the segment orchestrator's
+// final allow-all intent is processed leaves host bridge ports in
+// Non-DF suppression mode.
+#[tokio::test]
+async fn shutdown_restores_bum_flags_even_without_owned_fdb_entries() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![10],
+        },
+    );
+    h.handle.set_links(links);
+
+    let mut bum = BumEnforcementTable::new();
+    let esi = EthernetSegmentIdentifier::new([1; 10]);
+    bum.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            inst,
+            RemoteMacTable::new(),
+            bum,
+        ))
+        .unwrap();
+
+    let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
+    let allow = rustbgpd_evpn_linux::BumPortFlags::allow_all();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(h.handle.bum_port_flags().get(&10), Some(&suppress));
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert_eq!(
+        handle.bum_port_flags().get(&10),
+        Some(&allow),
+        "drain must restore CE-port flood flags before the actor exits"
+    );
+}
+
+// 1d. Transiently-failed BUM ops must be re-emitted on the next
 // reconcile pass. Pre-PR #57 review (#1) the actor updated
 // `last_bum_plan` unconditionally after `apply_plan`, so a failed
 // SetBumPortFlags op silently disappeared from future diffs even

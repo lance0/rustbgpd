@@ -22,10 +22,10 @@
 //! for EVPN multi-homing enforcement.
 //!
 //! This module deliberately does **not** speak netlink. The
-//! [`BumPortFlagPlan`] rows it returns are the input the next slice
-//! (rtnetlink-driven `RTM_SETLINK` with the bridge-port `slave_data`
-//! triplet) will consume; landing the mapping as pure logic now lets
-//! us pin the contract via unit tests before the privileged wiring.
+//! [`BumPortFlagPlan`] rows it returns feed the rtnetlink-backed
+//! `RTM_SETLINK` bridge-port `slave_data` triplet in the Linux
+//! dataplane implementation, while this pure layer keeps the
+//! mapping contract easy to pin with unit tests.
 
 use rustbgpd_evpn::{BumEnforcementReadiness, BumEnforcementStatus, BumForwardingAction};
 
@@ -86,10 +86,10 @@ pub struct BumPortFlagPlan {
 }
 
 /// Resolve a slice of [`BumEnforcementStatus`] rows into the flat
-/// list of `(ifindex, flags)` actions the next slice will push to
+/// list of `(ifindex, flags)` actions the Linux dataplane pushes to
 /// the kernel. Skips rows whose readiness is not `Ready` — the
-/// orchestrator already logs those at warn level and they are
-/// reported back to operators via the `DataplaneReport` surface.
+/// orchestrator already logs those at warn level and they are reported
+/// back to operators via the `DataplaneReport` surface.
 ///
 /// Deduplicates per ifindex on a "most-restrictive wins" basis. If
 /// the same CE-facing port appears under both an `Allow` row and a
@@ -128,7 +128,7 @@ pub fn compute_flag_plan(rows: &[BumEnforcementStatus]) -> Vec<BumPortFlagPlan> 
 
 /// Diff two plan snapshots and return only the entries that need to
 /// change. Idempotent: an unchanged port emits nothing. Used by the
-/// next slice to translate a level-triggered intent into the minimal
+/// reconciler to translate a level-triggered intent into the minimal
 /// set of `RTM_SETLINK` calls.
 #[must_use]
 pub fn diff_flag_plans(prior: &[BumPortFlagPlan], new: &[BumPortFlagPlan]) -> Vec<BumPortFlagPlan> {
@@ -164,8 +164,6 @@ pub fn diff_flag_plans(prior: &[BumPortFlagPlan], new: &[BumPortFlagPlan]) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use std::net::IpAddr;
-
     use rustbgpd_evpn::{
         BumEnforcementReadiness, BumEnforcementStatus, BumForwardingAction, DfRole,
         EthernetSegmentIdentifier, EvpnInstanceId,
@@ -179,10 +177,6 @@ mod tests {
 
     fn esi(seed: u8) -> EthernetSegmentIdentifier {
         EthernetSegmentIdentifier::new([seed; 10])
-    }
-
-    fn ip(s: &str) -> IpAddr {
-        s.parse().unwrap()
     }
 
     fn row(
@@ -236,7 +230,6 @@ mod tests {
             },
         )];
         assert!(compute_flag_plan(&rows).is_empty());
-        let _ = ip("10.0.0.1"); // proof we can use the import in tests
     }
 
     #[test]

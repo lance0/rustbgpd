@@ -331,7 +331,7 @@ pub struct DataplaneReport {
 }
 ```
 
-### Gate 8b kernel primitive (proven, not yet wired)
+### Gate 8b kernel primitive (wired, opt-in)
 
 The BUM-suppression primitive is the per-port bridge flood-flag
 triplet — `IFLA_BRPORT_UNICAST_FLOOD` /

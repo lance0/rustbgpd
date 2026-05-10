@@ -15,6 +15,7 @@
 #   docker run --rm \
 #     --cap-add=NET_ADMIN \
 #     --cap-add=SYS_ADMIN \
+#     --security-opt apparmor=unconfined \
 #     -e EVPN_LINUX_NETNS=1 \
 #     -v "$(pwd)":/work -w /work \
 #     -v cargo-cache:/usr/local/cargo/registry \

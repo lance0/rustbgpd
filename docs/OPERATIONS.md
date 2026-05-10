@@ -139,7 +139,9 @@ fields.
 listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
 `[mrt]`, `[[evpn_instances]]` (Phase-2 VTEP foundation — gRPC
 `EvpnService` shares an `Arc<EvpnInstanceTable>` built once at
-startup; reload-time mutation lands with kernel reconciliation), and
+startup; reload-time mutation lands with kernel reconciliation),
+`[[ethernet_segments]]` (Gate 8 segment orchestrator snapshot),
+`apply_bum_enforcement` (Gate 8b dataplane actor startup flag), and
 inline `policy.import` / `policy.export` legacy global-fallback
 statements.
 

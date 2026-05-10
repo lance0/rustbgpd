@@ -79,8 +79,9 @@ Running `sudo -E env EVPN_LINUX_NETNS=1 cargo test ...` directly on
 the host still works and is the right path for active development.
 This harness is the right path when:
 
-- The host kernel is too old, but you have access to a modern one
-  inside Docker Desktop / a remote daemon.
+- The local host kernel is too old, but you have access to a Docker
+  daemon backed by a modern kernel (for example Docker Desktop's VM
+  or a remote Linux daemon).
 - You're reviewing a PR and want to run the tests without installing
   iproute2 / iputils-ping / sudo'ing.
 - You want strong cleanup guarantees — a panicking test inside the
@@ -101,8 +102,8 @@ The CI step pre-builds the harness image with `docker/build-push-action`
 + GHA layer caching, then invokes `run-netns-tests.sh` with
 `SKIP_BUILD=1` so the helper reuses the pre-built image rather than
 re-running its mtime-based rebuild check (which always fires on a
-fresh checkout). Warm CI runs complete in ~30s; cold runs (image
-cache miss) in ~2-3 min.
+fresh checkout). Warm CI runs complete in roughly 1-2 min; cold
+runs (image cache miss) in ~2-3 min.
 
 `SKIP_BUILD=1` is also the right env var when chaining the harness
 into other automation — set it whenever you've already produced

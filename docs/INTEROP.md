@@ -29,7 +29,7 @@ container exercises a real Linux bridge inside a netns):
   via the harness at `crates/evpn-linux/tests/docker/`. Validates
   the kernel-side `IFLA_BRPORT_*_FLOOD` triplet on every PR so a
   netlink-attribute encoding regression can't slip past
-  PR-CI. Runs in ~30s warm.
+  PR-CI. Runs in roughly 1-2 min warm.
 
 The other 19 interop tests are gated locally — either because they
 need kernel features missing on the GitHub runner image (`vrf` for
