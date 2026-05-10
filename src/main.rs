@@ -1110,10 +1110,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let evpn_segment_handle = if ethernet_segments.is_empty() {
         None
     } else {
+        let bum_enforcement_tx = evpn_dataplane_handle
+            .as_ref()
+            .map(evpn_dataplane::EvpnDataplaneHandle::bum_enforcement_sender);
         evpn_segment::spawn(
             &evpn_instances,
             ethernet_segments,
             rib_tx.clone(),
+            bum_enforcement_tx,
             metrics.clone(),
             evpn_segment_shutdown.clone(),
         )

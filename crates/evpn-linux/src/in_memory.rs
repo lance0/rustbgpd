@@ -13,6 +13,7 @@
 //! This is the fake the `compute_diff` tests don't need (those are
 //! pure), but Phase 3 will need to drive a complete actor lifecycle.
 
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +23,7 @@ use tokio::sync::mpsc;
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::error::DataplaneError;
 use crate::snapshot::{
-    InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelSnapshot,
+    InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
 };
 
 /// Test fake of [`Dataplane`].
@@ -229,6 +230,11 @@ impl InMemoryHandle {
             .expect("poisoned")
             .kernel
             .insert_fdb(vni, entry);
+    }
+
+    /// Replace the fake link inventory wholesale.
+    pub fn set_links(&self, links: BTreeMap<String, KernelLinkInfo>) {
+        self.state.lock().expect("poisoned").kernel.set_links(links);
     }
 
     /// Set the probe outcome for one instance.

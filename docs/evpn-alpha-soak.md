@@ -112,10 +112,16 @@ visibility)
   routes, ESI Label extcomm (RFC 7432 §7.5) on Type 1 EAD-per-ES
   with `single_active = false` (Gate 8 default). M38 driver asserts
   both extcomms appear on the wire. No wire codec change.
+- [x] **Gate 8b enforcement intent foundation.** DF-election role
+  state now feeds the EVPN Linux dataplane supervisor as a portable
+  `(ESI, VNI)` BUM-enforcement table. The reconciler resolves bridge,
+  VXLAN ifindex, and CE-facing port identity and reports the desired
+  `allow` / `suppress` action in `DataplaneReport`, but still does
+  not mutate kernel filters.
 - [ ] **Gate 8b — multi-homing enforcement.** Six concrete
   remaining slices:
-  1. Dataplane split-horizon enforcement (feed `evpn_df_role` into
-     the Linux dataplane supervisor; suppress CE-facing BUM on
+  1. Dataplane split-horizon kernel primitive (consume the reported
+     BUM-enforcement plan and actually suppress CE-facing BUM on
      Non-DF for `(ESI, VNI)`, preserve remote FDB programming and
      local learning).
   2. Proper per-ESI label allocator (replaces the deterministic

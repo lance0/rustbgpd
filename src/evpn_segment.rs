@@ -47,9 +47,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustbgpd_evpn::{
-    DfAlgorithm, DfCandidate, DfElection, DfRole, EthernetSegment, EvpnInstance, EvpnInstanceId,
-    EvpnInstanceTable, LocalEadPerEsOriginator, LocalEadPerEviOriginator, LocalEsOriginator,
-    OriginationAction,
+    BumEnforcementTable, DfAlgorithm, DfCandidate, DfElection, DfRole, EthernetSegment,
+    EvpnInstance, EvpnInstanceId, EvpnInstanceTable, LocalEadPerEsOriginator,
+    LocalEadPerEviOriginator, LocalEsOriginator, OriginationAction,
 };
 use rustbgpd_rib::{EvpnRouteEvent, RibUpdate, route::EvpnRibRoute};
 use rustbgpd_telemetry::BgpMetrics;
@@ -57,7 +57,7 @@ use rustbgpd_wire::{
     AsPath, EthernetSegmentIdentifier, EvpnEadPerEs, EvpnEadPerEvi, EvpnEs, EvpnRoute,
     EvpnRouteKey, MplsLabel, Origin, PathAttribute,
 };
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -86,6 +86,7 @@ pub fn spawn(
     instances: &Arc<EvpnInstanceTable>,
     segments: Vec<EthernetSegment>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnSegmentHandle> {
@@ -96,6 +97,7 @@ pub fn spawn(
     let runtime = SegmentRuntime {
         instances: instances.clone(),
         rib_tx,
+        bum_enforcement_tx,
         metrics,
         shutdown: daemon_shutdown.clone(),
     };
@@ -109,6 +111,7 @@ pub fn spawn(
 struct SegmentRuntime {
     instances: Arc<EvpnInstanceTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    bum_enforcement_tx: Option<watch::Sender<Arc<BumEnforcementTable>>>,
     metrics: BgpMetrics,
     shutdown: CancellationToken,
 }
@@ -204,6 +207,7 @@ async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
 
     // Initial origination + election.
     initial_startup(&runtime, &mut by_esi).await;
+    publish_bum_enforcement_snapshot(&runtime, &by_esi);
 
     // Periodic re-election timer — backstop in case we're in poll-only mode
     // (broadcast subscription failed) or events get dropped under load.
@@ -215,6 +219,7 @@ async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
             biased;
             () = runtime.shutdown.cancelled() => {
                 drain(&runtime, &mut by_esi).await;
+                publish_empty_bum_enforcement_snapshot(&runtime);
                 return;
             }
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
@@ -315,6 +320,7 @@ async fn handle_evpn_event(
         return;
     };
     run_election_for(runtime, state).await;
+    publish_bum_enforcement_snapshot(runtime, by_esi);
 }
 
 async fn reelection_sweep(
@@ -331,6 +337,7 @@ async fn reelection_sweep(
     for state in by_esi.values_mut() {
         run_election_for_routes(runtime, state, &routes).await;
     }
+    publish_bum_enforcement_snapshot(runtime, by_esi);
 }
 
 /// Re-gather candidates from the RIB and re-run election for one
@@ -412,6 +419,62 @@ async fn run_election_with_candidates(
             "EVPN segment: DF role updated"
         );
     }
+}
+
+fn publish_bum_enforcement_snapshot(
+    runtime: &SegmentRuntime,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+) {
+    let Some(tx) = &runtime.bum_enforcement_tx else {
+        return;
+    };
+    let table = Arc::new(build_bum_enforcement_table(&runtime.instances, by_esi));
+    debug!(
+        rows = table.len(),
+        "EVPN segment: published BUM enforcement intent"
+    );
+    tx.send_replace(table);
+}
+
+fn publish_empty_bum_enforcement_snapshot(runtime: &SegmentRuntime) {
+    if let Some(tx) = &runtime.bum_enforcement_tx {
+        tx.send_replace(Arc::new(BumEnforcementTable::new()));
+    }
+}
+
+fn build_bum_enforcement_table(
+    instances: &EvpnInstanceTable,
+    by_esi: &HashMap<EthernetSegmentIdentifier, SegmentState>,
+) -> BumEnforcementTable {
+    build_bum_enforcement_table_from_roles(
+        instances,
+        by_esi.iter().flat_map(|(&esi, state)| {
+            state
+                .last_roles
+                .iter()
+                .map(move |(&vni, &role)| (esi, vni, role))
+        }),
+    )
+}
+
+fn build_bum_enforcement_table_from_roles<I>(
+    instances: &EvpnInstanceTable,
+    roles: I,
+) -> BumEnforcementTable
+where
+    I: IntoIterator<Item = (EthernetSegmentIdentifier, EvpnInstanceId, DfRole)>,
+{
+    let mut table = BumEnforcementTable::new();
+    for (esi, vni, role) in roles {
+        let Some(inst) = instances.get(vni) else {
+            continue;
+        };
+        let Some(bridge) = inst.bridge.as_ref() else {
+            continue;
+        };
+        table.insert(esi, vni, role, bridge.clone());
+    }
+    table
 }
 
 /// Pull all current Type 4 ES best-paths from the RIB and project
@@ -982,9 +1045,42 @@ mod tests {
             &instances,
             Vec::new(),
             rib_tx,
+            None,
             metrics,
             CancellationToken::new(),
         );
         assert!(h.is_none());
+    }
+
+    #[test]
+    fn bum_enforcement_table_maps_roles_to_bridges() {
+        let mut instances = EvpnInstanceTable::new();
+        instances.insert(instance(100)).unwrap();
+        instances.insert(instance(200)).unwrap();
+        let id = esi(7);
+
+        let table = build_bum_enforcement_table_from_roles(
+            &instances,
+            [(id, vni(100), DfRole::Df), (id, vni(200), DfRole::NonDf)],
+        );
+
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.get(id, vni(100)).unwrap().bridge, "br100");
+        assert_eq!(
+            table.get(id, vni(200)).unwrap().action,
+            rustbgpd_evpn::BumForwardingAction::Suppress
+        );
+    }
+
+    #[test]
+    fn bum_enforcement_table_skips_unbound_instances() {
+        let mut instances = EvpnInstanceTable::new();
+        let mut inst = instance(100);
+        inst.bridge = None;
+        instances.insert(inst).unwrap();
+
+        let table =
+            build_bum_enforcement_table_from_roles(&instances, [(esi(7), vni(100), DfRole::NonDf)]);
+        assert!(table.is_empty());
     }
 }

@@ -421,6 +421,7 @@ mod tests {
             }],
             applied: vec![],
             failed: vec![],
+            bum_enforcement: vec![],
         }
     }
 

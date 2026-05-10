@@ -10,17 +10,20 @@
 //!
 //! then spawns the actor and drives the scenario.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_evpn::{
-    DataplaneIntent, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress, RemoteMacEntry,
-    RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
+    BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
+    EthernetSegmentIdentifier, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress,
+    RemoteMacEntry, RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
 };
+use rustbgpd_evpn_linux::snapshot::KernelVxlanInfo;
 use rustbgpd_evpn_linux::{
     DataplaneOp, InMemoryDataplane, InMemoryHandle, InstanceProbe, KernelEvent, KernelFdbEntry,
-    KernelFdbFlags, ReconcileActor, ReconcileActorConfig,
+    KernelFdbFlags, KernelLinkInfo, ReconcileActor, ReconcileActorConfig,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -141,6 +144,21 @@ fn intent(
         generation,
         instances: Arc::new(instances),
         remote_macs: Arc::new(macs),
+        bum_enforcement: Arc::new(BumEnforcementTable::new()),
+    })
+}
+
+fn intent_with_bum_enforcement(
+    generation: u64,
+    instances: EvpnInstanceTable,
+    macs: RemoteMacTable,
+    bum_enforcement: BumEnforcementTable,
+) -> Arc<DataplaneIntent> {
+    Arc::new(DataplaneIntent {
+        generation,
+        instances: Arc::new(instances),
+        remote_macs: Arc::new(macs),
+        bum_enforcement: Arc::new(bum_enforcement),
     })
 }
 
@@ -167,6 +185,56 @@ async fn initial_reconcile_emits_apply_for_desired_mac() {
     assert_eq!(last.applied.len(), 1);
     assert!(last.failed.is_empty());
     assert!(h.handle.kernel_has_fdb(vni(100), mac(1)));
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconcile_report_includes_observable_bum_enforcement_plan() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![10],
+        },
+    );
+    h.handle.set_links(links);
+
+    let mut bum = BumEnforcementTable::new();
+    let esi = EthernetSegmentIdentifier::new([1; 10]);
+    bum.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            inst,
+            RemoteMacTable::new(),
+            bum,
+        ))
+        .unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(last.bum_enforcement.len(), 1);
+    assert_eq!(last.bum_enforcement[0].esi, esi);
+    assert_eq!(last.bum_enforcement[0].role, DfRole::NonDf);
+    assert_eq!(last.bum_enforcement[0].vxlan_ifindex, Some(200));
+    assert_eq!(last.bum_enforcement[0].ce_port_ifindexes, vec![10]);
+    assert_eq!(
+        last.bum_enforcement[0].readiness,
+        BumEnforcementReadiness::Ready
+    );
     h.shutdown().await;
 }
 

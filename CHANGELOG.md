@@ -11,6 +11,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 8b enforcement intent foundation — observable BUM
+  plan, no kernel mutation yet.** The daemon now feeds DF-election
+  role state into the EVPN Linux dataplane supervisor as a portable
+  `BumEnforcementTable` keyed by `(ESI, VNI)`. The reconciler
+  resolves each row against current link inventory and emits
+  `DataplaneReport.bum_enforcement` rows with bridge name, VXLAN
+  ifindex, CE-facing port ifindexes, DF role, and desired action
+  (`allow` for DF, `suppress` for Non-DF). This tees up Gate 8b's
+  actual split-horizon kernel primitive while staying observable-only
+  and preserving all existing remote-FDB behavior.
 - **EVPN Gate 8b prep — ES-Import RT + ESI Label extcomms on
   Type 1/4 origination.** Closes the two control-plane gaps ADR-0057
   flagged from Gate 8:

@@ -21,11 +21,13 @@
 //! - ADR-0054 §2 (snapshot/watch input)
 //! - ADR-0054 §8 (failures surface as status, not domain mutation)
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::mac::{MacAddress, RemoteMacTable};
-use crate::{EvpnInstanceId, EvpnInstanceTable};
+use crate::{DfRole, EvpnInstanceId, EvpnInstanceTable};
+use rustbgpd_wire::EthernetSegmentIdentifier;
 
 /// Complete desired-state snapshot fed to the Linux dataplane.
 ///
@@ -34,9 +36,9 @@ use crate::{EvpnInstanceId, EvpnInstanceTable};
 /// so the daemon can correlate "I sent gen N" with "Linux applied/failed
 /// gen N" without timestamp guesswork.
 ///
-/// `instances` and `remote_macs` are `Arc` so the daemon can re-publish
-/// a near-identical snapshot (e.g., only the [`RemoteMacTable`] changed)
-/// without cloning the full instance table.
+/// `instances`, `remote_macs`, and `bum_enforcement` are `Arc` so the
+/// daemon can re-publish a near-identical snapshot (e.g., only the
+/// [`RemoteMacTable`] changed) without cloning the full instance table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataplaneIntent {
     /// Daemon-side monotonic counter. Strictly increases.
@@ -45,6 +47,12 @@ pub struct DataplaneIntent {
     pub instances: Arc<EvpnInstanceTable>,
     /// Desired remote-MAC programming for the kernel FDB.
     pub remote_macs: Arc<RemoteMacTable>,
+    /// Desired BUM forwarding role per `(ESI, VNI)`. Gate 8b's first
+    /// dataplane slice consumes this as an observable enforcement
+    /// intent only: the Linux actor resolves bridge / VXLAN / CE-port
+    /// identity and reports the plan, but does not mutate kernel
+    /// filters until the concrete primitive is selected.
+    pub bum_enforcement: Arc<BumEnforcementTable>,
 }
 
 impl DataplaneIntent {
@@ -57,8 +65,165 @@ impl DataplaneIntent {
             generation: 0,
             instances: Arc::new(EvpnInstanceTable::new()),
             remote_macs: Arc::new(RemoteMacTable::new()),
+            bum_enforcement: Arc::new(BumEnforcementTable::new()),
         }
     }
+}
+
+/// Desired forwarding action derived from the local DF role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BumForwardingAction {
+    /// Local PE is DF for the segment/VNI and may forward BUM toward
+    /// the CE-facing side.
+    Allow,
+    /// Local PE is Non-DF for the segment/VNI and must suppress BUM
+    /// toward the CE-facing side once Gate 8b kernel enforcement lands.
+    Suppress,
+}
+
+impl BumForwardingAction {
+    /// Derive the dataplane action from the DF role.
+    #[must_use]
+    pub const fn from_df_role(role: DfRole) -> Self {
+        match role {
+            DfRole::Df => Self::Allow,
+            DfRole::NonDf => Self::Suppress,
+        }
+    }
+
+    /// Lowercase string for logs / future CLI output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Suppress => "suppress",
+        }
+    }
+}
+
+/// Stable key for one BUM-enforcement row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BumEnforcementKey {
+    /// Ethernet Segment the role applies to.
+    pub esi: EthernetSegmentIdentifier,
+    /// Member VNI the role applies to.
+    pub vni: EvpnInstanceId,
+}
+
+/// One desired BUM-enforcement row from the daemon to the dataplane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BumEnforcementEntry {
+    /// Ethernet Segment the role applies to.
+    pub esi: EthernetSegmentIdentifier,
+    /// Member VNI the role applies to.
+    pub vni: EvpnInstanceId,
+    /// Local PE's DF role for `(esi, vni)`.
+    pub role: DfRole,
+    /// Desired forwarding action derived from [`Self::role`].
+    pub action: BumForwardingAction,
+    /// Operator-configured bridge name for the VNI. The Linux
+    /// dataplane resolves this into VXLAN + CE-facing port identity
+    /// at reconcile time.
+    pub bridge: String,
+}
+
+/// Complete desired BUM-enforcement table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BumEnforcementTable {
+    entries: BTreeMap<BumEnforcementKey, BumEnforcementEntry>,
+}
+
+impl BumEnforcementTable {
+    /// Empty table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert or replace one `(ESI, VNI)` row.
+    pub fn insert(
+        &mut self,
+        esi: EthernetSegmentIdentifier,
+        vni: EvpnInstanceId,
+        role: DfRole,
+        bridge: String,
+    ) {
+        let key = BumEnforcementKey { esi, vni };
+        self.entries.insert(
+            key,
+            BumEnforcementEntry {
+                esi,
+                vni,
+                role,
+                action: BumForwardingAction::from_df_role(role),
+                bridge,
+            },
+        );
+    }
+
+    /// Number of rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// `true` when there are no rows.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Look up one row.
+    #[must_use]
+    pub fn get(
+        &self,
+        esi: EthernetSegmentIdentifier,
+        vni: EvpnInstanceId,
+    ) -> Option<&BumEnforcementEntry> {
+        self.entries.get(&BumEnforcementKey { esi, vni })
+    }
+
+    /// Iterate rows in deterministic `(ESI, VNI)` order.
+    pub fn iter(&self) -> impl Iterator<Item = &BumEnforcementEntry> {
+        self.entries.values()
+    }
+}
+
+/// Readiness of one BUM-enforcement row after the Linux dataplane
+/// resolves it against current link inventory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BumEnforcementReadiness {
+    /// Bridge, VXLAN port, and CE-facing port identity are known.
+    Ready,
+    /// The row cannot be enforced yet; reason is operator-facing.
+    NotReady {
+        /// Human-readable reason.
+        reason: String,
+    },
+}
+
+/// Observable BUM-enforcement plan/status row emitted in
+/// [`DataplaneReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BumEnforcementStatus {
+    /// Ethernet Segment the row applies to.
+    pub esi: EthernetSegmentIdentifier,
+    /// Member VNI the row applies to.
+    pub vni: EvpnInstanceId,
+    /// Local PE's DF role.
+    pub role: DfRole,
+    /// Desired forwarding action.
+    pub action: BumForwardingAction,
+    /// Operator-configured bridge name.
+    pub bridge: String,
+    /// Resolved VXLAN ifindex when the bridge has exactly one VXLAN
+    /// port; absent when the row is not ready.
+    pub vxlan_ifindex: Option<u32>,
+    /// Resolved CE-facing bridge-port ifindexes. Empty until the
+    /// Linux inventory can identify at least one non-VXLAN port.
+    pub ce_port_ifindexes: Vec<u32>,
+    /// Whether the row has enough identity to be enforced.
+    pub readiness: BumEnforcementReadiness,
 }
 
 /// Result of a single reconcile pass.
@@ -83,6 +248,10 @@ pub struct DataplaneReport {
     pub applied: Vec<AppliedOp>,
     /// Operations that failed and are queued for retry.
     pub failed: Vec<FailedOp>,
+    /// Observable Gate 8b BUM-enforcement plan. The first Gate 8b
+    /// slice reports what would be enforced, but intentionally does
+    /// not mutate kernel filters.
+    pub bum_enforcement: Vec<BumEnforcementStatus>,
 }
 
 /// Per-instance status emitted alongside every report.
@@ -179,6 +348,7 @@ mod tests {
         assert_eq!(intent.generation, 0);
         assert!(intent.instances.is_empty());
         assert!(intent.remote_macs.is_empty());
+        assert!(intent.bum_enforcement.is_empty());
     }
 
     #[test]
@@ -240,5 +410,30 @@ mod tests {
         };
         assert_eq!(next.generation, 1);
         assert_eq!(prev.generation, 0);
+    }
+
+    #[test]
+    fn bum_enforcement_table_derives_action_from_role() {
+        let esi = EthernetSegmentIdentifier::new([1; 10]);
+        let vni = EvpnInstanceId::new(100).unwrap();
+        let mut table = BumEnforcementTable::new();
+        table.insert(esi, vni, DfRole::NonDf, "br100".to_string());
+
+        let row = table.get(esi, vni).unwrap();
+        assert_eq!(row.role, DfRole::NonDf);
+        assert_eq!(row.action, BumForwardingAction::Suppress);
+        assert_eq!(row.bridge, "br100");
+    }
+
+    #[test]
+    fn df_role_maps_to_bum_action() {
+        assert_eq!(
+            BumForwardingAction::from_df_role(DfRole::Df),
+            BumForwardingAction::Allow
+        );
+        assert_eq!(
+            BumForwardingAction::from_df_role(DfRole::NonDf),
+            BumForwardingAction::Suppress
+        );
     }
 }

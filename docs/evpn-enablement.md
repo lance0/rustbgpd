@@ -470,17 +470,34 @@ so this was an origination-only change with no wire bump:
 - **Type 1 EAD-per-EVI**: unchanged (carries no ESI Label per
   RFC 7432 §14).
 
-### Gate 8b — Multi-homing enforcement (deferred)
+### Gate 8b — Multi-homing enforcement
 
-Status: scoped, not started · Estimate: ~3-4 weeks · Blockers:
-Gate 8 + Gate 8b prep (cleared).
+Status: intent foundation landed, kernel enforcement deferred ·
+Estimate: ~3-4 weeks · Blockers: Gate 8 + Gate 8b prep (cleared).
 
-Adds the forwarding half. Concrete remaining slices:
+The first enforcement-foundation slice is in place:
 
-1. **Dataplane split-horizon enforcement** — feed `evpn_df_role`
-   into the Linux dataplane supervisor; on Non-DF for a
-   `(ESI, VNI)`, suppress / block CE-facing BUM behavior while
-   preserving remote FDB programming and local learning.
+1. **Observable BUM-enforcement intent** — `src/evpn_segment.rs`
+   publishes a complete `(ESI, VNI) -> DfRole` table into the EVPN
+   dataplane supervisor. `crates/evpn-linux` resolves each row
+   against the current link inventory and reports bridge, VXLAN
+   ifindex, CE-facing port ifindexes, and desired action
+   (`allow` for DF, `suppress` for Non-DF) through
+   `DataplaneReport.bum_enforcement`. No kernel filter mutation yet.
+
+Concrete remaining slices:
+
+1. **Dataplane split-horizon kernel primitive** — consume the
+   reported BUM-enforcement plan; on Non-DF for a `(ESI, VNI)`,
+   suppress / block CE-facing BUM behavior while preserving remote
+   FDB programming and local learning.
+   - Candidate primitives to spike before coding: `tc` filter on
+     CE-facing bridge ports, nftables bridge-family rules, bridge
+     VLAN filtering for VLAN-aware follow-up, or bridge MDB behavior
+     if it can cover the relevant multicast-only subset. Do not
+     wire any of these directly into the reconciler until a netns
+     test proves the primitive blocks CE-facing BUM without
+     affecting unicast FDB programming.
 2. **Proper ESI label allocator** — replace the deterministic
    ESI-byte-derived synthesizer with a real per-ESI label space
    that survives operator-level configuration churn.
