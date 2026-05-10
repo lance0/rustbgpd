@@ -11,18 +11,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **EVPN Gate 8b BUM-suppression op surface (`SetBumPortFlags`).**
-  New variant on `DataplaneOp` / `DataplaneOpKind` carrying
-  `(ifindex, BumPortFlags)` so the reconciler can drive
-  per-CE-port flag state through the same trait the FDB ops
-  already use. `InMemoryDataplane` records each call by ifindex
-  for assertion (`InMemoryHandle::bum_port_flags()`); the real
-  `LinuxDataplane` returns `InvalidArgument` until the netlink
-  wiring slice lands (`RTM_SETLINK` with `IFLA_PROTINFO` carrying
-  the `IFLA_BRPORT_*_FLOOD` triplet). The retry-state machinery
-  treats BUM ops as having a sentinel `(VNI=0xFFFFFF, MAC=ifindex
-  encoded)` fingerprint so two ifindexes never collide and no
-  real EVPN instance shares the key space. +1 test.
+- **EVPN Gate 8b BUM-suppression op surface + Linux netlink
+  wiring (`SetBumPortFlags`).** New variant on `DataplaneOp` /
+  `DataplaneOpKind` carrying `(ifindex, BumPortFlags)` so the
+  reconciler can drive per-CE-port flag state through the same
+  trait the FDB ops already use.
+  - `InMemoryDataplane` records each call by ifindex for
+    assertion (`InMemoryHandle::bum_port_flags()`).
+  - `LinuxDataplane::apply` now actually fires the proven
+    primitive — issues an `RTM_NEWLINK` carrying `IFLA_LINKINFO`
+    with `IFLA_INFO_PORT_KIND = "bridge"` + `IFLA_INFO_PORT_DATA`
+    holding the `IFLA_BRPORT_UNICAST_FLOOD` /
+    `IFLA_BRPORT_MCAST_FLOOD` / `IFLA_BRPORT_BCAST_FLOOD` triplet
+    via `rtnetlink::LinkHandle::set_port`. New
+    `crates/evpn-linux/src/linux/bum_filter.rs` (~120 lines) plus
+    4 error-classification unit tests
+    (`EOPNOTSUPP → KernelTooOld`, `EPERM → PermissionDenied`,
+    `ENODEV → LinkNotFound`, default → `Other`).
+  - New gated integration test
+    `linux_dataplane_set_bum_port_flags_round_trip` re-execs into
+    a netns, fires `SetBumPortFlags` via the real `LinuxDataplane`,
+    and verifies via `bridge -d link show` that `flood off /
+    mcast_flood off / bcast_flood off` land on the kernel side.
+    Requires `EVPN_LINUX_NETNS=1` + `CAP_NET_ADMIN` + Linux >= 4.18.
+  - The retry-state machinery treats BUM ops as having a sentinel
+    `(VNI=0xFFFFFF, MAC=ifindex-encoded)` fingerprint so two
+    ifindexes never collide and no real EVPN instance shares the
+    key space. +5 tests.
 - **EVPN Gate 8b BUM-suppression kernel primitive proven (spike,
   no kernel mutation yet).** Privileged netns spike at
   `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`

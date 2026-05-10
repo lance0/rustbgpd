@@ -130,14 +130,26 @@ visibility)
   succeed regardless of mode. Pure-logic mapping from
   `BumEnforcementStatus` → `(ifindex, BumPortFlags)` lives at
   `crates/evpn-linux/src/bum_filter.rs` with 9 unit tests.
-- [ ] **Gate 8b — multi-homing enforcement.** Six concrete
+- [x] **Gate 8b BUM-suppression rtnetlink wiring landed (apply
+  surface).** `LinuxDataplane::apply(&DataplaneOp::
+  SetBumPortFlags { ifindex, flags })` now fires the proven
+  `RTM_NEWLINK` + `IFLA_BRPORT_*_FLOOD` triplet. Privileged
+  round-trip test `linux_dataplane_set_bum_port_flags_round_trip`
+  verifies via `bridge -d link show` that the flags land. What
+  remains is the **emission half**: the reconciler does not yet
+  *produce* `SetBumPortFlags` ops from `BumEnforcementStatus` →
+  `BumPortFlagPlan` (the pure-logic mapping is already in
+  `crates/evpn-linux/src/bum_filter.rs`). Wiring that emission
+  into the reconcile loop behind a config flag is the next slice.
+- [ ] **Gate 8b — multi-homing enforcement.** Five concrete
   remaining slices:
-  1. Wire the proven BUM-suppression primitive into the reconciler
-     (rtnetlink `RTM_SETLINK` with bridge-port `IFLA_PROTINFO`
-     containing the `IFLA_BRPORT_*_FLOOD` triplet). The
-     pure-logic plan + diff is already there; this slice adds
-     the kernel-mutation half behind a config flag, with the
-     existing privileged netns gate guarding the integration test.
+  1. Wire reconciler-side emission of `SetBumPortFlags` ops:
+     compute `BumPortFlagPlan` from `BumEnforcementStatus` rows
+     each pass, diff against prior plan, push only changed entries
+     as `DataplaneOp::SetBumPortFlags`. Behind a config flag
+     (`bum_enforcement_apply: bool` defaulting to false) so
+     operators opt in. With the apply path proven by the netns
+     round-trip, this slice is small and pure-Rust.
   2. Proper per-ESI label allocator (replaces the deterministic
      ESI-byte-derived synthesizer used by Gate 8b prep).
   3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).

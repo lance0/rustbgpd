@@ -231,17 +231,11 @@ pub(crate) async fn apply_op(
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, mac } => (*vni, *mac),
         DataplaneOp::SetBumPortFlags { .. } => {
-            // Gate 8b BUM-suppression primitive — proven by the
-            // privileged netns spike but not yet wired through
-            // rtnetlink. Surfaces as a permanent-class error so the
-            // reconciler reports it cleanly without burning the
-            // backoff schedule. The next slice replaces this with a
-            // real `RTM_SETLINK` carrying `IFLA_PROTINFO` + the
-            // `IFLA_BRPORT_*_FLOOD` triplet.
-            return Err(DataplaneError::InvalidArgument(
-                "SetBumPortFlags not yet wired in LinuxDataplane (Gate 8b kernel slice)"
-                    .to_string(),
-            ));
+            // BUM port-flag ops are routed through `linux::bum_filter`
+            // by `LinuxDataplane::apply` and never reach this FDB
+            // helper. The match arm exists so the compiler can prove
+            // exhaustiveness.
+            unreachable!("SetBumPortFlags handled by linux::bum_filter, not the FDB apply helper")
         }
     };
 
