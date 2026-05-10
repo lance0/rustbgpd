@@ -54,13 +54,15 @@
 //! - [`LocalMacIpOriginator`] — MAC+IP Type 2 (Gate 7b+2 slice 2),
 //!   keyed on `(MAC, IP)` with independent sequence chains per
 //!   RFC 9135 §4.4 coexistence.
+//! - [`LocalEsOriginator`], [`LocalEadPerEsOriginator`],
+//!   [`LocalEadPerEviOriginator`] — Type 4 ES and Type 1 EAD
+//!   origination state machines for Gate 8 multi-homing.
 //!
-//! Type 1 (EAD), Type 4 (ES), Type 5 (IP-Prefix) origination are
-//! tracked in `docs/evpn-enablement.md` and remain follow-up
-//! work. Type 3 IMET origination is implemented in the daemon
-//! binary (`src/evpn_imet.rs`) rather than here because it
-//! depends on the wire encoder; the domain shape is captured by
-//! [`EvpnInstance`] alone.
+//! Type 3 IMET origination is implemented in the daemon binary
+//! (`src/evpn_imet.rs`) rather than here because it depends on the
+//! wire encoder; the domain shape is captured by [`EvpnInstance`]
+//! alone. Type 5 (IP-Prefix) origination remains a follow-up tracked
+//! in `docs/evpn-enablement.md`.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
@@ -78,8 +80,9 @@ pub mod route_target;
 pub mod segment;
 
 pub use dataplane::{
-    AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, FailedOp,
-    InstanceDataplaneStatus, InstanceState,
+    AppliedOp, BumEnforcementEntry, BumEnforcementKey, BumEnforcementReadiness,
+    BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,
+    DataplaneOpKind, DataplaneReport, FailedOp, InstanceDataplaneStatus, InstanceState,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use instance::{
@@ -100,4 +103,4 @@ pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
 // (including `crates/evpn-linux` and the daemon's projection layer)
 // can name the type without taking a direct `rustbgpd-wire` dep just
 // to construct an `EvpnInstance`.
-pub use rustbgpd_wire::RouteDistinguisher;
+pub use rustbgpd_wire::{EthernetSegmentIdentifier, RouteDistinguisher};

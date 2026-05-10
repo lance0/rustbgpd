@@ -38,6 +38,10 @@ pub struct KernelLinkInfo {
     /// exactly one is found. `None` indicates a missing or ambiguous
     /// VXLAN port and reports the instance `NotReady`.
     pub vxlan: Option<KernelVxlanInfo>,
+    /// Non-VXLAN bridge-member ifindexes observed under this bridge.
+    /// These are the CE-facing candidates Gate 8b will target for
+    /// BUM suppression once the kernel primitive is selected.
+    pub ce_port_ifindexes: Vec<u32>,
 }
 
 /// Properties of a VXLAN port that the probe verifies before treating

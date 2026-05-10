@@ -50,6 +50,7 @@ use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
 use crate::backoff::RetrySchedule;
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::diff::{Plan, compute_diff};
+use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
 use crate::snapshot::{InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedSet};
 
@@ -305,7 +306,10 @@ impl<D: Dataplane> ReconcileActor<D> {
                 // retry.
                 tracing::warn!(error = %e, "kernel snapshot dump failed");
                 let status = build_instance_status(&intent.instances, &probes);
-                self.emit_report(status, vec![], vec![]).await;
+                let bum_enforcement =
+                    build_bum_enforcement_status(&intent.bum_enforcement, &KernelSnapshot::new());
+                self.emit_report(status, vec![], vec![], bum_enforcement)
+                    .await;
                 return;
             }
         };
@@ -320,7 +324,9 @@ impl<D: Dataplane> ReconcileActor<D> {
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
 
         let status = build_instance_status(&intent.instances, &probes);
-        self.emit_report(status, applied, failed).await;
+        let bum_enforcement = build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
+        self.emit_report(status, applied, failed, bum_enforcement)
+            .await;
     }
 
     /// Apply each op in the plan, recording successes in `owned` and
@@ -472,6 +478,7 @@ impl<D: Dataplane> ReconcileActor<D> {
         instance_status: Vec<InstanceDataplaneStatus>,
         applied: Vec<AppliedOp>,
         failed: Vec<FailedOp>,
+        bum_enforcement: Vec<rustbgpd_evpn::BumEnforcementStatus>,
     ) {
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
@@ -479,6 +486,7 @@ impl<D: Dataplane> ReconcileActor<D> {
             instance_status,
             applied,
             failed,
+            bum_enforcement,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");

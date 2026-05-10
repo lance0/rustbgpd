@@ -175,6 +175,7 @@ mod tests {
             mac: None,
             vlan_filtering: false,
             vxlan_attach_count: 1,
+            ce_port_ifindexes: Vec::new(),
             vxlan: Some(KernelVxlanInfo {
                 ifindex: 200,
                 vni,

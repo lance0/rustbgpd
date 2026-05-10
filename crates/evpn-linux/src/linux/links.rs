@@ -54,6 +54,9 @@ pub(crate) struct BridgeLink {
     /// missing topology, `>=2` means ambiguous and reports
     /// `NotReady`.
     pub vxlan_attach_count: u32,
+    /// Non-VXLAN bridge-member ifindexes. These are CE-facing
+    /// candidates for Gate 8b BUM enforcement.
+    pub ce_port_ifindexes: Vec<u32>,
 }
 
 /// Per-VXLAN port slice, before being attached to a bridge.
@@ -131,6 +134,7 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
                             vlan_filtering,
                             vxlan: None,
                             vxlan_attach_count: 0,
+                            ce_port_ifindexes: Vec::new(),
                         },
                     );
                     bridge_ifindex_to_name.insert(ifindex, name);
@@ -193,6 +197,13 @@ pub(crate) async fn dump_links(handle: &Handle) -> Result<LinkCache, DataplaneEr
             continue;
         };
         bridge_port_to_vni.insert(port_ifindex, vxlan.vni);
+        if let Some(bridge) = bridges.get_mut(bridge_name) {
+            bridge.ce_port_ifindexes.push(port_ifindex);
+        }
+    }
+    for bridge in bridges.values_mut() {
+        bridge.ce_port_ifindexes.sort_unstable();
+        bridge.ce_port_ifindexes.dedup();
     }
 
     Ok(LinkCache {

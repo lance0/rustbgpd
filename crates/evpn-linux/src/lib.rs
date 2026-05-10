@@ -29,12 +29,18 @@
 //!   probes)`. The heart of the crate; backed by 11 explicit case
 //!   tests in `src/diff.rs`.
 //! - [`DataplaneOp`] — what the actor asks the dataplane to apply.
+//! - [`enforcement::build_bum_enforcement_status`] — Gate 8b
+//!   observable split-horizon plan derivation. Resolves
+//!   `(ESI, VNI) -> DF role` intent into bridge / VXLAN /
+//!   CE-facing-port status rows, without mutating kernel filters.
 //!
 //! ## Out of scope (Gate 7b)
 //!
 //! - Creating or deleting bridge / VXLAN netdevs (ADR-0054 §4).
 //! - VLAN-aware bridges (ADR-0054 §4 — needs schema extension).
 //! - L3VNI / IRB / Type 5 dataplane.
+//! - Applying split-horizon / BUM suppression filters. Gate 8b's
+//!   first slice reports the desired enforcement plan only.
 //! - Local-MAC origination policy knobs. This crate emits *observations*
 //!   via [`rustbgpd_evpn::LocalMacObservation`]; the daemon/domain
 //!   originator consumes them for MAC-only Type 2 mobility. Sticky/static
@@ -56,6 +62,7 @@
 pub mod backoff;
 pub mod dataplane;
 pub mod diff;
+pub mod enforcement;
 pub mod error;
 pub mod in_memory;
 pub mod reconcile;
@@ -70,6 +77,7 @@ pub use linux::LinuxDataplane;
 pub use backoff::{BACKOFF_CAP, BACKOFF_FACTOR, BACKOFF_INITIAL, RetrySchedule};
 pub use dataplane::{Dataplane, DataplaneOp, KernelEvent};
 pub use diff::{Plan, compute_diff};
+pub use enforcement::build_bum_enforcement_status;
 pub use error::{DataplaneError, FailureClass};
 pub use in_memory::{InMemoryDataplane, InMemoryHandle};
 pub use reconcile::{ReconcileActor, ReconcileActorConfig};

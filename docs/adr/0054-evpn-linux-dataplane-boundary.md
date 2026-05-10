@@ -83,6 +83,11 @@ pub struct DataplaneIntent {
     pub generation: u64,
     pub instances: Arc<EvpnInstanceTable>,
     pub remote_macs: Arc<RemoteMacTable>,
+    // Added by the Gate 8b enforcement-intent foundation:
+    // desired BUM role/action rows keyed by (ESI, VNI). The Linux
+    // crate reports the resolved plan before any kernel filter
+    // primitive is selected.
+    pub bum_enforcement: Arc<BumEnforcementTable>,
 }
 
 pub struct RemoteMacTable {
@@ -320,6 +325,8 @@ pub struct DataplaneReport {
     pub instance_status: Vec<InstanceDataplaneStatus>,
     pub applied: Vec<AppliedOp>,
     pub failed: Vec<FailedOp>,
+    // Gate 8b observable split-horizon plan; no kernel mutation yet.
+    pub bum_enforcement: Vec<BumEnforcementStatus>,
 }
 ```
 

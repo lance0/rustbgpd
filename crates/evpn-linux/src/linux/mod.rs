@@ -304,6 +304,7 @@ impl Dataplane for LinuxDataplane {
                 bridge_name: name.clone(),
                 vlan_filtering: link.vlan_filtering,
                 vxlan,
+                ce_port_ifindexes: link.ce_port_ifindexes.clone(),
             });
         }
         Ok(snap)

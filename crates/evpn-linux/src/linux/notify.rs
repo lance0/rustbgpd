@@ -357,6 +357,7 @@ mod tests {
                     learning_disabled: Some(true),
                 }),
                 vxlan_attach_count: 1,
+                ce_port_ifindexes: vec![port_ifindex],
             },
         );
         let mut vxlan_ifindex_to_vni = HashMap::new();

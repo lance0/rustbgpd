@@ -47,8 +47,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustbgpd_evpn::{
-    DataplaneIntent, DataplaneReport, EvpnInstanceTable, LocalMacObservation, ProjectedEvpnRoute,
-    RemoteMacTable, project_evpn_routes,
+    BumEnforcementTable, DataplaneIntent, DataplaneReport, EvpnInstanceTable, LocalMacObservation,
+    ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -108,6 +108,11 @@ pub struct EvpnDataplaneHandle {
     /// every report (including no-op passes), so a fresh subscriber
     /// converges on the next reconcile pass without missed state.
     pub(crate) report_tx: broadcast::Sender<DataplaneReport>,
+    /// Gate 8b enforcement-intent input. The segment orchestrator
+    /// publishes the latest `(ESI, VNI) -> DF role` table here; the
+    /// supervisor folds it into the same [`DataplaneIntent`] watch
+    /// stream as remote-MAC programming.
+    pub(crate) bum_enforcement_tx: watch::Sender<Arc<BumEnforcementTable>>,
 }
 
 impl EvpnDataplaneHandle {
@@ -118,6 +123,14 @@ impl EvpnDataplaneHandle {
     #[must_use]
     pub fn subscribe_reports(&self) -> broadcast::Receiver<DataplaneReport> {
         self.report_tx.subscribe()
+    }
+
+    /// Clone the Gate 8b enforcement publisher. Consumers publish a
+    /// complete table snapshot; intermediates may be coalesced by the
+    /// watch channel.
+    #[must_use]
+    pub fn bum_enforcement_sender(&self) -> watch::Sender<Arc<BumEnforcementTable>> {
+        self.bum_enforcement_tx.clone()
     }
 
     /// Cancel the shutdown token, which causes the reconcile actor to
@@ -233,6 +246,8 @@ where
     D: Dataplane + Send + Sync + 'static,
 {
     let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+    let (bum_enforcement_tx, bum_enforcement_rx) =
+        watch::channel(Arc::new(BumEnforcementTable::new()));
 
     // Reconcile actor sends reports through a bounded mpsc; a
     // forwarder task drains it and republishes through a broadcast
@@ -281,6 +296,7 @@ where
         supervisor_instances,
         rib_tx,
         intent_tx,
+        bum_enforcement_rx,
         supervisor_shutdown,
     ));
 
@@ -299,30 +315,34 @@ where
         actor_join,
         local_mac_rx: None,
         report_tx: report_broadcast_tx,
+        bum_enforcement_tx,
     }
 }
 
 /// Periodic supervisor loop: query the RIB, project, publish.
 ///
-/// Generation only advances when the projected `RemoteMacTable`
-/// actually differs from the previously-published one. The
+/// Generation only advances when the projected `RemoteMacTable` or
+/// BUM-enforcement table actually differs from the previously-published
+/// one. The
 /// reconcile actor uses the generation as the trigger to clear its
 /// permanent-failure suppression set (so an EPERM on op N stops
 /// retrying); incrementing on every poll regardless of content
 /// change would defeat that suppression and cause the actor to
 /// hammer the kernel every 5 s. The instance table is pinned at
-/// startup (ADR-0052), so equality on `RemoteMacTable` alone is
-/// sufficient — if the instance set ever becomes mutable here,
-/// extend the comparison.
+/// startup (ADR-0052), so equality on the two mutable tables is
+/// sufficient — if the instance set ever becomes mutable here, extend
+/// the comparison.
 async fn supervisor_loop(
     poll_interval: Duration,
     instances: Arc<EvpnInstanceTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
+    mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
     shutdown: CancellationToken,
 ) {
     let mut generation: u64 = 0;
     let mut last_table = RemoteMacTable::new();
+    let mut last_bum_enforcement = BumEnforcementTable::new();
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -341,7 +361,8 @@ async fn supervisor_loop(
                         continue;
                     }
                 };
-                if table == last_table && generation > 0 {
+                let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
+                if table == last_table && bum_enforcement == last_bum_enforcement && generation > 0 {
                     // No semantic change since the last publish.
                     // Skipping the `intent_tx.send` here keeps the
                     // reconcile actor's permanent-suppression set
@@ -353,10 +374,34 @@ async fn supervisor_loop(
                 }
                 generation = generation.saturating_add(1);
                 last_table = table.clone();
+                last_bum_enforcement = bum_enforcement.clone();
                 let intent = Arc::new(DataplaneIntent {
                     generation,
                     instances: instances.clone(),
                     remote_macs: Arc::new(table),
+                    bum_enforcement: Arc::new(bum_enforcement),
+                });
+                if intent_tx.send(intent).is_err() {
+                    debug!("intent receiver gone; supervisor exiting");
+                    return;
+                }
+            }
+            changed = bum_enforcement_rx.changed() => {
+                if changed.is_err() {
+                    debug!("BUM enforcement publisher gone; supervisor exiting");
+                    return;
+                }
+                let bum_enforcement = bum_enforcement_rx.borrow_and_update().as_ref().clone();
+                if bum_enforcement == last_bum_enforcement && generation > 0 {
+                    continue;
+                }
+                generation = generation.saturating_add(1);
+                last_bum_enforcement = bum_enforcement.clone();
+                let intent = Arc::new(DataplaneIntent {
+                    generation,
+                    instances: instances.clone(),
+                    remote_macs: Arc::new(last_table.clone()),
+                    bum_enforcement: Arc::new(bum_enforcement),
                 });
                 if intent_tx.send(intent).is_err() {
                     debug!("intent receiver gone; supervisor exiting");
@@ -440,13 +485,16 @@ const fn _force_link() -> &'static dyn Fn(&[ExtendedCommunity]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::net::IpAddr;
 
     use rustbgpd_evpn::{
-        EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress, RouteDistinguisher,
-        RouteTarget,
+        BumEnforcementReadiness, BumEnforcementTable, DfRole, EvpnInstance, EvpnInstanceId,
+        EvpnInstanceTable, MacAddress, RouteDistinguisher, RouteTarget,
     };
-    use rustbgpd_evpn_linux::{InMemoryDataplane, InstanceProbe};
+    use rustbgpd_evpn_linux::{
+        InMemoryDataplane, InstanceProbe, KernelLinkInfo, snapshot::KernelVxlanInfo,
+    };
     use rustbgpd_rib::route::EvpnRibRoute;
     use rustbgpd_wire::{
         EthernetSegmentIdentifier, EthernetTagId, EvpnMacIp, EvpnRoute, ExtendedCommunity,
@@ -615,6 +663,75 @@ mod tests {
         h.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn supervisor_republishes_when_bum_enforcement_changes() {
+        let instances = Arc::new(local_instance_table(100, Some("br100")));
+        let (rib_tx, mut rib_rx) = mpsc::channel::<RibUpdate>(8);
+        let shutdown = CancellationToken::new();
+        let _rib_responder = tokio::spawn(async move {
+            while let Some(msg) = rib_rx.recv().await {
+                if let RibUpdate::QueryEvpnRoutes { reply } = msg {
+                    let _ = reply.send(vec![]);
+                }
+            }
+        });
+
+        let dp = InMemoryDataplane::new();
+        let dp_handle = dp.handle();
+        dp_handle.set_probe(vni(100), InstanceProbe::Ready);
+        let mut links = BTreeMap::new();
+        links.insert(
+            "br100".to_string(),
+            KernelLinkInfo {
+                bridge_name: "br100".to_string(),
+                vlan_filtering: false,
+                vxlan: Some(KernelVxlanInfo {
+                    ifindex: 200,
+                    vni: 100,
+                    local_ip: ipa("10.0.0.1"),
+                    learning_disabled: Some(true),
+                }),
+                ce_port_ifindexes: vec![10],
+            },
+        );
+        dp_handle.set_links(links);
+
+        let cfg = SupervisorConfig {
+            poll_interval: Duration::from_mins(1),
+            actor_config: ReconcileActorConfig::for_tests(),
+        };
+        let h = spawn_with_dataplane(cfg, &instances, rib_tx, shutdown.clone(), dp);
+        let mut reports = h.subscribe_reports();
+
+        let mut table = BumEnforcementTable::new();
+        let esi = EthernetSegmentIdentifier::new([3; 10]);
+        table.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+        h.bum_enforcement_sender()
+            .send(Arc::new(table))
+            .expect("supervisor is alive");
+
+        let mut seen = None;
+        for _ in 0..20 {
+            let report = tokio::time::timeout(Duration::from_millis(100), reports.recv())
+                .await
+                .expect("report timeout")
+                .expect("report channel open");
+            if !report.bum_enforcement.is_empty() {
+                seen = Some(report);
+                break;
+            }
+        }
+        let report = seen.expect("BUM enforcement report never arrived");
+        assert_eq!(report.bum_enforcement[0].esi, esi);
+        assert_eq!(report.bum_enforcement[0].role, DfRole::NonDf);
+        assert_eq!(
+            report.bum_enforcement[0].readiness,
+            BumEnforcementReadiness::Ready
+        );
+
+        h.shutdown().await;
+    }
+
     /// The supervisor must NOT bump the intent generation on every
     /// poll when the projected `RemoteMacTable` is unchanged. The
     /// reconcile actor uses the generation to clear permanent-
@@ -642,12 +759,14 @@ mod tests {
         // actor isn't spawned for this test — we only validate the
         // supervisor's deduplication logic.
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+        let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let supervisor_shutdown = shutdown.clone();
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_millis(15),
             instances,
             rib_tx,
             intent_tx,
+            bum_rx,
             supervisor_shutdown,
         ));
 
