@@ -1,7 +1,7 @@
 //! `rustbgpctl peer-group ...` — wraps PeerGroupService gRPCs.
 //!
 //! - `list` / `get NAME` / `set NAME --from-file FILE` / `delete NAME`
-//!   for named [[peer_groups]] entries.
+//!   for named `[[peer_groups]]` entries.
 //! - `attach ADDR --group NAME` / `detach ADDR` to bind / unbind a
 //!   neighbor to / from a peer group.
 

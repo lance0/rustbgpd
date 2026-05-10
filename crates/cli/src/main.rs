@@ -179,21 +179,21 @@ enum Command {
         interval: u64,
     },
 
-    /// Manage named [[policy_definitions]] entries and the global /
+    /// Manage named `[[policy_definitions]]` entries and the global /
     /// per-neighbor import/export chains. Backed by PolicyService.
     Policy {
         #[command(subcommand)]
         action: PolicyAction,
     },
 
-    /// Manage named [[neighbor_sets]] entries used by policy
+    /// Manage named `[[neighbor_sets]]` entries used by policy
     /// `match_neighbor_set`. Backed by PolicyService.
     NeighborSet {
         #[command(subcommand)]
         action: NeighborSetAction,
     },
 
-    /// Manage named [[peer_groups]] entries and bind/unbind neighbors
+    /// Manage named `[[peer_groups]]` entries and bind/unbind neighbors
     /// to them. Backed by PeerGroupService.
     PeerGroup {
         #[command(subcommand)]

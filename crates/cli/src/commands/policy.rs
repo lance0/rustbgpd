@@ -1,7 +1,7 @@
 //! `rustbgpctl policy ...` — wraps PolicyService gRPCs.
 //!
 //! - `list` / `get NAME` / `set NAME --from-file FILE` / `delete NAME`
-//!   for named [[policy_definitions]] entries.
+//!   for named `[[policy_definitions]]` entries.
 //! - `chain show [--neighbor ADDR]` for global or per-neighbor chains.
 //! - `chain set-import|set-export {--neighbor ADDR | --global} POL...`
 //!   to install (or replace) a chain.
