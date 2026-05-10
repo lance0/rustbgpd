@@ -360,7 +360,8 @@ Best-path explain is also available via `ExplainBestPath` RPC — it returns all
 candidates for a prefix with the decisive comparison reason for each. Set
 `peer_address` on the request to scope the response to that peer's Add-Path
 send view: candidates that the peer would actually receive (export-policy
-permitted + sendable-family + split-horizon + within the peer's effective
+permitted + sendable-family + not suppressed by split-horizon or iBGP /
+RFC 4456 route-reflector rules + within the peer's effective
 `add_path_send_max`) get a non-zero `advertised_path_id` reflecting the rank
 they would carry on the wire; everything else stays at `advertised_path_id =
 0`. The response echoes `peer_address` and the effective `add_path_send_max`

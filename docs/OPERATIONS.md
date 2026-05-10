@@ -437,8 +437,9 @@ rustbgpctl rib --prefix 203.0.113.0/24 --explain
 # Peer-scoped view: same shape, but every candidate the named peer would
 # actually receive gets a non-zero `advertised_path_id` (rank within the
 # peer's effective Add-Path send_max). Filtered candidates (export policy
-# reject, family mismatch, split-horizon, beyond send_max) stay at 0 so
-# the operator can see *why* each isn't advertised.
+# reject, family mismatch, split-horizon, iBGP / RFC 4456 RR suppression,
+# beyond send_max) stay at 0 so the operator can see *why* each isn't
+# advertised.
 rustbgpctl rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
 ```
 

@@ -638,14 +638,15 @@ message BestPathCandidate {
   // Set on responses scoped to a peer with Add-Path send mode
   // (`add_path_send_max > 0`). Non-zero = this candidate would be
   // advertised at this rank. Zero = filtered (export policy
-  // reject, family mismatch, split-horizon, or beyond
-  // `send_max`). Always zero in single-best send mode
-  // (`add_path_send_max == 0`) — single-best advertises only the
-  // Loc-RIB best (`best_route`) at `path_id = 0`, and never falls
-  // back to the next-best candidate when the winner is suppressed,
-  // so this field cannot represent that selection. In single-best
-  // mode operators infer winner-advertisement from `best_route`
-  // plus their knowledge of the peer's policy state.
+  // reject, family mismatch, split-horizon, iBGP / RFC 4456
+  // route-reflector suppression, or beyond `send_max`). Always
+  // zero in single-best send mode (`add_path_send_max == 0`) —
+  // single-best advertises only the Loc-RIB best (`best_route`)
+  // at `path_id = 0`, and never falls back to the next-best
+  // candidate when the winner is suppressed, so this field cannot
+  // represent that selection. In single-best mode operators infer
+  // winner-advertisement from `best_route` plus their knowledge
+  // of the peer's policy state.
   uint32 advertised_path_id = 4;
 }
 
