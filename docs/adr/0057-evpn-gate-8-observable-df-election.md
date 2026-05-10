@@ -31,9 +31,10 @@ watch DF flips, alerting can fire on stuck-non-DF, peers can validate
 that the local PE participates in the segment, and the resulting
 state machines are exactly the same ones you need at Gate 8b.
 
-Gate 8 ships pieces 1 and 2 only. Forwarding enforcement is Gate 8b.
-This ADR records the carve-out so future work doesn't accidentally
-re-litigate it.
+Gate 8 originally shipped pieces 1 and 2 only. Gate 8b follow-ups now
+ship opt-in forwarding enforcement and the related receive-side
+projection/filtering pieces; this ADR records the original carve-out so
+the split is understandable historically.
 
 ## Decision
 
@@ -76,7 +77,7 @@ The Gate 8 surface is:
   and `evpn_df_role_changes_total{esi,vni}` counter for spotting
   flap loops.
 
-### Out of scope (deferred to Gate 8b)
+### Out of scope at Gate 8 (Gate 8b status)
 
 - **ES-Import RT extcomm (RFC 7432 §7.6) origination — closed in
   the Gate 8b prep follow-up.** The Type 4 ES route now carries an
@@ -88,21 +89,23 @@ The Gate 8 surface is:
   user-configured RTs only.
 - **ESI Label extcomm (RFC 7432 §7.5) origination — closed in the
   Gate 8b prep follow-up.** The Type 1 EAD-per-ES route now carries
-  the ESI Label extcomm with the synthesized label and
-  `single_active = false` (all-active default). Gate 8b adds the
-  load-bearing half: the dataplane-side filter that drops segment
-  BUM on non-DF receivers, plus the proper per-ESI label allocator
-  that survives across operator-level configuration churn.
-- **Aliasing / backup paths (RFC 7432 §14)**: Multihomed remote MACs
-  resolved via Type 1 EAD-per-EVI as alternative next-hops. Out of
-  scope until enforcement lands — the failover semantics only matter
-  if the DF actually drops.
-- **Mass withdraw on `AS_PATH` change (RFC 7432 §8.6)**: The fast-flip
-  primitive that bypasses MP_UNREACH for whole-segment withdraw.
-  Gate 8b territory.
-- **DF-role-aware MAC origination**: A non-DF PE under enforcement
-  should not advertise MAC routes that aliasing peers can't follow
-  back. This couples to enforcement and stays in Gate 8b.
+  the ESI Label extcomm with an allocated per-ESI label and
+  `single_active = false` (all-active default). Gate 8b also adds
+  the load-bearing half: opt-in dataplane filtering that suppresses
+  segment BUM on non-DF receivers.
+- **Aliasing / backup paths (RFC 7432 §14) — control-plane half
+  closed in Gate 8b.** Projection now resolves Type 1 EAD-per-EVI
+  alternatives into `RemoteMacEntry::alias_vtep_ips`; Linux ECMP /
+  multi-destination programming remains a kernel-side follow-up.
+- **Mass withdraw — receive-side filter closed in Gate 8b.** The
+  dataplane supervisor snapshots EAD-per-ES reachability and drops
+  non-zero-ESI Type 2 routes whose `(origin VTEP next-hop, ESI)` is
+  not active. Event-driven AS_PATH-change heuristics remain optional
+  future optimization, not the RFC base path.
+- **DF-role-aware MAC origination — closed in Gate 8b.** Local Type 2
+  routes for VNIs in configured Ethernet Segments now carry the
+  segment ESI. Config rejects one VNI shared across multiple local
+  ESIs until learned-port disambiguation is plumbed.
 
 ### Rejected: ship Gate 8 with split-horizon enforcement
 
@@ -154,15 +157,12 @@ how route refresh, RPKI, and BMP all landed.
 
 ### Negative / risks
 
-- **Split-horizon black hole window.** A two-PE multihoming setup
-  built on Gate 8 *will* duplicate BUM toward the CE: every PE that
-  imports the segment forwards. This is not a regression — it's the
-  pre-Gate-8 status quo (which forwarded zero BUM via EVPN at all
-  for multihomed segments) made slightly worse by *attempting* the
-  config. The Gate 8 release notes flag this clearly: **do not
-  configure `[[ethernet_segments]]` for production multihoming
-  until Gate 8b ships.** Single-homed deployments and
-  route-reflector deployments are unaffected.
+- **Split-horizon black hole window — mitigated by Gate 8b opt-in
+  enforcement.** A Gate 8-only two-PE multihoming setup duplicates
+  BUM toward the CE. Gate 8b adds the kernel primitive behind
+  `apply_bum_enforcement`, still default-`false` until the 24 h churn
+  soak closes. Single-homed deployments and route-reflector
+  deployments are unaffected.
 - **Interop with strict ES-Import RT importers — closed in the
   Gate 8b prep follow-up.** Type 4 ES routes now carry the
   auto-derived ES-Import RT extcomm (high-order 6 octets of the

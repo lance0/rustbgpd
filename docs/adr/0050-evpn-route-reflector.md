@@ -220,8 +220,10 @@ inside Phase 1 (Gate 6, 2026-04-24). The service accepts display-form
 RDs (`65000:100`, `10.0.0.1:100`, `4200000000:100`), parses MAC + IP +
 label, and assembles an `EvpnRibRoute` with `RouteOrigin::Local` that
 flows through the same reflection pipeline as iBGP-learned routes.
-Phase 1 covers Type 2 MAC/IP and Type 3 IMET; Type 5 IP-Prefix and
-Type 1/4 multi-homing origination are deferred pending use-case signal.
+Phase 1 covers Type 2 MAC/IP and Type 3 IMET; Type 5 IP-Prefix
+injection is deferred pending use-case signal. Native Type 1/4
+multi-homing origination later shipped through `[[ethernet_segments]]`,
+but the injection service still does not expose those route types.
 
 ### CLI
 
@@ -260,10 +262,10 @@ easy operator identification.
   in-tree `bench/evpn-load` crate. See INTEROP.md § P1.5 for the full
   matrix.
 - Controller-injection (`AddEvpnRoute` / `DeleteEvpnRoute`) is exposed
-  for Type 2 MAC/IP and Type 3 IMET (Gate 6). Type 5 IP-Prefix and
-  Type 1/4 multi-homing origination are deferred pending use-case
-  signal — the wire codec already handles those types, only the
-  injection-service surface is gated.
+  for Type 2 MAC/IP and Type 3 IMET (Gate 6). Type 5 IP-Prefix
+  injection remains deferred pending use-case signal. Native Type 1/4
+  multi-homing origination later shipped through `[[ethernet_segments]]`;
+  only the injection-service surface is still gated.
 - MPLS encapsulation is not wired — the BGP Encapsulation ext community
   decoder handles any tunnel type value losslessly but rustbgpd does
   not negotiate an encap preference. VXLAN is the deployed case.

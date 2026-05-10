@@ -231,10 +231,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     follow-up."
 - **EVPN multi-homing foundation — observable DF election (Gate 8,
   ADR-0057).** First half of EVPN multi-homing: control-plane
-  election + Type 1/4 origination + Prometheus visibility.
-  Forwarding enforcement (split-horizon via the ESI Label extcomm,
-  ES-Import RT, aliasing, mass-withdraw) is Gate 8b — see ADR-0057
-  for the carve-out.
+  election + Type 1/4 origination + Prometheus visibility. Gate 8b
+  follow-ups in this release window add opt-in split-horizon/BUM
+  enforcement, ESI Label / ES-Import RT origination, aliasing
+  projection, and receive-side mass-withdraw filtering; remaining
+  gaps are called out in `docs/evpn-alpha-soak.md`.
   - **Domain types** — new `crates/evpn/src/segment.rs` ships
     `EthernetSegment` (ESI, member VNIs, DF preference, algorithm,
     originator IP), `DfAlgorithm` (`DefaultModulo`,
@@ -278,11 +279,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     topology with shared ESI for VNI 100. Asserts PE1 (lower IP)
     elected DF, PE2 elected NonDF, PE2 promotes after PE1
     shutdown, transition counter advances.
-  - **Operator note**: do not configure `[[ethernet_segments]]`
-    for production multihoming until Gate 8b ships — segment BUM
-    will duplicate toward the CE in a multi-PE setup. Gate 8 is
-    correct for single-DF deployments and for soak validation of
-    the control-plane half before enforcement lands.
+  - **Operator note**: `[[ethernet_segments]]` is now useful for
+    controlled multi-homing trials, but `apply_bum_enforcement`
+    remains default-`false` until the 24 h churn soak closes. Gate 8
+    remains correct for observing election behavior without enabling
+    kernel enforcement.
 
 ## [0.17.0] — 2026-05-09
 

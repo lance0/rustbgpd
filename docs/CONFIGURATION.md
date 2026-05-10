@@ -251,15 +251,15 @@ the peer via MP-BGP capabilities. Supported values:
     route types between iBGP-speaking VTEPs configured as
     `route_reflector_client = true`, with no local EVI state. Empty
     `[[evpn_instances]]` selects this mode.
-  - **Bidirectional VTEP mode (Phase 2 — Gates 7a / 7b / 7b+1):**
+  - **Bidirectional VTEP mode (Phase 2 — Gates 7a / 7b / 7b+1 / 7b+2 / 7c / 8 / 8b):**
     populating `[[evpn_instances]]` (see § *EVPN VTEP instances*
     below) makes the daemon program remote-MAC FDB entries from
-    received Type 2 routes (downward) AND originate local Type 2
-    routes from kernel-learned MACs + one Type 3 IMET per L2VNI
-    (upward). Linux-only; requires `CAP_NET_ADMIN` for the
-    rtnetlink subscription and FDB program path. Gate 7b+1 lands
-    in v0.15.0; ADR-0055 locks the boundary. DF election (Gate 8)
-    is still ahead.
+    received Type 2 routes (downward), originate local MAC-only and
+    MAC+IP Type 2 routes plus one Type 3 IMET per L2VNI (upward),
+    and optionally run Gate 8/8b multi-homing enforcement when
+    `[[ethernet_segments]]` and `apply_bum_enforcement` are
+    configured. Linux-only; requires `CAP_NET_ADMIN` for the
+    rtnetlink subscription and FDB program path.
   See [docs/USE_CASES.md](USE_CASES.md) § "VXLAN-EVPN DC Fabric"
   for a worked example and `examples/rr-evpn-fabric/config.toml`
   for a copy-paste-ready starting point.

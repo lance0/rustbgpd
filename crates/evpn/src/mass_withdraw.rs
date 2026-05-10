@@ -1,5 +1,5 @@
-//! Per-`(peer, ESI)` EAD-per-ES event tracker, the receiver-side
-//! fast-convergence path for EVPN multi-homing.
+//! Per-`(origin VTEP, ESI)` EAD-per-ES event tracker, the
+//! receiver-side fast-convergence path for EVPN multi-homing.
 //!
 //! RFC 7432 §8.4 ("Aliasing and Backup-Path") names the Type 1
 //! EAD-per-ES route as the per-Ethernet-Segment object on which
@@ -11,12 +11,12 @@
 //! `MP_UNREACH_NLRI` messages. The RFC's standard fast path is
 //! the **EAD-per-ES withdrawal**: when a peer withdraws its Type 1
 //! EAD-per-ES route for an ESI, every receiver sweeps every MAC
-//! route it had attributed to that `(peer, ESI)` pairing in one
+//! route it had attributed to that `(origin VTEP, ESI)` pairing in one
 //! operation.
 //!
 //! ## What this module does
 //!
-//! Pure-logic detector. Maintains per-`(peer, ESI)` state across
+//! Pure-logic detector. Maintains per-`(origin VTEP, ESI)` state across
 //! received EAD-per-ES events and returns
 //! `MassWithdrawTrigger { peer, esi }` for events that should
 //! cause the caller to sweep every Type 2 route it attributes to
@@ -193,7 +193,7 @@ impl AsPathTracker {
     /// Record an EAD-per-ES withdrawal for `(peer, esi)`. Returns
     /// `Some(MassWithdrawTrigger)` iff the tracker had previously
     /// observed an advertisement from this peer for this segment;
-    /// otherwise returns `None` (a withdrawal for a `(peer, ESI)`
+    /// otherwise returns `None` (a withdrawal for an `(origin VTEP, ESI)`
     /// we never saw advertise is a no-op — the RIB has nothing
     /// attributed to that pair to sweep). On success, internal
     /// state is cleared so a subsequent re-advertisement is

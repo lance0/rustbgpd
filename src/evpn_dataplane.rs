@@ -440,17 +440,19 @@ async fn build_remote_mac_table(
         instances.iter().map(|inst| inst.local_vtep_ip).collect();
 
     // Build the receiver-side mass-withdraw filter set from the
-    // current EAD-per-ES snapshot. A peer that has at least one
+    // current EAD-per-ES snapshot. A VTEP that has at least one
     // EAD-per-ES route for an ESI claims segment reachability;
-    // peers without one fail the §8.4 reachability precondition
-    // for any Type 2 they advertise on that ESI.
+    // VTEPs without one fail the §8.4 reachability precondition
+    // for any Type 2 they advertise on that ESI. Key by EVPN
+    // next-hop, not BGP session peer: behind a route reflector,
+    // many origin VTEPs can arrive through the same BGP peer.
     let active_ead_per_es: std::collections::BTreeSet<(
         std::net::IpAddr,
         rustbgpd_wire::EthernetSegmentIdentifier,
     )> = routes
         .iter()
         .filter_map(|r| match &r.route {
-            EvpnRoute::EadPerEs(ead) => Some((r.peer, ead.esi)),
+            EvpnRoute::EadPerEs(ead) => Some((r.next_hop, ead.esi)),
             _ => None,
         })
         .collect();
@@ -496,7 +498,8 @@ fn project_ead_per_evi(
 /// shape, returning `None` for non-Type-2 routes (Gate 7b L2VNI
 /// dataplane only programs MAC/IP entries) and for Type 2 routes
 /// that fail the RFC 7432 §8.4 mass-withdraw reachability gate
-/// (non-zero ESI without a matching EAD-per-ES from the same peer).
+/// (non-zero ESI without a matching EAD-per-ES from the same
+/// origin VTEP next-hop).
 fn project_one(
     route: &EvpnRibRoute,
     active_ead_per_es: &std::collections::BTreeSet<(
@@ -509,12 +512,12 @@ fn project_one(
     };
 
     // Mass-withdraw filter: a Type 2 with non-zero ESI is only
-    // valid if the originating peer also advertises an EAD-per-ES
+    // valid if the originating VTEP also advertises an EAD-per-ES
     // for the same segment. Without that, the segment is
     // unreachable from the peer's side and we shouldn't program
     // the MAC. ESI=0 routes (single-homed) bypass the filter.
     if macip.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
-        && !active_ead_per_es.contains(&(route.peer, macip.esi))
+        && !active_ead_per_es.contains(&(route.next_hop, macip.esi))
     {
         return None;
     }
@@ -706,18 +709,49 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         };
-        // No EAD-per-ES from peer 10.0.0.99 for this ESI → filter.
+        // No EAD-per-ES from VTEP 10.0.0.2 for this ESI → filter.
         let empty = std::collections::BTreeSet::new();
         assert!(project_one(&route, &empty).is_none());
         // Same route with the active set populated → route survives.
         let mut active = std::collections::BTreeSet::new();
-        active.insert((ipa("10.0.0.99"), esi));
+        active.insert((ipa("10.0.0.2"), esi));
         assert!(project_one(&route, &active).is_some());
-        // Different peer in the active set doesn't satisfy the
-        // gate — the EAD-per-ES must come from the same peer.
-        let mut wrong_peer = std::collections::BTreeSet::new();
-        wrong_peer.insert((ipa("10.0.0.55"), esi));
-        assert!(project_one(&route, &wrong_peer).is_none());
+        // Different VTEP in the active set doesn't satisfy the gate.
+        let mut wrong_vtep = std::collections::BTreeSet::new();
+        wrong_vtep.insert((ipa("10.0.0.55"), esi));
+        assert!(project_one(&route, &wrong_vtep).is_none());
+    }
+
+    #[test]
+    fn project_one_mass_withdraw_filter_keys_by_next_hop_not_bgp_peer() {
+        // Route-reflector topology regression: two origin VTEPs can
+        // arrive through the same BGP session peer. An active EAD-per-ES
+        // from VTEP A must not keep VTEP B's Type 2 route alive.
+        let esi = EthernetSegmentIdentifier::new([7; 10]);
+        let mut from_vtep_a = evpn_macip_route(100, 7, "10.0.0.2", None);
+        let mut from_vtep_b = from_vtep_a.clone();
+        from_vtep_b.next_hop = ipa("10.0.0.3");
+
+        if let EvpnRoute::MacIp(macip) = &mut from_vtep_a.route {
+            macip.esi = esi;
+        }
+        if let EvpnRoute::MacIp(macip) = &mut from_vtep_b.route {
+            macip.esi = esi;
+        }
+
+        assert_eq!(
+            from_vtep_a.peer, from_vtep_b.peer,
+            "test requires both routes to arrive through the same RR peer"
+        );
+
+        let mut active = std::collections::BTreeSet::new();
+        active.insert((ipa("10.0.0.2"), esi));
+
+        assert!(project_one(&from_vtep_a, &active).is_some());
+        assert!(
+            project_one(&from_vtep_b, &active).is_none(),
+            "EAD-per-ES from VTEP A must not satisfy VTEP B"
+        );
     }
 
     #[test]

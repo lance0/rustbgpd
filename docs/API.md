@@ -558,9 +558,10 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Encapsulation extended community (tunnel-type=8) is attached
 automatically. Set `disable_vxlan_encap: true` for MPLS-over-GRE
 deployments. Phase 1 supports `route_type` 2 (MAC/IP) and 3 (IMET);
-Type 5 IP-Prefix and Type 1/4 multi-homing origination are not yet
-exposed via injection (the RR still reflects them when received from
-peers).
+Type 5 IP-Prefix injection is not yet exposed. Native Type 1/4
+multi-homing origination is driven by `[[ethernet_segments]]`; the
+injection API does not expose those route types yet (the RR still
+reflects them when received from peers).
 
 ### Inject an EVPN Type 3 (IMET) route
 

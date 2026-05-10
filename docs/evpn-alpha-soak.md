@@ -105,8 +105,8 @@ visibility)
   Type 4 ES + Type 1 EAD-per-ES + Type 1 EAD-per-EVI origination,
   RFC 7432 §8.5 service carving, RFC 8584 §3 algorithm negotiation,
   Prometheus `evpn_df_role` surface + `evpn_df_role_changes_total`
-  counter, M38 smoke topology. **Forwarding enforcement deferred to
-  Gate 8b** — see ADR-0057 for the carve-out.
+  counter, M38 smoke topology. **Forwarding enforcement was deferred
+  from Gate 8 and is now covered by the Gate 8b alpha items below.**
 - [x] **Gate 8b prep — ES-Import RT + ESI Label origination.**
   Auto-derived ES-Import RT extcomm (RFC 7432 §7.6) on Type 4 ES
   routes, ESI Label extcomm (RFC 7432 §7.5) on Type 1 EAD-per-ES
@@ -189,10 +189,10 @@ visibility)
 - [x] **Mass-withdraw receive-side filter landed (RFC 7432 §8.4).**
   The supervisor's `build_remote_mac_table` snapshots EAD-per-ES
   routes from the RIB on every pass and drops any Type 2 with
-  non-zero ESI whose `(peer, ESI)` isn't in that snapshot. When a
-  peer withdraws its EAD-per-ES, all that peer's MACs for the
-  segment disappear from the next supervisor pass (≤5s). Stateless,
-  no event-tracking state machine in the supervisor — the
+  non-zero ESI whose `(origin VTEP next-hop, ESI)` isn't in that
+  snapshot. When a PE withdraws its EAD-per-ES, all that PE's MACs
+  for the segment disappear from the next supervisor pass (≤5s).
+  Stateless, no event-tracking state machine in the supervisor — the
   `mass_withdraw::AsPathTracker` shipped earlier remains for
   future event-driven RIB-side work where sub-poll latency
   matters.
@@ -210,9 +210,10 @@ visibility)
      `LinuxDataplane` consumer still programs only the primary
      `dst` per FDB row. Multi-VTEP forwarding needs `nexthop`
      groups or L3-route-based ECMP — a separate kernel-side
-     design slice. Mass-withdraw RIB sweep (consume the
-     `MassWithdrawTrigger` shipped earlier) rides with this slice
-     since both touch the same dataplane integration surface.
+     design slice. The current receive-side mass-withdraw filter is
+     level-triggered; event-driven consumption of the
+     `MassWithdrawTrigger` helper can ride with this slice if
+     sub-poll latency becomes necessary.
   3. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).

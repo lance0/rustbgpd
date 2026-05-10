@@ -651,8 +651,10 @@ implemented per ADR-0040.
   `RouteOrigin::Local` that flows through the same reflection
   pipeline as iBGP-learned routes. `rustbgpctl evpn add-mac-ip /
   add-imet / delete-mac-ip / delete-imet` CLI subcommands cover
-  the operator-facing surface. Type 5 IP-Prefix and Type 1/4
-  multi-homing origination are deferred pending use-case signal.
+  the operator-facing surface. Type 5 IP-Prefix injection is
+  deferred pending use-case signal. Native Type 1/4 multi-homing
+  origination ships through `[[ethernet_segments]]`; controller
+  injection for those route types is not exposed.
 - **Multi-homing Type 1 EAD + Type 4 ES reflection interop** (RFC 7432 §8):
   validated via the M32 4-node harness
   (`tests/interop/m32-evpn-multihome-frr.clab.yml`). Two FRR VTEPs
@@ -777,13 +779,13 @@ implemented per ADR-0040.
   and updates the Prometheus surface
   (`evpn_df_role{esi,vni,role}` gauge,
   `evpn_df_role_changes_total{esi,vni}` counter).
-- **Gate 8 scope is observation only.** Forwarding enforcement
-  (split-horizon via the ESI Label extcomm, ES-Import RT,
-  aliasing, mass-withdraw) is Gate 8b. ADR-0057 records the
-  carve-out in detail. Operator note: do not configure
-  `[[ethernet_segments]]` for production multihoming until
-  Gate 8b ships — segment BUM will duplicate toward the CE in a
-  multi-PE setup.
+- **Gate 8 scope was observation only; Gate 8b is now alpha opt-in.**
+  The follow-up Gate 8b slices add ESI Label / ES-Import RT
+  origination, DF-role-aware Type 2 ESI attachment, the
+  BUM-suppression kernel primitive behind `apply_bum_enforcement`,
+  aliasing projection, and a receive-side EAD-per-ES mass-withdraw
+  filter. Keep `apply_bum_enforcement = false` for production until
+  the 24 h churn soak in `docs/evpn-alpha-soak.md` closes.
 - **M38 smoke** (`tests/interop/m38-evpn-df-election.clab.yml`):
   2-PE rustbgpd segment, asserts (1) PE1 elected DF, (2) PE2
   elected NonDF, (3) PE2 promotes to DF after PE1 shutdown,

@@ -34,9 +34,11 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   L2VNI + RTNLGRP_NEIGH subscription) have shipped in v0.13.0,
   v0.14.0, and v0.15.0. Together they close the bidirectional
   single-homed L2VNI VTEP alpha loop.
-- **Gates 8-9** expand into active-active multi-homing execution /
-  IRB. Big investments gated by market demand, not technical
-  readiness.
+- **Gate 8/8b** adds active-active multi-homing alpha execution:
+  DF election, Type 1/4 origination, opt-in BUM suppression,
+  ESI-aware Type 2 origination, aliasing projection, and
+  receive-side mass-withdraw filtering. **Gate 9** expands into IRB.
+  Remaining big investments are gated by operator demand and soak.
 
 ## Current Position
 
@@ -53,7 +55,7 @@ closed.
 |-------|-------------|
 | RFC 7432 RR role | ~90-92% |
 | Production-ready RR for a SONiC/FRR fabric | ~95-97% |
-| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~32-36% |
+| Full RFC 7432 daemon (RR + VTEP + multi-homing + IRB) | ~45-50% |
 
 ## Gate Ladder
 
@@ -286,8 +288,9 @@ Status: **done** (feat/evpn-rr, 2026-04-24)
 Unlocks: SDN controllers / orchestration systems pushing EVPN routes
 directly into the RR via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC.
 Phase 1 supports Type 2 (MAC/IP) and Type 3 (IMET); Type 5 IP-Prefix
-and Type 1/4 multi-homing origination are deferred pending use-case
-signal.
+injection is deferred pending use-case signal. Native Type 1/4
+multi-homing origination ships through `[[ethernet_segments]]`, but
+controller injection for those route types is not exposed.
 
 Delivered:
 
@@ -463,19 +466,19 @@ so this was an origination-only change with no wire bump:
   Peers can now correlate the segment via RT match without
   preconfiguration.
 - **Type 1 EAD-per-ES route**: ESI Label extcomm (RFC 7432 §7.5)
-  with the synthesized label and `single_active = false`
+  with the allocated label and `single_active = false`
   (Gate 8 default is all-active). Peers can wire the label into
-  their split-horizon filter tables; the dataplane-side drops
-  on non-DF receivers stay Gate 8b proper.
+  their split-horizon filter tables; rustbgpd's dataplane-side drops
+  are now opt-in through `apply_bum_enforcement`.
 - **Type 1 EAD-per-EVI**: unchanged (carries no ESI Label per
   RFC 7432 §14).
 
 ### Gate 8b — Multi-homing enforcement
 
-Status: intent foundation landed, kernel enforcement deferred ·
-Estimate: ~3-4 weeks · Blockers: Gate 8 + Gate 8b prep (cleared).
+Status: ✅ alpha-supported, opt-in by config (`[Unreleased]`) ·
+Blockers cleared: Gate 8 + Gate 8b prep.
 
-The first enforcement-foundation slice is in place:
+Shipped pieces:
 
 1. **Observable BUM-enforcement intent** — `src/evpn_segment.rs`
    publishes a complete `(ESI, VNI) -> DfRole` table into the EVPN
@@ -483,44 +486,49 @@ The first enforcement-foundation slice is in place:
    against the current link inventory and reports bridge, VXLAN
    ifindex, CE-facing port ifindexes, and desired action
    (`allow` for DF, `suppress` for Non-DF) through
-   `DataplaneReport.bum_enforcement`. No kernel filter mutation yet.
+   `DataplaneReport.bum_enforcement`.
+2. **Dataplane split-horizon kernel primitive** — when
+   `apply_bum_enforcement = true`, the Linux dataplane applies the
+   validated BUM-suppression primitive for Non-DF CE-facing ports.
+   The Docker netns harness is PR-CI gated; the default remains
+   `false` until longer soak proves the primitive under churn.
+3. **Per-ESI label allocator** — `EsiLabelAllocator` assigns stable
+   labels per ESI, avoids deterministic synthesizer collisions, and
+   threads the allocated label through both the EAD-per-ES NLRI MPLS
+   label field and the ESI Label extended community.
+4. **ESI-aware MAC origination** — Type 2 routes originated for MACs
+   learned on a VNI in a configured `[[ethernet_segments]]` block
+   carry that segment's ESI. Config rejects a VNI shared across
+   multiple local segments until learned-port-to-ESI disambiguation
+   is plumbed.
+5. **Aliasing receive-side projection** — the dataplane projection
+   combines non-zero-ESI Type 2 routes with EAD-per-EVI routes and
+   populates `RemoteMacEntry::alias_vtep_ips` with backup VTEPs.
+   The Linux dataplane still programs only the primary `dst` per FDB
+   row; ECMP-to-multiple-VTEPs remains a kernel-side follow-up.
+6. **Mass-withdraw receive-side filter** — every supervisor pass
+   snapshots EAD-per-ES routes and drops non-zero-ESI Type 2 routes
+   whose `(origin VTEP next-hop, ESI)` is not active. This gives
+   level-triggered whole-segment withdrawal within the dataplane
+   supervisor poll interval.
 
 Concrete remaining slices:
 
-1. **Dataplane split-horizon kernel primitive** — consume the
-   reported BUM-enforcement plan; on Non-DF for a `(ESI, VNI)`,
-   suppress / block CE-facing BUM behavior while preserving remote
-   FDB programming and local learning.
-   - Candidate primitives to spike before coding: `tc` filter on
-     CE-facing bridge ports, nftables bridge-family rules, bridge
-     VLAN filtering for VLAN-aware follow-up, or bridge MDB behavior
-     if it can cover the relevant multicast-only subset. Do not
-     wire any of these directly into the reconciler until a netns
-     test proves the primitive blocks CE-facing BUM without
-     affecting unicast FDB programming.
-2. **Proper ESI label allocator** — replace the deterministic
-   ESI-byte-derived synthesizer with a real per-ESI label space
-   that survives operator-level configuration churn.
-3. **Aliasing / backup paths** (RFC 7432 §14) — multihomed
-   remote MACs resolved via Type 1 EAD-per-EVI as alternative
-   next-hops.
-4. **Mass withdraw on `AS_PATH` change** (RFC 7432 §8.6) — the
-   fast-flip primitive that bypasses MP_UNREACH for whole-segment
-   withdraw.
-5. **DF-role-aware MAC origination** — a non-DF PE under
-   enforcement should not advertise MAC routes that aliasing
-   peers can't follow back. Couples to slice 1.
-6. **Optional import-side ES-Import RT filtering** — apply the
-   ES-Import RT origination from Gate 8b prep on the daemon's
-   own RIB import path so unrelated segments are filtered before
-   they reach LocRib. Currently we *originate* the RT but
-   *import* via user-configured RTs only.
+1. **Privileged-runner 24 h soak validation** — synthetic DF flips,
+   MAC churn, and concurrent FDB programming before flipping
+   `apply_bum_enforcement` default to `true`.
+2. **Aliasing dataplane forwarding** — consume `alias_vtep_ips` in
+   `LinuxDataplane` via `nexthop` groups or L3-route-based ECMP.
+3. **Optional import-side ES-Import RT filtering** — apply the
+   ES-Import RT origination from Gate 8b prep on the daemon's own
+   RIB import path so unrelated segments are filtered before they
+   reach LocRib. Currently rustbgpd originates the RT but imports via
+   user-configured RTs only.
 
-**Operator note:** Gate 8 + Gate 8b prep enables peers to
-*observe* the segment without enabling segment forwarding. Do not
-configure `[[ethernet_segments]]` for production multihoming
-until Gate 8b proper ships — segment BUM will duplicate toward
-the CE in a 2-PE setup.
+**Operator note:** multi-homing enforcement is no longer merely
+observable, but it is still alpha and opt-in. Leave
+`apply_bum_enforcement = false` in production until the soak item
+above closes; enable it deliberately in labs or controlled trials.
 
 ---
 
@@ -551,7 +559,7 @@ Gate 6 (controller inject)      ── ✅ done   << full Phase 1 RR bundle comp
 ───────────── decision point ─────────────
 Gate 7 (VTEP mode)               ── ✅ done
 Gate 8 (multi-homing foundation) ── ✅ done   << observable DF election, M38 smoke
-Gate 8b (multi-homing enforcement) ── deferred (split-horizon + ESI Label)
+Gate 8b (multi-homing enforcement) ── ✅ alpha, opt-in
 Gate 9 (IRB, MVPN, PBB, MPLS)    ── furthest horizon
 ```
 
@@ -570,14 +578,15 @@ Gate 6 is ~1-2 weeks and opens a whole category of deployments (SDN
 controllers injecting EVPN). Gate 7 is 4-6 weeks and enters FRR
 competition territory. The ROI curve strongly favors Gate 6 first.
 
-## Out of Scope (explicit non-goals for Gates 1-6)
+## Original Non-Goals for Gates 1-6
 
-Following ADR-0050's guardrail list. These are only reconsidered after
-Gate 7 becomes a real commitment:
+Following ADR-0050's guardrail list. Several items below have since
+landed in later gates; this section records what Phase 1 deliberately
+did not take on:
 
-- VTEP mode (local EVI/VRF/VNI state, kernel FDB learning, local origination)
-- DF election execution
-- Symmetric IRB semantics
+- VTEP mode (landed across Gates 7a/7b/7b+1/7b+2/7c)
+- DF election execution (landed in Gate 8; enforcement alpha in Gate 8b)
+- Symmetric IRB semantics (still Gate 9)
 - Auto-derivation of Route Targets
 - PBB-EVPN (RFC 7623)
 - EVPN-MVPN (RFC 9251)

@@ -32,7 +32,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1 + 7b+2 + 7c).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. Gate 7b+2 closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (Gate 7c). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
-**Later:** Duplicate-MAC quarantine action (ADR-0055 §9), DF election + multi-homing (Gate 8), IRB semantics + L3VNI / Type 5 dataplane (Gate 9, RFC 9135), VPNv4/v6, MPLS-EVPN encap.
+**Later:** Duplicate-MAC quarantine action (ADR-0055 §9), aliasing dataplane ECMP and production-default multi-homing enforcement (Gate 8b follow-ups), IRB semantics + L3VNI / Type 5 dataplane (Gate 9, RFC 9135), VPNv4/v6, MPLS-EVPN encap.
 
 ---
 
@@ -458,15 +458,18 @@ controller-driven injection for Type 2 / Type 3. What remains:
   originator from a 5 s poll to a push-notified RIB broadcast for
   sub-second mobility convergence. **Still ahead in Phase 2:**
   duplicate-MAC quarantine action.
-- **Multi-homing execution:** the RR already reflects Type 1 EAD + Type 4 ES
-  unchanged (Gate 4); this is rustbgpd-as-VTEP DF election (RFC 7432 §8 +
-  RFC 8584) and aliasing / backup-path resolution against locally-learned
-  state (Phase 4).
+- **Multi-homing execution:** Gate 8/8b now covers rustbgpd-as-VTEP
+  DF election (RFC 7432 §8 + RFC 8584), Type 1/4 origination, opt-in
+  Non-DF BUM suppression, ESI-aware Type 2 origination, aliasing
+  projection, and receive-side EAD-per-ES mass-withdraw filtering.
+  Still ahead: aliasing dataplane ECMP and the 24 h soak before
+  enabling enforcement by default.
 - **Symmetric IRB semantics:** wire-level round-trip only — `label2` + Router
   MAC ext community preserved but not interpreted (Phase 4 / RFC 9135).
 - **Controller injection beyond Type 2 / Type 3:** Type 5 IP-Prefix and
-  Type 1 / Type 4 multi-homing origination are not yet exposed in the
-  injection RPCs.
+  Type 1 / Type 4 multi-homing route injection are not yet exposed in
+  the injection RPCs. Native daemon Type 1/4 origination exists via
+  `[[ethernet_segments]]`.
 - **RFC 9251 Route Types 6-8** (IGMP multicast), **RFC 7623 PBB-EVPN**,
   **MPLS encap**, **Add-Path for EVPN (RFC 9252)** (Phase 5).
 

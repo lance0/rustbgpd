@@ -546,9 +546,10 @@ thousands of VTEPs, and gives you structured observability.
   RFC 4456 ORIGINATOR_ID + CLUSTER_LIST so downstream VTEPs run DF
   election independently over the same inputs. Validated via M32
   (two FRR VTEPs sharing an ESI + observer). Type 1 EAD-per-EVI
-  reflection is validated via M32 and the synthetic M32b sibling;
-  rustbgpd still does not execute DF election or originate
-  multi-homing state as a local VTEP.
+  reflection is validated via M32 and the synthetic M32b sibling.
+  As a local VTEP, Gate 8/8b now originates Type 1/4 routes, runs DF
+  election, and can opt into BUM enforcement; the RR role still only
+  reflects these routes.
 - **GR / LLGR for EVPN** — VTEP restart no longer flaps the rest of
   the fabric: routes are marked stale on `PeerGracefulRestart`,
   promoted to `LLGR_STALE` on GR timer expiry per RFC 9494, and
@@ -591,16 +592,16 @@ thousands of VTEPs, and gives you structured observability.
 
 **What rustbgpd doesn't do yet (and which VTEPs handle for you):**
 
-- **DF forwarding enforcement** — Gate 8 (`[Unreleased]`, ADR-0057)
-  shipped the **observation half** of multi-homing: rustbgpd
-  originates Type 4 ES + Type 1 EAD-per-ES + Type 1 EAD-per-EVI for
-  configured `[[ethernet_segments]]`, runs RFC 7432 §8.5 service
-  carving + RFC 8584 §3 algorithm negotiation, and exposes the
-  result via Prometheus (`evpn_df_role{esi,vni,role}` +
-  `evpn_df_role_changes_total`). Forwarding enforcement (split-horizon
-  via the ESI Label extcomm, ES-Import RT, aliasing, mass-withdraw)
-  is Gate 8b — until it ships, do not configure
-  `[[ethernet_segments]]` for production multi-homing.
+- **EVPN multi-homing enforcement** — Gate 8 (`[Unreleased]`,
+  ADR-0057) shipped the observation half: Type 4 ES + Type 1
+  EAD-per-ES + Type 1 EAD-per-EVI origination, RFC 7432 §8.5
+  service carving + RFC 8584 §3 algorithm negotiation, and the
+  Prometheus `evpn_df_role` surface. Gate 8b follow-ups now add
+  ESI Label / ES-Import RT origination, DF-role-aware Type 2 ESI
+  attachment, opt-in BUM suppression via `apply_bum_enforcement`,
+  aliasing projection, and receive-side EAD-per-ES mass-withdraw
+  filtering. This is alpha: leave enforcement disabled in
+  production until the churn soak closes.
 - **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
   VTEP's job.
 - **IRB semantics** — rustbgpd preserves Type 2 `label2` and the Router
@@ -658,15 +659,18 @@ measurement path.
   still cover MAC-with-IP via ARP/ND suppression (Gate 7b+2 in
   rustbgpd; alpha-supported under the FRR-style replace model),
   observable DF election + Type 1/4 origination (Gate 8 — ADR-0057;
-  shipped in `[Unreleased]`), DF forwarding enforcement (Gate 8b,
-  deferred), and symmetric IRB / L3VNI (Gate 9, RFC 9135). See
+  shipped in `[Unreleased]`), opt-in DF forwarding enforcement
+  foundation (Gate 8b, alpha), and symmetric IRB / L3VNI (Gate 9,
+  RFC 9135). See
   [docs/evpn-enablement.md](evpn-enablement.md)
   for the full gate ladder and
   [docs/evpn-alpha-soak.md](evpn-alpha-soak.md) for the residual
   alpha-confidence checklist.
 - Controller injection (Gate 6) covers Type 2 MAC/IP and Type 3 IMET
-  via `InjectionService::AddEvpnRoute`; Type 5 IP-Prefix and Type 1/4
-  multi-homing origination are deferred pending use-case signal.
+  via `InjectionService::AddEvpnRoute`; Type 5 IP-Prefix injection is
+  deferred pending use-case signal. Native Type 1/4 multi-homing
+  origination ships through `[[ethernet_segments]]`, but controller
+  injection for those route types is not exposed.
 - Live FRR VTEP flap with tcpdump validation of the reflected
   `LLGR_STALE` community on the wire is the one piece of GR/LLGR
   coverage still tracked as a follow-up — the unit + integration
@@ -750,14 +754,16 @@ Be honest about where rustbgpd isn't the right tool:
   M37+IP smokes validate the MAC-only and MAC+IP loops against
   FRR 10.3.1. Multi-homing **foundation** (observable DF election
   + Type 1/4 origination) shipped in Gate 8 (`[Unreleased]`,
-  ADR-0057), validated by M38. **Still missing for full VTEP
-  parity:** multi-homing forwarding enforcement (Gate 8b —
-  split-horizon via ESI Label, aliasing, mass-withdraw), symmetric
-  IRB (Gate 9, RFC 9135), L3VNI / Type 5 dataplane (Gate 9),
-  duplicate-MAC quarantine action (ADR-0055 §9). For a single-homed
-  L2VNI fabric where DF enforcement and IRB aren't load-bearing,
-  rustbgpd is a fit today; for full FRR-equivalent VTEP coverage
-  the gap closes in Gates 8b / 9.
+  ADR-0057), validated by M38, with Gate 8b alpha enforcement
+  slices now landed behind opt-in config. **Still missing for full
+  VTEP parity:** aliasing dataplane ECMP, 24 h multi-homing churn
+  soak before enabling BUM enforcement by default, optional
+  import-side ES-Import RT filtering, symmetric IRB (Gate 9,
+  RFC 9135), L3VNI / Type 5 dataplane (Gate 9), and duplicate-MAC
+  quarantine action (ADR-0055 §9). For a single-homed L2VNI fabric
+  where IRB isn't load-bearing, rustbgpd is a fit today; for full
+  FRR-equivalent VTEP coverage the remaining gaps close in Gate 8b
+  follow-ups and Gate 9.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

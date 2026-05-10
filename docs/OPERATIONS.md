@@ -560,15 +560,15 @@ session machinery:
   IMET per configured L2VNI** (upward, ADR-0055). Linux-only. Gate
   7b+1 ships in v0.15.0.
 
-> **Phase-2 status:** Gate 7a (declarative model, ADR-0052),
-> Gate 7b (kernel reconciliation downward, v0.14.0, ADR-0054), and
-> Gate 7b+1 (local-MAC origination upward + Type 3 IMET, v0.15.0
-> candidate, ADR-0055) have all shipped. The bidirectional VTEP
-> loop is verified end-to-end by M37 against FRR 10.3.1 on Linux
-> 6.17 (4/4 PASS, local-only / privileged smoke). Still ahead:
-> MAC-with-IP origination via ARP/ND suppression (Gate 7b+2),
-> `advertise_svi_mac` consumption, DF execution + multi-homing
-> (Gate 8), IRB / L3VNI (Gate 9). See
+> **Phase-2 status:** Gates 7a/7b/7b+1/7b+2/7c have shipped the
+> bidirectional L2VNI VTEP loop: declarative instances, downward FDB
+> reconciliation, local MAC and MAC+IP origination, Type 3 IMET,
+> SVI MAC origination, sticky MAC config, and sub-second mobility
+> wakeups. Gate 8/8b adds alpha multi-homing execution: DF election,
+> Type 1/4 origination, opt-in BUM suppression, ESI-aware Type 2
+> origination, aliasing projection, and receive-side mass-withdraw
+> filtering. Still ahead: aliasing dataplane ECMP, production-default
+> multi-homing enforcement after soak, and IRB / L3VNI (Gate 9). See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
 > alpha-confidence checklist, and
@@ -621,8 +621,8 @@ Two complementary origination paths exist:
    delete-*` commands above). The controller decides what to
    originate; rustbgpd reflects + distributes. Type 2 (MAC/IP) and
    Type 3 (IMET) are exposed; Type 5 IP-Prefix and Type 1/4
-   multi-homing are still controller-originated only when a VTEP
-   advertises them.
+   multi-homing route injection are not exposed. Native Type 1/4
+   origination is driven by `[[ethernet_segments]]`.
 2. **Kernel-driven origination (Phase 2, Gate 7b+1):** with
    `[[evpn_instances]]` populated, the daemon subscribes to
    `RTNLGRP_NEIGH` (enum group id 3) and emits Type 2 routes for
