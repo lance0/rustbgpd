@@ -327,6 +327,9 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     if diff.evpn_instances_changed {
         restart_sections.push("[[evpn_instances]]");
     }
+    if diff.evpn_ip_vrfs_changed {
+        restart_sections.push("[[evpn_ip_vrfs]]");
+    }
     if diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
     }
@@ -595,6 +598,7 @@ fn main() {
                     "bmp_changed": diff.bmp_changed,
                     "mrt_changed": diff.mrt_changed,
                     "evpn_instances_changed": diff.evpn_instances_changed,
+                    "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
                     "ethernet_segments_changed": diff.ethernet_segments_changed,
                     "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
                     "inline_policy_import_changed": diff.policy.import_changed,
@@ -1831,6 +1835,14 @@ async fn reload_config(
             .evpn_instances
             .clone_from(&current.evpn_instances);
     }
+    if new_config.evpn_ip_vrfs != current.evpn_ip_vrfs {
+        error!(
+            "[[evpn_ip_vrfs]] differs from the live config: Gate 9 \
+             IP-VRF/L3VNI state is resolved from the startup snapshot. \
+             Restart rustbgpd to apply EVPN IP-VRF edits."
+        );
+        new_config.evpn_ip_vrfs.clone_from(&current.evpn_ip_vrfs);
+    }
     if new_config.ethernet_segments != current.ethernet_segments {
         error!(
             "[[ethernet_segments]] differs from the live config: the \
@@ -2796,6 +2808,111 @@ local_vtep_ip = "10.0.0.1"
             returned.evpn_instances[0].route_targets.len(),
             1,
             "RT-list expansion must NOT have advanced into the runtime snapshot"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// SIGHUP that edits `[[evpn_ip_vrfs]]` must not advance the
+    /// in-memory snapshot. Gate 9 currently validates IP-VRF schema
+    /// at startup only; letting reload adopt the new table would make
+    /// the next reload stop reporting drift even though no Type 5 /
+    /// L3VNI runtime state changed.
+    #[tokio::test]
+    async fn reload_pins_evpn_ip_vrfs_to_startup_snapshot() {
+        let path = unique_temp_path("reload-evpn-ip-vrf-pin");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert_eq!(initial.evpn_ip_vrfs.len(), 1);
+        assert_eq!(initial.evpn_ip_vrfs[0].name, "tenant-blue");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000", "65000:6000"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-red"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.1"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-red"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when only evpn_ip_vrfs drift");
+
+        assert_eq!(
+            returned.evpn_ip_vrfs, initial.evpn_ip_vrfs,
+            "reload must pin evpn_ip_vrfs to the startup snapshot until restart"
+        );
+        assert_eq!(
+            returned.evpn_ip_vrfs.len(),
+            1,
+            "new IP-VRF must not advance into the runtime snapshot"
+        );
+        assert_eq!(
+            returned.evpn_ip_vrfs[0].route_targets.len(),
+            1,
+            "RT-list expansion must not advance into the runtime snapshot"
         );
 
         std::fs::remove_file(&path).ok();

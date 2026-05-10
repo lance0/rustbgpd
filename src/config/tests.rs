@@ -2634,6 +2634,10 @@ fn diff_config_json_serializes() {
         "expected evpn_instances_changed in serialized diff: {json}"
     );
     assert!(
+        json.contains("\"evpn_ip_vrfs_changed\":false"),
+        "expected evpn_ip_vrfs_changed in serialized diff: {json}"
+    );
+    assert!(
         json.contains("\"ethernet_segments_changed\":false"),
         "expected ethernet_segments_changed in serialized diff: {json}"
     );
@@ -3662,6 +3666,29 @@ originator_ip = "10.0.0.100"
     let new = parse(&new_toml).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.ethernet_segments_changed);
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn evpn_ip_vrfs_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_ip_vrfs_changed);
     assert!(diff.has_restart_required_changes());
 }
 

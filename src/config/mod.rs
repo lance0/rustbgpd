@@ -1030,6 +1030,11 @@ pub struct ConfigDiff {
     /// reconciliation. Flagging here ensures `--diff` operators don't
     /// silently miss schema edits.
     pub evpn_instances_changed: bool,
+    /// `[[evpn_ip_vrfs]]` blocks added/removed/modified between old
+    /// and new. Gate 9's foundation slice validates this schema at
+    /// startup but has no runtime swap/reconcile surface, so edits are
+    /// restart-required and must remain visible across SIGHUPs.
+    pub evpn_ip_vrfs_changed: bool,
     /// `[[ethernet_segments]]` blocks added/removed/modified between
     /// old and new. The segment orchestrator resolves this table once
     /// at startup, so edits are restart-required until a runtime swap
@@ -1130,6 +1135,7 @@ impl ConfigDiff {
             || self.policy.import_changed
             || self.policy.export_changed
             || self.evpn_instances_changed
+            || self.evpn_ip_vrfs_changed
             || self.ethernet_segments_changed
             || self.apply_bum_enforcement_changed
     }
@@ -1228,6 +1234,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         bmp_changed: old.bmp != new.bmp,
         mrt_changed: old.mrt != new.mrt,
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
+        evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
     }

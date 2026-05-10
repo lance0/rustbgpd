@@ -538,12 +538,11 @@ pub struct EvpnInstanceConfig {
     /// (lowercase hex, six octets). Empty by default. See ADR-0056.
     #[serde(default)]
     pub sticky_macs: Vec<String>,
-    /// Optional name of an `[[evpn_ip_vrfs]]` entry that scopes this
-    /// L2VNI's IRB. When set, the daemon allows the matching IP-VRF
-    /// to originate Type 5 routes for prefixes the kernel reaches
-    /// via this L2VNI's SVI. The name must resolve to a declared
-    /// `[[evpn_ip_vrfs]]` entry at config-load time. Empty / unset
-    /// means this L2VNI is bridging-only (no IRB participation).
+    /// Optional name of an `[[evpn_ip_vrfs]]` entry that will scope this
+    /// L2VNI's future IRB behavior. Gate 9's schema foundation validates
+    /// that the name resolves to a declared `[[evpn_ip_vrfs]]` entry, but
+    /// this field does not yet originate Type 5 routes or program kernel
+    /// IRB state. Empty / unset means this L2VNI remains bridging-only.
     /// See ADR-0058.
     #[serde(default)]
     pub ip_vrf: Option<String>,
@@ -564,14 +563,13 @@ pub struct EvpnInstanceConfig {
 ///   value is operator-supplied (not auto-derived) — see ADR-0058
 ///   §4 for why.
 ///
-/// **Operator prerequisite**: the VRF device and the L3 VXLAN
-/// device must be pre-created (the daemon does not own their
-/// lifecycle — observe-only, same as L2 bridges and L2 VXLAN
-/// devices today). The reconciler runs seven readiness predicates
-/// before originating or installing anything; missing / mismatched
-/// state surfaces as `IpVrfStatus::NotReady` and gates the dataplane
-/// quietly while the operator brings the network up. See ADR-0058
-/// §3 + §7.
+/// **Operator prerequisite for the follow-on dataplane slices**: the
+/// VRF device and the L3 VXLAN device must be pre-created (the daemon
+/// will not own their lifecycle — observe-only, same as L2 bridges and
+/// L2 VXLAN devices today). The planned reconciler will run the
+/// readiness predicates in ADR-0058 §3 before originating or installing
+/// anything; Gate 9's foundation slice only parses and validates the
+/// schema.
 ///
 /// ## Fields
 ///
@@ -593,8 +591,9 @@ pub struct EvpnInstanceConfig {
 ///   MAC. `aa:bb:cc:dd:ee:ff` form.
 /// - `vrf_device` — Linux VRF device name. Observe-only.
 /// - `l3vxlan_device` — Linux L3 VXLAN device name. Observe-only.
-/// - `table_id` — VRF route table id, cross-checked against
-///   `vrf_device`'s `IFLA_VRF_TABLE`. Observe-only.
+/// - `table_id` — VRF route table id. The follow-on Linux readiness
+///   probe will cross-check it against `vrf_device`'s
+///   `IFLA_VRF_TABLE`. Observe-only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvpnIpVrfConfig {

@@ -47,11 +47,8 @@ one IP-VRF tenant:
 name = "tenant-blue"             # operator-facing handle
 vni = 5000                       # L3VNI
 rd = "65000:5000"                # Route Distinguisher
-route_targets = ["65000:5000"]   # import + export RT (auto-derived
-                                 # when omitted, per RFC convention)
-local_vtep_ip = "10.0.0.1"       # source IP for L3VXLAN encap;
-                                 # may be omitted to share with
-                                 # the daemon-wide local VTEP IP
+route_targets = ["65000:5000"]   # required import + export RTs
+local_vtep_ip = "10.0.0.1"       # required source IP for L3VXLAN encap
 router_mac = "02:00:00:00:00:01" # local Router MAC extcomm value
                                  # advertised on every Type 5; same
                                  # MAC the kernel uses as the inner
@@ -73,6 +70,11 @@ Validation, at config-load time:
 - `vni` is unique across both `[[evpn_ip_vrfs]]` and `[[evpn_instances]]`
   (an L3VNI and an L2VNI can't share a number).
 - `rd` parses (`asn:value` or `ip:value`).
+- `route_targets` is non-empty and every entry parses. Auto-RT
+  derivation is deliberately out of scope for this gate.
+- `local_vtep_ip` is required and parses as IPv4 or IPv6. Sharing
+  a daemon-wide VTEP IP may come later as an explicit defaulting
+  feature, not as implicit schema behavior.
 - `router_mac` is a valid unicast non-zero MAC. Not auto-derived; see
   §3 below.
 - Every `[[evpn_instances]].ip_vrf` resolves to a declared IP-VRF.
