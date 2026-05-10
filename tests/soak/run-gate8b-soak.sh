@@ -85,12 +85,23 @@ require_tool() {
     fi
 }
 
-# Scrape Prometheus from inside a container (port 9179 from PE configs).
+# Scrape Prometheus from the host using the container's clab IP.
+#
+# The rustbgpd image is built on debian:bookworm-slim with neither
+# wget nor curl installed (deliberately — the daemon doesn't need
+# either at runtime). Scraping from the host instead avoids the
+# image bloat, and on a containerlab management network the host
+# can reach the per-container IP directly. Falls back through
+# `docker inspect`'s NetworkSettings.Networks map (clab labels the
+# bridge `clab-<topology>` so we can't hardcode a single key).
 prom_scrape() {
     local container="$1"
-    docker exec "$container" wget -qO- http://127.0.0.1:9179/metrics 2>/dev/null \
-        || docker exec "$container" curl -sf http://127.0.0.1:9179/metrics 2>/dev/null \
-        || true
+    local ip
+    ip=$(docker inspect --format \
+        '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' \
+        "$container" 2>/dev/null | awk '{print $1}')
+    [ -z "$ip" ] && return 0
+    curl -sfm 5 "http://${ip}:9179/metrics" 2>/dev/null || true
 }
 
 prom_extract() {
