@@ -9,6 +9,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Policy `match_local_pref_ge/le` and `match_med_ge/le` now use
+  RFC 4271 implicit defaults when the attribute is absent.**
+  Previously a route arriving without `LOCAL_PREF` (typically
+  eBGP-received routes, where `LOCAL_PREF` doesn't go on the
+  wire) silently failed any `match local-preference >= N`
+  comparison, regardless of the threshold. Same for `MED`. The
+  engine now substitutes RFC 4271 §5.1.4–§5.1.5 defaults — 100
+  for `LOCAL_PREF`, 0 for `MED` — so a single policy reads
+  identically against routes regardless of whether the attribute
+  is on the wire. Matches FRR / BIRD / GoBGP behavior. Operators
+  who relied on the old "absent → no match" semantics will see
+  policies that previously silently passed eBGP routes now match
+  them against any LP threshold ≤ 100; if that's a behavioral
+  change you need to roll back, the workaround is an explicit
+  `match_route_type = "external"` guard or a separate import
+  policy chain for that peer group.
+
 ### Added
 
 - **`rustbgpctl` policy / peer-group / neighbor-set commands.**

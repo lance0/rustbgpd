@@ -436,7 +436,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [ ] **FlowSpec NLRI length encoding >4095 bytes** — FlowSpec length prefix uses a 12-bit mask; rules exceeding 4095 bytes get a silently truncated length on the wire
 - [x] **AS_PATH segment >255 ASN encoding** — long `AS_SEQUENCE`/`AS_SET` segments are now split into multiple wire segments during encode instead of silently truncating via `u8` wrap
 - [x] **IPv6 next-hop policy rewrite completeness** — export policy `set_next_hop = "<ipv6>"` is covered end-to-end for MP_REACH exports and route explain; classic IPv4 `NEXT_HOP` handling remains unchanged
-- [ ] **LOCAL_PREF/MED policy match implicit defaults** — `match_local_pref_ge/le` and `match_med_ge/le` currently return false when the attribute is absent; decide whether policy matching should use BGP implicit defaults (100 for `LOCAL_PREF`, 0 for `MED`) instead
+- [x] **LOCAL_PREF/MED policy match implicit defaults** — `match_local_pref_ge/le` and `match_med_ge/le` now apply RFC 4271's implicit defaults (100 for `LOCAL_PREF`, 0 for `MED`) when the attribute is absent. A policy `match local-preference >= 100` reads identically against eBGP-received routes (no LP on the wire) and iBGP routes (LP attribute present), matching FRR / BIRD / GoBGP convention.
 - [ ] **Typed error variants for API deletion handlers** — policy and peer-group deletion operations match error messages with `error.contains("still referenced")` instead of typed error variants; fragile coupling to internal error strings
 - [x] **Deduplicate `validate_policy_action()` / `proto_statement_to_input()`** — extracted to `policy_helpers.rs`, shared by `policy_service.rs` and `peer_group_service.rs`
 
