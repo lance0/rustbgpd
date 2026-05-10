@@ -235,6 +235,70 @@ async fn reconcile_report_includes_observable_bum_enforcement_plan() {
         last.bum_enforcement[0].readiness,
         BumEnforcementReadiness::Ready
     );
+    // With `apply_bum_enforcement = false` (the for_tests default),
+    // the actor must not push any kernel-side BUM ops — the row is
+    // observable-only, matching Gate 8's posture.
+    assert!(
+        h.handle.bum_port_flags().is_empty(),
+        "no BUM port-flag ops should be applied when apply_bum_enforcement = false"
+    );
+    h.shutdown().await;
+}
+
+// 1b. Same setup as above, but with `apply_bum_enforcement = true` —
+// the actor must compute the BumPortFlagPlan, diff against the prior
+// (empty) plan, and emit a `SetBumPortFlags { ifindex: 10, flags:
+// suppress_all }` op the InMemoryDataplane records.
+#[tokio::test]
+async fn reconcile_emits_set_bum_port_flags_when_apply_enabled() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![10, 11],
+        },
+    );
+    h.handle.set_links(links);
+
+    let mut bum = BumEnforcementTable::new();
+    let esi = EthernetSegmentIdentifier::new([1; 10]);
+    bum.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            inst,
+            RemoteMacTable::new(),
+            bum,
+        ))
+        .unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+
+    // Both CE-port ifindexes should have received `suppress_all`.
+    let recorded = h.handle.bum_port_flags();
+    assert_eq!(recorded.len(), 2, "got {recorded:?}");
+    let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
+    assert_eq!(recorded[&10], suppress);
+    assert_eq!(recorded[&11], suppress);
+
     h.shutdown().await;
 }
 

@@ -71,6 +71,14 @@ pub struct ReconcileActorConfig {
     /// Initial dump skipped — used by tests that want to drive dumps
     /// purely through events.
     pub skip_initial_dump: bool,
+    /// Apply `SetBumPortFlags` ops to the kernel (Gate 8b). When
+    /// `false` (default), the actor still computes the resolved
+    /// `BumPortFlagPlan` and surfaces it via `DataplaneReport.
+    /// bum_enforcement` for operator visibility, but never emits the
+    /// kernel-mutation ops — same observe-only posture Gate 8 ships.
+    /// Operators flip this to `true` once the privileged-runner soak
+    /// validates enforcement on their kernel.
+    pub apply_bum_enforcement: bool,
 }
 
 impl ReconcileActorConfig {
@@ -82,6 +90,7 @@ impl ReconcileActorConfig {
             coalesce_window: Duration::from_millis(50),
             drain_timeout: Duration::from_secs(5),
             skip_initial_dump: false,
+            apply_bum_enforcement: false,
         }
     }
 
@@ -94,6 +103,7 @@ impl ReconcileActorConfig {
             coalesce_window: Duration::from_millis(0),
             drain_timeout: Duration::from_secs(5),
             skip_initial_dump: false,
+            apply_bum_enforcement: false,
         }
     }
 }
@@ -148,6 +158,12 @@ struct ActorState {
     /// is purely about *relative* delays, so the anchor doesn't have
     /// to be wall-clock — `Instant` since `start` works.
     epoch: Instant,
+    /// Last `BumPortFlagPlan` snapshot the actor pushed to the kernel
+    /// (or *would* have, when `apply_bum_enforcement` is off). Used
+    /// to diff against the freshly resolved plan each pass and emit
+    /// only changed entries — keeps the kernel-mutation surface
+    /// minimal and idempotent.
+    last_bum_plan: Vec<crate::bum_filter::BumPortFlagPlan>,
 }
 
 impl ActorState {
@@ -159,6 +175,7 @@ impl ActorState {
             last_intent_generation: 0,
             reconcile_generation: 0,
             epoch: Instant::now(),
+            last_bum_plan: Vec::new(),
         }
     }
 
@@ -314,17 +331,44 @@ impl<D: Dataplane> ReconcileActor<D> {
             }
         };
 
-        let plan = compute_diff(
+        let mut plan = compute_diff(
             intent.remote_macs.as_ref(),
             &snapshot,
             &self.state.owned,
             &probes,
         );
 
+        // Resolve the BUM-enforcement plan early so the same row set
+        // both feeds report observability and (when enabled) drives
+        // kernel mutation. Diffed against last_bum_plan so we only
+        // emit ops for ifindexes whose desired flag triplet actually
+        // changed — idempotent at the netlink boundary.
+        let bum_enforcement = build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
+        let new_bum_plan = crate::bum_filter::compute_flag_plan(&bum_enforcement);
+        let bum_changes =
+            crate::bum_filter::diff_flag_plans(&self.state.last_bum_plan, &new_bum_plan);
+        if self.config.apply_bum_enforcement {
+            // Append the BUM ops to the same plan so the existing
+            // apply_plan loop dispatches them through Dataplane::apply
+            // alongside FDB ops — same retry-state, same report
+            // accounting.
+            for change in &bum_changes {
+                plan.ops.push(DataplaneOp::SetBumPortFlags {
+                    ifindex: change.ifindex,
+                    flags: change.flags,
+                });
+            }
+        }
+
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
 
+        // Update the last-applied BUM plan only after a successful
+        // apply pass. With `apply_bum_enforcement = false` we still
+        // record the plan we *would* have pushed so a later flip of
+        // the flag picks up the right baseline.
+        self.state.last_bum_plan = new_bum_plan;
+
         let status = build_instance_status(&intent.instances, &probes);
-        let bum_enforcement = build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
         self.emit_report(status, applied, failed, bum_enforcement)
             .await;
     }

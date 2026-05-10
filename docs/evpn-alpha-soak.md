@@ -141,15 +141,27 @@ visibility)
   `BumPortFlagPlan` (the pure-logic mapping is already in
   `crates/evpn-linux/src/bum_filter.rs`). Wiring that emission
   into the reconcile loop behind a config flag is the next slice.
-- [ ] **Gate 8b — multi-homing enforcement.** Five concrete
+- [x] **Gate 8b reconciler-side BUM emission landed.** The actor
+  now computes `BumPortFlagPlan` from `BumEnforcementStatus` each
+  pass, diffs against the last-applied plan, and emits
+  `DataplaneOp::SetBumPortFlags` ops for changed entries when
+  `ReconcileActorConfig::apply_bum_enforcement = true`. Default
+  remains `false` so existing observe-only deployments are
+  unchanged. End-to-end Gate 8b enforcement is now wired from
+  control-plane DF election → segment orchestrator →
+  `BumEnforcementTable` → reconciler → `LinuxDataplane::apply` →
+  `RTM_NEWLINK` with `IFLA_BRPORT_*_FLOOD`. The remaining work
+  is operational, not architectural: daemon-config plumbing for
+  the apply-flag, soak validation on a privileged runner, then
+  flipping the flag default on once enough operator hours back
+  the change.
+- [ ] **Gate 8b — multi-homing enforcement.** Four concrete
   remaining slices:
-  1. Wire reconciler-side emission of `SetBumPortFlags` ops:
-     compute `BumPortFlagPlan` from `BumEnforcementStatus` rows
-     each pass, diff against prior plan, push only changed entries
-     as `DataplaneOp::SetBumPortFlags`. Behind a config flag
-     (`bum_enforcement_apply: bool` defaulting to false) so
-     operators opt in. With the apply path proven by the netns
-     round-trip, this slice is small and pure-Rust.
+  1. Daemon `[evpn]` config plumbing for
+     `apply_bum_enforcement: bool`. Currently the flag lives on
+     `ReconcileActorConfig` and defaults to `false`; operators
+     can override only via code. A TOML field (or gRPC mutation)
+     is the missing operator-facing surface.
   2. Proper per-ESI label allocator (replaces the deterministic
      ESI-byte-derived synthesizer used by Gate 8b prep).
   3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).

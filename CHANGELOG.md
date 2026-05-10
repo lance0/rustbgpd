@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 8b reconciler-side emission of BUM-suppression ops.**
+  `ReconcileActor` now computes a `BumPortFlagPlan` from the
+  resolved `BumEnforcementStatus` rows on every reconcile pass,
+  diffs against the last-applied plan, and (when
+  `ReconcileActorConfig::apply_bum_enforcement = true`) emits
+  `DataplaneOp::SetBumPortFlags` ops for changed entries through
+  the same `apply_plan` loop the FDB ops use. Default is `false`
+  so existing observe-only deployments are unchanged; operators
+  flip the flag once a privileged-runner soak validates kernel
+  enforcement on their target environment. New `last_bum_plan`
+  field on the actor's internal state preserves the diff baseline
+  across passes — repeated reconcile-on-event firings re-emit no
+  ops when nothing changed (idempotent at the netlink boundary).
+  Two new actor-level integration tests:
+  `reconcile_emits_set_bum_port_flags_when_apply_enabled` (verifies
+  emission + per-CE-port fan-out) and an extension to
+  `reconcile_report_includes_observable_bum_enforcement_plan`
+  (verifies non-emission with default config). +2 tests.
 - **EVPN Gate 8b BUM-suppression op surface + Linux netlink
   wiring (`SetBumPortFlags`).** New variant on `DataplaneOp` /
   `DataplaneOpKind` carrying `(ifindex, BumPortFlags)` so the
