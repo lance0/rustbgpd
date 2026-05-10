@@ -70,6 +70,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `CAP_NET_ADMIN` + Linux >= 4.18. Hosted PR-CI skips them
     cleanly. Two actor-level integration tests pin the emit /
     no-emit toggle behavior. +17 unit + integration tests.
+  - **Docker harness** at `crates/evpn-linux/tests/docker/`
+    (`Dockerfile` + `run-netns-tests.sh` + `README.md`) runs the
+    privileged tests inside a container so contributors don't
+    need iproute2 / iputils-ping / sudo on the host. One-command
+    invocation: `bash crates/evpn-linux/tests/docker/run-netns-tests.sh`.
+    Validated single-pass against host kernel 6.17 (Ubuntu 24.04,
+    Docker 29.2.1): spike + round-trip both green, confirming the
+    `RTM_NEWLINK + IFLA_LINKINFO + IFLA_INFO_PORT_DATA +
+    IFLA_BRPORT_*_FLOOD` netlink-attribute encoding actually lands
+    the desired flag triplet on the kernel-side bridge port.
 - **EVPN Gate 8b enforcement intent foundation — observable BUM
   plan, no kernel mutation yet.** The daemon now feeds DF-election
   role state into the EVPN Linux dataplane supervisor as a portable

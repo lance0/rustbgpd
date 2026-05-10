@@ -385,6 +385,17 @@ per-port broadcast flood flag"). On older kernels the netlink call
 returns `EOPNOTSUPP`, which the bum-filter classifier maps to
 `DataplaneError::KernelTooOld`.
 
+The end-to-end path (election → orchestrator → reconciler → netlink
+→ kernel) was validated single-pass against host kernel 6.17 via
+the Docker harness at `crates/evpn-linux/tests/docker/`. The shell
+spike confirmed the BUM-suppression invariants on a real bridge,
+and the Rust `linux_dataplane_set_bum_port_flags_round_trip` test
+confirmed that `LinuxDataplane::apply` actually lands `flood off /
+mcast_flood off / bcast_flood off` on the CE-facing bridge port.
+Sustained-churn soak validation is tracked separately in
+`docs/evpn-alpha-soak.md` and is the precondition for flipping the
+`apply_bum_enforcement` default to `true`.
+
 `intent_generation` echoes the `DataplaneIntent::generation` that
 produced the report, letting the daemon correlate "I sent desired
 snapshot N" with "Linux applied/failed N". `reconcile_generation` is the

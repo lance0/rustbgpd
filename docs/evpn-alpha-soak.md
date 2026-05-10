@@ -119,11 +119,11 @@ visibility)
   `allow` / `suppress` action in `DataplaneReport`, but still does
   not mutate kernel filters.
 - [x] **Gate 8b multi-homing enforcement — end-to-end wired,
-  opt-in by config.** Closes the loop from DF election to kernel
-  split-horizon. The per-port `bridge link set ... flood off
-  mcast_flood off bcast_flood off` triplet on the CE-facing
-  bridge port is the chosen primitive (proven by the privileged
-  netns spike at
+  opt-in by config, validated on a real kernel.** Closes the loop
+  from DF election to kernel split-horizon. The per-port
+  `bridge link set ... flood off mcast_flood off bcast_flood off`
+  triplet on the CE-facing bridge port is the chosen primitive
+  (proven by the privileged netns spike at
   `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`,
   gated on `EVPN_LINUX_NETNS=1`); five load-bearing invariants
   hold: DF allows, Non-DF blocks broadcast / multicast /
@@ -143,12 +143,24 @@ visibility)
   resolved plan still flows through `DataplaneReport.bum_enforcement`
   for visibility. Hot reload still requires a daemon restart for
   this field — promoting it to SIGHUP-reloadable rides with the
-  next config-shape pass.
+  next config-shape pass. **Single-pass validation against host
+  kernel 6.17** via the Docker harness at
+  `crates/evpn-linux/tests/docker/`: spike + Rust netlink
+  round-trip both green, confirming the
+  `RTM_NEWLINK + IFLA_LINKINFO + IFLA_INFO_PORT_DATA +
+  IFLA_BRPORT_*_FLOOD` encoding actually lands the desired flag
+  triplet on the kernel-side bridge port. The remaining soak
+  question (slice 1 below) is "does it stay correct under
+  sustained churn?", not "does it work?".
 - [ ] **Gate 8b — remaining multi-homing enforcement work.** Five
   concrete slices:
-  1. Privileged-runner 24 h soak validation (synthetic DF flips
-     + MAC churn) before flipping the `apply_bum_enforcement`
-     default to `true`.
+  1. **Privileged-runner 24 h soak validation** (synthetic DF
+     flips + MAC churn) before flipping the
+     `apply_bum_enforcement` default to `true`. The single-pass
+     primitive validation has already landed via the Docker
+     harness — what's left is sustained-churn confidence under
+     realistic timing (BGP convergence noise, election flap
+     loops, FDB programming concurrent with flag flips).
   2. Proper per-ESI label allocator (replaces the deterministic
      ESI-byte-derived synthesizer used by Gate 8b prep).
   3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).
