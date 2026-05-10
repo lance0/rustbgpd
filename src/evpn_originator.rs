@@ -189,10 +189,21 @@ struct OriginatorRuntime {
     metrics: BgpMetrics,
     originated_local_mac_counts: OriginatedLocalMacCounts,
     shutdown: CancellationToken,
+    /// Per-VNI ESI override for ESI-aware MAC origination (Gate 8b
+    /// remaining slice 5 — DF-role-aware MAC origination). When a
+    /// MAC is learned on a VNI that participates in a configured
+    /// `[[ethernet_segments]]` block, the Type 2 NLRI's ESI field
+    /// carries that segment's ESI so peers can correlate the MAC
+    /// with EAD-per-EVI routes via aliasing (RFC 7432 §14). VNIs
+    /// not in this map default to `EthernetSegmentIdentifier::ZERO`
+    /// (single-homed CE), preserving Gate 7b+1 behavior.
+    vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
 }
 
 /// Spawn the originator. Returns `None` for RR-only deployments
 /// (empty `evpn_instances`).
+#[allow(clippy::too_many_arguments)]
+// ESI-aware origination nudged the count over the threshold; the daemon-side spawn is the only caller.
 #[must_use = "drop the handle to shut down the originator"]
 pub fn spawn(
     config: OriginatorConfig,
@@ -202,6 +213,7 @@ pub fn spawn(
     metrics: BgpMetrics,
     originated_local_mac_counts: OriginatedLocalMacCounts,
     daemon_shutdown: CancellationToken,
+    vni_to_esi: Arc<std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>,
 ) -> Option<EvpnOriginatorHandle> {
     if evpn_instances.is_empty() {
         info!("no EVPN instances configured — originator not spawned (RR-only deployment)");
@@ -218,6 +230,7 @@ pub fn spawn(
         metrics,
         originated_local_mac_counts,
         shutdown: shutdown.clone(),
+        vni_to_esi,
     };
     let join = tokio::spawn(originator_loop(config, runtime, local_mac_rx, state));
 
@@ -337,6 +350,7 @@ async fn originator_loop(
                     &runtime.rib_tx,
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
+                    &runtime.vni_to_esi,
                 ).await;
                 return;
             }
@@ -352,6 +366,7 @@ async fn originator_loop(
                         &runtime.rib_tx,
                         &runtime.metrics,
                         &runtime.originated_local_mac_counts,
+                        &runtime.vni_to_esi,
                     ).await;
                     return;
                 };
@@ -362,6 +377,7 @@ async fn originator_loop(
                     &runtime.rib_tx,
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
+                    &runtime.vni_to_esi,
                 ).await;
             }
             event = recv_evpn_event(&mut evpn_event_rx) => match event {
@@ -373,6 +389,7 @@ async fn originator_loop(
                         &runtime.rib_tx,
                         &runtime.metrics,
                         &runtime.originated_local_mac_counts,
+                        &runtime.vni_to_esi,
                     ).await;
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -386,6 +403,7 @@ async fn originator_loop(
                         &mut state,
                         &runtime.metrics,
                         &runtime.originated_local_mac_counts,
+                        &runtime.vni_to_esi,
                     ).await {
                         warn!(error = %e, "EVPN originator: lag-recovery repoll failed");
                     }
@@ -402,6 +420,7 @@ async fn originator_loop(
                     &mut state,
                     &runtime.metrics,
                     &runtime.originated_local_mac_counts,
+                    &runtime.vni_to_esi,
                 ).await {
                     warn!(error = %e, "EVPN originator: RIB poll failed");
                 }
@@ -458,6 +477,7 @@ async fn handle_observation(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     match *obs {
         LocalMacObservation::Learned { vni, mac, ifindex } => {
@@ -470,6 +490,7 @@ async fn handle_observation(
                 rib_tx,
                 metrics,
                 originated_local_mac_counts,
+                vni_to_esi,
             )
             .await;
         }
@@ -482,6 +503,7 @@ async fn handle_observation(
                 rib_tx,
                 metrics,
                 originated_local_mac_counts,
+                vni_to_esi,
             )
             .await;
         }
@@ -495,6 +517,7 @@ async fn handle_observation(
                 rib_tx,
                 metrics,
                 originated_local_mac_counts,
+                vni_to_esi,
             )
             .await;
         }
@@ -508,6 +531,7 @@ async fn handle_observation(
                 rib_tx,
                 metrics,
                 originated_local_mac_counts,
+                vni_to_esi,
             )
             .await;
         }
@@ -533,6 +557,7 @@ async fn handle_learned(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     let Some(inst) = instances.get(vni) else {
         debug!(?vni, ?mac, "Learned for unknown VNI — dropping");
@@ -580,7 +605,15 @@ async fn handle_learned(
         if view.is_some() && !actions.is_empty() {
             record_duplicate_mac_move(metrics, vni, mac);
         }
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     } else {
         // Pending IPs exist — go straight to MAC+IP. Drop any stale
         // MAC-only from the originator state (idempotent if we never
@@ -595,6 +628,7 @@ async fn handle_learned(
             rib_tx,
             metrics,
             originated_local_mac_counts,
+            vni_to_esi,
         )
         .await;
 
@@ -607,7 +641,15 @@ async fn handle_learned(
             if view.is_some() && !actions.is_empty() {
                 record_duplicate_mac_move(metrics, vni, mac);
             }
-            apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+            apply_actions(
+                actions,
+                inst,
+                rib_tx,
+                metrics,
+                originated_local_mac_counts,
+                vni_to_esi,
+            )
+            .await;
             state
                 .live_mac_ip
                 .entry(vni)
@@ -619,6 +661,7 @@ async fn handle_learned(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // ESI-aware origination nudged the count over the threshold; refactoring to a context struct is a separate slice.
 async fn handle_aged(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -627,6 +670,7 @@ async fn handle_aged(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     let Some(inst) = instances.get(vni) else {
         return;
@@ -644,11 +688,27 @@ async fn handle_aged(
     // cascading both is safe (each emits empty if not advertising).
     if let Some(mac_orig) = state.mac_originators.get_mut(&vni) {
         let actions = mac_orig.on_local_aged(mac);
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
     if let Some(mac_ip_orig) = state.mac_ip_originators.get_mut(&vni) {
         let actions = mac_ip_orig.on_local_mac_aged(mac);
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
 }
 
@@ -662,6 +722,7 @@ async fn handle_ip_added(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     let Some(inst) = instances.get(vni) else {
         return;
@@ -695,7 +756,15 @@ async fn handle_ip_added(
     // advertising.
     if was_mac_only && let Some(mac_orig) = state.mac_originators.get_mut(&vni) {
         let actions = mac_orig.on_local_aged(mac);
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
 
     // Emit MAC+IP route.
@@ -707,7 +776,15 @@ async fn handle_ip_added(
     if view.is_some() && !actions.is_empty() {
         record_duplicate_mac_move(metrics, vni, mac);
     }
-    apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    apply_actions(
+        actions,
+        inst,
+        rib_tx,
+        metrics,
+        originated_local_mac_counts,
+        vni_to_esi,
+    )
+    .await;
     state
         .live_mac_ip
         .entry(vni)
@@ -727,6 +804,7 @@ async fn handle_ip_removed(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     let Some(inst) = instances.get(vni) else {
         return;
@@ -746,7 +824,15 @@ async fn handle_ip_removed(
         return;
     };
     let actions = mac_ip_orig.on_local_ip_aged(mac, ip);
-    apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+    apply_actions(
+        actions,
+        inst,
+        rib_tx,
+        metrics,
+        originated_local_mac_counts,
+        vni_to_esi,
+    )
+    .await;
 
     // Update live cache. If this was the last IP for the MAC AND the
     // MAC is still locally learned, downgrade back to MAC-only by
@@ -776,7 +862,15 @@ async fn handle_ip_removed(
         // detection stays anchored to the real bridge port —
         // a downgrade isn't a port move and shouldn't ratchet up.
         let actions = mac_orig.on_local_learned(mac, ifindex, sticky, view);
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
 }
 
@@ -790,6 +884,7 @@ async fn repoll_rib(
     state: &mut OriginatorState,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) -> Result<(), RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
     let (new_mac_view, new_mac_ip_view) = build_remote_views(instances, &routes);
@@ -821,7 +916,15 @@ async fn repoll_rib(
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
 
     // --- MAC+IP contender diff ---
@@ -851,7 +954,15 @@ async fn repoll_rib(
         let Some(inst) = instances.get(vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
 
     state.remote_mac_view = new_mac_view;
@@ -901,6 +1012,7 @@ async fn handle_evpn_event(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     if !matches!(event.key, EvpnRouteKey::MacIp { .. }) {
         return;
@@ -911,6 +1023,7 @@ async fn handle_evpn_event(
         state,
         metrics,
         originated_local_mac_counts,
+        vni_to_esi,
     )
     .await
     {
@@ -929,6 +1042,7 @@ async fn drain_to_withdraws(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     for (vni, orig) in &mut state.mac_ip_originators {
         let actions = orig.drain_to_withdraws();
@@ -938,7 +1052,15 @@ async fn drain_to_withdraws(
         let Some(inst) = instances.get(*vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
     for (vni, orig) in &mut state.mac_originators {
         let actions = orig.drain_to_withdraws();
@@ -948,7 +1070,15 @@ async fn drain_to_withdraws(
         let Some(inst) = instances.get(*vni) else {
             continue;
         };
-        apply_actions(actions, inst, rib_tx, metrics, originated_local_mac_counts).await;
+        apply_actions(
+            actions,
+            inst,
+            rib_tx,
+            metrics,
+            originated_local_mac_counts,
+            vni_to_esi,
+        )
+        .await;
     }
 }
 
@@ -960,6 +1090,7 @@ async fn apply_actions(
     rib_tx: &mpsc::Sender<RibUpdate>,
     metrics: &BgpMetrics,
     originated_local_mac_counts: &OriginatedLocalMacCounts,
+    vni_to_esi: &std::collections::BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>,
 ) {
     for action in actions {
         match action {
@@ -969,7 +1100,15 @@ async fn apply_actions(
                 sticky,
                 key,
             } => {
-                let route = build_originated_route(instance, mac, mobility_seq, sticky, key);
+                // ESI-aware origination: when the VNI is part of a
+                // configured Ethernet Segment, attach the segment's
+                // ESI so peers can resolve aliasing alternatives.
+                // Single-homed VNIs default to ZERO.
+                let esi = vni_to_esi
+                    .get(&instance.id)
+                    .copied()
+                    .unwrap_or(EthernetSegmentIdentifier::ZERO);
+                let route = build_originated_route(instance, mac, mobility_seq, sticky, key, esi);
                 let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                 if rib_tx
                     .send(RibUpdate::InjectEvpn {
@@ -1036,16 +1175,52 @@ async fn apply_actions(
 }
 
 /// Construct the wire-shaped `EvpnRibRoute` for a Type 2 origination.
+///
+/// `esi` carries the Ethernet Segment Identifier the local PE attaches
+/// to the Type 2 NLRI's ESI field. Single-homed CE = pass
+/// [`EthernetSegmentIdentifier::ZERO`]; multi-homed CE on a configured
+/// `[[ethernet_segments]]` segment = pass the segment's ESI so peers
+/// can correlate this MAC with Type 1 EAD-per-EVI routes for the same
+/// segment via aliasing (RFC 7432 §14).
+///
+/// ## On the route key not including ESI
+///
+/// Per RFC 7432 §9, the Type 2 NLRI's full wire shape includes the
+/// ESI as part of the bytes a BGP receiver hashes to identify the
+/// route. `EvpnRouteKey::MacIp` deliberately keys on
+/// `(RD, EthTag, MAC, IP)` only — the ESI lives on the route's
+/// path-metadata side, not the lookup-key side. Two reasons that's
+/// safe in our model:
+///
+/// 1. **Origination is single-source-per-VNI.**
+///    `Config::resolve_ethernet_segments` rejects two segments
+///    sharing a member VNI, so the local PE can never originate the
+///    same `(RD, EthTag, MAC, IP)` under two different ESIs. The
+///    `vni_to_esi` lookup is total and deterministic.
+/// 2. **Reception relies on best-path tie-breaking.** When two
+///    peers advertise the same `(RD, EthTag, MAC, IP)` under
+///    different ESIs (e.g. a CE that accidentally hashes to
+///    different segments at different `ToRs`), the existing best-path
+///    chain (mobility sequence → `ORIGIN` → `CLUSTER_LIST` →
+///    `ORIGINATOR_ID`) picks one winner whose ESI becomes canonical;
+///    aliasing on the receive side then surfaces alternative VTEPs
+///    via the EAD-per-EVI index without extending the route key.
+///
+/// Folding ESI into `EvpnRouteKey::MacIp` would be a larger ADR-level
+/// change with cascading impact across the RIB index, best-path
+/// comparison, and Type 2 withdraw paths — explicitly out of scope
+/// for the Gate 8b feature slices.
 pub(crate) fn build_originated_route(
     instance: &EvpnInstance,
     mac: MacAddress,
     mobility_seq: Option<u32>,
     sticky: bool,
     key: EvpnRouteKey,
+    esi: EthernetSegmentIdentifier,
 ) -> EvpnRibRoute {
     let macip = EvpnMacIp {
         rd: instance.rd,
-        esi: EthernetSegmentIdentifier::ZERO,
+        esi,
         ethernet_tag: EthernetTagId(0),
         mac,
         ip: extract_ip_from_key(&key),
@@ -1504,6 +1679,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -1541,7 +1717,14 @@ mod tests {
             mac: mac(0xAA),
             ip: None,
         };
-        let route = build_originated_route(&inst, mac(0xAA), Some(5), false, key);
+        let route = build_originated_route(
+            &inst,
+            mac(0xAA),
+            Some(5),
+            false,
+            key,
+            EthernetSegmentIdentifier::ZERO,
+        );
         assert_eq!(route.next_hop, ipa("10.0.0.1"));
         assert_eq!(route.origin_type, RouteOrigin::Local);
         // Verify the route carries: Origin, AsPath, NextHop, ExtComms.
@@ -1572,7 +1755,14 @@ mod tests {
             mac: mac(0xAA),
             ip: None,
         };
-        let route = build_originated_route(&inst, mac(0xAA), None, false, key);
+        let route = build_originated_route(
+            &inst,
+            mac(0xAA),
+            None,
+            false,
+            key,
+            EthernetSegmentIdentifier::ZERO,
+        );
         let extcomms = route
             .attributes
             .iter()
@@ -1595,7 +1785,14 @@ mod tests {
             mac: mac(0xAA),
             ip: None,
         };
-        let route = build_originated_route(&inst, mac(0xAA), None, /* sticky */ true, key);
+        let route = build_originated_route(
+            &inst,
+            mac(0xAA),
+            None,
+            /* sticky */ true,
+            key,
+            EthernetSegmentIdentifier::ZERO,
+        );
         let extcomms = route
             .attributes
             .iter()
@@ -1611,6 +1808,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_originated_route_carries_segment_esi_when_provided() {
+        // Gate 8b ESI-aware MAC origination: when the daemon's
+        // `vni_to_esi` lookup returns a non-zero ESI for the VNI a
+        // MAC was learned on, the Type 2 NLRI's ESI field carries
+        // that segment identifier so peers can resolve aliasing
+        // (RFC 7432 §14) against the corresponding EAD-per-EVI
+        // routes.
+        let inst = local_instance(100);
+        let key = EvpnRouteKey::MacIp {
+            rd: inst.rd,
+            ethernet_tag: EthernetTagId(0),
+            mac: mac(0xAA),
+            ip: None,
+        };
+        let segment_esi = EthernetSegmentIdentifier::new([
+            0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x00, 0x01,
+        ]);
+        let route = build_originated_route(&inst, mac(0xAA), None, false, key, segment_esi);
+        let EvpnRoute::MacIp(macip) = &route.route else {
+            panic!("expected MacIp route");
+        };
+        assert_eq!(macip.esi, segment_esi);
+        // Single-homed default still works:
+        let route_zero = build_originated_route(
+            &inst,
+            mac(0xAA),
+            None,
+            false,
+            key,
+            EthernetSegmentIdentifier::ZERO,
+        );
+        let EvpnRoute::MacIp(macip_zero) = &route_zero.route else {
+            panic!("expected MacIp route");
+        };
+        assert_eq!(macip_zero.esi, EthernetSegmentIdentifier::ZERO);
+    }
+
     #[tokio::test]
     async fn spawn_returns_none_for_empty_instance_table() {
         let instances = Arc::new(EvpnInstanceTable::new());
@@ -1624,6 +1859,7 @@ mod tests {
             BgpMetrics::new(),
             OriginatedLocalMacCounts::default(),
             CancellationToken::new(),
+            std::sync::Arc::new(std::collections::BTreeMap::new()),
         );
         assert!(h.is_none());
     }
@@ -1640,6 +1876,7 @@ mod tests {
             BgpMetrics::new(),
             OriginatedLocalMacCounts::default(),
             CancellationToken::new(),
+            std::sync::Arc::new(std::collections::BTreeMap::new()),
         );
         assert!(h.is_none());
     }
@@ -1680,6 +1917,7 @@ mod tests {
             metrics,
             counts,
             shutdown.clone(),
+            std::sync::Arc::new(std::collections::BTreeMap::new()),
         )
         .expect("originator spawned");
 
@@ -1746,6 +1984,7 @@ mod tests {
             metrics.clone(),
             counts.clone(),
             shutdown.clone(),
+            std::sync::Arc::new(std::collections::BTreeMap::new()),
         )
         .expect("originator spawned");
 
@@ -1818,6 +2057,7 @@ mod tests {
             metrics.clone(),
             counts.clone(),
             shutdown.clone(),
+            std::sync::Arc::new(std::collections::BTreeMap::new()),
         )
         .expect("originator spawned");
 
@@ -1866,6 +2106,7 @@ mod tests {
             BgpMetrics::new(),
             OriginatedLocalMacCounts::default(),
             shutdown.clone(),
+            std::sync::Arc::new(std::collections::BTreeMap::new()),
         )
         .expect("originator spawned");
 
@@ -1957,7 +2198,16 @@ mod tests {
             None,
         );
 
-        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut state,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         let view = state
             .remote_mac_view
@@ -2005,7 +2255,16 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut state,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         let view = state
             .remote_mac_view
@@ -2061,7 +2320,16 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut state,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         let view = state
             .remote_mac_view
@@ -2109,7 +2377,16 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut state,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         assert_eq!(
             query_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -2168,6 +2445,7 @@ mod tests {
             metrics,
             counts,
             shutdown.clone(),
+            std::sync::Arc::new(std::collections::BTreeMap::new()),
         )
         .expect("originator spawned");
 
@@ -2239,7 +2517,16 @@ mod tests {
             timestamp: "0".to_string(),
         };
 
-        handle_evpn_event(&event, &instances, &mut state, &rib_tx, &metrics, &counts).await;
+        handle_evpn_event(
+            &event,
+            &instances,
+            &mut state,
+            &rib_tx,
+            &metrics,
+            &counts,
+            &std::collections::BTreeMap::new(),
+        )
+        .await;
 
         assert!(
             !state.remote_mac_view.contains_key(&(vni(100), mac(0xCC))),
@@ -2322,6 +2609,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2336,6 +2624,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2373,6 +2662,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2410,6 +2700,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2425,6 +2716,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2471,6 +2763,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         handle_observation(
@@ -2484,6 +2777,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         // Clear the log to focus on the IpRemoved phase.
@@ -2500,6 +2794,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2537,6 +2832,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         for ip in ["192.0.2.10", "192.0.2.11"] {
@@ -2551,6 +2847,7 @@ mod tests {
                 &rib_tx,
                 &metrics,
                 &counts,
+                &std::collections::BTreeMap::new(),
             )
             .await;
         }
@@ -2567,6 +2864,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2605,6 +2903,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         for ip in ["192.0.2.10", "2001:db8::1"] {
@@ -2619,6 +2918,7 @@ mod tests {
                 &rib_tx,
                 &metrics,
                 &counts,
+                &std::collections::BTreeMap::new(),
             )
             .await;
         }
@@ -2634,6 +2934,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2697,6 +2998,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         for ip in ["192.0.2.10", "2001:db8::1"] {
@@ -2711,6 +3013,7 @@ mod tests {
                 &rib_tx,
                 &metrics,
                 &counts,
+                &std::collections::BTreeMap::new(),
             )
             .await;
         }
@@ -2730,6 +3033,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         assert_eq!(
@@ -2751,6 +3055,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         assert_eq!(
@@ -2770,6 +3075,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         assert_eq!(counts.count(vni(100)), 0, "Aged clears the count");
@@ -2802,6 +3108,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         handle_observation(
@@ -2815,6 +3122,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         // Snapshot the action log: should be exactly the upgrade
@@ -2834,6 +3142,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 
@@ -2899,6 +3208,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
         handle_observation(
@@ -2912,6 +3222,7 @@ mod tests {
             &rib_tx,
             &metrics,
             &counts,
+            &std::collections::BTreeMap::new(),
         )
         .await;
 

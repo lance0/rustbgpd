@@ -154,23 +154,46 @@ visibility)
   regression can't slip past review. The remaining soak question
   (slice 1 below) is "does it stay correct under sustained
   churn?", not "does it work?".
-- [ ] **Gate 8b — remaining multi-homing enforcement work.** Five
-  concrete slices:
+- [x] **Per-ESI label allocator landed** (`crates/evpn/src/label_allocator.rs`).
+  `EsiLabelAllocator` with stable `(ESI -> label)` assignments,
+  free-list reuse, and synth-first strategy so operators on the
+  Gate 8b prep upgrade path see no label change unless they hit a
+  real collision. Replaces the deterministic
+  `synthesize_esi_label` previously vulnerable to bytes-[4..7]
+  collisions across operator-chosen ESIs.
+- [x] **DF-role-aware (ESI-aware) MAC origination landed**
+  (`src/evpn_originator.rs`). Type 2 NLRIs for MACs learned on a
+  VNI in a configured `[[ethernet_segments]]` block now carry the
+  segment's ESI; peers can resolve aliasing alternatives via
+  RFC 7432 §14. SVI MACs stay ESI=0 (L3 next-hop, not CE-side).
+- [x] **Aliasing resolver landed** (`crates/evpn/src/aliasing.rs`).
+  Pure-logic `AliasIndex` over EAD-per-EVI advertisements; lookup
+  by `(ESI, EthernetTag)` returns deduped `Vec<IpAddr>` of VTEPs
+  that can reach the segment. Shovel-ready for the projection
+  layer's `RemoteMacEntry::alias_vtep_ips` wiring slice and the
+  dataplane's ECMP-to-multiple-VTEPs forwarding slice.
+- [x] **Mass-withdraw `AS_PATH`-change detector landed**
+  (`crates/evpn/src/mass_withdraw.rs`). Pure-logic
+  `AsPathTracker` with `record_advertisement` / `record_withdrawal`
+  / `drop_peer`. Returns `MassWithdrawTrigger { peer, esi }` for
+  fingerprint changes. The RIB-side sweep that consumes triggers
+  remains a follow-up integration slice.
+- [ ] **Gate 8b — remaining multi-homing enforcement work.** Three
+  concrete slices left:
   1. **Privileged-runner 24 h soak validation** (synthetic DF
      flips + MAC churn) before flipping the
-     `apply_bum_enforcement` default to `true`. The single-pass
-     primitive validation has already landed via the Docker
-     harness — what's left is sustained-churn confidence under
-     realistic timing (BGP convergence noise, election flap
-     loops, FDB programming concurrent with flag flips).
-  2. Proper per-ESI label allocator (replaces the deterministic
-     ESI-byte-derived synthesizer used by Gate 8b prep).
-  3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).
-  4. Mass-withdraw on `AS_PATH` change (RFC 7432 §8.6).
-  5. DF-role-aware MAC origination (couples to enforcement —
-     a Non-DF PE under enforcement should not advertise MAC routes
-     that aliasing peers can't follow back).
-  6. Optional import-side ES-Import RT filtering on the daemon's
+     `apply_bum_enforcement` default to `true`. Single-pass
+     primitive validation already landed via the Docker harness;
+     what's left is sustained-churn confidence under realistic
+     timing (BGP convergence noise, election flap loops, FDB
+     programming concurrent with flag flips).
+  2. **Aliasing / mass-withdraw RIB integration.** The detection
+     half (above) is shovel-ready; this slice plumbs `AliasIndex`
+     into the projection layer (extending `RemoteMacEntry`) and
+     wires `AsPathTracker` triggers into RIB-side route sweeps.
+     Plus the dataplane-side ECMP work (`nexthop` groups or
+     L3-route-based) to actually program multi-VTEP forwarding.
+  3. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).
   Estimated ~3-4 weeks once started.

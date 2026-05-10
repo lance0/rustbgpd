@@ -1065,6 +1065,34 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // and `local_mac_rx` is therefore `None`.
     let evpn_originator_shutdown = tokio_util::sync::CancellationToken::new();
     let evpn_originated_local_mac_counts = evpn_originator::OriginatedLocalMacCounts::default();
+    // Resolve `[[ethernet_segments]]` early so the originator can
+    // attach the right ESI to Type 2 routes for MACs learned on
+    // multi-homed VNIs (Gate 8b ESI-aware MAC origination). The
+    // same resolved table is consumed by `evpn_segment::spawn`
+    // below.
+    let ethernet_segments = config
+        .resolve_ethernet_segments()
+        .expect("validated in Config::load");
+    let vni_to_esi: std::sync::Arc<
+        std::collections::BTreeMap<
+            rustbgpd_evpn::EvpnInstanceId,
+            rustbgpd_wire::EthernetSegmentIdentifier,
+        >,
+    > = {
+        let mut map = std::collections::BTreeMap::new();
+        for seg in &ethernet_segments {
+            for &vni in &seg.member_vnis {
+                // `Config::resolve_ethernet_segments` rejects
+                // duplicate member-VNI across segments at config
+                // load, so a `vni` appearing here twice is a logic
+                // bug, not an operator misconfiguration. The first
+                // write is the only write.
+                debug_assert!(!map.contains_key(&vni));
+                map.insert(vni, seg.esi);
+            }
+        }
+        std::sync::Arc::new(map)
+    };
     let evpn_originator_handle = if let Some(handle) = evpn_dataplane_handle.as_mut() {
         evpn_originator::spawn(
             evpn_originator::OriginatorConfig::default(),
@@ -1074,6 +1102,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             metrics.clone(),
             evpn_originated_local_mac_counts.clone(),
             evpn_originator_shutdown.clone(),
+            vni_to_esi.clone(),
         )
     } else {
         None
@@ -1118,9 +1147,8 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // member-VNI table to resolve against. Returns `None` for
     // single-homed deployments and route reflectors.
     let evpn_segment_shutdown = tokio_util::sync::CancellationToken::new();
-    let ethernet_segments = config
-        .resolve_ethernet_segments()
-        .expect("validated in Config::load");
+    // `ethernet_segments` was resolved upstream so the originator
+    // could build its `vni_to_esi` lookup before we got here.
     let evpn_segment_handle = if ethernet_segments.is_empty() {
         None
     } else {

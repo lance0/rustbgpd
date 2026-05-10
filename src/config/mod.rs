@@ -3,7 +3,7 @@ mod parse;
 mod schema;
 mod validation;
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
@@ -655,6 +655,16 @@ impl Config {
             }
         }
         let mut seen_esis: BTreeSet<EthernetSegmentIdentifier> = BTreeSet::new();
+        // ESI-aware MAC origination resolves a Type 2 NLRI's ESI by
+        // looking up the MAC's VNI in `vni_to_esi` (built in
+        // `src/main.rs` from the resolved segments). That model
+        // requires each member VNI to belong to **at most one**
+        // segment on this PE — otherwise the daemon would have to
+        // know the learned MAC's CE-side ifindex to disambiguate,
+        // which Gate 8b doesn't yet plumb. Reject the ambiguous
+        // shape at config load so silent wrong-ESI origination is
+        // structurally impossible.
+        let mut vni_owner: BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier> = BTreeMap::new();
         let mut out = Vec::with_capacity(self.ethernet_segments.len());
         for cfg in &self.ethernet_segments {
             let seg = parse_ethernet_segment(cfg, &known_vnis)?;
@@ -665,6 +675,22 @@ impl Config {
                         cfg.esi
                     ),
                 });
+            }
+            for &vni in &seg.member_vnis {
+                if let Some(prior_esi) = vni_owner.insert(vni, seg.esi) {
+                    return Err(ConfigError::InvalidEthernetSegment {
+                        reason: format!(
+                            "VNI {} is listed under multiple ethernet_segments \
+                             (current segment esi {:?}, prior segment esi {:02x?}); \
+                             one local Ethernet Segment per VNI is required for \
+                             ESI-aware MAC origination — disambiguation by \
+                             learned-port ifindex is not yet plumbed",
+                            vni.as_u32(),
+                            cfg.esi,
+                            prior_esi.octets(),
+                        ),
+                    });
+                }
             }
             out.push(seg);
         }

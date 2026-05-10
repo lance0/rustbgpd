@@ -3688,6 +3688,43 @@ fn ethernet_segments_default_empty() {
 }
 
 #[test]
+fn ethernet_segments_reject_member_vni_shared_across_segments() {
+    // Gate 8b ESI-aware MAC origination keys on `(VNI -> ESI)`.
+    // If two segments listed the same member VNI, the origination
+    // path would silently pick whichever resolved first and emit
+    // wrong-ESI Type 2 routes for MACs the operator actually
+    // intended for the other segment. Reject at config load.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:02"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+"#,
+    );
+    // Validation fires inside `Config::load` / `parse`, so the
+    // error surfaces here before any caller can construct the
+    // ambiguous segment table at runtime.
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("VNI 100") && msg.contains("multiple ethernet_segments"),
+        "expected VNI-collision error, got: {msg}"
+    );
+}
+
+#[test]
 fn ethernet_segment_minimal_parses() {
     let toml = evpn_toml_with(
         r#"

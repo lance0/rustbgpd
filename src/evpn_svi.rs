@@ -234,7 +234,19 @@ async fn inject_svi_mac(
     // ADR-0056 is explicit that this is the supported way to mark
     // an SVI MAC sticky on origination.
     let sticky = inst.sticky_macs.contains(&mac);
-    let route = build_originated_route(inst, mac, None, sticky, key);
+    // SVI MAC is the L3 next-hop for the local PE's bridge, not a
+    // CE-side MAC. It always advertises with ESI=0 (single-homed
+    // sentinel) regardless of whether the VNI participates in a
+    // configured Ethernet Segment — peers don't aliasing-resolve
+    // SVI MACs. Matches FRR / Cumulus behavior.
+    let route = build_originated_route(
+        inst,
+        mac,
+        None,
+        sticky,
+        key,
+        rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+    );
     let (reply_tx, reply_rx) = oneshot::channel();
     if runtime
         .rib_tx
