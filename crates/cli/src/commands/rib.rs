@@ -271,12 +271,14 @@ fn print_explain_advertised(explain: &crate::proto::ExplainAdvertisedRouteRespon
 
 /// Top-level shape of `--json` best-path explain output. Designed
 /// so that a global-view explain (no `--explain-peer`) emits the
-/// exact same key set as the v0.7.0 shape — `peer_address` /
-/// `add_path_send_max` / `advertised_path_id` are skipped via
-/// `skip_serializing_if` when they would carry no operator-visible
-/// information. Peer-scoped explain emits all three so the operator
-/// can read advertisement intent from the JSON without parsing the
-/// human-friendly table.
+/// exact same key set as the v0.7.0 shape — only the new
+/// Add-Path-related fields (`peer_address`, `add_path_send_max`,
+/// per-candidate `advertised_path_id`) are skipped via
+/// `skip_serializing_if` when not peer-scoped. The pre-existing
+/// `best_route` and per-candidate `route` keys keep emitting as
+/// `null` when absent, matching the v0.7.0 contract — downstream
+/// JSON consumers depend on the key set being stable across
+/// global-view runs, regardless of whether a best route exists.
 #[derive(Serialize)]
 struct JsonExplainBestPath {
     prefix: String,
@@ -284,14 +286,16 @@ struct JsonExplainBestPath {
     peer_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     add_path_send_max: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always emitted (as `null` when absent) — the v0.7.0 shape
+    /// included this key unconditionally.
     best_route: Option<JsonRoute>,
     candidates: Vec<JsonExplainCandidate>,
 }
 
 #[derive(Serialize)]
 struct JsonExplainCandidate {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Always emitted (as `null` when absent) — the v0.7.0 shape
+    /// included this key unconditionally.
     route: Option<JsonRoute>,
     vs_best_reason: String,
     vs_best_ordering: String,
@@ -574,6 +578,68 @@ mod tests {
         assert_eq!(req.peer_address, "192.0.2.1");
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
+    }
+
+    /// Pre-existing `best_route` and per-candidate `route` keys
+    /// must emit as `null` when absent — that's the v0.7.0 shape.
+    /// This test would fail if `skip_serializing_if = "Option::is_none"`
+    /// ever leaks back onto those fields.
+    #[test]
+    fn json_absent_best_route_emits_null_not_omitted() {
+        let resp = crate::proto::ExplainBestPathResponse {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            best_route: None,
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: None,
+                vs_best_reason: "HigherLocalPref".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                advertised_path_id: 0,
+            }],
+            peer_address: String::new(),
+            add_path_send_max: 0,
+        };
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
+                })
+                .collect(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            obj.contains_key("best_route"),
+            "best_route key must always be present (as null when absent)"
+        );
+        assert!(
+            obj.get("best_route").unwrap().is_null(),
+            "absent best_route must serialize to JSON null"
+        );
+        let cand = obj
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(
+            cand.contains_key("route"),
+            "candidate.route must always be present"
+        );
+        assert!(
+            cand.get("route").unwrap().is_null(),
+            "absent candidate.route must serialize to JSON null"
+        );
     }
 
     /// Global-view JSON output omits `peer_address` /
