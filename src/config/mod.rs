@@ -8,7 +8,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use rustbgpd_evpn::{
-    DfAlgorithm, EthernetSegment, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteTarget,
+    DfAlgorithm, EthernetSegment, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, IpVrf, IpVrfId,
+    IpVrfTable, RouteTarget,
 };
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
@@ -695,6 +696,65 @@ impl Config {
             out.push(seg);
         }
         Ok(out)
+    }
+
+    /// Resolve `[[evpn_ip_vrfs]]` entries into runtime [`IpVrfTable`].
+    ///
+    /// Validates:
+    ///
+    /// - Each IP-VRF entry's own field constraints (delegates to
+    ///   `parse_evpn_ip_vrf`).
+    /// - Uniqueness of `name` and `vni` across the table (delegated to
+    ///   [`IpVrfTable::insert`]).
+    /// - No L3VNI collides with any L2VNI in `[[evpn_instances]]` —
+    ///   the wire VNI space is shared, so reusing a number across L2
+    ///   and L3 would create wire ambiguity.
+    /// - Every `[[evpn_instances]].ip_vrf` reference resolves to a
+    ///   declared IP-VRF. Marks each referenced IP-VRF in the table
+    ///   so downstream layers can spot "declared but unused" entries.
+    ///
+    /// # Errors
+    /// Surfaces every malformed or conflicting entry as a
+    /// [`ConfigError::InvalidEvpnIpVrf`] with the offending name in
+    /// the message.
+    pub fn resolve_evpn_ip_vrfs(&self) -> Result<IpVrfTable, ConfigError> {
+        let mut table = IpVrfTable::new();
+        // Pre-compute the L2VNI set so we can reject any L3VNI that
+        // collides with one.
+        let l2_vnis: BTreeSet<u32> = self.evpn_instances.iter().map(|c| c.vni).collect();
+        for cfg in &self.evpn_ip_vrfs {
+            let vrf = parse_evpn_ip_vrf(cfg)?;
+            if l2_vnis.contains(&vrf.id.as_u32()) {
+                return Err(ConfigError::InvalidEvpnIpVrf {
+                    reason: format!(
+                        "evpn_ip_vrfs[{}]: L3VNI {} collides with an [[evpn_instances]] entry of the same VNI; \
+                         L2VNIs and L3VNIs share the wire VNI space and must not overlap",
+                        cfg.name,
+                        vrf.id.as_u32()
+                    ),
+                });
+            }
+            table
+                .insert(vrf)
+                .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+                    reason: e.to_string(),
+                })?;
+        }
+        // Validate L2→L3 bindings + record references.
+        for inst in &self.evpn_instances {
+            if let Some(ref name) = inst.ip_vrf {
+                if table.get(name).is_none() {
+                    return Err(ConfigError::InvalidEvpnIpVrf {
+                        reason: format!(
+                            "evpn_instances[vni={}]: ip_vrf {:?} does not match any declared [[evpn_ip_vrfs]] entry",
+                            inst.vni, name
+                        ),
+                    });
+                }
+                table.mark_referenced(name.clone());
+            }
+        }
+        Ok(table)
     }
 
     /// Returns `(TransportConfig, label, import_chain, export_chain)` per neighbor.
@@ -1680,6 +1740,95 @@ fn parse_ethernet_segment(
         df_preference: cfg.df_preference,
         df_algorithm,
         originator_ip,
+    })
+}
+
+/// Parse one [`EvpnIpVrfConfig`] entry into the runtime [`IpVrf`]
+/// domain type. Validates the VNI range, RD / RT / Router MAC /
+/// device-name shape, and table id; uniqueness across
+/// `[[evpn_ip_vrfs]]` and L3↔L2 VNI overlap are checked at the
+/// table-build level in `resolve_evpn_ip_vrfs`.
+fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig) -> Result<IpVrf, ConfigError> {
+    if cfg.name.trim().is_empty() {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: "name must not be empty".to_string(),
+        });
+    }
+    // Restrict the name to a safe identifier shape — operators may
+    // pass these to gRPC / logging / config diffs, and an
+    // unrestricted-character name complicates every downstream tool.
+    if !cfg
+        .name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic())
+        || !cfg
+            .name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!("name {:?}: must match ^[a-zA-Z][a-zA-Z0-9_-]*$", cfg.name),
+        });
+    }
+
+    let id = IpVrfId::new(cfg.vni).map_err(|e| ConfigError::InvalidEvpnIpVrf {
+        reason: format!("name {:?}: {e}", cfg.name),
+    })?;
+
+    let rd = cfg
+        .rd
+        .parse::<RouteDistinguisher>()
+        .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+            reason: format!("name {:?}: invalid rd {:?}: {e}", cfg.name, cfg.rd),
+        })?;
+
+    if cfg.route_targets.is_empty() {
+        return Err(ConfigError::InvalidEvpnIpVrf {
+            reason: format!("name {:?}: route_targets must not be empty", cfg.name),
+        });
+    }
+    let mut rts: Vec<RouteTarget> = Vec::with_capacity(cfg.route_targets.len());
+    for raw in &cfg.route_targets {
+        let rt = raw
+            .parse::<RouteTarget>()
+            .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+                reason: format!("name {:?}: invalid route_target {:?}: {e}", cfg.name, raw),
+            })?;
+        rts.push(rt);
+    }
+
+    let local_vtep_ip =
+        cfg.local_vtep_ip
+            .parse::<IpAddr>()
+            .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+                reason: format!(
+                    "name {:?}: invalid local_vtep_ip {:?}: {e}",
+                    cfg.name, cfg.local_vtep_ip
+                ),
+            })?;
+
+    let router_mac =
+        parse_mac_address(&cfg.router_mac).map_err(|e| ConfigError::InvalidEvpnIpVrf {
+            reason: format!(
+                "name {:?}: invalid router_mac {:?}: {e}",
+                cfg.name, cfg.router_mac
+            ),
+        })?;
+
+    IpVrf::new(
+        cfg.name.clone(),
+        id,
+        rd,
+        rts,
+        local_vtep_ip,
+        router_mac,
+        cfg.vrf_device.clone(),
+        cfg.l3vxlan_device.clone(),
+        cfg.table_id,
+    )
+    .map_err(|e| ConfigError::InvalidEvpnIpVrf {
+        reason: e.to_string(),
     })
 }
 

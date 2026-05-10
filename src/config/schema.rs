@@ -37,6 +37,13 @@ pub struct Config {
     /// the observable-without-enforcement scope decision.
     #[serde(default)]
     pub ethernet_segments: Vec<EthernetSegmentConfig>,
+    /// Local IP-VRFs / L3VNIs this VTEP serves (Gate 9 symmetric
+    /// Interface-less IRB, RFC 9136 §4.4.2). Empty by default —
+    /// L2-only VTEPs and route reflectors leave it empty. See
+    /// ADR-0058 for the IP-VRF lifecycle + Router MAC + observe-only
+    /// device contract.
+    #[serde(default)]
+    pub evpn_ip_vrfs: Vec<EvpnIpVrfConfig>,
     /// Apply Gate 8b BUM-suppression filters to the kernel
     /// (per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge
     /// ports). Default `false` — observe-only behavior preserved.
@@ -531,6 +538,86 @@ pub struct EvpnInstanceConfig {
     /// (lowercase hex, six octets). Empty by default. See ADR-0056.
     #[serde(default)]
     pub sticky_macs: Vec<String>,
+    /// Optional name of an `[[evpn_ip_vrfs]]` entry that scopes this
+    /// L2VNI's IRB. When set, the daemon allows the matching IP-VRF
+    /// to originate Type 5 routes for prefixes the kernel reaches
+    /// via this L2VNI's SVI. The name must resolve to a declared
+    /// `[[evpn_ip_vrfs]]` entry at config-load time. Empty / unset
+    /// means this L2VNI is bridging-only (no IRB participation).
+    /// See ADR-0058.
+    #[serde(default)]
+    pub ip_vrf: Option<String>,
+}
+
+/// One IP-VRF / L3VNI tenant served by this VTEP (Gate 9 symmetric
+/// Interface-less IRB, RFC 9136 §4.4.2).
+///
+/// Each entry binds:
+///
+/// - A configured **L3VNI** for the VXLAN encapsulation.
+/// - A Linux **VRF device** (`vrf_device`) whose route table the
+///   daemon watches for local-route → Type 5 origination.
+/// - A Linux **L3 VXLAN device** (`l3vxlan_device`) the daemon
+///   programs FIB entries through.
+/// - A **Router MAC** advertised on every outbound Type 5 via the
+///   RFC 9135 §4.2 / RFC 9136 Router MAC extended community. The
+///   value is operator-supplied (not auto-derived) — see ADR-0058
+///   §4 for why.
+///
+/// **Operator prerequisite**: the VRF device and the L3 VXLAN
+/// device must be pre-created (the daemon does not own their
+/// lifecycle — observe-only, same as L2 bridges and L2 VXLAN
+/// devices today). The reconciler runs seven readiness predicates
+/// before originating or installing anything; missing / mismatched
+/// state surfaces as `IpVrfStatus::NotReady` and gates the dataplane
+/// quietly while the operator brings the network up. See ADR-0058
+/// §3 + §7.
+///
+/// ## Fields
+///
+/// - `name` — operator-facing handle, used by
+///   `[[evpn_instances]].ip_vrf` to bind L2VNIs to this IP-VRF.
+///   `^[a-zA-Z][a-zA-Z0-9_-]*$`, unique across `[[evpn_ip_vrfs]]`.
+/// - `vni` — L3VNI in `1..=16_777_215`. Unique across both
+///   `[[evpn_instances]]` and `[[evpn_ip_vrfs]]` — an L2VNI and an
+///   L3VNI cannot share a number.
+/// - `rd` — Route Distinguisher (`asn:value` or `ipv4:value`).
+/// - `route_targets` — bidirectional RTs applied to both import
+///   and export. Tenant identity on the wire.
+/// - `local_vtep_ip` — VXLAN source IP for outbound Type 5
+///   `NEXT_HOP`. Typically equals the per-`[[evpn_instances]]`
+///   `local_vtep_ip`; explicitly carried so an operator with split
+///   VTEP IPs per VRF can express that.
+/// - `router_mac` — Router MAC value advertised on every outbound
+///   Type 5 and asserted against the kernel-side L3 VXLAN device's
+///   MAC. `aa:bb:cc:dd:ee:ff` form.
+/// - `vrf_device` — Linux VRF device name. Observe-only.
+/// - `l3vxlan_device` — Linux L3 VXLAN device name. Observe-only.
+/// - `table_id` — VRF route table id, cross-checked against
+///   `vrf_device`'s `IFLA_VRF_TABLE`. Observe-only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvpnIpVrfConfig {
+    /// Operator-facing tenant handle.
+    pub name: String,
+    /// L3VNI (`1..=16_777_215`).
+    pub vni: u32,
+    /// Route Distinguisher (`asn:value` or `ipv4:value`).
+    pub rd: String,
+    /// Bidirectional Route Targets — applied to both import and export.
+    pub route_targets: Vec<String>,
+    /// VXLAN tunnel source IP for outbound Type 5 `NEXT_HOP`.
+    pub local_vtep_ip: String,
+    /// Router MAC value (RFC 9135 §4.2 / RFC 9136 Router MAC ext-community).
+    /// `aa:bb:cc:dd:ee:ff`, lowercase hex.
+    pub router_mac: String,
+    /// Linux VRF device name (operator-managed, observe-only).
+    pub vrf_device: String,
+    /// Linux L3 VXLAN device name (operator-managed, observe-only).
+    pub l3vxlan_device: String,
+    /// VRF route table id, cross-checked against `vrf_device`'s
+    /// `IFLA_VRF_TABLE`.
+    pub table_id: u32,
 }
 
 /// One Ethernet Segment this PE participates in (Gate 8).
@@ -650,4 +737,6 @@ pub enum ConfigError {
     InvalidEvpnInstance { reason: String },
     #[error("invalid Ethernet Segment config: {reason}")]
     InvalidEthernetSegment { reason: String },
+    #[error("invalid EVPN IP-VRF config: {reason}")]
+    InvalidEvpnIpVrf { reason: String },
 }
