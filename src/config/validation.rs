@@ -546,6 +546,11 @@ impl Config {
         // table is discarded; gRPC and future kernel reconciliation
         // call `resolve_evpn_instances` on demand.
         let _ = self.resolve_evpn_instances()?;
+        // Validate Ethernet Segment config at load time as well. The
+        // daemon relies on this invariant before spawning the Gate 8
+        // orchestrator; invalid ES config must not silently degrade to
+        // "orchestrator not spawned".
+        let _ = self.resolve_ethernet_segments()?;
 
         Ok(())
     }

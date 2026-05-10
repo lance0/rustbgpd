@@ -67,17 +67,21 @@
 #![warn(clippy::pedantic)]
 
 pub mod dataplane;
+pub mod df_election;
 pub mod instance;
 pub mod mac;
 pub mod origination;
+pub mod origination_es;
 pub mod origination_macip;
 pub mod projection;
 pub mod route_target;
+pub mod segment;
 
 pub use dataplane::{
     AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, FailedOp,
     InstanceDataplaneStatus, InstanceState,
 };
+pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use instance::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError,
 };
@@ -86,9 +90,11 @@ pub use mac::{
     RemoteMacTableBuilder, RemoteMacTableBuilderError,
 };
 pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};
+pub use origination_es::{LocalEadPerEsOriginator, LocalEadPerEviOriginator, LocalEsOriginator};
 pub use origination_macip::{LocalMacIpOriginator, MacIpKey, RemoteMacIpView};
 pub use projection::{ProjectedEvpnRoute, project_evpn_routes};
 pub use route_target::{RouteTarget, RouteTargetParseError};
+pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
 
 // Re-export the wire `RouteDistinguisher` so consumers of this crate
 // (including `crates/evpn-linux` and the daemon's projection layer)

@@ -62,6 +62,8 @@ pub struct BgpMetrics {
     evpn_local_observations_dropped: IntCounterVec,
     evpn_duplicate_mac_moves: IntCounterVec,
     evpn_duplicate_mac_first_move_timestamp: IntGaugeVec,
+    evpn_df_role: IntGaugeVec,
+    evpn_df_role_changes: IntCounterVec,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -300,6 +302,24 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_df_role = IntGaugeVec::new(
+            Opts::new(
+                "evpn_df_role",
+                "EVPN Designated Forwarder role per (ESI, VNI, role): 1 indicates the active role for the local PE, 0 indicates inactive. Always two label combinations per (esi, vni) — role=df and role=nondf — exactly one of which is 1.",
+            ),
+            &["esi", "vni", "role"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_df_role_changes = IntCounterVec::new(
+            Opts::new(
+                "evpn_df_role_changes_total",
+                "EVPN Designated Forwarder role transitions per (ESI, VNI). Bumps every time the local PE flips between DF and NonDF for that (ESI, VNI). Useful for spotting unstable elections.",
+            ),
+            &["esi", "vni"],
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -409,6 +429,12 @@ impl BgpMetrics {
             .register(Box::new(evpn_duplicate_mac_first_move_timestamp.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_df_role.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_df_role_changes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -447,6 +473,8 @@ impl BgpMetrics {
             evpn_local_observations_dropped,
             evpn_duplicate_mac_moves,
             evpn_duplicate_mac_first_move_timestamp,
+            evpn_df_role,
+            evpn_df_role_changes,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -621,6 +649,29 @@ impl BgpMetrics {
                 .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
             first_seen.set(now);
         }
+    }
+
+    /// Set the EVPN Designated Forwarder role gauge for a
+    /// `(ESI, VNI)`. Sets `role="df"` to 1 and `role="nondf"` to 0
+    /// (or vice versa) so `PromQL evpn_df_role{role="df"} == 1`
+    /// finds active DFs. Caller passes the canonical ESI text form
+    /// (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`) and `is_df`.
+    pub fn set_evpn_df_role(&self, esi: &str, vni: u32, is_df: bool) {
+        let vni = vni.to_string();
+        self.evpn_df_role
+            .with_label_values(&[esi, vni.as_str(), "df"])
+            .set(i64::from(is_df));
+        self.evpn_df_role
+            .with_label_values(&[esi, vni.as_str(), "nondf"])
+            .set(i64::from(!is_df));
+    }
+
+    /// Record an EVPN DF role transition for `(ESI, VNI)`.
+    pub fn record_evpn_df_role_change(&self, esi: &str, vni: u32) {
+        let vni = vni.to_string();
+        self.evpn_df_role_changes
+            .with_label_values(&[esi, vni.as_str()])
+            .inc();
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.

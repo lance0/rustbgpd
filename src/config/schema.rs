@@ -31,6 +31,12 @@ pub struct Config {
     /// dependency on local EVI state.
     #[serde(default)]
     pub evpn_instances: Vec<EvpnInstanceConfig>,
+    /// Local Ethernet Segments this PE participates in (Gate 8
+    /// multihoming foundation). Empty by default — single-homed
+    /// VTEPs and route reflectors leave it empty. See ADR-0057 for
+    /// the observable-without-enforcement scope decision.
+    #[serde(default)]
+    pub ethernet_segments: Vec<EthernetSegmentConfig>,
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
@@ -517,6 +523,67 @@ pub struct EvpnInstanceConfig {
     pub sticky_macs: Vec<String>,
 }
 
+/// One Ethernet Segment this PE participates in (Gate 8).
+///
+/// Each entry produces:
+///
+/// - One Type 4 ES route announcing this PE as a candidate for the
+///   ESI's per-`(ESI, VNI)` DF election.
+/// - One Type 1 EAD-per-ES route signalling ES liveness.
+/// - One Type 1 EAD-per-EVI route per `member_vni` carrying the
+///   role-aware ESI Label flag.
+///
+/// **Operator prerequisite**: every member VNI must already be
+/// declared in `[[evpn_instances]]`. Members referencing unknown
+/// VNIs are rejected at config-load time.
+///
+/// ## Fields
+///
+/// - `esi` — 10-byte Ethernet Segment Identifier in canonical
+///   `XX:XX:XX:XX:XX:XX:XX:XX:XX:XX` form. Must be exactly 10
+///   colon-separated hex bytes. Type 0 (all zero) is rejected
+///   because Type 0 means "single-homed" and thus shouldn't appear
+///   in a multihoming config.
+/// - `member_vnis` — non-empty set of VNIs that participate in
+///   this ES. Each member contributes a slot to the per-(ESI, VNI)
+///   DF election.
+/// - `df_preference` — Designated Forwarder preference value
+///   reserved for the future preference-based DF Election algorithm
+///   (RFC 8584 §3.1). Gate 8 accepts only the default 32768 because
+///   default-modulo ignores preference.
+/// - `df_algorithm` — DF election algorithm string. Gate 8 accepts
+///   only `"default-modulo"` (RFC 7432 §8.5). The domain model keeps
+///   `"highest-random-weight"` and `"preference-based"` variants for
+///   wire/forward compatibility, but config rejects them until the
+///   runtime implements those algorithms. Default `"default-modulo"`.
+/// - `originator_ip` — IP this PE uses as the Type 4 ES route's
+///   originator address. Typically equals `evpn_instances[].local_vtep_ip`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EthernetSegmentConfig {
+    /// 10-byte ESI in colon-separated hex (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`).
+    pub esi: String,
+    /// VNIs participating in this ES. Each must already be declared
+    /// in `[[evpn_instances]]`.
+    pub member_vnis: Vec<u32>,
+    /// DF preference (RFC 8584 §3.1). Default 32768.
+    #[serde(default = "default_df_preference")]
+    pub df_preference: u32,
+    /// DF algorithm string. Default `"default-modulo"`.
+    #[serde(default = "default_df_algorithm")]
+    pub df_algorithm: String,
+    /// Originator IP carried on the Type 4 ES route.
+    pub originator_ip: String,
+}
+
+fn default_df_preference() -> u32 {
+    32_768
+}
+
+fn default_df_algorithm() -> String {
+    "default-modulo".to_string()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("failed to read config file: {0}")]
@@ -571,4 +638,6 @@ pub enum ConfigError {
     InvalidDynamicNeighbor { reason: String },
     #[error("invalid EVPN instance config: {reason}")]
     InvalidEvpnInstance { reason: String },
+    #[error("invalid Ethernet Segment config: {reason}")]
+    InvalidEthernetSegment { reason: String },
 }

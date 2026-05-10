@@ -1,0 +1,34 @@
+# M38 PE1: rustbgpd configured as the lower-IP candidate of a 2-PE
+# Ethernet Segment. With service carving (`vni mod n` = `100 mod 2`
+# = 0 → slot 0 → lower IP wins), this PE should be elected DF for
+# VNI 100.
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 32768
+df_algorithm = "default-modulo"
+originator_ip = "10.0.0.1"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 30
+families = ["l2vpn_evpn"]

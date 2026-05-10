@@ -3633,3 +3633,125 @@ sticky_macs = ["aa:bb:cc:dd:ee:01"]
         "evpn_instances_changed must surface as restart-required"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0057 — Ethernet Segment config. Validates Gate 8's operator-facing
+// `[[ethernet_segments]]` block before the daemon spawns the orchestrator.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ethernet_segments_default_empty() {
+    let config = parse(valid_toml()).unwrap();
+    assert!(config.ethernet_segments.is_empty());
+    assert!(config.resolve_ethernet_segments().unwrap().is_empty());
+}
+
+#[test]
+fn ethernet_segment_minimal_parses() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let segments = config.resolve_ethernet_segments().unwrap();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].member_vnis.len(), 1);
+    assert_eq!(segments[0].df_algorithm, DfAlgorithm::DefaultModulo);
+    assert_eq!(segments[0].df_preference, 32_768);
+}
+
+#[test]
+fn ethernet_segment_rejects_empty_member_vnis() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = []
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {msg}"
+    );
+    assert!(
+        msg.contains("member_vnis"),
+        "msg must call out member_vnis: {msg}"
+    );
+}
+
+#[test]
+fn ethernet_segment_rejects_non_default_df_algorithm() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_algorithm = "preference-based"
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {msg}"
+    );
+    assert!(
+        msg.contains("default-modulo"),
+        "msg must name supported algorithm: {msg}"
+    );
+}
+
+#[test]
+fn ethernet_segment_rejects_non_default_df_preference() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 100
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        matches!(err, ConfigError::InvalidEthernetSegment { .. }),
+        "expected InvalidEthernetSegment, got {msg}"
+    );
+    assert!(
+        msg.contains("32768"),
+        "msg must name supported preference: {msg}"
+    );
+}

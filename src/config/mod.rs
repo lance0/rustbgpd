@@ -7,7 +7,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
-use rustbgpd_evpn::{EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteTarget};
+use rustbgpd_evpn::{
+    DfAlgorithm, EthernetSegment, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, RouteTarget,
+};
 use rustbgpd_fsm::PeerConfig;
 use rustbgpd_policy::{
     CommunityMatch, NextHopAction, Policy, PolicyAction, PolicyChain, PolicyStatement,
@@ -15,8 +17,8 @@ use rustbgpd_policy::{
 };
 use rustbgpd_transport::{RemovePrivateAs, TransportConfig};
 use rustbgpd_wire::{
-    Afi, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity, MacAddress, Prefix,
-    RouteDistinguisher, Safi,
+    Afi, EthernetSegmentIdentifier, ExtendedCommunity, Ipv4Prefix, Ipv6Prefix, LargeCommunity,
+    MacAddress, Prefix, RouteDistinguisher, Safi,
 };
 
 pub use schema::*;
@@ -631,6 +633,42 @@ impl Config {
                 })?;
         }
         Ok(table)
+    }
+
+    /// Resolve `[[ethernet_segments]]` entries into runtime
+    /// [`EthernetSegment`] domain objects.
+    ///
+    /// Validates that every member VNI is also declared in
+    /// `[[evpn_instances]]` — orphan members are rejected at config
+    /// load time so the daemon never spawns a Type 1 EAD-per-EVI
+    /// originator for a VNI it has no instance for.
+    ///
+    /// # Errors
+    /// Surfaces every malformed entry as a
+    /// [`ConfigError::InvalidEthernetSegment`] with the offending
+    /// ESI string in the message.
+    pub fn resolve_ethernet_segments(&self) -> Result<Vec<EthernetSegment>, ConfigError> {
+        let mut known_vnis: BTreeSet<EvpnInstanceId> = BTreeSet::new();
+        for cfg in &self.evpn_instances {
+            if let Ok(id) = EvpnInstanceId::new(cfg.vni) {
+                known_vnis.insert(id);
+            }
+        }
+        let mut seen_esis: BTreeSet<EthernetSegmentIdentifier> = BTreeSet::new();
+        let mut out = Vec::with_capacity(self.ethernet_segments.len());
+        for cfg in &self.ethernet_segments {
+            let seg = parse_ethernet_segment(cfg, &known_vnis)?;
+            if !seen_esis.insert(seg.esi) {
+                return Err(ConfigError::InvalidEthernetSegment {
+                    reason: format!(
+                        "duplicate ESI {:?} (every [[ethernet_segments]] entry must have a unique ESI)",
+                        cfg.esi
+                    ),
+                });
+            }
+            out.push(seg);
+        }
+        Ok(out)
     }
 
     /// Returns `(TransportConfig, label, import_chain, export_chain)` per neighbor.
@@ -1509,6 +1547,122 @@ fn parse_mac_address(raw: &str) -> Result<MacAddress, &'static str> {
         bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
     }
     Ok(MacAddress::new(bytes))
+}
+
+/// Parse one [`EthernetSegmentConfig`] entry into the runtime
+/// [`EthernetSegment`] domain type. Validates the ESI text form,
+/// rejects Type 0 (single-homed sentinel), and confirms every
+/// member VNI exists in the resolved EVPN instance set.
+fn parse_ethernet_segment(
+    cfg: &EthernetSegmentConfig,
+    known_vnis: &BTreeSet<EvpnInstanceId>,
+) -> Result<EthernetSegment, ConfigError> {
+    let esi = parse_esi(&cfg.esi).map_err(|e| ConfigError::InvalidEthernetSegment {
+        reason: format!("esi {:?}: {e}", cfg.esi),
+    })?;
+    if esi.esi_type() == 0 && esi.octets().iter().all(|&b| b == 0) {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "esi {:?}: Type 0 (all-zero) ESI is the single-homed sentinel; \
+                 [[ethernet_segments]] entries must use a non-zero ESI",
+                cfg.esi
+            ),
+        });
+    }
+
+    if cfg.member_vnis.is_empty() {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "esi {:?}: member_vnis must contain at least one configured EVPN instance",
+                cfg.esi
+            ),
+        });
+    }
+
+    let mut member_vnis: BTreeSet<EvpnInstanceId> = BTreeSet::new();
+    for raw in &cfg.member_vnis {
+        let id = EvpnInstanceId::new(*raw).map_err(|e| ConfigError::InvalidEthernetSegment {
+            reason: format!("member_vni {raw}: {e}"),
+        })?;
+        if !known_vnis.contains(&id) {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!(
+                    "member_vni {raw} not declared in [[evpn_instances]] — every \
+                     ES member VNI must have a matching EVPN instance"
+                ),
+            });
+        }
+        if !member_vnis.insert(id) {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!("duplicate member_vni {raw} within ESI {:?}", cfg.esi),
+            });
+        }
+    }
+
+    let default_preference = 32_768;
+    if cfg.df_preference != default_preference {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "df_preference {}: reserved for a future preference-based DF election \
+                 implementation; Gate 8 accepts only the default {default_preference}",
+                cfg.df_preference
+            ),
+        });
+    }
+
+    let df_algorithm = match cfg.df_algorithm.as_str() {
+        "default-modulo" => DfAlgorithm::DefaultModulo,
+        "highest-random-weight" | "preference-based" => {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!(
+                    "df_algorithm {:?}: reserved for a future Gate 8b/8c implementation; \
+                     Gate 8 accepts only \"default-modulo\"",
+                    cfg.df_algorithm
+                ),
+            });
+        }
+        other => {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!("df_algorithm {other:?}: must be \"default-modulo\""),
+            });
+        }
+    };
+
+    let originator_ip =
+        cfg.originator_ip
+            .parse::<IpAddr>()
+            .map_err(|e| ConfigError::InvalidEthernetSegment {
+                reason: format!("originator_ip {:?}: {e}", cfg.originator_ip),
+            })?;
+
+    Ok(EthernetSegment {
+        esi,
+        member_vnis,
+        df_preference: cfg.df_preference,
+        df_algorithm,
+        originator_ip,
+    })
+}
+
+/// Parse a 10-byte ESI from operator text form
+/// (`XX:XX:XX:XX:XX:XX:XX:XX:XX:XX`). Each octet must be exactly
+/// two hex digits. The wire crate intentionally doesn't implement
+/// `FromStr` on `EthernetSegmentIdentifier` (the on-the-wire form
+/// is raw bytes, not the operator notation), so the daemon owns
+/// this parse.
+fn parse_esi(raw: &str) -> Result<EthernetSegmentIdentifier, &'static str> {
+    let parts: Vec<&str> = raw.split(':').collect();
+    if parts.len() != 10 {
+        return Err("expected 10 colon-separated hex octets");
+    }
+    let mut bytes = [0u8; 10];
+    for (i, octet) in parts.iter().enumerate() {
+        if octet.len() != 2 {
+            return Err("each octet must be exactly 2 hex digits");
+        }
+        bytes[i] = u8::from_str_radix(octet, 16).map_err(|_| "invalid hex octet")?;
+    }
+    Ok(EthernetSegmentIdentifier::new(bytes))
 }
 
 #[cfg(test)]

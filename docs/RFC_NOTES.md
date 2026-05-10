@@ -756,6 +756,39 @@ implemented per ADR-0040.
   detection counters shipped — the operator-facing escalation
   channel is the deferred half).
 
+### Phase 3: Multi-homing foundation (Gate 8, ADR-0057)
+
+- **Gate 8 (`[Unreleased]`, ADR-0057):** observable DF election +
+  Type 1/4 origination. New `crates/evpn/src/segment.rs` carries
+  the `EthernetSegment` domain type (ESI, member VNIs, DF
+  preference, algorithm, originator IP). New
+  `crates/evpn/src/df_election.rs` ships the pure
+  `(state, event) → roles` state machine — RFC 7432 §8.5 service
+  carving (sort candidates by originator IP ascending; `vni mod n`
+  picks the slot) plus RFC 8584 §3 algorithm negotiation (lowest
+  algorithm-id wins; `DefaultModulo` is the universal floor). New
+  `crates/evpn/src/origination_es.rs` ships three deterministic
+  Type 1/4 originators: `LocalEsOriginator` (Type 4 ES),
+  `LocalEadPerEsOriginator` (Type 1 EAD-per-ES with MAX_ET
+  marker), `LocalEadPerEviOriginator` (Type 1 EAD-per-EVI,
+  role-aware via `on_vni_role_changed`). Daemon orchestrator at
+  `src/evpn_segment.rs` subscribes to the EVPN best-path
+  broadcast (Gate 7c), re-runs election on every Type 4 event,
+  and updates the Prometheus surface
+  (`evpn_df_role{esi,vni,role}` gauge,
+  `evpn_df_role_changes_total{esi,vni}` counter).
+- **Gate 8 scope is observation only.** Forwarding enforcement
+  (split-horizon via the ESI Label extcomm, ES-Import RT,
+  aliasing, mass-withdraw) is Gate 8b. ADR-0057 records the
+  carve-out in detail. Operator note: do not configure
+  `[[ethernet_segments]]` for production multihoming until
+  Gate 8b ships — segment BUM will duplicate toward the CE in a
+  multi-PE setup.
+- **M38 smoke** (`tests/interop/m38-evpn-df-election.clab.yml`):
+  2-PE rustbgpd segment, asserts (1) PE1 elected DF, (2) PE2
+  elected NonDF, (3) PE2 promotes to DF after PE1 shutdown,
+  (4) `evpn_df_role_changes_total` advances on the promotion.
+
 ---
 
 ## RFC 9012 / RFC 8365 — BGP Encapsulation Ext Community + VXLAN-EVPN

@@ -124,15 +124,17 @@ this document is reference / long-tail.
   listeners are unchanged (file-system permissions remain their
   auth surface).
 - [ ] **EVPN VTEP alpha-soak slate.** With Gates 7a / 7b / 7b+1 /
-  7b+2 / 7c landed (v0.17.0), the bidirectional VTEP loop covers
-  MAC-only and MAC+IP origination under the FRR replace model with
-  sub-second mobility convergence. `docs/evpn-alpha-soak.md` tracks
-  the residuals as a checklist: M37 + M37+IP on a privileged CI
-  runner, 24 h soak with synthetic MAC churn, RFC 7432 §15.1
-  duplicate-MAC quarantine action (detection counters shipped, the
-  operator-facing escalation channel is the deferred half), plus
-  the larger Gate 8 / Gate 9 follow-ons. None of these block
-  v0.17.0 — they're the slope to v1.0-grade EVPN confidence.
+  7b+2 / 7c / 8 landed (v0.17.0 + `[Unreleased]`), the bidirectional
+  VTEP loop covers MAC-only and MAC+IP origination under the FRR
+  replace model with sub-second mobility convergence, plus
+  observable DF election against shared Ethernet Segments.
+  `docs/evpn-alpha-soak.md` tracks the residuals as a checklist:
+  M37 + M37+IP + M38 on a privileged CI runner, 24 h soak with
+  synthetic MAC churn, RFC 7432 §15.1 duplicate-MAC quarantine
+  action (detection counters shipped, the operator-facing
+  escalation channel is the deferred half), plus the larger
+  Gate 8b (multi-homing enforcement) / Gate 9 (IRB) follow-ons.
+  These are the slope to v1.0-grade EVPN confidence.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
@@ -503,7 +505,8 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [x] **Enhanced Route Refresh** (RFC 7313) — BoRR/EoRR demarcation and inbound family replacement semantics for `SoftResetIn`
 - [x] **EVPN Route Reflector — Phase 1** (RFC 7432) — L2VPN/EVPN (AFI 25 / SAFI 70) RR role for VXLAN-EVPN DC fabrics. All 5 RFC 7432 route types (EAD per-ES, EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix per RFC 9136), MAC mobility best-path per §15.1 with sticky-flag preservation, RFC 4456 reflection applied to EVPN routes, 6 typed extended-community accessors (BGP Encapsulation for VXLAN per RFC 8365/9012, MAC Mobility, ESI Label, ES-Import RT, Router MAC per RFC 9135, Default Gateway). `ListEvpnRoutes` gRPC RPC + `rustbgpctl evpn` CLI. Gates 0-6 closed on `feat/evpn-rr`: capability sanity (M29), real Type 2 MAC reflection with kernel VXLAN (M30), GR/LLGR stale handling, MAC mobility / sticky preservation interop (M31), multi-homing Type 1 EAD-per-EVI + Type 4 ES reflection (M32 — FRR ES on a bond interface), 50k-route scale validation with churn (M33), and controller-driven injection via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC. Includes review correctness fixes: source-peer split horizon, same-peer attribute-change detection, full RFC 4456 tie-break chain (stale → ORIGIN → CLUSTER_LIST → ORIGINATOR_ID), max-prefix counting EVPN keys + FlowSpec rules, EVPN withdrawals propagated through both AS_PATH and CLUSTER_LIST loop branches, EVPN initial dump for late-joining peers, EVPN ERR refresh tracking, Type 5 prefix in policy context, proto3 default-correct `disable_vxlan_encap` field. See ADR-0050 and [docs/evpn-enablement.md](docs/evpn-enablement.md) for the Gate 0-9 ladder.
 - [ ] **EVPN Phase 2 — VTEP mode** — local EVI/VRF/VNI state, MAC learning from kernel FDB, local route origination. Required for general-purpose routing; not required for RR-only deployments. Kernel integration design in ADR-0054 (Gate 7b foundation, v0.14.0) and ADR-0055 (Gate 7b+1 origination boundary, v0.15.0). With both gates landed, the bidirectional VTEP loop is closed — kernel-learned local MACs flow up via RTNLGRP_NEIGH → BGP EVPN Type 2 originations with RFC 7432 §15.1 mobility, and one Type 3 IMET per L2VNI carries RFC 6514 §5 PMSI Tunnel for ingress-replication BUM. MAC-with-IP origination (ARP/ND suppression learning), `advertise_svi_mac`, static-MAC config schema, and Gate 7c sub-second mobility convergence are the next slices on top — tracked in `docs/evpn-enablement.md`.
-- [ ] **EVPN Phase 3 — Multi-homing execution + IRB** — DF election (RFC 7432 §8 + RFC 8584), symmetric IRB semantics (RFC 9135), auto-derived Route Targets (RFC 8365 §5.1.2.1), aliasing / backup-path via Type 1 EAD. Needed for active-active ToR deployments. (Phase 1 already validates that the RR reflects multi-homing Type 1 EAD-per-EVI + Type 4 ES routes correctly so VTEPs can run DF election independently; Phase 3 is rustbgpd-as-VTEP execution.)
+- [x] **EVPN Phase 3 partial — Multi-homing foundation (Gate 8)** (`[Unreleased]`, ADR-0057) — observable DF election + Type 1/4 origination. Pure DF election state machine (RFC 7432 §8.5 service carving + RFC 8584 §3 algorithm negotiation), three Type 1/4 originator state machines (Type 4 ES, Type 1 EAD-per-ES with MAX_ET, Type 1 EAD-per-EVI role-aware), daemon orchestrator subscribed to the EVPN best-path broadcast, Prometheus `evpn_df_role{esi,vni,role}` gauge + `evpn_df_role_changes_total` counter. M38 smoke topology (2-PE rustbgpd shared ESI). **Forwarding enforcement (split-horizon, ESI Label, ES-Import RT, aliasing, mass-withdraw) is Gate 8b — ADR-0057 records the carve-out.** Operator note: do not configure `[[ethernet_segments]]` for production multi-homing until Gate 8b ships.
+- [ ] **EVPN Phase 3 — Multi-homing enforcement (Gate 8b) + IRB** — split-horizon via ESI Label extcomm (RFC 7432 §7.5), ES-Import RT (§7.6), aliasing / backup-path via Type 1 EAD-per-EVI (§14), mass-withdraw on AS_PATH change (§8.6), DF-role-aware MAC origination, symmetric IRB semantics (RFC 9135), auto-derived Route Targets (RFC 8365 §5.1.2.1). Needed for active-active ToR deployments.
 - [ ] **EVPN Phase 4 — Adjacent standards** — PBB-EVPN (RFC 7623), EVPN-MVPN integration (RFC 9251, Route Types 6/7/8), MPLS encapsulation, Add-Path for EVPN (RFC 9252). Service-provider EVPN use cases.
 - [ ] **EVPN polish + observability gaps** (low-priority, Phase 1 known limitations):
   - [x] Type 5 (IP Prefix) interop test against FRR (M30b, `tests/interop/m30b-evpn-type5-frr.clab.yml`) — single-VTEP origination from FRR vrf1 / L3VNI 100; rustbgpd RR decodes the Type 5 NLRI and surfaces RD, prefix, next-hop, VNI label, RT extended community, and VXLAN encap via `ListEvpnRoutes`. Withdrawal validated. RR-reflection of Type 5 (2-VTEP topology, ORIGINATOR_ID + CLUSTER_LIST asserts) tracked as M30c.

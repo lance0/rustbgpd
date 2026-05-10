@@ -22,6 +22,7 @@ mod config_persister;
 mod evpn_dataplane;
 mod evpn_imet;
 mod evpn_originator;
+mod evpn_segment;
 mod evpn_svi;
 mod looking_glass;
 mod metrics_server;
@@ -1096,6 +1097,28 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         None
     };
 
+    // EVPN Ethernet Segment orchestrator (Gate 8 multihoming
+    // foundation — observable DF election, no enforcement). Spawned
+    // when `[[ethernet_segments]]` has at least one entry and at
+    // least one configured `[[evpn_instances]]` exists for the
+    // member-VNI table to resolve against. Returns `None` for
+    // single-homed deployments and route reflectors.
+    let evpn_segment_shutdown = tokio_util::sync::CancellationToken::new();
+    let ethernet_segments = config
+        .resolve_ethernet_segments()
+        .expect("validated in Config::load");
+    let evpn_segment_handle = if ethernet_segments.is_empty() {
+        None
+    } else {
+        evpn_segment::spawn(
+            &evpn_instances,
+            ethernet_segments,
+            rib_tx.clone(),
+            metrics.clone(),
+            evpn_segment_shutdown.clone(),
+        )
+    };
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1383,6 +1406,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // must land while peer sessions are still up.
     if let Some(handle) = evpn_svi_handle {
         info!("draining EVPN SVI-MAC originator");
+        handle.shutdown().await;
+    }
+
+    // 1.9a'' Drain the EVPN segment orchestrator — withdraws all
+    // Type 4 ES + Type 1 EAD-per-ES + Type 1 EAD-per-EVI routes
+    // before peer sessions tear down. Same ordering rationale as
+    // the originator + SVI tasks.
+    if let Some(handle) = evpn_segment_handle {
+        info!("draining EVPN segment orchestrator");
         handle.shutdown().await;
     }
 
@@ -2902,6 +2934,7 @@ hold_time = 90
             file_path: None,
             dynamic_neighbors: Vec::new(),
             evpn_instances: Vec::new(),
+            ethernet_segments: Vec::new(),
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));

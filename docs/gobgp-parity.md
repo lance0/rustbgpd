@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-07
+Last updated: 2026-05-09
 
 ## Address Families
 
@@ -14,7 +14,7 @@ Last updated: 2026-05-07
 | IPv6 Labeled Unicast | Yes | No | |
 | VPNv4 / VPNv6 (RFC 4364) | Yes | No | |
 | L2VPN VPLS (RFC 4761) | Yes | No | |
-| L2VPN EVPN (RFC 7432) | Yes | Partial (RR + bidirectional VTEP, MAC-only and MAC+IP) | Route types 1-5 in RR mode with controller-injection gRPC for Type 2/3 (Gate 6, ADR-0050). Bidirectional VTEP shipped across Gates 7a/7b/7b+1/7b+2/7c (v0.13.0 onward, ADR-0052/0054/0055/0056): declarative `[[evpn_instances]]` schema; Linux kernel FDB programming from received Type 2 routes (downward); MAC-only and MAC+IP local origination via `RTNLGRP_NEIGH` subscription with RFC 7432 §15.1 mobility sequencing under the FRR-style replace model (one Type 2 per MAC at any time — `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back; requires `bridge neigh_suppress on`); Type 3 IMET per L2VNI carrying PMSI Tunnel (RFC 6514 §5); `advertise_svi_mac` SVI-MAC origination; `sticky_macs` (ADR-0056) for RFC 7432 §15.4 sticky bit; sub-second mobility convergence via push notification (Gate 7c). Note that GoBGP's "Yes" here is the wire codec — GoBGP itself does not own kernel-side VTEP integration (it relies on FRR/SDN injection), so on the VTEP-mode dimension rustbgpd has functional parity-plus. Still ahead for full RFC 7432 daemon parity: DF election + multi-homing (Gate 8), IRB / L3VNI / Type 5 dataplane (Gate 9), duplicate-MAC quarantine action (ADR-0055 §9), Route Types 6-9 |
+| L2VPN EVPN (RFC 7432) | Yes | Partial (RR + bidirectional VTEP, MAC-only and MAC+IP) | Route types 1-5 in RR mode with controller-injection gRPC for Type 2/3 (Gate 6, ADR-0050). Bidirectional VTEP shipped across Gates 7a/7b/7b+1/7b+2/7c (v0.13.0 onward, ADR-0052/0054/0055/0056): declarative `[[evpn_instances]]` schema; Linux kernel FDB programming from received Type 2 routes (downward); MAC-only and MAC+IP local origination via `RTNLGRP_NEIGH` subscription with RFC 7432 §15.1 mobility sequencing under the FRR-style replace model (one Type 2 per MAC at any time — `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back; requires `bridge neigh_suppress on`); Type 3 IMET per L2VNI carrying PMSI Tunnel (RFC 6514 §5); `advertise_svi_mac` SVI-MAC origination; `sticky_macs` (ADR-0056) for RFC 7432 §15.4 sticky bit; sub-second mobility convergence via push notification (Gate 7c). Note that GoBGP's "Yes" here is the wire codec — GoBGP itself does not own kernel-side VTEP integration (it relies on FRR/SDN injection), so on the VTEP-mode dimension rustbgpd has functional parity-plus. Multi-homing foundation shipped in `[Unreleased]` (Gate 8, ADR-0057): observable DF election (RFC 7432 §8.5 service carving + RFC 8584 §3 algorithm negotiation), Type 1/4 origination (Type 4 ES, Type 1 EAD-per-ES with MAX_ET, role-aware Type 1 EAD-per-EVI), Prometheus `evpn_df_role` surface. Still ahead: forwarding enforcement (Gate 8b — split-horizon via ESI Label, ES-Import RT, aliasing, mass-withdraw), IRB / L3VNI / Type 5 dataplane (Gate 9), duplicate-MAC quarantine action (ADR-0055 §9), Route Types 6-9 |
 | IPv4/IPv6 FlowSpec (RFC 8955) | Yes | Yes | SAFI 133, all 13 component types |
 | VPN FlowSpec | Yes | No | |
 | BGP-LS (RFC 7752) | Yes | No | |

@@ -82,7 +82,7 @@ use tracing::{debug, info, warn};
 /// The RIB indexes locally-injected routes under this synthetic peer
 /// IP; setting `EvpnRibRoute.peer` to the same value keeps the route
 /// recognizable as locally-originated downstream of the inject path.
-const LOCAL_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+pub(crate) const LOCAL_PEER: IpAddr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
 const ACTION_INJECT: &str = "inject";
 const ACTION_WITHDRAW: &str = "withdraw";
 
