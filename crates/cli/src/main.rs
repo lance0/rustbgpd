@@ -171,10 +171,141 @@ enum Command {
         interval: u64,
     },
 
+    /// Manage named [[policy_definitions]] entries and the global /
+    /// per-neighbor import/export chains. Backed by PolicyService.
+    Policy {
+        #[command(subcommand)]
+        action: PolicyAction,
+    },
+
+    /// Manage named [[neighbor_sets]] entries used by policy
+    /// `match_neighbor_set`. Backed by PolicyService.
+    NeighborSet {
+        #[command(subcommand)]
+        action: NeighborSetAction,
+    },
+
+    /// Manage named [[peer_groups]] entries and bind/unbind neighbors
+    /// to them. Backed by PeerGroupService.
+    PeerGroup {
+        #[command(subcommand)]
+        action: PeerGroupAction,
+    },
+
     /// Generate shell completions
     Completions {
         /// Shell to generate completions for
         shell: Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyAction {
+    /// List configured policies (names + statement counts)
+    List,
+    /// Show one policy by name
+    Get {
+        /// Policy name
+        name: String,
+    },
+    /// Set (create or replace) a policy from a JSON file
+    Set {
+        /// Policy name
+        name: String,
+        /// JSON file containing the PolicyDefinition shape
+        #[arg(long, value_name = "PATH")]
+        from_file: String,
+    },
+    /// Delete a policy by name
+    Delete {
+        /// Policy name
+        name: String,
+    },
+    /// Manage global / per-neighbor import/export chains
+    Chain {
+        #[command(subcommand)]
+        action: PolicyChainAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyChainAction {
+    /// Show the global chains, or the per-neighbor chains when
+    /// `--neighbor` is given.
+    Show {
+        /// Neighbor address (omit for the global chains)
+        #[arg(long)]
+        neighbor: Option<String>,
+    },
+    /// Replace the import chain. Empty list is rejected — use
+    /// `clear-import` instead. Apply globally by omitting `--neighbor`.
+    SetImport {
+        /// Neighbor address (omit for global)
+        #[arg(long)]
+        neighbor: Option<String>,
+        /// Ordered policy names that compose the chain
+        policies: Vec<String>,
+    },
+    /// Replace the export chain.
+    SetExport {
+        #[arg(long)]
+        neighbor: Option<String>,
+        policies: Vec<String>,
+    },
+    /// Clear the import chain entirely.
+    ClearImport {
+        #[arg(long)]
+        neighbor: Option<String>,
+    },
+    /// Clear the export chain entirely.
+    ClearExport {
+        #[arg(long)]
+        neighbor: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum NeighborSetAction {
+    /// List configured neighbor sets
+    List,
+    /// Show one neighbor set by name
+    Get { name: String },
+    /// Set (create or replace) a neighbor set from a JSON file
+    Set {
+        name: String,
+        #[arg(long, value_name = "PATH")]
+        from_file: String,
+    },
+    /// Delete a neighbor set
+    Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum PeerGroupAction {
+    /// List configured peer groups
+    List,
+    /// Show one peer group by name
+    Get { name: String },
+    /// Set (create or replace) a peer group from a JSON file
+    Set {
+        name: String,
+        #[arg(long, value_name = "PATH")]
+        from_file: String,
+    },
+    /// Delete a peer group
+    Delete { name: String },
+    /// Bind a neighbor to a peer group
+    Attach {
+        /// Neighbor address
+        address: String,
+        /// Peer-group name
+        #[arg(long)]
+        group: String,
+    },
+    /// Unbind a neighbor from its peer group
+    Detach {
+        /// Neighbor address
+        address: String,
     },
 }
 
@@ -785,6 +916,99 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             tui::run(connection, interval).await
         }
+        Command::Policy { action } => match action {
+            PolicyAction::List => commands::policy::list(connection, json).await,
+            PolicyAction::Get { name } => commands::policy::get(connection, &name, json).await,
+            PolicyAction::Set { name, from_file } => {
+                commands::policy::set(connection, &name, &from_file, json).await
+            }
+            PolicyAction::Delete { name } => {
+                commands::policy::delete(connection, &name, json).await
+            }
+            PolicyAction::Chain { action } => match action {
+                PolicyChainAction::Show { neighbor } => {
+                    commands::policy::chain_show(connection, neighbor.as_deref(), json).await
+                }
+                PolicyChainAction::SetImport { neighbor, policies } => {
+                    if policies.is_empty() {
+                        return Err(CliError::Argument(
+                            "set-import requires at least one policy name; use clear-import to drop the chain".into(),
+                        ));
+                    }
+                    commands::policy::chain_set(
+                        connection,
+                        commands::policy::ChainDirection::Import,
+                        neighbor.as_deref(),
+                        policies,
+                        json,
+                    )
+                    .await
+                }
+                PolicyChainAction::SetExport { neighbor, policies } => {
+                    if policies.is_empty() {
+                        return Err(CliError::Argument(
+                            "set-export requires at least one policy name; use clear-export to drop the chain".into(),
+                        ));
+                    }
+                    commands::policy::chain_set(
+                        connection,
+                        commands::policy::ChainDirection::Export,
+                        neighbor.as_deref(),
+                        policies,
+                        json,
+                    )
+                    .await
+                }
+                PolicyChainAction::ClearImport { neighbor } => {
+                    commands::policy::chain_clear(
+                        connection,
+                        commands::policy::ChainDirection::Import,
+                        neighbor.as_deref(),
+                        json,
+                    )
+                    .await
+                }
+                PolicyChainAction::ClearExport { neighbor } => {
+                    commands::policy::chain_clear(
+                        connection,
+                        commands::policy::ChainDirection::Export,
+                        neighbor.as_deref(),
+                        json,
+                    )
+                    .await
+                }
+            },
+        },
+        Command::NeighborSet { action } => match action {
+            NeighborSetAction::List => commands::neighbor_set::list(connection, json).await,
+            NeighborSetAction::Get { name } => {
+                commands::neighbor_set::get(connection, &name, json).await
+            }
+            NeighborSetAction::Set { name, from_file } => {
+                commands::neighbor_set::set(connection, &name, &from_file, json).await
+            }
+            NeighborSetAction::Delete { name } => {
+                commands::neighbor_set::delete(connection, &name, json).await
+            }
+        },
+        Command::PeerGroup { action } => match action {
+            PeerGroupAction::List => commands::peer_group::list(connection, json).await,
+            PeerGroupAction::Get { name } => {
+                commands::peer_group::get(connection, &name, json).await
+            }
+            PeerGroupAction::Set { name, from_file } => {
+                commands::peer_group::set(connection, &name, &from_file, json).await
+            }
+            PeerGroupAction::Delete { name } => {
+                commands::peer_group::delete(connection, &name, json).await
+            }
+            PeerGroupAction::Attach { address, group } => {
+                commands::peer_group::attach(connection, &address, &group, json).await
+            }
+            PeerGroupAction::Detach { address } => {
+                commands::peer_group::detach(connection, &address, json).await
+            }
+        },
         Command::Completions { .. } => unreachable!("handled before connect"),
     }
 }
@@ -1012,5 +1236,86 @@ mod tests {
         );
         assert!(parse_community_str("invalid").is_err());
         assert!(parse_community_str("70000:1").is_err());
+    }
+
+    #[test]
+    fn test_parse_policy_list() {
+        let cli = Cli::try_parse_from(["rustbgpctl", "policy", "list"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Policy {
+                action: PolicyAction::List
+            }
+        ));
+    }
+
+    #[test]
+    fn test_parse_policy_set_requires_from_file() {
+        // Missing --from-file flag should be a parse error.
+        let result = Cli::try_parse_from(["rustbgpctl", "policy", "set", "p1"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_policy_chain_set_import() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "policy",
+            "chain",
+            "set-import",
+            "--neighbor",
+            "10.0.0.2",
+            "p1",
+            "p2",
+        ])
+        .unwrap();
+        if let Command::Policy {
+            action:
+                PolicyAction::Chain {
+                    action: PolicyChainAction::SetImport { neighbor, policies },
+                },
+        } = cli.command
+        {
+            assert_eq!(neighbor.as_deref(), Some("10.0.0.2"));
+            assert_eq!(policies, vec!["p1".to_string(), "p2".to_string()]);
+        } else {
+            panic!("expected Policy Chain SetImport");
+        }
+    }
+
+    #[test]
+    fn test_parse_neighbor_set_get() {
+        let cli =
+            Cli::try_parse_from(["rustbgpctl", "neighbor-set", "get", "transit-peers"]).unwrap();
+        if let Command::NeighborSet {
+            action: NeighborSetAction::Get { name },
+        } = cli.command
+        {
+            assert_eq!(name, "transit-peers");
+        } else {
+            panic!("expected NeighborSet Get");
+        }
+    }
+
+    #[test]
+    fn test_parse_peer_group_attach() {
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "peer-group",
+            "attach",
+            "10.0.0.2",
+            "--group",
+            "transit",
+        ])
+        .unwrap();
+        if let Command::PeerGroup {
+            action: PeerGroupAction::Attach { address, group },
+        } = cli.command
+        {
+            assert_eq!(address, "10.0.0.2");
+            assert_eq!(group, "transit");
+        } else {
+            panic!("expected PeerGroup Attach");
+        }
     }
 }
