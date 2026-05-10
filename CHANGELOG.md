@@ -11,6 +11,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN aliasing receive-side wiring (RFC 7432 §14).** The
+  projection layer now resolves aliasing alternatives for Type 2
+  MAC routes whose ESI is non-zero, populating each
+  `RemoteMacEntry::alias_vtep_ips` with the additional VTEPs that
+  advertise EAD-per-EVI routes for the same `(ESI, EthernetTag)`.
+  - `RemoteMacEntry` gains an `alias_vtep_ips: Vec<IpAddr>` field
+    (default empty). The dataplane consumes it as the input for
+    future ECMP forwarding work; today's `LinuxDataplane` ignores
+    the field, so this slice is observable in
+    `DataplaneIntent::remote_macs` but not yet in the kernel.
+  - `ProjectedEvpnRoute` gains `esi` + `ethernet_tag` fields
+    sourced from the Type 2 NLRI. The supervisor in
+    `src/evpn_dataplane.rs` plumbs these through from the RIB.
+  - New `ProjectedEvpnEadPerEvi` input type and
+    `project_evpn_routes_with_aliases` function: builds an
+    `AliasIndex` from the EAD-per-EVI feed once, then resolves
+    alternatives for every Type 2 in one pass. The
+    `project_evpn_routes` legacy wrapper still exists for callers
+    without an EAD-per-EVI feed and yields empty alias lists.
+  - Self-originated EAD-per-EVI routes are filtered at the
+    daemon-side projection by checking next-hop against the
+    union of local VTEP IPs from `EvpnInstanceTable`.
+  - +5 unit tests covering: empty aliases for ESI=0 routes,
+    populated aliases for non-zero ESI, primary deduplication,
+    `(ESI, EthernetTag)`-keyed lookups, and the legacy wrapper's
+    empty-aliases contract.
+
 - **EVPN Gate 8b — four remaining feature slices.** Pure-logic
   modules + plumbing that complete the architectural surface for
   multi-homing. Each slice composes onto the Gate 8b enforcement

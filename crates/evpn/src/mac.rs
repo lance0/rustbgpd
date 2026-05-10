@@ -71,6 +71,18 @@ pub struct RemoteMacEntry {
     /// MAC mobility sequence number (RFC 7432 §15) if the originating
     /// route carried a `MAC Mobility` extended community.
     pub mobility_sequence: Option<u32>,
+    /// Aliasing alternative VTEP IPs for this MAC (RFC 7432 §14).
+    /// Populated by the projection layer when the originating Type 2
+    /// route carries a non-zero ESI and other peers have advertised
+    /// EAD-per-EVI routes for the same `(ESI, EthernetTag)` — those
+    /// peers' next-hops appear here so the dataplane can ECMP / fail
+    /// over without waiting for the primary's `MP_UNREACH_NLRI`.
+    /// Empty for single-homed routes (ESI == ZERO) and for
+    /// multi-homed routes with no aliasing alternatives observed.
+    /// `remote_vtep_ip` is **never** included here — the primary
+    /// stays in the dedicated field and `alias_vtep_ips` carries
+    /// only the *additional* VTEPs.
+    pub alias_vtep_ips: Vec<IpAddr>,
     /// How this entry came to be desired.
     pub source: RemoteMacSource,
 }
@@ -273,6 +285,7 @@ mod tests {
         RemoteMacEntry {
             remote_vtep_ip: remote.parse().unwrap(),
             mobility_sequence: None,
+            alias_vtep_ips: Vec::new(),
             source: RemoteMacSource::EvpnRibBestPath,
         }
     }

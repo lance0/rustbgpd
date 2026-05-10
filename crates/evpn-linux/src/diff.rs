@@ -233,6 +233,7 @@ mod tests {
         RemoteMacEntry {
             remote_vtep_ip: ip(remote),
             mobility_sequence: seq,
+            alias_vtep_ips: Vec::new(),
             source: RemoteMacSource::EvpnRibBestPath,
         }
     }
