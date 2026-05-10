@@ -48,7 +48,7 @@ use std::time::Duration;
 
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, DataplaneReport, EvpnInstanceTable, LocalMacObservation,
-    ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes,
+    ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes_with_aliases,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -413,10 +413,13 @@ async fn supervisor_loop(
 }
 
 /// Query the RIB for current best-path EVPN routes and project Type 2
-/// MAC/IP routes through [`project_evpn_routes`]. Other route types
-/// (Type 1 EAD, Type 3 IMET, Type 4 ES, Type 5 IP-Prefix) are ignored
-/// for Gate 7b — they're carried by the RR but the L2VNI dataplane
-/// boundary only programs Type 2 MACs.
+/// MAC/IP routes through [`project_evpn_routes_with_aliases`]. Type 1
+/// EAD-per-EVI routes are projected as aliasing inputs so multi-homed
+/// MACs surface their alternative VTEPs in
+/// [`rustbgpd_evpn::RemoteMacEntry::alias_vtep_ips`]. Other route types
+/// (Type 3 IMET, Type 4 ES, Type 5 IP-Prefix) are ignored for Gate 7b
+/// — they're carried by the RR but the L2VNI dataplane boundary only
+/// programs Type 2 MACs.
 async fn build_remote_mac_table(
     rib_tx: &mpsc::Sender<RibUpdate>,
     instances: &EvpnInstanceTable,
@@ -428,8 +431,43 @@ async fn build_remote_mac_table(
         .map_err(|_| RibQueryError::SendFailed)?;
     let routes = reply_rx.await.map_err(|_| RibQueryError::ReplyDropped)?;
 
+    // Build a quick lookup of local VTEP IPs so the EAD-per-EVI
+    // self-filter doesn't require a per-route instance-table scan.
+    let local_vtep_ips: std::collections::BTreeSet<std::net::IpAddr> =
+        instances.iter().map(|inst| inst.local_vtep_ip).collect();
+
     let projected: Vec<ProjectedEvpnRoute> = routes.iter().filter_map(project_one).collect();
-    Ok(project_evpn_routes(instances, projected))
+    let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
+        .iter()
+        .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips))
+        .collect();
+    Ok(project_evpn_routes_with_aliases(
+        instances,
+        projected,
+        ead_per_evi,
+    ))
+}
+
+/// Translate a Type 1 EAD-per-EVI [`EvpnRibRoute`] into the
+/// projection's aliasing input shape. Returns `None` for non-EAD
+/// routes and for self-originated EAD-per-EVI rows whose next-hop
+/// matches one of our local VTEP IPs (we shouldn't surface ourselves
+/// as an aliasing alternative).
+fn project_ead_per_evi(
+    route: &EvpnRibRoute,
+    local_vtep_ips: &std::collections::BTreeSet<std::net::IpAddr>,
+) -> Option<ProjectedEvpnEadPerEvi> {
+    let EvpnRoute::EadPerEvi(ead) = &route.route else {
+        return None;
+    };
+    if local_vtep_ips.contains(&route.next_hop) {
+        return None;
+    }
+    Some(ProjectedEvpnEadPerEvi {
+        esi: ead.esi,
+        ethernet_tag: ead.ethernet_tag,
+        next_hop: route.next_hop,
+    })
 }
 
 /// Translate a single [`EvpnRibRoute`] into the projection input
@@ -447,6 +485,8 @@ fn project_one(route: &EvpnRibRoute) -> Option<ProjectedEvpnRoute> {
         label1: macip.label1,
         next_hop: route.next_hop,
         mobility_sequence,
+        esi: macip.esi,
+        ethernet_tag: macip.ethernet_tag,
     })
 }
 

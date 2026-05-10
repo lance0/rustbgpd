@@ -1363,6 +1363,8 @@ fn build_remote_views(
                     label1: macip.label1,
                     next_hop: r.next_hop,
                     mobility_sequence: seq,
+                    esi: macip.esi,
+                    ethernet_tag: macip.ethernet_tag,
                 },
                 sticky,
             ))

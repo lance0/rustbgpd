@@ -101,7 +101,10 @@ pub use mass_withdraw::{AsPathFingerprint, AsPathTracker, MassWithdrawTrigger};
 pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};
 pub use origination_es::{LocalEadPerEsOriginator, LocalEadPerEviOriginator, LocalEsOriginator};
 pub use origination_macip::{LocalMacIpOriginator, MacIpKey, RemoteMacIpView};
-pub use projection::{ProjectedEvpnRoute, project_evpn_routes};
+pub use projection::{
+    ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, project_evpn_routes,
+    project_evpn_routes_with_aliases,
+};
 pub use route_target::{RouteTarget, RouteTargetParseError};
 pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
 

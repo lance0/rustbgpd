@@ -61,10 +61,45 @@ pub struct ProjectedEvpnRoute {
     /// MAC mobility sequence (RFC 7432 §15) if the originating route
     /// carried a `MAC Mobility` extended community.
     pub mobility_sequence: Option<u32>,
+    /// Ethernet Segment Identifier carried on the Type 2 NLRI.
+    /// `EthernetSegmentIdentifier::ZERO` for single-homed CEs;
+    /// non-zero when the originator advertises the MAC as part of a
+    /// multi-homed segment. The projection layer uses this to look
+    /// up aliasing alternatives via the [`crate::AliasIndex`] built
+    /// from EAD-per-EVI inputs.
+    pub esi: rustbgpd_wire::EthernetSegmentIdentifier,
+    /// Ethernet Tag identifying the EVI on the Type 2 NLRI.
+    /// Combined with `esi` to key aliasing lookups (RFC 7432 §14
+    /// is `(ESI, EthernetTag)`-keyed).
+    pub ethernet_tag: rustbgpd_wire::EthernetTagId,
+}
+
+/// Trimmed best-path EVPN Type 1 EAD-per-EVI record for projection
+/// input. The projection layer uses these to build an
+/// [`crate::AliasIndex`] before resolving Type 2 routes; an EAD-per-EVI
+/// from a peer signals "this peer can also reach `(esi, eth_tag)`."
+///
+/// Filtering self-originated entries (next-hop == local VTEP IP) is
+/// the caller's responsibility — the projection layer doesn't know
+/// which VTEP IP belongs to "us." Doing the filter at the call site
+/// keeps this struct purely declarative.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProjectedEvpnEadPerEvi {
+    /// Ethernet Segment Identifier the EAD-per-EVI route names.
+    pub esi: rustbgpd_wire::EthernetSegmentIdentifier,
+    /// Ethernet Tag identifying the EVI.
+    pub ethernet_tag: rustbgpd_wire::EthernetTagId,
+    /// Next-hop / VTEP IP advertised on the EAD-per-EVI route.
+    pub next_hop: IpAddr,
 }
 
 /// Build a [`RemoteMacTable`] from a stream of best-path Type 2
 /// records.
+///
+/// Backwards-compat wrapper around
+/// [`project_evpn_routes_with_aliases`] for callers that don't yet
+/// have an EAD-per-EVI feed. Aliasing alternatives default to
+/// empty when no EAD-per-EVI advertisements are supplied.
 ///
 /// The function is pure — no clocks, no I/O, no allocations beyond
 /// the returned table. It enforces the mobility tie-break described
@@ -85,10 +120,57 @@ pub fn project_evpn_routes<I>(instances: &EvpnInstanceTable, routes: I) -> Remot
 where
     I: IntoIterator<Item = ProjectedEvpnRoute>,
 {
+    project_evpn_routes_with_aliases(instances, routes, std::iter::empty())
+}
+
+/// Build a [`RemoteMacTable`] from Type 2 best paths plus
+/// EAD-per-EVI advertisements, populating each entry's
+/// `alias_vtep_ips` with the RFC 7432 §14 aliasing alternatives
+/// resolved from the EAD-per-EVI feed.
+///
+/// `ead_per_evi` is the caller's already-self-filtered stream of
+/// best-path EAD-per-EVI routes (i.e., self-originated entries
+/// removed at the call site). The projection layer uses these to
+/// build a [`crate::AliasIndex`] once, then resolves alternatives
+/// for every Type 2 with a non-zero ESI.
+///
+/// Same purity / panic contract as [`project_evpn_routes`].
+///
+/// # Panics
+///
+/// Panics under the same logic-bug condition as
+/// [`project_evpn_routes`] — the staged `BTreeMap` already dedupes
+/// `(VNI, MAC)` keys before calling
+/// [`RemoteMacTableBuilder::insert`], so a duplicate-MAC error from
+/// the builder indicates a bug in this function, not a runtime
+/// condition the caller can produce.
+///
+/// [`RemoteMacTableBuilder::insert`]: crate::RemoteMacTableBuilder::insert
+#[must_use]
+pub fn project_evpn_routes_with_aliases<R, A>(
+    instances: &EvpnInstanceTable,
+    routes: R,
+    ead_per_evi: A,
+) -> RemoteMacTable
+where
+    R: IntoIterator<Item = ProjectedEvpnRoute>,
+    A: IntoIterator<Item = ProjectedEvpnEadPerEvi>,
+{
+    use std::collections::BTreeMap;
+
+    // Build the aliasing index once. Empty input → empty index;
+    // single-homed Type 2 routes resolve to no alternatives even if
+    // the index has rows for unrelated ESIs.
+    let alias_rows = ead_per_evi.into_iter().map(|e| crate::AliasEadPerEvi {
+        esi: e.esi,
+        ethernet_tag: e.ethernet_tag,
+        vtep_ip: e.next_hop,
+    });
+    let alias_index = crate::AliasIndex::build(alias_rows);
+
     // Stage one: collect candidates per (VNI, MAC) and apply the
     // mobility tie-break. The builder rejects duplicates so we resolve
     // races *before* calling insert().
-    use std::collections::BTreeMap;
     let mut staged: BTreeMap<(EvpnInstanceId, MacAddress), ProjectedEvpnRoute> = BTreeMap::new();
 
     for route in routes {
@@ -122,9 +204,27 @@ where
 
     let mut builder = RemoteMacTable::builder();
     for ((vni, mac), route) in staged {
+        // Resolve aliasing alternatives for non-zero-ESI routes.
+        // `alias_resolved_next_hops` returns primary first; we want
+        // only the *additional* VTEPs in `alias_vtep_ips`, so trim
+        // the primary off the front.
+        let alias_vtep_ips = if route.esi == rustbgpd_wire::EthernetSegmentIdentifier::ZERO {
+            Vec::new()
+        } else {
+            let resolved = crate::alias_resolved_next_hops(
+                route.next_hop,
+                route.esi,
+                route.ethernet_tag,
+                &alias_index,
+            );
+            // resolved[0] is the primary (route.next_hop). Drop it
+            // so the field carries only alternatives.
+            resolved.into_iter().skip(1).collect()
+        };
         let entry = RemoteMacEntry {
             remote_vtep_ip: route.next_hop,
             mobility_sequence: route.mobility_sequence,
+            alias_vtep_ips,
             source: RemoteMacSource::EvpnRibBestPath,
         };
         // Builder rejects duplicates, but we already deduped via
@@ -226,6 +326,8 @@ mod tests {
             label1: label(v),
             next_hop: ipa(dst),
             mobility_sequence: seq,
+            esi: rustbgpd_wire::EthernetSegmentIdentifier::ZERO,
+            ethernet_tag: rustbgpd_wire::EthernetTagId(0),
         }
     }
 
@@ -361,6 +463,106 @@ mod tests {
             ],
         );
         assert!(table.is_empty());
+    }
+
+    fn route_with_esi(
+        v: u32,
+        m: u8,
+        dst: &str,
+        seq: Option<u32>,
+        esi: rustbgpd_wire::EthernetSegmentIdentifier,
+    ) -> ProjectedEvpnRoute {
+        let mut r = route(v, m, dst, seq);
+        r.esi = esi;
+        r
+    }
+
+    fn ead(
+        esi: rustbgpd_wire::EthernetSegmentIdentifier,
+        eth_tag: u32,
+        dst: &str,
+    ) -> ProjectedEvpnEadPerEvi {
+        ProjectedEvpnEadPerEvi {
+            esi,
+            ethernet_tag: rustbgpd_wire::EthernetTagId(eth_tag),
+            next_hop: ipa(dst),
+        }
+    }
+
+    fn esi_seed(seed: u8) -> rustbgpd_wire::EthernetSegmentIdentifier {
+        rustbgpd_wire::EthernetSegmentIdentifier::new([seed; 10])
+    }
+
+    #[test]
+    fn aliases_empty_for_zero_esi_routes() {
+        let routes = vec![route(100, 1, "10.0.0.2", None)];
+        let eads = vec![ead(esi_seed(1), 0, "10.0.0.3")];
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_vtep_ips.is_empty());
+    }
+
+    #[test]
+    fn aliases_populated_for_non_zero_esi_routes() {
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        // Two other PEs advertise EAD-per-EVI for the same segment.
+        let eads = vec![
+            ead(esi_seed(7), 0, "10.0.0.3"),
+            ead(esi_seed(7), 0, "10.0.0.4"),
+        ];
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        // Primary (10.0.0.2) is in `remote_vtep_ip`, never repeated.
+        assert_eq!(entry.remote_vtep_ip, ipa("10.0.0.2"));
+        assert_eq!(entry.alias_vtep_ips.len(), 2);
+        assert!(entry.alias_vtep_ips.contains(&ipa("10.0.0.3")));
+        assert!(entry.alias_vtep_ips.contains(&ipa("10.0.0.4")));
+    }
+
+    #[test]
+    fn aliases_filter_self_when_eads_include_primary() {
+        // A peer advertised EAD-per-EVI for the same `(esi, eth_tag)`
+        // and happens to share the Type 2's next-hop (e.g. the same
+        // PE advertised both Type 1 and Type 2). The alias list
+        // must not duplicate the primary.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let eads = vec![
+            ead(esi_seed(7), 0, "10.0.0.2"),
+            ead(esi_seed(7), 0, "10.0.0.3"),
+        ];
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(!entry.alias_vtep_ips.contains(&ipa("10.0.0.2")));
+        assert_eq!(entry.alias_vtep_ips, vec![ipa("10.0.0.3")]);
+    }
+
+    #[test]
+    fn aliases_keyed_on_esi_and_eth_tag_pair() {
+        // Two segments, two routes: each only resolves alternatives
+        // from the matching segment's EAD-per-EVI rows.
+        let routes = vec![
+            route_with_esi(100, 1, "10.0.0.2", None, esi_seed(1)),
+            route_with_esi(100, 2, "10.0.0.4", None, esi_seed(2)),
+        ];
+        let eads = vec![
+            ead(esi_seed(1), 0, "10.0.0.3"),
+            ead(esi_seed(2), 0, "10.0.0.5"),
+        ];
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let e1 = table.get(vni(100), mac(1)).unwrap();
+        let e2 = table.get(vni(100), mac(2)).unwrap();
+        assert_eq!(e1.alias_vtep_ips, vec![ipa("10.0.0.3")]);
+        assert_eq!(e2.alias_vtep_ips, vec![ipa("10.0.0.5")]);
+    }
+
+    #[test]
+    fn project_evpn_routes_legacy_wrapper_yields_empty_aliases() {
+        // Backwards-compat: the no-EAD wrapper must produce empty
+        // alias lists even for non-zero-ESI routes.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(1))];
+        let table = project_evpn_routes(&one_local(100), routes);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_vtep_ips.is_empty());
     }
 
     #[test]

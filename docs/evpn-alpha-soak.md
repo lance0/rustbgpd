@@ -178,6 +178,14 @@ visibility)
   / `drop_peer`. Returns `MassWithdrawTrigger { peer, esi }` for
   fingerprint changes. The RIB-side sweep that consumes triggers
   remains a follow-up integration slice.
+- [x] **Aliasing receive-side projection wiring landed.** The
+  daemon's projection layer now resolves
+  `RemoteMacEntry::alias_vtep_ips` for non-zero-ESI Type 2 routes
+  by combining them with EAD-per-EVI advertisements via the
+  `AliasIndex`. The supervisor at `src/evpn_dataplane.rs` plumbs
+  both Type 2 and EAD-per-EVI through from the RIB. The dataplane
+  itself doesn't yet program ECMP — that's the kernel-mutation
+  half tracked below.
 - [ ] **Gate 8b — remaining multi-homing enforcement work.** Three
   concrete slices left:
   1. **Privileged-runner 24 h soak validation** (synthetic DF
@@ -187,12 +195,14 @@ visibility)
      what's left is sustained-churn confidence under realistic
      timing (BGP convergence noise, election flap loops, FDB
      programming concurrent with flag flips).
-  2. **Aliasing / mass-withdraw RIB integration.** The detection
-     half (above) is shovel-ready; this slice plumbs `AliasIndex`
-     into the projection layer (extending `RemoteMacEntry`) and
-     wires `AsPathTracker` triggers into RIB-side route sweeps.
-     Plus the dataplane-side ECMP work (`nexthop` groups or
-     L3-route-based) to actually program multi-VTEP forwarding.
+  2. **Aliasing dataplane forwarding.** The control-plane half
+     (above) populates `alias_vtep_ips` cleanly; the
+     `LinuxDataplane` consumer still programs only the primary
+     `dst` per FDB row. Multi-VTEP forwarding needs `nexthop`
+     groups or L3-route-based ECMP — a separate kernel-side
+     design slice. Mass-withdraw RIB sweep (consume the
+     `MassWithdrawTrigger` shipped earlier) rides with this slice
+     since both touch the same dataplane integration surface.
   3. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).
