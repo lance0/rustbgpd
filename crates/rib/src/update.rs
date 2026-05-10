@@ -83,6 +83,14 @@ pub struct ExplainBestPath {
     pub best: Option<Route>,
     /// All candidates with their comparison against the best route.
     pub candidates: Vec<BestPathCandidate>,
+    /// Peer this explanation was scoped to, when the request named one.
+    /// `None` = global Loc-RIB view (the pre-Add-Path explain shape).
+    pub peer: Option<IpAddr>,
+    /// Peer's Add-Path `send_max` when scoped to a peer (`0` =
+    /// single-best send, or global view). When non-zero, the top
+    /// `add_path_send_max` candidates by best-path preference get a
+    /// non-zero `BestPathCandidate::advertised_path_id`.
+    pub add_path_send_max: u32,
 }
 
 /// A candidate route with its comparison result against the best route.
@@ -94,6 +102,16 @@ pub struct BestPathCandidate {
     pub vs_best_reason: BestPathReason,
     /// How this candidate compares to the best route.
     pub vs_best_ordering: std::cmp::Ordering,
+    /// When the explain was scoped to a peer with Add-Path send mode
+    /// (`add_path_send_max > 0`), non-zero = this candidate would be
+    /// advertised at this rank (1-based, capped at
+    /// `add_path_send_max`); zero = filtered out by the peer's
+    /// export policy / family check / split-horizon, or beyond
+    /// `send_max`. Always zero in single-best send mode
+    /// (`add_path_send_max == 0`) and on a global-view explain —
+    /// see `ExplainBestPath::add_path_send_max` for why single-best
+    /// can't be expressed through this field.
+    pub advertised_path_id: u32,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -193,8 +211,29 @@ pub enum RibUpdate {
     ExplainBestPath {
         /// Prefix to explain.
         prefix: Prefix,
-        /// Response channel.
-        reply: oneshot::Sender<ExplainBestPath>,
+        /// Optional peer scope (Add-Path send view). When `Some`, the
+        /// response shape is unchanged from the global form: the
+        /// Loc-RIB best stays in `best`, and `candidates` lists
+        /// every *non-best* route the RIB knows about (the winner is
+        /// never repeated in `candidates`). The peer scope adds
+        /// per-candidate advertisement tagging:
+        /// `advertised_path_id != 0` is set only on candidates that
+        /// the named peer would actually receive — i.e. those that
+        /// pass the peer's export policy + sendable-family check +
+        /// split-horizon / RR suppression and that fall within the
+        /// peer's effective `add_path_send_max`. Candidates beyond
+        /// the cap or rejected by the filters stay at
+        /// `advertised_path_id = 0` so the operator can see *why*
+        /// each isn't advertised. Note that ranks in `candidates`
+        /// may start at 2 when the Loc-RIB winner (in `best`) is
+        /// itself advertised at rank 1 to the peer; rank 1 is
+        /// therefore not always present in the candidates list.
+        /// When `None`, returns the global Loc-RIB view (every
+        /// candidate carries `advertised_path_id = 0`).
+        peer: Option<IpAddr>,
+        /// Response channel. `None` = unknown peer (peer was set but
+        /// not registered with this RIB).
+        reply: oneshot::Sender<Option<ExplainBestPath>>,
     },
     /// Query: explain whether the current best route for a prefix would be advertised to a peer.
     ExplainAdvertisedRoute {

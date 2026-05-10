@@ -132,6 +132,28 @@ async fn query_explain_best_path(
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::ExplainBestPath {
         prefix,
+        peer: None,
+        reply: reply_tx,
+    })
+    .await
+    .unwrap();
+    reply_rx
+        .await
+        .unwrap()
+        .expect("global-view explain never returns None")
+}
+
+/// Peer-scoped explain helper for the Add-Path explain tests.
+/// `Some` = scoped to that peer; `None` = unknown-peer error path.
+async fn query_explain_best_path_for_peer(
+    tx: &mpsc::Sender<RibUpdate>,
+    prefix: Prefix,
+    peer: IpAddr,
+) -> Option<crate::update::ExplainBestPath> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::ExplainBestPath {
+        prefix,
+        peer: Some(peer),
         reply: reply_tx,
     })
     .await
@@ -7342,6 +7364,369 @@ async fn explain_best_path_no_candidates() {
 
     assert!(explain.best.is_none());
     assert!(explain.candidates.is_empty());
+    assert!(explain.peer.is_none());
+    assert_eq!(explain.add_path_send_max, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Add-Path explain: a peer with `send_max=2` and 3 candidate routes
+/// should see exactly 2 candidates with non-zero `advertised_path_id`
+/// (ranks 1 + 2 by best-path order), and the third one with a zero
+/// `advertised_path_id` (it would be dropped past the limit).
+#[tokio::test]
+async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let peer3 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    for (peer, peer_addr, asn, lp) in [
+        (peer1, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 150),
+        (peer3, Ipv4Addr::new(10, 0, 0, 3), 65003, 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_multipath_route(prefix, peer_addr, vec![asn], lp)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: ipv4_sendable(),
+        add_path_send_max: 2,
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .expect("known peer");
+
+    assert_eq!(explain.peer, Some(target));
+    assert_eq!(explain.add_path_send_max, 2);
+    assert!(explain.best.is_some(), "best should be peer1 (LP=200)");
+    let best = explain.best.as_ref().unwrap();
+    assert_eq!(best.peer, peer1);
+
+    // Candidates exclude the winner; that's the existing contract.
+    // The remaining two are peer2 (advertised at rank 2) and peer3
+    // (filtered, beyond send_max).
+    assert_eq!(explain.candidates.len(), 2);
+    let by_peer: std::collections::HashMap<IpAddr, &crate::update::BestPathCandidate> = explain
+        .candidates
+        .iter()
+        .map(|c| (c.route.peer, c))
+        .collect();
+
+    let cand_peer2 = by_peer.get(&peer2).expect("peer2 is a candidate");
+    assert_eq!(
+        cand_peer2.advertised_path_id, 2,
+        "peer2 (LP=150) should be advertised at rank 2"
+    );
+
+    let cand_peer3 = by_peer.get(&peer3).expect("peer3 is a candidate");
+    assert_eq!(
+        cand_peer3.advertised_path_id, 0,
+        "peer3 (LP=100) should be filtered (beyond send_max)"
+    );
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: when the target peer is itself the source of the
+/// Loc-RIB best (split-horizon excludes it from the export-filtered
+/// set), single-best send mode (`send_max=0`) must not fall back to
+/// the next-best candidate. `distribute_single_best_prefix` would
+/// advertise nothing in this case; explain must reflect the same
+/// answer or it lies to the operator.
+#[tokio::test]
+async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let peer_winner = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer_runner_up = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    // peer_winner has the higher LP and *is* the target peer.
+    // Under split-horizon, peer_winner cannot receive its own route
+    // back — so single-best advertises nothing.
+    for (peer, addr, asn, lp) in [
+        (peer_winner, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (peer_runner_up, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: peer_winner, // <-- target IS the winner
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), peer_winner)
+        .await
+        .expect("known peer");
+    assert_eq!(explain.add_path_send_max, 0);
+    // No candidate may have a non-zero advertised_path_id. Before
+    // the fix, peer_runner_up would have been promoted to rank 1.
+    for cand in &explain.candidates {
+        assert_eq!(
+            cand.advertised_path_id, 0,
+            "single-best must not fall back; cand={:?}",
+            cand.route.peer
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Add-Path explain: a peer with `send_max=0` (single-best mode)
+/// only advertises the global best, even when more candidates exist.
+#[tokio::test]
+async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    for (peer, addr, asn, lp) in [
+        (peer1, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .expect("known peer");
+
+    assert_eq!(explain.peer, Some(target));
+    assert_eq!(explain.add_path_send_max, 0);
+    // Best = peer1 (LP=200). The losing candidate is peer2; under
+    // single-best send mode it would not be advertised even with
+    // a higher rank, so its advertised_path_id is 0.
+    assert!(explain.best.is_some());
+    assert_eq!(explain.candidates.len(), 1);
+    assert_eq!(explain.candidates[0].advertised_path_id, 0);
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Regression: when the prefix's AFI/SAFI isn't in the peer's
+/// `add_path_send_families`, the response's `add_path_send_max`
+/// must reflect 0 — not the bare config knob — to match what
+/// distribution would actually do.
+#[tokio::test]
+async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    for (peer, addr, asn, lp) in [
+        (peer1, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    // Peer registered with sendable_families = IPv4 unicast, but
+    // add_path_send_families = IPv6 unicast. Asking about an IPv4
+    // prefix → effective send_max should be 0.
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
+        add_path_send_max: 4,
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .expect("known peer");
+
+    assert_eq!(
+        explain.add_path_send_max, 0,
+        "effective send_max should be 0 when the prefix's family isn't in add_path_send_families"
+    );
+    for cand in &explain.candidates {
+        assert_eq!(cand.advertised_path_id, 0);
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Add-Path explain: an unknown peer returns `None` (not Found at the
+/// gRPC layer) rather than silently giving the global view.
+#[tokio::test]
+async fn explain_best_path_for_unknown_peer_returns_none() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+    let unknown = IpAddr::V4(Ipv4Addr::new(10, 99, 99, 99));
+
+    let result = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), unknown).await;
+    assert!(result.is_none(), "unknown peer should yield None");
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+/// Global-view explain (no peer scope) preserves the v0.7.0 shape
+/// even after the Add-Path extensions.
+#[tokio::test]
+async fn explain_best_path_global_view_unchanged() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(10, 0, 0, 0), 24);
+    let peer_a = Ipv4Addr::new(1, 0, 0, 1);
+    let peer_b = Ipv4Addr::new(1, 0, 0, 2);
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_a),
+        announced: vec![make_route_with_lp(prefix, peer_a, 200)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: IpAddr::V4(peer_b),
+        announced: vec![make_route_with_lp(prefix, peer_b, 100)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path(&tx, Prefix::V4(prefix)).await;
+    assert!(explain.peer.is_none());
+    assert_eq!(explain.add_path_send_max, 0);
+    // Every candidate has advertised_path_id == 0 in global view.
+    for cand in &explain.candidates {
+        assert_eq!(cand.advertised_path_id, 0);
+    }
 
     drop(tx);
     handle.await.unwrap();

@@ -100,4 +100,16 @@ pub enum Action {
     SessionEstablished(NegotiatedSession),
     /// The session left the Established state.
     SessionDown,
+    /// A timer-expired event arrived for a timer that should not be
+    /// running in the current state. The FSM ignores it instead of
+    /// tearing the session down (RFC 4271 §8.1 leaves stale-timer
+    /// behavior implementation-defined; tearing down a healthy session
+    /// because of a daemon-side timer-management bug is operationally
+    /// hostile). Daemon-side telemetry hooks this for visibility.
+    StaleTimerIgnored {
+        /// FSM state when the stale timer arrived.
+        state: SessionState,
+        /// Which timer the daemon delivered.
+        timer: TimerType,
+    },
 }

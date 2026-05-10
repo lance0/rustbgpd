@@ -9,6 +9,7 @@ use crate::proto::{
     AddPathRequest, DeletePathRequest, ExplainAdvertisedRouteRequest, ExplainBestPathRequest,
     ExplainDecision, ListRoutesRequest,
 };
+use serde::Serialize;
 
 /// Parsed route filter options from CLI flags.
 pub struct RouteFilterOpts {
@@ -268,19 +269,63 @@ fn print_explain_advertised(explain: &crate::proto::ExplainAdvertisedRouteRespon
     }
 }
 
+/// Top-level shape of `--json` best-path explain output. Designed
+/// so that a global-view explain (no `--explain-peer`) emits the
+/// exact same key set as the v0.7.0 shape — only the new
+/// Add-Path-related fields (`peer_address`, `add_path_send_max`,
+/// per-candidate `advertised_path_id`) are skipped via
+/// `skip_serializing_if` when not peer-scoped. The pre-existing
+/// `best_route` and per-candidate `route` keys keep emitting as
+/// `null` when absent, matching the v0.7.0 contract — downstream
+/// JSON consumers depend on the key set being stable across
+/// global-view runs, regardless of whether a best route exists.
+#[derive(Serialize)]
+struct JsonExplainBestPath {
+    prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    add_path_send_max: Option<u32>,
+    /// Always emitted (as `null` when absent) — the v0.7.0 shape
+    /// included this key unconditionally.
+    best_route: Option<JsonRoute>,
+    candidates: Vec<JsonExplainCandidate>,
+}
+
+#[derive(Serialize)]
+struct JsonExplainCandidate {
+    /// Always emitted (as `null` when absent) — the v0.7.0 shape
+    /// included this key unconditionally.
+    route: Option<JsonRoute>,
+    vs_best_reason: String,
+    vs_best_ordering: String,
+    /// Only emitted in peer-scoped mode; `0` in that mode means
+    /// "filtered or beyond send_max", which is meaningful. In
+    /// global-view mode the value is always `0` and would be
+    /// noise, so the field is suppressed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advertised_path_id: Option<u32>,
+}
+
 fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: bool) {
     if json {
-        let out = serde_json::json!({
-            "prefix": format!("{}/{}", resp.prefix, resp.prefix_length),
-            "best_route": resp.best_route.as_ref().map(route_to_json),
-            "candidates": resp.candidates.iter().map(|c| {
-                serde_json::json!({
-                    "route": c.route.as_ref().map(route_to_json),
-                    "vs_best_reason": c.vs_best_reason,
-                    "vs_best_ordering": c.vs_best_ordering,
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
                 })
-            }).collect::<Vec<_>>(),
-        });
+                .collect(),
+        };
         println!(
             "{}",
             serde_json::to_string_pretty(&out).expect("failed to serialize best-path explain")
@@ -292,6 +337,12 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
         "Best-path explanation for {}/{}",
         resp.prefix, resp.prefix_length
     );
+    if !resp.peer_address.is_empty() {
+        println!(
+            "Scope:      peer {} (Add-Path send_max={})",
+            resp.peer_address, resp.add_path_send_max
+        );
+    }
 
     if let Some(ref best) = resp.best_route {
         println!(
@@ -309,18 +360,39 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
     }
 
     println!();
-    println!(
-        "{:<18} {:<18} {:<22} {:<8}",
-        "Peer", "Next Hop", "Reason", "Result"
-    );
-    println!("{}", "-".repeat(70));
-
-    for c in &resp.candidates {
-        if let Some(ref r) = c.route {
-            println!(
-                "{:<18} {:<18} {:<22} {:<8}",
-                r.peer_address, r.next_hop, c.vs_best_reason, c.vs_best_ordering
-            );
+    let peer_scoped = !resp.peer_address.is_empty();
+    if peer_scoped {
+        println!(
+            "{:<18} {:<18} {:<22} {:<8} Adv-PathID",
+            "Peer", "Next Hop", "Reason", "Result"
+        );
+        println!("{}", "-".repeat(80));
+        for c in &resp.candidates {
+            if let Some(ref r) = c.route {
+                let advert = if c.advertised_path_id == 0 {
+                    "(filtered)".to_string()
+                } else {
+                    c.advertised_path_id.to_string()
+                };
+                println!(
+                    "{:<18} {:<18} {:<22} {:<8} {}",
+                    r.peer_address, r.next_hop, c.vs_best_reason, c.vs_best_ordering, advert
+                );
+            }
+        }
+    } else {
+        println!(
+            "{:<18} {:<18} {:<22} {:<8}",
+            "Peer", "Next Hop", "Reason", "Result"
+        );
+        println!("{}", "-".repeat(70));
+        for c in &resp.candidates {
+            if let Some(ref r) = c.route {
+                println!(
+                    "{:<18} {:<18} {:<22} {:<8}",
+                    r.peer_address, r.next_hop, c.vs_best_reason, c.vs_best_ordering
+                );
+            }
         }
     }
 }
@@ -328,6 +400,7 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
 pub async fn explain_best_path(
     connection: Connection,
     prefix: &str,
+    peer: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
@@ -337,6 +410,7 @@ pub async fn explain_best_path(
         .explain_best_path(ExplainBestPathRequest {
             prefix: addr,
             prefix_length: len,
+            peer_address: peer.unwrap_or("").to_string(),
         })
         .await?
         .into_inner();
@@ -504,5 +578,164 @@ mod tests {
         assert_eq!(req.peer_address, "192.0.2.1");
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
+    }
+
+    /// Pre-existing `best_route` and per-candidate `route` keys
+    /// must emit as `null` when absent — that's the v0.7.0 shape.
+    /// This test would fail if `skip_serializing_if = "Option::is_none"`
+    /// ever leaks back onto those fields.
+    #[test]
+    fn json_absent_best_route_emits_null_not_omitted() {
+        let resp = crate::proto::ExplainBestPathResponse {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            best_route: None,
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: None,
+                vs_best_reason: "HigherLocalPref".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                advertised_path_id: 0,
+            }],
+            peer_address: String::new(),
+            add_path_send_max: 0,
+        };
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
+                })
+                .collect(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            obj.contains_key("best_route"),
+            "best_route key must always be present (as null when absent)"
+        );
+        assert!(
+            obj.get("best_route").unwrap().is_null(),
+            "absent best_route must serialize to JSON null"
+        );
+        let cand = obj
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(
+            cand.contains_key("route"),
+            "candidate.route must always be present"
+        );
+        assert!(
+            cand.get("route").unwrap().is_null(),
+            "absent candidate.route must serialize to JSON null"
+        );
+    }
+
+    /// Global-view JSON output omits `peer_address` /
+    /// `add_path_send_max` (and per-candidate `advertised_path_id`)
+    /// so the v0.7.0 JSON shape contract stays intact for clients
+    /// that haven't migrated to the peer-scoped form. Peer-scoped
+    /// JSON output emits all three.
+    #[test]
+    fn json_global_view_omits_addpath_keys() {
+        let resp = crate::proto::ExplainBestPathResponse {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            best_route: None,
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: None,
+                vs_best_reason: "HigherLocalPref".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                advertised_path_id: 0,
+            }],
+            peer_address: String::new(),
+            add_path_send_max: 0,
+        };
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
+                })
+                .collect(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("peer_address"),
+            "global view must not expose peer_address"
+        );
+        assert!(
+            !obj.contains_key("add_path_send_max"),
+            "global view must not expose add_path_send_max"
+        );
+        let cand = obj
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(
+            !cand.contains_key("advertised_path_id"),
+            "global view must not expose advertised_path_id on candidates"
+        );
+    }
+
+    #[test]
+    fn json_peer_scoped_emits_addpath_keys() {
+        let resp = crate::proto::ExplainBestPathResponse {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            best_route: None,
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: None,
+                vs_best_reason: "HigherLocalPref".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                advertised_path_id: 2,
+            }],
+            peer_address: "10.0.0.99".to_string(),
+            add_path_send_max: 4,
+        };
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
+                })
+                .collect(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["peer_address"], "10.0.0.99");
+        assert_eq!(v["add_path_send_max"], 4);
+        assert_eq!(v["candidates"][0]["advertised_path_id"], 2);
     }
 }

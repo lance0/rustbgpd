@@ -16,6 +16,8 @@ use rustbgpd_api::proto::control_service_server::ControlServiceServer;
 use rustbgpd_api::proto::evpn_service_server::EvpnServiceServer;
 use rustbgpd_api::proto::global_service_server::GlobalServiceServer;
 use rustbgpd_api::proto::neighbor_service_server::NeighborServiceServer;
+use rustbgpd_api::proto::peer_group_service_server::PeerGroupServiceServer;
+use rustbgpd_api::proto::policy_service_server::PolicyServiceServer;
 use rustbgpd_api::proto::rib_service_server::RibServiceServer;
 
 #[derive(Default)]
@@ -25,6 +27,35 @@ pub(crate) struct MockState {
     pub(crate) last_add_neighbor: Mutex<Option<server_proto::NeighborConfig>>,
     pub(crate) last_softreset: Mutex<Option<server_proto::SoftResetInRequest>>,
     pub(crate) last_explain_advertised: Mutex<Option<server_proto::ExplainAdvertisedRouteRequest>>,
+    // Policy / neighbor-set / chain captures used by the policy.rs +
+    // neighbor_set.rs CLI tests.
+    pub(crate) last_set_policy: Mutex<Option<server_proto::SetPolicyRequest>>,
+    pub(crate) last_delete_policy: Mutex<Option<server_proto::DeletePolicyRequest>>,
+    pub(crate) last_set_neighbor_set: Mutex<Option<server_proto::SetNeighborSetRequest>>,
+    pub(crate) last_delete_neighbor_set: Mutex<Option<server_proto::DeleteNeighborSetRequest>>,
+    pub(crate) last_set_global_import_chain:
+        Mutex<Option<server_proto::SetGlobalImportChainRequest>>,
+    pub(crate) last_set_global_export_chain:
+        Mutex<Option<server_proto::SetGlobalExportChainRequest>>,
+    pub(crate) last_set_neighbor_import_chain:
+        Mutex<Option<server_proto::SetNeighborImportChainRequest>>,
+    pub(crate) last_set_neighbor_export_chain:
+        Mutex<Option<server_proto::SetNeighborExportChainRequest>>,
+    pub(crate) last_clear_global_import_chain:
+        Mutex<Option<server_proto::ClearGlobalImportChainRequest>>,
+    pub(crate) last_clear_global_export_chain:
+        Mutex<Option<server_proto::ClearGlobalExportChainRequest>>,
+    pub(crate) last_clear_neighbor_import_chain:
+        Mutex<Option<server_proto::ClearNeighborImportChainRequest>>,
+    pub(crate) last_clear_neighbor_export_chain:
+        Mutex<Option<server_proto::ClearNeighborExportChainRequest>>,
+    // Peer-group captures used by the peer_group.rs CLI tests.
+    pub(crate) last_set_peer_group: Mutex<Option<server_proto::SetPeerGroupRequest>>,
+    pub(crate) last_delete_peer_group: Mutex<Option<server_proto::DeletePeerGroupRequest>>,
+    pub(crate) last_set_neighbor_peer_group:
+        Mutex<Option<server_proto::SetNeighborPeerGroupRequest>>,
+    pub(crate) last_clear_neighbor_peer_group:
+        Mutex<Option<server_proto::ClearNeighborPeerGroupRequest>>,
 }
 
 pub(crate) struct MockServerHandle {
@@ -90,6 +121,12 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
         state: Arc::clone(&state),
     };
     let evpn = MockEvpnService;
+    let policy = MockPolicyService {
+        state: Arc::clone(&state),
+    };
+    let peer_group = MockPeerGroupService {
+        state: Arc::clone(&state),
+    };
 
     tokio::spawn(async move {
         Server::builder()
@@ -108,6 +145,14 @@ pub(crate) async fn spawn_mock_server(auth_token: Option<&str>) -> MockServerHan
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
             .add_service(EvpnServiceServer::with_interceptor(
                 evpn,
+                interceptor.clone(),
+            ))
+            .add_service(PolicyServiceServer::with_interceptor(
+                policy,
+                interceptor.clone(),
+            ))
+            .add_service(PeerGroupServiceServer::with_interceptor(
+                peer_group,
                 interceptor.clone(),
             ))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
@@ -151,6 +196,12 @@ pub(crate) async fn spawn_mock_uds_server(
         state: Arc::clone(&state),
     };
     let evpn = MockEvpnService;
+    let policy = MockPolicyService {
+        state: Arc::clone(&state),
+    };
+    let peer_group = MockPeerGroupService {
+        state: Arc::clone(&state),
+    };
 
     tokio::spawn(async move {
         Server::builder()
@@ -169,6 +220,14 @@ pub(crate) async fn spawn_mock_uds_server(
             .add_service(RibServiceServer::with_interceptor(rib, interceptor.clone()))
             .add_service(EvpnServiceServer::with_interceptor(
                 evpn,
+                interceptor.clone(),
+            ))
+            .add_service(PolicyServiceServer::with_interceptor(
+                policy,
+                interceptor.clone(),
+            ))
+            .add_service(PeerGroupServiceServer::with_interceptor(
+                peer_group,
                 interceptor.clone(),
             ))
             .serve_with_incoming_shutdown(UnixListenerStream::new(listener), async {
@@ -446,13 +505,16 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
 
     async fn explain_best_path(
         &self,
-        _request: Request<server_proto::ExplainBestPathRequest>,
+        request: Request<server_proto::ExplainBestPathRequest>,
     ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
+        let req = request.into_inner();
         Ok(Response::new(server_proto::ExplainBestPathResponse {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
             best_route: None,
             candidates: vec![],
+            peer_address: req.peer_address,
+            add_path_send_max: 0,
         }))
     }
 
@@ -550,5 +612,239 @@ fn mock_evpn_route(route_type: u32) -> server_proto::EvpnRouteEntry {
         communities: vec![],
         extended_communities: vec![],
         tunnel_type: 8,
+    }
+}
+
+struct MockPolicyService {
+    state: Arc<MockState>,
+}
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::policy_service_server::PolicyService for MockPolicyService {
+    async fn list_policies(
+        &self,
+        _request: Request<server_proto::ListPoliciesRequest>,
+    ) -> Result<Response<server_proto::ListPoliciesResponse>, Status> {
+        Ok(Response::new(server_proto::ListPoliciesResponse {
+            policies: vec![],
+        }))
+    }
+
+    async fn get_policy(
+        &self,
+        request: Request<server_proto::GetPolicyRequest>,
+    ) -> Result<Response<server_proto::GetPolicyResponse>, Status> {
+        Ok(Response::new(server_proto::GetPolicyResponse {
+            name: request.into_inner().name,
+            definition: Some(server_proto::PolicyDefinition::default()),
+        }))
+    }
+
+    async fn set_policy(
+        &self,
+        request: Request<server_proto::SetPolicyRequest>,
+    ) -> Result<Response<server_proto::SetPolicyResponse>, Status> {
+        *self.state.last_set_policy.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::SetPolicyResponse {}))
+    }
+
+    async fn delete_policy(
+        &self,
+        request: Request<server_proto::DeletePolicyRequest>,
+    ) -> Result<Response<server_proto::DeletePolicyResponse>, Status> {
+        *self.state.last_delete_policy.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::DeletePolicyResponse {}))
+    }
+
+    async fn list_neighbor_sets(
+        &self,
+        _request: Request<server_proto::ListNeighborSetsRequest>,
+    ) -> Result<Response<server_proto::ListNeighborSetsResponse>, Status> {
+        Ok(Response::new(server_proto::ListNeighborSetsResponse {
+            neighbor_sets: vec![],
+        }))
+    }
+
+    async fn get_neighbor_set(
+        &self,
+        request: Request<server_proto::GetNeighborSetRequest>,
+    ) -> Result<Response<server_proto::GetNeighborSetResponse>, Status> {
+        Ok(Response::new(server_proto::GetNeighborSetResponse {
+            name: request.into_inner().name,
+            definition: Some(server_proto::NeighborSetDefinition::default()),
+        }))
+    }
+
+    async fn set_neighbor_set(
+        &self,
+        request: Request<server_proto::SetNeighborSetRequest>,
+    ) -> Result<Response<server_proto::SetNeighborSetResponse>, Status> {
+        *self.state.last_set_neighbor_set.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::SetNeighborSetResponse {}))
+    }
+
+    async fn delete_neighbor_set(
+        &self,
+        request: Request<server_proto::DeleteNeighborSetRequest>,
+    ) -> Result<Response<server_proto::DeleteNeighborSetResponse>, Status> {
+        *self.state.last_delete_neighbor_set.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::DeleteNeighborSetResponse {}))
+    }
+
+    async fn get_global_policy_chains(
+        &self,
+        _request: Request<server_proto::GetGlobalPolicyChainsRequest>,
+    ) -> Result<Response<server_proto::GlobalPolicyChains>, Status> {
+        Ok(Response::new(server_proto::GlobalPolicyChains {
+            import_policy_names: vec!["g-import".to_string()],
+            export_policy_names: vec!["g-export".to_string()],
+        }))
+    }
+
+    async fn set_global_import_chain(
+        &self,
+        request: Request<server_proto::SetGlobalImportChainRequest>,
+    ) -> Result<Response<server_proto::SetGlobalImportChainResponse>, Status> {
+        *self.state.last_set_global_import_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::SetGlobalImportChainResponse {}))
+    }
+
+    async fn set_global_export_chain(
+        &self,
+        request: Request<server_proto::SetGlobalExportChainRequest>,
+    ) -> Result<Response<server_proto::SetGlobalExportChainResponse>, Status> {
+        *self.state.last_set_global_export_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::SetGlobalExportChainResponse {}))
+    }
+
+    async fn clear_global_import_chain(
+        &self,
+        request: Request<server_proto::ClearGlobalImportChainRequest>,
+    ) -> Result<Response<server_proto::ClearGlobalImportChainResponse>, Status> {
+        *self.state.last_clear_global_import_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::ClearGlobalImportChainResponse {},
+        ))
+    }
+
+    async fn clear_global_export_chain(
+        &self,
+        request: Request<server_proto::ClearGlobalExportChainRequest>,
+    ) -> Result<Response<server_proto::ClearGlobalExportChainResponse>, Status> {
+        *self.state.last_clear_global_export_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::ClearGlobalExportChainResponse {},
+        ))
+    }
+
+    async fn get_neighbor_policy_chains(
+        &self,
+        request: Request<server_proto::GetNeighborPolicyChainsRequest>,
+    ) -> Result<Response<server_proto::NeighborPolicyChains>, Status> {
+        Ok(Response::new(server_proto::NeighborPolicyChains {
+            address: request.into_inner().address,
+            import_policy_names: vec!["n-import".to_string()],
+            export_policy_names: vec!["n-export".to_string()],
+        }))
+    }
+
+    async fn set_neighbor_import_chain(
+        &self,
+        request: Request<server_proto::SetNeighborImportChainRequest>,
+    ) -> Result<Response<server_proto::SetNeighborImportChainResponse>, Status> {
+        *self.state.last_set_neighbor_import_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::SetNeighborImportChainResponse {},
+        ))
+    }
+
+    async fn set_neighbor_export_chain(
+        &self,
+        request: Request<server_proto::SetNeighborExportChainRequest>,
+    ) -> Result<Response<server_proto::SetNeighborExportChainResponse>, Status> {
+        *self.state.last_set_neighbor_export_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::SetNeighborExportChainResponse {},
+        ))
+    }
+
+    async fn clear_neighbor_import_chain(
+        &self,
+        request: Request<server_proto::ClearNeighborImportChainRequest>,
+    ) -> Result<Response<server_proto::ClearNeighborImportChainResponse>, Status> {
+        *self.state.last_clear_neighbor_import_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::ClearNeighborImportChainResponse {},
+        ))
+    }
+
+    async fn clear_neighbor_export_chain(
+        &self,
+        request: Request<server_proto::ClearNeighborExportChainRequest>,
+    ) -> Result<Response<server_proto::ClearNeighborExportChainResponse>, Status> {
+        *self.state.last_clear_neighbor_export_chain.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::ClearNeighborExportChainResponse {},
+        ))
+    }
+}
+
+struct MockPeerGroupService {
+    state: Arc<MockState>,
+}
+
+#[tonic::async_trait]
+impl rustbgpd_api::proto::peer_group_service_server::PeerGroupService for MockPeerGroupService {
+    async fn list_peer_groups(
+        &self,
+        _request: Request<server_proto::ListPeerGroupsRequest>,
+    ) -> Result<Response<server_proto::ListPeerGroupsResponse>, Status> {
+        Ok(Response::new(server_proto::ListPeerGroupsResponse {
+            peer_groups: vec![],
+        }))
+    }
+
+    async fn get_peer_group(
+        &self,
+        request: Request<server_proto::GetPeerGroupRequest>,
+    ) -> Result<Response<server_proto::GetPeerGroupResponse>, Status> {
+        Ok(Response::new(server_proto::GetPeerGroupResponse {
+            name: request.into_inner().name,
+            definition: Some(server_proto::PeerGroupDefinition::default()),
+        }))
+    }
+
+    async fn set_peer_group(
+        &self,
+        request: Request<server_proto::SetPeerGroupRequest>,
+    ) -> Result<Response<server_proto::SetPeerGroupResponse>, Status> {
+        *self.state.last_set_peer_group.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::SetPeerGroupResponse {}))
+    }
+
+    async fn delete_peer_group(
+        &self,
+        request: Request<server_proto::DeletePeerGroupRequest>,
+    ) -> Result<Response<server_proto::DeletePeerGroupResponse>, Status> {
+        *self.state.last_delete_peer_group.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::DeletePeerGroupResponse {}))
+    }
+
+    async fn set_neighbor_peer_group(
+        &self,
+        request: Request<server_proto::SetNeighborPeerGroupRequest>,
+    ) -> Result<Response<server_proto::SetNeighborPeerGroupResponse>, Status> {
+        *self.state.last_set_neighbor_peer_group.lock().await = Some(request.into_inner());
+        Ok(Response::new(server_proto::SetNeighborPeerGroupResponse {}))
+    }
+
+    async fn clear_neighbor_peer_group(
+        &self,
+        request: Request<server_proto::ClearNeighborPeerGroupRequest>,
+    ) -> Result<Response<server_proto::ClearNeighborPeerGroupResponse>, Status> {
+        *self.state.last_clear_neighbor_peer_group.lock().await = Some(request.into_inner());
+        Ok(Response::new(
+            server_proto::ClearNeighborPeerGroupResponse {},
+        ))
     }
 }

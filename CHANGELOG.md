@@ -11,6 +11,69 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`rustbgpctl` policy / peer-group / neighbor-set commands.**
+  Three new subcommand trees that wrap the existing PolicyService
+  and PeerGroupService gRPCs. `rustbgpctl policy {list|get|set|
+  delete}` covers named `[[policy_definitions]]`; `rustbgpctl
+  policy chain {show|set-import|set-export|clear-import|
+  clear-export} [--neighbor ADDR]` covers the global / per-neighbor
+  import/export chains. `rustbgpctl neighbor-set {list|get|set|
+  delete}` covers `[[neighbor_sets]]`. `rustbgpctl peer-group
+  {list|get|set|delete|attach|detach}` covers `[[peer_groups]]`
+  and binds neighbors to / from a group. `set` accepts a JSON file
+  via `--from-file PATH` whose shape mirrors the proto messages —
+  `serde(deny_unknown_fields)` rejects typos at parse time. Empty
+  `chain set-{import,export}` is rejected at the CLI layer with a
+  pointer at the matching `clear-*` command. Operators no longer
+  need TOML + SIGHUP for these surfaces. 24 new mock-server tests
+  pin the entire dispatch path; 5 new clap parse tests pin the
+  CLI surface.
+
+- **`bgp_fsm_stale_timer_events_total{peer, state, timer}`
+  Prometheus counter.** Emitted whenever the FSM receives a
+  timer-expired event in a state where the corresponding timer
+  should not be running per RFC 4271 §8.1's per-state event tables
+  (e.g. `KeepaliveTimerExpires` in Connect, `ConnectRetryTimerExpires`
+  in Established). Operators can graph it against zero; non-zero
+  identifies the specific (state, timer) pair, which points at the
+  daemon-side timer-management bug rather than a peer or wire issue.
+
+- **Add-Path send-view in ExplainBestPath.** `rustbgpctl rib
+  --prefix X --explain --explain-peer P` now scopes the explain
+  to peer P's actual send view: candidates are filtered by the
+  peer's resolved export policy + sendable families and the top
+  `add_path_send_max` are tagged with their advertised rank. The
+  CLI prints an extra `Adv-PathID` column showing rank or
+  `(filtered)` for each candidate. Empty `--explain-peer`
+  preserves the v0.7.0 global-view shape exactly. Proto fields
+  added to `ExplainBestPathRequest` (`peer_address`),
+  `BestPathCandidate` (`advertised_path_id`), and
+  `ExplainBestPathResponse` (`peer_address`,
+  `add_path_send_max`) — all additive, so old clients keep
+  working. `add_path_send_max` in the response reflects the
+  *effective* cap (zero when the prefix's AFI/SAFI isn't
+  sendable to the peer or isn't in the peer's
+  `add_path_send_families`), not the bare config knob.
+
+### Fixed
+
+- **FSM stale timer events no longer tear sessions down.** Timer
+  events that arrive in a state where the corresponding timer
+  should not be running per RFC 4271 §8.1 (e.g. a stale
+  `ConnectRetryTimerExpires` after Established) used to fall
+  through the catch-all and trigger an FSM Error NOTIFICATION,
+  converting a daemon-side timer-management bug (a tick that
+  wasn't cancelled when the FSM left the originating state) into
+  a real-world reachability outage. None of FRR/BIRD/GoBGP behave
+  this way; their FSMs treat stale ticks as benign. The FSM now
+  has explicit match arms for all 11 stale-timer (state, timer)
+  pairs across the six states; each emits a new
+  `Action::StaleTimerIgnored { state, timer }` for telemetry but
+  the session stays put. 11 new FSM tests pin every arm,
+  including a regression test that pins
+  `Established + ConnectRetry → no SessionDown`. Closes the
+  ROADMAP P1 item under Operational / Observability Hardening.
+
 - **EVPN mass-withdraw receive-side filter (RFC 7432 §8.4).**
   The dataplane supervisor now drops any Type 2 MAC route from the
   projection if its non-zero ESI doesn't have a matching

@@ -73,11 +73,16 @@ impl RibService {
             .map_err(|_| Status::internal("RIB manager dropped reply"))
     }
 
-    async fn query_explain_best_path(&self, prefix: Prefix) -> Result<ExplainBestPath, Status> {
+    async fn query_explain_best_path(
+        &self,
+        prefix: Prefix,
+        peer: Option<IpAddr>,
+    ) -> Result<Option<ExplainBestPath>, Status> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.rib_tx
             .send(RibUpdate::ExplainBestPath {
                 prefix,
+                peer,
                 reply: reply_tx,
             })
             .await
@@ -408,9 +413,12 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
                         std::cmp::Ordering::Equal => "equal".to_string(),
                         std::cmp::Ordering::Greater => "worse".to_string(),
                     },
+                    advertised_path_id: c.advertised_path_id,
                 }
             })
             .collect(),
+        peer_address: explain.peer.map(|p| p.to_string()).unwrap_or_default(),
+        add_path_send_max: explain.add_path_send_max,
     }
 }
 
@@ -593,7 +601,22 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ExplainBestPathResponse>, Status> {
         let req = request.into_inner();
         let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
-        let explain = self.query_explain_best_path(prefix).await?;
+        let peer = if req.peer_address.is_empty() {
+            None
+        } else {
+            Some(req.peer_address.parse::<IpAddr>().map_err(|_| {
+                Status::invalid_argument(format!("invalid peer_address: {}", req.peer_address))
+            })?)
+        };
+        let explain = self
+            .query_explain_best_path(prefix, peer)
+            .await?
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "peer {} not registered with this RIB",
+                    req.peer_address
+                ))
+            })?;
         Ok(Response::new(explain_best_path_to_proto(explain)))
     }
 
