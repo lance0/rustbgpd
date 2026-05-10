@@ -609,18 +609,25 @@ message ExplainBestPathRequest {
   string prefix = 1;
   uint32 prefix_length = 2;
   // Optional IP address (IPv4 or IPv6 literal) of the peer to
-  // scope the explanation to. When set, the explanation reflects
-  // the named peer's Add-Path send view: the full candidate set
-  // is still returned (so the operator can see why each loser
-  // would or wouldn't be advertised), but the top
-  // `add_path_send_max` candidates that pass the peer's export
-  // policy + sendable-family check + split-horizon / RR
-  // suppression are tagged with a non-zero `advertised_path_id`
-  // reflecting their advertised rank. Everything else stays at
-  // `advertised_path_id = 0`. Empty = global view, the v0.7.0
-  // behavior. Unknown peer → NOT_FOUND. Named `peer_address` to
-  // match the convention used elsewhere in this file (see e.g.
-  // `ExplainAdvertisedRouteRequest.peer_address`).
+  // scope the explanation to. The response shape is unchanged
+  // from the v0.7.0 form: the Loc-RIB best for this prefix lives
+  // in `best_route`, and `candidates` lists every *non-best*
+  // route the RIB knows about for this prefix (the winner is
+  // never repeated in `candidates`). When set, the explanation
+  // additionally tags peer-aware advertisement: every candidate
+  // that the named peer would receive — passes the peer's
+  // export policy + sendable-family check + split-horizon / RR
+  // suppression and falls within the peer's effective
+  // `add_path_send_max` — gets a non-zero
+  // `advertised_path_id` reflecting its advertised rank.
+  // Everything else stays at `advertised_path_id = 0`. Note
+  // that ranks in `candidates` may start at 2 when the
+  // Loc-RIB winner (in `best_route`) is itself advertised at
+  // rank 1 to the peer; rank 1 is therefore not always present
+  // in the `candidates` list. Empty = global view, the v0.7.0
+  // behavior. Unknown peer → NOT_FOUND. Named `peer_address`
+  // to match the convention used elsewhere in this file (see
+  // e.g. `ExplainAdvertisedRouteRequest.peer_address`).
   string peer_address = 3;
 }
 

@@ -212,18 +212,24 @@ pub enum RibUpdate {
         /// Prefix to explain.
         prefix: Prefix,
         /// Optional peer scope (Add-Path send view). When `Some`, the
-        /// returned `candidates` list keeps every non-best route and
-        /// `advertised_path_id` reflects which ones (and at what
-        /// rank) the named peer would actually receive — i.e.
+        /// response shape is unchanged from the global form: the
+        /// Loc-RIB best stays in `best`, and `candidates` lists
+        /// every *non-best* route the RIB knows about (the winner is
+        /// never repeated in `candidates`). The peer scope adds
+        /// per-candidate advertisement tagging:
         /// `advertised_path_id != 0` is set only on candidates that
+        /// the named peer would actually receive — i.e. those that
         /// pass the peer's export policy + sendable-family check +
         /// split-horizon / RR suppression and that fall within the
-        /// peer's `add_path_send_max`. Candidates beyond the cap (or
-        /// rejected by the filters) are still returned with
+        /// peer's effective `add_path_send_max`. Candidates beyond
+        /// the cap or rejected by the filters stay at
         /// `advertised_path_id = 0` so the operator can see *why*
-        /// each isn't advertised. When `None`, returns the global
-        /// Loc-RIB view (every candidate carries
-        /// `advertised_path_id = 0`).
+        /// each isn't advertised. Note that ranks in `candidates`
+        /// may start at 2 when the Loc-RIB winner (in `best`) is
+        /// itself advertised at rank 1 to the peer; rank 1 is
+        /// therefore not always present in the candidates list.
+        /// When `None`, returns the global Loc-RIB view (every
+        /// candidate carries `advertised_path_id = 0`).
         peer: Option<IpAddr>,
         /// Response channel. `None` = unknown peer (peer was set but
         /// not registered with this RIB).
