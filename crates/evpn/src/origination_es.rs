@@ -245,16 +245,27 @@ impl LocalEadPerEsOriginator {
 
 /// Type 1 EAD-per-EVI origination — one route per `(ESI, VNI)`.
 ///
-/// EAD-per-EVI is the per-fabric, per-EVI signalling route. PEs in
-/// the same EVI consult this route's ESI Label extcomm flag to
-/// decide split-horizon behavior for traffic ingressing on the ES.
+/// EAD-per-EVI is the per-fabric, per-EVI signalling route. Per
+/// RFC 7432 §14, the wire encoding does **not** carry the ESI Label
+/// extcomm; that flag rides on the EAD-per-ES route only. The Gate 8
+/// EAD-per-EVI shape is therefore role-independent: a `(ESI, VNI)`
+/// route looks the same whether the local PE is DF or `NonDF`.
 ///
-/// Most DF-aware of the three originators: a flip in the local PE's
-/// `DfRole` for `(ESI, VNI)` triggers a re-emit so the ESI Label
-/// flag updates on the wire. Gate 8 ships the role-aware re-emit
-/// hook; the actual flag encoding lives at the path-attribute
-/// boundary in the daemon (`apply_actions` side) and is wired in
-/// slice 3.
+/// `on_vni_role_changed` still updates the internal `(VNI, DfRole)`
+/// table so that:
+///
+/// - the first call for a `(ESI, VNI)` pair emits an Inject (the
+///   route appears on the wire); and
+/// - Gate 8b can layer aliasing extcomms / DF-role-aware origination
+///   on top without re-shaping the originator's external surface.
+///
+/// Subsequent role flips for an already-advertising VNI are
+/// **suppressed at the wire level** — the role state updates in
+/// place, but no Withdraw / Inject pair is emitted, since the
+/// reconstructed route would be byte-identical and the churn would
+/// only cost peers a refresh cycle. The Prometheus
+/// `evpn_df_role_changes_total` counter is the operator-facing
+/// signal for the flip; the wire stays quiet.
 #[derive(Debug)]
 pub struct LocalEadPerEviOriginator {
     rd: RouteDistinguisher,
@@ -315,9 +326,17 @@ impl LocalEadPerEviOriginator {
     }
 
     /// React to a `(VNI, DfRole)` update from the orchestrator.
-    /// Emits an Inject on first appearance, an Inject + Withdraw
-    /// pair when the role flips (the wire route's ESI Label flag
-    /// shifts), and an empty vector on idempotent repeat.
+    ///
+    /// Action surface:
+    ///
+    /// - **First appearance**: emits one Inject so the EAD-per-EVI
+    ///   route lands on the wire.
+    /// - **Idempotent repeat** (same role): empty vector.
+    /// - **Role flip** for an already-advertising VNI: empty vector
+    ///   in Gate 8 — the EAD-per-EVI wire shape is role-independent
+    ///   (RFC 7432 §14), so a re-emit would be byte-identical churn.
+    ///   The internal role state still updates so Gate 8b can layer
+    ///   wire-shape changes on top without altering the call site.
     pub fn on_vni_role_changed(
         &mut self,
         vni: EvpnInstanceId,
@@ -325,28 +344,25 @@ impl LocalEadPerEviOriginator {
     ) -> Vec<OriginationAction> {
         let key = self.key_for(vni);
         let prior = self.by_vni.get(&vni).copied();
-        if let Some(prior) = prior
-            && prior.role == role
-        {
-            // Idempotent — same role for already-advertising entry.
+        if let Some(prior) = prior {
+            if prior.role != role {
+                // Role flip on an already-advertising VNI. Update
+                // state but emit nothing — see the doc comment for
+                // the rationale (EAD-per-EVI wire shape is
+                // role-independent in Gate 8).
+                self.by_vni.insert(vni, EadPerEviState { key, role });
+            }
+            // Either idempotent or a state-only flip — no actions.
             return Vec::new();
         }
-        let mut actions = Vec::new();
-        if let Some(prior) = prior {
-            // Role flip — withdraw the old shape, inject the new.
-            actions.push(OriginationAction::Withdraw {
-                mac: MacAddress::new([0; 6]),
-                key: prior.key,
-            });
-        }
-        actions.push(OriginationAction::Inject {
+        // First appearance: route advertises now.
+        self.by_vni.insert(vni, EadPerEviState { key, role });
+        vec![OriginationAction::Inject {
             mac: MacAddress::new([0; 6]),
             mobility_seq: None,
             sticky: false,
             key,
-        });
-        self.by_vni.insert(vni, EadPerEviState { key, role });
-        actions
+        }]
     }
 
     /// Withdraw a `(ESI, VNI)` advertisement. Used when the VNI is
@@ -553,16 +569,18 @@ mod tests {
     }
 
     #[test]
-    fn ead_per_evi_role_flip_emits_withdraw_then_inject() {
-        // Role flip changes the wire shape (ESI Label flag), so the
-        // route is withdrawn under the old role's encoding and
-        // re-injected under the new. Two actions in order.
+    fn ead_per_evi_role_flip_emits_no_wire_actions_in_gate_8() {
+        // Per RFC 7432 §14 the EAD-per-EVI wire shape carries no
+        // role-dependent extcomm, so Gate 8 emits no Withdraw /
+        // Inject pair on a flip — only the internal role state
+        // updates. Gate 8b will layer aliasing extcomms on top and
+        // re-introduce wire-side actions then.
         let mut o = LocalEadPerEviOriginator::new(rd(65000, 100), esi(1));
         let _ = o.on_vni_role_changed(vni(100), DfRole::Df);
         let actions = o.on_vni_role_changed(vni(100), DfRole::NonDf);
-        assert_eq!(actions.len(), 2);
-        assert_withdraw(&actions[0]);
-        assert_inject(&actions[1]);
+        assert!(actions.is_empty(), "got {actions:?}");
+        // Internal state still tracks the new role for Gate 8b.
+        assert_eq!(o.advertised_count(), 1);
     }
 
     #[test]
@@ -571,9 +589,10 @@ mod tests {
         let _ = o.on_vni_role_changed(vni(100), DfRole::Df);
         let _ = o.on_vni_role_changed(vni(200), DfRole::NonDf);
         assert_eq!(o.advertised_count(), 2);
-        // Flipping VNI 100 doesn't touch VNI 200's state.
+        // Flipping VNI 100 doesn't touch VNI 200's state and emits
+        // no wire actions in Gate 8 (role-independent shape).
         let actions = o.on_vni_role_changed(vni(100), DfRole::NonDf);
-        assert_eq!(actions.len(), 2);
+        assert!(actions.is_empty(), "got {actions:?}");
         assert_eq!(o.advertised_count(), 2);
     }
 

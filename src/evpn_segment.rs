@@ -9,30 +9,37 @@
 //! 1. **Spawn** — daemon main reads `[[ethernet_segments]]`, resolves
 //!    via `Config::resolve_ethernet_segments`, hands the resulting
 //!    `Vec<EthernetSegment>` here.
-//! 2. **Startup** — for each ES: emit the Type 4 ES route + Type 1
-//!    EAD-per-ES route, run DF election with the local PE as sole
-//!    candidate (the local PE is DF for all member VNIs at startup
-//!    because no peers have been observed yet), emit one Type 1
-//!    EAD-per-EVI per member VNI carrying the role-aware shape.
+//! 2. **Startup** — for each ES: emit the Type 4 ES route (with the
+//!    auto-derived ES-Import RT extcomm) + Type 1 EAD-per-ES route
+//!    (with the ESI Label extcomm), run DF election with the local
+//!    PE as sole candidate (the local PE is DF for all member VNIs
+//!    at startup because no peers have been observed yet), emit one
+//!    Type 1 EAD-per-EVI per member VNI.
 //! 3. **Steady state** — subscribe to the
 //!    [`rustbgpd_rib::EvpnRouteEvent`] broadcast; on every Type 4
 //!    event for a tracked ESI, re-gather candidates from the RIB
-//!    via `QueryEvpnRoutes`, re-run election, fire per-VNI
-//!    `on_vni_role_changed` for any flipped slot, and update the
-//!    Prometheus gauge / counter.
+//!    via `QueryEvpnRoutes`, re-run election, update the Prometheus
+//!    gauge / counter, and fire `on_vni_role_changed` so the
+//!    per-VNI originator's role state stays in sync. The Gate 8
+//!    EAD-per-EVI wire shape is role-independent (RFC 7432 §14), so
+//!    a flip on an already-advertising VNI emits no wire churn — the
+//!    operator-facing signal is `evpn_df_role_changes_total`. Gate 8b
+//!    will layer aliasing extcomms on top and re-introduce the
+//!    wire-side re-emit for actual shape-changing events.
 //! 4. **Shutdown** — drain all per-ESI Type 1/4 routes before peer
 //!    sessions tear down so peer state converges from the
 //!    most-specific NLRI shape down (same convention as the
 //!    existing originator + SVI tasks).
 //!
-//! ## Scope (Gate 8 — observable)
+//! ## Scope (Gate 8 + Gate 8b prep)
 //!
 //! The daemon-side path here ships the **observation** half of the
-//! gate: Prometheus surface + tracing logs + the wire-side Type 1/4
-//! origination needed for peers to see the local PE as a candidate.
-//! Forwarding-blocking enforcement (split-horizon via the ESI Label
-//! extcomm, aliasing-driven backup paths, mass-withdraw on
-//! `AS_PATH` change) is Gate 8b — see ADR-0057.
+//! gate plus the wire-side extcomms peers need to import / filter
+//! the segment (ES-Import RT on Type 4, ESI Label on Type 1
+//! EAD-per-ES). Forwarding-blocking enforcement (split-horizon
+//! drops on non-DF receivers, aliasing-driven backup paths,
+//! mass-withdraw on `AS_PATH` change, DF-role-aware MAC origination)
+//! remains Gate 8b — see ADR-0057.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;

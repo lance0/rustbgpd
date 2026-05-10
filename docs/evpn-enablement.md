@@ -439,28 +439,71 @@ Ships:
   negotiation, callable from a unit test.
 - Three Type 1/4 origination state machines
   (`crates/evpn/src/origination_es.rs`) — Type 4 ES, Type 1
-  EAD-per-ES (with MAX_ET marker), Type 1 EAD-per-EVI (role-aware).
+  EAD-per-ES (with MAX_ET marker), Type 1 EAD-per-EVI. The
+  EAD-per-EVI originator tracks per-VNI DF role internally for
+  Gate 8b but emits no wire churn on role flips (the Gate 8 wire
+  shape is role-independent per RFC 7432 §14).
 - Daemon orchestrator (`src/evpn_segment.rs`) wiring all of the
   above off the EVPN best-path broadcast (Gate 7c).
 - Observable Prometheus surface — `evpn_df_role{esi,vni,role}`
   gauge and `evpn_df_role_changes_total{esi,vni}` counter.
 - ADR-0057 records the observation/enforcement carve-out.
 
+### Gate 8b prep — ES-Import RT + ESI Label origination
+
+Status: ✅ shipped (`[Unreleased]`, follows Gate 8 in the same
+release window).
+
+Closes the two control-plane gaps ADR-0057 originally flagged
+from Gate 8 — both extcomms had wire-codec support already,
+so this was an origination-only change with no wire bump:
+
+- **Type 4 ES route**: auto-derived ES-Import RT extcomm
+  (RFC 7432 §7.6) — high-order 6 octets of the ESI Value.
+  Peers can now correlate the segment via RT match without
+  preconfiguration.
+- **Type 1 EAD-per-ES route**: ESI Label extcomm (RFC 7432 §7.5)
+  with the synthesized label and `single_active = false`
+  (Gate 8 default is all-active). Peers can wire the label into
+  their split-horizon filter tables; the dataplane-side drops
+  on non-DF receivers stay Gate 8b proper.
+- **Type 1 EAD-per-EVI**: unchanged (carries no ESI Label per
+  RFC 7432 §14).
+
 ### Gate 8b — Multi-homing enforcement (deferred)
 
 Status: scoped, not started · Estimate: ~3-4 weeks · Blockers:
-Gate 8 (cleared).
+Gate 8 + Gate 8b prep (cleared).
 
-Adds the forwarding half: ESI Label extcomm (RFC 7432 §7.5)
-allocator, split-horizon enforcement on the Linux dataplane,
-ES-Import RT (§7.6), aliasing via Type 1 EAD-per-EVI (§14),
-mass-withdraw on `AS_PATH` change (§8.6), DF-role-aware MAC
-origination.
+Adds the forwarding half. Concrete remaining slices:
 
-**Operator note:** Gate 8 origination enables peers to *observe*
-the segment without enabling segment forwarding. Do not configure
-`[[ethernet_segments]]` for production multihoming until Gate 8b
-ships — segment BUM will duplicate toward the CE in a 2-PE setup.
+1. **Dataplane split-horizon enforcement** — feed `evpn_df_role`
+   into the Linux dataplane supervisor; on Non-DF for a
+   `(ESI, VNI)`, suppress / block CE-facing BUM behavior while
+   preserving remote FDB programming and local learning.
+2. **Proper ESI label allocator** — replace the deterministic
+   ESI-byte-derived synthesizer with a real per-ESI label space
+   that survives operator-level configuration churn.
+3. **Aliasing / backup paths** (RFC 7432 §14) — multihomed
+   remote MACs resolved via Type 1 EAD-per-EVI as alternative
+   next-hops.
+4. **Mass withdraw on `AS_PATH` change** (RFC 7432 §8.6) — the
+   fast-flip primitive that bypasses MP_UNREACH for whole-segment
+   withdraw.
+5. **DF-role-aware MAC origination** — a non-DF PE under
+   enforcement should not advertise MAC routes that aliasing
+   peers can't follow back. Couples to slice 1.
+6. **Optional import-side ES-Import RT filtering** — apply the
+   ES-Import RT origination from Gate 8b prep on the daemon's
+   own RIB import path so unrelated segments are filtered before
+   they reach LocRib. Currently we *originate* the RT but
+   *import* via user-configured RTs only.
+
+**Operator note:** Gate 8 + Gate 8b prep enables peers to
+*observe* the segment without enabling segment forwarding. Do not
+configure `[[ethernet_segments]]` for production multihoming
+until Gate 8b proper ships — segment BUM will duplicate toward
+the CE in a 2-PE setup.
 
 ---
 

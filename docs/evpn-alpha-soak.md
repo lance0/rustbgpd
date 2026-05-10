@@ -107,10 +107,26 @@ visibility)
   Prometheus `evpn_df_role` surface + `evpn_df_role_changes_total`
   counter, M38 smoke topology. **Forwarding enforcement deferred to
   Gate 8b** — see ADR-0057 for the carve-out.
-- [ ] **Gate 8b — multi-homing enforcement.** ESI Label extcomm
-  allocator + split-horizon enforcement on the Linux dataplane,
-  ES-Import RT, aliasing via Type 1 EAD-per-EVI, mass-withdraw on
-  AS_PATH change, DF-role-aware MAC origination. ~3-4 weeks.
+- [x] **Gate 8b prep — ES-Import RT + ESI Label origination.**
+  Auto-derived ES-Import RT extcomm (RFC 7432 §7.6) on Type 4 ES
+  routes, ESI Label extcomm (RFC 7432 §7.5) on Type 1 EAD-per-ES
+  with `single_active = false` (Gate 8 default). M38 driver asserts
+  both extcomms appear on the wire. No wire codec change.
+- [ ] **Gate 8b — multi-homing enforcement.** Six concrete
+  remaining slices:
+  1. Dataplane split-horizon enforcement (feed `evpn_df_role` into
+     the Linux dataplane supervisor; suppress CE-facing BUM on
+     Non-DF for `(ESI, VNI)`, preserve remote FDB programming and
+     local learning).
+  2. Proper per-ESI label allocator (replaces the deterministic
+     ESI-byte-derived synthesizer used by Gate 8b prep).
+  3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).
+  4. Mass-withdraw on `AS_PATH` change (RFC 7432 §8.6).
+  5. DF-role-aware MAC origination (couples to slice 1).
+  6. Optional import-side ES-Import RT filtering on the daemon's
+     own RIB import path (we already *originate* the RT in Gate 8b
+     prep; this would also *import* by it).
+  Estimated ~3-4 weeks once started.
 - [ ] **Gate 9 — symmetric IRB (RFC 9135) + L3VNI / Type 5
   dataplane.** Per-VRF IP routes via Type 5, MAC-VRF + IP-VRF
   separation, Router MAC extended community lifecycle, the
