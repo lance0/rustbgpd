@@ -53,15 +53,31 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     forwarding is a follow-up (`LinuxDataplane` programs one
     `dst` per MAC today; multi-VTEP needs `nexthop` group or
     L3-route-based ECMP).
-  - **Mass-withdraw `AS_PATH`-change detector**
-    (`crates/evpn/src/mass_withdraw.rs`). Pure-logic
-    `AsPathTracker` that maintains `(peer, ESI) -> AsPathFingerprint`
-    state and returns `MassWithdrawTrigger { peer, esi }` whenever
-    a re-advertisement's fingerprint differs from the recorded
-    one. Also covers `record_withdrawal` (always a trigger) and
-    `drop_peer` (one trigger per tracked ESI on session
-    teardown). FNV-1a fingerprints make the tracker lightweight
-    enough to invoke on every EAD-per-ES event. +12 unit tests.
+  - **Per-`(peer, ESI)` EAD-per-ES event tracker for receiver-side
+    mass-withdraw** (`crates/evpn/src/mass_withdraw.rs`). RFC 7432
+    §8.4 names the EAD-per-ES *withdrawal* as the standard
+    fast-convergence signal — when a peer withdraws its Type 1
+    EAD-per-ES route for an ESI, every receiver sweeps every MAC
+    route attributed to that `(peer, ESI)` pairing in one
+    operation. Pure-logic `AsPathTracker` exposes:
+    - `record_withdrawal` — canonical RFC 7432 §8.4 trigger.
+      Returns `Some(MassWithdrawTrigger)` when there was prior
+      state for `(peer, ESI)` to sweep; `None` for unseen pairs
+      (no phantom RIB sweep).
+    - `drop_peer` — session teardown / peer-down. Returns one
+      trigger per ESI the peer was tracking.
+    - `record_advertisement` (optional) — vendor-interop
+      heuristic adopted by FRR / Cumulus / Junos: if a peer's
+      EAD-per-ES `AS_PATH` changes between two advertisements
+      without an explicit Withdraw between them, treat it as
+      mass-withdraw. Not in the RFC, documented as a heuristic.
+    `AsPathFingerprint::from_as_path` hashes segment type +
+    segment length + ASN bytes per `AsPathSegment`, so re-
+    segmentation by an upstream peer (e.g. `[1,2]` becoming
+    `[1] [2]`, or `AsSequence` becoming `AsSet`) produces
+    distinct fingerprints. FNV-1a backs the hash; a
+    `from_asns` flat helper stays for tests / single-segment
+    callers but is documented as fidelity-lossy. +13 unit tests.
     The RIB-side sweep that consumes triggers is the next slice.
 
 - **EVPN Gate 8b multi-homing enforcement — end-to-end wired,

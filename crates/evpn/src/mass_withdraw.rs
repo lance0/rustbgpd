@@ -1,28 +1,44 @@
-//! Mass-withdraw on `AS_PATH` change for EVPN multi-homing
-//! (RFC 7432 §8.6).
+//! Per-`(peer, ESI)` EAD-per-ES event tracker, the receiver-side
+//! fast-convergence path for EVPN multi-homing.
 //!
-//! When a remote PE that participates in an Ethernet Segment loses
-//! its CE-side connectivity (NIC down, bond fail, etc.), it would
-//! normally have to withdraw every MAC route it had advertised on
-//! that segment one-by-one — an O(MACs-on-segment) wave of
-//! `MP_UNREACH_NLRI` messages that scales poorly under failure.
-//! RFC 7432 §8.6 defines a fast-flip primitive: re-advertise the
-//! Type 1 EAD-per-ES route with a *changed* `AS_PATH`, and every
-//! receiver mass-withdraws every MAC route it had attributed to
-//! that `(peer, ESI)` pairing in one operation.
+//! RFC 7432 §8.4 ("Aliasing and Backup-Path") names the Type 1
+//! EAD-per-ES route as the per-Ethernet-Segment object on which
+//! receivers do mass-MAC sweeping. When a remote PE that
+//! participates in an Ethernet Segment loses its CE-side
+//! connectivity (NIC down, bond fail, etc.), it would otherwise
+//! have to withdraw every MAC route it had advertised on that
+//! segment one-by-one — an O(MACs-on-segment) wave of
+//! `MP_UNREACH_NLRI` messages. The RFC's standard fast path is
+//! the **EAD-per-ES withdrawal**: when a peer withdraws its Type 1
+//! EAD-per-ES route for an ESI, every receiver sweeps every MAC
+//! route it had attributed to that `(peer, ESI)` pairing in one
+//! operation.
 //!
 //! ## What this module does
 //!
-//! Pure-logic change detector. Tracks `(peer, ESI) ->
-//! AsPathFingerprint` across received EAD-per-ES events; on an
-//! advertisement whose fingerprint differs from the last recorded
-//! one, returns `MassWithdrawTrigger { peer, esi }`. The caller
-//! wires the trigger into the RIB to sweep matching MAC routes.
+//! Pure-logic detector. Maintains per-`(peer, ESI)` state across
+//! received EAD-per-ES events and returns
+//! `MassWithdrawTrigger { peer, esi }` for events that should
+//! cause the caller to sweep every Type 2 route it attributes to
+//! that peer/segment.
 //!
-//! Withdrawal of the EAD-per-ES route itself (`MP_UNREACH_NLRI` on
-//! the Type 1) is *also* a mass-withdraw signal — RFC 7432 §8.6
-//! treats both as equivalent. The detector exposes
-//! `record_withdraw` for that path.
+//! Three event sources:
+//!
+//! 1. **EAD-per-ES withdrawal** (`record_withdrawal`). The
+//!    canonical RFC 7432 §8.4 mass-withdraw signal — peer's
+//!    `MP_UNREACH_NLRI` for the Type 1 EAD-per-ES tells receivers
+//!    "this segment is gone from my side; sweep accordingly."
+//! 2. **Session teardown / peer-down** (`drop_peer`). One trigger
+//!    per ESI the peer was tracking; the BGP layer's session-down
+//!    path doesn't need to know about per-ESI bookkeeping
+//!    explicitly.
+//! 3. **`AS_PATH` change on EAD-per-ES re-advertisement**
+//!    (`record_advertisement`, optional). Not in RFC 7432 itself,
+//!    but adopted by FRR / Cumulus / Junos as a vendor-interop
+//!    heuristic: if the peer's `AS_PATH` for the EAD-per-ES route
+//!    changes between two advertisements without a Withdraw
+//!    in-between, treat it as if the segment churned. Keep this
+//!    path optional and document it as a heuristic, not RFC.
 //!
 //! ## What this module does NOT do
 //!
@@ -32,22 +48,25 @@
 //!   makes the policy (which routes to sweep, in what order)
 //!   explicit at the call site rather than buried here.
 //! - Cache `AS_PATH`s by content. The fingerprint is a hash of
-//!   the path's wire shape; equality is hash-equality. False
-//!   negatives are theoretically possible (hash collisions on
-//!   distinct AS paths) but RFC-wise they'd be a one-shot missed
-//!   mass-withdraw the next 5 s reconcile pass corrects via the
-//!   FDB-aging path. The fingerprint type is opaque so we can swap
-//!   the hash function without touching call sites.
+//!   the path's wire shape (segment type + segment length + ASN
+//!   bytes), so two `AS_PATH`s that differ only in segment
+//!   structure (e.g. `AS_SEQUENCE [1, 2]` vs two `AS_SEQUENCE`
+//!   segments `[1] [2]`) produce different fingerprints. False
+//!   negatives via hash collision are tolerable — they'd be a
+//!   one-shot missed mass-withdraw the next 5 s reconcile pass
+//!   corrects via the FDB-aging path. The fingerprint type is
+//!   opaque so we can swap the hash function without touching
+//!   call sites.
 //! - Decide whether `AS_PATH` *should* have changed. Detection is
 //!   purely "did it change vs the last advertisement we saw?" The
-//!   RFC §8.6 contract is that the *originator* changes its
-//!   `AS_PATH` only when it intends mass-withdraw; receivers like
-//!   us trust that contract.
+//!   policy contract that justifies firing on `AS_PATH` change is
+//!   the originator's, not the receiver's — we trust the upstream
+//!   conventions.
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
-use rustbgpd_wire::EthernetSegmentIdentifier;
+use rustbgpd_wire::{AsPath, AsPathSegment, EthernetSegmentIdentifier};
 
 /// Opaque fingerprint of an `AS_PATH`. Equal fingerprints → equal
 /// paths (false negatives via hash collision are tolerable, see
@@ -56,29 +75,71 @@ use rustbgpd_wire::EthernetSegmentIdentifier;
 pub struct AsPathFingerprint(u64);
 
 impl AsPathFingerprint {
-    /// Build from a slice of 4-octet ASNs in segment order.
-    /// Implementation: FNV-1a over the bytes. Stable across
-    /// runs and cheap enough to hash on every event.
+    /// Build a fingerprint from an `AS_PATH`'s wire shape:
+    /// segment-type tag + segment length + ASN bytes for each
+    /// segment in order. Two `AS_PATH`s that differ only in
+    /// segment structure (e.g. one segment `[1, 2]` vs two
+    /// segments `[1]` then `[2]`) produce different fingerprints,
+    /// so a re-segmentation by an upstream peer counts as a
+    /// change for mass-withdraw purposes.
     #[must_use]
-    pub fn from_asns(asns: &[u32]) -> Self {
-        // FNV-1a 64-bit
+    pub fn from_as_path(path: &AsPath) -> Self {
+        // FNV-1a 64-bit, structure-aware. Tag bytes for segment
+        // type are distinct constants so a switch from
+        // `AsSequence` to `AsSet` (same ASNs) hashes differently.
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for asn in asns {
-            for &byte in &asn.to_be_bytes() {
-                h ^= u64::from(byte);
-                h = h.wrapping_mul(0x100_0000_01b3);
+        for segment in &path.segments {
+            let (tag, asns): (u8, &[u32]) = match segment {
+                AsPathSegment::AsSequence(asns) => (0x02, asns.as_slice()),
+                AsPathSegment::AsSet(asns) => (0x01, asns.as_slice()),
+            };
+            h = fnv1a_step(h, tag);
+            // Length prefix in network order so segment boundaries
+            // contribute distinct bytes — this is what makes
+            // [1,2] vs [1][2] hash differently even though the
+            // flat ASN sequence is identical.
+            // BGP `AS_PATH` segments are at most 255 ASNs by wire shape
+            // (segment-length is a u8), so the `usize -> u32` cast
+            // never truncates in practice. Saturating-cast to silence
+            // the clippy lint without changing semantics.
+            let asn_count = u32::try_from(asns.len()).unwrap_or(u32::MAX);
+            for &byte in &asn_count.to_be_bytes() {
+                h = fnv1a_step(h, byte);
+            }
+            for asn in asns {
+                for &byte in &asn.to_be_bytes() {
+                    h = fnv1a_step(h, byte);
+                }
             }
         }
         Self(h)
     }
 
+    /// Build from a flat ASN list. Test/helper convenience —
+    /// production callers should use [`Self::from_as_path`] so
+    /// segment structure is preserved. The flat form treats every
+    /// ASN as part of one synthetic `AsSequence` segment, which
+    /// matches the most common single-segment shape but loses
+    /// fidelity for paths with multiple segments or `AsSet`s.
+    #[must_use]
+    pub fn from_asns(asns: &[u32]) -> Self {
+        Self::from_as_path(&AsPath {
+            segments: vec![AsPathSegment::AsSequence(asns.to_vec())],
+        })
+    }
+
     /// Sentinel for "no `AS_PATH` ever recorded" — distinct from
     /// any plausible hash output (the FNV-1a basis is a different
-    /// constant from the empty-input result of `from_asns(&[])`).
+    /// constant from the empty-input result).
     #[must_use]
     pub const fn never_seen() -> Self {
         Self(0)
     }
+}
+
+#[inline]
+const fn fnv1a_step(h: u64, byte: u8) -> u64 {
+    (h ^ (byte as u64)).wrapping_mul(0x100_0000_01b3)
 }
 
 /// One mass-withdraw trigger. The caller sweeps every MAC route
@@ -129,11 +190,20 @@ impl AsPathTracker {
         }
     }
 
-    /// Record an EAD-per-ES withdrawal for `(peer, esi)`. Always
-    /// returns a trigger (the route went away — every MAC the
-    /// peer advertised on this segment must be swept). The
-    /// internal state is cleared so a subsequent re-advertisement
-    /// is treated as first-seen.
+    /// Record an EAD-per-ES withdrawal for `(peer, esi)`. Returns
+    /// `Some(MassWithdrawTrigger)` iff the tracker had previously
+    /// observed an advertisement from this peer for this segment;
+    /// otherwise returns `None` (a withdrawal for a `(peer, ESI)`
+    /// we never saw advertise is a no-op — the RIB has nothing
+    /// attributed to that pair to sweep). On success, internal
+    /// state is cleared so a subsequent re-advertisement is
+    /// treated as first-seen, not a fingerprint flip.
+    ///
+    /// Callers that need every withdrawal to surface a trigger
+    /// regardless of seeding must guarantee `record_advertisement`
+    /// has been called first (e.g. drive both off the same
+    /// `EvpnRouteEvent` broadcast subscription so first-seen and
+    /// withdrawal events arrive in order on a single stream).
     pub fn record_withdrawal(
         &mut self,
         peer: IpAddr,
@@ -142,9 +212,6 @@ impl AsPathTracker {
         if self.by_key.remove(&(peer, esi)).is_some() {
             Some(MassWithdrawTrigger { peer, esi })
         } else {
-            // Withdrawal for a peer/segment we never saw advertise
-            // is a no-op rather than a spurious sweep — the RIB
-            // has nothing to withdraw.
             None
         }
     }
@@ -214,6 +281,46 @@ mod tests {
         let a = AsPathFingerprint::from_asns(&[64512, 64513]);
         let b = AsPathFingerprint::from_asns(&[64513, 64512]);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_segment_structure() {
+        // [1, 2] in one AsSequence vs [1] [2] in two AsSequences:
+        // flat ASN list is identical, but the wire shape differs,
+        // so the fingerprints must too. Otherwise a peer that
+        // re-segments its `AS_PATH` between advertisements (a real
+        // BGP behavior under route-server / aggregation churn)
+        // would silently fail to trigger mass-withdraw.
+        let one_seg = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![1, 2])],
+        };
+        let two_segs = AsPath {
+            segments: vec![
+                AsPathSegment::AsSequence(vec![1]),
+                AsPathSegment::AsSequence(vec![2]),
+            ],
+        };
+        assert_ne!(
+            AsPathFingerprint::from_as_path(&one_seg),
+            AsPathFingerprint::from_as_path(&two_segs),
+        );
+    }
+
+    #[test]
+    fn fingerprint_distinguishes_segment_type() {
+        // Same ASN list under AsSequence vs AsSet must hash
+        // differently — the segment-type tag prefix bytes guarantee
+        // that.
+        let seq = AsPath {
+            segments: vec![AsPathSegment::AsSequence(vec![1, 2, 3])],
+        };
+        let set = AsPath {
+            segments: vec![AsPathSegment::AsSet(vec![1, 2, 3])],
+        };
+        assert_ne!(
+            AsPathFingerprint::from_as_path(&seq),
+            AsPathFingerprint::from_as_path(&set),
+        );
     }
 
     #[test]

@@ -1182,6 +1182,34 @@ async fn apply_actions(
 /// `[[ethernet_segments]]` segment = pass the segment's ESI so peers
 /// can correlate this MAC with Type 1 EAD-per-EVI routes for the same
 /// segment via aliasing (RFC 7432 §14).
+///
+/// ## On the route key not including ESI
+///
+/// Per RFC 7432 §9, the Type 2 NLRI's full wire shape includes the
+/// ESI as part of the bytes a BGP receiver hashes to identify the
+/// route. `EvpnRouteKey::MacIp` deliberately keys on
+/// `(RD, EthTag, MAC, IP)` only — the ESI lives on the route's
+/// path-metadata side, not the lookup-key side. Two reasons that's
+/// safe in our model:
+///
+/// 1. **Origination is single-source-per-VNI.**
+///    `Config::resolve_ethernet_segments` rejects two segments
+///    sharing a member VNI, so the local PE can never originate the
+///    same `(RD, EthTag, MAC, IP)` under two different ESIs. The
+///    `vni_to_esi` lookup is total and deterministic.
+/// 2. **Reception relies on best-path tie-breaking.** When two
+///    peers advertise the same `(RD, EthTag, MAC, IP)` under
+///    different ESIs (e.g. a CE that accidentally hashes to
+///    different segments at different `ToRs`), the existing best-path
+///    chain (mobility sequence → `ORIGIN` → `CLUSTER_LIST` →
+///    `ORIGINATOR_ID`) picks one winner whose ESI becomes canonical;
+///    aliasing on the receive side then surfaces alternative VTEPs
+///    via the EAD-per-EVI index without extending the route key.
+///
+/// Folding ESI into `EvpnRouteKey::MacIp` would be a larger ADR-level
+/// change with cascading impact across the RIB index, best-path
+/// comparison, and Type 2 withdraw paths — explicitly out of scope
+/// for the Gate 8b feature slices.
 pub(crate) fn build_originated_route(
     instance: &EvpnInstance,
     mac: MacAddress,

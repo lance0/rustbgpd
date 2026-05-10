@@ -1082,10 +1082,13 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         let mut map = std::collections::BTreeMap::new();
         for seg in &ethernet_segments {
             for &vni in &seg.member_vnis {
-                // First-write-wins on collisions — overlapping
-                // member VNIs across segments aren't expected, but
-                // guarding here keeps the originator deterministic.
-                map.entry(vni).or_insert(seg.esi);
+                // `Config::resolve_ethernet_segments` rejects
+                // duplicate member-VNI across segments at config
+                // load, so a `vni` appearing here twice is a logic
+                // bug, not an operator misconfiguration. The first
+                // write is the only write.
+                debug_assert!(!map.contains_key(&vni));
+                map.insert(vni, seg.esi);
             }
         }
         std::sync::Arc::new(map)
