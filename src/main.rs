@@ -1033,8 +1033,13 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // into the coordinated shutdown block at the bottom of main where
     // we await its bounded drain.
     let evpn_dataplane_shutdown = tokio_util::sync::CancellationToken::new();
+    let supervisor_config = {
+        let mut cfg = evpn_dataplane::SupervisorConfig::default();
+        cfg.actor_config.apply_bum_enforcement = config.apply_bum_enforcement;
+        cfg
+    };
     let mut evpn_dataplane_handle = evpn_dataplane::spawn(
-        evpn_dataplane::SupervisorConfig::default(),
+        supervisor_config,
         &evpn_instances,
         rib_tx.clone(),
         metrics.clone(),
@@ -2939,6 +2944,7 @@ hold_time = 90
             dynamic_neighbors: Vec::new(),
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
+            apply_bum_enforcement: false,
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));

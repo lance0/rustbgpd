@@ -11,6 +11,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 8b operator-facing config: `apply_bum_enforcement`.**
+  New top-level TOML key on `Config`, default `false`. When set,
+  the daemon constructs the EVPN supervisor with
+  `ReconcileActorConfig::apply_bum_enforcement = true` so the
+  reconciler actually pushes `SetBumPortFlags` ops into the
+  kernel via `LinuxDataplane`. With the flag off (default) the
+  resolved enforcement plan is still surfaced via
+  `DataplaneReport.bum_enforcement` for operator visibility, but
+  no kernel mutation occurs — observe-only behavior preserved.
 - **EVPN Gate 8b reconciler-side emission of BUM-suppression ops.**
   `ReconcileActor` now computes a `BumPortFlagPlan` from the
   resolved `BumEnforcementStatus` rows on every reconcile pass,

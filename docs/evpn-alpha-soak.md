@@ -155,13 +155,18 @@ visibility)
   the apply-flag, soak validation on a privileged runner, then
   flipping the flag default on once enough operator hours back
   the change.
-- [ ] **Gate 8b — multi-homing enforcement.** Four concrete
+- [x] **Gate 8b operator-facing config landed.** Top-level
+  `apply_bum_enforcement: bool` TOML field on `Config` (default
+  `false`). The daemon main wires it into the supervisor's
+  `ReconcileActorConfig`, so flipping the TOML key flips kernel
+  enforcement on. Hot reload still requires a daemon restart for
+  this field — promoting it to SIGHUP-reloadable is a small
+  follow-up that can ride with the next config-shape pass.
+- [ ] **Gate 8b — multi-homing enforcement.** Three concrete
   remaining slices:
-  1. Daemon `[evpn]` config plumbing for
-     `apply_bum_enforcement: bool`. Currently the flag lives on
-     `ReconcileActorConfig` and defaults to `false`; operators
-     can override only via code. A TOML field (or gRPC mutation)
-     is the missing operator-facing surface.
+  1. Privileged-runner soak validation (24 h with synthetic DF
+     flips + MAC churn) before flipping the
+     `apply_bum_enforcement` default to `true`.
   2. Proper per-ESI label allocator (replaces the deterministic
      ESI-byte-derived synthesizer used by Gate 8b prep).
   3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).

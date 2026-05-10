@@ -37,6 +37,16 @@ pub struct Config {
     /// the observable-without-enforcement scope decision.
     #[serde(default)]
     pub ethernet_segments: Vec<EthernetSegmentConfig>,
+    /// Apply Gate 8b BUM-suppression filters to the kernel
+    /// (per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge
+    /// ports). Default `false` — observe-only behavior preserved.
+    /// Operators flip this to `true` once a privileged-runner soak
+    /// validates kernel enforcement on their environment. The
+    /// resolved enforcement plan is always reported via
+    /// `DataplaneReport.bum_enforcement` regardless of this flag, so
+    /// observability does not depend on the flip.
+    #[serde(default)]
+    pub apply_bum_enforcement: bool,
     /// Path of the config file (populated by `Config::load`, not serialized).
     #[serde(skip)]
     pub file_path: Option<PathBuf>,
