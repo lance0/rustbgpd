@@ -88,7 +88,9 @@ impl ErrorTemplate {
         match self {
             Self::Io => DataplaneError::Io(std::io::Error::other("injected I/O failure")),
             Self::Other(s) => DataplaneError::Other(s.clone()),
-            Self::KernelTooOld => DataplaneError::KernelTooOld,
+            Self::KernelTooOld => DataplaneError::KernelTooOld {
+                feature: "injected feature".to_string(),
+            },
         }
     }
 }

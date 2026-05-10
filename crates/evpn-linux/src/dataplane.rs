@@ -77,14 +77,23 @@ pub enum DataplaneOp {
         mac: MacAddress,
     },
     /// Apply the per-port flood-flag triplet to a CE-facing bridge
-    /// port (Gate 8b BUM-suppression primitive). Realized via
-    /// `RTM_SETLINK` carrying `IFLA_PROTINFO` with
+    /// port (Gate 8b BUM-suppression primitive). Realized in
+    /// [`crate::LinuxDataplane`] via a single `RTM_NEWLINK`
+    /// (sent through `rtnetlink::LinkHandle::set_port`) carrying
+    /// `IFLA_LINKINFO` with `IFLA_INFO_PORT_KIND = "bridge"` and
+    /// `IFLA_INFO_PORT_DATA` holding the
     /// `IFLA_BRPORT_UNICAST_FLOOD` / `IFLA_BRPORT_MCAST_FLOOD` /
-    /// `IFLA_BRPORT_BCAST_FLOOD`. Implementations that don't yet
-    /// speak the netlink attribute set may return
-    /// [`DataplaneError`]'s `KernelTooOld` / `Unsupported` variants
-    /// — the reconcile actor records the failure and the operator
-    /// sees it via `DataplaneReport.failed`.
+    /// `IFLA_BRPORT_BCAST_FLOOD` triplet. Implementations failing
+    /// to apply the triplet surface
+    /// [`DataplaneError::KernelTooOld`] (`EOPNOTSUPP`),
+    /// [`DataplaneError::PermissionDenied`] (`EPERM` / `EACCES`),
+    /// [`DataplaneError::LinkNotFound`] (`ENODEV` — stale
+    /// ifindex), [`DataplaneError::InvalidArgument`]
+    /// (caller-side guard, e.g. ifindex 0), or
+    /// [`DataplaneError::Other`] (catch-all that the actor's
+    /// backoff retries). The reconcile actor records the failure
+    /// and the operator sees it via
+    /// [`rustbgpd_evpn::DataplaneReport::failed`].
     SetBumPortFlags {
         /// CE-facing bridge port ifindex.
         ifindex: u32,

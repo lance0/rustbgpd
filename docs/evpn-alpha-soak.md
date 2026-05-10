@@ -118,60 +118,44 @@ visibility)
   VXLAN ifindex, and CE-facing port identity and reports the desired
   `allow` / `suppress` action in `DataplaneReport`, but still does
   not mutate kernel filters.
-- [x] **Gate 8b BUM-suppression primitive proven.** The per-port
-  `bridge link set ... flood off mcast_flood off bcast_flood off`
-  triplet on the CE-facing bridge port is the right kernel hammer
-  — proven safe by the privileged netns spike at
-  `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`
-  (gated on `EVPN_LINUX_NETNS=1`). All five load-bearing
-  invariants hold: DF allows, Non-DF blocks broadcast / multicast
-  / unknown-unicast, known-unicast forwarding survives Non-DF,
-  the toggle is symmetric, and `extern_learn` FDB add/del
-  succeed regardless of mode. Pure-logic mapping from
-  `BumEnforcementStatus` → `(ifindex, BumPortFlags)` lives at
-  `crates/evpn-linux/src/bum_filter.rs` with 9 unit tests.
-- [x] **Gate 8b BUM-suppression rtnetlink wiring landed (apply
-  surface).** `LinuxDataplane::apply(&DataplaneOp::
-  SetBumPortFlags { ifindex, flags })` now fires the proven
-  `RTM_NEWLINK` + `IFLA_BRPORT_*_FLOOD` triplet. Privileged
-  round-trip test `linux_dataplane_set_bum_port_flags_round_trip`
-  verifies via `bridge -d link show` that the flags land. What
-  remains is the **emission half**: the reconciler does not yet
-  *produce* `SetBumPortFlags` ops from `BumEnforcementStatus` →
-  `BumPortFlagPlan` (the pure-logic mapping is already in
-  `crates/evpn-linux/src/bum_filter.rs`). Wiring that emission
-  into the reconcile loop behind a config flag is the next slice.
-- [x] **Gate 8b reconciler-side BUM emission landed.** The actor
-  now computes `BumPortFlagPlan` from `BumEnforcementStatus` each
-  pass, diffs against the last-applied plan, and emits
-  `DataplaneOp::SetBumPortFlags` ops for changed entries when
-  `ReconcileActorConfig::apply_bum_enforcement = true`. Default
-  remains `false` so existing observe-only deployments are
-  unchanged. End-to-end Gate 8b enforcement is now wired from
-  control-plane DF election → segment orchestrator →
-  `BumEnforcementTable` → reconciler → `LinuxDataplane::apply` →
-  `RTM_NEWLINK` with `IFLA_BRPORT_*_FLOOD`. The remaining work
-  is operational, not architectural: daemon-config plumbing for
-  the apply-flag, soak validation on a privileged runner, then
-  flipping the flag default on once enough operator hours back
-  the change.
-- [x] **Gate 8b operator-facing config landed.** Top-level
+- [x] **Gate 8b multi-homing enforcement — end-to-end wired,
+  opt-in by config.** Closes the loop from DF election to kernel
+  split-horizon. The per-port `bridge link set ... flood off
+  mcast_flood off bcast_flood off` triplet on the CE-facing
+  bridge port is the chosen primitive (proven by the privileged
+  netns spike at
+  `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`,
+  gated on `EVPN_LINUX_NETNS=1`); five load-bearing invariants
+  hold: DF allows, Non-DF blocks broadcast / multicast /
+  unknown-unicast, known-unicast forwarding survives Non-DF,
+  toggle is symmetric, `extern_learn` FDB add/del succeeds
+  regardless of mode. The pure-logic plan
+  (`crates/evpn-linux/src/bum_filter.rs`) maps
+  `BumEnforcementStatus` → `Vec<BumPortFlagPlan>` with
+  most-restrictive-wins on collisions and auto-restore for
+  disappeared ports; `LinuxDataplane::apply` consumes
+  `DataplaneOp::SetBumPortFlags` and issues `RTM_NEWLINK` with
+  the `IFLA_BRPORT_*_FLOOD` triplet; the reconcile actor emits
+  the diff each pass, with per-port `last_bum_plan` updates
+  gated on apply success so failed ports keep retrying. Top-level
   `apply_bum_enforcement: bool` TOML field on `Config` (default
-  `false`). The daemon main wires it into the supervisor's
-  `ReconcileActorConfig`, so flipping the TOML key flips kernel
-  enforcement on. Hot reload still requires a daemon restart for
-  this field — promoting it to SIGHUP-reloadable is a small
-  follow-up that can ride with the next config-shape pass.
-- [ ] **Gate 8b — multi-homing enforcement.** Three concrete
-  remaining slices:
-  1. Privileged-runner soak validation (24 h with synthetic DF
-     flips + MAC churn) before flipping the
-     `apply_bum_enforcement` default to `true`.
+  `false`) is the operator-facing opt-in; with the flag off, the
+  resolved plan still flows through `DataplaneReport.bum_enforcement`
+  for visibility. Hot reload still requires a daemon restart for
+  this field — promoting it to SIGHUP-reloadable rides with the
+  next config-shape pass.
+- [ ] **Gate 8b — remaining multi-homing enforcement work.** Five
+  concrete slices:
+  1. Privileged-runner 24 h soak validation (synthetic DF flips
+     + MAC churn) before flipping the `apply_bum_enforcement`
+     default to `true`.
   2. Proper per-ESI label allocator (replaces the deterministic
      ESI-byte-derived synthesizer used by Gate 8b prep).
   3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).
   4. Mass-withdraw on `AS_PATH` change (RFC 7432 §8.6).
-  5. DF-role-aware MAC origination (couples to slice 1).
+  5. DF-role-aware MAC origination (couples to enforcement —
+     a Non-DF PE under enforcement should not advertise MAC routes
+     that aliasing peers can't follow back).
   6. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).

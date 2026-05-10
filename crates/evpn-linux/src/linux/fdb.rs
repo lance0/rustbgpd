@@ -353,7 +353,9 @@ fn classify_apply_error(err: &rtnetlink::Error) -> DataplaneError {
 fn errno_to_dataplane_error(errno: i32, detail: &str) -> DataplaneError {
     match errno {
         libc::EPERM | libc::EACCES => DataplaneError::PermissionDenied(detail.to_owned()),
-        libc::EOPNOTSUPP => DataplaneError::KernelTooOld,
+        libc::EOPNOTSUPP => DataplaneError::KernelTooOld {
+            feature: "NTF_EXT_LEARNED (Linux ≥4.18)".to_string(),
+        },
         libc::EINVAL => DataplaneError::InvalidArgument(detail.to_owned()),
         _ => DataplaneError::Other(format!("netlink errno {errno}: {detail}")),
     }
@@ -551,7 +553,13 @@ mod tests {
     #[test]
     fn errno_eopnotsupp_is_kernel_too_old_permanent() {
         let dp_err = errno_to_dataplane_error(libc::EOPNOTSUPP, "Operation not supported");
-        assert!(matches!(dp_err, DataplaneError::KernelTooOld));
+        assert!(matches!(dp_err, DataplaneError::KernelTooOld { .. }));
+        if let DataplaneError::KernelTooOld { ref feature } = dp_err {
+            assert!(
+                feature.contains("NTF_EXT_LEARNED"),
+                "FDB-side EOPNOTSUPP must surface the NTF_EXT_LEARNED feature label, got {feature}"
+            );
+        }
         assert_eq!(dp_err.class(), FailureClass::Permanent);
     }
 

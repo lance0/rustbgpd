@@ -51,8 +51,15 @@ TEST_MAC="02:aa:bb:cc:dd:42"
 
 ns_exec() { ip netns exec "$NS" "$@"; }
 
+# Per-run temp file for stderr capture from `bridge link set`. Using
+# `mktemp` so concurrent invocations of the spike (e.g. parallel
+# `cargo test` runs on different testers) don't race for a fixed
+# `/tmp/bridge.err` and clobber each other's diagnostic output.
+BRIDGE_ERR=$(mktemp -t "rustbgpd-bum-spike.XXXXXX.err")
+
 cleanup() {
     ip netns delete "$NS" >/dev/null 2>&1 || true
+    rm -f "$BRIDGE_ERR"
 }
 trap cleanup EXIT
 
@@ -151,9 +158,9 @@ ns_exec ip addr add "${SUBNET}.3/24" dev "$SRC_TAP"
 
 # Probe the kernel's per-port flood-flag support against ce-br. Any
 # error here means this kernel is too old; bail with a clear message.
-if ! ns_exec bridge link set dev "$CE_BR" flood on mcast_flood on bcast_flood on 2>/tmp/bridge.err; then
+if ! ns_exec bridge link set dev "$CE_BR" flood on mcast_flood on bcast_flood on 2>"$BRIDGE_ERR"; then
     echo "ERROR: kernel does not support per-port flood flags:" >&2
-    cat /tmp/bridge.err >&2
+    cat "$BRIDGE_ERR" >&2
     exit 2
 fi
 

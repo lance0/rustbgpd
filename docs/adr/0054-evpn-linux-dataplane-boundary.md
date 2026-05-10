@@ -325,7 +325,8 @@ pub struct DataplaneReport {
     pub instance_status: Vec<InstanceDataplaneStatus>,
     pub applied: Vec<AppliedOp>,
     pub failed: Vec<FailedOp>,
-    // Gate 8b observable split-horizon plan; no kernel mutation yet.
+    // Gate 8b split-horizon plan; always populated for visibility,
+    // mutated into the kernel only when Config::apply_bum_enforcement = true.
     pub bum_enforcement: Vec<BumEnforcementStatus>,
 }
 ```
@@ -356,17 +357,33 @@ under the load-bearing invariants by the privileged netns spike at
 The pure-logic mapping from `BumEnforcementStatus` to the
 `(ifindex, flag triplet)` plan lives at
 `crates/evpn-linux/src/bum_filter.rs` (`BumPortFlags`,
-`compute_flag_plan`, `diff_flag_plans`). The next slice consumes
-that plan via rtnetlink (`RTM_SETLINK` with bridge-port
-`IFLA_PROTINFO`). Most-restrictive wins on ifindex collisions
-(suppress beats allow), and disappeared previously-suppressed
-ports are restored to `allow_all` so the kernel never holds a
-stale suppress on a port the orchestrator no longer manages.
+`compute_flag_plan`, `diff_flag_plans`). Most-restrictive wins on
+ifindex collisions (suppress beats allow), and disappeared
+previously-suppressed ports are restored to `allow_all` so the
+kernel never holds a stale suppress on a port the orchestrator no
+longer manages.
+
+`LinuxDataplane::apply` consumes the `DataplaneOp::SetBumPortFlags`
+ops the reconciler emits and issues a single `RTM_NEWLINK` (sent
+through `rtnetlink::LinkHandle::set_port`) carrying `IFLA_LINKINFO`
+with `IFLA_INFO_PORT_KIND = "bridge"` and `IFLA_INFO_PORT_DATA`
+holding the `IFLA_BRPORT_*_FLOOD` triplet — the same wire shape
+`bridge link set ... flood off mcast_flood off bcast_flood off`
+produces. Errors map to `KernelTooOld`, `PermissionDenied`,
+`LinkNotFound`, `InvalidArgument`, or `Other` per the existing
+`DataplaneError` taxonomy.
+
+The actual mutation is gated by a daemon-side config flag
+(`Config::apply_bum_enforcement`, default `false`) plumbed into
+`ReconcileActorConfig::apply_bum_enforcement`. When the flag is off
+the actor still computes the resolved plan and surfaces it via
+`DataplaneReport.bum_enforcement` for observability — the kernel
+mutation is the only thing the flag gates.
 
 `bcast_flood` requires Linux >= 4.18 (commit 4ce1b1bb05a3, "bridge:
-per-port broadcast flood flag"). The wiring slice will surface a
-clear NotReady reason when the kernel is too old, mirroring the
-existing `KernelTooOld` errno classification.
+per-port broadcast flood flag"). On older kernels the netlink call
+returns `EOPNOTSUPP`, which the bum-filter classifier maps to
+`DataplaneError::KernelTooOld`.
 
 `intent_generation` echoes the `DataplaneIntent::generation` that
 produced the report, letting the daemon correlate "I sent desired

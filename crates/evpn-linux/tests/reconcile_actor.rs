@@ -302,6 +302,90 @@ async fn reconcile_emits_set_bum_port_flags_when_apply_enabled() {
     h.shutdown().await;
 }
 
+// 1c. Transiently-failed BUM ops must be re-emitted on the next
+// reconcile pass. Pre-PR #57 review (#1) the actor updated
+// `last_bum_plan` unconditionally after `apply_plan`, so a failed
+// SetBumPortFlags op silently disappeared from future diffs even
+// though the kernel never received the change. The fix updates
+// `last_bum_plan` per-port on success only — failed ports keep
+// their prior recorded state so the next pass's diff still
+// produces the op.
+#[tokio::test(start_paused = true)]
+async fn failed_bum_op_is_re_emitted_on_next_pass() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![10],
+        },
+    );
+    h.handle.set_links(links);
+
+    // Inject one transient failure for the SetBumPortFlags { 10,
+    // suppress_all } op. The first reconcile pass will fail; the
+    // second pass (triggered by the actor's retry-due timer) must
+    // re-emit the op rather than skipping it.
+    h.handle.inject_failure_other(
+        Some(rustbgpd_evpn_linux::DataplaneOp::SetBumPortFlags {
+            ifindex: 10,
+            flags: rustbgpd_evpn_linux::BumPortFlags::suppress_all(),
+        }),
+        "transient netlink hiccup",
+    );
+
+    let mut bum = BumEnforcementTable::new();
+    let esi = EthernetSegmentIdentifier::new([1; 10]);
+    bum.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            inst,
+            RemoteMacTable::new(),
+            bum,
+        ))
+        .unwrap();
+
+    // Drain reports until the kernel state reflects the desired
+    // suppress_all. The first pass should fail; the actor's retry
+    // timer should fire and the second pass should succeed (the
+    // injected failure was popped FIFO).
+    let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
+    let mut applied = false;
+    for _ in 0..20 {
+        // Advance virtual time past the backoff window (initial = 100ms,
+        // ±25% jitter → up to 125ms). 250ms covers it with margin.
+        tokio::time::advance(Duration::from_millis(250)).await;
+        // Drain any reports that surfaced.
+        let _ = h.try_drain_reports().await;
+        if h.handle.bum_port_flags().get(&10) == Some(&suppress) {
+            applied = true;
+            break;
+        }
+    }
+    assert!(
+        applied,
+        "BUM op never re-applied after transient failure; \
+         last_bum_plan must update only on success"
+    );
+
+    h.shutdown().await;
+}
+
 // 2. Coalescing — gen=1 then gen=2 published in quick succession,
 //    only gen=2 reconciles. Validates watch::Receiver semantics.
 #[tokio::test(start_paused = true)]

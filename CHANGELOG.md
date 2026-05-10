@@ -11,85 +11,65 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **EVPN Gate 8b operator-facing config: `apply_bum_enforcement`.**
-  New top-level TOML key on `Config`, default `false`. When set,
-  the daemon constructs the EVPN supervisor with
-  `ReconcileActorConfig::apply_bum_enforcement = true` so the
-  reconciler actually pushes `SetBumPortFlags` ops into the
-  kernel via `LinuxDataplane`. With the flag off (default) the
-  resolved enforcement plan is still surfaced via
-  `DataplaneReport.bum_enforcement` for operator visibility, but
-  no kernel mutation occurs — observe-only behavior preserved.
-- **EVPN Gate 8b reconciler-side emission of BUM-suppression ops.**
-  `ReconcileActor` now computes a `BumPortFlagPlan` from the
-  resolved `BumEnforcementStatus` rows on every reconcile pass,
-  diffs against the last-applied plan, and (when
-  `ReconcileActorConfig::apply_bum_enforcement = true`) emits
-  `DataplaneOp::SetBumPortFlags` ops for changed entries through
-  the same `apply_plan` loop the FDB ops use. Default is `false`
-  so existing observe-only deployments are unchanged; operators
-  flip the flag once a privileged-runner soak validates kernel
-  enforcement on their target environment. New `last_bum_plan`
-  field on the actor's internal state preserves the diff baseline
-  across passes — repeated reconcile-on-event firings re-emit no
-  ops when nothing changed (idempotent at the netlink boundary).
-  Two new actor-level integration tests:
-  `reconcile_emits_set_bum_port_flags_when_apply_enabled` (verifies
-  emission + per-CE-port fan-out) and an extension to
-  `reconcile_report_includes_observable_bum_enforcement_plan`
-  (verifies non-emission with default config). +2 tests.
-- **EVPN Gate 8b BUM-suppression op surface + Linux netlink
-  wiring (`SetBumPortFlags`).** New variant on `DataplaneOp` /
-  `DataplaneOpKind` carrying `(ifindex, BumPortFlags)` so the
-  reconciler can drive per-CE-port flag state through the same
-  trait the FDB ops already use.
-  - `InMemoryDataplane` records each call by ifindex for
-    assertion (`InMemoryHandle::bum_port_flags()`).
-  - `LinuxDataplane::apply` now actually fires the proven
-    primitive — issues an `RTM_NEWLINK` carrying `IFLA_LINKINFO`
-    with `IFLA_INFO_PORT_KIND = "bridge"` + `IFLA_INFO_PORT_DATA`
-    holding the `IFLA_BRPORT_UNICAST_FLOOD` /
-    `IFLA_BRPORT_MCAST_FLOOD` / `IFLA_BRPORT_BCAST_FLOOD` triplet
-    via `rtnetlink::LinkHandle::set_port`. New
-    `crates/evpn-linux/src/linux/bum_filter.rs` (~120 lines) plus
-    4 error-classification unit tests
-    (`EOPNOTSUPP → KernelTooOld`, `EPERM → PermissionDenied`,
-    `ENODEV → LinkNotFound`, default → `Other`).
-  - New gated integration test
-    `linux_dataplane_set_bum_port_flags_round_trip` re-execs into
-    a netns, fires `SetBumPortFlags` via the real `LinuxDataplane`,
-    and verifies via `bridge -d link show` that `flood off /
-    mcast_flood off / bcast_flood off` land on the kernel side.
-    Requires `EVPN_LINUX_NETNS=1` + `CAP_NET_ADMIN` + Linux >= 4.18.
-  - The retry-state machinery treats BUM ops as having a sentinel
-    `(VNI=0xFFFFFF, MAC=ifindex-encoded)` fingerprint so two
-    ifindexes never collide and no real EVPN instance shares the
-    key space. +5 tests.
-- **EVPN Gate 8b BUM-suppression kernel primitive proven (spike,
-  no kernel mutation yet).** Privileged netns spike at
-  `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`
-  validates that the per-port `bridge link set ... flood off
-  mcast_flood off bcast_flood off` triplet on the CE-facing
-  bridge port is the right kernel hammer for split-horizon. All
-  five load-bearing invariants hold: DF allows, Non-DF blocks
-  broadcast / multicast / unknown-unicast, **known-unicast
-  forwarding survives Non-DF**, the toggle is symmetric, and
-  `extern_learn` FDB add/del succeed regardless of mode.
-  - New pure-logic `crates/evpn-linux/src/bum_filter.rs` maps
-    `BumEnforcementStatus` rows to a flat
+- **EVPN Gate 8b multi-homing enforcement — end-to-end wired,
+  opt-in by config.** Closes the loop from DF election to kernel
+  split-horizon enforcement, gated by a default-`false` config
+  flag so existing observe-only deployments are unchanged.
+  - **Kernel primitive proven**: privileged netns spike at
+    `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`
+    validates that the per-port `bridge link set ... flood off
+    mcast_flood off bcast_flood off` triplet on the CE-facing
+    bridge port is the right kernel hammer for split-horizon.
+    Five load-bearing invariants hold: DF allows, Non-DF blocks
+    broadcast / multicast / unknown-unicast, **known-unicast
+    forwarding survives Non-DF**, the toggle is symmetric, and
+    `extern_learn` FDB add/del succeed regardless of mode.
+  - **Pure-logic mapping** in `crates/evpn-linux/src/bum_filter.rs`
+    turns `BumEnforcementStatus` rows into a flat
     `Vec<BumPortFlagPlan>` (ifindex + per-port flag triplet) with
     most-restrictive-wins on ifindex collisions and
     auto-restoration of disappeared previously-suppressed ports
-    to `allow_all`. 9 unit tests.
-  - Gated integration test `tests/netns_bum_filter.rs` runs the
-    privileged spike via `EVPN_LINUX_NETNS=1`, mirroring the
-    existing `netns_dataplane.rs` pattern.
-  - ADR-0054 records the chosen primitive plus the
-    `IFLA_BRPORT_*_FLOOD` netlink attributes the next slice will
-    set via `RTM_SETLINK`.
-  - The reconciler still does not mutate kernel filters in this
-    PR — that's the next slice. The plan + diff are observable;
-    the netlink wiring is the only remaining piece.
+    to `allow_all`. `diff_flag_plans` makes the apply path
+    idempotent at the netlink boundary.
+  - **New `DataplaneOp` variant `SetBumPortFlags { ifindex, flags }`**
+    routes through the same trait the FDB ops use.
+    `InMemoryDataplane` records each call by ifindex for
+    assertion (`InMemoryHandle::bum_port_flags()`); the BUM op
+    path uses its own retry / permanent-failure schedule keyed by
+    ifindex (separate from the FDB `(VNI, MAC)` schedule), so no
+    sentinel-VNI collision risk exists.
+  - **Linux netlink apply** in
+    `crates/evpn-linux/src/linux/bum_filter.rs` issues a single
+    `RTM_NEWLINK` (sent through `rtnetlink::LinkHandle::set_port`)
+    carrying `IFLA_LINKINFO` with `IFLA_INFO_PORT_KIND = "bridge"`
+    and `IFLA_INFO_PORT_DATA` holding the
+    `IFLA_BRPORT_UNICAST_FLOOD` / `IFLA_BRPORT_MCAST_FLOOD` /
+    `IFLA_BRPORT_BCAST_FLOOD` triplet. Errors map to
+    `KernelTooOld` (`EOPNOTSUPP`), `PermissionDenied`
+    (`EPERM` / `EACCES`), `LinkNotFound` (`ENODEV`),
+    `InvalidArgument` (caller-side guard), or `Other`
+    (catch-all the actor's backoff retries).
+  - **Reconciler-side emission**: the actor computes a fresh
+    `BumPortFlagPlan` each pass, diffs against the last-applied
+    plan, and emits `DataplaneOp::SetBumPortFlags` ops for changed
+    entries through the same `apply_plan` loop the FDB ops use.
+    Per-port `last_bum_plan` updates only for ifindexes whose op
+    succeeded — failed ports keep their prior recorded state so
+    the next reconcile pass re-emits the op (the apply-side
+    retry/backoff governs the cadence).
+  - **Operator-facing config** `apply_bum_enforcement: bool` on
+    `Config` (default `false`). Plumbed into the supervisor's
+    `ReconcileActorConfig`. With the flag off, the resolved
+    enforcement plan is still surfaced via
+    `DataplaneReport.bum_enforcement` for operator visibility,
+    but no kernel mutation occurs.
+  - **Gated integration tests**: shell-driven netns spike
+    (`bum_filter_spike_validates_kernel_primitive`) and Rust
+    netlink round-trip (`linux_dataplane_set_bum_port_flags_
+    round_trip`) both run under `EVPN_LINUX_NETNS=1` +
+    `CAP_NET_ADMIN` + Linux >= 4.18. Hosted PR-CI skips them
+    cleanly. Two actor-level integration tests pin the emit /
+    no-emit toggle behavior. +17 unit + integration tests.
 - **EVPN Gate 8b enforcement intent foundation — observable BUM
   plan, no kernel mutation yet.** The daemon now feeds DF-election
   role state into the EVPN Linux dataplane supervisor as a portable

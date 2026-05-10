@@ -57,6 +57,36 @@ fn try_run(cmd: &str, args: &[&str]) {
     let _ = Command::new(cmd).args(args).output();
 }
 
+/// RAII guard that creates a netns on construction and deletes it
+/// on Drop, so a panicking assertion in the middle of a test never
+/// leaks the netns on the host. Mirrors the `NetnsFixture` pattern
+/// in `tests/netns_dataplane.rs`.
+struct NetnsFixture {
+    name: String,
+}
+
+impl NetnsFixture {
+    fn create(test_name: &str) -> Self {
+        let name = format!("rustbgpd-test-{test_name}-{}", std::process::id());
+        try_run("ip", &["netns", "delete", &name]);
+        run("ip", &["netns", "add", &name]);
+        run("ip", &["-n", &name, "link", "set", "lo", "up"]);
+        Self { name }
+    }
+
+    fn ns_exec(&self, cmd: &str, args: &[&str]) -> std::process::Output {
+        let mut full = vec!["netns", "exec", self.name.as_str(), cmd];
+        full.extend(args);
+        run("ip", &full)
+    }
+}
+
+impl Drop for NetnsFixture {
+    fn drop(&mut self) {
+        try_run("ip", &["netns", "delete", &self.name]);
+    }
+}
+
 #[test]
 fn bum_filter_spike_validates_kernel_primitive() {
     if !netns_gate() {
@@ -90,36 +120,29 @@ async fn linux_dataplane_set_bum_port_flags_round_trip() {
         return;
     }
 
-    let ns = format!("rb-bum-rt-{}", std::process::id());
-    try_run("ip", &["netns", "delete", &ns]);
-    run("ip", &["netns", "add", &ns]);
-    let ns_exec = |cmd: &str, args: &[&str]| {
-        let mut full = vec!["netns", "exec", &ns, cmd];
-        full.extend(args);
-        run("ip", &full);
-    };
-    ns_exec("ip", &["link", "set", "lo", "up"]);
-    ns_exec("ip", &["link", "add", "br100", "type", "bridge"]);
-    ns_exec(
-        "ip",
-        &[
-            "link", "add", "ce-br", "type", "veth", "peer", "name", "ce-tap",
-        ],
-    );
-    ns_exec("ip", &["link", "set", "ce-br", "master", "br100"]);
-    ns_exec("ip", &["link", "set", "br100", "up"]);
-    ns_exec("ip", &["link", "set", "ce-br", "up"]);
-    ns_exec("ip", &["link", "set", "ce-tap", "up"]);
-
     // Re-exec inside the netns; the inner pass connects rtnetlink
     // and exercises the LinuxDataplane apply path. The outer pass
     // collects the kernel state via `bridge -d link show ce-br`
-    // and asserts the flags landed.
+    // and asserts the flags landed. NetnsFixture's Drop guarantees
+    // cleanup even if a downstream assertion panics.
     let inner_marker = std::env::var("RUSTBGPD_BUM_INNER").is_ok();
     if !inner_marker {
+        let ns = NetnsFixture::create("bum-rt");
+        ns.ns_exec("ip", &["link", "add", "br100", "type", "bridge"]);
+        ns.ns_exec(
+            "ip",
+            &[
+                "link", "add", "ce-br", "type", "veth", "peer", "name", "ce-tap",
+            ],
+        );
+        ns.ns_exec("ip", &["link", "set", "ce-br", "master", "br100"]);
+        ns.ns_exec("ip", &["link", "set", "br100", "up"]);
+        ns.ns_exec("ip", &["link", "set", "ce-br", "up"]);
+        ns.ns_exec("ip", &["link", "set", "ce-tap", "up"]);
+
         let exe = std::env::current_exe().expect("self-exe");
         let status = Command::new("ip")
-            .args(["netns", "exec", &ns])
+            .args(["netns", "exec", &ns.name])
             .arg(&exe)
             .args([
                 "--exact",
@@ -135,9 +158,7 @@ async fn linux_dataplane_set_bum_port_flags_round_trip() {
         // Outer pass: read ce-br's flag state and assert all three
         // flooding flags landed in the suppress configuration the
         // inner pass requested last.
-        let mut full = vec!["netns", "exec", &ns];
-        full.extend(["bridge", "-d", "link", "show", "dev", "ce-br"]);
-        let out = run("ip", &full);
+        let out = ns.ns_exec("bridge", &["-d", "link", "show", "dev", "ce-br"]);
         let dump = String::from_utf8_lossy(&out.stdout);
         for label in ["flood off", "mcast_flood off", "bcast_flood off"] {
             assert!(
@@ -146,8 +167,9 @@ async fn linux_dataplane_set_bum_port_flags_round_trip() {
             );
         }
 
-        try_run("ip", &["netns", "delete", &ns]);
         return;
+        // NetnsFixture::drop runs here, deleting the netns on both
+        // success and panic paths.
     }
 
     // Inner pass: connect rtnetlink in the netns and apply the op.
