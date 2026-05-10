@@ -505,13 +505,16 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
 
     async fn explain_best_path(
         &self,
-        _request: Request<server_proto::ExplainBestPathRequest>,
+        request: Request<server_proto::ExplainBestPathRequest>,
     ) -> Result<Response<server_proto::ExplainBestPathResponse>, Status> {
+        let req = request.into_inner();
         Ok(Response::new(server_proto::ExplainBestPathResponse {
             prefix: "203.0.113.0".to_string(),
             prefix_length: 24,
             best_route: None,
             candidates: vec![],
+            peer: req.peer,
+            add_path_send_max: 0,
         }))
     }
 

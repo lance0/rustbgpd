@@ -608,12 +608,25 @@ message ExplainAdvertisedRouteResponse {
 message ExplainBestPathRequest {
   string prefix = 1;
   uint32 prefix_length = 2;
+  // Optional. When set, the explanation is scoped to the named
+  // peer's Add-Path send view: candidates are filtered by the
+  // peer's export policy + sendable families, sorted by best-path
+  // preference, and the top `add_path_send_max` get a non-zero
+  // `advertised_path_id` reflecting their advertised rank. Empty =
+  // global view, the v0.7.0 behavior. Unknown peer → NOT_FOUND.
+  string peer = 3;
 }
 
 message BestPathCandidate {
   Route route = 1;
   string vs_best_reason = 2;
   string vs_best_ordering = 3;
+  // Set on responses scoped to a peer (see
+  // `ExplainBestPathRequest.peer`). Non-zero = this candidate
+  // would be advertised at this rank under the current Add-Path
+  // send_max. Zero = filtered (export policy reject, family
+  // mismatch, split-horizon, or beyond send_max).
+  uint32 advertised_path_id = 4;
 }
 
 message ExplainBestPathResponse {
@@ -621,6 +634,14 @@ message ExplainBestPathResponse {
   uint32 prefix_length = 2;
   Route best_route = 3;
   repeated BestPathCandidate candidates = 4;
+  // Echoed from the request when the explanation is peer-scoped.
+  // Empty for global-view responses.
+  string peer = 5;
+  // Peer's Add-Path send_max (0 = single-best send mode or
+  // global-view response). When set, the top
+  // `add_path_send_max` candidates by best-path preference get a
+  // non-zero `BestPathCandidate.advertised_path_id`.
+  uint32 add_path_send_max = 6;
 }
 
 message Route {

@@ -83,6 +83,14 @@ pub struct ExplainBestPath {
     pub best: Option<Route>,
     /// All candidates with their comparison against the best route.
     pub candidates: Vec<BestPathCandidate>,
+    /// Peer this explanation was scoped to, when the request named one.
+    /// `None` = global Loc-RIB view (the pre-Add-Path explain shape).
+    pub peer: Option<IpAddr>,
+    /// Peer's Add-Path `send_max` when scoped to a peer (`0` =
+    /// single-best send, or global view). When non-zero, the top
+    /// `add_path_send_max` candidates by best-path preference get a
+    /// non-zero `BestPathCandidate::advertised_path_id`.
+    pub add_path_send_max: u32,
 }
 
 /// A candidate route with its comparison result against the best route.
@@ -94,6 +102,12 @@ pub struct BestPathCandidate {
     pub vs_best_reason: BestPathReason,
     /// How this candidate compares to the best route.
     pub vs_best_ordering: std::cmp::Ordering,
+    /// When the explain was scoped to a peer with Add-Path send,
+    /// non-zero = this candidate would be advertised at this rank
+    /// (1-based, capped at `add_path_send_max`); zero = filtered out
+    /// by the peer's export policy / family check / split-horizon, or
+    /// beyond the `send_max`. Always zero on a global-view explain.
+    pub advertised_path_id: u32,
 }
 
 /// Messages sent from peer sessions to the RIB manager.
@@ -193,8 +207,15 @@ pub enum RibUpdate {
     ExplainBestPath {
         /// Prefix to explain.
         prefix: Prefix,
-        /// Response channel.
-        reply: oneshot::Sender<ExplainBestPath>,
+        /// Optional peer scope (Add-Path send view). When `Some`, the
+        /// explanation reflects what the named peer would actually
+        /// receive — export policy filtered, ranked by best-path,
+        /// truncated to the peer's `add_path_send_max`. When `None`,
+        /// returns the global Loc-RIB view.
+        peer: Option<IpAddr>,
+        /// Response channel. `None` = unknown peer (peer was set but
+        /// not registered with this RIB).
+        reply: oneshot::Sender<Option<ExplainBestPath>>,
     },
     /// Query: explain whether the current best route for a prefix would be advertised to a peer.
     ExplainAdvertisedRoute {

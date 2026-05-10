@@ -272,12 +272,15 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
     if json {
         let out = serde_json::json!({
             "prefix": format!("{}/{}", resp.prefix, resp.prefix_length),
+            "peer": (!resp.peer.is_empty()).then(|| resp.peer.clone()),
+            "add_path_send_max": resp.add_path_send_max,
             "best_route": resp.best_route.as_ref().map(route_to_json),
             "candidates": resp.candidates.iter().map(|c| {
                 serde_json::json!({
                     "route": c.route.as_ref().map(route_to_json),
                     "vs_best_reason": c.vs_best_reason,
                     "vs_best_ordering": c.vs_best_ordering,
+                    "advertised_path_id": c.advertised_path_id,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -292,6 +295,12 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
         "Best-path explanation for {}/{}",
         resp.prefix, resp.prefix_length
     );
+    if !resp.peer.is_empty() {
+        println!(
+            "Scope:      peer {} (Add-Path send_max={})",
+            resp.peer, resp.add_path_send_max
+        );
+    }
 
     if let Some(ref best) = resp.best_route {
         println!(
@@ -309,18 +318,39 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
     }
 
     println!();
-    println!(
-        "{:<18} {:<18} {:<22} {:<8}",
-        "Peer", "Next Hop", "Reason", "Result"
-    );
-    println!("{}", "-".repeat(70));
-
-    for c in &resp.candidates {
-        if let Some(ref r) = c.route {
-            println!(
-                "{:<18} {:<18} {:<22} {:<8}",
-                r.peer_address, r.next_hop, c.vs_best_reason, c.vs_best_ordering
-            );
+    let peer_scoped = !resp.peer.is_empty();
+    if peer_scoped {
+        println!(
+            "{:<18} {:<18} {:<22} {:<8} Adv-PathID",
+            "Peer", "Next Hop", "Reason", "Result"
+        );
+        println!("{}", "-".repeat(80));
+        for c in &resp.candidates {
+            if let Some(ref r) = c.route {
+                let advert = if c.advertised_path_id == 0 {
+                    "(filtered)".to_string()
+                } else {
+                    c.advertised_path_id.to_string()
+                };
+                println!(
+                    "{:<18} {:<18} {:<22} {:<8} {}",
+                    r.peer_address, r.next_hop, c.vs_best_reason, c.vs_best_ordering, advert
+                );
+            }
+        }
+    } else {
+        println!(
+            "{:<18} {:<18} {:<22} {:<8}",
+            "Peer", "Next Hop", "Reason", "Result"
+        );
+        println!("{}", "-".repeat(70));
+        for c in &resp.candidates {
+            if let Some(ref r) = c.route {
+                println!(
+                    "{:<18} {:<18} {:<22} {:<8}",
+                    r.peer_address, r.next_hop, c.vs_best_reason, c.vs_best_ordering
+                );
+            }
         }
     }
 }
@@ -328,6 +358,7 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
 pub async fn explain_best_path(
     connection: Connection,
     prefix: &str,
+    peer: Option<&str>,
     json: bool,
 ) -> Result<(), CliError> {
     let (addr, len) = output::parse_prefix(prefix).map_err(CliError::Argument)?;
@@ -337,6 +368,7 @@ pub async fn explain_best_path(
         .explain_best_path(ExplainBestPathRequest {
             prefix: addr,
             prefix_length: len,
+            peer: peer.unwrap_or("").to_string(),
         })
         .await?
         .into_inner();

@@ -477,8 +477,12 @@ impl RibManager {
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
                 self.handle_query_advertised_routes(peer, reply);
             }
-            RibUpdate::ExplainBestPath { prefix, reply } => {
-                self.handle_explain_best_path(prefix, reply);
+            RibUpdate::ExplainBestPath {
+                prefix,
+                peer,
+                reply,
+            } => {
+                self.handle_explain_best_path(prefix, peer, reply);
             }
             RibUpdate::ExplainAdvertisedRoute {
                 peer,
@@ -629,12 +633,39 @@ impl RibManager {
         }
     }
 
+    #[expect(clippy::too_many_lines)]
     fn handle_explain_best_path(
         &mut self,
         prefix: Prefix,
-        reply: tokio::sync::oneshot::Sender<ExplainBestPath>,
+        peer: Option<IpAddr>,
+        reply: tokio::sync::oneshot::Sender<Option<ExplainBestPath>>,
     ) {
         use crate::best_path::best_path_cmp;
+        use crate::manager::helpers::should_suppress_ibgp_inner;
+        use rustbgpd_policy::{PolicyAction, RouteContext, RouteType, evaluate_chain};
+
+        // Mirrors `distribution::route_type`. Local copy because that
+        // helper is private to the distribution module and lifting it
+        // up would be a wider surgery than this slice warrants.
+        fn route_type_for(origin: crate::route::RouteOrigin) -> RouteType {
+            match origin {
+                crate::route::RouteOrigin::Local => RouteType::Local,
+                crate::route::RouteOrigin::Ibgp => RouteType::Internal,
+                crate::route::RouteOrigin::Ebgp => RouteType::External,
+            }
+        }
+
+        // Peer-scoped: reject the call before any work if the peer
+        // isn't registered. Mirrors handle_explain_advertised_route's
+        // not-found semantics so the CLI can give the operator a
+        // clear "unknown peer" error instead of a silently-empty
+        // response.
+        if let Some(peer_addr) = peer
+            && !self.peer_sendable_families.contains_key(&peer_addr)
+        {
+            let _ = reply.send(None);
+            return;
+        }
 
         // Collect all candidates from all Adj-RIB-In tables.
         let mut all_candidates: Vec<crate::route::Route> = self
@@ -643,11 +674,114 @@ impl RibManager {
             .flat_map(|rib| rib.iter_prefix(&prefix).cloned())
             .collect();
 
-        // Find best using same logic as LocRib::recompute.
+        // Best by RFC 4271 best-path comparison — independent of
+        // peer scope, and used as the reference point for every
+        // candidate's `vs_best_reason`.
         let best = all_candidates
             .iter()
             .min_by(|a, b| best_path_cmp(a, b))
             .cloned();
+
+        // For the peer-aware path, build the ranked advertised set so
+        // each candidate can be tagged with its `advertised_path_id`.
+        // The selection mirrors `distribute_multipath_prefix` exactly:
+        // family check → split-horizon → iBGP/RR suppression → export
+        // policy → top-N by best-path. Mirroring the contract is
+        // deliberate — operators trust explain only if it produces
+        // the same selection that distribution would, modulo state
+        // changes between the two calls.
+        let mut advertised: Vec<(IpAddr, u32)> = Vec::new();
+        let mut add_path_send_max: u32 = 0;
+        if let Some(peer_addr) = peer {
+            add_path_send_max = self.add_path_send_max_for_prefix(peer_addr, &prefix);
+            let target_is_ebgp = self.peer_is_ebgp.get(&peer_addr).copied().unwrap_or(true);
+            let target_is_rr_client = self
+                .peer_is_rr_client
+                .get(&peer_addr)
+                .copied()
+                .unwrap_or(false);
+            let target_peer_asn = self.peer_asn.get(&peer_addr).copied();
+            let target_peer_group = self.peer_group.get(&peer_addr).map(String::as_str);
+            let cluster_id = self.cluster_id;
+            let sendable = self.peer_sendable_families.get(&peer_addr);
+            let family = match prefix {
+                Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
+                Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
+            };
+            // Family check fails fast: nothing is advertised at all.
+            if sendable.is_some_and(|f| f.contains(&family)) {
+                let export_pol = self.export_policy_for(peer_addr);
+                let mut filtered: Vec<&crate::route::Route> = all_candidates
+                    .iter()
+                    .filter(|route| {
+                        if route.peer == peer_addr {
+                            return false; // split horizon
+                        }
+                        if should_suppress_ibgp_inner(
+                            route,
+                            target_is_ebgp,
+                            target_is_rr_client,
+                            cluster_id,
+                            &self.peer_is_rr_client,
+                        ) {
+                            return false;
+                        }
+                        true
+                    })
+                    .collect();
+                filtered.sort_by(|a, b| best_path_cmp(a, b));
+
+                let limit = if add_path_send_max == 0 {
+                    1
+                } else if add_path_send_max == u32::MAX {
+                    usize::MAX
+                } else {
+                    add_path_send_max as usize
+                };
+
+                let mut next_rank: u32 = 1;
+                for cand in &filtered {
+                    if (next_rank as usize) > limit {
+                        break;
+                    }
+                    let aspath_str = cand
+                        .as_path()
+                        .map_or_else(String::new, rustbgpd_wire::AsPath::to_aspath_string);
+                    let aspath_len = cand.as_path().map_or(0, rustbgpd_wire::AsPath::len);
+                    let ctx = RouteContext {
+                        prefix,
+                        next_hop: Some(cand.next_hop),
+                        extended_communities: cand.extended_communities(),
+                        communities: cand.communities(),
+                        large_communities: cand.large_communities(),
+                        as_path_str: &aspath_str,
+                        as_path_len: aspath_len,
+                        validation_state: cand.validation_state,
+                        aspa_state: cand.aspa_state,
+                        peer_address: Some(peer_addr),
+                        peer_asn: target_peer_asn,
+                        peer_group: target_peer_group,
+                        route_type: Some(route_type_for(cand.origin_type)),
+                        evpn_route_type: None,
+                        local_pref: cand.local_pref_attr(),
+                        med: cand.med_attr(),
+                    };
+                    if evaluate_chain(export_pol, &ctx).action != PolicyAction::Permit {
+                        continue;
+                    }
+                    advertised.push((cand.peer, cand.path_id));
+                    next_rank += 1;
+                }
+            }
+        }
+
+        let advertised_lookup = |route: &crate::route::Route| -> u32 {
+            advertised
+                .iter()
+                .position(|(p, id)| *p == route.peer && *id == route.path_id)
+                .and_then(|idx| u32::try_from(idx + 1).ok())
+                .unwrap_or(0)
+        };
 
         let candidates = if let Some(ref best_route) = best {
             all_candidates
@@ -655,10 +789,12 @@ impl RibManager {
                 .filter(|c| !(c.peer == best_route.peer && c.path_id == best_route.path_id))
                 .map(|candidate| {
                     let (ordering, reason) = best_path_cmp_with_reason(&candidate, best_route);
+                    let advertised_path_id = advertised_lookup(&candidate);
                     BestPathCandidate {
                         route: candidate,
                         vs_best_reason: reason,
                         vs_best_ordering: ordering,
+                        advertised_path_id,
                     }
                 })
                 .collect()
@@ -670,9 +806,11 @@ impl RibManager {
             prefix,
             best,
             candidates,
+            peer,
+            add_path_send_max,
         };
 
-        if reply.send(explanation).is_err() {
+        if reply.send(Some(explanation)).is_err() {
             warn!("query caller dropped before receiving best-path explanation");
         }
     }

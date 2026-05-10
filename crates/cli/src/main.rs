@@ -83,6 +83,14 @@ enum Command {
         #[arg(long, requires = "prefix")]
         explain: bool,
 
+        /// Scope --explain to a specific peer's Add-Path send view.
+        /// When set, candidates are filtered by the peer's export
+        /// policy + sendable families and the top
+        /// `add_path_send_max` are tagged with their advertised
+        /// rank. Omit for the global Loc-RIB view.
+        #[arg(long, requires = "explain")]
+        explain_peer: Option<String>,
+
         /// Filter by origin ASN (last ASN in AS_PATH)
         #[arg(long)]
         origin_asn: Option<u32>,
@@ -646,6 +654,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             prefix,
             longer,
             explain,
+            explain_peer,
             origin_asn,
             community,
             large_community,
@@ -685,7 +694,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                                 "--explain requires --prefix with an exact CIDR".into(),
                             ));
                         };
-                        commands::rib::explain_best_path(connection, prefix, json).await
+                        commands::rib::explain_best_path(
+                            connection,
+                            prefix,
+                            explain_peer.as_deref(),
+                            json,
+                        )
+                        .await
                     } else {
                         commands::rib::best(connection, family_val, &filters, json).await
                     }
