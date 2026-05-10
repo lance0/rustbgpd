@@ -7,6 +7,19 @@ use rustbgpd_wire::{
     LargeCommunity, PathAttribute, Prefix, RpkiValidation,
 };
 
+/// Implicit `LOCAL_PREF` used when a route arrives without the
+/// attribute (e.g. eBGP-received with no `LOCAL_PREF` on the wire).
+/// RFC 4271 §5.1.5 makes 100 the default for best-path purposes;
+/// `match_local_pref_ge` / `match_local_pref_le` use the same
+/// value so policy reads identically against routes regardless of
+/// whether `LOCAL_PREF` is on the wire. `FRR` / `BIRD` / `GoBGP`
+/// follow the same convention.
+pub(crate) const IMPLICIT_LOCAL_PREF: u32 = 100;
+
+/// Implicit `MED` used when a route arrives without the attribute.
+/// RFC 4271 §5.1.4 specifies 0.
+pub(crate) const IMPLICIT_MED: u32 = 0;
+
 /// Action taken when a prefix matches a policy entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyAction {
@@ -592,19 +605,31 @@ impl PolicyStatement {
                 .match_as_path_length_le
                 .is_none_or(|v| ctx.as_path_len <= v as usize);
 
+        // RFC 4271: when LOCAL_PREF is absent (e.g. an eBGP-received
+        // route with no LOCAL_PREF on the wire), the implicit value
+        // for best-path purposes is 100. RFC 4271 §5.1.5 doesn't
+        // mandate the same default for policy *matching* — it leaves
+        // the question implementation-defined — but FRR / BIRD /
+        // GoBGP all use the implicit default in their match
+        // semantics so an operator's `match local-preference >= 100`
+        // works against routes the engine itself treats as having
+        // LP=100. Matching that convention here means a single
+        // policy reads identically against routes that arrive with
+        // an explicit LOCAL_PREF (iBGP) and routes that don't
+        // (eBGP) — the previous behavior silently failed to match
+        // eBGP routes against any LP threshold.
+        let candidate_local_pref = ctx.local_pref.unwrap_or(IMPLICIT_LOCAL_PREF);
         let local_pref_ok = self
             .match_local_pref_ge
-            .is_none_or(|v| ctx.local_pref.is_some_and(|candidate| candidate >= v))
+            .is_none_or(|v| candidate_local_pref >= v)
             && self
                 .match_local_pref_le
-                .is_none_or(|v| ctx.local_pref.is_some_and(|candidate| candidate <= v));
+                .is_none_or(|v| candidate_local_pref <= v);
 
-        let med_ok = self
-            .match_med_ge
-            .is_none_or(|v| ctx.med.is_some_and(|candidate| candidate >= v))
-            && self
-                .match_med_le
-                .is_none_or(|v| ctx.med.is_some_and(|candidate| candidate <= v));
+        // RFC 4271 §5.1.4: MED defaults to 0 when absent.
+        let candidate_med = ctx.med.unwrap_or(IMPLICIT_MED);
+        let med_ok = self.match_med_ge.is_none_or(|v| candidate_med >= v)
+            && self.match_med_le.is_none_or(|v| candidate_med <= v);
 
         let next_hop_ok = self
             .match_next_hop
