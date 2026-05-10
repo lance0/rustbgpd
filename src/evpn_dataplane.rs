@@ -682,11 +682,11 @@ mod tests {
 
     #[test]
     fn project_one_drops_non_zero_esi_macip_without_active_ead_per_es() {
-        // RFC 7432 §8.4 mass-withdraw gate: a peer that advertises
-        // a Type 2 with non-zero ESI but doesn't claim segment
-        // reachability (no current EAD-per-ES from the same peer
-        // for the same ESI) fails the receiver-side reachability
-        // precondition and we drop the route from projection.
+        // RFC 7432 §8.4 mass-withdraw gate: a route whose origin VTEP
+        // advertises a Type 2 with non-zero ESI but doesn't claim
+        // segment reachability (no current EAD-per-ES from the same
+        // origin VTEP for the same ESI) fails the receiver-side
+        // reachability precondition and is dropped from projection.
         use rustbgpd_wire::{EthernetSegmentIdentifier, EvpnMacIp, MplsLabel};
         let esi = EthernetSegmentIdentifier::new([1; 10]);
         let route = EvpnRibRoute {
