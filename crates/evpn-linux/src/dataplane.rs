@@ -76,6 +76,21 @@ pub enum DataplaneOp {
         /// MAC the entry programmed.
         mac: MacAddress,
     },
+    /// Apply the per-port flood-flag triplet to a CE-facing bridge
+    /// port (Gate 8b BUM-suppression primitive). Realized via
+    /// `RTM_SETLINK` carrying `IFLA_PROTINFO` with
+    /// `IFLA_BRPORT_UNICAST_FLOOD` / `IFLA_BRPORT_MCAST_FLOOD` /
+    /// `IFLA_BRPORT_BCAST_FLOOD`. Implementations that don't yet
+    /// speak the netlink attribute set may return
+    /// [`DataplaneError`]'s `KernelTooOld` / `Unsupported` variants
+    /// — the reconcile actor records the failure and the operator
+    /// sees it via `DataplaneReport.failed`.
+    SetBumPortFlags {
+        /// CE-facing bridge port ifindex.
+        ifindex: u32,
+        /// Desired flag triplet for this port.
+        flags: crate::bum_filter::BumPortFlags,
+    },
 }
 
 /// Kernel-side notifications the actor consumes through

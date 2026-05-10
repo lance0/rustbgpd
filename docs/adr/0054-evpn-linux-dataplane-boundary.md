@@ -330,6 +330,44 @@ pub struct DataplaneReport {
 }
 ```
 
+### Gate 8b kernel primitive (proven, not yet wired)
+
+The BUM-suppression primitive is the per-port bridge flood-flag
+triplet — `IFLA_BRPORT_UNICAST_FLOOD` /
+`IFLA_BRPORT_MCAST_FLOOD` / `IFLA_BRPORT_BCAST_FLOOD`. On the
+CE-facing bridge port:
+
+- DF (`Allow`): all three flags **on** (kernel default).
+- Non-DF (`Suppress`): all three flags **off**.
+
+This matches what FRR uses for the same job and was proven safe
+under the load-bearing invariants by the privileged netns spike at
+`crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`:
+
+1. DF → broadcast / multicast / unknown unicast reach CE.
+2. Non-DF → all three classes blocked at the CE-facing port.
+3. **Known unicast still forwards** under Non-DF — flooding flags
+   only gate flooding; FDB-resolved unicast is unaffected. This is
+   the invariant that keeps EVPN remote-MAC traffic flowing.
+4. Restore is symmetric — no kernel state lingers after toggling.
+5. `bridge fdb add ... extern_learn` / `del` (the operations the
+   reconciler uses) succeed regardless of the flood-flag state.
+
+The pure-logic mapping from `BumEnforcementStatus` to the
+`(ifindex, flag triplet)` plan lives at
+`crates/evpn-linux/src/bum_filter.rs` (`BumPortFlags`,
+`compute_flag_plan`, `diff_flag_plans`). The next slice consumes
+that plan via rtnetlink (`RTM_SETLINK` with bridge-port
+`IFLA_PROTINFO`). Most-restrictive wins on ifindex collisions
+(suppress beats allow), and disappeared previously-suppressed
+ports are restored to `allow_all` so the kernel never holds a
+stale suppress on a port the orchestrator no longer manages.
+
+`bcast_flood` requires Linux >= 4.18 (commit 4ce1b1bb05a3, "bridge:
+per-port broadcast flood flag"). The wiring slice will surface a
+clear NotReady reason when the kernel is too old, mirroring the
+existing `KernelTooOld` errno classification.
+
 `intent_generation` echoes the `DataplaneIntent::generation` that
 produced the report, letting the daemon correlate "I sent desired
 snapshot N" with "Linux applied/failed N". `reconcile_generation` is the

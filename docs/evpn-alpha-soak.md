@@ -118,12 +118,26 @@ visibility)
   VXLAN ifindex, and CE-facing port identity and reports the desired
   `allow` / `suppress` action in `DataplaneReport`, but still does
   not mutate kernel filters.
+- [x] **Gate 8b BUM-suppression primitive proven.** The per-port
+  `bridge link set ... flood off mcast_flood off bcast_flood off`
+  triplet on the CE-facing bridge port is the right kernel hammer
+  — proven safe by the privileged netns spike at
+  `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`
+  (gated on `EVPN_LINUX_NETNS=1`). All five load-bearing
+  invariants hold: DF allows, Non-DF blocks broadcast / multicast
+  / unknown-unicast, known-unicast forwarding survives Non-DF,
+  the toggle is symmetric, and `extern_learn` FDB add/del
+  succeed regardless of mode. Pure-logic mapping from
+  `BumEnforcementStatus` → `(ifindex, BumPortFlags)` lives at
+  `crates/evpn-linux/src/bum_filter.rs` with 9 unit tests.
 - [ ] **Gate 8b — multi-homing enforcement.** Six concrete
   remaining slices:
-  1. Dataplane split-horizon kernel primitive (consume the reported
-     BUM-enforcement plan and actually suppress CE-facing BUM on
-     Non-DF for `(ESI, VNI)`, preserve remote FDB programming and
-     local learning).
+  1. Wire the proven BUM-suppression primitive into the reconciler
+     (rtnetlink `RTM_SETLINK` with bridge-port `IFLA_PROTINFO`
+     containing the `IFLA_BRPORT_*_FLOOD` triplet). The
+     pure-logic plan + diff is already there; this slice adds
+     the kernel-mutation half behind a config flag, with the
+     existing privileged netns gate guarding the integration test.
   2. Proper per-ESI label allocator (replaces the deterministic
      ESI-byte-derived synthesizer used by Gate 8b prep).
   3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).

@@ -230,6 +230,19 @@ pub(crate) async fn apply_op(
         DataplaneOp::AddRemoteFdb { vni, mac, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, mac } => (*vni, *mac),
+        DataplaneOp::SetBumPortFlags { .. } => {
+            // Gate 8b BUM-suppression primitive — proven by the
+            // privileged netns spike but not yet wired through
+            // rtnetlink. Surfaces as a permanent-class error so the
+            // reconciler reports it cleanly without burning the
+            // backoff schedule. The next slice replaces this with a
+            // real `RTM_SETLINK` carrying `IFLA_PROTINFO` + the
+            // `IFLA_BRPORT_*_FLOOD` triplet.
+            return Err(DataplaneError::InvalidArgument(
+                "SetBumPortFlags not yet wired in LinuxDataplane (Gate 8b kernel slice)"
+                    .to_string(),
+            ));
+        }
     };
 
     let vxlan_ifindex =
@@ -289,6 +302,12 @@ pub(crate) async fn apply_op(
                 .await
                 .map_err(|e| classify_apply_error(&e))?;
             Ok(())
+        }
+        DataplaneOp::SetBumPortFlags { .. } => {
+            // Unreachable: the early-return at the top of `apply_op`
+            // already handled this op. Match arm exists so the
+            // compiler can prove exhaustiveness.
+            unreachable!("SetBumPortFlags handled at function entry")
         }
     }
 }

@@ -466,6 +466,14 @@ impl<D: Dataplane> ReconcileActor<D> {
             DataplaneOp::RemoveRemoteFdb { vni, mac } => {
                 self.state.owned.record_withdrawn(*vni, *mac);
             }
+            DataplaneOp::SetBumPortFlags { .. } => {
+                // BUM-port-flag ops do not interact with the FDB
+                // OwnedSet — they program a different kernel surface
+                // (bridge port `IFLA_PROTINFO` rather than FDB).
+                // Retry-state still gets cleared below via the
+                // op_vni/op_mac stubs so the op-fingerprint
+                // bookkeeping is uniform across op shapes.
+            }
         }
         self.state.retry.record_success(op_vni(op), op_mac(op));
     }
@@ -587,6 +595,18 @@ fn op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         DataplaneOp::AddRemoteFdb { vni, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, .. } => *vni,
+        DataplaneOp::SetBumPortFlags { .. } => {
+            // BUM port-flag ops are not VNI-keyed (they target a
+            // bridge-port ifindex). The retry-state machinery
+            // requires a VNI for fingerprinting; pick the max
+            // 24-bit VNI (16777215 = `0xFF_FFFF`) as a sentinel
+            // outside the operator-allocated range. The next slice
+            // either replaces the retry key with an op-shape-aware
+            // tagged enum or routes BUM ops on a separate retry
+            // table entirely.
+            rustbgpd_evpn::EvpnInstanceId::new(0xFF_FFFF)
+                .expect("0xFF_FFFF is the max valid 24-bit VNI")
+        }
     }
 }
 
@@ -595,6 +615,15 @@ fn op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         DataplaneOp::AddRemoteFdb { mac, .. }
         | DataplaneOp::UpdateRemoteFdb { mac, .. }
         | DataplaneOp::RemoveRemoteFdb { mac, .. } => *mac,
+        DataplaneOp::SetBumPortFlags { ifindex, .. } => {
+            // Encode the CE-port ifindex in the low 4 octets of the
+            // sentinel MAC so two BUM ops on different ifindexes
+            // don't collide in the (vni, mac) retry key. High two
+            // octets stay zero so the sentinel space cannot collide
+            // with any real OUI-assigned MAC.
+            let bytes = ifindex.to_be_bytes();
+            rustbgpd_evpn::MacAddress::new([0, 0, bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
     }
 }
 
@@ -609,6 +638,9 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
             dst: *dst,
         },
         DataplaneOp::RemoveRemoteFdb { mac, .. } => DataplaneOpKind::RemoveRemoteFdb { mac: *mac },
+        DataplaneOp::SetBumPortFlags { ifindex, .. } => {
+            DataplaneOpKind::SetBumPortFlags { ifindex: *ifindex }
+        }
     }
 }
 

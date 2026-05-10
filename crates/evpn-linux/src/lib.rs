@@ -60,6 +60,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod backoff;
+pub mod bum_filter;
 pub mod dataplane;
 pub mod diff;
 pub mod enforcement;
@@ -75,6 +76,7 @@ pub mod linux;
 pub use linux::LinuxDataplane;
 
 pub use backoff::{BACKOFF_CAP, BACKOFF_FACTOR, BACKOFF_INITIAL, RetrySchedule};
+pub use bum_filter::{BumPortFlagPlan, BumPortFlags, compute_flag_plan, diff_flag_plans};
 pub use dataplane::{Dataplane, DataplaneOp, KernelEvent};
 pub use diff::{Plan, compute_diff};
 pub use enforcement::build_bum_enforcement_status;

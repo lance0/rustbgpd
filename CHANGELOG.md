@@ -11,6 +11,43 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 8b BUM-suppression op surface (`SetBumPortFlags`).**
+  New variant on `DataplaneOp` / `DataplaneOpKind` carrying
+  `(ifindex, BumPortFlags)` so the reconciler can drive
+  per-CE-port flag state through the same trait the FDB ops
+  already use. `InMemoryDataplane` records each call by ifindex
+  for assertion (`InMemoryHandle::bum_port_flags()`); the real
+  `LinuxDataplane` returns `InvalidArgument` until the netlink
+  wiring slice lands (`RTM_SETLINK` with `IFLA_PROTINFO` carrying
+  the `IFLA_BRPORT_*_FLOOD` triplet). The retry-state machinery
+  treats BUM ops as having a sentinel `(VNI=0xFFFFFF, MAC=ifindex
+  encoded)` fingerprint so two ifindexes never collide and no
+  real EVPN instance shares the key space. +1 test.
+- **EVPN Gate 8b BUM-suppression kernel primitive proven (spike,
+  no kernel mutation yet).** Privileged netns spike at
+  `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`
+  validates that the per-port `bridge link set ... flood off
+  mcast_flood off bcast_flood off` triplet on the CE-facing
+  bridge port is the right kernel hammer for split-horizon. All
+  five load-bearing invariants hold: DF allows, Non-DF blocks
+  broadcast / multicast / unknown-unicast, **known-unicast
+  forwarding survives Non-DF**, the toggle is symmetric, and
+  `extern_learn` FDB add/del succeed regardless of mode.
+  - New pure-logic `crates/evpn-linux/src/bum_filter.rs` maps
+    `BumEnforcementStatus` rows to a flat
+    `Vec<BumPortFlagPlan>` (ifindex + per-port flag triplet) with
+    most-restrictive-wins on ifindex collisions and
+    auto-restoration of disappeared previously-suppressed ports
+    to `allow_all`. 9 unit tests.
+  - Gated integration test `tests/netns_bum_filter.rs` runs the
+    privileged spike via `EVPN_LINUX_NETNS=1`, mirroring the
+    existing `netns_dataplane.rs` pattern.
+  - ADR-0054 records the chosen primitive plus the
+    `IFLA_BRPORT_*_FLOOD` netlink attributes the next slice will
+    set via `RTM_SETLINK`.
+  - The reconciler still does not mutate kernel filters in this
+    PR — that's the next slice. The plan + diff are observable;
+    the netlink wiring is the only remaining piece.
 - **EVPN Gate 8b enforcement intent foundation — observable BUM
   plan, no kernel mutation yet.** The daemon now feeds DF-election
   role state into the EVPN Linux dataplane supervisor as a portable
