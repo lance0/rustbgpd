@@ -11,6 +11,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 8b prep — ES-Import RT + ESI Label extcomms on
+  Type 1/4 origination.** Closes the two control-plane gaps ADR-0057
+  flagged from Gate 8:
+  - **Type 4 ES route** now carries the auto-derived ES-Import RT
+    extcomm (RFC 7432 §7.6) — high-order 6 octets of the ESI Value
+    (bytes [1..7] of the 10-byte ESI). Peers that filter Type 4
+    imports on this RT can correlate the segment without
+    preconfiguration.
+  - **Type 1 EAD-per-ES route** now carries the ESI Label extcomm
+    (RFC 7432 §7.5) with the synthesized label and
+    `single_active = false` (all-active default). Peers can now
+    wire the label into their split-horizon filter tables; the
+    dataplane-side drops on non-DF receivers remain Gate 8b proper.
+  - **Type 1 EAD-per-EVI** stays unchanged — per RFC 7432 §14 it
+    carries no ESI Label (the per-EVI label lives in the route's
+    own MPLS label field). Aliasing extcomms remain Gate 8b
+    territory.
+  - The wire codec already supported both extcomms
+    (`ExtendedCommunity::es_import_rt` / `::esi_label`); the change
+    is purely on the origination side. No wire bump.
+  - `M38` driver now scrapes `ListEvpnRoutes` via gRPC on each PE
+    and asserts the new extcomms appear on both Type 4 and
+    Type 1 EAD-per-ES routes. M38 PE configs gain the gRPC TCP
+    listener on `:50051` to support the assertion.
+  - ADR-0057 updated: ES-Import RT + ESI Label origination moved
+    from "deferred to Gate 8b" to "closed in Gate 8b prep
+    follow-up."
 - **EVPN multi-homing foundation — observable DF election (Gate 8,
   ADR-0057).** First half of EVPN multi-homing: control-plane
   election + Type 1/4 origination + Prometheus visibility.

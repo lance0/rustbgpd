@@ -78,18 +78,21 @@ The Gate 8 surface is:
 
 ### Out of scope (deferred to Gate 8b)
 
-- **ES-Import RT extcomm (RFC 7432 §7.6)**: The Type 4 ES route
-  needs a derived ES-Import RT that peers match on import to find
-  routes for shared segments. Gate 8 emits the ES route with
-  user-configured RTs only; peers that import via wildcard or
-  explicit match will see it, peers that filter on ES-Import RT
-  won't. This is an interop downside acknowledged here, not a
-  correctness gap — the daemon-side state remains coherent.
-- **ESI Label extcomm (RFC 7432 §7.5)**: This is the load-bearing
-  field for split-horizon enforcement. Gate 8b will allocate a
-  proper per-ESI label space and wire it through `LocalEadPerEsOriginator`,
-  alongside the dataplane-side filter that drops segment BUM on
-  non-DF receivers.
+- **ES-Import RT extcomm (RFC 7432 §7.6) origination — closed in
+  the Gate 8b prep follow-up.** The Type 4 ES route now carries an
+  auto-derived ES-Import RT (high-order 6 octets of the ESI Value
+  per §7.6), so peers that filter Type 4 imports on this RT can
+  correlate the segment without preconfiguration. The remaining
+  Gate 8b work is the *import-side* application of the RT in the
+  daemon's own RIB filter — Gate 8 still imports Type 4 via the
+  user-configured RTs only.
+- **ESI Label extcomm (RFC 7432 §7.5) origination — closed in the
+  Gate 8b prep follow-up.** The Type 1 EAD-per-ES route now carries
+  the ESI Label extcomm with the synthesized label and
+  `single_active = false` (all-active default). Gate 8b adds the
+  load-bearing half: the dataplane-side filter that drops segment
+  BUM on non-DF receivers, plus the proper per-ESI label allocator
+  that survives across operator-level configuration churn.
 - **Aliasing / backup paths (RFC 7432 §14)**: Multihomed remote MACs
   resolved via Type 1 EAD-per-EVI as alternative next-hops. Out of
   scope until enforcement lands — the failover semantics only matter
