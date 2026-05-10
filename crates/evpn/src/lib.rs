@@ -68,10 +68,13 @@
 #![deny(clippy::all)]
 #![warn(clippy::pedantic)]
 
+pub mod aliasing;
 pub mod dataplane;
 pub mod df_election;
 pub mod instance;
+pub mod label_allocator;
 pub mod mac;
+pub mod mass_withdraw;
 pub mod origination;
 pub mod origination_es;
 pub mod origination_macip;
@@ -79,6 +82,7 @@ pub mod projection;
 pub mod route_target;
 pub mod segment;
 
+pub use aliasing::{AliasEadPerEvi, AliasIndex, alias_resolved_next_hops};
 pub use dataplane::{
     AppliedOp, BumEnforcementEntry, BumEnforcementKey, BumEnforcementReadiness,
     BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,
@@ -88,10 +92,12 @@ pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use instance::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError,
 };
+pub use label_allocator::{AllocateError, EsiLabelAllocator, synthesize_from_esi};
 pub use mac::{
     LocalMacObservation, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
     RemoteMacTableBuilder, RemoteMacTableBuilderError,
 };
+pub use mass_withdraw::{AsPathFingerprint, AsPathTracker, MassWithdrawTrigger};
 pub use origination::{LocalMacOriginator, OriginationAction, RemoteMacView};
 pub use origination_es::{LocalEadPerEsOriginator, LocalEadPerEviOriginator, LocalEsOriginator};
 pub use origination_macip::{LocalMacIpOriginator, MacIpKey, RemoteMacIpView};

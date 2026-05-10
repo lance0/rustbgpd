@@ -131,10 +131,22 @@ struct SegmentState {
     /// don't, the user has a misconfigured deployment that no amount
     /// of clever fanout will save.
     reference_instance_id: EvpnInstanceId,
+    /// ESI label assigned by the per-ESI allocator. Shared between
+    /// the EAD-per-ES route's MPLS label field and the ESI Label
+    /// extcomm — both must agree, and both must remain stable
+    /// across reconfiguration so peers don't see split-horizon
+    /// filter-table flap.
+    esi_label: MplsLabel,
 }
 
+#[allow(clippy::too_many_lines)] // setup + main select loop combined; further extraction hurts the lifecycle story
 async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
     let mut by_esi: HashMap<EthernetSegmentIdentifier, SegmentState> = HashMap::new();
+    // One allocator per spawn so two operators on different daemons
+    // don't have to coordinate label space; the allocator survives
+    // for the lifetime of the actor task and assignments stay
+    // stable across reconfiguration within that lifetime.
+    let mut esi_label_allocator = rustbgpd_evpn::EsiLabelAllocator::new();
 
     // Build per-ESI state.
     for seg in segments {
@@ -154,12 +166,22 @@ async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
             continue;
         };
         let rd = inst.rd;
-        // ESI label: a synthetic per-ESI label below the kernel's
-        // typical reserved range. Gate 8 uses a deterministic
-        // function of the ESI bytes so peers don't see thrash; Gate
-        // 8b can swap this for a proper allocator alongside the
-        // split-horizon enforcement work.
-        let esi_label = synthesize_esi_label(seg.esi);
+        // Reserve the per-ESI label via the allocator. First-seen
+        // ESIs land on their deterministic synth label so operators
+        // upgrading from Gate 8b prep observe no label change;
+        // subsequent collisions get distinct labels from the
+        // allocator's free-list / fresh-scan paths.
+        let esi_label = match esi_label_allocator.reserve(seg.esi) {
+            Ok(label) => label,
+            Err(e) => {
+                warn!(
+                    esi = ?seg.esi.octets(),
+                    error = %e,
+                    "ESI label allocator exhausted — skipping segment"
+                );
+                continue;
+            }
+        };
         let es_origin = LocalEsOriginator::new(rd, seg.esi, seg.originator_ip);
         let ead_per_es = LocalEadPerEsOriginator::new(rd, seg.esi, esi_label);
         let mut ead_per_evi = LocalEadPerEviOriginator::new(rd, seg.esi);
@@ -192,6 +214,7 @@ async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
                 election,
                 last_roles: BTreeMap::new(),
                 reference_instance_id: reference_vni,
+                esi_label,
             },
         );
     }
@@ -411,7 +434,7 @@ async fn run_election_with_candidates(
             );
             continue;
         };
-        apply_with_instance(runtime, &inst, actions).await;
+        apply_with_instance(runtime, &inst, state.esi_label, actions).await;
         debug!(
             esi = esi_str.as_str(),
             vni = vni.as_u32(),
@@ -567,18 +590,19 @@ async fn apply(runtime: &SegmentRuntime, state: &SegmentState, actions: Vec<Orig
     let Some(inst) = runtime.instances.get(state.reference_instance_id).cloned() else {
         return;
     };
-    apply_with_instance(runtime, &inst, actions).await;
+    apply_with_instance(runtime, &inst, state.esi_label, actions).await;
 }
 
 async fn apply_with_instance(
     runtime: &SegmentRuntime,
     inst: &EvpnInstance,
+    esi_label: MplsLabel,
     actions: Vec<OriginationAction>,
 ) {
     for action in actions {
         match action {
             OriginationAction::Inject { key, .. } => {
-                let route = build_es_route(inst, &key);
+                let route = build_es_route(inst, &key, esi_label);
                 let (reply_tx, reply_rx) = oneshot::channel();
                 if runtime
                     .rib_tx
@@ -638,7 +662,11 @@ async fn apply_with_instance(
 /// - **Type 1 EAD-per-EVI**: no extra extcomms (the per-EVI label
 ///   lives in the route's MPLS label field; aliasing extcomms are
 ///   Gate 8b territory).
-fn build_es_route(instance: &EvpnInstance, key: &EvpnRouteKey) -> EvpnRibRoute {
+fn build_es_route(
+    instance: &EvpnInstance,
+    key: &EvpnRouteKey,
+    esi_label: MplsLabel,
+) -> EvpnRibRoute {
     let (route, key_specific_extcomms): (EvpnRoute, Vec<rustbgpd_wire::ExtendedCommunity>) =
         match key {
             EvpnRouteKey::Es {
@@ -669,18 +697,19 @@ fn build_es_route(instance: &EvpnInstance, key: &EvpnRouteKey) -> EvpnRibRoute {
                     rd: *rd,
                     esi: *esi,
                     ethernet_tag: *ethernet_tag,
-                    label: synthesize_esi_label(*esi),
+                    label: esi_label,
                 }),
                 // RFC 7432 §7.5: ESI Label extcomm carries the label
                 // peers will match against the inner VXLAN/MPLS label
-                // for split-horizon enforcement. Gate 8 publishes the
-                // value so peers can wire up their import + filter
-                // tables; Gate 8b adds the dataplane drops on
-                // non-DF receivers. `single_active = false` for the
-                // all-active default mode.
+                // for split-horizon enforcement. Single source of
+                // truth: the per-ESI allocator's reservation, threaded
+                // through `apply_with_instance` so the route's
+                // `EvpnEadPerEs.label` field and this extcomm always
+                // agree. `single_active = false` for the all-active
+                // default mode.
                 vec![rustbgpd_wire::ExtendedCommunity::esi_label(
                     false,
-                    synthesize_esi_label(*esi).value(),
+                    esi_label.value(),
                 )],
             ),
             EvpnRouteKey::EadPerEvi {
@@ -767,23 +796,6 @@ fn es_import_rt_from_esi(esi: EthernetSegmentIdentifier) -> [u8; 6] {
     [o[1], o[2], o[3], o[4], o[5], o[6]]
 }
 
-/// Synthesize a deterministic ESI label from the ESI bytes. Gate 8
-/// uses a content-derived label so peers don't see thrash on
-/// daemon restarts; Gate 8b's split-horizon work will swap this for
-/// a proper label allocator that survives across operator-level
-/// configuration changes.
-///
-/// Maps ESI bytes [4..7] (the AS / value half of an LACP- or
-/// preference-derived ESI) into the 16..=2^20 - 1 range so the
-/// resulting label is always within the 20-bit MPLS label space.
-fn synthesize_esi_label(esi: EthernetSegmentIdentifier) -> MplsLabel {
-    let octets = esi.octets();
-    let raw = u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]);
-    // Keep above the reserved range while staying inside 20 bits.
-    let label = 16 + (raw % ((1 << 20) - 16));
-    MplsLabel::new(label)
-}
-
 /// Format an ESI as colon-separated hex bytes, matching the operator
 /// config text form. Used as a metric label and CLI output.
 fn format_esi(esi: EthernetSegmentIdentifier) -> String {
@@ -835,11 +847,17 @@ mod tests {
     }
 
     #[test]
-    fn synthesize_esi_label_is_deterministic_and_in_range() {
-        let label_a = synthesize_esi_label(esi(0x42));
-        let label_b = synthesize_esi_label(esi(0x42));
+    fn esi_label_allocator_is_deterministic_for_first_seen() {
+        // The orchestrator now reaches for the per-ESI allocator,
+        // which delegates first-seen ESIs to the deterministic
+        // synth so operators upgrading from Gate 8b prep see no
+        // label change. The allocator's collision-avoidance path
+        // is covered by `crates/evpn/src/label_allocator.rs::tests`.
+        use rustbgpd_evpn::EsiLabelAllocator;
+        let mut a = EsiLabelAllocator::new();
+        let label_a = a.reserve(esi(0x42)).unwrap();
+        let label_b = a.reserve(esi(0x42)).unwrap();
         assert_eq!(label_a, label_b);
-        // Within 20-bit MPLS range, above reserved 16.
         assert!(label_a.value() >= 16);
         assert!(label_a.value() < (1 << 20));
     }
@@ -860,7 +878,7 @@ mod tests {
             esi: esi(1),
             originator_ip: ipa("10.0.0.1"),
         };
-        let route = build_es_route(&inst, &key);
+        let route = build_es_route(&inst, &key, MplsLabel::new(123));
         assert!(matches!(route.route, EvpnRoute::Es(_)));
         // Must carry: Origin, AsPath, NextHop, ExtendedCommunities.
         assert!(
@@ -897,7 +915,7 @@ mod tests {
             esi: esi(1),
             ethernet_tag: EthernetTagId::MAX_ET,
         };
-        let route = build_es_route(&inst, &key);
+        let route = build_es_route(&inst, &key, MplsLabel::new(123));
         match route.route {
             EvpnRoute::EadPerEs(r) => {
                 assert_eq!(r.ethernet_tag, EthernetTagId::MAX_ET);
@@ -914,7 +932,7 @@ mod tests {
             esi: esi(1),
             ethernet_tag: EthernetTagId(100),
         };
-        let route = build_es_route(&inst, &key);
+        let route = build_es_route(&inst, &key, MplsLabel::new(123));
         match route.route {
             EvpnRoute::EadPerEvi(r) => {
                 assert_eq!(r.ethernet_tag.0, 100);
@@ -957,7 +975,7 @@ mod tests {
             esi: id,
             originator_ip: ipa("10.0.0.1"),
         };
-        let route = build_es_route(&inst, &key);
+        let route = build_es_route(&inst, &key, MplsLabel::new(123));
         let extcomms = route
             .attributes
             .iter()
@@ -983,7 +1001,7 @@ mod tests {
             esi: id,
             ethernet_tag: EthernetTagId::MAX_ET,
         };
-        let route = build_es_route(&inst, &key);
+        let route = build_es_route(&inst, &key, MplsLabel::new(123));
         let extcomms = route
             .attributes
             .iter()
@@ -998,7 +1016,17 @@ mod tests {
             .find_map(ExtendedCommunity::as_esi_label)
             .expect("ESI Label extcomm attached");
         assert!(!single_active, "Gate 8 default is all-active");
-        assert_eq!(label, synthesize_esi_label(id).value());
+        // Allocator-driven label is whatever we passed to
+        // build_es_route, so the test asserts the round-trip rather
+        // than a specific synth value.
+        assert_eq!(label, 123);
+        // The EAD-per-ES NLRI's MPLS label field must agree with
+        // the extcomm — single source of truth via `esi_label`.
+        let EvpnRoute::EadPerEs(ead) = &route.route else {
+            panic!("expected EadPerEs route, got {:?}", route.route);
+        };
+        assert_eq!(ead.label.value(), 123);
+        let _ = id; // ESI not asserted here; covered by other tests.
     }
 
     #[test]
@@ -1009,7 +1037,7 @@ mod tests {
             esi: esi(1),
             ethernet_tag: EthernetTagId(100),
         };
-        let route = build_es_route(&inst, &key);
+        let route = build_es_route(&inst, &key, MplsLabel::new(123));
         let extcomms = route
             .attributes
             .iter()

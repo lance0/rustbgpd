@@ -11,6 +11,59 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 8b — four remaining feature slices.** Pure-logic
+  modules + plumbing that complete the architectural surface for
+  multi-homing. Each slice composes onto the Gate 8b enforcement
+  base shipped earlier; together they retire all five remaining
+  Gate 8b "concrete slices" tracked in `docs/evpn-alpha-soak.md`
+  except the 24h soak validation.
+  - **Per-ESI label allocator** (`crates/evpn/src/label_allocator.rs`).
+    `EsiLabelAllocator` with stable `(ESI -> label)` assignments,
+    a free list for released labels, and a synth-first strategy
+    so operators upgrading from Gate 8b prep observe no label
+    change unless they hit a real collision. Replaces the
+    deterministic `synthesize_esi_label` in `src/evpn_segment.rs`
+    that was vulnerable to bytes-[4..7] collisions across ESIs
+    chosen by independent operators. The synth itself stays
+    exposed (`synthesize_from_esi`) for tests / offline tooling.
+    +10 unit tests; orchestrator now caches the allocated label
+    on `SegmentState.esi_label` and threads it through
+    `build_es_route` so the EAD-per-ES NLRI's MPLS label field
+    and the ESI Label extcomm always agree.
+  - **DF-role-aware (ESI-aware) MAC origination.** When a local
+    MAC is learned on a VNI that participates in a configured
+    `[[ethernet_segments]]` block, the originated Type 2 NLRI now
+    carries the segment's ESI rather than the all-zero
+    single-homed sentinel. Plumbed via a new
+    `Arc<BTreeMap<EvpnInstanceId, EthernetSegmentIdentifier>>` lookup
+    threaded through the originator (`src/evpn_originator.rs`)
+    and built once at startup from `config.resolve_ethernet_segments()`.
+    SVI MAC origination remains ESI=0 (it's the L3 next-hop, not
+    a CE-side MAC — matches FRR / Cumulus). +1 unit test in
+    `evpn_originator::tests`.
+  - **Aliasing resolver** (`crates/evpn/src/aliasing.rs`).
+    Pure-logic `AliasIndex` keyed on `(ESI, EthernetTagId)`,
+    built from EAD-per-EVI advertisements, exposing a
+    `vtep_ips_for(esi, eth_tag)` lookup for the projection /
+    dataplane wiring slices that follow. Includes
+    `alias_resolved_next_hops` convenience for the upcoming
+    `RemoteMacEntry::alias_vtep_ips` field. Filters single-homed
+    (ESI=0) advertisements and dedupes `(ESI, EthTag, VTEP)`
+    triples. +9 unit tests. The actual ECMP-to-multiple-VTEPs
+    forwarding is a follow-up (`LinuxDataplane` programs one
+    `dst` per MAC today; multi-VTEP needs `nexthop` group or
+    L3-route-based ECMP).
+  - **Mass-withdraw `AS_PATH`-change detector**
+    (`crates/evpn/src/mass_withdraw.rs`). Pure-logic
+    `AsPathTracker` that maintains `(peer, ESI) -> AsPathFingerprint`
+    state and returns `MassWithdrawTrigger { peer, esi }` whenever
+    a re-advertisement's fingerprint differs from the recorded
+    one. Also covers `record_withdrawal` (always a trigger) and
+    `drop_peer` (one trigger per tracked ESI on session
+    teardown). FNV-1a fingerprints make the tracker lightweight
+    enough to invoke on every EAD-per-ES event. +12 unit tests.
+    The RIB-side sweep that consumes triggers is the next slice.
+
 - **EVPN Gate 8b multi-homing enforcement — end-to-end wired,
   opt-in by config.** Closes the loop from DF election to kernel
   split-horizon enforcement, gated by a default-`false` config
