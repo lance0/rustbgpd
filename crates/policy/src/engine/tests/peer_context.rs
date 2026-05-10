@@ -123,6 +123,30 @@ fn local_pref_and_med_comparisons_use_rfc_implicit_defaults() {
         "implicit LOCAL_PREF=100 must not satisfy ge=200"
     );
 
+    let mut local_pref_ge_100 = stmt(None, PolicyAction::Deny, vec![]);
+    local_pref_ge_100.match_local_pref_ge = Some(100);
+    let policy_ge_100 = Policy {
+        entries: vec![local_pref_ge_100],
+        default_action: PolicyAction::Permit,
+    };
+    assert_eq!(
+        policy_ge_100.evaluate(&route_ctx_no_lp).action,
+        PolicyAction::Deny,
+        "implicit LOCAL_PREF=100 must satisfy ge=100"
+    );
+
+    let mut local_pref_ge_50 = stmt(None, PolicyAction::Deny, vec![]);
+    local_pref_ge_50.match_local_pref_ge = Some(50);
+    let policy_ge_50 = Policy {
+        entries: vec![local_pref_ge_50],
+        default_action: PolicyAction::Permit,
+    };
+    assert_eq!(
+        policy_ge_50.evaluate(&route_ctx_no_lp).action,
+        PolicyAction::Deny,
+        "implicit LOCAL_PREF=100 must satisfy ge=50"
+    );
+
     let mut implicit_default_threshold = stmt(None, PolicyAction::Deny, vec![]);
     implicit_default_threshold.match_local_pref_le = Some(100);
     let policy_at_default = Policy {
@@ -156,6 +180,18 @@ fn local_pref_and_med_comparisons_use_rfc_implicit_defaults() {
         p_med_le_0.evaluate(&route_ctx_no_lp).action,
         PolicyAction::Deny,
         "implicit MED=0 must satisfy le=0"
+    );
+
+    let mut med_floor_statement = stmt(None, PolicyAction::Deny, vec![]);
+    med_floor_statement.match_med_ge = Some(0);
+    let policy_med_floor = Policy {
+        entries: vec![med_floor_statement],
+        default_action: PolicyAction::Permit,
+    };
+    assert_eq!(
+        policy_med_floor.evaluate(&route_ctx_no_lp).action,
+        PolicyAction::Deny,
+        "implicit MED=0 must satisfy ge=0"
     );
 
     let mut med_ge_50 = stmt(None, PolicyAction::Deny, vec![]);
