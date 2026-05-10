@@ -1,0 +1,57 @@
+# Containerlab topology for the Gate 8b 24-hour soak.
+#
+# 2-PE rustbgpd shared ESI topology (mirrors M38 but with full
+# kernel-side VTEP plumbing — bridge + VXLAN + CE veth — so the
+# Gate 8b BUM-suppression filter has a real CE-facing port to flip
+# flags on, not just a placeholder bridge).
+#
+# Each PE container starts as `apply_bum_enforcement = true`, so
+# DF-role flips translate into real kernel-side
+# `RTM_NEWLINK + IFLA_BRPORT_*_FLOOD` ops on the CE veth.
+#
+# The harness `bash tests/soak/run-gate8b-soak.sh` flips election
+# by toggling PE2 (docker stop / docker start) on a configurable
+# cadence; PE1's segment orchestrator re-runs election on every
+# Type 4 event from PE2's session up/down, so its BUM-flag plan
+# updates correspondingly.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/soak/gate8b-soak.clab.yml
+#   bash tests/soak/run-gate8b-soak.sh
+#   sudo containerlab destroy -t tests/soak/gate8b-soak.clab.yml --cleanup
+
+name: gate8b-soak
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-soak-gate8b-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-soak-gate8b.sh:/usr/local/bin/start-rustbgpd-soak-gate8b.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-soak-gate8b.sh 10.0.0.1 10.0.0.2 100
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd::evpn_dataplane=debug,rustbgpd_evpn_linux::reconcile=info
+
+    pe2:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-soak-gate8b-pe2.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-soak-gate8b.sh:/usr/local/bin/start-rustbgpd-soak-gate8b.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-rustbgpd-soak-gate8b.sh 10.0.0.2 10.0.0.1 100
+      env:
+        RUST_LOG: info,rustbgpd::evpn_segment=debug,rustbgpd::evpn_dataplane=debug,rustbgpd_evpn_linux::reconcile=info
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]
