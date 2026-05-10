@@ -138,28 +138,31 @@ this document is reference / long-tail.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
-- [ ] **`rustbgpctl` policy / peer-group / neighbor-set commands** —
-  the daemon-side `PolicyService` and `PeerGroupService` gRPC
-  surfaces are complete, but the CLI only wraps NeighborService /
-  RibService / InjectionService. Operators currently manage policy
-  and peer-groups via TOML+SIGHUP (now hot-reloads as of v0.12.0)
-  or raw `grpcurl`; neither is friendly. Three command
-  classes to add:
-    - **Read** — `rustbgpctl policy list/get`, `peer-group list/get`,
-      `neighbor-set list/get` (wraps `List*` / `Get*` RPCs).
-    - **Write** — `rustbgpctl policy set/delete`, `peer-group set/delete`,
-      `neighbor-set set/delete`, plus `policy chain set-global-import/
-      export/clear` (wraps `Set*` / `Delete*` / chain RPCs).
-    - **Runtime-vs-file diff** — `rustbgpctl policy diff <candidate.toml>`
-      compares the daemon's *runtime* state (which may have drifted
-      from disk via gRPC mutations) against a candidate file. This is
-      genuinely different from `rustbgpd --diff` (file-vs-file dry-run
-      of SIGHUP) and pairs naturally with the SIGHUP reconcile work.
-      May require a new gRPC RPC that returns the daemon's effective
-      runtime config snapshot.
-  Pure CLI / proto-wrapping work — no protocol changes. ~800–1500
-  LOC across `crates/cli/src/commands/policy.rs` +
-  `peer_group.rs` + clap wiring.
+- [x] **`rustbgpctl` policy / peer-group / neighbor-set commands**
+  (PR #61) — three new subcommand trees wrap `PolicyService` (18
+  RPCs) and `PeerGroupService` (6 RPCs):
+    - **Read** — `rustbgpctl policy list/get`,
+      `peer-group list/get`, `neighbor-set list/get`.
+    - **Write** — `rustbgpctl policy set/delete`,
+      `peer-group set/delete`, `neighbor-set set/delete`. `set`
+      accepts a JSON file via `--from-file PATH` whose shape
+      mirrors the proto message; `serde(deny_unknown_fields)`
+      rejects typos at parse time.
+    - **Chain management** — `rustbgpctl policy chain
+      show|set-import|set-export|clear-import|clear-export
+      [--neighbor ADDR]` for global / per-neighbor import/export
+      chains. Empty `set-*` is rejected at the CLI layer with a
+      pointer at the matching `clear-*` command.
+    - **Peer-group binding** — `rustbgpctl peer-group
+      attach ADDR --group NAME` / `detach ADDR`.
+  29 mock-server / clap-parse tests pin the dispatch path.
+  `--explain-peer` extension on `rib --explain` (Add-Path send
+  view) shipped alongside in the same PR.
+
+  **Not yet shipped:** `rustbgpctl policy diff <candidate.toml>`
+  (runtime-vs-file dry-run that pairs with the SIGHUP reconcile
+  work). Tracked separately under "Runtime-vs-file diff" below
+  when scope is needed.
 - [x] **Auto-retry pending soft-resets and policy hot-applies across
   SIGHUP boundaries.** Shipped on the SIGHUP reconcile branch.
   `update_runtime_policies` is now bail-and-retry across every
@@ -432,7 +435,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **Injection API zero-value local_pref/MED** — injection now uses presence semantics, allowing valid `local_pref=0` and `med=0` values
 - [x] **Peer group API validation parity** — peer group families and `remove_private_as` strings are validated and normalized through the same helpers as dynamic neighbors
 - [x] **Policy action string validation at API layer** — invalid `default_action` and statement actions are now rejected with `INVALID_ARGUMENT`
-- [ ] **Add-Path explain support** — route explain currently operates on the single Loc-RIB best path only; for Add-Path peers, non-best candidates that are actually advertised are invisible to explain
+- [x] **Add-Path explain support** — `ExplainBestPath` now optionally scopes to a peer; in peer-scoped mode every candidate that the peer would actually receive (export-policy permitted + sendable-family + split-horizon + within `add_path_send_max`) gets a non-zero `advertised_path_id` reflecting its rank. CLI `rustbgpctl rib --prefix X --explain --explain-peer P`. JSON output preserves the v0.7.0 global-view shape (new fields skip-when-default). Proto changes additive.
 - [ ] **FlowSpec NLRI length encoding >4095 bytes** — FlowSpec length prefix uses a 12-bit mask; rules exceeding 4095 bytes get a silently truncated length on the wire
 - [x] **AS_PATH segment >255 ASN encoding** — long `AS_SEQUENCE`/`AS_SET` segments are now split into multiple wire segments during encode instead of silently truncating via `u8` wrap
 - [x] **IPv6 next-hop policy rewrite completeness** — export policy `set_next_hop = "<ipv6>"` is covered end-to-end for MP_REACH exports and route explain; classic IPv4 `NEXT_HOP` handling remains unchanged
@@ -477,7 +480,7 @@ Items identified during review that improve strictness, correctness, or long-run
 - [x] **Optional Prometheus listener** — `prometheus_addr` is now optional; omit it to skip the metrics HTTP server while still collecting metrics for gRPC health and internal counters
 - [x] **Native gRPC mTLS** (v0.11.0) — TCP listeners terminate TLS in-process via tonic + rustls/ring. See "Next Up — Pre-v1.0 Polish" entry above for the config surface and the partial-config rejection rule.
 - [ ] **Finer-grained gRPC authorization** — per-service or per-RPC authorization beyond binary listener access
-- [ ] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) in states where the timer should already be stopped trigger FSM Error and session teardown instead of being silently ignored
+- [x] **FSM stale timer event handling** — timer events (ConnectRetry/Hold/Keepalive) arriving in states where the timer should not be running per RFC 4271 §8.1 now emit `Action::StaleTimerIgnored { state, timer }` and leave the session in place, instead of falling through to FsmError + teardown. The daemon hooks the action and bumps `bgp_fsm_stale_timer_events_total{peer, state, timer}` so the events stay observable. 11 explicit (state, timer) arms across all 6 FSM states; matches FRR / BIRD / GoBGP behavior.
 - [x] **Validation snapshot delivery to transport sessions** — `match_rpki_validation` and `match_aspa_validation` now work in import policy. `ValidationSnapshot` (VRP + ASPA tables) delivered to transport sessions via `tokio::sync::watch` channel. Each session borrows the latest immutable snapshot and evaluates import policy against it. RIB-side revalidation remains the correctness backstop. Config rejection for import validation matches removed.
 - [ ] **Convergent import validation on cache update** — import `match_rpki_validation` / `match_aspa_validation` is currently best-effort at ingress time; later VRP/ASPA cache updates do not re-run import policy or trigger route refresh for affected peers. Fix: on cache update, trigger `SoftResetIn` for peers whose resolved import policy uses validation-state matches. Infrastructure exists (route refresh, per-peer policy tracking). Not urgent — current semantics match FRR/BIRD behavior and are documented in KNOWN_ISSUES.
 

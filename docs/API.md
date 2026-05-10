@@ -311,7 +311,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListBestRoutes` | Loc-RIB: best route per prefix after path selection |
 | `ListAdvertisedRoutes` | Adj-RIB-Out: routes advertised to a specific peer |
 | `ExplainAdvertisedRoute` | Dry-run export decision for one prefix to one peer |
-| `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons |
+| `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
@@ -357,8 +357,17 @@ response includes the final decision, decisive reasons, selected best-route
 identity, and any export modifications that would be applied.
 
 Best-path explain is also available via `ExplainBestPath` RPC — it returns all
-candidates for a prefix with the decisive comparison reason for each. Import
-explain and exact policy/statement attribution are deferred.
+candidates for a prefix with the decisive comparison reason for each. Set
+`peer_address` on the request to scope the response to that peer's Add-Path
+send view: candidates that the peer would actually receive (export-policy
+permitted + sendable-family + split-horizon + within the peer's effective
+`add_path_send_max`) get a non-zero `advertised_path_id` reflecting the rank
+they would carry on the wire; everything else stays at `advertised_path_id =
+0`. The response echoes `peer_address` and the effective `add_path_send_max`
+so the operator can read advertisement intent without cross-referencing the
+peer config. Empty `peer_address` returns the v0.7.0 global Loc-RIB view
+unchanged. Unknown `peer_address` → `NOT_FOUND`. Import explain and exact
+policy/statement attribution are deferred.
 
 ### Address family filtering
 
