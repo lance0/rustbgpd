@@ -32,10 +32,19 @@ pub enum DataplaneError {
         name: String,
     },
 
-    /// `extern_learn` is not supported on this kernel (<4.18). The
-    /// affected instance is reported `NotReady` with this message.
-    #[error("kernel too old: NTF_EXT_LEARNED not supported (Linux ≥4.18 required)")]
-    KernelTooOld,
+    /// A kernel feature the operation depends on is not supported
+    /// (the netlink call returned `EOPNOTSUPP`). The `feature`
+    /// string identifies what's missing — e.g. `"NTF_EXT_LEARNED
+    /// (Linux ≥4.18)"` for FDB programming, `"IFLA_BRPORT_BCAST_FLOOD
+    /// (Linux ≥4.18)"` for the Gate 8b BUM-suppression triplet.
+    /// Permanent class — the affected op is suppressed until either
+    /// the op shape changes or the operator upgrades the kernel.
+    #[error("kernel too old: {feature} not supported")]
+    KernelTooOld {
+        /// Feature identifier the operation needs (kernel attribute,
+        /// flag, or ABI surface).
+        feature: String,
+    },
 
     /// The kernel rejected the operation with `EPERM` / `EACCES` —
     /// the daemon process lacks `CAP_NET_ADMIN` (or some other
@@ -85,7 +94,7 @@ impl DataplaneError {
             Self::Io(_) | Self::Other(_) => FailureClass::Transient,
             Self::InvalidArgument(_)
             | Self::LinkNotFound { .. }
-            | Self::KernelTooOld
+            | Self::KernelTooOld { .. }
             | Self::PermissionDenied(_)
             | Self::UnsupportedVtepDestination { .. } => FailureClass::Permanent,
             Self::LocalMacConflict { .. } => FailureClass::Conflict,

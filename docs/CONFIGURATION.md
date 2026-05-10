@@ -1281,9 +1281,10 @@ earlier reload steps still land at the manager and remain in effect.
 Inline `policy.import` / `policy.export` (the legacy global-fallback
 statements), `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
-`[mrt]`, and `[[evpn_instances]]` are **restart-required** — they're
-surfaced under "Restart-required" in `rustbgpd --diff` and logged at
-reload time with a one-line migration hint to named definitions plus
+`[mrt]`, `[[evpn_instances]]`, `[[ethernet_segments]]`, and
+`apply_bum_enforcement` are **restart-required** — they're surfaced
+under "Restart-required" in `rustbgpd --diff` and logged at reload
+time with a one-line migration hint to named definitions plus
 `import_chain` / `export_chain` where applicable. The `[[evpn_instances]]`
 case is the Phase-2 VTEP slice (ADR-0052 + ADR-0054 + ADR-0055): the
 gRPC `EvpnService` shares the resolved instance table via an `Arc`
@@ -1291,7 +1292,9 @@ built once at startup, the dataplane reconciler (Gate 7b) consumes
 that same `Arc` for downward FDB programming, and the originator +
 IMET tasks (Gate 7b+1) consume it for upward Type 2 / Type 3
 origination. SIGHUP pins the in-memory snapshot back to the startup
-value so drift detection stays observable across every reload.
+value so drift detection stays observable across every reload. Gate 8
+segment and Gate 8b enforcement settings follow the same pinning rule
+because their actors also resolve startup snapshots.
 Reload-time mutation (`AddEvpnInstance` / `DeleteEvpnInstance` and
 SIGHUP delta application) is tracked as alpha-soak follow-up — see
 `docs/evpn-alpha-soak.md`.

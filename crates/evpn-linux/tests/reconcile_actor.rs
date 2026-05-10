@@ -235,6 +235,214 @@ async fn reconcile_report_includes_observable_bum_enforcement_plan() {
         last.bum_enforcement[0].readiness,
         BumEnforcementReadiness::Ready
     );
+    // With `apply_bum_enforcement = false` (the for_tests default),
+    // the actor must not push any kernel-side BUM ops — the row is
+    // observable-only, matching Gate 8's posture.
+    assert!(
+        h.handle.bum_port_flags().is_empty(),
+        "no BUM port-flag ops should be applied when apply_bum_enforcement = false"
+    );
+    h.shutdown().await;
+}
+
+// 1b. Same setup as above, but with `apply_bum_enforcement = true` —
+// the actor must compute the BumPortFlagPlan, diff against the prior
+// (empty) plan, and emit a `SetBumPortFlags { ifindex: 10, flags:
+// suppress_all }` op the InMemoryDataplane records.
+#[tokio::test]
+async fn reconcile_emits_set_bum_port_flags_when_apply_enabled() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![10, 11],
+        },
+    );
+    h.handle.set_links(links);
+
+    let mut bum = BumEnforcementTable::new();
+    let esi = EthernetSegmentIdentifier::new([1; 10]);
+    bum.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            inst,
+            RemoteMacTable::new(),
+            bum,
+        ))
+        .unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+
+    // Both CE-port ifindexes should have received `suppress_all`.
+    let recorded = h.handle.bum_port_flags();
+    assert_eq!(recorded.len(), 2, "got {recorded:?}");
+    let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
+    assert_eq!(recorded[&10], suppress);
+    assert_eq!(recorded[&11], suppress);
+
+    h.shutdown().await;
+}
+
+// 1c. Shutdown must restore any CE-facing ports the actor suppressed
+// even when there are no rustbgpd-owned FDB entries to drain. Without
+// this, a daemon exit that races before the segment orchestrator's
+// final allow-all intent is processed leaves host bridge ports in
+// Non-DF suppression mode.
+#[tokio::test]
+async fn shutdown_restores_bum_flags_even_without_owned_fdb_entries() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![10],
+        },
+    );
+    h.handle.set_links(links);
+
+    let mut bum = BumEnforcementTable::new();
+    let esi = EthernetSegmentIdentifier::new([1; 10]);
+    bum.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            inst,
+            RemoteMacTable::new(),
+            bum,
+        ))
+        .unwrap();
+
+    let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
+    let allow = rustbgpd_evpn_linux::BumPortFlags::allow_all();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(h.handle.bum_port_flags().get(&10), Some(&suppress));
+
+    let handle = h.handle.clone();
+    h.shutdown().await;
+    assert_eq!(
+        handle.bum_port_flags().get(&10),
+        Some(&allow),
+        "drain must restore CE-port flood flags before the actor exits"
+    );
+}
+
+// 1d. Transiently-failed BUM ops must be re-emitted on the next
+// reconcile pass. Pre-PR #57 review (#1) the actor updated
+// `last_bum_plan` unconditionally after `apply_plan`, so a failed
+// SetBumPortFlags op silently disappeared from future diffs even
+// though the kernel never received the change. The fix updates
+// `last_bum_plan` per-port on success only — failed ports keep
+// their prior recorded state so the next pass's diff still
+// produces the op.
+#[tokio::test(start_paused = true)]
+async fn failed_bum_op_is_re_emitted_on_next_pass() {
+    let cfg = ReconcileActorConfig {
+        apply_bum_enforcement: true,
+        ..ReconcileActorConfig::for_tests()
+    };
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let mut links = BTreeMap::new();
+    links.insert(
+        "br100".to_string(),
+        KernelLinkInfo {
+            bridge_name: "br100".to_string(),
+            vlan_filtering: false,
+            vxlan: Some(KernelVxlanInfo {
+                ifindex: 200,
+                vni: 100,
+                local_ip: ipa("10.0.0.1"),
+                learning_disabled: Some(true),
+            }),
+            ce_port_ifindexes: vec![10],
+        },
+    );
+    h.handle.set_links(links);
+
+    // Inject one transient failure for the SetBumPortFlags { 10,
+    // suppress_all } op. The first reconcile pass will fail; the
+    // second pass (triggered by the actor's retry-due timer) must
+    // re-emit the op rather than skipping it.
+    h.handle.inject_failure_other(
+        Some(rustbgpd_evpn_linux::DataplaneOp::SetBumPortFlags {
+            ifindex: 10,
+            flags: rustbgpd_evpn_linux::BumPortFlags::suppress_all(),
+        }),
+        "transient netlink hiccup",
+    );
+
+    let mut bum = BumEnforcementTable::new();
+    let esi = EthernetSegmentIdentifier::new([1; 10]);
+    bum.insert(esi, vni(100), DfRole::NonDf, "br100".to_string());
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent_with_bum_enforcement(
+            1,
+            inst,
+            RemoteMacTable::new(),
+            bum,
+        ))
+        .unwrap();
+
+    // Drain reports until the kernel state reflects the desired
+    // suppress_all. The first pass should fail; the actor's retry
+    // timer should fire and the second pass should succeed (the
+    // injected failure was popped FIFO).
+    let suppress = rustbgpd_evpn_linux::BumPortFlags::suppress_all();
+    let mut applied = false;
+    for _ in 0..20 {
+        // Advance virtual time past the backoff window (initial = 100ms,
+        // ±25% jitter → up to 125ms). 250ms covers it with margin.
+        tokio::time::advance(Duration::from_millis(250)).await;
+        // Drain any reports that surfaced.
+        let _ = h.try_drain_reports().await;
+        if h.handle.bum_port_flags().get(&10) == Some(&suppress) {
+            applied = true;
+            break;
+        }
+    }
+    assert!(
+        applied,
+        "BUM op never re-applied after transient failure; \
+         last_bum_plan must update only on success"
+    );
+
     h.shutdown().await;
 }
 

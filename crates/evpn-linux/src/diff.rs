@@ -547,6 +547,9 @@ mod tests {
                         "Remove key not in applied: {op:?}"
                     );
                 }
+                DataplaneOp::SetBumPortFlags { .. } => {
+                    panic!("compute_diff must not produce SetBumPortFlags ops; got {op:?}");
+                }
             }
         }
     }

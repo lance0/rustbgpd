@@ -1,0 +1,205 @@
+//! Privileged netns spike for the Gate 8b BUM-suppression primitive.
+//!
+//! Two flavors:
+//!
+//! 1. `bum_filter_spike_validates_kernel_primitive` — runs the
+//!    shell-driven topology + traffic generator at
+//!    `tests/scripts/netns-bum-filter-spike.sh`. Validates that
+//!    the per-port `bridge link set ... flood off mcast_flood off
+//!    bcast_flood off` triplet is the right kernel primitive: DF
+//!    allows / Non-DF blocks BUM, known unicast survives, restore
+//!    is symmetric, FDB programming is unaffected.
+//!
+//! 2. `linux_dataplane_set_bum_port_flags_round_trip` — exercises
+//!    the same primitive through the Rust path: `LinuxDataplane::
+//!    apply(&DataplaneOp::SetBumPortFlags { ifindex, flags })`
+//!    issues an `RTM_NEWLINK` carrying the
+//!    `IFLA_BRPORT_*_FLOOD` triplet, then `bridge -j -d link
+//!    show` confirms the flags applied. This is the load-bearing
+//!    integration test for the rtnetlink wiring — without it
+//!    we'd be trusting the netlink-packet-route attribute layout
+//!    blindly.
+//!
+//! Both gate on `EVPN_LINUX_NETNS=1` and require `CAP_NET_ADMIN`
+//! (for `bridge link set`), `CAP_SYS_ADMIN` (for `ip netns add`),
+//! and kernel >= 4.18 (per-port `bcast_flood`).
+//!
+//! Run locally on a host that already has iproute2 + iputils-ping
+//! + sudo:
+//!
+//! ```bash
+//! sudo -E env EVPN_LINUX_NETNS=1 \
+//!   cargo test -p rustbgpd-evpn-linux --test netns_bum_filter
+//! ```
+//!
+//! Or run inside the Docker harness — useful when the host kernel
+//! is too old or you don't want to install the userland tooling
+//! locally:
+//!
+//! ```bash
+//! bash crates/evpn-linux/tests/docker/run-netns-tests.sh
+//! ```
+//!
+//! See `tests/docker/README.md` for what the harness does and why.
+
+#![cfg(target_os = "linux")]
+
+use std::process::Command;
+
+use rustbgpd_evpn_linux::{BumPortFlags, Dataplane, DataplaneOp, LinuxDataplane};
+
+fn netns_gate() -> bool {
+    std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1")
+}
+
+fn run(cmd: &str, args: &[&str]) -> std::process::Output {
+    let out = Command::new(cmd).args(args).output().expect("spawn");
+    if !out.status.success() {
+        panic!(
+            "{cmd} {args:?} failed: status={} stdout={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+    out
+}
+
+fn try_run(cmd: &str, args: &[&str]) {
+    let _ = Command::new(cmd).args(args).output();
+}
+
+/// RAII guard that creates a netns on construction and deletes it
+/// on Drop, so a panicking assertion in the middle of a test never
+/// leaks the netns on the host. Mirrors the `NetnsFixture` pattern
+/// in `tests/netns_dataplane.rs`.
+struct NetnsFixture {
+    name: String,
+}
+
+impl NetnsFixture {
+    fn create(test_name: &str) -> Self {
+        let name = format!("rustbgpd-test-{test_name}-{}", std::process::id());
+        try_run("ip", &["netns", "delete", &name]);
+        run("ip", &["netns", "add", &name]);
+        run("ip", &["-n", &name, "link", "set", "lo", "up"]);
+        Self { name }
+    }
+
+    fn ns_exec(&self, cmd: &str, args: &[&str]) -> std::process::Output {
+        let mut full = vec!["netns", "exec", self.name.as_str(), cmd];
+        full.extend(args);
+        run("ip", &full)
+    }
+}
+
+impl Drop for NetnsFixture {
+    fn drop(&mut self) {
+        try_run("ip", &["netns", "delete", &self.name]);
+    }
+}
+
+#[test]
+fn bum_filter_spike_validates_kernel_primitive() {
+    if !netns_gate() {
+        eprintln!(
+            "skipping: set EVPN_LINUX_NETNS=1 to run privileged BUM-filter spike (requires \
+             CAP_NET_ADMIN + kernel >= 4.18)"
+        );
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let script = format!("{manifest}/tests/scripts/netns-bum-filter-spike.sh");
+
+    let status = Command::new("bash")
+        .arg(&script)
+        .status()
+        .expect("failed to spawn netns-bum-filter-spike.sh");
+
+    assert!(
+        status.success(),
+        "BUM-filter spike script failed (exit {status}); see script output above"
+    );
+}
+
+#[tokio::test]
+async fn linux_dataplane_set_bum_port_flags_round_trip() {
+    if !netns_gate() {
+        eprintln!(
+            "skipping: set EVPN_LINUX_NETNS=1 to round-trip SetBumPortFlags via real netlink"
+        );
+        return;
+    }
+
+    // Re-exec inside the netns; the inner pass connects rtnetlink
+    // and exercises the LinuxDataplane apply path. The outer pass
+    // collects the kernel state via `bridge -d link show ce-br`
+    // and asserts the flags landed. NetnsFixture's Drop guarantees
+    // cleanup even if a downstream assertion panics.
+    let inner_marker = std::env::var("RUSTBGPD_BUM_INNER").is_ok();
+    if !inner_marker {
+        let ns = NetnsFixture::create("bum-rt");
+        ns.ns_exec("ip", &["link", "add", "br100", "type", "bridge"]);
+        ns.ns_exec(
+            "ip",
+            &[
+                "link", "add", "ce-br", "type", "veth", "peer", "name", "ce-tap",
+            ],
+        );
+        ns.ns_exec("ip", &["link", "set", "ce-br", "master", "br100"]);
+        ns.ns_exec("ip", &["link", "set", "br100", "up"]);
+        ns.ns_exec("ip", &["link", "set", "ce-br", "up"]);
+        ns.ns_exec("ip", &["link", "set", "ce-tap", "up"]);
+
+        let exe = std::env::current_exe().expect("self-exe");
+        let status = Command::new("ip")
+            .args(["netns", "exec", &ns.name])
+            .arg(&exe)
+            .args([
+                "--exact",
+                "--nocapture",
+                "linux_dataplane_set_bum_port_flags_round_trip",
+            ])
+            .env("RUSTBGPD_BUM_INNER", "1")
+            .env("EVPN_LINUX_NETNS", "1")
+            .status()
+            .expect("spawn inner");
+        assert!(status.success(), "inner test invocation failed");
+
+        // Outer pass: read ce-br's flag state and assert all three
+        // flooding flags landed in the suppress configuration the
+        // inner pass requested last.
+        let out = ns.ns_exec("bridge", &["-d", "link", "show", "dev", "ce-br"]);
+        let dump = String::from_utf8_lossy(&out.stdout);
+        for label in ["flood off", "mcast_flood off", "bcast_flood off"] {
+            assert!(
+                dump.contains(label),
+                "expected `{label}` in `bridge -d link show ce-br` output:\n{dump}"
+            );
+        }
+
+        return;
+        // NetnsFixture::drop runs here, deleting the netns on both
+        // success and panic paths.
+    }
+
+    // Inner pass: connect rtnetlink in the netns and apply the op.
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+
+    // Resolve ce-br's ifindex via /sys.
+    let ifindex_str =
+        std::fs::read_to_string("/sys/class/net/ce-br/ifindex").expect("read ce-br ifindex");
+    let ifindex: u32 = ifindex_str.trim().parse().expect("parse ifindex");
+    assert!(ifindex > 0, "got ifindex 0");
+
+    // Apply suppress (Non-DF) — matches the spike's primary case.
+    dp.apply(&DataplaneOp::SetBumPortFlags {
+        ifindex,
+        flags: BumPortFlags::suppress_all(),
+    })
+    .await
+    .expect("SetBumPortFlags suppress_all");
+}

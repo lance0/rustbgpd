@@ -118,17 +118,58 @@ visibility)
   VXLAN ifindex, and CE-facing port identity and reports the desired
   `allow` / `suppress` action in `DataplaneReport`, but still does
   not mutate kernel filters.
-- [ ] **Gate 8b — multi-homing enforcement.** Six concrete
-  remaining slices:
-  1. Dataplane split-horizon kernel primitive (consume the reported
-     BUM-enforcement plan and actually suppress CE-facing BUM on
-     Non-DF for `(ESI, VNI)`, preserve remote FDB programming and
-     local learning).
+- [x] **Gate 8b multi-homing enforcement — end-to-end wired,
+  opt-in by config, validated on a real kernel.** Closes the loop
+  from DF election to kernel split-horizon. The per-port
+  `bridge link set ... flood off mcast_flood off bcast_flood off`
+  triplet on the CE-facing bridge port is the chosen primitive
+  (proven by the privileged netns spike at
+  `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`,
+  gated on `EVPN_LINUX_NETNS=1`); five load-bearing invariants
+  hold: DF allows, Non-DF blocks broadcast / multicast /
+  unknown-unicast, known-unicast forwarding survives Non-DF,
+  toggle is symmetric, `extern_learn` FDB add/del succeeds
+  regardless of mode. The pure-logic plan
+  (`crates/evpn-linux/src/bum_filter.rs`) maps
+  `BumEnforcementStatus` → `Vec<BumPortFlagPlan>` with
+  most-restrictive-wins on collisions and auto-restore for
+  disappeared ports; `LinuxDataplane::apply` consumes
+  `DataplaneOp::SetBumPortFlags` and issues `RTM_NEWLINK` with
+  the `IFLA_BRPORT_*_FLOOD` triplet; the reconcile actor emits
+  the diff each pass, with per-port `last_bum_plan` updates
+  gated on apply success so failed ports keep retrying. Top-level
+  `apply_bum_enforcement: bool` TOML field on `Config` (default
+  `false`) is the operator-facing opt-in; with the flag off, the
+  resolved plan still flows through `DataplaneReport.bum_enforcement`
+  for visibility. Hot reload still requires a daemon restart for
+  this field — promoting it to SIGHUP-reloadable rides with the
+  next config-shape pass. **Validated against a real kernel via
+  the Docker harness at `crates/evpn-linux/tests/docker/`** —
+  spike + Rust netlink round-trip both green, confirming the
+  `RTM_NEWLINK + IFLA_LINKINFO + IFLA_INFO_PORT_DATA +
+  IFLA_BRPORT_*_FLOOD` encoding actually lands the desired flag
+  triplet on the kernel-side bridge port. **The harness is wired
+  into PR-CI** (`evpn_bum_filter_kernel` job in
+  `.github/workflows/ci.yml`), so a netlink-attribute encoding
+  regression can't slip past review. The remaining soak question
+  (slice 1 below) is "does it stay correct under sustained
+  churn?", not "does it work?".
+- [ ] **Gate 8b — remaining multi-homing enforcement work.** Five
+  concrete slices:
+  1. **Privileged-runner 24 h soak validation** (synthetic DF
+     flips + MAC churn) before flipping the
+     `apply_bum_enforcement` default to `true`. The single-pass
+     primitive validation has already landed via the Docker
+     harness — what's left is sustained-churn confidence under
+     realistic timing (BGP convergence noise, election flap
+     loops, FDB programming concurrent with flag flips).
   2. Proper per-ESI label allocator (replaces the deterministic
      ESI-byte-derived synthesizer used by Gate 8b prep).
   3. Aliasing / backup paths via Type 1 EAD-per-EVI (RFC 7432 §14).
   4. Mass-withdraw on `AS_PATH` change (RFC 7432 §8.6).
-  5. DF-role-aware MAC origination (couples to slice 1).
+  5. DF-role-aware MAC origination (couples to enforcement —
+     a Non-DF PE under enforcement should not advertise MAC routes
+     that aliasing peers can't follow back).
   6. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).

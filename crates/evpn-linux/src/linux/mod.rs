@@ -48,6 +48,7 @@ use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::error::DataplaneError;
 use crate::snapshot::{InstanceProbes, KernelSnapshot};
 
+mod bum_filter;
 mod fdb;
 mod links;
 mod notify;
@@ -311,8 +312,17 @@ impl Dataplane for LinuxDataplane {
     }
 
     async fn apply(&mut self, op: &DataplaneOp) -> Result<(), DataplaneError> {
-        let cache = self.link_cache.lock().await.clone();
-        fdb::apply_op(&self.handle, &cache, op).await
+        match op {
+            DataplaneOp::SetBumPortFlags { ifindex, flags } => {
+                bum_filter::apply_bum_port_flags(&self.handle, *ifindex, *flags).await
+            }
+            DataplaneOp::AddRemoteFdb { .. }
+            | DataplaneOp::UpdateRemoteFdb { .. }
+            | DataplaneOp::RemoveRemoteFdb { .. } => {
+                let cache = self.link_cache.lock().await.clone();
+                fdb::apply_op(&self.handle, &cache, op).await
+            }
+        }
     }
 
     fn next_event(&mut self) -> impl Future<Output = Option<KernelEvent>> + Send {

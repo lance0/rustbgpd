@@ -2633,6 +2633,14 @@ fn diff_config_json_serializes() {
         json.contains("\"evpn_instances_changed\":false"),
         "expected evpn_instances_changed in serialized diff: {json}"
     );
+    assert!(
+        json.contains("\"ethernet_segments_changed\":false"),
+        "expected ethernet_segments_changed in serialized diff: {json}"
+    );
+    assert!(
+        json.contains("\"apply_bum_enforcement_changed\":false"),
+        "expected apply_bum_enforcement_changed in serialized diff: {json}"
+    );
 }
 
 #[test]
@@ -3632,6 +3640,39 @@ sticky_macs = ["aa:bb:cc:dd:ee:01"]
         diff.has_restart_required_changes(),
         "evpn_instances_changed must surface as restart-required"
     );
+}
+
+#[test]
+fn ethernet_segments_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.100"
+"#,
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.ethernet_segments_changed);
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn apply_bum_enforcement_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = format!("apply_bum_enforcement = true\n{}", valid_toml());
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.apply_bum_enforcement_changed);
+    assert!(diff.has_restart_required_changes());
 }
 
 // ---------------------------------------------------------------------------

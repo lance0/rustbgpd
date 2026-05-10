@@ -61,6 +61,11 @@ struct State {
     /// Counter — total apply calls (including failed ones). Tests
     /// assert this against expectations.
     apply_count: usize,
+    /// Recorded `SetBumPortFlags` calls keyed by ifindex. Tests use
+    /// this to assert the reconciler issued the expected per-port
+    /// flag triplet — the in-memory backend doesn't have a real
+    /// kernel to inspect.
+    bum_port_flags: std::collections::BTreeMap<u32, crate::bum_filter::BumPortFlags>,
 }
 
 #[derive(Debug, Clone)]
@@ -83,7 +88,9 @@ impl ErrorTemplate {
         match self {
             Self::Io => DataplaneError::Io(std::io::Error::other("injected I/O failure")),
             Self::Other(s) => DataplaneError::Other(s.clone()),
-            Self::KernelTooOld => DataplaneError::KernelTooOld,
+            Self::KernelTooOld => DataplaneError::KernelTooOld {
+                feature: "injected feature".to_string(),
+            },
         }
     }
 }
@@ -105,6 +112,7 @@ impl InMemoryDataplane {
                 probes: InstanceProbes::new(),
                 failures: VecDeque::new(),
                 apply_count: 0,
+                bum_port_flags: std::collections::BTreeMap::new(),
             })),
             events_rx,
             events_tx,
@@ -204,6 +212,9 @@ impl InMemoryDataplane {
             }
             DataplaneOp::RemoveRemoteFdb { vni, mac } => {
                 state.kernel.remove_fdb(*vni, *mac);
+            }
+            DataplaneOp::SetBumPortFlags { ifindex, flags } => {
+                state.bum_port_flags.insert(*ifindex, *flags);
             }
         }
         Ok(())
@@ -337,6 +348,16 @@ impl InMemoryHandle {
             .find_fdb(vni, mac)
             .is_some()
     }
+
+    /// Snapshot the recorded `SetBumPortFlags` state by ifindex.
+    /// Tests use this to assert the reconciler issued the expected
+    /// per-port flag triplet.
+    #[must_use]
+    pub fn bum_port_flags(
+        &self,
+    ) -> std::collections::BTreeMap<u32, crate::bum_filter::BumPortFlags> {
+        self.state.lock().expect("poisoned").bum_port_flags.clone()
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +412,45 @@ mod tests {
         // Subsequent apply with the same op now succeeds (the
         // injection was popped).
         dp.apply(&op).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_bum_port_flags_records_per_ifindex_state() {
+        let mut dp = InMemoryDataplane::new();
+        let h = dp.handle();
+
+        dp.apply(&DataplaneOp::SetBumPortFlags {
+            ifindex: 10,
+            flags: crate::bum_filter::BumPortFlags::suppress_all(),
+        })
+        .await
+        .unwrap();
+        dp.apply(&DataplaneOp::SetBumPortFlags {
+            ifindex: 11,
+            flags: crate::bum_filter::BumPortFlags::allow_all(),
+        })
+        .await
+        .unwrap();
+
+        let recorded = h.bum_port_flags();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(
+            recorded[&10],
+            crate::bum_filter::BumPortFlags::suppress_all()
+        );
+        assert_eq!(recorded[&11], crate::bum_filter::BumPortFlags::allow_all());
+
+        // Reapply with new flags overwrites — idempotent at the
+        // ifindex granularity.
+        dp.apply(&DataplaneOp::SetBumPortFlags {
+            ifindex: 10,
+            flags: crate::bum_filter::BumPortFlags::allow_all(),
+        })
+        .await
+        .unwrap();
+        let recorded = h.bum_port_flags();
+        assert_eq!(recorded[&10], crate::bum_filter::BumPortFlags::allow_all());
+        assert_eq!(recorded.len(), 2, "ifindex 11 still present");
     }
 
     #[tokio::test]

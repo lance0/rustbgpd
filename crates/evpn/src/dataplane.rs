@@ -336,6 +336,14 @@ pub enum DataplaneOpKind {
         /// MAC the entry programmed.
         mac: MacAddress,
     },
+    /// Apply the BUM-suppression flag triplet to a CE-facing bridge
+    /// port (Gate 8b kernel primitive). The MAC / VNI fields used by
+    /// FDB ops aren't meaningful here — the affected kernel object
+    /// is a bridge port identified by its ifindex.
+    SetBumPortFlags {
+        /// CE-facing bridge port ifindex.
+        ifindex: u32,
+    },
 }
 
 #[cfg(test)]

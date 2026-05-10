@@ -325,10 +325,76 @@ pub struct DataplaneReport {
     pub instance_status: Vec<InstanceDataplaneStatus>,
     pub applied: Vec<AppliedOp>,
     pub failed: Vec<FailedOp>,
-    // Gate 8b observable split-horizon plan; no kernel mutation yet.
+    // Gate 8b split-horizon plan; always populated for visibility,
+    // mutated into the kernel only when Config::apply_bum_enforcement = true.
     pub bum_enforcement: Vec<BumEnforcementStatus>,
 }
 ```
+
+### Gate 8b kernel primitive (wired, opt-in)
+
+The BUM-suppression primitive is the per-port bridge flood-flag
+triplet — `IFLA_BRPORT_UNICAST_FLOOD` /
+`IFLA_BRPORT_MCAST_FLOOD` / `IFLA_BRPORT_BCAST_FLOOD`. On the
+CE-facing bridge port:
+
+- DF (`Allow`): all three flags **on** (kernel default).
+- Non-DF (`Suppress`): all three flags **off**.
+
+This matches what FRR uses for the same job and was proven safe
+under the load-bearing invariants by the privileged netns spike at
+`crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`:
+
+1. DF → broadcast / multicast / unknown unicast reach CE.
+2. Non-DF → all three classes blocked at the CE-facing port.
+3. **Known unicast still forwards** under Non-DF — flooding flags
+   only gate flooding; FDB-resolved unicast is unaffected. This is
+   the invariant that keeps EVPN remote-MAC traffic flowing.
+4. Restore is symmetric — no kernel state lingers after toggling.
+5. `bridge fdb add ... extern_learn` / `del` (the operations the
+   reconciler uses) succeed regardless of the flood-flag state.
+
+The pure-logic mapping from `BumEnforcementStatus` to the
+`(ifindex, flag triplet)` plan lives at
+`crates/evpn-linux/src/bum_filter.rs` (`BumPortFlags`,
+`compute_flag_plan`, `diff_flag_plans`). Most-restrictive wins on
+ifindex collisions (suppress beats allow), and disappeared
+previously-suppressed ports are restored to `allow_all` so the
+kernel never holds a stale suppress on a port the orchestrator no
+longer manages.
+
+`LinuxDataplane::apply` consumes the `DataplaneOp::SetBumPortFlags`
+ops the reconciler emits and issues a single `RTM_NEWLINK` (sent
+through `rtnetlink::LinkHandle::set_port`) carrying `IFLA_LINKINFO`
+with `IFLA_INFO_PORT_KIND = "bridge"` and `IFLA_INFO_PORT_DATA`
+holding the `IFLA_BRPORT_*_FLOOD` triplet — the same wire shape
+`bridge link set ... flood off mcast_flood off bcast_flood off`
+produces. Errors map to `KernelTooOld`, `PermissionDenied`,
+`LinkNotFound`, `InvalidArgument`, or `Other` per the existing
+`DataplaneError` taxonomy.
+
+The actual mutation is gated by a daemon-side config flag
+(`Config::apply_bum_enforcement`, default `false`) plumbed into
+`ReconcileActorConfig::apply_bum_enforcement`. When the flag is off
+the actor still computes the resolved plan and surfaces it via
+`DataplaneReport.bum_enforcement` for observability — the kernel
+mutation is the only thing the flag gates.
+
+`bcast_flood` requires Linux >= 4.18 (commit 4ce1b1bb05a3, "bridge:
+per-port broadcast flood flag"). On older kernels the netlink call
+returns `EOPNOTSUPP`, which the bum-filter classifier maps to
+`DataplaneError::KernelTooOld`.
+
+The end-to-end path (election → orchestrator → reconciler → netlink
+→ kernel) was validated single-pass against host kernel 6.17 via
+the Docker harness at `crates/evpn-linux/tests/docker/`. The shell
+spike confirmed the BUM-suppression invariants on a real bridge,
+and the Rust `linux_dataplane_set_bum_port_flags_round_trip` test
+confirmed that `LinuxDataplane::apply` actually lands `flood off /
+mcast_flood off / bcast_flood off` on the CE-facing bridge port.
+Sustained-churn soak validation is tracked separately in
+`docs/evpn-alpha-soak.md` and is the precondition for flipping the
+`apply_bum_enforcement` default to `true`.
 
 `intent_generation` echoes the `DataplaneIntent::generation` that
 produced the report, letting the daemon correlate "I sent desired

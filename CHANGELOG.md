@@ -11,6 +11,75 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 8b multi-homing enforcement — end-to-end wired,
+  opt-in by config.** Closes the loop from DF election to kernel
+  split-horizon enforcement, gated by a default-`false` config
+  flag so existing observe-only deployments are unchanged.
+  - **Kernel primitive proven**: privileged netns spike at
+    `crates/evpn-linux/tests/scripts/netns-bum-filter-spike.sh`
+    validates that the per-port `bridge link set ... flood off
+    mcast_flood off bcast_flood off` triplet on the CE-facing
+    bridge port is the right kernel hammer for split-horizon.
+    Five load-bearing invariants hold: DF allows, Non-DF blocks
+    broadcast / multicast / unknown-unicast, **known-unicast
+    forwarding survives Non-DF**, the toggle is symmetric, and
+    `extern_learn` FDB add/del succeed regardless of mode.
+  - **Pure-logic mapping** in `crates/evpn-linux/src/bum_filter.rs`
+    turns `BumEnforcementStatus` rows into a flat
+    `Vec<BumPortFlagPlan>` (ifindex + per-port flag triplet) with
+    most-restrictive-wins on ifindex collisions and
+    auto-restoration of disappeared previously-suppressed ports
+    to `allow_all`. `diff_flag_plans` makes the apply path
+    idempotent at the netlink boundary.
+  - **New `DataplaneOp` variant `SetBumPortFlags { ifindex, flags }`**
+    routes through the same trait the FDB ops use.
+    `InMemoryDataplane` records each call by ifindex for
+    assertion (`InMemoryHandle::bum_port_flags()`); the BUM op
+    path uses its own retry / permanent-failure schedule keyed by
+    ifindex (separate from the FDB `(VNI, MAC)` schedule), so no
+    sentinel-VNI collision risk exists.
+  - **Linux netlink apply** in
+    `crates/evpn-linux/src/linux/bum_filter.rs` issues a single
+    `RTM_NEWLINK` (sent through `rtnetlink::LinkHandle::set_port`)
+    carrying `IFLA_LINKINFO` with `IFLA_INFO_PORT_KIND = "bridge"`
+    and `IFLA_INFO_PORT_DATA` holding the
+    `IFLA_BRPORT_UNICAST_FLOOD` / `IFLA_BRPORT_MCAST_FLOOD` /
+    `IFLA_BRPORT_BCAST_FLOOD` triplet. Errors map to
+    `KernelTooOld` (`EOPNOTSUPP`), `PermissionDenied`
+    (`EPERM` / `EACCES`), `LinkNotFound` (`ENODEV`),
+    `InvalidArgument` (caller-side guard), or `Other`
+    (catch-all the actor's backoff retries).
+  - **Reconciler-side emission**: the actor computes a fresh
+    `BumPortFlagPlan` each pass, diffs against the last-applied
+    plan, and emits `DataplaneOp::SetBumPortFlags` ops for changed
+    entries through the same `apply_plan` loop the FDB ops use.
+    Per-port `last_bum_plan` updates only for ifindexes whose op
+    succeeded — failed ports keep their prior recorded state so
+    the next reconcile pass re-emits the op (the apply-side
+    retry/backoff governs the cadence).
+  - **Operator-facing config** `apply_bum_enforcement: bool` on
+    `Config` (default `false`). Plumbed into the supervisor's
+    `ReconcileActorConfig`. With the flag off, the resolved
+    enforcement plan is still surfaced via
+    `DataplaneReport.bum_enforcement` for operator visibility,
+    but no kernel mutation occurs.
+  - **Gated integration tests**: shell-driven netns spike
+    (`bum_filter_spike_validates_kernel_primitive`) and Rust
+    netlink round-trip (`linux_dataplane_set_bum_port_flags_
+    round_trip`) both run under `EVPN_LINUX_NETNS=1` +
+    `CAP_NET_ADMIN` + Linux >= 4.18. Hosted PR-CI skips them
+    cleanly. Two actor-level integration tests pin the emit /
+    no-emit toggle behavior. +17 unit + integration tests.
+  - **Docker harness** at `crates/evpn-linux/tests/docker/`
+    (`Dockerfile` + `run-netns-tests.sh` + `README.md`) runs the
+    privileged tests inside a container so contributors don't
+    need iproute2 / iputils-ping / sudo on the host. One-command
+    invocation: `bash crates/evpn-linux/tests/docker/run-netns-tests.sh`.
+    Validated single-pass against host kernel 6.17 (Ubuntu 24.04,
+    Docker 29.2.1): spike + round-trip both green, confirming the
+    `RTM_NEWLINK + IFLA_LINKINFO + IFLA_INFO_PORT_DATA +
+    IFLA_BRPORT_*_FLOOD` netlink-attribute encoding actually lands
+    the desired flag triplet on the kernel-side bridge port.
 - **EVPN Gate 8b enforcement intent foundation — observable BUM
   plan, no kernel mutation yet.** The daemon now feeds DF-election
   role state into the EVPN Linux dataplane supervisor as a portable

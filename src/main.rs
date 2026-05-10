@@ -327,6 +327,12 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     if diff.evpn_instances_changed {
         restart_sections.push("[[evpn_instances]]");
     }
+    if diff.ethernet_segments_changed {
+        restart_sections.push("[[ethernet_segments]]");
+    }
+    if diff.apply_bum_enforcement_changed {
+        restart_sections.push("apply_bum_enforcement");
+    }
     if p.import_changed {
         restart_sections.push("[policy.import] (inline)");
     }
@@ -555,9 +561,10 @@ fn main() {
             //                     SIGHUP now applies) + the
             //                     per-neighbor effective-impact view
             //   restart_required — `[global]`, `[rpki]`, `[bmp]`,
-            //                      `[mrt]`, plus inline `policy.import`
-            //                      / `policy.export` (no runtime swap
-            //                      surface yet)
+            //                      `[mrt]`, EVPN startup-only
+            //                      surfaces, plus inline
+            //                      `policy.import` / `policy.export`
+            //                      (no runtime swap surface yet)
             //   informational    — empty (kept on the schema as a
             //                      stable bucket so consumers don't
             //                      break when the predicate is true
@@ -588,6 +595,8 @@ fn main() {
                     "bmp_changed": diff.bmp_changed,
                     "mrt_changed": diff.mrt_changed,
                     "evpn_instances_changed": diff.evpn_instances_changed,
+                    "ethernet_segments_changed": diff.ethernet_segments_changed,
+                    "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
                     "inline_policy_import_changed": diff.policy.import_changed,
                     "inline_policy_export_changed": diff.policy.export_changed,
                 },
@@ -1033,8 +1042,13 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // into the coordinated shutdown block at the bottom of main where
     // we await its bounded drain.
     let evpn_dataplane_shutdown = tokio_util::sync::CancellationToken::new();
+    let supervisor_config = {
+        let mut cfg = evpn_dataplane::SupervisorConfig::default();
+        cfg.actor_config.apply_bum_enforcement = config.apply_bum_enforcement;
+        cfg
+    };
     let mut evpn_dataplane_handle = evpn_dataplane::spawn(
-        evpn_dataplane::SupervisorConfig::default(),
+        supervisor_config,
         &evpn_instances,
         rib_tx.clone(),
         metrics.clone(),
@@ -1788,6 +1802,25 @@ async fn reload_config(
         new_config
             .evpn_instances
             .clone_from(&current.evpn_instances);
+    }
+    if new_config.ethernet_segments != current.ethernet_segments {
+        error!(
+            "[[ethernet_segments]] differs from the live config: the \
+             EVPN segment orchestrator resolved the startup snapshot. \
+             Restart rustbgpd to apply Ethernet Segment edits."
+        );
+        new_config
+            .ethernet_segments
+            .clone_from(&current.ethernet_segments);
+    }
+    if new_config.apply_bum_enforcement != current.apply_bum_enforcement {
+        error!(
+            "apply_bum_enforcement differs from the live config: the \
+             EVPN dataplane reconciler read this startup-only setting \
+             when it was spawned. Restart rustbgpd to apply the Gate 8b \
+             kernel-enforcement opt-in."
+        );
+        new_config.apply_bum_enforcement = current.apply_bum_enforcement;
     }
 
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
@@ -2740,6 +2773,91 @@ local_vtep_ip = "10.0.0.1"
         std::fs::remove_file(&path).ok();
     }
 
+    /// SIGHUP must also pin Gate 8 startup-only EVPN surfaces that
+    /// feed long-lived actors: the Ethernet Segment table and the
+    /// kernel-enforcement opt-in. Otherwise a reload would advance
+    /// `current`, the actor would still be on its startup state, and
+    /// the next reload would stop reporting drift.
+    #[tokio::test]
+    async fn reload_pins_ethernet_segments_and_bum_enforcement_to_startup_snapshot() {
+        let path = unique_temp_path("reload-evpn-gate8-pin");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(initial.ethernet_segments.is_empty());
+        assert!(!initial.apply_bum_enforcement);
+
+        std::fs::write(
+            &path,
+            r#"
+apply_bum_enforcement = true
+
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+originator_ip = "10.0.0.1"
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return a config even when only Gate 8 surfaces drift");
+
+        assert_eq!(
+            returned.ethernet_segments, initial.ethernet_segments,
+            "reload must pin ethernet_segments to the startup snapshot until restart"
+        );
+        assert_eq!(
+            returned.apply_bum_enforcement, initial.apply_bum_enforcement,
+            "reload must pin apply_bum_enforcement to the startup snapshot until restart"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[tokio::test]
     async fn reload_hot_applies_honor_graceful_shutdown() {
         let path = unique_temp_path("reload-honor-gshut-hot-apply");
@@ -2939,6 +3057,7 @@ hold_time = 90
             dynamic_neighbors: Vec::new(),
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
+            apply_bum_enforcement: false,
         };
 
         assert_eq!(max_gr_restart_time_secs(&config), Some(180));
