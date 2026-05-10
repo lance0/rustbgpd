@@ -953,8 +953,15 @@ policy:
 - `"internal"` — learned from an iBGP peer
 - `"local"` — locally injected or originated
 
-`match_local_pref_*` and `match_med_*` are inclusive comparisons. If the route
-does not carry the relevant attribute, the comparison does not match.
+`match_local_pref_*` and `match_med_*` are inclusive comparisons. When the
+route does not carry the attribute on the wire (typical for `LOCAL_PREF` on
+eBGP-received routes), the engine substitutes the RFC 4271 implicit defaults
+— 100 for `LOCAL_PREF` (§5.1.5), 0 for `MED` (§5.1.4) — and matches against
+those. A single policy `match_local_pref_ge = 100` therefore reads
+identically against iBGP routes (LP attribute on the wire) and eBGP routes
+(no LP on the wire). Matches FRR / BIRD / GoBGP convention. To match only
+routes with an explicit attribute, pair the numeric match with
+`match_route_type = "internal"` (LP) or a more specific filter.
 
 `match_next_hop` is exact IP equality against the route's resolved next hop.
 It applies to unicast routes. FlowSpec routes do not expose a policy-matchable

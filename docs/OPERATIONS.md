@@ -427,6 +427,52 @@ rustbgpctl rib received 10.0.0.2
 rustbgpctl rib
 ```
 
+### Explain a best-path decision
+
+```bash
+# Global Loc-RIB view: best route + every losing candidate annotated with
+# the decisive comparison reason.
+rustbgpctl rib --prefix 203.0.113.0/24 --explain
+
+# Peer-scoped view: same shape, but every candidate the named peer would
+# actually receive gets a non-zero `advertised_path_id` (rank within the
+# peer's effective Add-Path send_max). Filtered candidates (export policy
+# reject, family mismatch, split-horizon, iBGP / RFC 4456 RR suppression,
+# beyond send_max) stay at 0 so the operator can see *why* each isn't
+# advertised.
+rustbgpctl rib --prefix 203.0.113.0/24 --explain --explain-peer 10.0.0.2
+```
+
+### Manage policies, peer groups, and neighbor sets
+
+```bash
+# Read
+rustbgpctl policy list
+rustbgpctl policy get import-from-transit
+rustbgpctl neighbor-set list
+rustbgpctl peer-group list
+
+# Write — JSON file matches the proto message shape
+rustbgpctl policy set import-from-transit --from-file policy.json
+rustbgpctl neighbor-set set transit-peers --from-file ns.json
+rustbgpctl peer-group set transit --from-file pg.json
+
+# Apply chains globally or per-neighbor
+rustbgpctl policy chain set-import import-from-transit
+rustbgpctl policy chain set-import import-from-transit --neighbor 10.0.0.2
+rustbgpctl policy chain show --neighbor 10.0.0.2
+
+# Bind / unbind neighbors to a peer-group
+rustbgpctl peer-group attach 10.0.0.5 --group transit
+rustbgpctl peer-group detach 10.0.0.5
+```
+
+`--from-file` accepts JSON whose shape mirrors the proto message
+(`PolicyDefinition` / `NeighborSetDefinition` / `PeerGroupDefinition`);
+unknown fields are rejected at parse time. Empty
+`chain set-{import,export}` is rejected — use the matching `clear-*`
+subcommand to drop a chain.
+
 ### Graceful shutdown (daemon exit)
 
 ```bash
