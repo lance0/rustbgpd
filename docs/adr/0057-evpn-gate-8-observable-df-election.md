@@ -163,10 +163,11 @@ how route refresh, RPKI, and BMP all landed.
   configure `[[ethernet_segments]]` for production multihoming
   until Gate 8b ships.** Single-homed deployments and
   route-reflector deployments are unaffected.
-- **Interop with strict ES-Import RT importers.** A peer that
-  filters Type 4 routes on ES-Import RT will not see Gate 8's ES
-  routes. Peers using wildcard import or explicit RT match (the
-  common case) will. Documented in `docs/INTEROP.md`.
+- **Interop with strict ES-Import RT importers — closed in the
+  Gate 8b prep follow-up.** Type 4 ES routes now carry the
+  auto-derived ES-Import RT extcomm (high-order 6 octets of the
+  ESI Value), so peers that filter on ES-Import RT now see the
+  segment without operator preconfiguration.
 - **Wire crate stays at 0.9.0.** Gate 8 reuses the existing Type 1/4
   encoders/decoders from `rustbgpd-wire`. No wire bump.
 
@@ -178,7 +179,11 @@ how route refresh, RPKI, and BMP all landed.
   determinism, algorithm negotiation floor, empty-candidate
   rejection, duplicate-originator rejection (17 tests).
 - `crates/evpn/src/origination_es.rs` unit tests — startup,
-  shutdown, role-aware EAD-per-EVI emission (19 tests).
+  shutdown, EAD-per-EVI per-VNI state tracking (note: in Gate 8
+  the EAD-per-EVI wire shape is role-independent per RFC 7432 §14,
+  so role flips on an already-advertising VNI emit no wire
+  actions; the per-VNI role state is still tracked for Gate 8b
+  aliasing) (19 tests).
 - `src/evpn_segment.rs` orchestrator tests — extcomm decode,
   candidate gathering, role-flip propagation (5 tests).
 - M38 interop topology in `tests/interop/topologies/m38-evpn-df/`
