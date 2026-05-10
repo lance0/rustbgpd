@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Gate 8b 24-hour soak — sustained DF-flip + BUM-enforcement churn
+# Gate 8b 24-hour soak — sustained shared-ESI candidate-set churn
 # on the 2-PE shared-ESI topology at `tests/soak/gate8b-soak.clab.yml`.
 #
 # Drives election by toggling PE2 (docker stop / docker start) on a
 # configurable cadence; PE1's segment orchestrator re-runs election
-# on every Type 4 event, and its dataplane reconciler emits
-# `SetBumPortFlags` ops against the CE veth on every role flip
-# because the candidate set changes.
+# on every Type 4 event. With the default modulo election and PE1's
+# lower originator IP, PE1 remains DF in both the one-candidate and
+# two-candidate states; this soak stresses recompute/reconcile
+# memory behavior rather than a DF↔Non-DF flag transition.
 #
 # Output: tests/soak/runs/gate8b-<UTC-timestamp>/
 #   - samples.csv     one-row-per-minute timeseries (mem, df_role,
@@ -121,22 +122,52 @@ prom_extract() {
 container_rss_mb() {
     # /proc/<pid>/status VmRSS for the rustbgpd PID inside the
     # container. Falls back to docker stats memory if VmRSS isn't
-    # readable (e.g. permission edge cases).
+    # readable (e.g. permission edge cases or a stopped container).
     local container="$1"
-    docker exec "$container" sh -c '
+    local rss
+    rss=$(docker exec "$container" sh -c '
         pid=$(pidof rustbgpd 2>/dev/null || echo "")
         if [ -n "$pid" ] && [ -r /proc/$pid/status ]; then
             awk "/^VmRSS:/ {print \$2/1024}" /proc/$pid/status
         fi
-    ' 2>/dev/null || echo ""
+    ' 2>/dev/null || echo "")
+    if [ -n "$rss" ]; then
+        echo "$rss"
+        return 0
+    fi
+
+    docker stats --no-stream --format '{{.MemUsage}}' "$container" 2>/dev/null | awk '
+        NR == 1 {
+            value = $1
+            unit = value
+            sub(/^[0-9.]+/, "", unit)
+            sub(/[A-Za-z]+$/, "", value)
+            n = value + 0
+            if (unit == "KiB" || unit == "kB" || unit == "KB") {
+                print n / 1024
+            } else if (unit == "MiB" || unit == "MB") {
+                print n
+            } else if (unit == "GiB" || unit == "GB") {
+                print n * 1024
+            }
+        }
+    '
 }
 
 bridge_flag_state() {
     # Returns "df" if all three flood flags are ON for the CE-facing
-    # bridge port, "nondf" if all three are OFF, "mixed" otherwise.
+    # bridge port, "nondf" if all three are OFF, "unreachable" if
+    # the container/interface cannot be read, and "mixed" otherwise.
     local container="$1"
     local out
-    out=$(docker exec "$container" bridge -d link show dev ce100a 2>/dev/null || echo "")
+    if ! out=$(docker exec "$container" bridge -d link show dev ce100a 2>/dev/null); then
+        echo "unreachable"
+        return 0
+    fi
+    if [ -z "$out" ]; then
+        echo "unreachable"
+        return 0
+    fi
     local f m b
     f=$(printf '%s' "$out" | grep -oE 'flood (on|off)' | head -1 | awk '{print $2}')
     m=$(printf '%s' "$out" | grep -oE 'mcast_flood (on|off)' | head -1 | awk '{print $2}')
@@ -156,13 +187,18 @@ bridge_flag_state() {
 
 require_tool docker
 require_tool containerlab
+require_tool curl
 
-if ! docker inspect "$PE1_NAME" >/dev/null 2>&1; then
+container_is_running() {
+    [ "$(docker inspect --format='{{.State.Running}}' "$1" 2>/dev/null || echo false)" = "true" ]
+}
+
+if ! container_is_running "$PE1_NAME"; then
     log "ERROR: container $PE1_NAME not running. Deploy the topology first:"
     log "  sudo containerlab deploy -t $TOPOLOGY"
     exit 2
 fi
-if ! docker inspect "$PE2_NAME" >/dev/null 2>&1; then
+if ! container_is_running "$PE2_NAME"; then
     log "ERROR: container $PE2_NAME not running"
     exit 2
 fi

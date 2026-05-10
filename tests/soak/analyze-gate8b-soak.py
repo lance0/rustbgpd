@@ -8,14 +8,14 @@ produces a JSON verdict against Gate 8b-specific gates:
     1.0 because the segment orchestrator + reconciler add a small
     steady-state working set we accept)
   - Peak resident memory per PE < 512 MB
-  - DF role transitions: pe1 + pe2 counters monotonically advance
-    (no reset → no daemon restart) AND each flip cycle should
-    produce at least one increment somewhere
-  - BUM flag agreement: when pe2 is running, pe1's flag state
-    should be `nondf` for at least one sample per flip cycle
-    (proves the kernel mutation actually fires); when pe2 is down,
-    pe1 should be `df` for at least one sample per flip cycle
-    (proves the restore path fires)
+  - DF role-change counters: pe1 + pe2 counters monotonically
+    advance (no reset → no daemon restart), and the run must include
+    at least one PE2-running sample and one PE2-stopped sample.
+
+The BUM flag state is reported for diagnostics, but not currently
+gated: with the default modulo election in this topology PE1 remains
+DF when PE2 is up and when PE2 is down. Exercising a real DF↔Non-DF
+flag transition requires a separate preference-flip topology.
 
 Stdlib only. Mirrors `analyze-soak.py`'s shape so the operator-
 facing output is consistent.
@@ -113,8 +113,8 @@ def main():
 
     pe1_slope = slope_mb_per_hour(steady, "pe1_rss_mb")
     pe2_slope = slope_mb_per_hour(steady, "pe2_rss_mb")
-    pe1_peak = peak(rows, "pe1_rss_mb")
-    pe2_peak = peak(rows, "pe2_rss_mb")
+    pe1_peak = peak(enumerate(rows), "pe1_rss_mb")
+    pe2_peak = peak(enumerate(rows), "pe2_rss_mb")
 
     # DF transition counter monotonicity. A reset implies daemon
     # restart inside the run window — that's a fail.
@@ -137,23 +137,11 @@ def main():
         None,
     )
 
-    # BUM-flag toggle observability: PE2 running ↔ PE1 should be
-    # nondf for *some* sample (the local PE is non-DF when PE2 has
-    # the lower originator IP — actually wait, our config has PE1
-    # at 10.0.0.1 which IS the lower IP, so PE1 stays DF when both
-    # are up). The harness-flip semantics: when PE2 is up, PE1
-    # election runs with both candidates; when PE2 is down, PE1
-    # election runs with one candidate (still DF). So PE1's flag
-    # should always be `df` regardless of PE2 state under the
-    # default-modulo algorithm with 100 mod 2 = 0 (slot 0 = lower
-    # IP = PE1).
-    #
-    # To exercise the actual nondf path we'd need to flip
-    # df_preference instead of stopping PE2. The current harness
-    # exercises the candidate-set-recompute path on every PE2
-    # transition, which is what we want for memory/leak gates;
-    # the flag-toggle gate is operator-discretion (set
-    # SOAK_REQUIRE_NONDF_TRANSITION=1 to enforce).
+    # BUM-flag observability: under this topology's default modulo
+    # election, PE1 remains DF with PE2 up and with PE2 down. Keep
+    # the observed state in the report for diagnostics, but do not
+    # gate on a DF↔Non-DF flag transition here. That needs a separate
+    # preference-flip topology.
     pe1_flag_states = {r["pe1_bum_flags"] for r in rows if r["pe1_bum_flags"]}
     pe2_running_samples = sum(1 for r in rows if r["pe2_running"] == "1")
     pe2_stopped_samples = sum(1 for r in rows if r["pe2_running"] == "0")
@@ -164,16 +152,16 @@ def main():
         gates.append({"name": name, "pass": bool(ok), "detail": detail})
 
     gate("pe1_memory_slope",
-         math.isnan(pe1_slope) or pe1_slope < args.mem_slope_fail,
+         not math.isnan(pe1_slope) and pe1_slope < args.mem_slope_fail,
          f"{pe1_slope:.3f} MB/h vs cap {args.mem_slope_fail}")
     gate("pe2_memory_slope",
-         math.isnan(pe2_slope) or pe2_slope < args.mem_slope_fail,
+         not math.isnan(pe2_slope) and pe2_slope < args.mem_slope_fail,
          f"{pe2_slope:.3f} MB/h vs cap {args.mem_slope_fail}")
     gate("pe1_peak_memory",
-         math.isnan(pe1_peak) or pe1_peak < args.mem_peak_fail,
+         not math.isnan(pe1_peak) and pe1_peak < args.mem_peak_fail,
          f"{pe1_peak:.1f} MB vs cap {args.mem_peak_fail}")
     gate("pe2_peak_memory",
-         math.isnan(pe2_peak) or pe2_peak < args.mem_peak_fail,
+         not math.isnan(pe2_peak) and pe2_peak < args.mem_peak_fail,
          f"{pe2_peak:.1f} MB vs cap {args.mem_peak_fail}")
     gate("pe1_df_changes_monotone", pe1_mono,
          "no counter reset = no daemon restart")
