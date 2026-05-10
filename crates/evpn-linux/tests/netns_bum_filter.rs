@@ -21,14 +21,26 @@
 //!    blindly.
 //!
 //! Both gate on `EVPN_LINUX_NETNS=1` and require `CAP_NET_ADMIN`
-//! plus kernel >= 4.18 (per-port `bcast_flood`).
+//! (for `bridge link set`), `CAP_SYS_ADMIN` (for `ip netns add`),
+//! and kernel >= 4.18 (per-port `bcast_flood`).
 //!
-//! Run locally:
+//! Run locally on a host that already has iproute2 + iputils-ping
+//! + sudo:
 //!
 //! ```bash
 //! sudo -E env EVPN_LINUX_NETNS=1 \
 //!   cargo test -p rustbgpd-evpn-linux --test netns_bum_filter
 //! ```
+//!
+//! Or run inside the Docker harness — useful when the host kernel
+//! is too old or you don't want to install the userland tooling
+//! locally:
+//!
+//! ```bash
+//! bash crates/evpn-linux/tests/docker/run-netns-tests.sh
+//! ```
+//!
+//! See `tests/docker/README.md` for what the harness does and why.
 
 #![cfg(target_os = "linux")]
 

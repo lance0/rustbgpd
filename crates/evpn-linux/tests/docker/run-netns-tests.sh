@@ -1,0 +1,111 @@
+#!/usr/bin/env bash
+# Run the Gate 8b privileged netns tests inside a Docker container
+# so the host kernel doesn't need iproute2 / iputils-ping / a Rust
+# toolchain pre-installed and the test artifacts can't leak netnses
+# into the host.
+#
+# Requires:
+#   - Docker daemon running on a Linux host with kernel >= 4.18
+#     (the host kernel is what the netns sees; the container shares
+#     the host's `net` capabilities via `--cap-add=NET_ADMIN`).
+#   - Repo checkout at the script's grand-grand-grand-parent (the
+#     workspace root containing Cargo.toml).
+#
+# Usage:
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh           # both tests
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh spike     # spike only
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh roundtrip # netlink round-trip only
+#
+# Exits 0 on green; surfaces the inner cargo exit code otherwise.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
+IMAGE_TAG="${IMAGE_TAG:-rustbgpd-netns-tests:latest}"
+DOCKERFILE="$SCRIPT_DIR/Dockerfile"
+
+# Test-name filter mapping. Empty filter runs both gated tests in
+# the netns_bum_filter binary.
+case "${1:-all}" in
+    spike)      FILTER="bum_filter_spike_validates_kernel_primitive" ;;
+    roundtrip)  FILTER="linux_dataplane_set_bum_port_flags_round_trip" ;;
+    all|"")     FILTER="" ;;
+    *)
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all" >&2
+        exit 2
+        ;;
+esac
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: docker not found in PATH" >&2
+    exit 2
+fi
+
+# Build only when the Dockerfile is newer than the cached image, or
+# the image is missing. Saves ~30s on hot iterations.
+needs_build=1
+if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+    image_built=$(docker image inspect "$IMAGE_TAG" --format '{{.Created}}')
+    image_built_ts=$(date -d "$image_built" +%s 2>/dev/null || echo 0)
+    dockerfile_ts=$(stat -c %Y "$DOCKERFILE" 2>/dev/null || stat -f %m "$DOCKERFILE")
+    if [ "$image_built_ts" -ge "$dockerfile_ts" ]; then
+        needs_build=0
+    fi
+fi
+
+if [ "$needs_build" -eq 1 ]; then
+    echo "[harness] building $IMAGE_TAG"
+    docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
+else
+    echo "[harness] reusing cached $IMAGE_TAG"
+fi
+
+# Per-runner volume names so concurrent invocations on the same
+# host don't fight for the same target/ cache. The user can override
+# via env to share caches intentionally (e.g. for CI).
+CARGO_CACHE_VOL="${CARGO_CACHE_VOL:-rustbgpd-netns-tests-cargo}"
+TARGET_CACHE_VOL="${TARGET_CACHE_VOL:-rustbgpd-netns-tests-target}"
+
+# Capability + privilege rationale:
+#   - --cap-add=NET_ADMIN: required for `bridge link set ... flood off`
+#   - --cap-add=SYS_ADMIN: required for `ip netns add` (CLONE_NEWNET).
+#   - We deliberately do NOT use `--privileged` — keeping the cap set
+#     tight so the harness runs on hardened CI runners that ban
+#     privileged containers.
+
+DOCKER_ARGS=(
+    --rm
+    --cap-add=NET_ADMIN
+    --cap-add=SYS_ADMIN
+    # Without `--security-opt apparmor=unconfined`, `ip netns add`'s
+    # `mount --make-shared /run/netns` call returns EACCES on hosts
+    # where Docker uses the default Ubuntu AppArmor profile (which
+    # is everywhere outside very stripped images). NET_ADMIN +
+    # SYS_ADMIN don't help — AppArmor's mount mediation runs
+    # independently of POSIX caps.
+    --security-opt apparmor=unconfined
+    -e EVPN_LINUX_NETNS=1
+    -e RUST_BACKTRACE=1
+    -e CARGO_TERM_COLOR=always
+    -v "${REPO_ROOT}:/work"
+    -v "${CARGO_CACHE_VOL}:/usr/local/cargo/registry"
+    -v "${TARGET_CACHE_VOL}:/work/target"
+    -w /work
+)
+
+# `--test-threads=1`: the privileged tests both create their own
+# netnses and re-exec into them; running them in parallel inside
+# the same container risks them clobbering each other on the
+# `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
+TEST_ARGS=(
+    cargo test -p rustbgpd-evpn-linux --test netns_bum_filter
+    --
+    --test-threads=1 --nocapture
+)
+if [ -n "$FILTER" ]; then
+    TEST_ARGS+=("--exact" "$FILTER")
+fi
+
+echo "[harness] running: ${TEST_ARGS[*]}"
+exec docker run "${DOCKER_ARGS[@]}" "$IMAGE_TAG" "${TEST_ARGS[@]}"
