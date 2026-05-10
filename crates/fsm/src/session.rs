@@ -77,6 +77,22 @@ impl Session {
 
     // ── Per-state handlers ─────────────────────────────────────────────
 
+    /// Emit a `StaleTimerIgnored` action for a timer-expired event that
+    /// arrived in a state where the corresponding timer should not be
+    /// running. RFC 4271 §8.1's per-state event tables don't list these
+    /// pairs, but tearing a healthy session down because the daemon-side
+    /// timer infrastructure delivered a late tick is operationally
+    /// hostile — every other reasonable implementation we surveyed
+    /// (FRR/BIRD/GoBGP) drops the event silently. The action lets the
+    /// daemon expose a counter so it stays observable instead of fully
+    /// invisible.
+    fn ignore_stale_timer(&self, timer: TimerType) -> Vec<Action> {
+        vec![Action::StaleTimerIgnored {
+            state: self.state,
+            timer,
+        }]
+    }
+
     #[expect(clippy::needless_pass_by_value)]
     fn handle_idle(&mut self, event: Event) -> Vec<Action> {
         match event {
@@ -89,6 +105,14 @@ impl Session {
                 actions.push(self.transition_to(SessionState::Connect));
                 actions
             }
+            // RFC 4271: In Idle, no timers should be running. Late timer
+            // ticks indicate a daemon-side bug (timer not stopped on the
+            // last transition into Idle) — surface them through the
+            // StaleTimerIgnored counter so they can be observed without
+            // tearing the session down.
+            Event::ConnectRetryTimerExpires => self.ignore_stale_timer(TimerType::ConnectRetry),
+            Event::HoldTimerExpires => self.ignore_stale_timer(TimerType::Hold),
+            Event::KeepaliveTimerExpires => self.ignore_stale_timer(TimerType::Keepalive),
             // RFC 4271: In Idle, all other events are ignored.
             _ => vec![],
         }
@@ -129,6 +153,11 @@ impl Session {
                 actions
             }
 
+            // RFC 4271: in Connect, only the ConnectRetry timer is
+            // running. Hold/Keepalive ticks are stale.
+            Event::HoldTimerExpires => self.ignore_stale_timer(TimerType::Hold),
+            Event::KeepaliveTimerExpires => self.ignore_stale_timer(TimerType::Keepalive),
+
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
     }
@@ -166,6 +195,11 @@ impl Session {
                 actions.push(self.transition_to(SessionState::Active));
                 actions
             }
+
+            // RFC 4271: in Active, only the ConnectRetry timer is
+            // running. Hold/Keepalive ticks are stale.
+            Event::HoldTimerExpires => self.ignore_stale_timer(TimerType::Hold),
+            Event::KeepaliveTimerExpires => self.ignore_stale_timer(TimerType::Keepalive),
 
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
@@ -237,6 +271,11 @@ impl Session {
                 let (code, subcode, data) = e.to_notification();
                 self.enter_idle_with_notification(code, subcode, data)
             }
+
+            // RFC 4271: in OpenSent, only the Hold timer is running.
+            // ConnectRetry/Keepalive ticks are stale.
+            Event::ConnectRetryTimerExpires => self.ignore_stale_timer(TimerType::ConnectRetry),
+            Event::KeepaliveTimerExpires => self.ignore_stale_timer(TimerType::Keepalive),
 
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
@@ -311,6 +350,10 @@ impl Session {
                 let (code, subcode, data) = e.to_notification();
                 self.enter_idle_with_notification(code, subcode, data)
             }
+
+            // RFC 4271: in OpenConfirm, only Hold + Keepalive timers
+            // are running. ConnectRetry ticks are stale.
+            Event::ConnectRetryTimerExpires => self.ignore_stale_timer(TimerType::ConnectRetry),
 
             _ => self.enter_idle_with_notification(NotificationCode::FsmError, 0, Bytes::new()),
         }
@@ -411,6 +454,10 @@ impl Session {
                 actions.extend(self.enter_idle_with_notification(code, subcode, data));
                 actions
             }
+
+            // RFC 4271: in Established, only Hold + Keepalive timers
+            // are running. ConnectRetry ticks are stale.
+            Event::ConnectRetryTimerExpires => self.ignore_stale_timer(TimerType::ConnectRetry),
 
             _ => {
                 self.negotiated = None;
@@ -565,10 +612,12 @@ mod tests {
     #[test]
     fn idle_ignores_other_events() {
         let mut s = Session::new(test_config());
+        // Non-timer events are silently dropped — no Action emitted.
         assert!(s.handle_event(Event::KeepaliveReceived).is_empty());
         assert!(s.handle_event(Event::TcpConnectionFails).is_empty());
-        assert!(s.handle_event(Event::HoldTimerExpires).is_empty());
         assert_eq!(s.state(), SessionState::Idle);
+        // Timer events emit StaleTimerIgnored; covered by
+        // `idle_stale_*` tests below.
     }
 
     #[test]
@@ -1073,5 +1122,162 @@ mod tests {
         assert_eq!(open.hold_time, 90);
         assert_eq!(open.bgp_identifier, Ipv4Addr::new(10, 0, 0, 1));
         assert!(!open.capabilities.is_empty());
+    }
+
+    // ── Stale timer events ─────────────────────────────────────────
+    //
+    // RFC 4271 §8.1's per-state event tables don't list every (state,
+    // timer) pair. A timer firing in a state where it should not be
+    // running indicates a daemon-side timer-management bug, not a
+    // peer protocol violation; tearing the session down would convert
+    // a daemon bug into a real-world reachability outage. Each arm
+    // emits a `StaleTimerIgnored` action so the daemon can bump a
+    // counter for visibility, but the session stays put.
+
+    /// Helper: assert the actions list is exactly one
+    /// `StaleTimerIgnored` for the expected (state, timer).
+    fn assert_stale_timer(actions: &[Action], state: SessionState, timer: TimerType) {
+        assert_eq!(actions.len(), 1, "expected exactly one action: {actions:?}");
+        match &actions[0] {
+            Action::StaleTimerIgnored { state: s, timer: t } => {
+                assert_eq!(*s, state, "state label mismatch");
+                assert_eq!(*t, timer, "timer label mismatch");
+            }
+            other => panic!("expected StaleTimerIgnored, got {other:?}"),
+        }
+    }
+
+    /// Drive the session into a state for stale-timer tests. Helper
+    /// keeps the per-test setup short.
+    fn drive_to(state: SessionState) -> Session {
+        let mut s = Session::new(test_config());
+        if state == SessionState::Idle {
+            return s;
+        }
+        s.handle_event(Event::ManualStart);
+        if state == SessionState::Connect {
+            return s;
+        }
+        if state == SessionState::Active {
+            s.handle_event(Event::TcpConnectionFails);
+            return s;
+        }
+        s.handle_event(Event::TcpConnectionConfirmed);
+        if state == SessionState::OpenSent {
+            return s;
+        }
+        s.handle_event(Event::OpenReceived(peer_open()));
+        if state == SessionState::OpenConfirm {
+            return s;
+        }
+        s.handle_event(Event::KeepaliveReceived);
+        assert_eq!(s.state(), SessionState::Established);
+        s
+    }
+
+    // -- Idle (none of the timers should be running) --
+
+    #[test]
+    fn idle_stale_connect_retry_timer_is_observable() {
+        let mut s = drive_to(SessionState::Idle);
+        let actions = s.handle_event(Event::ConnectRetryTimerExpires);
+        assert_stale_timer(&actions, SessionState::Idle, TimerType::ConnectRetry);
+        assert_eq!(s.state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn idle_stale_hold_timer_is_observable() {
+        let mut s = drive_to(SessionState::Idle);
+        let actions = s.handle_event(Event::HoldTimerExpires);
+        assert_stale_timer(&actions, SessionState::Idle, TimerType::Hold);
+        assert_eq!(s.state(), SessionState::Idle);
+    }
+
+    #[test]
+    fn idle_stale_keepalive_timer_is_observable() {
+        let mut s = drive_to(SessionState::Idle);
+        let actions = s.handle_event(Event::KeepaliveTimerExpires);
+        assert_stale_timer(&actions, SessionState::Idle, TimerType::Keepalive);
+        assert_eq!(s.state(), SessionState::Idle);
+    }
+
+    // -- Connect (only ConnectRetry should be running) --
+
+    #[test]
+    fn connect_stale_hold_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::Connect);
+        let actions = s.handle_event(Event::HoldTimerExpires);
+        assert_stale_timer(&actions, SessionState::Connect, TimerType::Hold);
+        assert_eq!(s.state(), SessionState::Connect);
+    }
+
+    #[test]
+    fn connect_stale_keepalive_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::Connect);
+        let actions = s.handle_event(Event::KeepaliveTimerExpires);
+        assert_stale_timer(&actions, SessionState::Connect, TimerType::Keepalive);
+        assert_eq!(s.state(), SessionState::Connect);
+    }
+
+    // -- Active (only ConnectRetry should be running) --
+
+    #[test]
+    fn active_stale_hold_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::Active);
+        let actions = s.handle_event(Event::HoldTimerExpires);
+        assert_stale_timer(&actions, SessionState::Active, TimerType::Hold);
+        assert_eq!(s.state(), SessionState::Active);
+    }
+
+    #[test]
+    fn active_stale_keepalive_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::Active);
+        let actions = s.handle_event(Event::KeepaliveTimerExpires);
+        assert_stale_timer(&actions, SessionState::Active, TimerType::Keepalive);
+        assert_eq!(s.state(), SessionState::Active);
+    }
+
+    // -- OpenSent (only Hold should be running) --
+
+    #[test]
+    fn open_sent_stale_connect_retry_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::OpenSent);
+        let actions = s.handle_event(Event::ConnectRetryTimerExpires);
+        assert_stale_timer(&actions, SessionState::OpenSent, TimerType::ConnectRetry);
+        assert_eq!(s.state(), SessionState::OpenSent);
+    }
+
+    #[test]
+    fn open_sent_stale_keepalive_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::OpenSent);
+        let actions = s.handle_event(Event::KeepaliveTimerExpires);
+        assert_stale_timer(&actions, SessionState::OpenSent, TimerType::Keepalive);
+        assert_eq!(s.state(), SessionState::OpenSent);
+    }
+
+    // -- OpenConfirm (Hold + Keepalive should be running) --
+
+    #[test]
+    fn open_confirm_stale_connect_retry_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::OpenConfirm);
+        let actions = s.handle_event(Event::ConnectRetryTimerExpires);
+        assert_stale_timer(&actions, SessionState::OpenConfirm, TimerType::ConnectRetry);
+        assert_eq!(s.state(), SessionState::OpenConfirm);
+    }
+
+    // -- Established (Hold + Keepalive should be running) --
+
+    #[test]
+    fn established_stale_connect_retry_timer_does_not_tear_session_down() {
+        let mut s = drive_to(SessionState::Established);
+        let actions = s.handle_event(Event::ConnectRetryTimerExpires);
+        assert_stale_timer(&actions, SessionState::Established, TimerType::ConnectRetry);
+        assert_eq!(s.state(), SessionState::Established);
+        // Crucially: no SessionDown action — the existing established
+        // session is undisturbed.
+        assert!(
+            !has_action(&actions, |a| matches!(a, Action::SessionDown)),
+            "stale connect-retry must not emit SessionDown: {actions:?}"
+        );
     }
 }

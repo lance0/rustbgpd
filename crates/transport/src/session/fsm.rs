@@ -305,6 +305,25 @@ impl PeerSession {
                         })
                         .await;
                 }
+                Action::StaleTimerIgnored { state, timer } => {
+                    let timer_label = match timer {
+                        rustbgpd_fsm::TimerType::ConnectRetry => "connect_retry",
+                        rustbgpd_fsm::TimerType::Hold => "hold",
+                        rustbgpd_fsm::TimerType::Keepalive => "keepalive",
+                    };
+                    warn!(
+                        peer = %self.peer_label,
+                        state = state.as_str(),
+                        timer = timer_label,
+                        "ignoring stale timer event — timer should not be running in this state; \
+                         daemon-side timer-management bug suspected, session left intact"
+                    );
+                    self.metrics.record_stale_timer_event(
+                        &self.peer_label,
+                        state.as_str(),
+                        timer_label,
+                    );
+                }
                 Action::SessionDown => {
                     info!(peer = %self.peer_label, "session down");
 

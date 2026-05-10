@@ -21,6 +21,7 @@ pub struct BgpMetrics {
     state_transitions: IntCounterVec,
     session_flaps: IntCounterVec,
     session_established: IntCounterVec,
+    stale_timer_events: IntCounterVec,
 
     // ── Notifications ──────────────────────────────────────────────
     notifications_sent: IntCounterVec,
@@ -116,6 +117,15 @@ impl BgpMetrics {
                 "Total times a BGP session reached Established",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let stale_timer_events = IntCounterVec::new(
+            Opts::new(
+                "bgp_fsm_stale_timer_events_total",
+                "FSM timer-expired events that arrived in a state where the corresponding timer should not be running. Non-zero values point at a daemon-side timer-management bug; the FSM ignores these events rather than tearing the session down.",
+            ),
+            &["peer", "state", "timer"],
         )
         .expect("valid metric definition");
 
@@ -366,6 +376,9 @@ impl BgpMetrics {
             .register(Box::new(session_established.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(stale_timer_events.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(notifications_sent.clone()))
             .expect("metric not already registered");
         registry
@@ -452,6 +465,7 @@ impl BgpMetrics {
             state_transitions,
             session_flaps,
             session_established,
+            stale_timer_events,
             notifications_sent,
             notifications_received,
             messages_sent,
@@ -505,6 +519,16 @@ impl BgpMetrics {
         if to == "established" {
             self.session_established.with_label_values(&[peer]).inc();
         }
+    }
+
+    /// Record an FSM stale-timer event (timer-expired in a state where
+    /// the corresponding timer should not be running). The FSM ignores
+    /// these rather than tearing the session down; the counter exists
+    /// so they don't disappear silently.
+    pub fn record_stale_timer_event(&self, peer: &str, state: &str, timer: &str) {
+        self.stale_timer_events
+            .with_label_values(&[peer, state, timer])
+            .inc();
     }
 
     /// Record a NOTIFICATION sent to a peer.
