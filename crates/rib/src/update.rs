@@ -212,10 +212,18 @@ pub enum RibUpdate {
         /// Prefix to explain.
         prefix: Prefix,
         /// Optional peer scope (Add-Path send view). When `Some`, the
-        /// explanation reflects what the named peer would actually
-        /// receive — export policy filtered, ranked by best-path,
-        /// truncated to the peer's `add_path_send_max`. When `None`,
-        /// returns the global Loc-RIB view.
+        /// returned `candidates` list keeps every non-best route and
+        /// `advertised_path_id` reflects which ones (and at what
+        /// rank) the named peer would actually receive — i.e.
+        /// `advertised_path_id != 0` is set only on candidates that
+        /// pass the peer's export policy + sendable-family check +
+        /// split-horizon / RR suppression and that fall within the
+        /// peer's `add_path_send_max`. Candidates beyond the cap (or
+        /// rejected by the filters) are still returned with
+        /// `advertised_path_id = 0` so the operator can see *why*
+        /// each isn't advertised. When `None`, returns the global
+        /// Loc-RIB view (every candidate carries
+        /// `advertised_path_id = 0`).
         peer: Option<IpAddr>,
         /// Response channel. `None` = unknown peer (peer was set but
         /// not registered with this RIB).

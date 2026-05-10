@@ -610,13 +610,16 @@ message ExplainBestPathRequest {
   uint32 prefix_length = 2;
   // Optional IP address (IPv4 or IPv6 literal) of the peer to
   // scope the explanation to. When set, the explanation reflects
-  // the named peer's Add-Path send view: candidates are filtered
-  // by the peer's export policy + sendable families, sorted by
-  // best-path preference, and the top `add_path_send_max` get a
-  // non-zero `advertised_path_id` reflecting their advertised
-  // rank. Empty = global view, the v0.7.0 behavior. Unknown peer
-  // → NOT_FOUND. Named `peer_address` to match the existing
-  // convention used elsewhere in this file (see e.g.
+  // the named peer's Add-Path send view: the full candidate set
+  // is still returned (so the operator can see why each loser
+  // would or wouldn't be advertised), but the top
+  // `add_path_send_max` candidates that pass the peer's export
+  // policy + sendable-family check + split-horizon / RR
+  // suppression are tagged with a non-zero `advertised_path_id`
+  // reflecting their advertised rank. Everything else stays at
+  // `advertised_path_id = 0`. Empty = global view, the v0.7.0
+  // behavior. Unknown peer → NOT_FOUND. Named `peer_address` to
+  // match the convention used elsewhere in this file (see e.g.
   // `ExplainAdvertisedRouteRequest.peer_address`).
   string peer_address = 3;
 }
@@ -647,10 +650,17 @@ message ExplainBestPathResponse {
   // Echoed from the request when the explanation is peer-scoped.
   // Empty for global-view responses.
   string peer_address = 5;
-  // Peer's Add-Path `send_max` (0 = single-best send mode or
-  // global-view response). When non-zero, the top
-  // `add_path_send_max` candidates by best-path preference get a
-  // non-zero `BestPathCandidate.advertised_path_id`.
+  // Effective Add-Path `send_max` for this prefix and peer (0 in
+  // any of: global-view response, peer in single-best mode,
+  // peer's `add_path_send_families` doesn't include the prefix's
+  // AFI/SAFI, prefix is for an AFI/SAFI not in the peer's
+  // `sendable_families`). When non-zero, up to that many
+  // candidates by best-path preference will carry a non-zero
+  // `BestPathCandidate.advertised_path_id`. The "effective"
+  // qualifier matters because a peer with `add_path_send_max=4`
+  // but no Add-Path families negotiated for this prefix's AFI
+  // gets `add_path_send_max = 0` here — the response reflects
+  // what would actually happen, not the bare config knob.
   uint32 add_path_send_max = 6;
 }
 

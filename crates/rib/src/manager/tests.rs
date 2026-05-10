@@ -7596,6 +7596,75 @@ async fn explain_best_path_for_single_best_peer_marks_only_winner_path_id_zero()
     handle.await.unwrap();
 }
 
+/// Regression: when the prefix's AFI/SAFI isn't in the peer's
+/// `add_path_send_families`, the response's `add_path_send_max`
+/// must reflect 0 — not the bare config knob — to match what
+/// distribution would actually do.
+#[tokio::test]
+async fn explain_best_path_effective_send_max_zero_on_family_mismatch() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let target = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    for (peer, addr, asn, lp) in [
+        (peer1, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (peer2, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    // Peer registered with sendable_families = IPv4 unicast, but
+    // add_path_send_families = IPv6 unicast. Asking about an IPv4
+    // prefix → effective send_max should be 0.
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: target,
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![(Afi::Ipv6, Safi::Unicast)],
+        add_path_send_max: 4,
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), target)
+        .await
+        .expect("known peer");
+
+    assert_eq!(
+        explain.add_path_send_max, 0,
+        "effective send_max should be 0 when the prefix's family isn't in add_path_send_families"
+    );
+    for cand in &explain.candidates {
+        assert_eq!(cand.advertised_path_id, 0);
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Add-Path explain: an unknown peer returns `None` (not Found at the
 /// gRPC layer) rather than silently giving the global view.
 #[tokio::test]

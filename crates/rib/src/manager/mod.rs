@@ -693,7 +693,6 @@ impl RibManager {
         let mut advertised: Vec<(IpAddr, u32)> = Vec::new();
         let mut add_path_send_max: u32 = 0;
         if let Some(peer_addr) = peer {
-            add_path_send_max = self.add_path_send_max_for_prefix(peer_addr, &prefix);
             let target_is_ebgp = self.peer_is_ebgp.get(&peer_addr).copied().unwrap_or(true);
             let target_is_rr_client = self
                 .peer_is_rr_client
@@ -708,20 +707,36 @@ impl RibManager {
                 Prefix::V4(_) => (Afi::Ipv4, Safi::Unicast),
                 Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
             };
-            // Family check fails fast: nothing is advertised at all.
-            // Single-best peers (`send_max == 0`) also skip the
-            // ranking loop — `distribute_single_best_prefix` only ever
-            // advertises the Loc-RIB best with `path_id = 0`, never
-            // falls back to the next-best candidate. Marking a non-best
-            // candidate as "advertised" because it sorts first in the
-            // export-filtered set would lie to the operator about what
-            // distribution would actually do (e.g. when the global best
-            // is suppressed by split-horizon). In that mode the
-            // operator infers winner-advertisement from `best_route`
-            // plus the export policy state visible elsewhere; the
-            // candidates list still surfaces the alternatives with
+            // `add_path_send_max_for_prefix()` already returns 0 if
+            // the peer's `add_path_send_families` doesn't cover this
+            // prefix's AFI/SAFI; we additionally zero it out when the
+            // sendable-family check fails so the response always
+            // reflects the *effective* cap. A peer with
+            // `add_path_send_max=4` for IPv4 unicast but no IPv6
+            // unicast sendable will see `add_path_send_max=0` here
+            // for an IPv6 prefix — same answer distribution would
+            // produce.
+            //
+            // Single-best peers (`effective send_max == 0`) skip the
+            // ranking loop entirely — `distribute_single_best_prefix`
+            // only ever advertises the Loc-RIB best with
+            // `path_id = 0`, never falls back to the next-best
+            // candidate. Marking a non-best candidate as "advertised"
+            // because it sorts first in the export-filtered set would
+            // lie to the operator about what distribution would
+            // actually do (e.g. when the global best is suppressed by
+            // split-horizon). In that mode the operator infers
+            // winner-advertisement from `best_route` plus the export
+            // policy state visible elsewhere; the candidates list
+            // still surfaces the alternatives with
             // `advertised_path_id = 0`.
-            if add_path_send_max > 0 && sendable.is_some_and(|f| f.contains(&family)) {
+            let family_sendable = sendable.is_some_and(|f| f.contains(&family));
+            add_path_send_max = if family_sendable {
+                self.add_path_send_max_for_prefix(peer_addr, &prefix)
+            } else {
+                0
+            };
+            if add_path_send_max > 0 {
                 let export_pol = self.export_policy_for(peer_addr);
                 let mut filtered: Vec<&crate::route::Route> = all_candidates
                     .iter()
@@ -785,13 +800,16 @@ impl RibManager {
             }
         }
 
-        let advertised_lookup = |route: &crate::route::Route| -> u32 {
-            advertised
-                .iter()
-                .position(|(p, id)| *p == route.peer && *id == route.path_id)
-                .and_then(|idx| u32::try_from(idx + 1).ok())
-                .unwrap_or(0)
-        };
+        // Build the advertised-rank index once (O(N) build, O(1)
+        // lookup) so the per-candidate tagging below stays linear in
+        // candidate count rather than quadratic. With Add-Path
+        // peers commonly carrying tens of paths per prefix this is
+        // a meaningful difference at scale.
+        let advertised_rank: HashMap<(IpAddr, u32), u32> = advertised
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, key)| u32::try_from(idx + 1).ok().map(|rank| (*key, rank)))
+            .collect();
 
         let candidates = if let Some(ref best_route) = best {
             all_candidates
@@ -799,7 +817,10 @@ impl RibManager {
                 .filter(|c| !(c.peer == best_route.peer && c.path_id == best_route.path_id))
                 .map(|candidate| {
                     let (ordering, reason) = best_path_cmp_with_reason(&candidate, best_route);
-                    let advertised_path_id = advertised_lookup(&candidate);
+                    let advertised_path_id = advertised_rank
+                        .get(&(candidate.peer, candidate.path_id))
+                        .copied()
+                        .unwrap_or(0);
                     BestPathCandidate {
                         route: candidate,
                         vs_best_reason: reason,

@@ -46,10 +46,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   CLI prints an extra `Adv-PathID` column showing rank or
   `(filtered)` for each candidate. Empty `--explain-peer`
   preserves the v0.7.0 global-view shape exactly. Proto fields
-  added to `ExplainBestPathRequest` (`peer`),
+  added to `ExplainBestPathRequest` (`peer_address`),
   `BestPathCandidate` (`advertised_path_id`), and
-  `ExplainBestPathResponse` (`peer`, `add_path_send_max`) — all
-  additive, so old clients keep working.
+  `ExplainBestPathResponse` (`peer_address`,
+  `add_path_send_max`) — all additive, so old clients keep
+  working. `add_path_send_max` in the response reflects the
+  *effective* cap (zero when the prefix's AFI/SAFI isn't
+  sendable to the peer or isn't in the peer's
+  `add_path_send_families`), not the bare config knob.
 
 ### Fixed
 
