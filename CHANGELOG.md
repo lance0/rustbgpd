@@ -14,18 +14,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **EVPN mass-withdraw receive-side filter (RFC 7432 §8.4).**
   The dataplane supervisor now drops any Type 2 MAC route from the
   projection if its non-zero ESI doesn't have a matching
-  EAD-per-ES advertisement from the *same peer*. When a peer
-  withdraws its Type 1 EAD-per-ES route, every MAC route from that
-  peer attributed to the segment vanishes from the next supervisor
-  pass (≤5s) — the canonical RFC §8.4 fast-flip primitive,
-  observable end-to-end without per-MAC `MP_UNREACH_NLRI`.
+  EAD-per-ES advertisement from the same *(origin VTEP next-hop,
+  ESI)*. When a PE withdraws its Type 1 EAD-per-ES route, every
+  Type 2 route attributed to that origin VTEP + segment vanishes
+  from the next supervisor pass (≤5s) — the canonical RFC §8.4
+  fast-flip primitive, observable end-to-end without per-MAC
+  `MP_UNREACH_NLRI`.
   Stateless: each `build_remote_mac_table` call snapshots the
   current EAD-per-ES set from the RIB and applies it as a
   reachability gate, so there's no event-tracking state machine
   in the supervisor. Single-homed routes (ESI=0) bypass the gate.
   +1 unit test pinning the three relevant cases (no-EAD-per-ES
-  drops; matching EAD-per-ES allows; same ESI from a different
-  peer doesn't satisfy the gate).
+  drops; matching EAD-per-ES allows; the same ESI from a different
+  origin VTEP doesn't satisfy the gate).
 
 - **EVPN aliasing receive-side wiring (RFC 7432 §14).** The
   projection layer now resolves aliasing alternatives for Type 2
@@ -96,24 +97,26 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     forwarding is a follow-up (`LinuxDataplane` programs one
     `dst` per MAC today; multi-VTEP needs `nexthop` group or
     L3-route-based ECMP).
-  - **Per-`(peer, ESI)` EAD-per-ES event tracker for receiver-side
+  - **Per-`(origin VTEP, ESI)` EAD-per-ES event tracker for receiver-side
     mass-withdraw** (`crates/evpn/src/mass_withdraw.rs`). RFC 7432
     §8.4 names the EAD-per-ES *withdrawal* as the standard
-    fast-convergence signal — when a peer withdraws its Type 1
-    EAD-per-ES route for an ESI, every receiver sweeps every MAC
-    route attributed to that `(peer, ESI)` pairing in one
-    operation. Pure-logic `AsPathTracker` exposes:
+    fast-convergence signal — when an origin VTEP withdraws its
+    Type 1 EAD-per-ES route for an ESI, every receiver sweeps
+    every MAC route attributed to that `(origin VTEP, ESI)`
+    pairing in one operation. Pure-logic `AsPathTracker` exposes:
     - `record_withdrawal` — canonical RFC 7432 §8.4 trigger.
       Returns `Some(MassWithdrawTrigger)` when there was prior
-      state for `(peer, ESI)` to sweep; `None` for unseen pairs
-      (no phantom RIB sweep).
-    - `drop_peer` — session teardown / peer-down. Returns one
-      trigger per ESI the peer was tracking.
+      state for `(origin VTEP, ESI)` to sweep; `None` for unseen
+      pairs (no phantom RIB sweep).
+    - `drop_origin_vtep` — direct-peer teardown or origin-VTEP
+      disappearance. Returns one trigger per ESI the origin VTEP
+      was tracking.
     - `record_advertisement` (optional) — vendor-interop
-      heuristic adopted by FRR / Cumulus / Junos: if a peer's
-      EAD-per-ES `AS_PATH` changes between two advertisements
-      without an explicit Withdraw between them, treat it as
-      mass-withdraw. Not in the RFC, documented as a heuristic.
+      heuristic adopted by FRR / Cumulus / Junos: if the origin
+      VTEP's EAD-per-ES `AS_PATH` changes between two
+      advertisements without an explicit Withdraw between them,
+      treat it as mass-withdraw. Not in the RFC, documented as a
+      heuristic.
     `AsPathFingerprint::from_as_path` hashes segment type +
     segment length + ASN bytes per `AsPathSegment`, so re-
     segmentation by an upstream peer (e.g. `[1,2]` becoming

@@ -175,9 +175,10 @@ visibility)
 - [x] **Mass-withdraw `AS_PATH`-change detector landed**
   (`crates/evpn/src/mass_withdraw.rs`). Pure-logic
   `AsPathTracker` with `record_advertisement` / `record_withdrawal`
-  / `drop_peer`. Returns `MassWithdrawTrigger { peer, esi }` for
-  fingerprint changes. The RIB-side sweep that consumes triggers
-  remains a follow-up integration slice.
+  / `drop_origin_vtep`. Returns
+  `MassWithdrawTrigger { origin_vtep, esi }` for fingerprint
+  changes. The RIB-side sweep that consumes triggers remains a
+  follow-up integration slice.
 - [x] **Aliasing receive-side projection wiring landed.** The
   daemon's projection layer now resolves
   `RemoteMacEntry::alias_vtep_ips` for non-zero-ESI Type 2 routes

@@ -18,9 +18,9 @@
 //!
 //! Pure-logic detector. Maintains per-`(origin VTEP, ESI)` state across
 //! received EAD-per-ES events and returns
-//! `MassWithdrawTrigger { peer, esi }` for events that should
+//! `MassWithdrawTrigger { origin_vtep, esi }` for events that should
 //! cause the caller to sweep every Type 2 route it attributes to
-//! that peer/segment.
+//! that origin VTEP / segment.
 //!
 //! Three event sources:
 //!
@@ -28,15 +28,14 @@
 //!    canonical RFC 7432 §8.4 mass-withdraw signal — peer's
 //!    `MP_UNREACH_NLRI` for the Type 1 EAD-per-ES tells receivers
 //!    "this segment is gone from my side; sweep accordingly."
-//! 2. **Session teardown / peer-down** (`drop_peer`). One trigger
-//!    per ESI the peer was tracking; the BGP layer's session-down
-//!    path doesn't need to know about per-ESI bookkeeping
-//!    explicitly.
+//! 2. **Origin VTEP disappearance** (`drop_origin_vtep`). One trigger
+//!    per ESI the origin VTEP was tracking; a direct-peer session-down
+//!    path can use this when the BGP peer is also the origin VTEP.
 //! 3. **`AS_PATH` change on EAD-per-ES re-advertisement**
 //!    (`record_advertisement`, optional). Not in RFC 7432 itself,
 //!    but adopted by FRR / Cumulus / Junos as a vendor-interop
-//!    heuristic: if the peer's `AS_PATH` for the EAD-per-ES route
-//!    changes between two advertisements without a Withdraw
+//!    heuristic: if the origin VTEP's `AS_PATH` for the EAD-per-ES
+//!    route changes between two advertisements without a Withdraw
 //!    in-between, treat it as if the segment churned. Keep this
 //!    path optional and document it as a heuristic, not RFC.
 //!
@@ -143,20 +142,20 @@ const fn fnv1a_step(h: u64, byte: u8) -> u64 {
 }
 
 /// One mass-withdraw trigger. The caller sweeps every MAC route
-/// it had attributed to `peer` on `esi`.
+/// it had attributed to `origin_vtep` on `esi`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MassWithdrawTrigger {
-    /// Peer that advertised the EAD-per-ES change.
-    pub peer: IpAddr,
+    /// Origin VTEP that advertised the EAD-per-ES change.
+    pub origin_vtep: IpAddr,
     /// Segment whose member MACs should be swept.
     pub esi: EthernetSegmentIdentifier,
 }
 
-/// Per-`(peer, esi)` `AS_PATH` tracker.
+/// Per-`(origin VTEP, esi)` `AS_PATH` tracker.
 ///
-/// Maintains the last fingerprint seen on each `(peer, esi)` pair;
-/// returns a trigger only when the new fingerprint differs from
-/// the recorded one. The first-seen advertisement is *not* a
+/// Maintains the last fingerprint seen on each `(origin VTEP, esi)`
+/// pair; returns a trigger only when the new fingerprint differs
+/// from the recorded one. The first-seen advertisement is *not* a
 /// trigger — it's the establish event, not a flip.
 #[derive(Debug, Default, Clone)]
 pub struct AsPathTracker {
@@ -165,34 +164,34 @@ pub struct AsPathTracker {
 
 impl AsPathTracker {
     /// Empty tracker; `record_advertisement` for the first
-    /// advertisement of a given `(peer, esi)` returns `None`.
+    /// advertisement of a given `(origin VTEP, esi)` returns `None`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record an EAD-per-ES advertisement from `peer` for `esi`
-    /// with the given `AS_PATH` fingerprint. Returns
+    /// Record an EAD-per-ES advertisement from `origin_vtep` for
+    /// `esi` with the given `AS_PATH` fingerprint. Returns
     /// `Some(MassWithdrawTrigger)` iff this is a re-advertisement
     /// with a different fingerprint than the previous one.
     pub fn record_advertisement(
         &mut self,
-        peer: IpAddr,
+        origin_vtep: IpAddr,
         esi: EthernetSegmentIdentifier,
         fingerprint: AsPathFingerprint,
     ) -> Option<MassWithdrawTrigger> {
-        let key = (peer, esi);
+        let key = (origin_vtep, esi);
         let prior = self.by_key.insert(key, fingerprint);
         match prior {
             None => None, // First-seen — establish, not a flip.
             Some(p) if p == fingerprint => None,
-            Some(_) => Some(MassWithdrawTrigger { peer, esi }),
+            Some(_) => Some(MassWithdrawTrigger { origin_vtep, esi }),
         }
     }
 
-    /// Record an EAD-per-ES withdrawal for `(peer, esi)`. Returns
+    /// Record an EAD-per-ES withdrawal for `(origin VTEP, esi)`. Returns
     /// `Some(MassWithdrawTrigger)` iff the tracker had previously
-    /// observed an advertisement from this peer for this segment;
+    /// observed an advertisement from this origin VTEP for this segment;
     /// otherwise returns `None` (a withdrawal for an `(origin VTEP, ESI)`
     /// we never saw advertise is a no-op — the RIB has nothing
     /// attributed to that pair to sweep). On success, internal
@@ -206,38 +205,38 @@ impl AsPathTracker {
     /// withdrawal events arrive in order on a single stream).
     pub fn record_withdrawal(
         &mut self,
-        peer: IpAddr,
+        origin_vtep: IpAddr,
         esi: EthernetSegmentIdentifier,
     ) -> Option<MassWithdrawTrigger> {
-        if self.by_key.remove(&(peer, esi)).is_some() {
-            Some(MassWithdrawTrigger { peer, esi })
+        if self.by_key.remove(&(origin_vtep, esi)).is_some() {
+            Some(MassWithdrawTrigger { origin_vtep, esi })
         } else {
             None
         }
     }
 
-    /// Drop all state for `peer` (e.g., on session teardown).
-    /// Returns one trigger per ESI the peer was tracking.
+    /// Drop all state for `origin_vtep` (e.g., direct-peer session teardown).
+    /// Returns one trigger per ESI the origin VTEP was tracking.
     #[must_use]
-    pub fn drop_peer(&mut self, peer: IpAddr) -> Vec<MassWithdrawTrigger> {
+    pub fn drop_origin_vtep(&mut self, origin_vtep: IpAddr) -> Vec<MassWithdrawTrigger> {
         let to_remove: Vec<_> = self
             .by_key
             .keys()
-            .filter(|(p, _)| *p == peer)
+            .filter(|(p, _)| *p == origin_vtep)
             .copied()
             .collect();
         let mut out = Vec::with_capacity(to_remove.len());
         for key in to_remove {
             self.by_key.remove(&key);
             out.push(MassWithdrawTrigger {
-                peer: key.0,
+                origin_vtep: key.0,
                 esi: key.1,
             });
         }
         out
     }
 
-    /// Number of `(peer, esi)` pairs currently tracked.
+    /// Number of `(origin VTEP, esi)` pairs currently tracked.
     #[must_use]
     pub fn len(&self) -> usize {
         self.by_key.len()
@@ -358,7 +357,7 @@ mod tests {
         assert_eq!(
             trigger,
             Some(MassWithdrawTrigger {
-                peer: peer("10.0.0.1"),
+                origin_vtep: peer("10.0.0.1"),
                 esi: esi(1),
             })
         );
@@ -394,26 +393,26 @@ mod tests {
     }
 
     #[test]
-    fn drop_peer_emits_one_trigger_per_tracked_esi() {
+    fn drop_origin_vtep_emits_one_trigger_per_tracked_esi() {
         let mut t = AsPathTracker::new();
         let fp = AsPathFingerprint::from_asns(&[64512]);
         let _ = t.record_advertisement(peer("10.0.0.1"), esi(1), fp);
         let _ = t.record_advertisement(peer("10.0.0.1"), esi(2), fp);
         let _ = t.record_advertisement(peer("10.0.0.2"), esi(1), fp);
 
-        let triggers = t.drop_peer(peer("10.0.0.1"));
+        let triggers = t.drop_origin_vtep(peer("10.0.0.1"));
         assert_eq!(triggers.len(), 2);
         for trigger in &triggers {
-            assert_eq!(trigger.peer, peer("10.0.0.1"));
+            assert_eq!(trigger.origin_vtep, peer("10.0.0.1"));
         }
         // Other peer's state survives.
         assert_eq!(t.len(), 1);
     }
 
     #[test]
-    fn drop_peer_unknown_returns_empty() {
+    fn drop_origin_vtep_unknown_returns_empty() {
         let mut t = AsPathTracker::new();
-        assert!(t.drop_peer(peer("10.0.0.99")).is_empty());
+        assert!(t.drop_origin_vtep(peer("10.0.0.99")).is_empty());
     }
 
     #[test]
