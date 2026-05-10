@@ -186,6 +186,16 @@ visibility)
   both Type 2 and EAD-per-EVI through from the RIB. The dataplane
   itself doesn't yet program ECMP — that's the kernel-mutation
   half tracked below.
+- [x] **Mass-withdraw receive-side filter landed (RFC 7432 §8.4).**
+  The supervisor's `build_remote_mac_table` snapshots EAD-per-ES
+  routes from the RIB on every pass and drops any Type 2 with
+  non-zero ESI whose `(peer, ESI)` isn't in that snapshot. When a
+  peer withdraws its EAD-per-ES, all that peer's MACs for the
+  segment disappear from the next supervisor pass (≤5s). Stateless,
+  no event-tracking state machine in the supervisor — the
+  `mass_withdraw::AsPathTracker` shipped earlier remains for
+  future event-driven RIB-side work where sub-poll latency
+  matters.
 - [ ] **Gate 8b — remaining multi-homing enforcement work.** Three
   concrete slices left:
   1. **Privileged-runner 24 h soak validation** (synthetic DF
