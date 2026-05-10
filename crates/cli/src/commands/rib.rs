@@ -272,7 +272,7 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
     if json {
         let out = serde_json::json!({
             "prefix": format!("{}/{}", resp.prefix, resp.prefix_length),
-            "peer": (!resp.peer.is_empty()).then(|| resp.peer.clone()),
+            "peer": (!resp.peer_address.is_empty()).then(|| resp.peer_address.clone()),
             "add_path_send_max": resp.add_path_send_max,
             "best_route": resp.best_route.as_ref().map(route_to_json),
             "candidates": resp.candidates.iter().map(|c| {
@@ -295,10 +295,10 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
         "Best-path explanation for {}/{}",
         resp.prefix, resp.prefix_length
     );
-    if !resp.peer.is_empty() {
+    if !resp.peer_address.is_empty() {
         println!(
             "Scope:      peer {} (Add-Path send_max={})",
-            resp.peer, resp.add_path_send_max
+            resp.peer_address, resp.add_path_send_max
         );
     }
 
@@ -318,7 +318,7 @@ fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: b
     }
 
     println!();
-    let peer_scoped = !resp.peer.is_empty();
+    let peer_scoped = !resp.peer_address.is_empty();
     if peer_scoped {
         println!(
             "{:<18} {:<18} {:<22} {:<8} Adv-PathID",
@@ -368,7 +368,7 @@ pub async fn explain_best_path(
         .explain_best_path(ExplainBestPathRequest {
             prefix: addr,
             prefix_length: len,
-            peer: peer.unwrap_or("").to_string(),
+            peer_address: peer.unwrap_or("").to_string(),
         })
         .await?
         .into_inner();

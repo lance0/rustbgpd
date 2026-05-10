@@ -709,7 +709,19 @@ impl RibManager {
                 Prefix::V6(_) => (Afi::Ipv6, Safi::Unicast),
             };
             // Family check fails fast: nothing is advertised at all.
-            if sendable.is_some_and(|f| f.contains(&family)) {
+            // Single-best peers (`send_max == 0`) also skip the
+            // ranking loop — `distribute_single_best_prefix` only ever
+            // advertises the Loc-RIB best with `path_id = 0`, never
+            // falls back to the next-best candidate. Marking a non-best
+            // candidate as "advertised" because it sorts first in the
+            // export-filtered set would lie to the operator about what
+            // distribution would actually do (e.g. when the global best
+            // is suppressed by split-horizon). In that mode the
+            // operator infers winner-advertisement from `best_route`
+            // plus the export policy state visible elsewhere; the
+            // candidates list still surfaces the alternatives with
+            // `advertised_path_id = 0`.
+            if add_path_send_max > 0 && sendable.is_some_and(|f| f.contains(&family)) {
                 let export_pol = self.export_policy_for(peer_addr);
                 let mut filtered: Vec<&crate::route::Route> = all_candidates
                     .iter()
@@ -731,9 +743,7 @@ impl RibManager {
                     .collect();
                 filtered.sort_by(|a, b| best_path_cmp(a, b));
 
-                let limit = if add_path_send_max == 0 {
-                    1
-                } else if add_path_send_max == u32::MAX {
+                let limit = if add_path_send_max == u32::MAX {
                     usize::MAX
                 } else {
                     add_path_send_max as usize

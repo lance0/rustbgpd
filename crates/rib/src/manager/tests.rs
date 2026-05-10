@@ -7459,6 +7459,78 @@ async fn explain_best_path_for_addpath_peer_marks_top_n_with_path_id() {
     handle.await.unwrap();
 }
 
+/// Regression: when the target peer is itself the source of the
+/// Loc-RIB best (split-horizon excludes it from the export-filtered
+/// set), single-best send mode (`send_max=0`) must not fall back to
+/// the next-best candidate. `distribute_single_best_prefix` would
+/// advertise nothing in this case; explain must reflect the same
+/// answer or it lies to the operator.
+#[tokio::test]
+async fn explain_best_path_single_best_does_not_fall_back_when_winner_is_target() {
+    let (tx, rx) = mpsc::channel(64);
+    let metrics = BgpMetrics::new();
+    let handle = tokio::spawn(RibManager::new(rx, dummy_query_rx(), None, None, metrics).run());
+
+    let peer_winner = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer_runner_up = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let prefix = Ipv4Prefix::new(Ipv4Addr::new(192, 168, 1, 0), 24);
+
+    // peer_winner has the higher LP and *is* the target peer.
+    // Under split-horizon, peer_winner cannot receive its own route
+    // back — so single-best advertises nothing.
+    for (peer, addr, asn, lp) in [
+        (peer_winner, Ipv4Addr::new(10, 0, 0, 1), 65001, 200),
+        (peer_runner_up, Ipv4Addr::new(10, 0, 0, 2), 65002, 100),
+    ] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_multipath_route(prefix, addr, vec![asn], lp)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let (out_tx, _out_rx) = mpsc::channel(64);
+    tx.send(RibUpdate::PeerUp {
+        peer: peer_winner, // <-- target IS the winner
+        peer_asn: 65000,
+        peer_router_id: Ipv4Addr::UNSPECIFIED,
+        outbound_tx: out_tx,
+        export_policy: None,
+        sendable_families: ipv4_sendable(),
+        is_ebgp: true,
+        route_reflector_client: false,
+        add_path_send_families: vec![],
+        add_path_send_max: 0,
+    })
+    .await
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let explain = query_explain_best_path_for_peer(&tx, Prefix::V4(prefix), peer_winner)
+        .await
+        .expect("known peer");
+    assert_eq!(explain.add_path_send_max, 0);
+    // No candidate may have a non-zero advertised_path_id. Before
+    // the fix, peer_runner_up would have been promoted to rank 1.
+    for cand in &explain.candidates {
+        assert_eq!(
+            cand.advertised_path_id, 0,
+            "single-best must not fall back; cand={:?}",
+            cand.route.peer
+        );
+    }
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Add-Path explain: a peer with `send_max=0` (single-best mode)
 /// only advertises the global best, even when more candidates exist.
 #[tokio::test]

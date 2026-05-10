@@ -513,7 +513,7 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
             prefix_length: 24,
             best_route: None,
             candidates: vec![],
-            peer: req.peer,
+            peer_address: req.peer_address,
             add_path_send_max: 0,
         }))
     }

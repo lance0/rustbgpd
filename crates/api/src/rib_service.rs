@@ -417,7 +417,7 @@ fn explain_best_path_to_proto(explain: ExplainBestPath) -> proto::ExplainBestPat
                 }
             })
             .collect(),
-        peer: explain.peer.map(|p| p.to_string()).unwrap_or_default(),
+        peer_address: explain.peer.map(|p| p.to_string()).unwrap_or_default(),
         add_path_send_max: explain.add_path_send_max,
     }
 }
@@ -601,18 +601,21 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ExplainBestPathResponse>, Status> {
         let req = request.into_inner();
         let prefix = parse_prefix_request(&req.prefix, req.prefix_length)?;
-        let peer = if req.peer.is_empty() {
+        let peer = if req.peer_address.is_empty() {
             None
         } else {
-            Some(req.peer.parse::<IpAddr>().map_err(|_| {
-                Status::invalid_argument(format!("invalid peer address: {}", req.peer))
+            Some(req.peer_address.parse::<IpAddr>().map_err(|_| {
+                Status::invalid_argument(format!("invalid peer_address: {}", req.peer_address))
             })?)
         };
         let explain = self
             .query_explain_best_path(prefix, peer)
             .await?
             .ok_or_else(|| {
-                Status::not_found(format!("peer {} not registered with this RIB", req.peer))
+                Status::not_found(format!(
+                    "peer {} not registered with this RIB",
+                    req.peer_address
+                ))
             })?;
         Ok(Response::new(explain_best_path_to_proto(explain)))
     }
