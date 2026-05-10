@@ -9,6 +9,7 @@ use crate::proto::{
     AddPathRequest, DeletePathRequest, ExplainAdvertisedRouteRequest, ExplainBestPathRequest,
     ExplainDecision, ListRoutesRequest,
 };
+use serde::Serialize;
 
 /// Parsed route filter options from CLI flags.
 pub struct RouteFilterOpts {
@@ -268,22 +269,59 @@ fn print_explain_advertised(explain: &crate::proto::ExplainAdvertisedRouteRespon
     }
 }
 
+/// Top-level shape of `--json` best-path explain output. Designed
+/// so that a global-view explain (no `--explain-peer`) emits the
+/// exact same key set as the v0.7.0 shape — `peer_address` /
+/// `add_path_send_max` / `advertised_path_id` are skipped via
+/// `skip_serializing_if` when they would carry no operator-visible
+/// information. Peer-scoped explain emits all three so the operator
+/// can read advertisement intent from the JSON without parsing the
+/// human-friendly table.
+#[derive(Serialize)]
+struct JsonExplainBestPath {
+    prefix: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    add_path_send_max: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    best_route: Option<JsonRoute>,
+    candidates: Vec<JsonExplainCandidate>,
+}
+
+#[derive(Serialize)]
+struct JsonExplainCandidate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    route: Option<JsonRoute>,
+    vs_best_reason: String,
+    vs_best_ordering: String,
+    /// Only emitted in peer-scoped mode; `0` in that mode means
+    /// "filtered or beyond send_max", which is meaningful. In
+    /// global-view mode the value is always `0` and would be
+    /// noise, so the field is suppressed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    advertised_path_id: Option<u32>,
+}
+
 fn print_explain_best_path(resp: &crate::proto::ExplainBestPathResponse, json: bool) {
     if json {
-        let out = serde_json::json!({
-            "prefix": format!("{}/{}", resp.prefix, resp.prefix_length),
-            "peer": (!resp.peer_address.is_empty()).then(|| resp.peer_address.clone()),
-            "add_path_send_max": resp.add_path_send_max,
-            "best_route": resp.best_route.as_ref().map(route_to_json),
-            "candidates": resp.candidates.iter().map(|c| {
-                serde_json::json!({
-                    "route": c.route.as_ref().map(route_to_json),
-                    "vs_best_reason": c.vs_best_reason,
-                    "vs_best_ordering": c.vs_best_ordering,
-                    "advertised_path_id": c.advertised_path_id,
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
                 })
-            }).collect::<Vec<_>>(),
-        });
+                .collect(),
+        };
         println!(
             "{}",
             serde_json::to_string_pretty(&out).expect("failed to serialize best-path explain")
@@ -536,5 +574,102 @@ mod tests {
         assert_eq!(req.peer_address, "192.0.2.1");
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
+    }
+
+    /// Global-view JSON output omits `peer_address` /
+    /// `add_path_send_max` (and per-candidate `advertised_path_id`)
+    /// so the v0.7.0 JSON shape contract stays intact for clients
+    /// that haven't migrated to the peer-scoped form. Peer-scoped
+    /// JSON output emits all three.
+    #[test]
+    fn json_global_view_omits_addpath_keys() {
+        let resp = crate::proto::ExplainBestPathResponse {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            best_route: None,
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: None,
+                vs_best_reason: "HigherLocalPref".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                advertised_path_id: 0,
+            }],
+            peer_address: String::new(),
+            add_path_send_max: 0,
+        };
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
+                })
+                .collect(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(
+            !obj.contains_key("peer_address"),
+            "global view must not expose peer_address"
+        );
+        assert!(
+            !obj.contains_key("add_path_send_max"),
+            "global view must not expose add_path_send_max"
+        );
+        let cand = obj
+            .get("candidates")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|a| a.first())
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(
+            !cand.contains_key("advertised_path_id"),
+            "global view must not expose advertised_path_id on candidates"
+        );
+    }
+
+    #[test]
+    fn json_peer_scoped_emits_addpath_keys() {
+        let resp = crate::proto::ExplainBestPathResponse {
+            prefix: "10.0.0.0".to_string(),
+            prefix_length: 24,
+            best_route: None,
+            candidates: vec![crate::proto::BestPathCandidate {
+                route: None,
+                vs_best_reason: "HigherLocalPref".to_string(),
+                vs_best_ordering: "worse".to_string(),
+                advertised_path_id: 2,
+            }],
+            peer_address: "10.0.0.99".to_string(),
+            add_path_send_max: 4,
+        };
+        let peer_scoped = !resp.peer_address.is_empty();
+        let out = JsonExplainBestPath {
+            prefix: format!("{}/{}", resp.prefix, resp.prefix_length),
+            peer_address: peer_scoped.then(|| resp.peer_address.clone()),
+            add_path_send_max: peer_scoped.then_some(resp.add_path_send_max),
+            best_route: resp.best_route.as_ref().map(route_to_json),
+            candidates: resp
+                .candidates
+                .iter()
+                .map(|c| JsonExplainCandidate {
+                    route: c.route.as_ref().map(route_to_json),
+                    vs_best_reason: c.vs_best_reason.clone(),
+                    vs_best_ordering: c.vs_best_ordering.clone(),
+                    advertised_path_id: peer_scoped.then_some(c.advertised_path_id),
+                })
+                .collect(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&out).unwrap();
+        assert_eq!(v["peer_address"], "10.0.0.99");
+        assert_eq!(v["add_path_send_max"], 4);
+        assert_eq!(v["candidates"][0]["advertised_path_id"], 2);
     }
 }
