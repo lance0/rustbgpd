@@ -1,0 +1,47 @@
+# Gate 8b 24-hour soak — PE1 (lower-IP, default-DF candidate).
+#
+# Mirrors `tests/interop/configs/rustbgpd-m38-pe1.toml` but enables
+# `apply_bum_enforcement = true` so the soak exercises the kernel
+# split-horizon path (RTM_NEWLINK + IFLA_BRPORT_*_FLOOD) under
+# sustained DF-flip + MAC churn. The harness flips election by
+# stopping/starting PE2 on a configurable cadence; PE1's role
+# alternates between DF (PE2 down or higher slot) and DF (PE2 up
+# but vni mod 2 = 0 still picks PE1) — but the BUM ops themselves
+# fire on every PE2 establish/teardown because the candidate set
+# changes.
+
+apply_bum_enforcement = true
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 32768
+df_algorithm = "default-modulo"
+originator_ip = "10.0.0.1"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 30
+families = ["l2vpn_evpn"]

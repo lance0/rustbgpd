@@ -154,3 +154,96 @@ To confirm the harness's gates actually trip:
 - Build a debug daemon with an artificial leak (e.g., `Box::leak` in a
   hot path), run a 1-hour soak, expect `slope_mb_per_hour > 1.0` and
   `fail` verdict.
+
+---
+
+# Gate 8b 24-Hour Soak
+
+Sibling harness covering the Gate 8b multi-homing enforcement
+path — the actual `apply_bum_enforcement = true` kernel-mutation
+behavior under sustained DF-flip + candidate-set-recompute churn.
+
+The M33 soak above leaves `apply_bum_enforcement = false` because
+M33 has no segments configured. Gate 8b needs its own harness so
+the BUM-suppression rtnetlink path is exercised on every flip.
+
+## Topology
+
+`tests/soak/gate8b-soak.clab.yml` deploys 2 rustbgpd PEs
+(`clab-gate8b-soak-pe1` / `pe2`) with:
+
+- shared ESI `00:00:00:00:00:00:00:00:00:01` for VNI 100,
+- `apply_bum_enforcement = true` on both,
+- full kernel topology per PE (br100 + vxlan100 + ce100a/b veth)
+  so the BUM-suppression filter has a real CE-facing port to
+  flip flags on,
+- iBGP L2VPN/EVPN session between PE1 (10.0.0.1) and PE2
+  (10.0.0.2).
+
+## Run
+
+```bash
+docker build -t rustbgpd:dev .
+sudo containerlab deploy -t tests/soak/gate8b-soak.clab.yml
+
+# Full 24h run (default):
+bash tests/soak/run-gate8b-soak.sh
+
+# 1h smoke with 5-min flip cadence:
+SOAK_HOURS=1 FLIP_INTERVAL_SEC=300 \
+    bash tests/soak/run-gate8b-soak.sh
+
+# Auto-destroy on exit:
+CLEANUP=1 bash tests/soak/run-gate8b-soak.sh
+```
+
+## What gets sampled
+
+`tests/soak/runs/gate8b-<UTC>/samples.csv`, one row per
+`SAMPLE_INTERVAL` (default 60s):
+
+```
+ts_unix, elapsed_sec,
+pe1_rss_mb, pe2_rss_mb,
+pe1_df_role, pe2_df_role,
+pe1_df_changes, pe2_df_changes,
+pe1_bum_flags, pe2_bum_flags,    # df / nondf / mixed / unreachable
+pe2_running                       # 1 / 0 driven by harness
+```
+
+Plus per-PE daemon logs streamed to `pe1.log` / `pe2.log` and
+flip events recorded in `flips.log` so post-mortem of any anomaly
+correlates the harness action to whatever the daemon was doing.
+
+## Live monitoring
+
+```bash
+tail -F tests/soak/runs/gate8b-<UTC>/soak.log     # harness progress
+tail -F tests/soak/runs/gate8b-<UTC>/samples.csv  # CSV stream
+tail -F tests/soak/runs/gate8b-<UTC>/pe1.log      # daemon log
+tail -F tests/soak/runs/gate8b-<UTC>/flips.log    # flip events
+```
+
+## Analyze
+
+```bash
+python3 tests/soak/analyze-gate8b-soak.py \
+    tests/soak/runs/gate8b-<UTC>/samples.csv \
+    --output tests/soak/runs/gate8b-<UTC>/report.json
+```
+
+Gates: per-PE memory slope < 1.5 MB/h, peak RSS < 512 MB, DF
+transition counters monotone (no daemon restart inside the
+window), at least one full flip cycle observed.
+
+## When to run Gate 8b soak
+
+- **Before flipping the `apply_bum_enforcement` default to `true`**
+  (currently `false` for safety).
+- **After any change to** `crates/evpn/src/df_election.rs`,
+  `crates/evpn/src/origination_es.rs`, `src/evpn_segment.rs`,
+  `src/evpn_dataplane.rs`, `crates/evpn-linux/src/bum_filter.rs`,
+  `crates/evpn-linux/src/linux/bum_filter.rs`, or
+  `crates/evpn-linux/src/reconcile.rs`.
+- **Before tagging the first release that ships Gate 8b
+  enforcement on by default.**

@@ -1,0 +1,43 @@
+# Gate 8b 24-hour soak — PE2 (higher-IP candidate; flips between
+# Non-DF when PE1 present and DF when PE1 down).
+#
+# See rustbgpd-soak-gate8b-pe1.toml for the soak rationale. PE2 is
+# the harness-controlled flip target — the harness `docker stop`s
+# this container on a cadence to force election re-runs on PE1
+# and BUM-suppression toggles on PE1's CE-facing port.
+
+apply_bum_enforcement = true
+
+[global]
+asn = 65000
+router_id = "10.0.0.2"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+prometheus_addr = "0.0.0.0:9179"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.2:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.2"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"
+member_vnis = [100]
+df_preference = 32768
+df_algorithm = "default-modulo"
+originator_ip = "10.0.0.2"
+
+[[neighbors]]
+address = "10.0.0.1"
+remote_asn = 65000
+description = "pe1"
+hold_time = 30
+families = ["l2vpn_evpn"]
