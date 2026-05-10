@@ -11,6 +11,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN mass-withdraw receive-side filter (RFC 7432 §8.4).**
+  The dataplane supervisor now drops any Type 2 MAC route from the
+  projection if its non-zero ESI doesn't have a matching
+  EAD-per-ES advertisement from the *same peer*. When a peer
+  withdraws its Type 1 EAD-per-ES route, every MAC route from that
+  peer attributed to the segment vanishes from the next supervisor
+  pass (≤5s) — the canonical RFC §8.4 fast-flip primitive,
+  observable end-to-end without per-MAC `MP_UNREACH_NLRI`.
+  Stateless: each `build_remote_mac_table` call snapshots the
+  current EAD-per-ES set from the RIB and applies it as a
+  reachability gate, so there's no event-tracking state machine
+  in the supervisor. Single-homed routes (ESI=0) bypass the gate.
+  +1 unit test pinning the three relevant cases (no-EAD-per-ES
+  drops; matching EAD-per-ES allows; same ESI from a different
+  peer doesn't satisfy the gate).
+
 - **EVPN aliasing receive-side wiring (RFC 7432 §14).** The
   projection layer now resolves aliasing alternatives for Type 2
   MAC routes whose ESI is non-zero, populating each

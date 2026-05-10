@@ -416,10 +416,13 @@ async fn supervisor_loop(
 /// MAC/IP routes through [`project_evpn_routes_with_aliases`]. Type 1
 /// EAD-per-EVI routes are projected as aliasing inputs so multi-homed
 /// MACs surface their alternative VTEPs in
-/// [`rustbgpd_evpn::RemoteMacEntry::alias_vtep_ips`]. Other route types
-/// (Type 3 IMET, Type 4 ES, Type 5 IP-Prefix) are ignored for Gate 7b
-/// — they're carried by the RR but the L2VNI dataplane boundary only
-/// programs Type 2 MACs.
+/// [`rustbgpd_evpn::RemoteMacEntry::alias_vtep_ips`]. Type 1 EAD-per-ES
+/// routes drive the receiver-side mass-withdraw filter (RFC 7432 §8.4):
+/// a Type 2 with non-zero ESI is dropped from the projection if the
+/// originating peer does not currently advertise an EAD-per-ES route
+/// for the same ESI. Other route types (Type 3 IMET, Type 4 ES, Type 5
+/// IP-Prefix) are ignored for Gate 7b — they're carried by the RR but
+/// the L2VNI dataplane boundary only programs Type 2 MACs.
 async fn build_remote_mac_table(
     rib_tx: &mpsc::Sender<RibUpdate>,
     instances: &EvpnInstanceTable,
@@ -436,7 +439,26 @@ async fn build_remote_mac_table(
     let local_vtep_ips: std::collections::BTreeSet<std::net::IpAddr> =
         instances.iter().map(|inst| inst.local_vtep_ip).collect();
 
-    let projected: Vec<ProjectedEvpnRoute> = routes.iter().filter_map(project_one).collect();
+    // Build the receiver-side mass-withdraw filter set from the
+    // current EAD-per-ES snapshot. A peer that has at least one
+    // EAD-per-ES route for an ESI claims segment reachability;
+    // peers without one fail the §8.4 reachability precondition
+    // for any Type 2 they advertise on that ESI.
+    let active_ead_per_es: std::collections::BTreeSet<(
+        std::net::IpAddr,
+        rustbgpd_wire::EthernetSegmentIdentifier,
+    )> = routes
+        .iter()
+        .filter_map(|r| match &r.route {
+            EvpnRoute::EadPerEs(ead) => Some((r.peer, ead.esi)),
+            _ => None,
+        })
+        .collect();
+
+    let projected: Vec<ProjectedEvpnRoute> = routes
+        .iter()
+        .filter_map(|r| project_one(r, &active_ead_per_es))
+        .collect();
     let ead_per_evi: Vec<ProjectedEvpnEadPerEvi> = routes
         .iter()
         .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips))
@@ -472,11 +494,31 @@ fn project_ead_per_evi(
 
 /// Translate a single [`EvpnRibRoute`] into the projection input
 /// shape, returning `None` for non-Type-2 routes (Gate 7b L2VNI
-/// dataplane only programs MAC/IP entries).
-fn project_one(route: &EvpnRibRoute) -> Option<ProjectedEvpnRoute> {
+/// dataplane only programs MAC/IP entries) and for Type 2 routes
+/// that fail the RFC 7432 §8.4 mass-withdraw reachability gate
+/// (non-zero ESI without a matching EAD-per-ES from the same peer).
+fn project_one(
+    route: &EvpnRibRoute,
+    active_ead_per_es: &std::collections::BTreeSet<(
+        std::net::IpAddr,
+        rustbgpd_wire::EthernetSegmentIdentifier,
+    )>,
+) -> Option<ProjectedEvpnRoute> {
     let EvpnRoute::MacIp(macip) = &route.route else {
         return None;
     };
+
+    // Mass-withdraw filter: a Type 2 with non-zero ESI is only
+    // valid if the originating peer also advertises an EAD-per-ES
+    // for the same segment. Without that, the segment is
+    // unreachable from the peer's side and we shouldn't program
+    // the MAC. ESI=0 routes (single-homed) bypass the filter.
+    if macip.esi != rustbgpd_wire::EthernetSegmentIdentifier::ZERO
+        && !active_ead_per_es.contains(&(route.peer, macip.esi))
+    {
+        return None;
+    }
+
     let mobility_sequence = extract_mac_mobility_sequence(&route.attributes);
     Some(ProjectedEvpnRoute {
         rd: macip.rd,
@@ -604,7 +646,10 @@ mod tests {
     #[test]
     fn project_one_picks_macip_with_mobility_seq() {
         let route = evpn_macip_route(100, 1, "10.0.0.2", Some(7));
-        let projected = project_one(&route).unwrap();
+        // ESI=0 → bypasses the mass-withdraw filter regardless of
+        // the active set's contents.
+        let active = std::collections::BTreeSet::new();
+        let projected = project_one(&route, &active).unwrap();
         assert_eq!(projected.mac.octets(), [1; 6]);
         assert_eq!(projected.next_hop, ipa("10.0.0.2"));
         assert_eq!(projected.mobility_sequence, Some(7));
@@ -628,7 +673,51 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         };
-        assert!(project_one(&imet).is_none());
+        let active = std::collections::BTreeSet::new();
+        assert!(project_one(&imet, &active).is_none());
+    }
+
+    #[test]
+    fn project_one_drops_non_zero_esi_macip_without_active_ead_per_es() {
+        // RFC 7432 §8.4 mass-withdraw gate: a peer that advertises
+        // a Type 2 with non-zero ESI but doesn't claim segment
+        // reachability (no current EAD-per-ES from the same peer
+        // for the same ESI) fails the receiver-side reachability
+        // precondition and we drop the route from projection.
+        use rustbgpd_wire::{EthernetSegmentIdentifier, EvpnMacIp, MplsLabel};
+        let esi = EthernetSegmentIdentifier::new([1; 10]);
+        let route = EvpnRibRoute {
+            route: EvpnRoute::MacIp(EvpnMacIp {
+                rd: RouteDistinguisher::ZERO,
+                esi,
+                ethernet_tag: EthernetTagId(0),
+                mac: rustbgpd_wire::MacAddress::new([2; 6]),
+                ip: None,
+                label1: MplsLabel::new(100),
+                label2: None,
+            }),
+            next_hop: ipa("10.0.0.2"),
+            link_local_next_hop: None,
+            peer: ipa("10.0.0.99"),
+            attributes: Arc::new(vec![]),
+            received_at: std::time::Instant::now(),
+            origin_type: rustbgpd_rib::route::RouteOrigin::Ebgp,
+            peer_router_id: std::net::Ipv4Addr::new(10, 0, 0, 99),
+            is_stale: false,
+            is_llgr_stale: false,
+        };
+        // No EAD-per-ES from peer 10.0.0.99 for this ESI → filter.
+        let empty = std::collections::BTreeSet::new();
+        assert!(project_one(&route, &empty).is_none());
+        // Same route with the active set populated → route survives.
+        let mut active = std::collections::BTreeSet::new();
+        active.insert((ipa("10.0.0.99"), esi));
+        assert!(project_one(&route, &active).is_some());
+        // Different peer in the active set doesn't satisfy the
+        // gate — the EAD-per-ES must come from the same peer.
+        let mut wrong_peer = std::collections::BTreeSet::new();
+        wrong_peer.insert((ipa("10.0.0.55"), esi));
+        assert!(project_one(&route, &wrong_peer).is_none());
     }
 
     #[test]
