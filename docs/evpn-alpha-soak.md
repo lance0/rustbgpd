@@ -143,15 +143,17 @@ visibility)
   resolved plan still flows through `DataplaneReport.bum_enforcement`
   for visibility. Hot reload still requires a daemon restart for
   this field — promoting it to SIGHUP-reloadable rides with the
-  next config-shape pass. **Single-pass validation against host
-  kernel 6.17** via the Docker harness at
-  `crates/evpn-linux/tests/docker/`: spike + Rust netlink
-  round-trip both green, confirming the
+  next config-shape pass. **Validated against a real kernel via
+  the Docker harness at `crates/evpn-linux/tests/docker/`** —
+  spike + Rust netlink round-trip both green, confirming the
   `RTM_NEWLINK + IFLA_LINKINFO + IFLA_INFO_PORT_DATA +
   IFLA_BRPORT_*_FLOOD` encoding actually lands the desired flag
-  triplet on the kernel-side bridge port. The remaining soak
-  question (slice 1 below) is "does it stay correct under
-  sustained churn?", not "does it work?".
+  triplet on the kernel-side bridge port. **The harness is wired
+  into PR-CI** (`evpn_bum_filter_kernel` job in
+  `.github/workflows/ci.yml`), so a netlink-attribute encoding
+  regression can't slip past review. The remaining soak question
+  (slice 1 below) is "does it stay correct under sustained
+  churn?", not "does it work?".
 - [ ] **Gate 8b — remaining multi-homing enforcement work.** Five
   concrete slices:
   1. **Privileged-runner 24 h soak validation** (synthetic DF

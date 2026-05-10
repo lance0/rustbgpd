@@ -19,12 +19,25 @@ mirrors `.github/workflows/interop.yml`:
 - **EVPN + SIGHUP** — control-plane sanity, MAC reflection, policy soft-reset: **M29**, **M30**, **M34**.
 - **Graceful Shutdown** — receiver/initiator coverage across unicast, FlowSpec, and EVPN: **M35**, **M35b**, **M35c**.
 
-The other 19 tests are gated locally — either because they need
-kernel features missing on the GitHub runner image (`vrf` for L3VNI,
-bond ES for multi-homing), substantial wall-clock (M11/M16 GR/LLGR,
-M33 scale soak), additional fixtures (StayRTR / mock RTR v2 server),
-or platform-diversity gating (BIRD, GoBGP — exercise the wire codec
-against alternate implementations rather than gating every PR).
+Plus one **kernel-primitive** PR-CI gate that lives in `ci.yml`
+rather than `interop.yml` (no containerlab — single Docker
+container exercises a real Linux bridge inside a netns):
+
+- **EVPN Gate 8b BUM-suppression primitive** — runs the spike
+  (`bum_filter_spike_validates_kernel_primitive`) and the Rust
+  netlink round-trip (`linux_dataplane_set_bum_port_flags_round_trip`)
+  via the harness at `crates/evpn-linux/tests/docker/`. Validates
+  the kernel-side `IFLA_BRPORT_*_FLOOD` triplet on every PR so a
+  netlink-attribute encoding regression can't slip past
+  PR-CI. Runs in ~30s warm.
+
+The other 19 interop tests are gated locally — either because they
+need kernel features missing on the GitHub runner image (`vrf` for
+L3VNI, bond ES for multi-homing), substantial wall-clock (M11/M16
+GR/LLGR, M33 scale soak), additional fixtures (StayRTR / mock RTR
+v2 server), or platform-diversity gating (BIRD, GoBGP — exercise
+the wire codec against alternate implementations rather than
+gating every PR).
 
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|

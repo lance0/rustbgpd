@@ -43,22 +43,34 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # Build only when the Dockerfile is newer than the cached image, or
-# the image is missing. Saves ~30s on hot iterations.
-needs_build=1
-if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
-    image_built=$(docker image inspect "$IMAGE_TAG" --format '{{.Created}}')
-    image_built_ts=$(date -d "$image_built" +%s 2>/dev/null || echo 0)
-    dockerfile_ts=$(stat -c %Y "$DOCKERFILE" 2>/dev/null || stat -f %m "$DOCKERFILE")
-    if [ "$image_built_ts" -ge "$dockerfile_ts" ]; then
-        needs_build=0
+# the image is missing. Saves ~30s on hot iterations. Set
+# `SKIP_BUILD=1` to assert the image already exists and bail out
+# rather than rebuild — used by CI where a sibling step pre-builds
+# via GHA layer cache and the local Dockerfile mtime would otherwise
+# trip the rebuild check.
+if [ "${SKIP_BUILD:-0}" = "1" ]; then
+    if ! docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+        echo "ERROR: SKIP_BUILD=1 but image $IMAGE_TAG not found" >&2
+        exit 2
     fi
-fi
-
-if [ "$needs_build" -eq 1 ]; then
-    echo "[harness] building $IMAGE_TAG"
-    docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
+    echo "[harness] SKIP_BUILD=1 — using pre-built $IMAGE_TAG"
 else
-    echo "[harness] reusing cached $IMAGE_TAG"
+    needs_build=1
+    if docker image inspect "$IMAGE_TAG" >/dev/null 2>&1; then
+        image_built=$(docker image inspect "$IMAGE_TAG" --format '{{.Created}}')
+        image_built_ts=$(date -d "$image_built" +%s 2>/dev/null || echo 0)
+        dockerfile_ts=$(stat -c %Y "$DOCKERFILE" 2>/dev/null || stat -f %m "$DOCKERFILE")
+        if [ "$image_built_ts" -ge "$dockerfile_ts" ]; then
+            needs_build=0
+        fi
+    fi
+
+    if [ "$needs_build" -eq 1 ]; then
+        echo "[harness] building $IMAGE_TAG"
+        docker build -f "$DOCKERFILE" -t "$IMAGE_TAG" "$REPO_ROOT"
+    else
+        echo "[harness] reusing cached $IMAGE_TAG"
+    fi
 fi
 
 # Per-runner volume names so concurrent invocations on the same

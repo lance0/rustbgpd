@@ -81,3 +81,57 @@ jobs:
           # share artifacts compiled by stable rustc.
           key: msrv-1.92
       - run: cargo check --workspace --all-targets
+
+  evpn_bum_filter_kernel:
+    # Runs the Gate 8b BUM-suppression primitive against a real
+    # kernel via the Docker harness at
+    # `crates/evpn-linux/tests/docker/`. Two tests fire under one
+    # invocation:
+    #
+    # - `bum_filter_spike_validates_kernel_primitive` — shell-driven
+    #   topology + `ping -b` + `bridge link set` flag toggle. Asserts
+    #   the five load-bearing invariants (DF allows, Non-DF blocks
+    #   broadcast/multicast/unknown-unicast, known-unicast survives
+    #   Non-DF, restore is symmetric, FDB programming unaffected).
+    # - `linux_dataplane_set_bum_port_flags_round_trip` — Rust netlink
+    #   round-trip. Asserts `LinuxDataplane::apply` actually lands
+    #   `flood off / mcast_flood off / bcast_flood off` on the
+    #   kernel-side bridge port.
+    #
+    # `ubuntu-latest` ships kernel 6.x which has
+    # `IFLA_BRPORT_BCAST_FLOOD` (added in 4.18) so the harness's
+    # kernel prerequisite is met without runner customization.
+    #
+    # The harness needs `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN
+    # --security-opt apparmor=unconfined`; it does NOT need
+    # `--privileged`. GitHub-hosted runners allow all three.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Pre-build the harness image with GHA cache so the warm path
+      # (no Dockerfile change) skips the `apt-get install` rebuild.
+      - name: Build netns-test harness image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: crates/evpn-linux/tests/docker/Dockerfile
+          load: true
+          tags: rustbgpd-netns-tests:latest
+          cache-from: type=gha,scope=evpn-bum-kernel
+          cache-to: type=gha,scope=evpn-bum-kernel,mode=max
+
+      - name: Run BUM-filter primitive validation
+        # The helper handles cap flags + bind-mounts. We pre-built
+        # the image via the GHA-cached step above, so SKIP_BUILD=1
+        # makes the helper assert the image exists and skip its
+        # mtime-based rebuild check (which would otherwise refire
+        # the build because every checkout writes fresh mtimes).
+        run: bash crates/evpn-linux/tests/docker/run-netns-tests.sh
+        env:
+          IMAGE_TAG: rustbgpd-netns-tests:latest
+          SKIP_BUILD: "1"

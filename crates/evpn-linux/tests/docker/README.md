@@ -89,3 +89,22 @@ This harness is the right path when:
 
 Both paths exercise the same test code; the harness is just a
 container around it.
+
+## CI integration
+
+The harness is wired into PR-CI via the `evpn_bum_filter_kernel`
+job in `.github/workflows/ci.yml`. Every PR runs both gated tests
+against the GitHub-hosted runner's kernel (Ubuntu 24.04, kernel
+6.x — well past the 4.18 floor for `IFLA_BRPORT_BCAST_FLOOD`).
+
+The CI step pre-builds the harness image with `docker/build-push-action`
++ GHA layer caching, then invokes `run-netns-tests.sh` with
+`SKIP_BUILD=1` so the helper reuses the pre-built image rather than
+re-running its mtime-based rebuild check (which always fires on a
+fresh checkout). Warm CI runs complete in ~30s; cold runs (image
+cache miss) in ~2-3 min.
+
+`SKIP_BUILD=1` is also the right env var when chaining the harness
+into other automation — set it whenever you've already produced
+the image via some other path and don't want the helper to
+second-guess.
