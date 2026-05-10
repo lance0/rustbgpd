@@ -1104,19 +1104,19 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // member-VNI table to resolve against. Returns `None` for
     // single-homed deployments and route reflectors.
     let evpn_segment_shutdown = tokio_util::sync::CancellationToken::new();
-    let evpn_segment_handle = match config.resolve_ethernet_segments() {
-        Ok(segments) if !segments.is_empty() => evpn_segment::spawn(
+    let ethernet_segments = config
+        .resolve_ethernet_segments()
+        .expect("validated in Config::load");
+    let evpn_segment_handle = if ethernet_segments.is_empty() {
+        None
+    } else {
+        evpn_segment::spawn(
             &evpn_instances,
-            segments,
+            ethernet_segments,
             rib_tx.clone(),
             metrics.clone(),
             evpn_segment_shutdown.clone(),
-        ),
-        Ok(_) => None,
-        Err(e) => {
-            error!(error = %e, "failed to resolve [[ethernet_segments]] — Gate 8 orchestrator not spawned");
-            None
-        }
+        )
     };
 
     // Spawn gRPC API server (keep JoinHandle for supervision)

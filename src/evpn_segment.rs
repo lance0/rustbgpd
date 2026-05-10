@@ -158,6 +158,18 @@ async fn segment_loop(runtime: SegmentRuntime, segments: Vec<EthernetSegment>) {
             .iter()
             .map(|&v| (v, MplsLabel::new(v.as_u32())))
             .collect();
+        let rds: BTreeMap<_, _> = seg
+            .member_vnis
+            .iter()
+            .map(|&v| {
+                let inst = runtime
+                    .instances
+                    .get(v)
+                    .expect("validated by Config::resolve_ethernet_segments");
+                (v, inst.rd)
+            })
+            .collect();
+        ead_per_evi.set_rds(rds);
         ead_per_evi.set_labels(labels);
         let election = DfElection::new(seg.esi, seg.member_vnis.iter().copied());
         by_esi.insert(
@@ -302,8 +314,15 @@ async fn reelection_sweep(
     runtime: &SegmentRuntime,
     by_esi: &mut HashMap<EthernetSegmentIdentifier, SegmentState>,
 ) {
+    let routes = match query_evpn_routes(&runtime.rib_tx).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "EVPN segment: sweep candidate gather failed");
+            return;
+        }
+    };
     for state in by_esi.values_mut() {
-        run_election_for(runtime, state).await;
+        run_election_for_routes(runtime, state, &routes).await;
     }
 }
 
@@ -318,6 +337,23 @@ async fn run_election_for(runtime: &SegmentRuntime, state: &mut SegmentState) {
             return;
         }
     };
+    run_election_with_candidates(runtime, state, candidates).await;
+}
+
+async fn run_election_for_routes(
+    runtime: &SegmentRuntime,
+    state: &mut SegmentState,
+    routes: &[EvpnRibRoute],
+) {
+    let candidates = gather_candidates_from_routes(state, routes);
+    run_election_with_candidates(runtime, state, candidates).await;
+}
+
+async fn run_election_with_candidates(
+    runtime: &SegmentRuntime,
+    state: &mut SegmentState,
+    candidates: Vec<DfCandidate>,
+) {
     let new_roles = match state.election.run(&candidates, state.config.originator_ip) {
         Ok(r) => r,
         Err(e) => {
@@ -331,10 +367,6 @@ async fn run_election_for(runtime: &SegmentRuntime, state: &mut SegmentState) {
     };
 
     let esi_str = format_esi(state.config.esi);
-    let Some(inst) = runtime.instances.get(state.reference_instance_id).cloned() else {
-        return;
-    };
-
     // Compute and apply per-VNI role changes.
     let mut transitions: Vec<(EvpnInstanceId, DfRole)> = Vec::new();
     for (&vni, &role) in &new_roles {
@@ -357,6 +389,14 @@ async fn run_election_for(runtime: &SegmentRuntime, state: &mut SegmentState) {
                 .record_evpn_df_role_change(esi_str.as_str(), vni.as_u32());
         }
         state.last_roles.insert(vni, role);
+        let Some(inst) = runtime.instances.get(vni).cloned() else {
+            warn!(
+                esi = esi_str.as_str(),
+                vni = vni.as_u32(),
+                "EVPN segment: role changed for unknown VNI"
+            );
+            continue;
+        };
         apply_with_instance(runtime, &inst, actions).await;
         debug!(
             esi = esi_str.as_str(),
@@ -376,6 +416,13 @@ async fn gather_candidates(
     rib_tx: &mpsc::Sender<RibUpdate>,
 ) -> Result<Vec<DfCandidate>, RibQueryError> {
     let routes = query_evpn_routes(rib_tx).await?;
+    Ok(gather_candidates_from_routes(state, &routes))
+}
+
+fn gather_candidates_from_routes(
+    state: &SegmentState,
+    routes: &[EvpnRibRoute],
+) -> Vec<DfCandidate> {
     let mut by_ip: BTreeMap<IpAddr, DfCandidate> = BTreeMap::new();
     // Local PE always present.
     by_ip.insert(
@@ -386,17 +433,16 @@ async fn gather_candidates(
             df_algorithm: state.config.df_algorithm,
         },
     );
-    for r in &routes {
+    for r in routes {
         let EvpnRoute::Es(es) = &r.route else {
             continue;
         };
         if es.esi != state.config.esi {
             continue;
         }
-        // Per-PE candidate. df_preference / df_algorithm decode from
-        // the route's DF Election extcomm if present; absent extcomm
-        // → DefaultModulo + default preference (matches RFC 8584
-        // fallback rules).
+        // Per-PE candidate. df_algorithm decodes from the route's DF
+        // Election extcomm if present; absent extcomm → DefaultModulo
+        // + default preference (matches RFC 8584 fallback rules).
         let (pref, alg) = decode_df_election_extcomm(&r.attributes)
             .unwrap_or((32_768, DfAlgorithm::DefaultModulo));
         by_ip.entry(es.originator_ip).or_insert(DfCandidate {
@@ -405,13 +451,14 @@ async fn gather_candidates(
             df_algorithm: alg,
         });
     }
-    Ok(by_ip.into_values().collect())
+    by_ip.into_values().collect()
 }
 
 fn decode_df_election_extcomm(attrs: &[PathAttribute]) -> Option<(u32, DfAlgorithm)> {
     // RFC 8584 §3.1: DF Election extcomm type 0x06 subtype 0x06,
-    // carrying algorithm + preference. Decode is best-effort —
-    // unrecognized extcomms fall back to defaults at the call site.
+    // carrying RSV(3 bits), DF Alg(5 bits), bitmap(16 bits), and
+    // reserved bytes. Decode is best-effort — unrecognized extcomms
+    // fall back to defaults at the call site.
     for attr in attrs {
         let PathAttribute::ExtendedCommunities(ecs) = attr else {
             continue;
@@ -419,9 +466,8 @@ fn decode_df_election_extcomm(attrs: &[PathAttribute]) -> Option<(u32, DfAlgorit
         for ec in ecs {
             let bytes = ec.as_u64().to_be_bytes();
             if bytes[0] == 0x06 && bytes[1] == 0x06 {
-                let alg = DfAlgorithm::from_algorithm_id(bytes[2]);
-                let pref = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-                return Some((pref, alg));
+                let alg = DfAlgorithm::from_algorithm_id(bytes[2] & 0x1f);
+                return Some((32_768, alg));
             }
         }
     }
@@ -605,13 +651,13 @@ fn next_hop_path_attribute(vtep_ip: IpAddr) -> PathAttribute {
 /// configuration changes.
 ///
 /// Maps ESI bytes [4..7] (the AS / value half of an LACP- or
-/// preference-derived ESI) into the 16..=15 + 2^20 range so the
+/// preference-derived ESI) into the 16..=2^20 - 1 range so the
 /// resulting label is always within the 20-bit MPLS label space.
 fn synthesize_esi_label(esi: EthernetSegmentIdentifier) -> MplsLabel {
     let octets = esi.octets();
     let raw = u32::from_be_bytes([octets[4], octets[5], octets[6], octets[7]]);
-    // Mask to 20 bits and bias above the reserved range (16).
-    let label = 16 + (raw & 0x000F_FFFF);
+    // Keep above the reserved range while staying inside 20 bits.
+    let label = 16 + (raw % ((1 << 20) - 16));
     MplsLabel::new(label)
 }
 
@@ -629,7 +675,7 @@ fn format_esi(esi: EthernetSegmentIdentifier) -> String {
 mod tests {
     use super::*;
     use rustbgpd_evpn::{EvpnInstance, EvpnInstanceTable, RouteTarget};
-    use rustbgpd_wire::EthernetTagId;
+    use rustbgpd_wire::{EthernetTagId, ExtendedCommunity};
 
     fn rd(asn: u16, val: u32) -> rustbgpd_wire::RouteDistinguisher {
         let mut bytes = [0u8; 8];
@@ -672,7 +718,7 @@ mod tests {
         assert_eq!(label_a, label_b);
         // Within 20-bit MPLS range, above reserved 16.
         assert!(label_a.value() >= 16);
-        assert!(label_a.value() < (1 << 20) + 16);
+        assert!(label_a.value() < (1 << 20));
     }
 
     #[test]
@@ -753,6 +799,16 @@ mod tests {
             }
             other => panic!("expected EadPerEvi, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decode_df_election_extcomm_reads_five_bit_algorithm() {
+        let ec =
+            ExtendedCommunity::new(u64::from_be_bytes([0x06, 0x06, 0b1110_0001, 0, 0, 0, 0, 0]));
+        let attrs = [PathAttribute::ExtendedCommunities(vec![ec])];
+        let (pref, alg) = decode_df_election_extcomm(&attrs).unwrap();
+        assert_eq!(pref, 32_768);
+        assert_eq!(alg, DfAlgorithm::HighestRandomWeight);
     }
 
     #[tokio::test]

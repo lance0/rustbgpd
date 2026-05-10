@@ -1570,6 +1570,15 @@ fn parse_ethernet_segment(
         });
     }
 
+    if cfg.member_vnis.is_empty() {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "esi {:?}: member_vnis must contain at least one configured EVPN instance",
+                cfg.esi
+            ),
+        });
+    }
+
     let mut member_vnis: BTreeSet<EvpnInstanceId> = BTreeSet::new();
     for raw in &cfg.member_vnis {
         let id = EvpnInstanceId::new(*raw).map_err(|e| ConfigError::InvalidEthernetSegment {
@@ -1590,16 +1599,31 @@ fn parse_ethernet_segment(
         }
     }
 
+    let default_preference = 32_768;
+    if cfg.df_preference != default_preference {
+        return Err(ConfigError::InvalidEthernetSegment {
+            reason: format!(
+                "df_preference {}: reserved for a future preference-based DF election \
+                 implementation; Gate 8 accepts only the default {default_preference}",
+                cfg.df_preference
+            ),
+        });
+    }
+
     let df_algorithm = match cfg.df_algorithm.as_str() {
         "default-modulo" => DfAlgorithm::DefaultModulo,
-        "highest-random-weight" => DfAlgorithm::HighestRandomWeight,
-        "preference-based" => DfAlgorithm::PreferenceBased,
-        other => {
+        "highest-random-weight" | "preference-based" => {
             return Err(ConfigError::InvalidEthernetSegment {
                 reason: format!(
-                    "df_algorithm {other:?}: must be one of \
-                     \"default-modulo\", \"highest-random-weight\", \"preference-based\""
+                    "df_algorithm {:?}: reserved for a future Gate 8b/8c implementation; \
+                     Gate 8 accepts only \"default-modulo\"",
+                    cfg.df_algorithm
                 ),
+            });
+        }
+        other => {
+            return Err(ConfigError::InvalidEthernetSegment {
+                reason: format!("df_algorithm {other:?}: must be \"default-modulo\""),
             });
         }
     };

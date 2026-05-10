@@ -46,8 +46,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Config schema** — `[[ethernet_segments]]` TOML block with
     `esi`, `member_vnis`, `df_preference`, `df_algorithm`,
     `originator_ip`. ESI parser rejects the Type 0 single-homed
-    sentinel and validates that every member VNI maps to a
-    configured EVPN instance.
+    sentinel, requires a non-empty member-VNI list, validates that
+    every member VNI maps to a configured EVPN instance, and accepts
+    only `df_algorithm = "default-modulo"` plus the default
+    `df_preference = 32768` until the non-default RFC 8584 algorithms
+    are implemented.
   - **Observable surface** — `evpn_df_role{esi,vni,role}` gauge
     (PromQL `evpn_df_role{role="df"} == 1` finds active DFs) and
     `evpn_df_role_changes_total{esi,vni}` counter for spotting

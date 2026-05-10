@@ -429,10 +429,11 @@ Blockers cleared.
 
 Ships:
 
-- `[[ethernet_segments]]` config block with ESI, member VNIs,
-  `df_preference`, `df_algorithm`, originator IP. Single-homed and
-  RR deployments take the empty-config early return and pay zero
-  runtime cost.
+- `[[ethernet_segments]]` config block with ESI, non-empty member
+  VNI list, `df_preference = 32768`,
+  `df_algorithm = "default-modulo"`, and originator IP.
+  Single-homed and RR deployments take the empty-config early return
+  and pay zero runtime cost.
 - Pure DF election state machine (`crates/evpn/src/df_election.rs`)
   — RFC 7432 §8.5 service carving + RFC 8584 §3 algorithm
   negotiation, callable from a unit test.

@@ -44,7 +44,11 @@ The Gate 8 surface is:
 - **Domain types** in `crates/evpn/src/segment.rs`: `EthernetSegment`,
   `DfAlgorithm` (`DefaultModulo`, `HighestRandomWeight`,
   `PreferenceBased`), `DfRole`. The runtime config is parsed from
-  `[[ethernet_segments]]` in `Config::resolve_ethernet_segments`.
+  `[[ethernet_segments]]` in `Config::resolve_ethernet_segments`;
+  Gate 8 config accepts only `DefaultModulo` with the default
+  preference `32768`, while the non-default enum variants and
+  preference field are retained for wire/decode compatibility and
+  the later Gate 8b/8c implementation.
 - **Pure DF election state machine** in
   `crates/evpn/src/df_election.rs`: `DfElection::run` takes the
   candidate set + the local PE's originator IP and returns

@@ -259,6 +259,10 @@ impl LocalEadPerEsOriginator {
 pub struct LocalEadPerEviOriginator {
     rd: RouteDistinguisher,
     esi: EthernetSegmentIdentifier,
+    /// Per-VNI RD overrides. Gate 8's daemon wiring fills this from
+    /// the matching `[[evpn_instances]]` entries so each EAD-per-EVI
+    /// route carries the same RD as the EVI it represents.
+    rd_for_vni: BTreeMap<EvpnInstanceId, RouteDistinguisher>,
     /// Per-`(ESI, VNI)` MPLS label / VNI value carried on the route.
     label_for_vni: BTreeMap<EvpnInstanceId, MplsLabel>,
     /// Currently-advertised state per `(ESI, VNI)`. Tracks the
@@ -279,6 +283,7 @@ impl LocalEadPerEviOriginator {
         Self {
             rd,
             esi,
+            rd_for_vni: BTreeMap::new(),
             label_for_vni: BTreeMap::new(),
             by_vni: BTreeMap::new(),
         }
@@ -294,6 +299,13 @@ impl LocalEadPerEviOriginator {
     /// VNI → label mapping. Idempotent across identical inputs.
     pub fn set_labels(&mut self, labels: BTreeMap<EvpnInstanceId, MplsLabel>) {
         self.label_for_vni = labels;
+    }
+
+    /// Set per-VNI RD values. If a VNI is absent, the constructor RD
+    /// is used as a fallback for backwards-compatible tests and
+    /// single-RD callers.
+    pub fn set_rds(&mut self, rds: BTreeMap<EvpnInstanceId, RouteDistinguisher>) {
+        self.rd_for_vni = rds;
     }
 
     /// Number of `(ESI, VNI)` pairs currently advertising.
@@ -372,7 +384,7 @@ impl LocalEadPerEviOriginator {
 
     fn key_for(&self, vni: EvpnInstanceId) -> EvpnRouteKey {
         EvpnRouteKey::EadPerEvi {
-            rd: self.rd,
+            rd: self.rd_for_vni.get(&vni).copied().unwrap_or(self.rd),
             esi: self.esi,
             ethernet_tag: EthernetTagId(vni.as_u32()),
         }
@@ -615,6 +627,28 @@ mod tests {
             panic!("expected EvpnRouteKey::EadPerEvi, got {key:?}");
         };
         assert_eq!(ethernet_tag.0, 100);
+    }
+
+    #[test]
+    fn ead_per_evi_key_uses_per_vni_rd_when_available() {
+        let mut o = LocalEadPerEviOriginator::new(rd(65000, 100), esi(1));
+        let mut rds = BTreeMap::new();
+        rds.insert(vni(100), rd(65000, 100));
+        rds.insert(vni(200), rd(65000, 200));
+        o.set_rds(rds);
+
+        let actions = o.on_vni_role_changed(vni(200), DfRole::Df);
+        let OriginationAction::Inject { key, .. } = &actions[0] else {
+            panic!("expected Inject, got {:?}", actions[0]);
+        };
+        let EvpnRouteKey::EadPerEvi {
+            rd, ethernet_tag, ..
+        } = *key
+        else {
+            panic!("expected EvpnRouteKey::EadPerEvi, got {key:?}");
+        };
+        assert_eq!(rd, self::rd(65000, 200));
+        assert_eq!(ethernet_tag.0, 200);
     }
 
     #[test]

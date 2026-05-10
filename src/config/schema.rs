@@ -544,15 +544,18 @@ pub struct EvpnInstanceConfig {
 ///   colon-separated hex bytes. Type 0 (all zero) is rejected
 ///   because Type 0 means "single-homed" and thus shouldn't appear
 ///   in a multihoming config.
-/// - `member_vnis` — VNIs that participate in this ES. Each member
-///   contributes a slot to the per-(ESI, VNI) DF election.
+/// - `member_vnis` — non-empty set of VNIs that participate in
+///   this ES. Each member contributes a slot to the per-(ESI, VNI)
+///   DF election.
 /// - `df_preference` — Designated Forwarder preference value
-///   carried in the DF Election extcomm (RFC 8584 §3.1). Higher
-///   wins. Default 32768.
-/// - `df_algorithm` — DF election algorithm string. Recognized:
-///   `"default-modulo"` (RFC 7432 §8.5 — the only fully-implemented
-///   algorithm), `"highest-random-weight"` and `"preference-based"`
-///   reserved for forward-compat. Default `"default-modulo"`.
+///   reserved for the future preference-based DF Election algorithm
+///   (RFC 8584 §3.1). Gate 8 accepts only the default 32768 because
+///   default-modulo ignores preference.
+/// - `df_algorithm` — DF election algorithm string. Gate 8 accepts
+///   only `"default-modulo"` (RFC 7432 §8.5). The domain model keeps
+///   `"highest-random-weight"` and `"preference-based"` variants for
+///   wire/forward compatibility, but config rejects them until the
+///   runtime implements those algorithms. Default `"default-modulo"`.
 /// - `originator_ip` — IP this PE uses as the Type 4 ES route's
 ///   originator address. Typically equals `evpn_instances[].local_vtep_ip`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
