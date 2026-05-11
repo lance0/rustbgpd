@@ -266,6 +266,19 @@ pub struct DataplaneReport {
     /// configured. Re-emitted on every report so the gRPC / CLI
     /// surfaces don't need to track transitions themselves.
     pub ip_vrf_status: Vec<IpVrfDataplaneStatus>,
+    /// Per-IP-VRF kernel-route observation snapshot for this pass
+    /// (Gate 9 slice 6a). `Some(empty)` when no `[[evpn_ip_vrfs]]`
+    /// are configured (success, zero observations); `None` when the
+    /// underlying kernel dump failed transiently and the daemon
+    /// should preserve its last-known observation snapshot rather
+    /// than treat the field as authoritative.
+    ///
+    /// ADR-0054 §6 motivates the distinction: the level-triggered
+    /// reconciler must not advance state on a netlink failure —
+    /// otherwise the L3 originator would interpret a transient dump
+    /// failure as "kernel has no routes" and withdraw every
+    /// currently-originated Type 5.
+    pub ip_vrf_routes: Option<crate::ip_vrf::IpVrfRouteDump>,
 }
 
 /// Per-instance status emitted alongside every report.

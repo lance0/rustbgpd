@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_evpn::ip_vrf::{IpVrfStatus, IpVrfTable};
+use rustbgpd_evpn::ip_vrf::{IpVrfRouteDump, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, IpVrfId, LocalMacObservation, MacAddress};
 #[cfg_attr(not(test), allow(unused_imports))]
 use tokio::sync::mpsc;
@@ -151,6 +151,36 @@ pub trait Dataplane: Send {
         _ip_vrfs: &IpVrfTable,
     ) -> impl Future<Output = HashMap<IpVrfId, IpVrfStatus>> + Send {
         async { HashMap::new() }
+    }
+
+    /// Dump every kernel route in each configured IP-VRF's
+    /// `table_id`, classify it, and produce per-VRF observations the
+    /// daemon's L3 originator (slice 6b) can subscribe to. Counters
+    /// for filtered routes ride alongside on
+    /// [`IpVrfRouteDump::filter_counts`].
+    ///
+    /// Returns `None` on transient kernel-dump failure. The
+    /// reconciler forwards `None` to the daemon, which preserves the
+    /// last successful observation snapshot in its watch channel
+    /// rather than synthesizing an empty dump — a swallowed dump
+    /// failure would otherwise look identical to "the kernel has no
+    /// routes" and the L3 originator would withdraw every
+    /// currently-originated Type 5 (ADR-0054 §6 level-triggered
+    /// model requires "don't advance state on failure", not "publish
+    /// empty"). Implementations log the underlying error before
+    /// returning `None`.
+    ///
+    /// Default returns `Some(IpVrfRouteDump::default())` —
+    /// implementations that don't support Gate 9
+    /// (`InMemoryDataplane`, future non-Linux impls) silently no-op
+    /// for IP-VRF routes (zero VRFs configured → no observations,
+    /// no failure either). The trait extension stays non-breaking
+    /// via this default.
+    fn dump_ip_vrf_routes(
+        &mut self,
+        _ip_vrfs: &IpVrfTable,
+    ) -> impl Future<Output = Option<IpVrfRouteDump>> + Send {
+        async { Some(IpVrfRouteDump::default()) }
     }
 
     /// Dump the current kernel FDB + link inventory.

@@ -255,10 +255,30 @@ landing, tracked here for visibility)
   - `DataplaneReport.ip_vrf_status` rows + `rustbgpctl evpn vrfs
     [NAME]` CLI + `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf`
     gRPC RPCs so operators read the verdict without scraping logs.
+  - **Slice 6 PR A (#77)**: per-IP-VRF kernel-route observation +
+    local Type 5 origination. The reconcile actor's per-pass
+    `Dataplane::dump_ip_vrf_routes` walks each IP-VRF's `table_id`
+    via `RTM_GETROUTE`, runs a conservative classifier
+    (connected/static/manual kept; other routing daemons' routes,
+    non-forwardable types, link-local / multicast prefixes, and
+    routes whose output device is the IP-VRF's own L3 VXLAN are
+    filtered), and emits observations on
+    `DataplaneReport.ip_vrf_routes`. The daemon mirrors observations
+    onto a `tokio::sync::watch` channel that the new L3 originator
+    task subscribes to alongside the slice-5 readiness watch.
+    The originator's level-triggered diff loop injects Type 5
+    routes when the IP-VRF is `Ready` and withdraws them on
+    readiness loss; transient kernel-dump failure preserves the
+    last-good observation snapshot so a netlink hiccup doesn't
+    cascade into a mass withdraw. `IpVrfState.originated_routes_count`
+    + three new Prometheus series (observed gauge, filtered
+    counter, suppressed counter) expose the surface to operators.
 
-  Still ahead:
-  - Type 5 origination + FIB programming, M39 manual containerlab
-    smoke.
+  Still ahead (slice 6 PR B):
+  - Remote Type 5 import + L3 FIB programming (kernel route +
+    neighbor on the L3 VXLAN + bridge FDB for the inner DMAC).
+  - M39 manual containerlab smoke validating the bidirectional
+    Type 5 path against FRR.
 
   Follow-on optimization once the reconcile-loop integration is
   in place: share one rtnetlink link dump across

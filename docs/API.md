@@ -570,9 +570,14 @@ Encapsulation extended community (tunnel-type=8) is attached
 automatically. Set `disable_vxlan_encap: true` for MPLS-over-GRE
 deployments. Phase 1 supports `route_type` 2 (MAC/IP) and 3 (IMET);
 Type 5 IP-Prefix injection is not exposed via the injection API.
-Native Gate 9 Type 5 origination from `[[evpn_ip_vrfs]]` is not yet
-shipped — today the Gate 9 foundation only parses the config and
-runs an IP-VRF readiness probe in the EVPN reconcile actor.
+Native Gate 9 Type 5 origination from `[[evpn_ip_vrfs]]` ships in
+slice 6 PR A (#77): the daemon dumps kernel routes per IP-VRF
+`table_id`, classifies them (connected/static/manual only — routes
+installed by other routing daemons or whose output device is the
+L3 VXLAN are filtered), and originates a Type 5 per surviving prefix
+when the IP-VRF's readiness probe says `Ready`. Remote Type 5
+import + L3 FIB programming (kernel route + neighbor + L3VXLAN FDB)
+remain ahead in slice 6 PR B.
 Native Type 1/4 multi-homing origination is driven by
 `[[ethernet_segments]]`; the injection API does not expose those route
 types yet (the RR still reflects them when received from peers).

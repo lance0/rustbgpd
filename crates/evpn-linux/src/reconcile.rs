@@ -355,6 +355,13 @@ impl<D: Dataplane> ReconcileActor<D> {
         Self::log_ip_vrf_transitions(&mut self.state.last_ip_vrf_status, &ip_vrf_status_map);
         let ip_vrf_status = build_ip_vrf_status(&intent.ip_vrfs, &ip_vrf_status_map);
 
+        // Gate 9 slice 6a: dump kernel routes per IP-VRF's `table_id`
+        // and emit per-VRF observations on the report. Short-circuits
+        // when the intent's `IpVrfTable` is empty (Gate 9 opt-in via
+        // `[[evpn_ip_vrfs]]`), so L2-only and RR-only deployments
+        // never pay the netlink dump cost.
+        let ip_vrf_routes = self.dataplane.dump_ip_vrf_routes(&intent.ip_vrfs).await;
+
         let snapshot = match self.dataplane.dump_snapshot().await {
             Ok(s) => s,
             Err(e) => {
@@ -366,8 +373,15 @@ impl<D: Dataplane> ReconcileActor<D> {
                 let status = build_instance_status(&intent.instances, &probes);
                 let bum_enforcement =
                     build_bum_enforcement_status(&intent.bum_enforcement, &KernelSnapshot::new());
-                self.emit_report(status, vec![], vec![], bum_enforcement, ip_vrf_status)
-                    .await;
+                self.emit_report(
+                    status,
+                    vec![],
+                    vec![],
+                    bum_enforcement,
+                    ip_vrf_status,
+                    ip_vrf_routes,
+                )
+                .await;
                 return;
             }
         };
@@ -454,8 +468,15 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
 
         let status = build_instance_status(&intent.instances, &probes);
-        self.emit_report(status, applied, failed, bum_enforcement, ip_vrf_status)
-            .await;
+        self.emit_report(
+            status,
+            applied,
+            failed,
+            bum_enforcement,
+            ip_vrf_status,
+            ip_vrf_routes,
+        )
+        .await;
     }
 
     /// Apply each op in the plan, recording successes in `owned` and
@@ -715,6 +736,7 @@ impl<D: Dataplane> ReconcileActor<D> {
         failed: Vec<FailedOp>,
         bum_enforcement: Vec<rustbgpd_evpn::BumEnforcementStatus>,
         ip_vrf_status: Vec<rustbgpd_evpn::IpVrfDataplaneStatus>,
+        ip_vrf_routes: Option<rustbgpd_evpn::ip_vrf::IpVrfRouteDump>,
     ) {
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
@@ -724,6 +746,7 @@ impl<D: Dataplane> ReconcileActor<D> {
             failed,
             bum_enforcement,
             ip_vrf_status,
+            ip_vrf_routes,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");

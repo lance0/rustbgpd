@@ -10,10 +10,12 @@
 //! particular §3 (observe-only Linux device lifecycle) and §4 (Router
 //! MAC is operator-supplied, never auto-derived from the kernel).
 
+pub mod observation;
 pub mod origination;
 pub mod projection;
 pub mod readiness;
 
+pub use observation::{IpVrfRouteDump, LocalIpRouteObservation, RouteFilterReason, RouteSource};
 pub use origination::{
     LocalIpRoute, OriginatedIpPrefixRoute, OriginationError, originate_ip_prefix_route,
 };
@@ -193,12 +195,25 @@ pub enum IpVrfError {
 }
 
 /// Resolved table of local IP-VRFs, with uniqueness enforced on
-/// `(name)` and `(id)`. Built once at config load (or after each
-/// SIGHUP reconcile pass) and held by the supervisor.
+/// `(name)`, `(id)`, and `(table_id)`. Built once at config load (or
+/// after each SIGHUP reconcile pass) and held by the supervisor.
+///
+/// `table_id` uniqueness matters for runtime correctness, not just
+/// operator hygiene: the slice 6a route classifier
+/// (`crates/evpn-linux/src/linux/routes.rs`) keys observations off
+/// `RouteAttribute::Table(u32)`, so two VRFs sharing the same
+/// `table_id` would misattribute every kernel route in that table to
+/// whichever VRF won the `HashMap::insert` race. That cross-tenant
+/// misattribution could leak a prefix under the wrong L3VNI / RD / RT
+/// on the wire. Rejecting at config load keeps the runtime path
+/// structurally safe.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct IpVrfTable {
     by_name: std::collections::BTreeMap<String, IpVrf>,
     by_id: std::collections::BTreeMap<IpVrfId, String>,
+    /// `table_id` → operator-facing name. Built so route observations
+    /// keyed on `RouteAttribute::Table` resolve to a single IP-VRF.
+    by_table_id: std::collections::BTreeMap<u32, String>,
     /// Names of IP-VRFs that any `[[evpn_instances]]` entry referenced.
     /// Built incrementally so the config layer can validate without
     /// scanning the L2 table.
@@ -212,12 +227,14 @@ impl IpVrfTable {
         Self::default()
     }
 
-    /// Insert an IP-VRF, enforcing uniqueness on `name` and `id`.
+    /// Insert an IP-VRF, enforcing uniqueness on `name`, `id`, and
+    /// `table_id`.
     ///
     /// # Errors
     /// Returns [`IpVrfTableError::DuplicateName`] /
-    /// [`IpVrfTableError::DuplicateId`] when either key is already
-    /// present.
+    /// [`IpVrfTableError::DuplicateId`] /
+    /// [`IpVrfTableError::DuplicateTableId`] when the respective
+    /// key is already present.
     pub fn insert(&mut self, vrf: IpVrf) -> Result<(), IpVrfTableError> {
         if self.by_name.contains_key(&vrf.name) {
             return Err(IpVrfTableError::DuplicateName { name: vrf.name });
@@ -229,7 +246,15 @@ impl IpVrfTable {
                 duplicate: vrf.name,
             });
         }
+        if let Some(existing) = self.by_table_id.get(&vrf.table_id) {
+            return Err(IpVrfTableError::DuplicateTableId {
+                table_id: vrf.table_id,
+                existing: existing.clone(),
+                duplicate: vrf.name,
+            });
+        }
         self.by_id.insert(vrf.id, vrf.name.clone());
+        self.by_table_id.insert(vrf.table_id, vrf.name.clone());
         self.by_name.insert(vrf.name.clone(), vrf);
         Ok(())
     }
@@ -284,6 +309,16 @@ pub enum IpVrfTableError {
     #[error("evpn_ip_vrfs: L3VNI {vni} declared twice ({existing:?} and {duplicate:?})")]
     DuplicateId {
         vni: u32,
+        existing: String,
+        duplicate: String,
+    },
+    #[error(
+        "evpn_ip_vrfs: table_id {table_id} declared twice ({existing:?} and {duplicate:?}) — \
+         each IP-VRF must own its own kernel route table or slice 6a route observations would \
+         misattribute prefixes across tenants"
+    )]
+    DuplicateTableId {
+        table_id: u32,
         existing: String,
         duplicate: String,
     },
@@ -522,6 +557,48 @@ mod tests {
         assert!(matches!(
             err,
             IpVrfTableError::DuplicateId { vni: 5000, .. }
+        ));
+    }
+
+    /// Two IP-VRFs sharing the same `table_id` must be rejected at
+    /// table-insert time. The slice 6a route classifier keys
+    /// observations off `RouteAttribute::Table`, so a collision
+    /// would silently misattribute kernel routes to whichever VRF
+    /// won the `HashMap::insert` race — a potential cross-tenant
+    /// leak. Catching at config load makes the runtime path
+    /// structurally safe.
+    #[test]
+    fn rejects_duplicate_table_id() {
+        let mut t = IpVrfTable::new();
+        let a = IpVrf::new(
+            "blue".to_string(),
+            IpVrfId::new(5000).unwrap(),
+            rd(),
+            vec![rt()],
+            vtep(),
+            router_mac(),
+            "vrf-blue".to_string(),
+            "vni5000".to_string(),
+            100,
+        )
+        .unwrap();
+        let b = IpVrf::new(
+            "red".to_string(),
+            IpVrfId::new(6000).unwrap(),
+            rd(),
+            vec![rt()],
+            vtep(),
+            router_mac(),
+            "vrf-red".to_string(),
+            "vni6000".to_string(),
+            100, // collision
+        )
+        .unwrap();
+        t.insert(a).unwrap();
+        let err = t.insert(b).unwrap_err();
+        assert!(matches!(
+            err,
+            IpVrfTableError::DuplicateTableId { table_id: 100, .. }
         ));
     }
 }

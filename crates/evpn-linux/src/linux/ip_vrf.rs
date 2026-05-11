@@ -79,6 +79,17 @@ impl IpVrfObservations {
             l3vxlan: self.vxlans.get(l3vxlan_device).copied(),
         }
     }
+
+    /// `IFLA_IFNAME` → `ifindex` map for every observed VXLAN device.
+    /// Used by the per-IP-VRF route dump (slice 6a) to recognize
+    /// routes whose output device is the IP-VRF's own L3 VXLAN and
+    /// filter them.
+    pub(crate) fn vxlan_name_to_ifindex(&self) -> HashMap<String, u32> {
+        self.vxlans
+            .iter()
+            .map(|(name, obs)| (name.clone(), obs.ifindex))
+            .collect()
+    }
 }
 
 /// Walk every netlink-reported link and pick out VRF + VXLAN devices.

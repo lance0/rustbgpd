@@ -94,7 +94,10 @@ pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use instance::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError,
 };
-pub use ip_vrf::{IpVrf, IpVrfError, IpVrfId, IpVrfIdError, IpVrfTable, IpVrfTableError};
+pub use ip_vrf::{
+    IpVrf, IpVrfError, IpVrfId, IpVrfIdError, IpVrfRouteDump, IpVrfTable, IpVrfTableError,
+    LocalIpRouteObservation, RouteFilterReason, RouteSource,
+};
 pub use label_allocator::{AllocateError, EsiLabelAllocator, synthesize_from_esi};
 pub use mac::{
     LocalMacObservation, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
@@ -114,5 +117,9 @@ pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
 // Re-export the wire `RouteDistinguisher` so consumers of this crate
 // (including `crates/evpn-linux` and the daemon's projection layer)
 // can name the type without taking a direct `rustbgpd-wire` dep just
-// to construct an `EvpnInstance`.
-pub use rustbgpd_wire::{EthernetSegmentIdentifier, RouteDistinguisher};
+// to construct an `EvpnInstance`. The IP-prefix wire types are
+// re-exported for the same reason: slice 6 plumbing in `evpn-linux`
+// needs to spell out kernel-route prefixes without depending on wire.
+pub use rustbgpd_wire::{
+    EthernetSegmentIdentifier, EvpnIpPrefixValue, Ipv4Prefix, Ipv6Prefix, RouteDistinguisher,
+};
