@@ -159,15 +159,28 @@ pub trait Dataplane: Send {
     /// for filtered routes ride alongside on
     /// [`IpVrfRouteDump::filter_counts`].
     ///
-    /// Default returns an empty [`IpVrfRouteDump`] — implementations
-    /// that don't support Gate 9 (`InMemoryDataplane`, future
-    /// non-Linux impls) silently no-op for IP-VRF routes. The trait
-    /// extension stays non-breaking via this default.
+    /// Returns `None` on transient kernel-dump failure. The
+    /// reconciler forwards `None` to the daemon, which preserves the
+    /// last successful observation snapshot in its watch channel
+    /// rather than synthesizing an empty dump — a swallowed dump
+    /// failure would otherwise look identical to "the kernel has no
+    /// routes" and the L3 originator would withdraw every
+    /// currently-originated Type 5 (ADR-0054 §6 level-triggered
+    /// model requires "don't advance state on failure", not "publish
+    /// empty"). Implementations log the underlying error before
+    /// returning `None`.
+    ///
+    /// Default returns `Some(IpVrfRouteDump::default())` —
+    /// implementations that don't support Gate 9
+    /// (`InMemoryDataplane`, future non-Linux impls) silently no-op
+    /// for IP-VRF routes (zero VRFs configured → no observations,
+    /// no failure either). The trait extension stays non-breaking
+    /// via this default.
     fn dump_ip_vrf_routes(
         &mut self,
         _ip_vrfs: &IpVrfTable,
-    ) -> impl Future<Output = IpVrfRouteDump> + Send {
-        async { IpVrfRouteDump::default() }
+    ) -> impl Future<Output = Option<IpVrfRouteDump>> + Send {
+        async { Some(IpVrfRouteDump::default()) }
     }
 
     /// Dump the current kernel FDB + link inventory.

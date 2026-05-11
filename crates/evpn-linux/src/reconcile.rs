@@ -736,7 +736,7 @@ impl<D: Dataplane> ReconcileActor<D> {
         failed: Vec<FailedOp>,
         bum_enforcement: Vec<rustbgpd_evpn::BumEnforcementStatus>,
         ip_vrf_status: Vec<rustbgpd_evpn::IpVrfDataplaneStatus>,
-        ip_vrf_routes: rustbgpd_evpn::ip_vrf::IpVrfRouteDump,
+        ip_vrf_routes: Option<rustbgpd_evpn::ip_vrf::IpVrfRouteDump>,
     ) {
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,

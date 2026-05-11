@@ -1229,29 +1229,43 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         // observations themselves are forwarded onto
                         // a watch channel for the L3 originator
                         // (slice 6b) to subscribe to.
-                        for (vrf_id, observations) in &report.ip_vrf_routes.observations {
-                            let label = vrf_id_to_name
-                                .get(vrf_id)
-                                .cloned()
-                                .unwrap_or_else(|| vrf_id.as_u32().to_string());
-                            metrics_for_routes.set_evpn_ip_vrf_observed_routes(
-                                &label,
-                                i64::try_from(observations.len()).unwrap_or(i64::MAX),
+                        //
+                        // `ip_vrf_routes = None` signals a transient
+                        // kernel-dump failure (ADR-0054 §6). Preserve
+                        // the watch's last-good value and do not
+                        // increment Prometheus counters — the next
+                        // successful reconcile pass will re-publish
+                        // and bump filter counts from a fresh dump.
+                        if let Some(dump) = report.ip_vrf_routes {
+                            for (vrf_id, observations) in &dump.observations {
+                                let label = vrf_id_to_name
+                                    .get(vrf_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| vrf_id.as_u32().to_string());
+                                metrics_for_routes.set_evpn_ip_vrf_observed_routes(
+                                    &label,
+                                    i64::try_from(observations.len()).unwrap_or(i64::MAX),
+                                );
+                            }
+                            for ((vrf_id, reason), delta) in &dump.filter_counts {
+                                let label = vrf_id_to_name
+                                    .get(vrf_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| vrf_id.as_u32().to_string());
+                                metrics_for_routes.add_evpn_ip_vrf_observed_routes_filtered(
+                                    &label,
+                                    reason.label(),
+                                    *delta,
+                                );
+                            }
+                            evpn_ip_vrf_routes_tx
+                                .send_replace(std::sync::Arc::new(dump.observations));
+                        } else {
+                            tracing::debug!(
+                                "ip-vrf route dump failed this reconcile pass; preserving \
+                                 last-good observation snapshot"
                             );
                         }
-                        for ((vrf_id, reason), delta) in &report.ip_vrf_routes.filter_counts {
-                            let label = vrf_id_to_name
-                                .get(vrf_id)
-                                .cloned()
-                                .unwrap_or_else(|| vrf_id.as_u32().to_string());
-                            metrics_for_routes.add_evpn_ip_vrf_observed_routes_filtered(
-                                &label,
-                                reason.label(),
-                                *delta,
-                            );
-                        }
-                        evpn_ip_vrf_routes_tx
-                            .send_replace(std::sync::Arc::new(report.ip_vrf_routes.observations));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // The reconcile actor emits at most one report

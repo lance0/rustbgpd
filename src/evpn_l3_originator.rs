@@ -125,9 +125,8 @@ impl OriginatedIpVrfRouteCounts {
     }
 }
 
-/// Handle returned by [`spawn`]. Drop to keep running; call
-/// [`Self::join`] after triggering the parent shutdown token to wait
-/// for a clean drain.
+/// Handle returned by [`spawn`]. Call [`Self::shutdown`] to cancel
+/// the actor and wait for the drain to finish.
 pub struct EvpnL3OriginatorHandle {
     shutdown: CancellationToken,
     join: tokio::task::JoinHandle<()>,
@@ -279,20 +278,25 @@ async fn reconcile(
         );
     }
 
-    // Phase 1: withdrawals — `have - want`.
-    let to_withdraw: Vec<(IpVrfId, EvpnIpPrefixValue)> = originated
-        .keys()
-        .filter(|k| !want.contains_key(k))
-        .copied()
+    // Phase 1: withdrawals — `have - want`. Only drop the entry
+    // from `originated` once the RIB has acknowledged the withdraw;
+    // a transient channel/reply failure leaves the entry in place so
+    // the next reconcile pass retries (level-triggered model).
+    let to_withdraw: Vec<((IpVrfId, EvpnIpPrefixValue), EvpnRouteKey)> = originated
+        .iter()
+        .filter(|(k, _)| !want.contains_key(k))
+        .map(|(k, v)| (*k, *v))
         .collect();
-    for (vrf_id, prefix) in to_withdraw {
-        let key = originated
-            .remove(&(vrf_id, prefix))
-            .expect("just observed in keys()");
-        withdraw_one(&cfg.rib_tx, vrf_id, key, &cfg.originated_counts).await;
+    for ((vrf_id, prefix), key) in to_withdraw {
+        if withdraw_one(&cfg.rib_tx, vrf_id, key, &cfg.originated_counts).await {
+            originated.remove(&(vrf_id, prefix));
+        }
     }
 
-    // Phase 2: injections — `want - have`.
+    // Phase 2: injections — `want - have`. Only record the entry in
+    // `originated` once the RIB has acknowledged the inject. A
+    // failed inject leaves us in the "want, not yet originated"
+    // state so the next pass retries with the same shape.
     for ((vrf_id, prefix), obs) in &want {
         if originated.contains_key(&(*vrf_id, *prefix)) {
             continue; // already originated
@@ -312,8 +316,9 @@ async fn reconcile(
             }
         };
         let key = route.key();
-        inject_one(&cfg.rib_tx, *vrf_id, key, route, &cfg.originated_counts).await;
-        originated.insert((*vrf_id, *prefix), key);
+        if inject_one(&cfg.rib_tx, *vrf_id, key, route, &cfg.originated_counts).await {
+            originated.insert((*vrf_id, *prefix), key);
+        }
     }
 }
 
@@ -340,13 +345,21 @@ fn try_originate(
     })
 }
 
+/// Issue an `InjectEvpn` over the RIB channel and wait for the
+/// acknowledgement. Returns `true` only when the RIB replied
+/// `Ok(())`; `false` for every failure path (channel closed before
+/// send, reply dropped, RIB rejected with a string error). Callers
+/// must gate their state updates on the return value — recording an
+/// inject as "complete" without an ack would diverge the originator's
+/// in-memory state from the RIB and leave the next reconcile pass
+/// unable to retry.
 async fn inject_one(
     rib_tx: &mpsc::Sender<RibUpdate>,
     vrf_id: IpVrfId,
     _key: EvpnRouteKey,
     route: EvpnRibRoute,
     counts: &OriginatedIpVrfRouteCounts,
-) {
+) -> bool {
     let (reply_tx, reply_rx) = oneshot::channel();
     if rib_tx
         .send(RibUpdate::InjectEvpn {
@@ -357,21 +370,35 @@ async fn inject_one(
         .is_err()
     {
         warn!("L3 originator: rib channel closed during inject");
-        return;
+        return false;
     }
     match reply_rx.await {
-        Ok(Ok(())) => counts.inc(vrf_id),
-        Ok(Err(e)) => warn!(error = %e, vrf_id = ?vrf_id, "L3 originator: RIB rejected inject"),
-        Err(_) => warn!(vrf_id = ?vrf_id, "L3 originator: inject reply dropped"),
+        Ok(Ok(())) => {
+            counts.inc(vrf_id);
+            true
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, vrf_id = ?vrf_id, "L3 originator: RIB rejected inject");
+            false
+        }
+        Err(_) => {
+            warn!(vrf_id = ?vrf_id, "L3 originator: inject reply dropped");
+            false
+        }
     }
 }
 
+/// Issue a `WithdrawEvpn` over the RIB channel and wait for the
+/// acknowledgement. Returns `true` only when the RIB replied
+/// `Ok(())`. Callers must keep the entry in their in-memory
+/// `originated` map when this returns `false` so the next reconcile
+/// pass retries.
 async fn withdraw_one(
     rib_tx: &mpsc::Sender<RibUpdate>,
     vrf_id: IpVrfId,
     key: EvpnRouteKey,
     counts: &OriginatedIpVrfRouteCounts,
-) {
+) -> bool {
     let (reply_tx, reply_rx) = oneshot::channel();
     if rib_tx
         .send(RibUpdate::WithdrawEvpn {
@@ -382,22 +409,36 @@ async fn withdraw_one(
         .is_err()
     {
         warn!("L3 originator: rib channel closed during withdraw");
-        return;
+        return false;
     }
     match reply_rx.await {
-        Ok(Ok(())) => counts.dec(vrf_id),
-        Ok(Err(e)) => warn!(error = %e, vrf_id = ?vrf_id, "L3 originator: RIB rejected withdraw"),
-        Err(_) => warn!(vrf_id = ?vrf_id, "L3 originator: withdraw reply dropped"),
+        Ok(Ok(())) => {
+            counts.dec(vrf_id);
+            true
+        }
+        Ok(Err(e)) => {
+            warn!(error = %e, vrf_id = ?vrf_id, "L3 originator: RIB rejected withdraw");
+            false
+        }
+        Err(_) => {
+            warn!(vrf_id = ?vrf_id, "L3 originator: withdraw reply dropped");
+            false
+        }
     }
 }
 
+/// Best-effort drain on shutdown. Walks every currently-originated
+/// route and tries to withdraw it; entries whose withdraw fails stay
+/// in the map but the map is dropped at task exit anyway, so this is
+/// strictly observability. The bounded `EvpnL3OriginatorHandle::shutdown`
+/// timeout caps how long the daemon waits.
 async fn drain_all(
     originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
     cfg: &SpawnConfig,
 ) {
     let snapshot: Vec<_> = originated.iter().map(|(k, v)| (*k, *v)).collect();
     for ((vrf_id, _prefix), key) in &snapshot {
-        withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await;
+        let _ = withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await;
     }
     originated.clear();
 }
@@ -481,10 +522,39 @@ mod tests {
         }
     }
 
-    /// Spawn a RIB-channel responder that immediately replies `Ok(())`
-    /// to every Inject / Withdraw and records the message kind +
-    /// route key for the test to inspect.
-    fn rib_responder() -> (
+    /// What the test RIB responder does for each request kind.
+    /// Defaults to `Ok` for both; tests for the inject-failure and
+    /// withdraw-failure regression paths (review finding #2) flip
+    /// one or both arms to `Reject` to simulate a RIB that rejects
+    /// the request with an error string.
+    #[derive(Debug, Clone, Copy)]
+    struct RibResponderMode {
+        inject: ReplyMode,
+        withdraw: ReplyMode,
+    }
+
+    impl Default for RibResponderMode {
+        fn default() -> Self {
+            Self {
+                inject: ReplyMode::Ok,
+                withdraw: ReplyMode::Ok,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ReplyMode {
+        Ok,
+        Reject,
+    }
+
+    /// Spawn a RIB-channel responder that records every Inject /
+    /// Withdraw plus the configured reply outcome. Records the
+    /// recorded `RibCall` *before* sending the reply so the test
+    /// can observe the request shape even when the reply is `Err`.
+    fn rib_responder(
+        mode: RibResponderMode,
+    ) -> (
         mpsc::Sender<RibUpdate>,
         tokio::task::JoinHandle<Vec<RibCall>>,
     ) {
@@ -495,12 +565,20 @@ mod tests {
                 match msg {
                     RibUpdate::InjectEvpn { route, reply } => {
                         let key = route.key();
-                        let _ = reply.send(Ok(()));
                         calls.push(RibCall::Inject(key));
+                        let response = match mode.inject {
+                            ReplyMode::Ok => Ok(()),
+                            ReplyMode::Reject => Err("test rejection".to_string()),
+                        };
+                        let _ = reply.send(response);
                     }
                     RibUpdate::WithdrawEvpn { key, reply } => {
-                        let _ = reply.send(Ok(()));
                         calls.push(RibCall::Withdraw(key));
+                        let response = match mode.withdraw {
+                            ReplyMode::Ok => Ok(()),
+                            ReplyMode::Reject => Err("test rejection".to_string()),
+                        };
+                        let _ = reply.send(response);
                     }
                     _other => {
                         calls.push(RibCall::Other);
@@ -529,6 +607,10 @@ mod tests {
 
     impl Harness {
         fn new(vrfs: Vec<IpVrf>) -> Self {
+            Self::with_responder_mode(vrfs, RibResponderMode::default())
+        }
+
+        fn with_responder_mode(vrfs: Vec<IpVrf>, mode: RibResponderMode) -> Self {
             let mut table = IpVrfTable::new();
             for v in vrfs {
                 table.insert(v).unwrap();
@@ -536,7 +618,7 @@ mod tests {
             let ip_vrfs = Arc::new(table);
             let (obs_tx, obs_rx) = watch::channel(Arc::new(HashMap::new()));
             let (status_tx, status_rx) = watch::channel(Vec::<IpVrfDataplaneStatus>::new());
-            let (rib_tx, rib_handle) = rib_responder();
+            let (rib_tx, rib_handle) = rib_responder(mode);
             let cfg = SpawnConfig {
                 ip_vrfs,
                 rib_tx: rib_tx.clone(),
@@ -786,5 +868,168 @@ mod tests {
             rib_rx.try_recv(),
             Err(TryRecvError::Empty | TryRecvError::Disconnected)
         ));
+    }
+
+    /// Regression for review finding #1: when the dataplane crate
+    /// reports a transient kernel route-dump failure, the daemon's
+    /// subscriber preserves the watch channel's last-good value
+    /// rather than publishing an empty map. The originator therefore
+    /// continues to see the same observation set across the failure
+    /// and must NOT withdraw any currently-originated Type 5 routes.
+    ///
+    /// Driven at the originator layer by holding the observation
+    /// watch stable across multiple reconcile passes — the daemon's
+    /// `if let Some(dump) = report.ip_vrf_routes` branch enforces
+    /// this contract upstream.
+    #[tokio::test]
+    async fn route_dump_failure_preserves_originated_routes() {
+        let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let predicted = predicted_key(&v, observation(100, [10, 1, 0, 0], 24).prefix);
+        let mut h = Harness::new(vec![v]);
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert_eq!(originated.len(), 1);
+
+        // Simulate the dataplane reporting a transient dump failure:
+        // the daemon's contract is to NOT update the observation
+        // watch. Trigger reconcile via a status re-publish (same
+        // value, but `send_replace` always fires `changed()`).
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+
+        assert_eq!(
+            originated.len(),
+            1,
+            "transient route-dump failure must not drop originated entries"
+        );
+        let calls = h.collect_calls().await;
+        assert_eq!(
+            calls,
+            vec![RibCall::Inject(predicted)],
+            "no Withdraw should fire when observations are preserved across a transient failure"
+        );
+    }
+
+    /// Regression for review finding #2 (inject branch): when the
+    /// RIB rejects an `InjectEvpn` with an error reply, the originator
+    /// must NOT record the route as originated. The next reconcile
+    /// pass observes the same `want` shape and retries the inject.
+    #[tokio::test]
+    async fn inject_failure_keeps_route_pending_for_retry() {
+        let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let predicted = predicted_key(&v, observation(100, [10, 1, 0, 0], 24).prefix);
+        let mut h = Harness::with_responder_mode(
+            vec![v],
+            RibResponderMode {
+                inject: ReplyMode::Reject,
+                withdraw: ReplyMode::Ok,
+            },
+        );
+
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert!(
+            originated.is_empty(),
+            "failed inject must not record the entry as originated"
+        );
+
+        // Second pass: same `want`, same `have` (empty). The
+        // originator should retry the inject. We can't easily flip
+        // the responder mode mid-test, so just assert the second
+        // pass also emits an Inject (proving retry).
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+        assert!(originated.is_empty());
+
+        let calls = h.collect_calls().await;
+        let injects = calls
+            .iter()
+            .filter(|c| matches!(c, RibCall::Inject(_)))
+            .count();
+        assert_eq!(
+            injects, 2,
+            "originator must retry on the next reconcile after a rejected inject"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|c| matches!(c, RibCall::Inject(k) if *k == predicted)),
+            "every retry uses the same EvpnRouteKey"
+        );
+    }
+
+    /// Regression for review finding #2 (withdraw branch): when the
+    /// RIB rejects a `WithdrawEvpn`, the originator must KEEP the
+    /// entry in its in-memory `originated` map so the next reconcile
+    /// pass retries.
+    #[tokio::test]
+    async fn withdraw_failure_keeps_route_originated() {
+        let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let predicted = predicted_key(&v, observation(100, [10, 1, 0, 0], 24).prefix);
+        let mut h = Harness::with_responder_mode(
+            vec![v],
+            RibResponderMode {
+                inject: ReplyMode::Ok,
+                withdraw: ReplyMode::Reject,
+            },
+        );
+
+        // Inject succeeds.
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert_eq!(originated.len(), 1);
+
+        // Observations cleared → next reconcile wants withdraw, but
+        // the rejecting responder fails the request. Entry must
+        // stay in `originated` so the next pass retries.
+        let mut empty_map = HashMap::new();
+        empty_map.insert(IpVrfId::new(100).unwrap(), vec![]);
+        h.obs_tx.send_replace(Arc::new(empty_map));
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+        assert_eq!(
+            originated.len(),
+            1,
+            "failed withdraw must leave the entry in place for retry"
+        );
+
+        // Second pass: same `want`, same `have`. Retry the withdraw.
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+        assert_eq!(originated.len(), 1);
+
+        let calls = h.collect_calls().await;
+        let withdraws = calls
+            .iter()
+            .filter(|c| matches!(c, RibCall::Withdraw(_)))
+            .count();
+        assert_eq!(
+            withdraws, 2,
+            "originator must retry on the next reconcile after a rejected withdraw"
+        );
+        assert!(
+            calls
+                .iter()
+                .filter(|c| matches!(c, RibCall::Withdraw(_)))
+                .all(|c| matches!(c, RibCall::Withdraw(k) if *k == predicted)),
+        );
     }
 }
