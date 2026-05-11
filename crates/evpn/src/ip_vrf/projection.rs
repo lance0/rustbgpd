@@ -24,13 +24,30 @@
 //! — observable, not silent. Those routes are either malformed or
 //! intended for L2 EVIs and have no place in an IP-VRF FIB.
 //!
-//! A route whose RTs intersect *multiple* IP-VRFs is imported into
-//! every matching one. That's correct per RFC 9136 §4.4.2 — the same
-//! prefix can legitimately appear in two tenant FIBs if both tenants
-//! claim the same RT — but operators tend to treat it as a
-//! misconfiguration. The supervisor logs at WARN when it happens; the
-//! projection layer just reports it via the multi-tenant `entries`
-//! shape and stays quiet.
+//! A route whose RTs intersect *multiple* IP-VRFs is considered for
+//! import into every match — but each candidate VRF still has to
+//! pass the L3VNI check (§Wire L3VNI vs configured L3VNI below). In
+//! practice the wire route carries a single L3VNI, so a route that
+//! matches multiple IP-VRFs by RT can only land in the one whose
+//! configured L3VNI agrees; the others are recorded with
+//! [`DropReason::L3VniMismatch`]. RFC 9136 §4.4.2 allows the same
+//! prefix in two tenant FIBs when both tenants legitimately claim
+//! the same RT (and same VNI); shared RTs across distinct-VNI
+//! tenants is operator misconfig and the projection surfaces it
+//! rather than silently programming the wrong encap.
+//!
+//! ## Wire L3VNI vs configured L3VNI
+//!
+//! Each candidate IP-VRF must additionally satisfy
+//! `route.l3vni == vrf.id.as_u32()`. A mismatch means the
+//! originator's VNI for that RT disagrees with our local config —
+//! installing the route anyway would program a kernel FIB entry
+//! whose VXLAN encap uses the wrong VNI. Drop with
+//! [`DropReason::L3VniMismatch`] so the misconfig is observable.
+//! When the check passes, the [`RemoteIpPrefixEntry::l3vni`] is
+//! sourced from the *VRF's* configured VNI (not echoed from the
+//! wire) so any future drift in the wire decoder can't propagate
+//! into kernel programming.
 //!
 //! ## Router MAC
 //!
@@ -195,6 +212,21 @@ pub enum DropReason {
         next_hop: IpAddr,
         vrf: String,
     },
+    /// The route's RTs matched an IP-VRF, but the route's wire
+    /// `l3vni` (label slot) disagreed with that IP-VRF's configured
+    /// L3VNI. This means the originator and the local config
+    /// disagree on the L3VNI for the same RT — either misconfig on
+    /// the originator, or the operator's RT list overlaps two
+    /// distinct tenants on this PE. Importing the route would
+    /// produce a kernel FIB entry whose VXLAN encap uses the wrong
+    /// VNI; drop instead so the misconfig is observable.
+    L3VniMismatch {
+        prefix: EvpnIpPrefixValue,
+        next_hop: IpAddr,
+        vrf: String,
+        observed_vni: u32,
+        configured_vni: u32,
+    },
 }
 
 /// Build a [`RemoteIpPrefixTable`] from the IP-VRF table and a stream
@@ -246,26 +278,43 @@ where
         };
 
         // RT match: for every IP-VRF whose RT set intersects the
-        // route's RT list, install one entry.
-        let mut imported_anywhere = false;
+        // route's RT list, additionally verify the route's wire
+        // L3VNI matches the IP-VRF's configured L3VNI before
+        // installing. A mismatch means the originator's VNI
+        // disagrees with our config for the same RT, which would
+        // program a kernel FIB entry whose VXLAN encap uses the
+        // wrong VNI — drop with `L3VniMismatch` so the misconfig
+        // is observable rather than silently wrong.
+        let mut matched_any_rt = false;
         for vrf in vrfs.iter() {
-            if rt_match(&vrf.route_targets, &route.route_targets) {
-                imported_anywhere = true;
-                let entry = RemoteIpPrefixEntry {
+            if !rt_match(&vrf.route_targets, &route.route_targets) {
+                continue;
+            }
+            matched_any_rt = true;
+            if route.l3vni != vrf.id.as_u32() {
+                table.drops.push(DropReason::L3VniMismatch {
                     prefix: route.prefix,
                     next_hop: route.next_hop,
-                    l3vni: route.l3vni,
-                    router_mac,
-                };
-                // Last-write-wins on (IpVrfId, prefix) collisions.
-                // Equal-best routes only land here after the RIB has
-                // picked one, so this branch is operationally
-                // unreachable, but the projection stays deterministic
-                // by inserting last.
-                table.entries.insert((vrf.id, route.prefix), entry);
+                    vrf: vrf.name.clone(),
+                    observed_vni: route.l3vni,
+                    configured_vni: vrf.id.as_u32(),
+                });
+                continue;
             }
+            let entry = RemoteIpPrefixEntry {
+                prefix: route.prefix,
+                next_hop: route.next_hop,
+                l3vni: vrf.id.as_u32(),
+                router_mac,
+            };
+            // Last-write-wins on (IpVrfId, prefix) collisions.
+            // Equal-best routes only land here after the RIB has
+            // picked one, so this branch is operationally
+            // unreachable, but the projection stays deterministic
+            // by inserting last.
+            table.entries.insert((vrf.id, route.prefix), entry);
         }
-        if !imported_anywhere {
+        if !matched_any_rt {
             table.drops.push(DropReason::NoMatchingIpVrf {
                 prefix: route.prefix,
                 next_hop: route.next_hop,
@@ -406,7 +455,13 @@ mod tests {
     }
 
     #[test]
-    fn route_with_multiple_matching_vrfs_imports_into_each() {
+    fn route_with_multiple_matching_vrfs_imports_into_each_with_matching_vni() {
+        // Two VRFs share an RT but have distinct L3VNIs (the table
+        // enforces VNI uniqueness). The wire route carries a single
+        // L3VNI — so it can match the L3VNI of at most one VRF.
+        // Under the post-fix semantics, the route imports into the
+        // VRF whose VNI matches and is dropped (L3VniMismatch) for
+        // the other.
         let mut vrfs = IpVrfTable::new();
         vrfs.insert(vrf_with("blue", 5000, "10.0.0.1", &["65000:5000"]))
             .unwrap();
@@ -416,11 +471,62 @@ mod tests {
             &vrfs,
             vec![route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"])],
         );
-        assert_eq!(table.len(), 2);
         let blue = IpVrfId::new(5000).unwrap();
         let red = IpVrfId::new(5001).unwrap();
         assert_eq!(table.for_vrf(blue).count(), 1);
-        assert_eq!(table.for_vrf(red).count(), 1);
+        assert_eq!(table.for_vrf(red).count(), 0);
+        // The mismatch with the red VRF is recorded so an operator
+        // can spot the misconfig (RT shared across tenants with
+        // different VNIs).
+        assert!(table.drops().iter().any(|d| matches!(
+            d,
+            DropReason::L3VniMismatch { vrf, observed_vni: 5000, configured_vni: 5001, .. }
+                if vrf == "red"
+        )));
+    }
+
+    #[test]
+    fn l3vni_mismatch_drops_route_and_records_drop_reason() {
+        // Single VRF with VNI=5000, but the route advertises VNI=9999.
+        // RT matches → would have imported under the old semantics;
+        // under the post-fix semantics it's dropped.
+        let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        let mut r = route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"]);
+        r.l3vni = 9999;
+        let table = project_ip_prefix_routes(&vrfs, vec![r]);
+        assert!(table.is_empty(), "L3VNI-mismatched route must not import");
+        assert!(
+            table.drops().iter().any(|d| matches!(
+                d,
+                DropReason::L3VniMismatch {
+                    observed_vni: 9999,
+                    configured_vni: 5000,
+                    ..
+                }
+            )),
+            "must record L3VniMismatch drop reason: {:?}",
+            table.drops()
+        );
+    }
+
+    #[test]
+    fn entry_l3vni_uses_vrf_configured_vni_not_route_label() {
+        // Defense-in-depth: even when the route's wire VNI matches
+        // the VRF's configured VNI on the happy path, the entry
+        // should carry the *VRF's* VNI (not echo back the route's
+        // label). This pins the contract that downstream FIB
+        // programming uses the local-config VNI, immunizing the
+        // dataplane from any drift if the wire decoder ever loses
+        // precision.
+        let vrfs = one_vrf("blue", 5000, "10.0.0.1", &["65000:5000"]);
+        let table = project_ip_prefix_routes(
+            &vrfs,
+            vec![route(v4([10, 1, 0, 0], 24), "10.0.0.2", &["65000:5000"])],
+        );
+        let blue = IpVrfId::new(5000).unwrap();
+        let entries: Vec<_> = table.for_vrf(blue).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.l3vni, 5000);
     }
 
     #[test]

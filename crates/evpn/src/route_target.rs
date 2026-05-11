@@ -182,11 +182,15 @@ impl RouteTarget {
     /// | `Ipv4`        | `0x01`                 | `0x02`               | `[ipv4:[u8;4], value:u16]`    |
     /// | `FourOctetAs` | `0x02`                 | `0x02`               | `[asn:u32, value:u16]`        |
     ///
-    /// The transitive flag (high bit `0x40` of the type byte, RFC
-    /// 4360 §3) is omitted on emit — receivers OR it in as needed.
-    /// The decoder ([`Self::from_extended_community`]) clears it
-    /// before matching so a transitive-flagged community still
-    /// recognizes as the same Route Target subtype.
+    /// The type-byte's `0x40` bit is the **non-transitive** flag
+    /// (RFC 4360 §3.1 — bit set means "do not propagate across
+    /// AS boundaries"; bit clear, i.e. the value emitted here,
+    /// means transitive). The decoder
+    /// ([`Self::from_extended_community`]) clears this bit before
+    /// matching so a non-transitive-flagged community still
+    /// recognizes as the same Route Target subtype — relevant if a
+    /// peer originates RTs with the non-transitive bit set
+    /// (uncommon for RTs but RFC-permitted).
     ///
     /// Used by Type 2 / Type 3 / Type 4 / Type 5 origination on the
     /// daemon side.
@@ -220,8 +224,9 @@ impl RouteTarget {
     /// Decode the inverse of [`Self::to_extended_community`]. Returns
     /// `None` for any extended community that isn't a Route Target —
     /// the subtype byte (`bytes[1]`) must be `0x02` and the type
-    /// byte (`bytes[0]`, after masking the transitive flag) must be
-    /// one of the three RFC-defined formats (`0x00` / `0x01` / `0x02`).
+    /// byte (`bytes[0]`, after clearing the non-transitive flag)
+    /// must be one of the three RFC-defined formats (`0x00` / `0x01`
+    /// / `0x02`).
     #[must_use]
     pub fn from_extended_community(c: rustbgpd_wire::ExtendedCommunity) -> Option<Self> {
         let bytes = c.as_u64().to_be_bytes();
@@ -229,9 +234,11 @@ impl RouteTarget {
         if bytes[1] != 0x02 {
             return None;
         }
-        // Type byte selects the variant. Mask off the transitive bit
-        // (0x40, RFC 4360 §3) so a transitive-flagged community decodes
-        // as the same RT format as a non-transitive one.
+        // Type byte selects the variant. Clear the non-transitive
+        // flag bit (`0x40`, RFC 4360 §3.1) so a non-transitive RT
+        // decodes as the same format as a transitive one. RTs are
+        // conventionally transitive (bit clear), but RFC-permitted
+        // non-transitive variants must round-trip cleanly too.
         match bytes[0] & 0x3F {
             0x00 => Some(Self::TwoOctetAs {
                 asn: u16::from_be_bytes([bytes[2], bytes[3]]),
