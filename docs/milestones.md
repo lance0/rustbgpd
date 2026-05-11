@@ -1,4 +1,4 @@
-# Milestone History (M0–M9, M29–M37)
+# Milestone History (M0–M9, M29–M38)
 
 Archived build orders, exit criteria, and design choices from the
 initial development phase. For the current feature roadmap, see
@@ -652,19 +652,65 @@ for the architectural record.
   `LocalMacIpOriginator` state machine, daemon correlation under
   the FRR-style replace model per RFC 9135 §7.2.3. Operator
   prerequisite: bridge `neigh_suppress on`).
+- **Multi-homing foundation (Gate 8, v0.17.0, ADR-0057) — landed.**
+  Three Type 1/4 origination state machines in
+  `crates/evpn/src/origination_es.rs` (Type 4 ES + Type 1 EAD-per-ES
+  + Type 1 EAD-per-EVI), RFC 7432 §8.5 service carving + RFC 8584 §3
+  algorithm negotiation in `crates/evpn/src/df_election.rs`, and a
+  Prometheus `evpn_df_role` surface so operators can observe DF /
+  Non-DF role per `(ESI, EVI)`. **M38 containerlab smoke** validates
+  the DF inputs end-to-end against FRR.
+- **Multi-homing enforcement alpha (Gate 8b) — landed (opt-in).**
+  ESI Label + ES-Import RT extcomms attached to Type 1/4
+  origination, DF-role-aware Type 2 ESI attachment, RFC 7432 §14
+  aliasing receive-side projection
+  (`crates/evpn/src/aliasing.rs`), RFC 7432 §8.4 receive-side
+  EAD-per-ES mass-withdraw filtering
+  (`crates/evpn/src/mass_withdraw.rs`), and opt-in kernel BUM-port
+  enforcement (RFC 7432 §8.5) via `apply_bum_enforcement`. The
+  enforcement primitive flips `flood off / mcast_flood off /
+  bcast_flood off` on the kernel bridge port — validated end-to-end
+  by `evpn_bum_filter_kernel` in CI under a Docker harness with
+  `CAP_NET_ADMIN + CAP_SYS_ADMIN`. Production-default enforcement
+  awaits the 24 h churn soak.
+- **Gate 9 readiness chain — in flight on `main`.** Foundation
+  (ADR-0058 + `[[evpn_ip_vrfs]]` config schema) landed, then
+  pure-logic Type 5 origination + projection helpers in
+  `crates/evpn/src/ip_vrf/`, the IP-VRF readiness probe
+  (`crates/evpn/src/ip_vrf/readiness.rs`), Linux IP-VRF / L3
+  VXLAN netlink dumps in `crates/evpn-linux`, and
+  `Dataplane::probe_ip_vrfs` plumbed through `DataplaneIntent`
+  and the reconcile call. **Still ahead:** Type 5 origination on
+  the wire + the `DataplaneReport` rows that surface it through
+  the CLI, and the Type 5 dataplane / FIB programming half with
+  its M39 manual smoke.
 - **Still deferred (alpha-soak follow-up):** duplicate-MAC
   quarantine action (RFC 7432 §15.1 M=180 s/N=5; detection
   counters shipped, action deferred per ADR-0055 §9), runtime
   mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`).
   Tracked in [docs/evpn-alpha-soak.md](evpn-alpha-soak.md).
-- **DF election execution** (RFC 7432 §8 + RFC 8584) — still
-  deferred. Phase 1 reflects the inputs unchanged so VTEPs run the
-  election themselves.
 - **Symmetric IRB semantics** (RFC 9135) — still deferred. `label2`
-  and Router MAC are preserved across reflection but not
-  interpreted.
+  and Router MAC are preserved across reflection but not yet
+  interpreted on the dataplane.
 - **Type 5 / Type 1 / Type 4 origination via gRPC** — still
-  deferred.
+  deferred. Native Type 1/4 origination ships through
+  `[[ethernet_segments]]`; controller injection for those route
+  types and for Type 5 is not exposed.
 - **RFC 9251 Route Types 6-8** (multicast EVPN), **RFC 7623
   PBB-EVPN**, **MPLS encapsulation**, **RFC 9252 Add-Path for
   EVPN** — still deferred.
+
+### Phase 2 interop scripts (local-only driver scripts)
+
+Beyond the M29-M33 set above, several Phase 2 smokes live in
+`tests/interop/scripts/` but are not wired into PR-CI — they need
+either privileged kernel capabilities or wall time that hosted
+runners can't sustain:
+
+| ID | Scope | Status |
+|----|-------|--------|
+| **M30b** | EVPN Type 5 / IP-Prefix reflection through the RR against a real FRR VTEP with L3VNI binding. | Manual; blocked on hosted runners (Azure-tuned `ubuntu-latest` kernel ships without the `vrf` module so `ip link add ... type vrf` fails inside the FRR container). Runs cleanly on a local box. |
+| **M36** | Gate 7b downward path — rustbgpd-as-VTEP, FRR-as-originator. Validates kernel FDB program/withdraw via rtnetlink. | Manual; needs `CAP_NET_ADMIN` (privileged Docker). |
+| **M37** | Gate 7b+1 upward path — rustbgpd-as-originator, FRR-as-consumer. Validates Type 2 + IMET origination per ADR-0055. | Manual; needs `CAP_NET_ADMIN`. |
+| **M37+IP** | Gate 7b+2 — MAC+IP Type 2 origination via ARP/ND suppression under the FRR-style replace model. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m37-evpn-mac-ip-origination.sh`. |
+| **M38** | Gate 8 — observable DF election with two rustbgpd-as-VTEPs sharing an ESI. Validates Type 1/4 origination + the Prometheus `evpn_df_role` surface. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m38-evpn-df-election.sh`. |

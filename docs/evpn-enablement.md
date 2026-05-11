@@ -1,6 +1,6 @@
 # EVPN Enablement Roadmap
 
-Last updated: 2026-05-07
+Last updated: 2026-05-11
 
 Gate-by-gate plan for turning rustbgpd's Phase 1 EVPN Route Reflector into a
 production-ready control plane and, eventually, a VTEP-capable daemon.
@@ -37,7 +37,13 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 - **Gate 8/8b** adds active-active multi-homing alpha execution:
   DF election, Type 1/4 origination, opt-in BUM suppression,
   ESI-aware Type 2 origination, aliasing projection, and
-  receive-side mass-withdraw filtering. **Gate 9** expands into IRB.
+  receive-side mass-withdraw filtering. **Gate 9** expands into IRB;
+  the readiness chain has landed (`[[evpn_ip_vrfs]]` config schema,
+  pure-logic `IpVrfStatus` probe, Linux VRF + L3 VXLAN netlink
+  dumps, `Dataplane::probe_ip_vrfs` trait + Linux impl, plumbed
+  through `DataplaneIntent` with `Ready` ↔ `NotReady` transitions
+  logged). Type 5 origination + FIB programming and the operator-
+  facing `vrfs` CLI / gRPC surface are still ahead.
   Remaining big investments are gated by operator demand and soak.
 
 ## Current Position
@@ -410,11 +416,11 @@ flow that Gate 7b's foundation left as a stub.
 | Task | File / location |
 |------|----------------|
 | MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine action) — detection counters shipped; the operator-facing escalation channel and quarantine action are deferred per ADR-0055 §9 | `crates/evpn/src/origination.rs` (extend) |
-| Type 5 IP Prefix origination per L3VNI | (deferred to Gate 9 — IP-VRF concept needed) |
+| Type 5 IP Prefix origination per L3VNI | (Gate 9 — pure-logic origination/projection helpers landed in `[Unreleased]`; daemon-side wiring + FIB programming still ahead) |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
-**Closed by post-v0.16.0 follow-ups (in `[Unreleased]`):**
+**Closed in v0.17.0 (post-v0.16.0 follow-ups):**
 
 | Item | Where it landed |
 |------|-----------------|
@@ -454,8 +460,8 @@ Ships:
 
 ### Gate 8b prep — ES-Import RT + ESI Label origination
 
-Status: ✅ shipped (`[Unreleased]`, follows Gate 8 in the same
-release window).
+Status: ✅ shipped in v0.17.0, follows Gate 8 in the same release
+window.
 
 Closes the two control-plane gaps ADR-0057 originally flagged
 from Gate 8 — both extcomms had wire-codec support already,
@@ -475,7 +481,7 @@ so this was an origination-only change with no wire bump:
 
 ### Gate 8b — Multi-homing enforcement
 
-Status: ✅ alpha-supported, opt-in by config (`[Unreleased]`) ·
+Status: ✅ alpha-supported, opt-in by config (shipped in v0.17.0) ·
 Blockers cleared: Gate 8 + Gate 8b prep.
 
 Shipped pieces:
@@ -534,11 +540,47 @@ above closes; enable it deliberately in labs or controlled trials.
 
 ### Gate 9 — Symmetric IRB (RFC 9135), adjacent standards
 
-Status: after Gate 7 · Estimate: ~2-3 weeks · Blockers: Gate 7
+Status: readiness chain landed in `[Unreleased]` · Type 5 origination
++ FIB programming still ahead · Blockers cleared from Gate 7
 
-Unlocks: L3 routing between EVPN tenants on the same VTEP. Router MAC
-generation, Type 2 + Type 5 coordination, L3VNI mapping. Also
-Auto-derived Route Targets (RFC 8365 §5.1.2.1).
+Unlocks: L3 routing between EVPN tenants on the same VTEP under the
+RFC 9136 §4.4.2 symmetric Interface-less IRB model (matches FRR's
+default). Operator-supplied Router MAC, Type 2 + Type 5 coordination,
+L3VNI mapping.
+
+Shipped pieces (`[Unreleased]`):
+
+- `[[evpn_ip_vrfs]]` TOML schema declares IP-VRF / L3VNI tenants
+  with name, RD, RT list, local VTEP IP, operator-supplied Router
+  MAC, and observe-only `vrf_device` / `l3vxlan_device` / `table_id`.
+  Optional `ip_vrf` field on `[[evpn_instances]]` binds an L2VNI to
+  a declared IP-VRF by name. ADR-0058 §4 records the deliberate
+  decision to not auto-derive the Router MAC.
+- Pure-logic `rustbgpd_evpn::ip_vrf::readiness` probe against ADR-
+  0058 §3's seven predicates (`vrf_device` exists + UP + matching
+  table id; `l3vxlan_device` exists + UP + matching VNI + matching
+  local IP + enslaved to the VRF + MAC matches Router MAC).
+  `NotReady { reasons }` reports every failing predicate at once.
+- Pure-logic `ip_vrf::origination` + `ip_vrf::projection` helpers
+  for Type 5 NLRI construction (label = L3VNI, Interface-less
+  gateway, RT extcomms, BGP Encap = VXLAN, Router MAC extcomm)
+  and RT-keyed import with Router MAC enforcement / self-origin
+  filtering.
+- Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
+  rtnetlink dumps), `Dataplane::probe_ip_vrfs` trait method +
+  Linux implementation, `IpVrfTable` plumbed through
+  `DataplaneIntent`; reconcile actor calls `probe_ip_vrfs` each
+  pass and logs `Ready` ↔ `NotReady` transitions via tracing.
+
+Still ahead:
+
+- `DataplaneReport.ip_vrf_status` rows + `rustbgpctl evpn vrfs
+  [get NAME]` CLI + gRPC RPC so operators can read the verdict
+  without scraping logs.
+- Type 5 origination + FIB programming (consume the pure-logic
+  helpers from the daemon), M39 manual containerlab smoke
+  against FRR.
+- Auto-derived Route Targets (RFC 8365 §5.1.2.1).
 
 Further out on this track:
 
@@ -560,7 +602,8 @@ Gate 6 (controller inject)      ── ✅ done   << full Phase 1 RR bundle comp
 Gate 7 (VTEP mode)               ── ✅ done
 Gate 8 (multi-homing foundation) ── ✅ done   << observable DF election, M38 smoke
 Gate 8b (multi-homing enforcement) ── ✅ alpha, opt-in
-Gate 9 (IRB, MVPN, PBB, MPLS)    ── furthest horizon
+Gate 9 (IRB, Type 5)             ── readiness chain landed; origination + FIB ahead
+Gate 9+ (MVPN, PBB, MPLS)        ── furthest horizon
 ```
 
 ### Harness reuse
@@ -586,7 +629,8 @@ did not take on:
 
 - VTEP mode (landed across Gates 7a/7b/7b+1/7b+2/7c)
 - DF election execution (landed in Gate 8; enforcement alpha in Gate 8b)
-- Symmetric IRB semantics (still Gate 9)
+- Symmetric IRB semantics (Gate 9 — readiness chain landed; Type 5
+  origination + FIB programming still ahead)
 - Auto-derivation of Route Targets
 - PBB-EVPN (RFC 7623)
 - EVPN-MVPN (RFC 9251)

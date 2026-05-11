@@ -136,16 +136,23 @@ contender. Filtering structurally at the projection layer (via
 downward dataplane flow per Gate 7b) reuses the existing rule rather
 than duplicating it.
 
-### 5. Polling, not broadcast subscription
+### 5. Event-driven first, polling as backstop
 
-The originator polls the RIB on the same fixed cadence the dataplane
-supervisor uses (5 s default). The existing `RouteEvent` broadcast at
-`crates/rib/src/event.rs` is keyed by `Prefix` and is therefore
-unicast-only — EVPN best-path changes do not surface there. Adding an
-EVPN-specific broadcast is tracked as a Gate 7c convergence
-optimization in `docs/evpn-enablement.md`; it is **not** required for
-correctness because mobility races are bounded by the polling cadence
-and the level-triggered re-evaluation in `on_remote_changed`.
+The originator subscribes to a dedicated `EvpnRouteEvent` broadcast at
+`crates/rib/src/event.rs`, keyed by `EvpnRouteKey`, alongside a 5 s
+`poll_tick` backstop. Each best-path change for a tracked `(VNI, MAC)`
+wakes the originator within one broadcast hop; the periodic poll is
+retained for two narrow cases — recovering from a `RecvError::Lagged`
+on the broadcast channel, and cold start before the first event has
+populated `remote_view`.
+
+This is a post-merge revision of the original "polling only" decision.
+The 5 s poll cadence was the v0.15 correctness floor and is now the
+convergence ceiling instead: mobility races resolve at broadcast
+latency, with the poll as the level-triggered safety net the original
+ADR called for. The dedicated `EvpnRouteEvent` type was introduced
+(commit `c4573cd`) so EVPN-keyed events don't have to ride the
+prefix-keyed `RouteEvent` broadcast.
 
 ### 6. Type 3 IMET origination is lifecycle-decoupled from kernel readiness
 
@@ -171,34 +178,46 @@ encodes the label field as the **raw 24-bit VNI** per RFC 8365 §5.1.3
 (no MPLS-style shift) and the Tunnel Identifier as the unicast
 originator IP.
 
-### 7. Origination of MAC-with-IP Type 2 is deferred
+### 7. Origination of MAC-with-IP Type 2 (closed in Gate 7b+2)
 
 `LocalMacObservation::Learned` carries no host IP because
 `RTM_NEWNEIGH AF_BRIDGE` (the kernel's bridge FDB feed) is L2-only.
 Carrying ARP/ND-suppression observations requires a separate
 `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH` subscription correlated by
-MAC, which is its own design problem. Gate 7b+1 originates the
-**IP-less** Type 2 ("MAC-only") form exclusively. The wire codec
-already supports the MAC+IP form; only the consumer is deferred.
+MAC, which is its own design problem.
 
-### 8. Sticky / static MAC anti-spoof config is deferred
+Gate 7b+1 originated the **IP-less** Type 2 ("MAC-only") form
+exclusively. Gate 7b+2 closed the MAC+IP loop: the dataplane crate
+now classifies `AF_INET` / `AF_INET6` `RTM_NEWNEIGH` events
+(`crates/evpn-linux/src/linux/notify.rs`), the `LocalMacIpOriginator`
+state machine in `crates/evpn/src/origination_macip.rs` pairs MAC+IP
+observations against the existing MAC-only state, and the daemon
+adapter in `src/evpn_originator.rs` drives both originators against
+the same RIB inject/withdraw surface. M37+IP
+(`tests/interop/m37-evpn-mac-ip-origination.clab.yml`) is the
+interop smoke against FRR.
+
+### 8. Sticky / static MAC anti-spoof config (closed by ADR-0056)
 
 The wire-side codec for the sticky bit (RFC 7432 §15.4) is in scope —
 `OriginationAction::Inject` carries a `sticky: bool` field, the state
 machine plumbs it through, and the daemon encodes it in the MAC
 Mobility extended community when set. The **operator-facing** config
-field (e.g., a `static_macs: BTreeSet<MacAddress>` on
-`EvpnInstance`) is **out of scope** for this ADR. Schema questions
-(per-MAC vs per-port? imported from sysctl? gRPC mutation?) deserve
-their own follow-up. Until that schema lands, the daemon always
-passes `sticky = false`.
+field was deferred at the time this ADR was written; ADR-0056 closed
+that follow-up with the `sticky_macs: Vec<String>` field on
+`[[evpn_instances]]`. The daemon now consults
+`inst.sticky_macs.contains(&mac)` on `LocalMacObservation::Learned`
+and passes the resolved bit through the existing plumbing.
 
-### 9. MAC duplication detection is deferred
+### 9. MAC duplication detection (counter shipped; quarantine deferred)
 
 RFC 7432 §15.1 also defines a "5 moves in 180s ⇒ duplicate"
-quarantine heuristic. Detection counters can land in a follow-up
-without changing this ADR; quarantine action requires operator-facing
-escalation channels (gRPC + metrics + log) and is therefore deferred.
+quarantine heuristic. The detection counter
+(`evpn_duplicate_mac_moves_total{mac,vni}`) shipped in v0.16 and is
+labeled by MAC + VNI for operator alerting. The quarantine *action*
+remains deferred because it requires operator-facing escalation
+channels (gRPC + metrics + log) and a clear "how do we un-quarantine"
+flow; tracked in `docs/evpn-alpha-soak.md`.
 
 ## Consequences
 
@@ -220,13 +239,10 @@ escalation channels (gRPC + metrics + log) and is therefore deferred.
 
 ### Negative
 
-- The poll cadence (5 s default) is a convergence floor for
-  mobility-driven sequence bumps. RFC 7432 doesn't impose a tighter
-  bound, but operators with sub-second move requirements will see
-  this as a gap. Tracked in `docs/evpn-enablement.md` as Gate 7c.
-- The MAC-only Type 2 origination is operationally narrower than
-  FRR's behavior (FRR snoops ARP/ND too). Documented as a deferred
-  item; v1.0 readiness is not blocked but full FRR parity is.
+- The `EvpnRouteEvent` broadcast (added post-merge, see §5) closes
+  the mobility-convergence gap that the original 5 s poll left open;
+  the poll is now the level-triggered backstop the original ADR
+  called for. Tracked closed in `docs/evpn-enablement.md`.
 - Real-kernel verification requires `EVPN_LINUX_NETNS=1` and
   `CAP_NET_ADMIN`. PR-CI runners cannot exercise it; a privileged
   runner job is a separate follow-up.
@@ -251,20 +267,28 @@ startup-pinned. The free-function shape is symmetric to other
 "originated at boot, withdrawn at shutdown" patterns in the daemon
 (e.g., the gRPC injection service's static-route bulk inject).
 
-**Adding an EVPN-specific `RouteEvent` broadcast.** Tracked as Gate
-7c in `docs/evpn-enablement.md`. Polling is the right correctness
-floor; the broadcast is a convergence-latency optimization that does
-not need to ship before v1.0.
+**Adding an EVPN-specific `RouteEvent` broadcast.** Originally
+deferred as a Gate 7c optimization; subsequently shipped (commit
+`c4573cd`) as the primary wakeup, with the 5 s poll demoted to a
+backstop. See §5 for the revised decision.
 
 ## Implementation references
 
-- `crates/evpn/src/origination.rs` — state machine
+- `crates/evpn/src/origination.rs` — MAC-only state machine
+- `crates/evpn/src/origination_macip.rs` — MAC+IP state machine
+  (Gate 7b+2)
 - `crates/wire/src/pmsi.rs` — PMSI Tunnel codec
-- `src/evpn_originator.rs` — daemon actor
+- `crates/rib/src/event.rs` — `EvpnRouteEvent` broadcast (post-merge,
+  see §5)
+- `src/evpn_originator.rs` — daemon actor (subscribes to
+  `EvpnRouteEvent`; drives both MAC-only and MAC+IP originators)
 - `src/evpn_imet.rs` — Type 3 IMET originate/withdraw helpers
 - `crates/evpn-linux/src/linux/notify.rs` — `RTNLGRP_NEIGH`
-  subscription + classifier
+  subscription + classifier (AF_BRIDGE for MAC, AF_INET/AF_INET6
+  for MAC+IP)
 - `crates/evpn-linux/src/dataplane.rs` — `take_local_mac_rx` trait
   method
-- `tests/interop/m37-evpn-local-origination.clab.yml` — interop
-  smoke (Phase G)
+- `tests/interop/m37-evpn-local-origination.clab.yml` — MAC-only
+  interop smoke
+- `tests/interop/m37-evpn-mac-ip-origination.clab.yml` — MAC+IP
+  interop smoke (Gate 7b+2)

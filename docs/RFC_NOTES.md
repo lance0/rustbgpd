@@ -547,7 +547,7 @@ implemented per ADR-0040.
 
 ---
 
-## RFC 7432 — EVPN (Phase 1: Route Reflector + Phase 2: Bidirectional VTEP)
+## RFC 7432 — EVPN (Phase 1: Route Reflector + Phase 2: Bidirectional VTEP + Phase 3: Multi-homing + Phase 4: IRB foundation)
 
 - AFI 25 (L2VPN) / SAFI 70 (EVPN). Enum variants added to `Afi` and
   `Safi`; capability negotiation works automatically.
@@ -791,6 +791,24 @@ implemented per ADR-0040.
   elected NonDF, (3) PE2 promotes to DF after PE1 shutdown,
   (4) `evpn_df_role_changes_total` advances on the promotion.
 
+### Phase 4: Symmetric IRB foundation (Gate 9, ADR-0058)
+
+- **Gate 9 foundation (`[Unreleased]`, ADR-0058):** ships the
+  `[[evpn_ip_vrfs]]` TOML schema (parsed in `src/config/schema.rs`
+  as `EvpnIpVrfConfig`), an `[[evpn_instances]].ip_vrf` binding, the
+  `rustbgpd-evpn` `IpVrf` / `IpVrfTable` domain types under
+  `crates/evpn/src/ip_vrf/`, and the pure `IpVrfStatus` readiness
+  probe checking the seven RFC 9136 §4.4.2 predicates. The
+  `rustbgpd-evpn-linux` crate adds `LinuxDataplane::probe_ip_vrfs`
+  and the IP-VRF / L3 VXLAN device dumps in
+  `crates/evpn-linux/src/linux/ip_vrf.rs`. The reconcile actor
+  consumes the probe each pass via `intent.ip_vrfs` and logs
+  Ready / NotReady transitions through `tracing`.
+- **Still ahead in Gate 9:** Type 5 origination, Type 5 FIB
+  programming, `IpVrfStatus` rows on `DataplaneReport`, the
+  `rustbgpctl evpn vrfs` CLI command, and the M39 containerlab
+  smoke. Tracked as Gate 9 slices 5+6.
+
 ---
 
 ## RFC 9012 / RFC 8365 — BGP Encapsulation Ext Community + VXLAN-EVPN
@@ -807,12 +825,31 @@ implemented per ADR-0040.
 
 ---
 
-## RFC 9135 — Symmetric IRB (wire support, semantics deferred)
+## RFC 9135 / RFC 9136 — Symmetric IRB (Gate 9 foundation landed)
 
 - Type 2 MAC/IP routes with a second MPLS label (Label2) and the
   Router MAC ext community (Type 0x06, Subtype 0x03) are decoded and
-  reflected unchanged. rustbgpd does not yet interpret IRB pairings.
-- The Router MAC ext community accessor returns the 6-byte MAC.
+  reflected unchanged. The Router MAC ext community accessor returns
+  the 6-byte MAC.
+- **Gate 9 foundation (ADR-0058)** adopts the RFC 9136 §4.4.2
+  symmetric Interface-less IP-VRF-to-IP-VRF model as the only IRB
+  mode rustbgpd will support. Asymmetric IRB (RFC 9135 §4.1) and the
+  Interface-ful IP-VRF-to-IP-VRF model (RFC 9136 §4.4.1) are
+  explicit non-goals.
+- The `[[evpn_ip_vrfs]]` config block declares per-tenant IP-VRF /
+  L3VNI state (RD, RTs, VTEP source IP, Router MAC, observed Linux
+  VRF + L3 VXLAN device names, VRF table id). `[[evpn_instances]]`
+  gains an optional `ip_vrf = "..."` field binding an L2VNI to one
+  IP-VRF tenant.
+- A pure-logic IP-VRF readiness probe (`rustbgpd-evpn` crate) maps a
+  portable kernel snapshot against the configured `IpVrf` and returns
+  an `IpVrfStatus` verdict; every failing predicate is enumerated.
+  The Linux netlink dumps that populate the snapshot live in
+  `rustbgpd-evpn-linux`. The reconcile actor runs the probe each
+  pass and logs Ready / NotReady transitions per `(name, L3VNI)`.
+- **Not yet implemented in Gate 9:** Type 5 origination, Type 5 FIB
+  programming, `rustbgpctl evpn vrfs` CLI surface, and the M39
+  containerlab smoke. These remain on the Gate 9 slice list.
 
 ---
 

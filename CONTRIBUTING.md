@@ -2,7 +2,7 @@
 
 ## Development Setup
 
-- Rust 1.88+ (edition 2024)
+- Rust 1.92+ (edition 2024 — workspace MSRV tracks Tokio's rolling 6-month-behind-stable policy)
 - `protobuf-compiler` (`apt-get install protobuf-compiler` on Debian/Ubuntu)
 - Linux x86_64 or aarch64 (primary targets)
 - macOS works for development but is not CI-tested
@@ -103,7 +103,8 @@ crates/
   rpki/                  # RPKI origin validation: RTR client (RFC 8210), VRP table
   bmp/                   # BMP exporter (RFC 7854): codec, per-collector client, manager
   mrt/                   # MRT dump export (RFC 6396): codec, writer, manager
-  evpn/                  # EVPN local VTEP domain model (RFC 7432 / RFC 8365): EvpnInstance, RouteTarget
+  evpn/                  # EVPN local VTEP domain model (RFC 7432 / RFC 8365 / RFC 9136): EvpnInstance, IpVrf, RouteTarget, origination + projection state machines (kernel-free)
+  evpn-linux/            # Linux kernel dataplane for EVPN VTEP mode (#[cfg(target_os = "linux")]): rtnetlink reconciler, FDB / link / IP-VRF dumps, RTNLGRP_NEIGH classifier
   api/                   # gRPC server (tonic) — 8 services
   telemetry/             # Prometheus metrics + structured tracing
   cli/                   # rustbgpctl — gRPC CLI with human-readable and JSON output
@@ -124,6 +125,8 @@ These are not guidelines — they are enforced invariants:
 - `bmp` and `telemetry` have no internal dependencies
 - `rib` depends on `wire`, `policy`, `telemetry`, and `rpki`
 - `transport` owns BGP peer session I/O and drives the FSM — it depends on `wire`, `fsm`, `rib`, `policy`, `telemetry`, and `bmp`
+- `evpn` is the local-VTEP domain crate — depends only on `wire`, never on `rib` or `transport`, never programs the kernel
+- `evpn-linux` is the Linux kernel dataplane for EVPN VTEP mode — depends only on `evpn`, never on `rib` or `transport`
 - `cli` has no internal crate dependencies (client-only proto stubs)
 
 ## Pull Request Process

@@ -137,9 +137,9 @@ These protect BGP transport sessions, not the gRPC management surface.
 ## Linux EVPN VTEP — `CAP_NET_ADMIN` requirement
 
 Running rustbgpd in **EVPN VTEP mode** on Linux (a non-empty
-`[[evpn_instances]]` configuration) requires the daemon to hold
-`CAP_NET_ADMIN` (or run as root) for two distinct kernel-facing
-operations:
+`[[evpn_instances]]` or `[[evpn_ip_vrfs]]` configuration) requires the
+daemon to hold `CAP_NET_ADMIN` (or run as root) for the kernel-facing
+operations the EVPN reconciler issues:
 
 1. **Bridge FDB program / withdraw** (Gate 7b, ADR-0054 — v0.14.0).
    The `crates/evpn-linux` reconciler issues `RTM_NEWNEIGH` /
@@ -151,6 +151,11 @@ operations:
    to receive unsolicited `RTM_NEWNEIGH` / `RTM_DELNEIGH` events
    for kernel-learned local MACs. This is a kernel-side privilege
    separate from gRPC management security.
+3. **IP-VRF / L3 VXLAN link dumps** (Gate 9 foundation, ADR-0058).
+   When `[[evpn_ip_vrfs]]` is non-empty, the reconcile actor issues
+   `RTM_GETLINK` against the same rtnetlink socket to populate the
+   IP-VRF readiness probe. Dumps are observe-only; no kernel state
+   is mutated by the Gate 9 foundation slice.
 
 If `CAP_NET_ADMIN` is not granted:
 
@@ -162,10 +167,11 @@ If `CAP_NET_ADMIN` is not granted:
   local-MAC observations will be silent` at WARN. Downward
   programming may still work; upward origination won't fire.
 
-**RR-only deployments** (empty `[[evpn_instances]]`) need none of
-this — no netlink socket is opened, no background reconciler or
-originator is spawned, and the daemon runs at the same privilege
-level as a pure control-plane speaker.
+**RR-only deployments** (both `[[evpn_instances]]` and
+`[[evpn_ip_vrfs]]` empty) need none of this — no netlink socket is
+opened, no background reconciler or originator is spawned, and the
+daemon runs at the same privilege level as a pure control-plane
+speaker.
 
 Recommended deployment posture for EVPN VTEPs:
 

@@ -104,6 +104,7 @@ added at runtime.
 | `AddDynamicNeighbor` | Add a `[[dynamic_neighbors]]` range — auto-accept peers from a CIDR with a configured AS / peer-group |
 | `DeleteDynamicNeighbor` | Remove a dynamic-neighbor range; in-flight sessions stay until they go Idle |
 | `ListDynamicNeighbors` | List configured dynamic-neighbor ranges with active peer counts |
+| `SetGracefulShutdown` | RFC 8326 initiator toggle — attach the `GRACEFUL_SHUTDOWN` community to outbound updates for one peer (or all peers when `address` is empty) and clear with `clear = true` |
 
 ### Add a neighbor
 
@@ -568,10 +569,13 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 Encapsulation extended community (tunnel-type=8) is attached
 automatically. Set `disable_vxlan_encap: true` for MPLS-over-GRE
 deployments. Phase 1 supports `route_type` 2 (MAC/IP) and 3 (IMET);
-Type 5 IP-Prefix injection is not yet exposed. Native Type 1/4
-multi-homing origination is driven by `[[ethernet_segments]]`; the
-injection API does not expose those route types yet (the RR still
-reflects them when received from peers).
+Type 5 IP-Prefix injection is not exposed via the injection API.
+Native Gate 9 Type 5 origination from `[[evpn_ip_vrfs]]` is not yet
+shipped — today the Gate 9 foundation only parses the config and
+runs an IP-VRF readiness probe in the EVPN reconcile actor.
+Native Type 1/4 multi-homing origination is driven by
+`[[ethernet_segments]]`; the injection API does not expose those route
+types yet (the RR still reflects them when received from peers).
 
 ### Inject an EVPN Type 3 (IMET) route
 

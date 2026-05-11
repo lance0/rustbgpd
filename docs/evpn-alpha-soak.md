@@ -1,13 +1,15 @@
 # EVPN VTEP alpha-soak checklist
 
 Post-merge confidence list for the bidirectional EVPN VTEP loop
-(Gates 7a + 7b + 7b+1, v0.15.0). The branch landed the
-control-plane and kernel paths; this file tracks what we still need
-to retire residual alpha-VTEP risk before claiming v1.0-grade
-production readiness.
+(Gates 7a + 7b + 7b+1 in v0.15.0; Gates 7b+2 / 7c / 8 / 8b prep /
+8b enforcement intent + kernel primitive layered in across v0.16.0
+and v0.17.0; Gate 9 IP-VRF readiness chain in `[Unreleased]`). The
+branch landed the control-plane and kernel paths; this file tracks
+what we still need to retire residual alpha-VTEP risk before
+claiming v1.0-grade production readiness.
 
 Items are checkboxed so individual slices can move independently;
-none of them block v0.15.0 release on their own.
+none of them block v0.17.0 release on their own.
 
 ## CI / observability
 
@@ -41,16 +43,19 @@ none of them block v0.15.0 release on their own.
   via `rustbgpctl evpn instances` without scraping logs. Human output
   renders `originated-local-macs=N`; JSON and gRPC expose
   `originated_local_macs_count`.
-- [ ] **24 h soak** of M37 with a synthetic MAC churn driver
-  (`bridge fdb add` + `bridge fdb del` at ~10 Hz on a few thousand
-  MACs). The local-only driver now lives at
+- [ ] **24 h MAC-churn soak** of M37 with a synthetic MAC churn
+  driver (`bridge fdb add` + `bridge fdb del` at ~10 Hz on a few
+  thousand MACs). The local-only driver now lives at
   `tests/interop/scripts/test-m37-evpn-local-origination-churn.sh`.
   Use `--smoke` for a one-round, five-MAC pre-release check; the
   remaining work is to run the full driver long enough to confirm RSS
   slope stays flat under the originator's
   `BTreeMap<MacAddress, LocalMacOriginationState>` retention model
   (entries are kept after Aged so the seq ratchet survives — we want
-  to verify that doesn't compound badly under heavy churn).
+  to verify that doesn't compound badly under heavy churn). Separate
+  from the Gate 8b BUM-state 24 h soak under "remaining multi-homing
+  enforcement work" below, which exercises DF flips rather than
+  origination churn.
 
 ## Convergence + correctness slices
 
@@ -98,8 +103,8 @@ none of them block v0.15.0 release on their own.
   action remains deferred — sticky-bit origination ships without
   any automatic detect-and-defend behavior on top of it.
 
-## Larger follow-on gates (out of v0.15.0 scope, tracked here for
-visibility)
+## Larger follow-on gates (beyond the v0.15.0 bidirectional-loop
+landing, tracked here for visibility)
 
 - [x] **Gate 8 — multi-homing foundation + observable DF election.**
   Type 4 ES + Type 1 EAD-per-ES + Type 1 EAD-per-EVI origination,
@@ -199,13 +204,16 @@ visibility)
   matters.
 - [ ] **Gate 8b — remaining multi-homing enforcement work.** Three
   concrete slices left:
-  1. **Privileged-runner 24 h soak validation** (synthetic DF
-     flips + MAC churn) before flipping the
+  1. **Privileged-runner 24 h soak validation** before flipping the
      `apply_bum_enforcement` default to `true`. Single-pass
-     primitive validation already landed via the Docker harness;
-     what's left is sustained-churn confidence under realistic
-     timing (BGP convergence noise, election flap loops, FDB
-     programming concurrent with flag flips).
+     primitive validation already landed via the Docker harness; the
+     24 h BUM-state soak (synthetic DF flips against `tests/soak/
+     configs/rustbgpd-soak-gate8b-pe{1,2}.toml`) completed cleanly
+     — PE1 RSS flat at ~13.95 MB throughout, full-run slope decayed
+     to 0.050 MB/h. What's still ahead is the MAC-churn variant
+     (FDB programming concurrent with flag flips) so the combined
+     enforcement + origination paths get the same sustained-churn
+     confidence under realistic timing.
   2. **Aliasing dataplane forwarding.** The control-plane half
      (above) populates `alias_vtep_ips` cleanly; the
      `LinuxDataplane` consumer still programs only the primary
@@ -222,16 +230,38 @@ visibility)
 - [ ] **Gate 9 — symmetric IRB (RFC 9135) + L3VNI / Type 5
   dataplane.** Per-VRF IP routes via Type 5, MAC-VRF + IP-VRF
   separation, Router MAC extended community lifecycle, the
-  symmetric IRB packet path through the kernel. ~2-3 weeks. The
-  `crates/rib` Type 5 codec already round-trips; the daemon-side
-  origination + kernel programming is what's missing.
-  - Follow-on optimization once slice 4c lands: share one
-    rtnetlink link dump across `links::dump_links` (L2) and
-    `ip_vrf::dump_ip_vrf_observations` (L3). Today each reconcile
-    pass issues two `RTM_GETLINK` round-trips that traverse the
-    same kernel link list. Saves one syscall + one allocation per
-    pass; matters under churn. Not a correctness blocker, defer
-    until the reconcile-loop integration is in place.
+  symmetric IRB packet path through the kernel. The
+  `crates/rib` Type 5 codec already round-trips. Readiness chain
+  is in place (`[Unreleased]`):
+  - `[[evpn_ip_vrfs]]` TOML schema + validation, optional
+    `ip_vrf` field on `[[evpn_instances]]` (config foundation).
+  - Pure-logic `ip_vrf::readiness` probe against ADR-0058 §3's
+    seven predicates, with per-failure `NotReady { reasons }`
+    surface.
+  - Pure-logic `ip_vrf::origination` + `ip_vrf::projection`
+    helpers for Type 5 NLRI + RT-keyed import / Router MAC
+    enforcement / self-origination filtering.
+  - Linux `ip_vrf::dump_ip_vrf_observations` (VRF + L3 VXLAN
+    netlink dumps) and `Dataplane::probe_ip_vrfs` trait + Linux
+    implementation.
+  - `IpVrfTable` plumbed through `DataplaneIntent`; the reconcile
+    actor calls `probe_ip_vrfs` each pass and logs `Ready` ↔
+    `NotReady` transitions via tracing.
+
+  Still ahead:
+  - `DataplaneReport.ip_vrf_status` rows + `rustbgpctl evpn vrfs
+    [get NAME]` CLI + gRPC RPC so operators can read the verdict
+    without scraping logs.
+  - Type 5 origination + FIB programming, M39 manual containerlab
+    smoke.
+
+  Follow-on optimization once the reconcile-loop integration is
+  in place: share one rtnetlink link dump across
+  `links::dump_links` (L2) and `ip_vrf::dump_ip_vrf_observations`
+  (L3). Today each reconcile pass issues two `RTM_GETLINK`
+  round-trips that traverse the same kernel link list. Saves
+  one syscall + one allocation per pass; matters under churn.
+  Not a correctness blocker.
 - [ ] **`[[evpn_instances]]` mutation surface.** Today the table is
   pinned at startup. `AddEvpnInstance` / `DeleteEvpnInstance` gRPC
   + SIGHUP reload semantics need a swap surface (`ArcSwap` or

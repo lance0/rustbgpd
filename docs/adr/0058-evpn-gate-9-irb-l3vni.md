@@ -1,6 +1,7 @@
 # ADR-0058: EVPN Gate 9 — symmetric IRB, L3VNI, Type 5 dataplane
 
-**Status:** Proposed
+**Status:** Accepted; rollout slices 1–6 shipped on main
+(PRs #66, #67, #72, #73, #74, #75); slices 7–8 pending
 **Date:** 2026-05-10
 
 ## Context
@@ -196,16 +197,17 @@ in Gate 9.
 ### 6. Domain layout
 
 ```
-crates/evpn/src/ip_vrf/mod.rs          NEW: IpVrf, IpVrfId, IpVrfTable
-crates/evpn/src/ip_vrf/origination.rs  NEW: kernel route → Type 5 builder
-crates/evpn/src/ip_vrf/projection.rs   NEW: Type 5 → RemoteIpPrefix
-crates/evpn/src/ip_vrf/readiness.rs    NEW: pure-logic readiness probe
-src/config/schema.rs                 + EvpnIpVrfConfig serde shape
-src/config/mod.rs                    + parse_evpn_ip_vrf, validation
-src/evpn_ip_vrf.rs                   NEW: per-vrf supervisor task
-crates/evpn-linux/src/linux/links.rs + VrfLink, L3VxlanLink dumps
-crates/evpn-linux/src/reconcile.rs   + IP-VRF readiness probe wiring
-crates/evpn-linux/src/...            + FIB install/withdraw ops
+crates/evpn/src/ip_vrf/mod.rs           NEW: IpVrf, IpVrfId, IpVrfTable
+crates/evpn/src/ip_vrf/origination.rs   NEW: kernel route → Type 5 builder
+crates/evpn/src/ip_vrf/projection.rs    NEW: Type 5 → RemoteIpPrefix
+crates/evpn/src/ip_vrf/readiness.rs     NEW: pure-logic readiness probe
+src/config/schema.rs                  + EvpnIpVrfConfig serde shape
+src/config/mod.rs                     + parse_evpn_ip_vrf, validation
+src/evpn_ip_vrf.rs                    NEW: per-vrf supervisor task (slice 8)
+crates/evpn-linux/src/linux/ip_vrf.rs NEW: IpVrfObservations + snapshot_for
+crates/evpn-linux/src/dataplane.rs    + Dataplane::probe_ip_vrfs trait method
+crates/evpn-linux/src/reconcile.rs    + IP-VRF readiness probe wiring
+crates/evpn-linux/src/...             + FIB install/withdraw ops (slice 8)
 ```
 
 The pure-logic split mirrors the L2 side:

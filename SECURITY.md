@@ -54,9 +54,14 @@ input from the network. It runs under continuous fuzzing in CI.
 - **TCP-AO (RFC 5925):** Not v1. Roadmap item.
 - **gRPC:** Unix domain socket by default (local-only). TCP listeners
   are opt-in via config. Per-listener bearer-token authentication is
-  available via `token_file`. No native mTLS or fine-grained per-RPC
-  authorization yet -- use an mTLS proxy (see `examples/envoy-mtls/`)
-  for remote access.
+  available via `token_file`. Native mTLS terminates in-process on TCP
+  listeners via tonic + rustls/ring — configure `tls_cert_file`,
+  `tls_key_file`, and `tls_client_ca_file` together on
+  `[global.telemetry.grpc_tcp]` (partial config is rejected at config
+  load). An mTLS proxy front-end (see `examples/envoy-mtls/`) remains a
+  valid alternative for multi-host fan-out. Fine-grained per-RPC
+  authorization beyond the read-only / read-write listener split is
+  not yet implemented.
 
 ### Rate Limiting
 

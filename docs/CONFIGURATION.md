@@ -1246,6 +1246,99 @@ See [ADR-0044](adr/0044-mrt-dump-export.md) for design details.
 
 ---
 
+## `[[evpn_ip_vrfs]]`
+
+Optional, repeatable. Declares the local IP-VRF / L3VNI tenants this VTEP
+serves under the RFC 9136 §4.4.2 symmetric Interface-less IRB model
+(Gate 9 foundation, ADR-0058). Empty by default — L2-only VTEPs and
+RR-only deployments leave it empty.
+
+Today the daemon parses and validates this block, builds an
+`IpVrfTable`, and runs a per-pass readiness probe in the EVPN reconcile
+actor (Linux netlink dumps of the VRF and L3 VXLAN devices, logged
+Ready / NotReady transitions). Type 5 origination, Type 5 FIB
+programming, and the matching `rustbgpctl evpn vrfs` CLI surface are
+not yet shipped — they ride on follow-on Gate 9 slices.
+
+```toml
+[[evpn_ip_vrfs]]
+name = "tenant-blue"               # operator-facing handle
+vni = 5000                         # L3VNI (1..=16_777_215)
+rd = "65000:5000"                  # Route Distinguisher
+route_targets = ["65000:5000"]     # bidirectional RTs (non-empty)
+local_vtep_ip = "10.0.0.1"         # VXLAN source IP for outbound Type 5
+router_mac = "02:00:00:00:00:01"   # Router MAC ext-community value
+vrf_device = "vrf-blue"            # Linux VRF device (observe-only)
+l3vxlan_device = "vni5000"         # Linux L3 VXLAN device (observe-only)
+table_id = 5000                    # VRF route table id
+
+# An `[[evpn_instances]]` entry binds to this IP-VRF by name.
+[[evpn_instances]]
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+ip_vrf = "tenant-blue"             # optional — empty means L2-only
+```
+
+### IP-VRF fields
+
+| Field            | Type      | Required | Default | Description |
+|------------------|-----------|----------|---------|-------------|
+| `name`           | string    | yes      | --      | Operator handle; `^[a-zA-Z][a-zA-Z0-9_-]*$`, unique across `[[evpn_ip_vrfs]]` |
+| `vni`            | u32       | yes      | --      | L3VNI in `1..=16_777_215`; must not collide with any `[[evpn_instances]]` VNI |
+| `rd`             | string    | yes      | --      | Route Distinguisher (`asn:value` or `ipv4:value`) |
+| `route_targets`  | [string]  | yes      | --      | Bidirectional RTs (non-empty); applied to import and export |
+| `local_vtep_ip`  | string    | yes      | --      | Unicast VTEP source IP for outbound Type 5 `NEXT_HOP` |
+| `router_mac`     | string    | yes      | --      | Unicast non-zero MAC (`aa:bb:cc:dd:ee:ff`) advertised via the RFC 9135 §4.2 / RFC 9136 Router MAC extended community |
+| `vrf_device`     | string    | yes      | --      | Linux VRF device name (operator-managed, observe-only) |
+| `l3vxlan_device` | string    | yes      | --      | Linux L3 VXLAN device name (operator-managed, observe-only) |
+| `table_id`       | u32       | yes      | --      | VRF route table id (> 0); cross-checked against `vrf_device`'s `IFLA_VRF_TABLE` |
+
+### L2VNI binding
+
+`[[evpn_instances]].ip_vrf` is an optional string that names an
+`[[evpn_ip_vrfs]]` entry. Empty / unset leaves that L2VNI as
+bridging-only. Validation rejects a name that does not resolve to any
+declared IP-VRF.
+
+### Readiness predicates
+
+The reconcile actor maps each IP-VRF against its kernel snapshot every
+pass. ADR-0058 §3 defines seven predicates that must all hold for the
+IP-VRF to be `Ready`:
+
+1. `vrf_device` exists and is administratively UP.
+2. `vrf_device`'s `IFLA_VRF_TABLE` equals `table_id`.
+3. `l3vxlan_device` exists and is administratively UP.
+4. `l3vxlan_device`'s `IFLA_VXLAN_ID` equals the configured L3VNI.
+5. `l3vxlan_device`'s `IFLA_VXLAN_LOCAL` (or `IFLA_VXLAN_LOCAL6`) equals
+   `local_vtep_ip`.
+6. `l3vxlan_device`'s `IFLA_MASTER` points to `vrf_device`.
+7. `l3vxlan_device`'s link-layer address equals the configured
+   `router_mac`.
+
+`NotReady` results enumerate every failing predicate; the actor logs
+the transition once per state change rather than every pass.
+
+### Validation rules (Gate 9 foundation)
+
+- `name` matches `^[a-zA-Z][a-zA-Z0-9_-]*$` and is unique across `[[evpn_ip_vrfs]]`.
+- `vni` is in `1..=16_777_215` and does not collide with any `[[evpn_instances]]` VNI.
+- `rd` parses as `asn:value` or `ipv4:value`.
+- `route_targets` is non-empty and every entry parses.
+- `local_vtep_ip` is a valid unicast IP (rejects unspecified / multicast / loopback).
+- `router_mac` is a unicast non-zero MAC.
+- `vrf_device` and `l3vxlan_device` are non-blank.
+- `table_id` is `> 0`.
+- Every `[[evpn_instances]].ip_vrf` resolves to a declared IP-VRF.
+- `[[evpn_ip_vrfs]]` is restart-required — SIGHUP pins the in-memory
+  snapshot back to the startup value, same lifecycle as `[[evpn_instances]]`.
+
+See [ADR-0058](adr/0058-evpn-gate-9-irb-l3vni.md) for the design rationale.
+
+---
+
 ## Config Persistence
 
 Neighbor mutations made through the gRPC API (`AddNeighbor`, `DeleteNeighbor`)
@@ -1288,20 +1381,24 @@ earlier reload steps still land at the manager and remain in effect.
 Inline `policy.import` / `policy.export` (the legacy global-fallback
 statements), `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
-`[mrt]`, `[[evpn_instances]]`, `[[ethernet_segments]]`, and
-`apply_bum_enforcement` are **restart-required** — they're surfaced
-under "Restart-required" in `rustbgpd --diff` and logged at reload
-time with a one-line migration hint to named definitions plus
-`import_chain` / `export_chain` where applicable. The `[[evpn_instances]]`
-case is the Phase-2 VTEP slice (ADR-0052 + ADR-0054 + ADR-0055): the
-gRPC `EvpnService` shares the resolved instance table via an `Arc`
-built once at startup, the dataplane reconciler (Gate 7b) consumes
-that same `Arc` for downward FDB programming, and the originator +
-IMET tasks (Gate 7b+1) consume it for upward Type 2 / Type 3
-origination. SIGHUP pins the in-memory snapshot back to the startup
-value so drift detection stays observable across every reload. Gate 8
-segment and Gate 8b enforcement settings follow the same pinning rule
-because their actors also resolve startup snapshots.
+`[mrt]`, `[[evpn_instances]]`, `[[ethernet_segments]]`,
+`[[evpn_ip_vrfs]]`, and `apply_bum_enforcement` are
+**restart-required** — they're surfaced under "Restart-required" in
+`rustbgpd --diff` and logged at reload time with a one-line migration
+hint to named definitions plus `import_chain` / `export_chain` where
+applicable. The `[[evpn_instances]]` case is the Phase-2 VTEP slice
+(ADR-0052 + ADR-0054 + ADR-0055): the gRPC `EvpnService` shares the
+resolved instance table via an `Arc` built once at startup, the
+dataplane reconciler (Gate 7b) consumes that same `Arc` for downward
+FDB programming, and the originator + IMET tasks (Gate 7b+1) consume
+it for upward Type 2 / Type 3 origination. SIGHUP pins the in-memory
+snapshot back to the startup value so drift detection stays observable
+across every reload. Gate 8 segment and Gate 8b enforcement settings
+follow the same pinning rule because their actors also resolve startup
+snapshots. The Gate 9 `[[evpn_ip_vrfs]]` table (ADR-0058) is pinned the
+same way; today the reconcile actor consumes it only for the IP-VRF
+readiness probe (Linux netlink dumps of the VRF and L3 VXLAN devices,
+logging Ready / NotReady transitions).
 Reload-time mutation (`AddEvpnInstance` / `DeleteEvpnInstance` and
 SIGHUP delta application) is tracked as alpha-soak follow-up — see
 `docs/evpn-alpha-soak.md`.

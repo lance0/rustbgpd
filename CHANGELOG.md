@@ -11,6 +11,50 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 9 IpVrfTable plumbed through DataplaneIntent +
+  reconcile call.** Closes the daemon-side end-to-end wiring slice:
+  the daemon's `src/evpn_dataplane.rs` supervisor now publishes the
+  resolved `IpVrfTable` on every `DataplaneIntent` it broadcasts,
+  the reconcile actor reads it on each pass, calls
+  `Dataplane::probe_ip_vrfs(&intent.ip_vrfs)`, diffs the returned
+  `Vec<IpVrfStatus>` against the previous pass's snapshot, and
+  emits `tracing::info!` / `warn!` log lines for readiness
+  transitions (Ready ↔ NotReady, plus the failing-predicate set
+  on every NotReady so operators can grep). The intent's IP-VRF
+  generation advances only on semantic change so empty
+  `[[evpn_ip_vrfs]]` deployments keep paying zero dataplane cost,
+  and RR-only deployments still short-circuit the spawn entirely.
+  No kernel mutation yet — readiness state is observable only.
+  `DataplaneReport.ip_vrf_status` + `rustbgpctl evpn vrfs` land in
+  the next slice; Type 5 origination + L3 FIB programming follow
+  on top.
+
+- **EVPN Gate 9 `Dataplane::probe_ip_vrfs` trait surface + Linux
+  impl.** New default-implemented method on the `Dataplane` trait
+  (`async fn probe_ip_vrfs(&mut self, table: &IpVrfTable) ->
+  Vec<IpVrfStatus>`) returns an empty vec by default so non-Linux
+  fakes and the `InMemoryDataplane` opt in only when the test
+  drives readiness explicitly. `LinuxDataplane`'s impl gathers an
+  `IpVrfKernelSnapshot` from the rtnetlink VRF / L3VXLAN dumps
+  shipped earlier and pipes it into the pure
+  `rustbgpd_evpn::ip_vrf::readiness::evaluate` helper for every
+  configured `[[evpn_ip_vrfs]]` entry, returning one
+  `IpVrfStatus` per entry. `InMemoryDataplane` gains a matching
+  hook so unit tests can pin readiness transitions deterministically.
+
+- **EVPN Gate 9 Linux IP-VRF + L3 VXLAN netlink dumps.** New
+  `crates/evpn-linux/src/linux/ip_vrf.rs` adds two rtnetlink-backed
+  dump helpers — `dump_vrf_devices` (resolves `IFLA_LINKINFO`
+  kind = `"vrf"`, `IFLA_VRF_TABLE`, oper-state) and
+  `dump_l3_vxlan_devices` (resolves VXLAN attributes with
+  `IFLA_VXLAN_ID`, `IFLA_VXLAN_LOCAL`, master ifindex, link-layer
+  address, oper-state) — and bundles them into an
+  `IpVrfKernelSnapshot`. The classifier filters non-VRF / non-VXLAN
+  links structurally so unrelated bridges, bonds, and physical
+  netdevs never reach readiness evaluation. Errors propagate as
+  the existing `KernelError` variants for consistency with the
+  FDB and link-dump paths.
+
 - **EVPN Gate 9 IP-VRF readiness probe (pure-logic).** New
   `rustbgpd_evpn::ip_vrf::readiness` module: takes a portable
   [`IpVrfKernelSnapshot`] (built by the `crates/evpn-linux`

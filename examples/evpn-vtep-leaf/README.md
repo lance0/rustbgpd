@@ -21,8 +21,10 @@ see [`../rr-evpn-fabric/`](../rr-evpn-fabric/).
     `local_vtep_ip`. Optional `bridge` set to `br100` for the Linux
     dataplane reconciler.
   - **VNI 10200** — adds `advertise_svi_mac = true` (RFC 9135 §6.1).
-    Today the flag parses and surfaces in `rustbgpctl evpn
-    instances`; default-gateway/SVI-MAC origination remains a follow-up.
+    The Linux dataplane captures the bridge link-layer address,
+    surfaces it on `InstanceDataplaneStatus.bridge_mac`, and the
+    daemon's SVI task originates a Type 2 for the bridge MAC on
+    instance-Ready; withdraws on `Ready → NotReady` or bridge MAC drift.
   - **VNI 10300** — uses a 4-octet AS in the RD (`4200000000:300` →
     RFC 4364 Type 2 RD); two route targets to demonstrate the
     bidirectional list (deduplicated and canonicalized on
@@ -109,11 +111,12 @@ rustbgpctl evpn diagnose
 ## What this example does NOT do (yet)
 
 - Create Linux bridge or VXLAN netdevs for you.
-- Originate MAC-with-IP Type 2 routes from ARP/ND suppression learning.
-- Consume `advertise_svi_mac` for default-gateway/SVI-MAC origination.
 - Enforce RFC 7432 §15 duplicate-MAC quarantine. Detection metrics are
   exposed; quarantine action remains future work.
-- Implement IRB / L3VNI / Type 5 dataplane behavior.
+- Originate Type 5 prefix routes or program the L3VNI / VRF FIB —
+  Gate 9 readiness probing is in place (`[[evpn_ip_vrfs]]` + the
+  reconcile-time `IpVrfStatus` log line), but Type 5 wire shape and
+  kernel FIB programming are still ahead.
 
 ## Related
 

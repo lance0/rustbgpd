@@ -83,9 +83,11 @@ effective-impact view:
   chains. SIGHUP reconciles all of these.
 - **Restart-required changes** — `[global]` ASN/router-id/families,
   `[global.telemetry.grpc_*]` listener config (including TLS / mTLS),
-  `[rpki]`, `[bmp]`, `[mrt]`, `[[evpn_instances]]`, and inline
-  `policy.import` / `policy.export` legacy statements. Surfaced with
-  a one-line migration hint where applicable.
+  `[rpki]`, `[bmp]`, `[mrt]`, `[[evpn_instances]]`,
+  `[[ethernet_segments]]`, `[[evpn_ip_vrfs]]`,
+  `apply_bum_enforcement`, and inline `policy.import` /
+  `policy.export` legacy statements. Surfaced with a one-line
+  migration hint where applicable.
 - **Effectively impacted neighbors (via inheritance)** — every
   neighbor whose resolved import / export chain would move at reload,
   with the upstream change(s) responsible (peer-group / policy /
@@ -141,6 +143,8 @@ listener config (including any TLS / mTLS field), `[rpki]`, `[bmp]`,
 `EvpnService` shares an `Arc<EvpnInstanceTable>` built once at
 startup; reload-time mutation lands with kernel reconciliation),
 `[[ethernet_segments]]` (Gate 8 segment orchestrator snapshot),
+`[[evpn_ip_vrfs]]` (Gate 9 IP-VRF foundation — pinned
+`Arc<IpVrfTable>` consumed by the readiness probe),
 `apply_bum_enforcement` (Gate 8b dataplane actor startup flag), and
 inline `policy.import` / `policy.export` legacy global-fallback
 statements.
@@ -613,11 +617,18 @@ session machinery:
 > wakeups. Gate 8/8b adds alpha multi-homing execution: DF election,
 > Type 1/4 origination, opt-in BUM suppression, ESI-aware Type 2
 > origination, aliasing projection, and receive-side mass-withdraw
-> filtering. Still ahead: aliasing dataplane ECMP, production-default
-> multi-homing enforcement after soak, and IRB / L3VNI (Gate 9). See
-> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
-> [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
-> alpha-confidence checklist, and
+> filtering. Gate 9 foundation has landed for symmetric IRB
+> (RFC 9136 §4.4.2): `[[evpn_ip_vrfs]]` config schema +
+> `[[evpn_instances]].ip_vrf` binding, the pure-logic IP-VRF
+> readiness probe, and Linux netlink dumps consumed by the
+> reconcile actor (logs Ready / NotReady transitions per
+> `(name, L3VNI)`). Still ahead in Gate 9: Type 5 origination,
+> Type 5 FIB programming, the matching `rustbgpctl evpn vrfs` CLI
+> surface, and the M39 containerlab smoke. Other gaps: aliasing
+> dataplane ECMP and production-default multi-homing enforcement
+> after soak. See [`evpn-enablement.md`](evpn-enablement.md) for the
+> gate ladder, [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the
+> residual alpha-confidence checklist, and
 > [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) for
 > the operator runbook.
 

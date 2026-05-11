@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-07 (v0.16.0)
+Last updated: 2026-05-11 (v0.17.0)
 
 ## Overview
 
@@ -26,7 +26,7 @@ Last updated: 2026-05-07 (v0.16.0)
 | IPv6 Labeled Unicast | No | Yes | No | Yes | No |
 | VPNv4 (RFC 4364) | No | Yes | Yes | Yes | Yes |
 | VPNv6 | No | Yes | Yes | Yes | Yes |
-| L2VPN EVPN (RFC 7432) | Partial (RR + bidirectional VTEP: Types 1-5 reflection, Type 2 local-MAC/MAC+IP origination from kernel FDB/neighbor events, Type 3 IMET per configured L2VNI, opt-in Gate 8/8b multi-homing alpha; IRB/L3VNI and aliasing dataplane ECMP still ahead) | Yes | Yes | Yes | No |
+| L2VPN EVPN (RFC 7432) | Partial (RR + bidirectional VTEP: Types 1-5 reflection, Type 2 local-MAC/MAC+IP origination from kernel FDB/neighbor events, Type 3 IMET per configured L2VNI, observable DF election + Type 1/4 origination, opt-in Gate 8b multi-homing enforcement alpha including RFC 7432 §14 aliasing receive-side projection and RFC 7432 §8.4 mass-withdraw filtering, RFC 7432 §8.5 kernel BUM-port enforcement; IRB / L3VNI / Type 5 dataplane still ahead) | Yes | Yes | Yes | No |
 | L2VPN VPLS | No | No | No | Yes | No |
 | IPv4 FlowSpec (RFC 8955) | Yes | Yes | Yes | Yes | Yes |
 | IPv6 FlowSpec | Yes | Yes | Yes | Yes | Yes |

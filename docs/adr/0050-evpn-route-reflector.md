@@ -273,5 +273,9 @@ easy operator identification.
 See [docs/evpn-enablement.md](../evpn-enablement.md) for the gate-by-gate
 plan. Gates 0-6 (capability, Type 2 reflection, GR/LLGR, MAC mobility,
 multi-homing reflection, scale validation, controller injection) shipped
-on `feat/evpn-rr`; Gates 7-9 (VTEP mode, multi-homing execution / DF
-election, IRB / MVPN / PBB / MPLS) remain a strategic decision point.
+on `feat/evpn-rr`. Subsequent gates have since landed under their own
+ADRs: Gate 7a/7b/7b+1/7b+2 VTEP mode (ADR-0052 / ADR-0054 / ADR-0055),
+Gate 8 observable DF election (ADR-0057), Gate 8b multihoming execution
+including BUM split-horizon + aliasing + mass-withdraw, and Gate 9
+symmetric IRB / L3VNI / Type 5 dataplane (ADR-0058). MVPN, PBB, and
+MPLS encapsulation remain out of scope.

@@ -66,7 +66,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
 - [x] Config persistence + SIGHUP reload — gRPC neighbor add/delete mutations persist to TOML via atomic write; SIGHUP triggers config reload with structured per-peer reconciliation
 - [x] LLGR (RFC 9494) — two-phase GR timer: GR-stale routes promote to LLGR-stale with LLGR_STALE community, configurable llgr_stale_time per peer, NO_LLGR routes purged at transition, effective stale time = min(local, peer)
-- [x] 1245 tests — unit, integration, property, fuzz
+- [x] 1893 workspace tests — unit, integration, property, fuzz
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -124,17 +124,22 @@ this document is reference / long-tail.
   listeners are unchanged (file-system permissions remain their
   auth surface).
 - [ ] **EVPN VTEP alpha-soak slate.** With Gates 7a / 7b / 7b+1 /
-  7b+2 / 7c / 8 landed (v0.17.0 + `[Unreleased]`), the bidirectional
-  VTEP loop covers MAC-only and MAC+IP origination under the FRR
-  replace model with sub-second mobility convergence, plus
-  observable DF election against shared Ethernet Segments.
-  `docs/evpn-alpha-soak.md` tracks the residuals as a checklist:
-  M37 + M37+IP + M38 on a privileged CI runner, 24 h soak with
-  synthetic MAC churn, RFC 7432 §15.1 duplicate-MAC quarantine
-  action (detection counters shipped, the operator-facing
-  escalation channel is the deferred half), plus the larger
-  Gate 8b (multi-homing enforcement) / Gate 9 (IRB) follow-ons.
-  These are the slope to v1.0-grade EVPN confidence.
+  7b+2 / 7c / 8 / 8b landed (v0.17.0 + `[Unreleased]`) and Gate 9
+  IRB readiness foundation live (`[[evpn_ip_vrfs]]` config + Type 5
+  pure-logic helpers + IP-VRF readiness probe + Linux netlink dumps
+  + `probe_ip_vrfs` end-to-end through the reconciler, ADR-0058),
+  the bidirectional VTEP loop covers MAC-only and MAC+IP origination
+  under the FRR replace model with sub-second mobility convergence,
+  plus observable DF election against shared Ethernet Segments and
+  observable IP-VRF readiness state. `docs/evpn-alpha-soak.md`
+  tracks the residuals as a checklist: M37 + M37+IP + M38 on a
+  privileged CI runner, 24 h soak with synthetic MAC churn, RFC 7432
+  §15.1 duplicate-MAC quarantine action (detection counters shipped,
+  the operator-facing escalation channel is the deferred half),
+  plus the remaining Gate 9 slices — `DataplaneReport.ip_vrf_status`
+  + `rustbgpctl evpn vrfs` CLI surface, Type 5 origination + L3 FIB
+  programming, and the M39 manual smoke. These are the slope to
+  v1.0-grade EVPN confidence.
 - [ ] **CI regression tracking for benchmarks** — automated runs of
   the criterion benchmarks with threshold-based alerts on PR. The
   benchmarks exist; the regression gate doesn't.
@@ -393,6 +398,7 @@ this document is reference / long-tail.
 
 #### Recently shipped (post-v0.7.0)
 
+- [x] **EVPN Gate 9 IRB readiness foundation** (`[Unreleased]`, ADR-0058, PRs #66 / #67 / #72 / #73 / #74 / #75) — `[[evpn_ip_vrfs]]` TOML schema with VRF / L3VXLAN device binding, operator-supplied Router MAC, and an L2VNI `ip_vrf` link; pure-logic `IpVrf` / `IpVrfTable` domain types in `crates/evpn::ip_vrf` with config-load validation. Pure-logic Type 5 origination (`originate_ip_prefix_route`) + projection (`project_ip_prefix_routes`) helpers enforce the RFC 9136 §4.4.2 Interface-less symmetric IRB model. `IpVrfStatus` readiness probe checks the seven ADR-0058 §3 predicates (VRF device exists + UP + matches `table_id`; L3 VXLAN exists + UP + matches VNI + matches local VTEP IP + enslaved to the VRF + MAC matches Router MAC). `crates/evpn-linux` adds rtnetlink-backed VRF / L3VXLAN dumps that build an `IpVrfKernelSnapshot`. A new `Dataplane::probe_ip_vrfs` trait method (default `Vec::new()`) wires the snapshot through `LinuxDataplane`; the reconcile actor calls it every pass, plumbs the `IpVrfTable` through `DataplaneIntent`, and surfaces readiness transitions via `tracing::info!` / `warn!`. Remaining slices: `DataplaneReport.ip_vrf_status` + `rustbgpctl evpn vrfs`, Type 5 origination + L3 FIB programming, and the M39 manual smoke against FRR.
 - [x] **ASPA verification** (v0.7.0) — upstream path verification with RTR v2 support, ADR-0049
 - [x] **Config diff** (v0.7.0) — `rustbgpd --diff` previews SIGHUP changes
 - [x] **Looking glass REST API** (v0.7.0) — birdwatcher-compatible endpoints
@@ -507,11 +513,12 @@ Each moves overall parity 3-5% while disproportionately improving real-world usa
 - [x] **Admin shutdown communication** (RFC 8203) — human-readable reason text in Cease NOTIFICATION; threaded from gRPC DisableNeighbor through transport
 - [x] **Enhanced Route Refresh** (RFC 7313) — BoRR/EoRR demarcation and inbound family replacement semantics for `SoftResetIn`
 - [x] **EVPN Route Reflector — Phase 1** (RFC 7432) — L2VPN/EVPN (AFI 25 / SAFI 70) RR role for VXLAN-EVPN DC fabrics. All 5 RFC 7432 route types (EAD per-ES, EAD per-EVI, MAC/IP, IMET, Ethernet Segment, IP Prefix per RFC 9136), MAC mobility best-path per §15.1 with sticky-flag preservation, RFC 4456 reflection applied to EVPN routes, 6 typed extended-community accessors (BGP Encapsulation for VXLAN per RFC 8365/9012, MAC Mobility, ESI Label, ES-Import RT, Router MAC per RFC 9135, Default Gateway). `ListEvpnRoutes` gRPC RPC + `rustbgpctl evpn` CLI. Gates 0-6 closed on `feat/evpn-rr`: capability sanity (M29), real Type 2 MAC reflection with kernel VXLAN (M30), GR/LLGR stale handling, MAC mobility / sticky preservation interop (M31), multi-homing Type 1 EAD-per-EVI + Type 4 ES reflection (M32 — FRR ES on a bond interface), 50k-route scale validation with churn (M33), and controller-driven injection via `AddEvpnRoute` / `DeleteEvpnRoute` gRPC. Includes review correctness fixes: source-peer split horizon, same-peer attribute-change detection, full RFC 4456 tie-break chain (stale → ORIGIN → CLUSTER_LIST → ORIGINATOR_ID), max-prefix counting EVPN keys + FlowSpec rules, EVPN withdrawals propagated through both AS_PATH and CLUSTER_LIST loop branches, EVPN initial dump for late-joining peers, EVPN ERR refresh tracking, Type 5 prefix in policy context, proto3 default-correct `disable_vxlan_encap` field. See ADR-0050 and [docs/evpn-enablement.md](docs/evpn-enablement.md) for the Gate 0-9 ladder.
-- [ ] **EVPN Phase 2 — VTEP mode** — local EVI/VRF/VNI state, MAC learning from kernel FDB, local route origination. Required for general-purpose routing; not required for RR-only deployments. Kernel integration design in ADR-0054 (Gate 7b foundation, v0.14.0) and ADR-0055 (Gate 7b+1 origination boundary, v0.15.0). With both gates landed, the bidirectional VTEP loop is closed — kernel-learned local MACs flow up via RTNLGRP_NEIGH → BGP EVPN Type 2 originations with RFC 7432 §15.1 mobility, and one Type 3 IMET per L2VNI carries RFC 6514 §5 PMSI Tunnel for ingress-replication BUM. MAC-with-IP origination (ARP/ND suppression learning), `advertise_svi_mac`, static-MAC config schema, and Gate 7c sub-second mobility convergence are the next slices on top — tracked in `docs/evpn-enablement.md`.
+- [x] **EVPN Phase 2 — VTEP mode (single-homed L2VNI alpha)** — local EVI/VNI state, MAC learning from kernel FDB, local route origination. Required for general-purpose routing; not required for RR-only deployments. Kernel integration design in ADR-0054 (Gate 7b foundation, v0.14.0) and ADR-0055 (Gate 7b+1 origination boundary, v0.15.0). The bidirectional VTEP loop is closed — kernel-learned local MACs flow up via RTNLGRP_NEIGH → BGP EVPN Type 2 originations with RFC 7432 §15.1 mobility, and one Type 3 IMET per L2VNI carries RFC 6514 §5 PMSI Tunnel for ingress-replication BUM. Gate 7b+2 closes the MAC-with-IP path under ARP/ND suppression (v0.17.0), Gate 7c switches the originator to push-notified RIB broadcasts for sub-second mobility convergence (v0.17.0), `advertise_svi_mac` originates the bridge's own MAC on Ready (v0.17.0), and `sticky_macs` config carries the RFC 7432 §15.4 sticky bit on origination (v0.17.0, ADR-0056). Tracked next slices: duplicate-MAC quarantine action, gRPC mutation surface for `[[evpn_instances]]`, VLAN-aware bridges, bridge / VXLAN netdev creation — see `docs/evpn-enablement.md`.
 - [x] **EVPN Phase 3 partial — Multi-homing foundation (Gate 8)** (`[Unreleased]`, ADR-0057) — observable DF election + Type 1/4 origination. Pure DF election state machine (RFC 7432 §8.5 service carving + RFC 8584 §3 algorithm negotiation), three Type 1/4 originator state machines (Type 4 ES, Type 1 EAD-per-ES with MAX_ET, Type 1 EAD-per-EVI), daemon orchestrator subscribed to the EVPN best-path broadcast, Prometheus `evpn_df_role{esi,vni,role}` gauge + `evpn_df_role_changes_total` counter. M38 smoke topology (2-PE rustbgpd shared ESI). **Forwarding enforcement (split-horizon drops + aliasing + mass-withdraw + DF-role-aware MAC origination) is Gate 8b — ADR-0057 records the carve-out.** Operator note: do not configure `[[ethernet_segments]]` for production multi-homing until Gate 8b ships.
 - [x] **EVPN Phase 3 partial — Gate 8b prep extcomms** (`[Unreleased]`, ADR-0057) — auto-derived ES-Import RT extcomm (RFC 7432 §7.6) on Type 4 ES routes and ESI Label extcomm (RFC 7432 §7.5) on Type 1 EAD-per-ES routes (`single_active = false` Gate 8 default). Closes the "control plane looks like multi-homing but peers may not import the right routes" gap without touching dataplane behavior. M38 driver asserts both extcomms appear on the wire. No wire codec change.
 - [x] **EVPN Phase 3 partial — Gate 8b enforcement intent foundation** (`[Unreleased]`) — DF-election role state now feeds the Linux dataplane supervisor as a portable `(ESI, VNI)` BUM-enforcement table. The reconciler resolves bridge, VXLAN ifindex, and CE-facing port identity and reports the desired action (`allow` for DF, `suppress` for Non-DF) through `DataplaneReport.bum_enforcement`. Observable-only: no kernel filter mutation yet.
-- [ ] **EVPN Phase 3 — Multi-homing enforcement (Gate 8b proper) + IRB** — split-horizon kernel primitive on the Linux dataplane (consume the BUM-enforcement plan; suppress CE-facing BUM on Non-DF for `(ESI, VNI)`), proper per-ESI label allocator that survives operator config churn, aliasing / backup-path via Type 1 EAD-per-EVI (RFC 7432 §14), mass-withdraw on AS_PATH change (§8.6), DF-role-aware MAC origination, optional import-side ES-Import RT filtering, symmetric IRB semantics (RFC 9135), auto-derived Route Targets (RFC 8365 §5.1.2.1). Needed for active-active ToR deployments.
+- [x] **EVPN Phase 3 partial — Gate 9 IRB readiness foundation** (`[Unreleased]`, ADR-0058) — `[[evpn_ip_vrfs]]` TOML schema with VRF / L3VXLAN device binding and operator-supplied Router MAC, pure-logic Type 5 origination + projection helpers (RFC 9136 §4.4.2 Interface-less IRB), `IpVrfStatus` readiness probe checking the seven ADR-0058 §3 predicates, Linux rtnetlink dumps for VRF / L3VXLAN inventory, and a `Dataplane::probe_ip_vrfs` trait surface called every reconcile pass with readiness transitions surfaced via `tracing::info!` / `warn!`. **Type 5 origination + L3 FIB programming are still ahead** — this slice unlocks the readiness gate, not the dataplane.
+- [ ] **EVPN Phase 3 — Multi-homing enforcement (Gate 8b residual) + Gate 9 dataplane** — Gate 8b residuals: aliasing dataplane ECMP (`LinuxDataplane` consumes `RemoteMacEntry::alias_vtep_ips` via nexthop group or L3-route-based ECMP), production-default multi-homing enforcement after the 24 h soak. Gate 9 dataplane: `DataplaneReport.ip_vrf_status` surfacing + `rustbgpctl evpn vrfs` CLI view, Type 5 origination, L3 FIB programming for symmetric IRB (RFC 9135), auto-derived Route Targets (RFC 8365 §5.1.2.1), M39 manual smoke against FRR. Needed for active-active ToR deployments and tenant-routing topologies.
 - [ ] **EVPN Phase 4 — Adjacent standards** — PBB-EVPN (RFC 7623), EVPN-MVPN integration (RFC 9251, Route Types 6/7/8), MPLS encapsulation, Add-Path for EVPN (RFC 9252). Service-provider EVPN use cases.
 - [ ] **EVPN polish + observability gaps** (low-priority, Phase 1 known limitations):
   - [x] Type 5 (IP Prefix) interop test against FRR (M30b, `tests/interop/m30b-evpn-type5-frr.clab.yml`) — single-VTEP origination from FRR vrf1 / L3VNI 100; rustbgpd RR decodes the Type 5 NLRI and surfaces RD, prefix, next-hop, VNI label, RT extended community, and VXLAN encap via `ListEvpnRoutes`. Withdrawal validated. RR-reflection of Type 5 (2-VTEP topology, ORIGINATOR_ID + CLUSTER_LIST asserts) tracked as M30c.
@@ -627,15 +634,18 @@ Features that market research indicates are lower value than originally planned.
 
 ### Interop Test Coverage
 
-35 automated interop scripts cover M1, M3, M4, M10–M37 (including
-M30b, M32b, M35b, M35c sub-suites) against FRR 10.3.1, BIRD 2.0.12,
-GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual smoke tests.
-M36 is the Gate 7b real-VTEP smoke (rustbgpd-as-VTEP, FRR-as-
-originator, iBGP/AS65000) — 8/8 PASS locally against Linux 6.17 +
-FRR 10.3.1; M37 is the Gate 7b+1 local-origination smoke
+35 automated interop scripts cover M1, M3, M4, M10–M38 (including
+M30b, M32b, M35b, M35c, M37+IP sub-suites) against FRR 10.3.1,
+BIRD 2.0.12, GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual
+smoke tests. M36 is the Gate 7b real-VTEP smoke (rustbgpd-as-VTEP,
+FRR-as-originator, iBGP/AS65000) — 8/8 PASS locally against Linux
+6.17 + FRR 10.3.1; M37 is the Gate 7b+1 local-origination smoke
 (rustbgpd-as-originator, FRR-as-consumer) — 4/4 PASS locally against
-the same kernel/FRR pair. Both are not in CI yet because privileged
-kernel state is required.
+the same kernel/FRR pair; M37+IP is the Gate 7b+2 MAC-with-IP
+origination smoke; M38 is the Gate 8 DF-election smoke
+(2-PE rustbgpd shared ESI). M36/M37/M37+IP/M38 are not in CI yet
+because privileged kernel state is required. M39 (Gate 9 IRB)
+arrives with the Type 5 origination + L3 FIB slice.
 
 **Must-test (high signal, high risk):**
 
@@ -689,10 +699,10 @@ releases (see "Next Up — Pre-v1.0 Polish" above).
 - [x] Wire crate API stability (`rustbgpd-wire` published on crates.io)
 - [x] Comprehensive rustdoc for public API (hand-written crates; generated proto stubs excluded)
 - [ ] **Security audit of gRPC surface** *(v1.0 gate)* — independent
-  review of the gRPC API surface, listener configuration (mTLS pending,
-  see Next Up), and authorization model. Native gRPC mTLS lands in v0.x
-  before the audit so the audit isn't blocked on a known-missing
-  primitive.
+  review of the gRPC API surface, listener configuration (UDS default
+  + opt-in TCP + native mTLS + bearer-token auth, all shipped in
+  v0.11.0), and authorization model. The audit is no longer blocked
+  on a known-missing primitive.
 - [x] **RibManager submodule split** — 8,318-line manager.rs split into 7 submodules (mod.rs, distribution.rs, peer_lifecycle.rs, route_refresh.rs, graceful_restart.rs, helpers.rs, tests.rs)
 - [x] **RTR expire_interval enforcement** — VRPs are now cleared if no fresh EndOfData arrives before the expiry window
 
@@ -744,7 +754,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
-- [x] Automated interop test scripts (M1, M3, M4, M10–M33)
+- [x] Automated interop test scripts (M1, M3, M4, M10–M38)
 - [x] Binary releases (GitHub Releases with cross-compiled linux-amd64/arm64 binaries)
 - [ ] Homebrew formula
 - [x] crates.io publishing (`rustbgpd-wire` published; other crates remain internal)

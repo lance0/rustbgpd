@@ -7,12 +7,27 @@ pushing a version tag.
 
 ## Automated (CI)
 
-These run on every push and PR:
+These run on every push and PR (`.github/workflows/ci.yml`,
+`.github/workflows/interop.yml`):
 
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] `cargo test --workspace`
 - [ ] `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"`
+- [ ] **MSRV gate** — `cargo check --workspace --all-targets` at the
+      declared `rust-version` (kept in lockstep with the Dockerfile
+      builder version)
+- [ ] **Wire crate README freshness gate** — if
+      `crates/wire/Cargo.toml` version changed in the diff,
+      `crates/wire/README.md` must also be touched
+- [ ] **Gate 8b BUM-filter kernel primitive**
+      (`evpn_bum_filter_kernel` job) — runs the netns harness under
+      `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN
+      --security-opt apparmor=unconfined` against `ubuntu-latest`'s
+      6.x kernel
+- [ ] **Interop tier** — M1, M10, M13, M14, M15, M17, M22, M24, M25,
+      M29, M30, M34, M35, M35b, M35c against FRR 10.3.1 via
+      containerlab
 
 ## Manual smoke tests
 
@@ -179,6 +194,28 @@ containerlab destroy -t tests/interop/m36-evpn-vtep-smoke.clab.yml
 containerlab deploy -t tests/interop/m37-evpn-local-origination.clab.yml
 bash tests/interop/scripts/test-m37-evpn-local-origination.sh
 containerlab destroy -t tests/interop/m37-evpn-local-origination.clab.yml
+```
+
+If the release touches **Gate 7b+2** (MAC-with-IP Type 2 via ARP/ND
+suppression — `crates/evpn/src/origination_macip.rs`), also run
+M37+IP. If the release touches **Gate 8 / 8b** (Type 1/4 origination
+in `crates/evpn/src/origination_es.rs`, DF election in
+`crates/evpn/src/df_election.rs`, ESI Label / ES-Import RT extcomms,
+aliasing in `crates/evpn/src/aliasing.rs`, mass-withdraw in
+`crates/evpn/src/mass_withdraw.rs`, or BUM-port enforcement), run M38
+to validate DF election + Type 1/4 origination against a peer running
+the same code. Both are **local-only, privileged smokes**:
+
+```bash
+# M37+IP — Gate 7b+2 MAC-with-IP Type 2 via ARP/ND suppression
+containerlab deploy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
+bash tests/interop/scripts/test-m37-evpn-mac-ip-origination.sh
+containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
+
+# M38 — Gate 8 observable DF election with two VTEPs sharing an ESI
+containerlab deploy -t tests/interop/m38-evpn-df-election.clab.yml
+bash tests/interop/scripts/test-m38-evpn-df-election.sh
+containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml
 ```
 
 Also smoke the controller-injection path against a live RR (M30

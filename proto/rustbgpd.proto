@@ -1037,8 +1037,10 @@ message EvpnInstanceState {
   // bare `optional` for strings without explicit `optional` keyword;
   // empty == not configured).
   string bridge = 5;
-  // RFC 9135 §6.1 SVI MAC origination flag. Reserved — always reflects
-  // the configured value but does not yet drive Type 2 origination.
+  // RFC 9135 §6.1 SVI MAC origination flag. When `true`, the daemon's
+  // SVI task originates a Type 2 for the bridge link-layer address
+  // (captured from the Linux dataplane) on instance-Ready and
+  // withdraws on `Ready → NotReady` or bridge MAC drift.
   bool advertise_svi_mac = 6;
   // Number of MAC-only Type 2 routes currently locally originated by
   // this daemon for the instance and accepted by the RIB.

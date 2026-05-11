@@ -6,6 +6,13 @@ This runbook is for the bidirectional EVPN VTEP alpha path:
   entries.
 - Gate 7b+1: kernel-learned local MACs originate EVPN Type 2 routes,
   and one Type 3 IMET is originated per configured L2VNI.
+- Gate 7b+2: MAC-with-IP origination — `AF_INET` / `AF_INET6`
+  neighbour observations on the bridge correlate with their MAC and
+  are advertised under FRR-style replace semantics (one of MAC-only
+  / MAC+IP advertising at any time).
+- Gate 7c: sub-second remote-best-path mobility via the EVPN-keyed
+  `EvpnRouteEvent` broadcast; the 5 s `QueryEvpnRoutes` poll stays
+  as a backstop for `Lagged` subscribers and cold start.
 
 RR-only deployments with empty `[[evpn_instances]]` do not spawn the
 dataplane reconciler or local-MAC originator.
