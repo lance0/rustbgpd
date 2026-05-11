@@ -50,6 +50,7 @@ use crate::snapshot::{InstanceProbes, KernelSnapshot};
 
 mod bum_filter;
 mod fdb;
+mod ip_vrf;
 mod links;
 mod notify;
 mod probe;
