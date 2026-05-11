@@ -1040,6 +1040,16 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             .expect("EVPN instances re-resolve cleanly after Config::validate"),
     );
 
+    // Gate 9 IP-VRFs (`[[evpn_ip_vrfs]]`). Same expect-after-validate
+    // pattern as `evpn_instances`. Empty for any deployment without
+    // Gate 9 config; the dataplane short-circuits `probe_ip_vrfs` when
+    // empty so L2-only and RR-only deployments incur zero added cost.
+    let evpn_ip_vrfs = std::sync::Arc::new(
+        config
+            .resolve_evpn_ip_vrfs()
+            .expect("EVPN IP-VRFs re-resolve cleanly after Config::validate"),
+    );
+
     // EVPN Linux dataplane reconciler (Gate 7b). Returns None when
     // [[evpn_instances]] is empty — RR-only deployments don't open a
     // netlink socket and don't spawn the actor. The handle is moved
@@ -1054,6 +1064,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let mut evpn_dataplane_handle = evpn_dataplane::spawn(
         supervisor_config,
         &evpn_instances,
+        &evpn_ip_vrfs,
         rib_tx.clone(),
         metrics.clone(),
         evpn_dataplane_shutdown.clone(),

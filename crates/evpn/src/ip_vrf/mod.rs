@@ -195,7 +195,7 @@ pub enum IpVrfError {
 /// Resolved table of local IP-VRFs, with uniqueness enforced on
 /// `(name)` and `(id)`. Built once at config load (or after each
 /// SIGHUP reconcile pass) and held by the supervisor.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct IpVrfTable {
     by_name: std::collections::BTreeMap<String, IpVrf>,
     by_id: std::collections::BTreeMap<IpVrfId, String>,

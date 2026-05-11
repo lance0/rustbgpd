@@ -225,6 +225,13 @@ visibility)
   symmetric IRB packet path through the kernel. ~2-3 weeks. The
   `crates/rib` Type 5 codec already round-trips; the daemon-side
   origination + kernel programming is what's missing.
+  - Follow-on optimization once slice 4c lands: share one
+    rtnetlink link dump across `links::dump_links` (L2) and
+    `ip_vrf::dump_ip_vrf_observations` (L3). Today each reconcile
+    pass issues two `RTM_GETLINK` round-trips that traverse the
+    same kernel link list. Saves one syscall + one allocation per
+    pass; matters under churn. Not a correctness blocker, defer
+    until the reconcile-loop integration is in place.
 - [ ] **`[[evpn_instances]]` mutation surface.** Today the table is
   pinned at startup. `AddEvpnInstance` / `DeleteEvpnInstance` gRPC
   + SIGHUP reload semantics need a swap surface (`ArcSwap` or
