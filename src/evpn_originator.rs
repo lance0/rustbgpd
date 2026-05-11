@@ -204,7 +204,8 @@ struct OriginatorRuntime {
 /// (empty `evpn_instances`).
 #[allow(clippy::too_many_arguments)]
 // ESI-aware origination nudged the count over the threshold; the daemon-side spawn is the only caller.
-#[must_use = "drop the handle to shut down the originator"]
+#[must_use = "call `EvpnOriginatorHandle::shutdown` to stop the originator — \
+              dropping the handle leaves the task running"]
 pub fn spawn(
     config: OriginatorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,

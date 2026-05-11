@@ -172,7 +172,9 @@ pub struct SpawnConfig {
 /// Spawn the Type 5 originator. Returns `None` when no
 /// `[[evpn_ip_vrfs]]` are configured (the originator has nothing to
 /// do in that case).
-#[must_use = "drop the handle to shut down the originator"]
+#[must_use = "call `EvpnL3OriginatorHandle::shutdown` to stop the originator — \
+              dropping the handle leaves the task running because \
+              `CancellationToken` does not auto-cancel on drop"]
 pub fn spawn(cfg: SpawnConfig) -> Option<EvpnL3OriginatorHandle> {
     if cfg.ip_vrfs.is_empty() {
         info!(
