@@ -207,13 +207,18 @@ landing, tracked here for visibility)
   1. **Privileged-runner 24 h soak validation** before flipping the
      `apply_bum_enforcement` default to `true`. Single-pass
      primitive validation already landed via the Docker harness; the
-     24 h BUM-state soak (synthetic DF flips against `tests/soak/
-     configs/rustbgpd-soak-gate8b-pe{1,2}.toml`) completed cleanly
-     — PE1 RSS flat at ~13.95 MB throughout, full-run slope decayed
-     to 0.050 MB/h. What's still ahead is the MAC-churn variant
-     (FDB programming concurrent with flag flips) so the combined
-     enforcement + origination paths get the same sustained-churn
-     confidence under realistic timing.
+     24 h BUM-state soak completed 2026-05-11
+     (full postmortem: [`docs/soak-gate8b-24h-bum-state.md`](soak-gate8b-24h-bum-state.md)).
+     PE1 RSS plateaued at 13.9453 MB after a one-time 3h 32m settle
+     and stayed there for the remaining 20.5h (steady-state slope
+     0.000 MB/h); all 142 flip events kept the BUM-port flag
+     triplet on the expected side of every DF transition. What's
+     still ahead is the **MAC-churn variant** (FDB programming
+     concurrent with flag flips) so the combined enforcement +
+     origination paths get the same sustained-churn confidence
+     under realistic timing. The MAC-churn variant reuses
+     `tests/soak/run-gate8b-soak.sh` with an additional ~10 Hz
+     `bridge fdb add / del` loop on the per-cycle hook.
   2. **Aliasing dataplane forwarding.** The control-plane half
      (above) populates `alias_vtep_ips` cleanly; the
      `LinuxDataplane` consumer still programs only the primary
