@@ -196,14 +196,15 @@ in Gate 9.
 ### 6. Domain layout
 
 ```
-crates/evpn/src/ip_vrf.rs           NEW: IpVrfConfig, IpVrf domain object
+crates/evpn/src/ip_vrf/mod.rs          NEW: IpVrf, IpVrfId, IpVrfTable
 crates/evpn/src/ip_vrf/origination.rs  NEW: kernel route → Type 5 builder
 crates/evpn/src/ip_vrf/projection.rs   NEW: Type 5 → RemoteIpPrefix
+crates/evpn/src/ip_vrf/readiness.rs    NEW: pure-logic readiness probe
 src/config/schema.rs                 + EvpnIpVrfConfig serde shape
 src/config/mod.rs                    + parse_evpn_ip_vrf, validation
 src/evpn_ip_vrf.rs                   NEW: per-vrf supervisor task
 crates/evpn-linux/src/linux/links.rs + VrfLink, L3VxlanLink dumps
-crates/evpn-linux/src/reconcile.rs   + IP-VRF readiness probe
+crates/evpn-linux/src/reconcile.rs   + IP-VRF readiness probe wiring
 crates/evpn-linux/src/...            + FIB install/withdraw ops
 ```
 
@@ -221,12 +222,14 @@ The pure-logic split mirrors the L2 side:
 
 ### 7. Linux probe shape (Step 3)
 
-A new `IpVrfStatus` enum in `crates/evpn/src/dataplane.rs`:
+`IpVrfStatus` lives in `crates/evpn/src/ip_vrf/readiness.rs`
+(re-exported via `crates/evpn/src/ip_vrf/mod.rs`). The actual
+shape that landed — with the observed value attached to every
+mismatch variant so a future `--json` view can render the
+delta without re-querying the kernel:
 
 ```rust
 pub enum IpVrfStatus {
-    /// Some readiness predicate is unsatisfied.
-    NotReady { reasons: Vec<IpVrfNotReady> },
     /// All seven §3 predicates hold; we may originate / install.
     Ready {
         vrf_ifindex: u32,
@@ -234,20 +237,31 @@ pub enum IpVrfStatus {
         table_id: u32,
         router_mac: MacAddress,
     },
+    /// At least one predicate failed. Every failing predicate is
+    /// reported so an operator's `--json` view can render the full
+    /// list, not just the first one tripped.
+    NotReady { reasons: Vec<IpVrfNotReady> },
 }
 
 pub enum IpVrfNotReady {
     VrfDeviceMissing,
     VrfDeviceDown,
-    VrfTableIdMismatch  { observed: Option<u32>, configured: u32 },
+    VrfTableIdMismatch  { observed: u32, configured: u32 },
     L3VxlanMissing,
     L3VxlanDown,
-    L3VxlanVniMismatch  { observed: Option<u32>, configured: u32 },
+    L3VxlanVniMismatch  { observed: u32, configured: u32 },
     L3VxlanLocalMismatch{ observed: Option<IpAddr>, configured: IpAddr },
-    L3VxlanNotInVrf,
+    L3VxlanNotInVrf     { observed_master: Option<u32>, expected_master: u32 },
     RouterMacMismatch   { observed: Option<MacAddress>, configured: MacAddress },
 }
 ```
+
+The probe itself —
+`probe(&IpVrf, &IpVrfKernelSnapshot) -> IpVrfStatus` — is pure
+and takes a portable [`IpVrfKernelSnapshot`] built by the
+`crates/evpn-linux` reconciler from rtnetlink in a follow-on
+slice. Keeps the seven predicates unit-testable against
+synthesized snapshots — no privileged runners.
 
 The reconciler populates this for every configured IP-VRF on every
 pass and includes it in `DataplaneReport.ip_vrf_status` (new field).

@@ -11,6 +11,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 9 IP-VRF readiness probe (pure-logic).** New
+  `rustbgpd_evpn::ip_vrf::readiness` module: takes a portable
+  [`IpVrfKernelSnapshot`] (built by the `crates/evpn-linux`
+  reconciler from rtnetlink in a follow-on slice — kernel-free in
+  this layer) and an [`IpVrf`] config, returns an [`IpVrfStatus`]
+  verdict against the seven readiness predicates from ADR-0058 §3:
+  `vrf_device` exists + UP + `IFLA_VRF_TABLE` matches; `l3vxlan_device`
+  exists + UP + `IFLA_VXLAN_ID` matches + `IFLA_VXLAN_LOCAL` matches +
+  enslaved to the right master + `address` (MAC) matches the
+  configured Router MAC. Every failing predicate is reported in the
+  `NotReady { reasons }` vec so a future `--json` view can render
+  the full list rather than the first one tripped. The probe also
+  suppresses the `L3VxlanNotInVrf` complaint when the VRF
+  observation itself is missing — that situation is already named
+  via `VrfDeviceMissing` and synthesizing a duplicate reason with
+  no useful info would just clutter operator output. 14 unit tests
+  pin every variant + the suppress-duplicate behavior.
+
 - **EVPN Gate 9 Type 5 domain helpers (pure-logic).** Two new
   modules in `rustbgpd_evpn::ip_vrf`:
   - `origination` — `originate_ip_prefix_route(&IpVrf,
