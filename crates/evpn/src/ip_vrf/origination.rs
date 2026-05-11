@@ -4,8 +4,7 @@
 //! Mirrors `crates/evpn/src/origination.rs` (Type 2) and
 //! `crates/evpn/src/origination_es.rs` (Type 1 / Type 4) for the
 //! Gate 9 IRB case. ADR-0058 pins the symmetric Interface-less
-//! Interface-less RT-5 shape (RFC 9136 §4.4.2) — the on-wire fields
-//! are:
+//! RT-5 shape (RFC 9136 §4.4.2) — the on-wire fields are:
 //!
 //! - `prefix`: the kernel route key (IPv4 or IPv6).
 //! - `gateway`: zero (`0.0.0.0` / `::`) — Interface-less model uses
@@ -16,14 +15,15 @@
 //!   validated at config load, asserted by the builder).
 //! - `ethernet_tag`: zero (Type 5 doesn't use the EVI tag concept).
 //!
-//! And the path attribute list:
+//! And the non-MP path attribute list (the only thing this layer
+//! emits — the next-hop is carried separately on
+//! [`OriginatedIpPrefixRoute::next_hop`] for the encoder to fold
+//! into `MP_REACH_NLRI` at send time, NOT as a standalone
+//! `PathAttribute::NextHop`):
 //!
 //! - `ORIGIN = IGP` — these are routes from the local kernel.
 //! - `AS_PATH = empty` — iBGP origination puts no ASN; eBGP wrapping
 //!   is the transport's job.
-//! - `NEXT_HOP = IpVrf::local_vtep_ip` — the originator VTEP.
-//! - `MP_REACH_NLRI` — added by the wire encoder at send time, not
-//!   here. Origination builds the NLRI + the non-MP attrs only.
 //! - `ExtendedCommunities`: { Route Target ×N from
 //!   `IpVrf::route_targets`, BGP Encapsulation = 8 (VXLAN), Router
 //!   MAC extcomm = `IpVrf::router_mac` }.
@@ -83,11 +83,15 @@ impl LocalIpRoute {
 pub struct OriginatedIpPrefixRoute {
     /// The EVPN Type 5 NLRI to advertise.
     pub route: EvpnRoute,
-    /// Path attributes to attach (`Origin`, `AsPath`, `NextHop`, `ExtComms`).
+    /// Non-MP path attributes (`Origin`, empty `AsPath`,
+    /// `ExtendedCommunities`). The next-hop is *not* in this list —
+    /// see [`Self::next_hop`].
     pub attributes: Vec<PathAttribute>,
     /// Local VTEP IP this advertisement names as `NEXT_HOP`. Carried
-    /// alongside the attribute list so the supervisor / RIB can
-    /// build `MP_REACH_NLRI` without re-parsing the attribute set.
+    /// separately from `attributes` so the wire encoder folds it into
+    /// `MP_REACH_NLRI` at send time (the right place for an MP-BGP
+    /// next-hop) instead of also emitting a standalone
+    /// `PathAttribute::NextHop`.
     pub next_hop: IpAddr,
 }
 

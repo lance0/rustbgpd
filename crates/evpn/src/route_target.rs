@@ -171,17 +171,22 @@ impl FromStr for RouteTarget {
 
 impl RouteTarget {
     /// Encode into the 8-byte wire form of a Route Target Extended
-    /// Community (RFC 4360 §3 / RFC 5668 §2 — type byte high nibble
-    /// selects the administrator format, low nibble + subtype 0x02
-    /// marks "Route Target").
+    /// Community (RFC 4360 §3 / RFC 5668 §2). The first byte is the
+    /// **type** (selects the administrator format), the second byte
+    /// is the **subtype** (`0x02` = Route Target), and the remaining
+    /// six bytes are the administrator + assigned-number value.
     ///
-    /// The mapping is:
+    /// | Variant       | Type byte (`bytes[0]`) | Subtype (`bytes[1]`) | Value layout                  |
+    /// |---------------|------------------------|----------------------|-------------------------------|
+    /// | `TwoOctetAs`  | `0x00`                 | `0x02`               | `[asn:u16, value:u32]`        |
+    /// | `Ipv4`        | `0x01`                 | `0x02`               | `[ipv4:[u8;4], value:u16]`    |
+    /// | `FourOctetAs` | `0x02`                 | `0x02`               | `[asn:u32, value:u16]`        |
     ///
-    /// | Variant       | Type byte | Encoding                 |
-    /// |---------------|-----------|--------------------------|
-    /// | `TwoOctetAs`  | `0x00`    | `[asn:u16, value:u32]`   |
-    /// | `Ipv4`        | `0x01`    | `[ipv4:u32, value:u16]`  |
-    /// | `FourOctetAs` | `0x02`    | `[asn:u32, value:u16]`   |
+    /// The transitive flag (high bit `0x40` of the type byte, RFC
+    /// 4360 §3) is omitted on emit — receivers OR it in as needed.
+    /// The decoder ([`Self::from_extended_community`]) clears it
+    /// before matching so a transitive-flagged community still
+    /// recognizes as the same Route Target subtype.
     ///
     /// Used by Type 2 / Type 3 / Type 4 / Type 5 origination on the
     /// daemon side.
@@ -214,8 +219,9 @@ impl RouteTarget {
 
     /// Decode the inverse of [`Self::to_extended_community`]. Returns
     /// `None` for any extended community that isn't a Route Target —
-    /// type byte's low nibble must be `0x02` (Route Target subtype)
-    /// and high nibble must be one of the three RFC-defined formats.
+    /// the subtype byte (`bytes[1]`) must be `0x02` and the type
+    /// byte (`bytes[0]`, after masking the transitive flag) must be
+    /// one of the three RFC-defined formats (`0x00` / `0x01` / `0x02`).
     #[must_use]
     pub fn from_extended_community(c: rustbgpd_wire::ExtendedCommunity) -> Option<Self> {
         let bytes = c.as_u64().to_be_bytes();
@@ -223,9 +229,9 @@ impl RouteTarget {
         if bytes[1] != 0x02 {
             return None;
         }
-        // High nibble of the type byte selects the variant. Mask off
-        // the transitive bit (0x40) which the daemon may set for some
-        // RT subtypes per RFC 4360 §3.
+        // Type byte selects the variant. Mask off the transitive bit
+        // (0x40, RFC 4360 §3) so a transitive-flagged community decodes
+        // as the same RT format as a non-transitive one.
         match bytes[0] & 0x3F {
             0x00 => Some(Self::TwoOctetAs {
                 asn: u16::from_be_bytes([bytes[2], bytes[3]]),

@@ -18,9 +18,11 @@
 //!
 //! A Type 5 route is imported into IP-VRF `V` when any RT in the
 //! route's `ExtendedCommunities` matches any RT in
-//! `V.route_targets`. A route with no RT extcomms is dropped silently
-//! — those are either malformed or intended for L2 EVIs and have no
-//! place in an IP-VRF FIB.
+//! `V.route_targets`. A route with no RT extcomms (or whose RTs
+//! intersect *no* configured IP-VRF) is recorded in
+//! [`RemoteIpPrefixTable::drops`] with [`DropReason::NoMatchingIpVrf`]
+//! — observable, not silent. Those routes are either malformed or
+//! intended for L2 EVIs and have no place in an IP-VRF FIB.
 //!
 //! A route whose RTs intersect *multiple* IP-VRFs is imported into
 //! every matching one. That's correct per RFC 9136 §4.4.2 — the same
@@ -173,7 +175,7 @@ impl RemoteIpPrefixTable {
 /// Why a single route was excluded from the projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropReason {
-    /// The route's RT extcoms didn't intersect any IP-VRF in the
+    /// The route's RT extcomms didn't intersect any IP-VRF in the
     /// table — silently importing it would land it in an arbitrary
     /// tenant or none.
     NoMatchingIpVrf {
