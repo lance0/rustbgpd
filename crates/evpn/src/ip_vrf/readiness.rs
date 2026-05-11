@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_vrf_device_is_reported_alone_when_l3vxlan_also_missing() {
+    fn both_device_missing_predicates_reported_when_neither_observed() {
         let snap = IpVrfKernelSnapshot {
             vrf: None,
             l3vxlan: None,
