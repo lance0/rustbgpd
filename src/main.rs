@@ -1192,8 +1192,29 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // wiring.
     let (evpn_ip_vrf_status_tx, evpn_ip_vrf_status_rx) =
         tokio::sync::watch::channel(Vec::<rustbgpd_evpn::IpVrfDataplaneStatus>::new());
+
+    // Latest snapshot of `DataplaneReport.ip_vrf_routes.observations`
+    // for the Gate 9 slice 6b L3 originator subscriber and for
+    // Prometheus gauge updates. Stays empty on RR-only deployments and
+    // when `[[evpn_ip_vrfs]]` is unset — `dump_ip_vrf_routes`
+    // short-circuits in both cases.
+    let (evpn_ip_vrf_routes_tx, evpn_ip_vrf_routes_rx) =
+        tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::<
+            rustbgpd_evpn::IpVrfId,
+            Vec<rustbgpd_evpn::LocalIpRouteObservation>,
+        >::new()));
+    // Suppress unused-var until slice 6b lands the subscriber.
+    let _evpn_ip_vrf_routes_rx_unused = evpn_ip_vrf_routes_rx.clone();
     if let Some(handle) = evpn_dataplane_handle.as_ref() {
         let mut reports = handle.subscribe_reports();
+        // Resolve IpVrfId → operator-facing name for the metric labels
+        // — same labelling the gRPC surface uses.
+        let vrf_id_to_name: std::collections::HashMap<rustbgpd_evpn::IpVrfId, String> =
+            evpn_ip_vrfs
+                .iter()
+                .map(|v| (v.id, v.name.clone()))
+                .collect();
+        let metrics_for_routes = metrics.clone();
         tokio::spawn(async move {
             loop {
                 match reports.recv().await {
@@ -1203,6 +1224,35 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         // pending watchers. Safe to call from inside
                         // a tokio task without blocking the worker.
                         evpn_ip_vrf_status_tx.send_replace(report.ip_vrf_status);
+                        // Slice 6a: publish per-VRF observed-routes
+                        // gauge values and bump filtered-routes
+                        // counters by the per-pass deltas. The
+                        // observations themselves are forwarded onto
+                        // a watch channel for the L3 originator
+                        // (slice 6b) to subscribe to.
+                        for (vrf_id, observations) in &report.ip_vrf_routes.observations {
+                            let label = vrf_id_to_name
+                                .get(vrf_id)
+                                .cloned()
+                                .unwrap_or_else(|| vrf_id.as_u32().to_string());
+                            metrics_for_routes.set_evpn_ip_vrf_observed_routes(
+                                &label,
+                                i64::try_from(observations.len()).unwrap_or(i64::MAX),
+                            );
+                        }
+                        for ((vrf_id, reason), delta) in &report.ip_vrf_routes.filter_counts {
+                            let label = vrf_id_to_name
+                                .get(vrf_id)
+                                .cloned()
+                                .unwrap_or_else(|| vrf_id.as_u32().to_string());
+                            metrics_for_routes.add_evpn_ip_vrf_observed_routes_filtered(
+                                &label,
+                                reason.label(),
+                                *delta,
+                            );
+                        }
+                        evpn_ip_vrf_routes_tx
+                            .send_replace(std::sync::Arc::new(report.ip_vrf_routes.observations));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // The reconcile actor emits at most one report

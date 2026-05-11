@@ -65,6 +65,8 @@ pub struct BgpMetrics {
     evpn_duplicate_mac_first_move_timestamp: IntGaugeVec,
     evpn_df_role: IntGaugeVec,
     evpn_df_role_changes: IntCounterVec,
+    evpn_ip_vrf_observed_routes: IntGaugeVec,
+    evpn_ip_vrf_observed_routes_filtered: IntCounterVec,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -330,6 +332,29 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_ip_vrf_observed_routes = IntGaugeVec::new(
+            Opts::new(
+                "evpn_ip_vrf_observed_routes",
+                "Kernel routes currently observed in each configured EVPN IP-VRF \
+                 `table_id` that survive the Gate 9 slice 6a classifier (eligible for \
+                 Type 5 origination). Label `vrf` is the operator-facing IP-VRF name.",
+            ),
+            &["vrf"],
+        )
+        .expect("valid metric definition");
+
+        let evpn_ip_vrf_observed_routes_filtered = IntCounterVec::new(
+            Opts::new(
+                "evpn_ip_vrf_observed_routes_filtered_total",
+                "Kernel routes filtered by the EVPN IP-VRF observation classifier \
+                 (Gate 9 slice 6a), per VRF and drop reason. `reason` ∈ \
+                 {installed_by_routing_daemon, output_device_is_l3vxlan, \
+                 non_forwardable_type, link_local_or_multicast, malformed}.",
+            ),
+            &["vrf", "reason"],
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -448,6 +473,12 @@ impl BgpMetrics {
             .register(Box::new(evpn_df_role_changes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_ip_vrf_observed_routes.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_ip_vrf_observed_routes_filtered.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -489,6 +520,8 @@ impl BgpMetrics {
             evpn_duplicate_mac_first_move_timestamp,
             evpn_df_role,
             evpn_df_role_changes,
+            evpn_ip_vrf_observed_routes,
+            evpn_ip_vrf_observed_routes_filtered,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -696,6 +729,27 @@ impl BgpMetrics {
         self.evpn_df_role_changes
             .with_label_values(&[esi, vni.as_str()])
             .inc();
+    }
+
+    /// Set the EVPN IP-VRF observed-routes gauge for one VRF (Gate 9
+    /// slice 6a). Call from the daemon's `DataplaneReport` subscriber
+    /// once per pass per VRF; the value is the latest count of routes
+    /// surviving the classifier.
+    pub fn set_evpn_ip_vrf_observed_routes(&self, vrf: &str, count: i64) {
+        self.evpn_ip_vrf_observed_routes
+            .with_label_values(&[vrf])
+            .set(count);
+    }
+
+    /// Increment the EVPN IP-VRF filtered-routes counter for one
+    /// `(vrf, reason)` by the given delta (Gate 9 slice 6a).
+    pub fn add_evpn_ip_vrf_observed_routes_filtered(&self, vrf: &str, reason: &str, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_ip_vrf_observed_routes_filtered
+            .with_label_values(&[vrf, reason])
+            .inc_by(delta);
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.

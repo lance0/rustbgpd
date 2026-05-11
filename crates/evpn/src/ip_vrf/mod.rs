@@ -10,10 +10,12 @@
 //! particular §3 (observe-only Linux device lifecycle) and §4 (Router
 //! MAC is operator-supplied, never auto-derived from the kernel).
 
+pub mod observation;
 pub mod origination;
 pub mod projection;
 pub mod readiness;
 
+pub use observation::{IpVrfRouteDump, LocalIpRouteObservation, RouteFilterReason, RouteSource};
 pub use origination::{
     LocalIpRoute, OriginatedIpPrefixRoute, OriginationError, originate_ip_prefix_route,
 };

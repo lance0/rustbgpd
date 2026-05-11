@@ -41,7 +41,9 @@ use netlink_packet_core::NetlinkPayload;
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::AsyncSocket;
 use rtnetlink::Handle;
-use rustbgpd_evpn::ip_vrf::{IpVrfNotReady, IpVrfStatus, IpVrfTable, probe as probe_ip_vrf};
+use rustbgpd_evpn::ip_vrf::{
+    IpVrfNotReady, IpVrfRouteDump, IpVrfStatus, IpVrfTable, probe as probe_ip_vrf,
+};
 use rustbgpd_evpn::{EvpnInstanceTable, IpVrfId, LocalMacObservation};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
@@ -56,6 +58,7 @@ mod ip_vrf;
 mod links;
 mod notify;
 mod probe;
+mod routes;
 
 type ObservationDropHook = Arc<dyn Fn(&'static str) + Send + Sync + 'static>;
 
@@ -312,6 +315,37 @@ impl Dataplane for LinuxDataplane {
             });
         }
         Ok(snap)
+    }
+
+    async fn dump_ip_vrf_routes(&mut self, ip_vrfs: &IpVrfTable) -> IpVrfRouteDump {
+        // Skip the netlink dump entirely when no IP-VRFs are
+        // configured — Gate 9 is opt-in and the vast majority of
+        // deployments never reach this branch with a non-empty table.
+        if ip_vrfs.is_empty() {
+            return IpVrfRouteDump::default();
+        }
+        // Build the L3VXLAN name→ifindex map from the link inventory.
+        // `probe_ip_vrfs` runs the same link dump in its own pass; for
+        // 6a we accept the dup (one extra `RTM_GETLINK` per reconcile
+        // cycle). A shared inventory pass is a follow-up.
+        let observations = match ip_vrf::dump_ip_vrf_observations(&self.handle).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "ip-vrf link dump (route observation) failed");
+                return IpVrfRouteDump::default();
+            }
+        };
+        let resolution = routes::IpVrfRoutingResolution::from_table(
+            ip_vrfs,
+            &observations.vxlan_name_to_ifindex(),
+        );
+        match routes::dump_routes(&self.handle, &resolution).await {
+            Ok(dump) => dump,
+            Err(e) => {
+                tracing::warn!(error = %e, "ip-vrf route dump failed");
+                IpVrfRouteDump::default()
+            }
+        }
     }
 
     async fn probe_ip_vrfs(&mut self, ip_vrfs: &IpVrfTable) -> HashMap<IpVrfId, IpVrfStatus> {

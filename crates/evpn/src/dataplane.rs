@@ -266,6 +266,12 @@ pub struct DataplaneReport {
     /// configured. Re-emitted on every report so the gRPC / CLI
     /// surfaces don't need to track transitions themselves.
     pub ip_vrf_status: Vec<IpVrfDataplaneStatus>,
+    /// Per-IP-VRF kernel-route observation snapshot for this pass
+    /// (Gate 9 slice 6a). Empty when no `[[evpn_ip_vrfs]]` are
+    /// configured. The daemon fans this out to the L3 originator
+    /// (slice 6b) and to Prometheus counters. Re-emitted on every
+    /// report so the consumer doesn't need to track transitions.
+    pub ip_vrf_routes: crate::ip_vrf::IpVrfRouteDump,
 }
 
 /// Per-instance status emitted alongside every report.
