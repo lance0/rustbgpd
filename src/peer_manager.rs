@@ -303,6 +303,7 @@ impl PeerManager {
                 dynamic_neighbors: Vec::new(),
                 evpn_instances: Vec::new(),
                 ethernet_segments: Vec::new(),
+                evpn_ip_vrfs: Vec::new(),
                 apply_bum_enforcement: false,
             },
         )
@@ -2168,6 +2169,7 @@ mod tests {
             file_path: None,
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
+            evpn_ip_vrfs: Vec::new(),
             apply_bum_enforcement: false,
         }
     }

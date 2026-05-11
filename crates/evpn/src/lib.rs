@@ -72,6 +72,7 @@ pub mod aliasing;
 pub mod dataplane;
 pub mod df_election;
 pub mod instance;
+pub mod ip_vrf;
 pub mod label_allocator;
 pub mod mac;
 pub mod mass_withdraw;
@@ -92,6 +93,7 @@ pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use instance::{
     EvpnInstance, EvpnInstanceId, EvpnInstanceIdError, EvpnInstanceTable, EvpnInstanceTableError,
 };
+pub use ip_vrf::{IpVrf, IpVrfError, IpVrfId, IpVrfIdError, IpVrfTable, IpVrfTableError};
 pub use label_allocator::{AllocateError, EsiLabelAllocator, synthesize_from_esi};
 pub use mac::{
     LocalMacObservation, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,

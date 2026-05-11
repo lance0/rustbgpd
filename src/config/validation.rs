@@ -551,6 +551,14 @@ impl Config {
         // orchestrator; invalid ES config must not silently degrade to
         // "orchestrator not spawned".
         let _ = self.resolve_ethernet_segments()?;
+        // Validate EVPN IP-VRF config at load time so an operator who
+        // declares a malformed [[evpn_ip_vrfs]] block, a duplicate
+        // L3VNI, or an L3VNI that collides with an L2VNI sees the
+        // error at startup rather than getting silently degraded
+        // behavior once Gate 9 wiring lands. Discards the resolved
+        // table; the daemon-side supervisor calls
+        // `resolve_evpn_ip_vrfs` on demand.
+        let _ = self.resolve_evpn_ip_vrfs()?;
 
         Ok(())
     }

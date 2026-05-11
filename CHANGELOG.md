@@ -9,6 +9,38 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN Gate 9 foundation: ADR-0058 + `[[evpn_ip_vrfs]]` config
+  schema.** New top-level TOML array declares IP-VRF / L3VNI
+  tenants this VTEP serves under the RFC 9136 §4.4.2 symmetric
+  Interface-less IRB model (matches FRR's default). Each entry
+  binds a name, L3VNI, RD, Route Targets, local VTEP IP,
+  operator-supplied Router MAC, and observe-only Linux
+  `vrf_device` / `l3vxlan_device` / `table_id`. `[[evpn_instances]]`
+  gains an optional `ip_vrf` field that binds an L2VNI to a
+  declared IP-VRF by name.
+
+  Validation at config load: per-entry shape (name regex, VNI
+  range, RD parse, RT parse, Router MAC must be unicast non-zero,
+  device names non-empty, table id > 0), name + L3VNI uniqueness
+  across `[[evpn_ip_vrfs]]`, L3VNI must not collide with any
+  L2VNI in `[[evpn_instances]]` (the wire VNI space is shared),
+  and every `[[evpn_instances]].ip_vrf` reference must resolve to
+  a declared IP-VRF. Backed by `rustbgpd_evpn::ip_vrf::{IpVrf,
+  IpVrfId, IpVrfTable}` — pure-logic domain object, kernel-free,
+  with 10 unit tests + 7 config integration tests.
+
+  No behavioral wiring yet — this commit only declares the
+  schema and surfaces config errors at startup. Subsequent
+  slices add Linux device readiness probe (Step 3), Type 5
+  origination / projection helpers (Step 4), CLI visibility
+  (Step 5), and end-to-end wiring + M39 interop smoke (Step 6).
+  See ADR-0058 for the architecture pinned around this object,
+  including the deliberate decision to not auto-derive the
+  Router MAC from kernel state (§4) and the observe-only Linux
+  device lifecycle contract (§3).
+
 ### Changed
 
 - **Policy `match_local_pref_ge/le` and `match_med_ge/le` now use

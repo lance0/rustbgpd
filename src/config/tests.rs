@@ -2634,6 +2634,10 @@ fn diff_config_json_serializes() {
         "expected evpn_instances_changed in serialized diff: {json}"
     );
     assert!(
+        json.contains("\"evpn_ip_vrfs_changed\":false"),
+        "expected evpn_ip_vrfs_changed in serialized diff: {json}"
+    );
+    assert!(
         json.contains("\"ethernet_segments_changed\":false"),
         "expected ethernet_segments_changed in serialized diff: {json}"
     );
@@ -3666,6 +3670,29 @@ originator_ip = "10.0.0.100"
 }
 
 #[test]
+fn evpn_ip_vrfs_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = diff_config(&old, &new);
+    assert!(diff.evpn_ip_vrfs_changed);
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
 fn apply_bum_enforcement_diff_marks_restart_required() {
     let old = parse(valid_toml()).unwrap();
     let new_toml = format!("apply_bum_enforcement = true\n{}", valid_toml());
@@ -3831,5 +3858,256 @@ originator_ip = "10.0.0.100"
     assert!(
         msg.contains("32768"),
         "msg must name supported preference: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// EVPN Gate 9 — `[[evpn_ip_vrfs]]` schema, parse, validation. ADR-0058.
+//
+// These tests pin the operator-facing TOML surface for local IP-VRFs
+// and the resolution into `IpVrfTable`. They cover the per-entry parse
+// (name shape / VNI range / RD / RT / VTEP / Router MAC / device /
+// table id), the table-level uniqueness checks, the L2↔L3 VNI overlap
+// check, and the `[[evpn_instances]].ip_vrf` cross-reference.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evpn_ip_vrfs_default_empty() {
+    // No `[[evpn_ip_vrfs]]` block ⇒ L2-only VTEP / RR shape stays valid.
+    let config = parse(valid_toml()).unwrap();
+    assert!(config.evpn_ip_vrfs.is_empty());
+    assert!(config.resolve_evpn_ip_vrfs().unwrap().is_empty());
+}
+
+#[test]
+fn evpn_ip_vrf_minimal_parses() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    assert_eq!(config.evpn_ip_vrfs.len(), 1);
+    let table = config.resolve_evpn_ip_vrfs().unwrap();
+    assert_eq!(table.len(), 1);
+    let vrf = table.get("tenant-blue").unwrap();
+    assert_eq!(vrf.id.as_u32(), 5000);
+    assert_eq!(vrf.vrf_device, "vrf-blue");
+    assert_eq!(vrf.l3vxlan_device, "vni5000");
+    assert_eq!(vrf.table_id, 5000);
+}
+
+#[test]
+fn evpn_ip_vrf_rejects_l3vni_colliding_with_l2vni() {
+    // L2VNI 100 declared, then [[evpn_ip_vrfs]] tries to reuse it as L3VNI.
+    // Must be rejected at config-load time — the wire VNI space is shared.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 100
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni100"
+table_id = 5000
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("collides") && msg.contains("100"),
+        "msg must call out the VNI collision: {msg}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_rejects_duplicate_name() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-blue-2"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        err.to_string().contains("duplicate name"),
+        "msg must mention duplicate name: {err}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_rejects_bad_router_mac() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "01:00:5e:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        err.to_string().contains("router_mac"),
+        "msg must name the bad field: {err}"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_rejects_bad_name_shape() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "1bad"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        err.to_string().contains("name"),
+        "msg must name the offending field: {err}"
+    );
+}
+
+#[test]
+fn evpn_instance_ip_vrf_link_must_resolve() {
+    // An [[evpn_instances]] entry referencing an undeclared IP-VRF is
+    // rejected at config-load time.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        err.to_string().contains("ip_vrf"),
+        "msg must mention ip_vrf reference: {err}"
+    );
+}
+
+#[test]
+fn evpn_instance_ip_vrf_link_marks_referenced() {
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.100:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.100"
+ip_vrf = "tenant-blue"
+
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "65000:5000"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+
+[[evpn_ip_vrfs]]
+name = "tenant-red"
+vni = 5001
+rd = "65000:5001"
+route_targets = ["65000:5001"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:02"
+vrf_device = "vrf-red"
+l3vxlan_device = "vni5001"
+table_id = 5001
+"#,
+    );
+    let config = parse(&toml).unwrap();
+    let table = config.resolve_evpn_ip_vrfs().unwrap();
+    assert_eq!(table.len(), 2);
+    assert!(
+        table.is_referenced("tenant-blue"),
+        "tenant-blue is bound by [[evpn_instances]].ip_vrf"
+    );
+    assert!(
+        !table.is_referenced("tenant-red"),
+        "tenant-red has no L2VNI binding"
+    );
+}
+
+#[test]
+fn evpn_ip_vrf_validation_catches_errors_at_validate() {
+    // Top-level `validate()` (called inside the test `parse` helper)
+    // must surface IP-VRF errors so a malformed [[evpn_ip_vrfs]] block
+    // doesn't slip past `Config::load`.
+    let toml = evpn_toml_with(
+        r#"
+[[evpn_ip_vrfs]]
+name = "tenant-blue"
+vni = 5000
+rd = "not a real rd"
+route_targets = ["65000:5000"]
+local_vtep_ip = "10.0.0.100"
+router_mac = "02:00:00:00:00:01"
+vrf_device = "vrf-blue"
+l3vxlan_device = "vni5000"
+table_id = 5000
+"#,
+    );
+    let err = parse(&toml).unwrap_err();
+    assert!(
+        err.to_string().contains("rd"),
+        "validate() must surface the bad rd: {err}"
     );
 }
