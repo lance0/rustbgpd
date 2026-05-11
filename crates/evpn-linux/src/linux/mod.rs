@@ -55,6 +55,7 @@ use crate::snapshot::{InstanceProbes, KernelSnapshot};
 mod bum_filter;
 mod fdb;
 mod ip_vrf;
+mod l3;
 mod links;
 mod notify;
 mod probe;
@@ -414,6 +415,66 @@ impl Dataplane for LinuxDataplane {
                 let cache = self.link_cache.lock().await.clone();
                 fdb::apply_op(&self.handle, &cache, op).await
             }
+            DataplaneOp::AddRemoteIpRoute {
+                prefix,
+                table_id,
+                l3vxlan_ifindex,
+                next_hop,
+                ..
+            } => {
+                l3::apply_add_ip_route(
+                    &self.handle,
+                    *prefix,
+                    *table_id,
+                    *l3vxlan_ifindex,
+                    *next_hop,
+                )
+                .await
+            }
+            DataplaneOp::RemoveRemoteIpRoute {
+                prefix,
+                table_id,
+                l3vxlan_ifindex,
+                next_hop,
+                ..
+            } => {
+                l3::apply_remove_ip_route(
+                    &self.handle,
+                    *prefix,
+                    *table_id,
+                    *l3vxlan_ifindex,
+                    *next_hop,
+                )
+                .await
+            }
+            DataplaneOp::AddL3Neighbor {
+                l3vxlan_ifindex,
+                next_hop,
+                router_mac,
+                ..
+            } => {
+                l3::apply_add_l3_neighbor(&self.handle, *l3vxlan_ifindex, *next_hop, *router_mac)
+                    .await
+            }
+            DataplaneOp::RemoveL3Neighbor {
+                l3vxlan_ifindex,
+                next_hop,
+                ..
+            } => l3::apply_remove_l3_neighbor(&self.handle, *l3vxlan_ifindex, *next_hop).await,
+            DataplaneOp::AddL3VxlanFdb {
+                l3vxlan_ifindex,
+                router_mac,
+                next_hop,
+                ..
+            } => {
+                l3::apply_add_l3vxlan_fdb(&self.handle, *l3vxlan_ifindex, *router_mac, *next_hop)
+                    .await
+            }
+            DataplaneOp::RemoveL3VxlanFdb {
+                l3vxlan_ifindex,
+                router_mac,
+                ..
+            } => l3::apply_remove_l3vxlan_fdb(&self.handle, *l3vxlan_ifindex, *router_mac).await,
         }
     }
 

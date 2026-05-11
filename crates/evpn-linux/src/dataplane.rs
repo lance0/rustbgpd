@@ -102,6 +102,89 @@ pub enum DataplaneOp {
         /// Desired flag triplet for this port.
         flags: crate::bum_filter::BumPortFlags,
     },
+    /// Install a remote IP-prefix route into the IP-VRF's
+    /// `table_id`. Gate 9 symmetric IRB / slice 6c. The Linux
+    /// implementation in `crate::linux::l3` sets `RTPROT_BGP` and
+    /// `RTNH_F_ONLINK` on the kernel route.
+    AddRemoteIpRoute {
+        /// IP-VRF the prefix belongs to (for accounting).
+        vrf_id: IpVrfId,
+        /// Prefix to install.
+        prefix: rustbgpd_evpn::EvpnIpPrefixValue,
+        /// Kernel VRF route table id.
+        table_id: u32,
+        /// L3 VXLAN ifindex the route uses as output device.
+        l3vxlan_ifindex: u32,
+        /// Remote VTEP next-hop (must match `prefix`'s family;
+        /// slice 6c does not implement cross-family `RTA_VIA`).
+        next_hop: IpAddr,
+    },
+    /// Remove a remote IP-prefix route previously installed by
+    /// [`Self::AddRemoteIpRoute`].
+    RemoveRemoteIpRoute {
+        /// IP-VRF the prefix belongs to.
+        vrf_id: IpVrfId,
+        /// Prefix to remove.
+        prefix: rustbgpd_evpn::EvpnIpPrefixValue,
+        /// Kernel VRF route table id (needed because the kernel
+        /// matches on table for delete).
+        table_id: u32,
+        /// L3 VXLAN ifindex (matched as part of the delete key).
+        l3vxlan_ifindex: u32,
+        /// Remote VTEP next-hop.
+        next_hop: IpAddr,
+    },
+    /// Add (or replace) a permanent ARP/ND entry on the L3 VXLAN
+    /// device mapping `next_hop` → `router_mac`. The kernel
+    /// consults this when building the inner Ethernet header
+    /// during symmetric-IRB encapsulation. Refcounted by the
+    /// reconcile actor across all owned prefixes sharing the
+    /// `(l3vxlan_ifindex, next_hop)` pair.
+    AddL3Neighbor {
+        /// IP-VRF the entry serves (for accounting / observability).
+        vrf_id: IpVrfId,
+        /// L3 VXLAN ifindex (the dev the entry lives on).
+        l3vxlan_ifindex: u32,
+        /// Remote VTEP IP (the neighbor's address).
+        next_hop: IpAddr,
+        /// Remote PE's router MAC (the link-layer address).
+        router_mac: MacAddress,
+    },
+    /// Remove an L3 neighbor entry. Only emitted when no remaining
+    /// owned route still references the `(l3vxlan_ifindex, next_hop)`
+    /// pair.
+    RemoveL3Neighbor {
+        /// IP-VRF the entry served (for accounting).
+        vrf_id: IpVrfId,
+        /// L3 VXLAN ifindex.
+        l3vxlan_ifindex: u32,
+        /// Remote VTEP IP whose neighbor row is being removed.
+        next_hop: IpAddr,
+    },
+    /// Add (or replace) the FDB row on the L3 VXLAN device that
+    /// maps `router_mac` → `next_hop`. Sets only `NTF_SELF`
+    /// (L3VXLANs aren't bridge ports). Refcounted by the reconcile
+    /// actor across all owned prefixes sharing the
+    /// `(l3vxlan_ifindex, router_mac)` pair.
+    AddL3VxlanFdb {
+        /// IP-VRF the entry serves.
+        vrf_id: IpVrfId,
+        /// L3 VXLAN ifindex.
+        l3vxlan_ifindex: u32,
+        /// Remote PE's router MAC.
+        router_mac: MacAddress,
+        /// Remote VTEP IP (the VXLAN tunnel endpoint).
+        next_hop: IpAddr,
+    },
+    /// Remove an L3VXLAN FDB row.
+    RemoveL3VxlanFdb {
+        /// IP-VRF the entry served.
+        vrf_id: IpVrfId,
+        /// L3 VXLAN ifindex.
+        l3vxlan_ifindex: u32,
+        /// Remote PE's router MAC.
+        router_mac: MacAddress,
+    },
 }
 
 /// Kernel-side notifications the actor consumes through

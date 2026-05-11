@@ -230,12 +230,18 @@ pub(crate) async fn apply_op(
         DataplaneOp::AddRemoteFdb { vni, mac, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, mac, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, mac } => (*vni, *mac),
-        DataplaneOp::SetBumPortFlags { .. } => {
+        DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
             // BUM port-flag ops are routed through `linux::bum_filter`
-            // by `LinuxDataplane::apply` and never reach this FDB
-            // helper. The match arm exists so the compiler can prove
-            // exhaustiveness.
-            unreachable!("SetBumPortFlags handled by linux::bum_filter, not the FDB apply helper")
+            // and L3 ops through `linux::l3` by `LinuxDataplane::apply`;
+            // they never reach this L2 FDB helper. Arms exist so the
+            // compiler can prove exhaustiveness.
+            unreachable!("non-L2-FDB op routed to FDB apply helper")
         }
     };
 
@@ -297,11 +303,17 @@ pub(crate) async fn apply_op(
                 .map_err(|e| classify_apply_error(&e))?;
             Ok(())
         }
-        DataplaneOp::SetBumPortFlags { .. } => {
+        DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
             // Unreachable: the early-return at the top of `apply_op`
-            // already handled this op. Match arm exists so the
+            // already handled non-L2-FDB ops. Arms exist so the
             // compiler can prove exhaustiveness.
-            unreachable!("SetBumPortFlags handled at function entry")
+            unreachable!("non-L2-FDB op handled at function entry")
         }
     }
 }
@@ -320,7 +332,7 @@ fn vxlan_ifindex_for_vni(cache: &LinkCache, vni: EvpnInstanceId) -> Option<u32> 
 /// Reads the `ErrorMessage::raw_code()` (an errno-style negative
 /// integer) and delegates to [`errno_to_dataplane_error`] for the
 /// per-errno mapping.
-fn classify_apply_error(err: &rtnetlink::Error) -> DataplaneError {
+pub(super) fn classify_apply_error(err: &rtnetlink::Error) -> DataplaneError {
     if let rtnetlink::Error::NetlinkError(msg) = err {
         // raw_code() is the errno-style integer the kernel sent
         // back, negative-encoded per netlink convention. Take the

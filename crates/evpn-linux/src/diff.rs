@@ -548,8 +548,14 @@ mod tests {
                         "Remove key not in applied: {op:?}"
                     );
                 }
-                DataplaneOp::SetBumPortFlags { .. } => {
-                    panic!("compute_diff must not produce SetBumPortFlags ops; got {op:?}");
+                DataplaneOp::SetBumPortFlags { .. }
+                | DataplaneOp::AddRemoteIpRoute { .. }
+                | DataplaneOp::RemoveRemoteIpRoute { .. }
+                | DataplaneOp::AddL3Neighbor { .. }
+                | DataplaneOp::RemoveL3Neighbor { .. }
+                | DataplaneOp::AddL3VxlanFdb { .. }
+                | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+                    panic!("compute_diff must only produce L2 FDB ops; got {op:?}");
                 }
             }
         }

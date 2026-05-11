@@ -216,6 +216,18 @@ impl InMemoryDataplane {
             DataplaneOp::SetBumPortFlags { ifindex, flags } => {
                 state.bum_port_flags.insert(*ifindex, *flags);
             }
+            // Gate 9 slice 6c L3 ops are out of scope for the
+            // in-memory fake — the L3 install path's logic is unit-
+            // tested directly via `linux::l3` build helpers, and the
+            // netns integration test (`EVPN_LINUX_NETNS=1`) exercises
+            // the real kernel apply path. The L3 reconciler diff loop
+            // doesn't route ops through this fake.
+            DataplaneOp::AddRemoteIpRoute { .. }
+            | DataplaneOp::RemoveRemoteIpRoute { .. }
+            | DataplaneOp::AddL3Neighbor { .. }
+            | DataplaneOp::RemoveL3Neighbor { .. }
+            | DataplaneOp::AddL3VxlanFdb { .. }
+            | DataplaneOp::RemoveL3VxlanFdb { .. } => {}
         }
         Ok(())
     }

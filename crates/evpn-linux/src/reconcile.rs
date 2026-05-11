@@ -680,6 +680,17 @@ impl<D: Dataplane> ReconcileActor<D> {
                 // Clear the BUM-side retry schedule for the ifindex.
                 self.state.bum_retry.record_success(*ifindex);
             }
+            DataplaneOp::AddRemoteIpRoute { .. }
+            | DataplaneOp::RemoveRemoteIpRoute { .. }
+            | DataplaneOp::AddL3Neighbor { .. }
+            | DataplaneOp::RemoveL3Neighbor { .. }
+            | DataplaneOp::AddL3VxlanFdb { .. }
+            | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+                // Gate 9 slice 6c L3 ops have their own owned-set
+                // and retry tracking inside the L3 diff loop
+                // (separate from this L2 FDB accounting).
+                // Handled by `record_success_l3` in the L3 path.
+            }
         }
     }
 
@@ -921,9 +932,15 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         DataplaneOp::AddRemoteFdb { vni, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, .. } => *vni,
-        DataplaneOp::SetBumPortFlags { .. } => {
+        DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
             // VNI 0 is invalid in the domain type, so VNI 1 is the
-            // harmless report placeholder.
+            // harmless report placeholder for non-L2-FDB ops.
             rustbgpd_evpn::EvpnInstanceId::new(1).expect("VNI 1 is always valid")
         }
     }
@@ -937,7 +954,13 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         DataplaneOp::AddRemoteFdb { mac, .. }
         | DataplaneOp::UpdateRemoteFdb { mac, .. }
         | DataplaneOp::RemoveRemoteFdb { mac, .. } => *mac,
-        DataplaneOp::SetBumPortFlags { .. } => rustbgpd_evpn::MacAddress::new([0; 6]),
+        DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => rustbgpd_evpn::MacAddress::new([0; 6]),
     }
 }
 
@@ -954,6 +977,18 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         DataplaneOp::RemoveRemoteFdb { mac, .. } => DataplaneOpKind::RemoveRemoteFdb { mac: *mac },
         DataplaneOp::SetBumPortFlags { ifindex, .. } => {
             DataplaneOpKind::SetBumPortFlags { ifindex: *ifindex }
+        }
+        // Gate 9 L3 ops use a parallel accounting surface
+        // (`AppliedL3Op` lands with the reconciler diff loop). They
+        // never reach the L2 `op_to_kind` path under the current
+        // apply_plan, so this arm is structurally unreachable.
+        DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+            unreachable!("L3 ops use a separate AppliedL3Op accounting path")
         }
     }
 }
