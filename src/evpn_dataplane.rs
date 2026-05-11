@@ -177,8 +177,11 @@ pub async fn spawn(
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnDataplaneHandle> {
-    if evpn_instances.is_empty() {
-        info!("no EVPN instances configured — dataplane actor not spawned (RR-only deployment)");
+    if evpn_instances.is_empty() && ip_vrfs.is_empty() {
+        info!(
+            "no EVPN L2 instances or IP-VRFs configured — dataplane actor not spawned \
+             (RR-only deployment)"
+        );
         return None;
     }
 

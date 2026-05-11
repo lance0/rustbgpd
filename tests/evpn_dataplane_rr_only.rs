@@ -191,7 +191,7 @@ fn rr_only_deployment_does_not_spawn_evpn_dataplane_actor() {
     // assertion stays resilient to surrounding fields.
     let logs = daemon.structured_logs();
     assert!(
-        logs.contains("no EVPN instances configured"),
+        logs.contains("no EVPN L2 instances or IP-VRFs configured"),
         "expected the RR-only short-circuit log line in daemon logs, \
          but got:\n{logs}"
     );

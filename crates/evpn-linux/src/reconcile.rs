@@ -661,7 +661,6 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
     }
 
-    /// Send a report, dropping it if the daemon-side receiver has gone
     /// Diff `current` IP-VRF readiness against `last` and emit one
     /// log line per VRF whose status changed. `last` is updated in
     /// place to reflect the new state. Steady-state is silent — this
@@ -705,6 +704,7 @@ impl<D: Dataplane> ReconcileActor<D> {
         last.retain(|id, _| current.contains_key(id));
     }
 
+    /// Send a report, dropping it if the daemon-side receiver has gone
     /// away (it shouldn't during normal operation, but it's not worth
     /// crashing the actor over).
     async fn emit_report(
