@@ -33,7 +33,7 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in the route-event wire fast. Six new classifier unit tests
   in `crates/evpn-linux/src/linux/notify.rs` plus a new
   privileged netns regression
-  `linux_dataplane_route_event_wakes_within_1s` in
+  `linux_dataplane_route_event_wakes_within_2s` in
   `tests/netns_l3_install.rs` that validates the full
   subscribe → kernel-event channel round trip end-to-end
   against a real netns under `EVPN_LINUX_NETNS=1`.

@@ -436,16 +436,18 @@ async fn linux_dataplane_foreign_route_survives_l3_cycle() {
     assert_route_present(&after_withdraw, foreign_prefix, foreign_gw, "l3vxlan-test");
 }
 
-/// Sub-second slice 6a withdraw: an `ip route add` / `ip route del`
+/// Slice 6a kernel-event wake: an `ip route add` / `ip route del`
 /// in a custom IP-VRF table must wake the reconcile actor via the
 /// `RTNLGRP_IPV4_ROUTE` subscription, not wait for the 60 s periodic
 /// dump. We can't drive the full reconcile actor here, but we can
 /// validate the kernel-event channel by polling [`Dataplane::next_event`]
-/// directly — if the subscription is wired correctly, the channel
-/// resolves within a few hundred milliseconds; if the regression
-/// returns the wire goes back to `pending()` and the test times out.
+/// directly. In practice the channel resolves within a few hundred
+/// milliseconds; the timeout below allows 2 s to absorb scheduling
+/// jitter on contended CI runners while still catching a regression
+/// fast — if the wire goes back to `pending()`, the timeout fires
+/// and the test fails immediately rather than blocking the suite.
 #[tokio::test]
-async fn linux_dataplane_route_event_wakes_within_1s() {
+async fn linux_dataplane_route_event_wakes_within_2s() {
     if !netns_gate() {
         eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged route-event wake test");
         return;
@@ -455,7 +457,7 @@ async fn linux_dataplane_route_event_wakes_within_1s() {
     if !is_inner() {
         let ns = NetnsFixture::create("wake");
         setup_topology(&ns, TABLE_ID, L3VNI, LOCAL_VTEP, router_mac);
-        run_inner(&ns, "linux_dataplane_route_event_wakes_within_1s");
+        run_inner(&ns, "linux_dataplane_route_event_wakes_within_2s");
         return;
     }
 

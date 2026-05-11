@@ -843,7 +843,13 @@ async fn permanent_failure_does_not_leak_across_keys() {
 /// the actor still drives forward progress on intent changes (and
 /// shuts down cleanly) when the event stream is closed from the
 /// start.
-#[tokio::test(start_paused = true)]
+///
+/// Runs against **real** tokio time, not paused — the `timeout`
+/// calls below need to actually elapse if the regression returns,
+/// otherwise the busy-loop would also block the timer task and the
+/// test would hang instead of failing. The waits are tight (≤2 s)
+/// so the cost of un-paused time is minimal.
+#[tokio::test]
 async fn closed_event_stream_does_not_starve_intent_and_shutdown() {
     let dataplane = InMemoryDataplane::with_closed_event_stream();
     let handle = dataplane.handle();

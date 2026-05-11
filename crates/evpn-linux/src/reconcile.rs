@@ -329,14 +329,14 @@ impl<D: Dataplane> ReconcileActor<D> {
                             // test impl reached end-of-stream). Flip
                             // the guard so the next iteration's
                             // `tokio::select!` disables this arm —
-                            // without that gate a closed
-                            // `mpsc::Receiver` would resolve to
-                            // `Some(None)` immediately on every poll
-                            // and, because the select is `biased`
-                            // and this arm sits before the periodic
-                            // / retry / shutdown arms, the actor
-                            // would spin and starve the rest of the
-                            // work.
+                            // without that gate, `next_event()` keeps
+                            // resolving to `None` immediately on every
+                            // poll (the closed-channel `recv()`
+                            // shape), and because the select is
+                            // `biased` and this arm sits before the
+                            // periodic / retry / shutdown arms, the
+                            // actor would spin and starve the rest
+                            // of the work.
                             self.state.event_stream_open = false;
                             tracing::warn!(
                                 "kernel-event stream closed; reconcile actor will rely on periodic dump + retry only"
