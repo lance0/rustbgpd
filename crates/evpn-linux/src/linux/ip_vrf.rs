@@ -36,12 +36,6 @@
 //! `IFF_UP` flag from the link header instead of `IFLA_OPERSTATE` —
 //! same convention `ip link` itself uses for the UP/DOWN column.
 
-// Slice 4a ships the dumps + composition helper alongside its own
-// tests; the reconciler / `dump_snapshot` consumer arrives in slice
-// 4b. The `expect` flips to a hard warning once that wiring lands,
-// prompting removal here.
-#![expect(dead_code, reason = "consumed by reconcile wiring in slice 4b")]
-
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -84,18 +78,6 @@ impl IpVrfObservations {
             vrf: self.vrfs.get(vrf_device).copied(),
             l3vxlan: self.vxlans.get(l3vxlan_device).copied(),
         }
-    }
-
-    /// Number of VRF observations captured. Exposed for telemetry /
-    /// diagnostics; not used by the readiness probe.
-    pub(crate) fn vrf_count(&self) -> usize {
-        self.vrfs.len()
-    }
-
-    /// Number of VXLAN observations captured (both L2 and L3 — the
-    /// reconciler decides which ones matter by name lookup).
-    pub(crate) fn vxlan_count(&self) -> usize {
-        self.vxlans.len()
     }
 }
 
