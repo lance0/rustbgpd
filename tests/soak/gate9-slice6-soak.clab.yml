@@ -1,0 +1,70 @@
+# Containerlab topology for the Gate 9 slice 6 24-hour soak.
+#
+# Two-PE symmetric Interface-less IRB topology — rustbgpd PE1
+# directly peered with FRR PE2, mirroring M39
+# (`tests/interop/m39-evpn-type5-symmetric-irb.clab.yml`) but with
+# soak-stable container names + an isolated run directory so the
+# soak driver doesn't collide with a live M39 smoke.
+#
+# The harness `bash tests/soak/run-gate9-slice6-soak.sh` drives
+# tenant-prefix churn on PE1's `lo-vrf1` (cycle `ip addr add` /
+# `ip addr del` of `192.0.2.1/24`) so slice 6a observes a steady
+# stream of `RTM_NEWROUTE` / `RTM_DELROUTE` events, slice 6b
+# emits the corresponding Type 5 announce / withdraw pairs, and
+# slice 6c's import side stays installed against PE2's stable
+# 198.51.100.0/24 advertisement. Validates the transactional
+# `L3OwnedState` and the `RTNLGRP_IPV4_ROUTE` wake path under
+# sustained churn.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   sudo containerlab deploy -t tests/soak/gate9-slice6-soak.clab.yml
+#   bash tests/soak/run-gate9-slice6-soak.sh
+#   sudo containerlab destroy -t tests/soak/gate9-slice6-soak.clab.yml --cleanup
+
+name: gate9-slice6-soak
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ../interop/configs/rustbgpd-m39-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ../interop/scripts/start-rustbgpd-m39-pe1.sh:/usr/local/bin/start-rustbgpd-m39-pe1.sh:ro
+        - ../interop/scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        # Soak-driver responsibility: provision the PE1 kernel
+        # topology AFTER deploy so the driver can re-provision
+        # cleanly across the churn loop. See
+        # tests/soak/run-gate9-slice6-soak.sh.
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=info
+
+    pe2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ../interop/configs/frr-daemons:/etc/frr/daemons:ro
+        - ../interop/configs/frr-bgpd-m39-pe2.conf:/etc/frr/frr.conf:ro
+        - ../interop/scripts/start-frr-vtep-l3.sh:/usr/local/bin/start-frr-vtep-l3.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        # PE2's tenant subnet (198.51.100.0/24) stays UP for the
+        # whole soak — only PE1 churns. This isolates the slice 6a
+        # / 6b origination + withdraw path under load while keeping
+        # slice 6c's import side under steady state, which is the
+        # asymmetric shape v0.18.0 ships.
+        - /usr/local/bin/start-frr-vtep-l3.sh 10.0.0.2 100 vrf1 198.51.100.1/24
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+        TENANT_VRF: vrf1
+        TENANT_PREFIX: 198.51.100.1/24
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]

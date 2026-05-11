@@ -247,3 +247,125 @@ window), at least one full flip cycle observed.
   `crates/evpn-linux/src/reconcile.rs`.
 - **Before tagging the first release that ships Gate 8b
   enforcement on by default.**
+
+---
+
+# Gate 9 slice 6 24-Hour Soak
+
+Symmetric Interface-less IRB / Type 5 churn harness. The first
+Gate 9 soak: validates the transactional `L3OwnedState` model and
+the `RTNLGRP_IPV4_ROUTE` wake path under sustained tenant-prefix
+churn against a stable FRR peer.
+
+## Topology
+
+`tests/soak/gate9-slice6-soak.clab.yml` deploys 2 PEs
+(`clab-gate9-slice6-soak-pe1` / `pe2`) reusing M39's config +
+scripts so the soak shape matches the smoke shape:
+
+- PE1 = rustbgpd (`rustbgpd:dev`) at 10.0.0.1, vrf1/L3VNI 100,
+  L3VXLAN enslaved directly to the VRF (Interface-less),
+  operator-supplied Router MAC `02:00:00:00:01:01`.
+- PE2 = FRR 10.3.1 at 10.0.0.2, vrf1/L3VNI 100, tenant
+  `198.51.100.0/24` advertised steady-state via
+  `advertise ipv4 unicast`.
+- Direct iBGP L2VPN/EVPN session between the two PEs.
+
+## Churn pattern
+
+The driver cycles PE1's tenant `192.0.2.1/24` on `lo-vrf1`:
+
+1. **At start**: tenant is UP (provisioned by the script before
+   the daemon launches so slice 6a's first observation pass sees
+   it).
+2. **Every `CHURN_INTERVAL_SEC`** (default 30 s): flip — `ip addr
+   del` when UP, `ip addr add` when DOWN. Each up→down transition
+   exercises the slice 6a `RTM_DELROUTE` wake → slice 6b Type 5
+   withdraw → FRR drops the route. Each down→up transition
+   exercises the slice 6a `RTM_NEWROUTE` wake → slice 6b Type 5
+   announce → FRR re-imports.
+
+Default 30 s churn × 24 h = 2880 add/del transitions ≈ 1440 full
+churn cycles. PE2's side stays steady — slice 6c's `L3OwnedState`
+keeps PE2's `198.51.100.0/24` installed the whole soak, so
+import-side drift would show up as installed_routes_count
+oscillation rather than steady state.
+
+## Run
+
+```bash
+docker build -t rustbgpd:dev .
+sudo containerlab deploy -t tests/soak/gate9-slice6-soak.clab.yml
+
+# Full 24h run (default):
+bash tests/soak/run-gate9-slice6-soak.sh
+
+# 1h smoke with tighter 15 s churn:
+SOAK_HOURS=1 CHURN_INTERVAL_SEC=15 \
+    bash tests/soak/run-gate9-slice6-soak.sh
+
+# Auto-destroy on exit:
+CLEANUP=1 bash tests/soak/run-gate9-slice6-soak.sh
+```
+
+## What gets sampled
+
+`tests/soak/runs/gate9-slice6-<UTC>/samples.csv`, one row per
+`SAMPLE_INTERVAL` (default 60 s):
+
+```
+ts_unix, elapsed_sec,
+pe1_rss_mb, pe2_rss_mb,
+pe1_installed_routes,      # gauge — should sit at 1 (PE2 steady)
+pe1_observed_routes,       # gauge — oscillates 0/1 with churn
+bgp_established,           # 1/0 from PE2's vtysh view
+tenant_present,            # 1/0 — matches harness churn state
+churn_cycles               # cumulative add→del→add cycle count
+```
+
+The originated-route count is currently surfaced via gRPC
+(`IpVrfState.originated_routes_count`) rather than Prometheus, so
+the CSV doesn't carry it. `pe1_observed_routes` is the upstream
+input to slice 6b origination (the kernel route the observer kept
+after the slice 6a classifier), so it tracks the churn cadence
+one reconcile-pass behind the harness `ip addr add/del` and is a
+sufficient proxy for "did the originator see something to act on".
+
+Plus per-PE daemon logs streamed to `pe1.log` / `pe2.log` and
+per-cycle events recorded in `churn.log`.
+
+## Gates
+
+- **Memory slope** (PE1, PE2) < 1 MB/h over the post-warmup
+  window. RSS in steady state should plateau within the first
+  few hours; sustained growth signals a leak in the L3 ownership
+  model or the wake path.
+- **Peak RSS** < 400 MB. The M39 smoke baseline is ~14 MB, so the
+  budget is generous; sustained growth toward the cap is the
+  failure mode to catch.
+- **`bgp_established == 1`** on every sample after warmup. Any
+  session flap is a regression (the BGP/TCP stack isn't supposed
+  to care about Type 5 churn).
+- **`pe1_installed_routes == 1`** on every sample after warmup
+  (PE2's steady advertisement should stay imported).
+- **`tenant_present` ↔ `pe1_observed_routes`** must agree on
+  every sample after the next-reconcile latency budget
+  (origination follows observation directly; if observed lags
+  the harness's `ip addr add/del` for more than a sample
+  interval, the wake path or the observer has a regression).
+- **`churn_cycles` strictly monotone** across the run. The driver
+  never goes backwards; a non-monotone column means the script
+  crashed and a restart resumed mid-run.
+
+## When to run Gate 9 slice 6 soak
+
+- **Before flipping any Gate 9 dataplane primitive default**
+  (none today — but follows the same gate as Gate 8b).
+- **After any change to** `crates/evpn/src/ip_vrf/`,
+  `crates/evpn-linux/src/l3_diff.rs`,
+  `crates/evpn-linux/src/linux/l3.rs`,
+  `crates/evpn-linux/src/linux/routes.rs`,
+  `crates/evpn-linux/src/linux/notify.rs` (route classifier),
+  or the `evpn_l3_originator` / `evpn_l3_installer` daemon tasks.
+- **Before tagging any release that touches the symmetric IRB
+  packet path or the L3 owned-state model.**
