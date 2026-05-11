@@ -6,8 +6,8 @@ use crate::proto::evpn_service_client::EvpnServiceClient;
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddEvpnRouteRequest, DeleteEvpnRouteRequest, ListEvpnInstancesRequest, ListEvpnRequest,
-    MetricsRequest,
+    AddEvpnRouteRequest, DeleteEvpnRouteRequest, GetIpVrfRequest, IpVrfReadinessState, IpVrfState,
+    ListEvpnInstancesRequest, ListEvpnRequest, ListIpVrfsRequest, MetricsRequest,
 };
 
 const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
@@ -299,6 +299,119 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
         }
     }
     Ok(())
+}
+
+/// List configured IP-VRFs and their readiness (Gate 9, ADR-0058).
+///
+/// Read-only. Joins the daemon's resolved `IpVrfTable` (from
+/// `[[evpn_ip_vrfs]]` config) with the latest readiness verdict
+/// from the reconcile actor's `probe_ip_vrfs` pass. RR-only and
+/// L2-only deployments see an empty list.
+pub async fn list_ip_vrfs(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_ip_vrfs(ListIpVrfsRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        let out: Vec<serde_json::Value> = resp.ip_vrfs.iter().map(ip_vrf_to_json).collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).expect("failed to serialize IP-VRF list as JSON")
+        );
+    } else if resp.ip_vrfs.is_empty() {
+        println!("No IP-VRFs configured");
+    } else {
+        for vrf in &resp.ip_vrfs {
+            println!("{}", format_ip_vrf_human(vrf));
+        }
+    }
+    Ok(())
+}
+
+/// Fetch one IP-VRF by name (Gate 9, ADR-0058). Returns `NotFound`
+/// if the operator-facing handle isn't in the resolved table.
+pub async fn get_ip_vrf(connection: Connection, name: String, json: bool) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let vrf = client
+        .get_ip_vrf(GetIpVrfRequest { name })
+        .await?
+        .into_inner();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ip_vrf_to_json(&vrf))
+                .expect("failed to serialize IP-VRF as JSON")
+        );
+    } else {
+        println!("{}", format_ip_vrf_human(&vrf));
+        // In the detail view we also print each not-ready reason on
+        // its own indented line so operators can scan the failures
+        // without parsing the parenthesized list.
+        if !vrf.not_ready_reasons.is_empty() {
+            for reason in &vrf.not_ready_reasons {
+                println!("  - {reason}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn readiness_label(state: i32) -> &'static str {
+    match IpVrfReadinessState::try_from(state) {
+        Ok(IpVrfReadinessState::IpVrfReadinessReady) => "ready",
+        Ok(IpVrfReadinessState::IpVrfReadinessNotReady) => "not-ready",
+        Ok(IpVrfReadinessState::IpVrfReadinessUnknown) => "unknown",
+        Err(_) => "unknown",
+    }
+}
+
+fn ip_vrf_to_json(vrf: &IpVrfState) -> serde_json::Value {
+    serde_json::json!({
+        "name": vrf.name,
+        "vni": vrf.vni,
+        "rd": vrf.rd,
+        "route_targets": vrf.route_targets,
+        "local_vtep_ip": vrf.local_vtep_ip,
+        "router_mac": vrf.router_mac,
+        "vrf_device": vrf.vrf_device,
+        "l3vxlan_device": vrf.l3vxlan_device,
+        "table_id": vrf.table_id,
+        "readiness": readiness_label(vrf.readiness_state),
+        "vrf_ifindex": vrf.vrf_ifindex,
+        "l3vxlan_ifindex": vrf.l3vxlan_ifindex,
+        "not_ready_reasons": vrf.not_ready_reasons,
+    })
+}
+
+fn format_ip_vrf_human(vrf: &IpVrfState) -> String {
+    let mut parts = vec![
+        format!("name={}", vrf.name),
+        format!("vni={}", vrf.vni),
+        format!("rd={}", vrf.rd),
+        format!("rts=[{}]", vrf.route_targets.join(",")),
+        format!("vtep={}", vrf.local_vtep_ip),
+        format!("router-mac={}", vrf.router_mac),
+        format!("vrf-device={}", vrf.vrf_device),
+        format!("l3vxlan-device={}", vrf.l3vxlan_device),
+        format!("table-id={}", vrf.table_id),
+        format!("readiness={}", readiness_label(vrf.readiness_state)),
+    ];
+    if matches!(
+        IpVrfReadinessState::try_from(vrf.readiness_state),
+        Ok(IpVrfReadinessState::IpVrfReadinessReady)
+    ) {
+        parts.push(format!("vrf-ifindex={}", vrf.vrf_ifindex));
+        parts.push(format!("l3vxlan-ifindex={}", vrf.l3vxlan_ifindex));
+    }
+    if !vrf.not_ready_reasons.is_empty() {
+        parts.push(format!("reasons=[{}]", vrf.not_ready_reasons.join("; ")));
+    }
+    parts.join(" ")
 }
 
 /// Read-only EVPN alpha health summary.

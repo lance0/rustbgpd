@@ -1180,6 +1180,43 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         )
     };
 
+    // Latest snapshot of `DataplaneReport.ip_vrf_status` rows for the
+    // gRPC `ListIpVrfs` / `GetIpVrf` surface (Gate 9 slice 5). A
+    // background task subscribes to the dataplane handle's report
+    // broadcast and writes the rows into a shared `Arc<RwLock<...>>`
+    // on every report; the gRPC service reads from it via a closure.
+    // RR-only deployments (`evpn_dataplane_handle.is_none()`) leave
+    // the snapshot at its empty default — `probe_ip_vrfs` would
+    // short-circuit to empty even if the actor ran, so the gRPC
+    // surface stays consistent without any wiring.
+    let evpn_ip_vrf_status_snapshot: Arc<
+        std::sync::RwLock<Vec<rustbgpd_evpn::IpVrfDataplaneStatus>>,
+    > = Arc::new(std::sync::RwLock::new(Vec::new()));
+    if let Some(handle) = evpn_dataplane_handle.as_ref() {
+        let mut reports = handle.subscribe_reports();
+        let snapshot = evpn_ip_vrf_status_snapshot.clone();
+        tokio::spawn(async move {
+            loop {
+                match reports.recv().await {
+                    Ok(report) => {
+                        if let Ok(mut guard) = snapshot.write() {
+                            *guard = report.ip_vrf_status;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // The reconcile actor emits at most one report
+                        // per pass (5 s default); if this subscriber
+                        // fell behind that bound, the broadcast buffer
+                        // already replaced the missed entries with
+                        // newer ones. Keep going — the next received
+                        // report supersedes whatever we missed.
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+    }
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1197,6 +1234,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             Arc::new(move |vni| {
                 rustbgpd_evpn::EvpnInstanceId::new(vni).map_or(0, |id| counts.count(id))
             })
+        },
+        evpn_ip_vrfs: evpn_ip_vrfs.clone(),
+        evpn_ip_vrf_status_snapshot: {
+            let snapshot = evpn_ip_vrf_status_snapshot.clone();
+            Arc::new(move || snapshot.read().map(|s| s.clone()).unwrap_or_default())
         },
     };
     let mut grpc_handle = tokio::spawn(async move {

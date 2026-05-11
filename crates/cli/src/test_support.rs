@@ -463,6 +463,23 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
             }],
         }))
     }
+
+    async fn list_ip_vrfs(
+        &self,
+        _request: Request<server_proto::ListIpVrfsRequest>,
+    ) -> Result<Response<server_proto::ListIpVrfsResponse>, Status> {
+        Ok(Response::new(server_proto::ListIpVrfsResponse {
+            ip_vrfs: Vec::new(),
+        }))
+    }
+
+    async fn get_ip_vrf(
+        &self,
+        request: Request<server_proto::GetIpVrfRequest>,
+    ) -> Result<Response<server_proto::IpVrfState>, Status> {
+        let name = request.into_inner().name;
+        Err(Status::not_found(format!("no IP-VRF named {name:?}")))
+    }
 }
 
 #[tonic::async_trait]

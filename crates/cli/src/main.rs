@@ -533,6 +533,14 @@ enum EvpnAction {
     /// List local EVPN instances configured on this VTEP. Empty when
     /// the daemon is acting purely as an EVPN route reflector.
     Instances,
+    /// List configured IP-VRFs (Gate 9, ADR-0058) and their
+    /// readiness verdict from the most recent reconcile pass.
+    Vrfs {
+        /// Operator-facing IP-VRF name. When provided, fetch just
+        /// this one VRF with detailed not-ready reasons; otherwise
+        /// list every configured IP-VRF.
+        name: Option<String>,
+    },
     /// Summarize EVPN VTEP alpha state and key metrics.
     Diagnose,
 }
@@ -887,6 +895,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 ip,
             }) => commands::evpn::delete_imet(connection, rd, ethernet_tag, ip, json).await,
             Some(EvpnAction::Instances) => commands::evpn::list_instances(connection, json).await,
+            Some(EvpnAction::Vrfs { name }) => match name {
+                Some(name) => commands::evpn::get_ip_vrf(connection, name, json).await,
+                None => commands::evpn::list_ip_vrfs(connection, json).await,
+            },
             Some(EvpnAction::Diagnose) => commands::evpn::diagnose(connection, json).await,
         },
 

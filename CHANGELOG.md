@@ -11,6 +11,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 9 `DataplaneReport.ip_vrf_status` rows +
+  `rustbgpctl evpn vrfs [NAME]` (slice 5).** Final operator-visibility
+  slice in the Gate 9 readiness chain — closes the loop from
+  configured `[[evpn_ip_vrfs]]` to a human-readable view of each
+  IP-VRF's live readiness. New `IpVrfDataplaneStatus` row type on
+  `DataplaneReport` (one row per configured IP-VRF, joining the
+  resolved `IpVrfTable` with the actor's per-pass
+  `probe_ip_vrfs` verdict). New gRPC `EvpnService.ListIpVrfs` /
+  `EvpnService.GetIpVrf` RPCs return the full Gate 9 config
+  surface (RD, RTs, VTEP IP, Router MAC, vrf/L3VXLAN device names,
+  table id) plus the live readiness state — `READY` with kernel
+  ifindexes, `NOT_READY` with one human-readable line per failing
+  ADR-0058 §3 predicate, or `UNKNOWN` on cold start before the
+  first probe pass. New `rustbgpctl evpn vrfs` lists every
+  configured VRF; `rustbgpctl evpn vrfs <NAME>` fetches one VRF
+  with indented not-ready reasons; both modes also accept
+  `--format json`. A daemon-side broadcast subscriber maintains
+  the latest snapshot for the gRPC layer so steady-state reads
+  don't synchronize with the actor. The spawn gate now triggers
+  on `[[evpn_instances]]` OR `[[evpn_ip_vrfs]]` so an L3-only
+  deployment also gets the readiness probe path. Type 5
+  origination + L3 FIB programming remain ahead (slice 6).
+
 - **EVPN Gate 9 IpVrfTable plumbed through DataplaneIntent +
   reconcile call.** Closes the daemon-side end-to-end wiring slice:
   the daemon's `src/evpn_dataplane.rs` supervisor now publishes the

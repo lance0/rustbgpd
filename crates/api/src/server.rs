@@ -59,6 +59,15 @@ pub struct ServeConfig {
     /// Live count provider for locally-originated Type 2 MAC routes
     /// accepted by the RIB, keyed by VNI.
     pub evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
+    /// Resolved Gate 9 IP-VRF table — empty when no
+    /// `[[evpn_ip_vrfs]]` are configured. Shared across listeners
+    /// the same way `evpn_instances` is.
+    pub evpn_ip_vrfs: Arc<rustbgpd_evpn::ip_vrf::IpVrfTable>,
+    /// Live snapshot reader for the most recent
+    /// `DataplaneReport.ip_vrf_status` rows. Returns an empty Vec
+    /// when no IP-VRFs are configured or before the reconcile
+    /// actor's first pass.
+    pub evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
 }
 
 /// Resolved gRPC listener configuration.
@@ -236,6 +245,8 @@ async fn run_listener(
     let mrt_trigger_tx = config.mrt_trigger_tx;
     let evpn_instances = config.evpn_instances;
     let evpn_originated_local_mac_count = config.evpn_originated_local_mac_count;
+    let evpn_ip_vrfs = config.evpn_ip_vrfs;
+    let evpn_ip_vrf_status_snapshot = config.evpn_ip_vrf_status_snapshot;
 
     match listener.endpoint {
         ListenerEndpoint::Tcp(addr) => {
@@ -255,6 +266,8 @@ async fn run_listener(
                 mrt_trigger_tx,
                 evpn_instances,
                 evpn_originated_local_mac_count,
+                evpn_ip_vrfs,
+                evpn_ip_vrf_status_snapshot,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -278,6 +291,8 @@ async fn run_listener(
                 mrt_trigger_tx,
                 evpn_instances,
                 evpn_originated_local_mac_count,
+                evpn_ip_vrfs,
+                evpn_ip_vrf_status_snapshot,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -304,6 +319,8 @@ async fn run_tcp_listener(
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_instances: Arc<EvpnInstanceTable>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
+    evpn_ip_vrfs: Arc<rustbgpd_evpn::ip_vrf::IpVrfTable>,
+    evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -359,9 +376,11 @@ async fn run_tcp_listener(
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::with_originated_local_mac_count(
+            EvpnService::with_full_surface(
                 evpn_instances,
+                evpn_ip_vrfs,
                 evpn_originated_local_mac_count,
+                evpn_ip_vrf_status_snapshot,
             ),
             interceptor.clone(),
         ))
@@ -399,6 +418,8 @@ async fn run_uds_listener(
     mrt_trigger_tx: Option<MrtTriggerTx>,
     evpn_instances: Arc<EvpnInstanceTable>,
     evpn_originated_local_mac_count: OriginatedLocalMacCountFn,
+    evpn_ip_vrfs: Arc<rustbgpd_evpn::ip_vrf::IpVrfTable>,
+    evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -444,9 +465,11 @@ async fn run_uds_listener(
             interceptor.clone(),
         ))
         .add_service(EvpnServiceServer::with_interceptor(
-            EvpnService::with_originated_local_mac_count(
+            EvpnService::with_full_surface(
                 evpn_instances,
+                evpn_ip_vrfs,
                 evpn_originated_local_mac_count,
+                evpn_ip_vrf_status_snapshot,
             ),
             interceptor.clone(),
         ))
