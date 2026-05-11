@@ -137,8 +137,10 @@ pub trait Dataplane: Send {
 
     /// Probe each configured IP-VRF against the kernel-observed
     /// topology and produce per-VRF [`IpVrfStatus`] verdicts (Gate 9,
-    /// ADR-0058 §3). The reconcile actor calls this on every pass so
-    /// readiness reflects current kernel state.
+    /// ADR-0058 §3). Intended to be called on every reconcile pass so
+    /// readiness reflects current kernel state; the call site itself
+    /// lives with the rest of the reconcile-actor wiring (intent
+    /// plumbing slice).
     ///
     /// Default returns an empty map — implementations that don't
     /// support Gate 9 (`InMemoryDataplane`, future non-Linux impls)
