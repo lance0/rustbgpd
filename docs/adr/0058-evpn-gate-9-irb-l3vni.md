@@ -369,7 +369,7 @@ shape as actually merged:
    edge-triggered output, not a 5 s spam loop.
 7. **CLI / report visibility slice.** Adds `IpVrfStatus` rows to
    `DataplaneReport`, a `ListIpVrfs` / `GetIpVrf` gRPC RPC, and the
-   `rustbgpctl evpn vrfs [get NAME]` command. Surfaces IP-VRF
+   `rustbgpctl evpn vrfs [NAME]` command. Surfaces IP-VRF
    readiness so the operator can see it before any FIB programming
    ships.
 8. **End-to-end wiring + M39 interop smoke.** Supervisor consumes
