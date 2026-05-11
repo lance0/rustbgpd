@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-05-11
+
+Gate 9 symmetric Interface-less IRB ends here. v0.17.0 closed
+the L2 EVPN story; v0.18.0 lights up the L3 datapath end-to-end.
+The release bundles slice 6 (PR A origination + PR B import +
+M39 manual smoke against FRR) and the sub-second route-event
+subscription follow-up. After this release rustbgpd can stand
+up symmetric IRB between two PEs, originate and import Type 5
+prefixes through a transactional kernel-ownership model with
+value-aware drift detection, and propagate operator
+`ip addr del` to peers within ~2 s. M39 manual containerlab
+smoke is 15/15 PASS against Linux 6.17 + FRR 10.3.1.
+
+The wire crate stays at 0.9.0 — no source-level changes under
+`crates/wire/src/` since v0.17.0.
+
 ### Added
 
 - **EVPN Gate 9 slice 6 follow-up — `RTNLGRP_IPV4_ROUTE` /

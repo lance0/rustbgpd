@@ -3,13 +3,14 @@
 Post-merge confidence list for the bidirectional EVPN VTEP loop
 (Gates 7a + 7b + 7b+1 in v0.15.0; Gates 7b+2 / 7c / 8 / 8b prep /
 8b enforcement intent + kernel primitive layered in across v0.16.0
-and v0.17.0; Gate 9 IP-VRF readiness chain in `[Unreleased]`). The
-branch landed the control-plane and kernel paths; this file tracks
-what we still need to retire residual alpha-VTEP risk before
-claiming v1.0-grade production readiness.
+and v0.17.0; Gate 9 symmetric Interface-less IRB end-to-end in
+v0.18.0 — PRs #77 / #78 / #79). The branch landed the
+control-plane, kernel, and L3 paths; this file tracks what we
+still need to retire residual alpha-VTEP risk before claiming
+v1.0-grade production readiness.
 
 Items are checkboxed so individual slices can move independently;
-none of them block v0.17.0 release on their own.
+none of them block v0.18.0 release on their own.
 
 ## CI / observability
 
@@ -237,7 +238,7 @@ landing, tracked here for visibility)
   separation, Router MAC extended community lifecycle, the
   symmetric IRB packet path through the kernel. The
   `crates/rib` Type 5 codec already round-trips. Readiness chain
-  is in place (`[Unreleased]`):
+  is in place (v0.18.0):
   - `[[evpn_ip_vrfs]]` TOML schema + validation, optional
     `ip_vrf` field on `[[evpn_instances]]` (config foundation).
   - Pure-logic `ip_vrf::readiness` probe against ADR-0058 §3's
