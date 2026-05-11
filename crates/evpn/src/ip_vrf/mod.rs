@@ -12,12 +12,16 @@
 
 pub mod origination;
 pub mod projection;
+pub mod readiness;
 
 pub use origination::{
     LocalIpRoute, OriginatedIpPrefixRoute, OriginationError, originate_ip_prefix_route,
 };
 pub use projection::{
     ProjectedIpPrefixRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable, project_ip_prefix_routes,
+};
+pub use readiness::{
+    IpVrfKernelSnapshot, IpVrfNotReady, IpVrfStatus, L3VxlanObservation, VrfObservation, probe,
 };
 
 use std::collections::BTreeSet;
