@@ -4,16 +4,21 @@
 # (PE2). Validates the full Gate 9 slice 6 datapath end-to-end:
 #
 #   1. iBGP L2VPN/EVPN session reaches Established.
-#   2. PE2 (FRR) sees PE1's Type 5 for 192.0.2.1/32.
-#   3. PE1 (rustbgpd) sees PE2's Type 5 for 192.0.2.2/32.
+#   2. PE2 (FRR) sees PE1's Type 5 for 192.0.2.0/24.
+#   3. PE1 (rustbgpd) sees PE2's Type 5 for 198.51.100.0/24.
 #   4. PE1's kernel installs PE2's prefix in vrf1 with the
 #      expected `proto bgp` / `onlink` / `dev l3vxlan100` shape.
 #   5. PE1's L3 neighbor row maps 10.0.0.2 → PE2's router MAC.
 #   6. PE1's L3VXLAN FDB row maps PE2's router MAC → 10.0.0.2.
-#   7. Bidirectional ping across vrf1 (PE1 → 192.0.2.2 and the
-#      reverse).
-#   8. Withdraw leg: removing PE1's tenant prefix causes FRR to
-#      drop the Type 5 within 30s.
+#   7. Cross-subnet ping across vrf1 (PE1 192.0.2.1 ↔ PE2
+#      198.51.100.1, both ways, over the L3VNI VXLAN tunnel).
+#   8. Local-originator withdraw: removing PE1's tenant address
+#      causes FRR to drop the Type 5 within ~90 s (slice 6a's
+#      route observation refreshes via the 1-min periodic dump).
+#   9. Reverse-direction withdraw: removing PE2's tenant address
+#      causes rustbgpd's L3 installer to clear PE1's kernel
+#      route + neighbor + FDB rows and drop
+#      `installed_routes_count` back to 0.
 #
 # Prerequisites:
 #   - containerlab deploy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml

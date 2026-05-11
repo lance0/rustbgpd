@@ -91,9 +91,11 @@ topology:
 
 # Underlay: 10.0.0.0/24 — PE1 (10.0.0.1) ↔ PE2 (10.0.0.2)
 # L3VNI: 100 (bound to vrf1 on both PEs, encoded in Type 5 label).
-# Tenant prefixes:
-#   - PE1: 192.0.2.1/32 (originated by rustbgpd from kernel)
-#   - PE2: 192.0.2.2/32 (originated by FRR redistribute connected)
-# Router MAC: derived per-PE from the L3VXLAN device link-layer
-# address (operator-supplied for rustbgpd via `router_mac`;
-# zebra-derived for FRR).
+# Tenant subnets (non-overlapping so every PE↔PE packet crosses the
+# L3VNI tunnel; slice 6a's classifier filters RTN_LOCAL host-route
+# rows, so /24 on the dummy is what produces the RTN_UNICAST
+# connected route the originator picks up):
+#   - PE1: 192.0.2.1/24 on lo-vrf1 → originates 192.0.2.0/24
+#   - PE2: 198.51.100.1/24 on lo-vrf1 → originates 198.51.100.0/24
+# Router MAC: operator-supplied for rustbgpd via the `router_mac`
+# field in `[[evpn_ip_vrfs]]`; zebra-derived for FRR.

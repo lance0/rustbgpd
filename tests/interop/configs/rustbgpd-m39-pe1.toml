@@ -11,10 +11,14 @@
 #     does not auto-derive from the L3VXLAN device's MAC. The
 #     startup script sets the device MAC to this value so the
 #     readiness probe passes.
-#   - The tenant prefix 192.0.2.1/32 lives on lo-vrf1 (created
-#     by the startup script). The slice 6a route observer
-#     classifies it as `Connected` (RTPROT_KERNEL) and slice 6b
-#     originates a Type 5 from it.
+#   - The tenant address 192.0.2.1/24 lives on lo-vrf1 (created
+#     by the startup script). `ip addr add 192.0.2.1/24` produces
+#     both an `RTN_LOCAL` host row (filtered by slice 6a) AND an
+#     `RTN_UNICAST` connected route for 192.0.2.0/24 (kept by the
+#     classifier as `Connected` / `RTPROT_KERNEL`); slice 6b
+#     originates the /24 as Type 5. Using /32 here would yield
+#     only the filtered LOCAL row and the daemon would never
+#     originate.
 
 [global]
 asn = 65000
