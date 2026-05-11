@@ -118,6 +118,15 @@ pub enum DataplaneOp {
         /// Remote VTEP next-hop (must match `prefix`'s family;
         /// slice 6c does not implement cross-family `RTA_VIA`).
         next_hop: IpAddr,
+        /// Remote PE's router MAC. Not consumed by the kernel
+        /// route-add itself (the kernel resolves the inner DMAC via
+        /// the L3 neighbor table), but carried on the op so the
+        /// reconcile actor's apply loop can correlate this route
+        /// with the `(l3vxlan_ifindex, router_mac)` FDB prerequisite
+        /// for fail-stop gating: a route install must not proceed
+        /// when its prerequisite resolution-add failed in the same
+        /// pass, or the kernel would forward to an unresolved path.
+        router_mac: MacAddress,
     },
     /// Remove a remote IP-prefix route previously installed by
     /// [`Self::AddRemoteIpRoute`].

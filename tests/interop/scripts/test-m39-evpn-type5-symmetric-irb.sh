@@ -117,17 +117,45 @@ wait_rustbgpd_sees_type5() {
 # Poll PE1's kernel routing table inside vrf1 until the given
 # prefix is installed. Field-fragment matching insulates against
 # iproute2 output variations (per the PR-B review's parser
-# guidance).
+# guidance). Asserts every operational flag the slice 6c install
+# path is documented to set — `proto bgp` (so slice 6a's own
+# observer never re-originates) and `onlink` (RTNH_F_ONLINK,
+# required for the L3VXLAN-direct topology where the next-hop is
+# not reachable via a connected route on the output device).
 wait_pe1_route_installed() {
     local prefix=$1
     local timeout=${2:-60}
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
+        local dump line
+        dump=$(docker exec "$PE1" ip route show table "$PE1_TABLE_ID" 2>/dev/null || true)
+        # The full route line for the prefix (one entry; if there are
+        # somehow two, take the first). All flags must appear on the
+        # same line.
+        line=$(echo "$dump" | grep -E "^${prefix//./\\.}\b" | head -1)
+        if [ -n "$line" ] \
+            && echo "$line" | grep -qE "via $PE2_IP\b" \
+            && echo "$line" | grep -qE "dev $PE1_L3VXLAN\b" \
+            && echo "$line" | grep -qE "proto bgp\b" \
+            && echo "$line" | grep -qE "\bonlink\b"; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# Poll PE1's kernel routing table until the given prefix is
+# **absent** — the symmetric assertion for the import-side
+# withdraw leg.
+wait_pe1_route_absent() {
+    local prefix=$1
+    local timeout=${2:-90}
+    local attempts=$((timeout / 2))
+    for _ in $(seq 1 "$attempts"); do
         local dump
         dump=$(docker exec "$PE1" ip route show table "$PE1_TABLE_ID" 2>/dev/null || true)
-        if echo "$dump" | grep -qE "^${prefix//./\\.}\b" \
-            && echo "$dump" | grep -qE "via $PE2_IP\b" \
-            && echo "$dump" | grep -qE "dev $PE1_L3VXLAN\b"; then
+        if ! echo "$dump" | grep -qE "^${prefix//./\\.}\b"; then
             return 0
         fi
         sleep 2
@@ -306,6 +334,52 @@ if wait_frr_loses_type5 "$PE1_ORIGINATED_HOST" "$PE1_ORIGINATED_PLEN" 90; then
 else
     fail "FRR still shows PE1's Type 5 90s after withdraw"
     docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix" >&2 || true
+fi
+
+# Test 10–13: reverse-direction withdraw — exercises the
+# import-side cleanup path on PE1. We remove the tenant prefix
+# on PE2's loopback; FRR (PE2) emits a Type 5 withdraw; rustbgpd
+# (PE1) drops the projected entry; the reconcile actor's diff
+# emits RemoveRemoteIpRoute + RemoveL3Neighbor + RemoveL3VxlanFdb
+# in canonical phase order; the kernel rows clear and
+# installed_routes_count converges back to 0.
+log "[test 10] reverse withdraw: remove $PE2_TENANT_HOST/24 on PE2, expect PE1 dataplane cleanup"
+docker exec "$PE2" ip addr del "${PE2_TENANT_HOST}/24" dev lo-vrf1 2>/dev/null || true
+
+log "[test 11] PE1 kernel removes $PE2_ORIGINATED_PREFIX from vrf1 table"
+if wait_pe1_route_absent "$PE2_ORIGINATED_PREFIX" 90; then
+    ok "kernel route absent from table $PE1_TABLE_ID"
+else
+    fail "PE1 kernel still has $PE2_ORIGINATED_PREFIX 90s after PE2 withdraw"
+    docker exec "$PE1" ip route show table "$PE1_TABLE_ID" >&2 || true
+fi
+
+log "[test 12] PE1 L3 neighbor row for $PE2_IP cleared after withdraw"
+neigh_after=$(docker exec "$PE1" ip neigh show dev "$PE1_L3VXLAN" 2>/dev/null || true)
+if ! echo "$neigh_after" | grep -qE "^$PE2_IP\b.*lladdr\b"; then
+    ok "neighbor row for $PE2_IP gone"
+else
+    fail "neighbor row for $PE2_IP still present after withdraw"
+    echo "$neigh_after" >&2
+fi
+
+log "[test 12b] PE1 L3VXLAN FDB row for dst $PE2_IP cleared after withdraw"
+fdb_after=$(docker exec "$PE1" bridge fdb show dev "$PE1_L3VXLAN" 2>/dev/null || true)
+if ! echo "$fdb_after" | grep -qE "dst $PE2_IP\b"; then
+    ok "FDB row for dst $PE2_IP gone"
+else
+    fail "FDB row for dst $PE2_IP still present after withdraw"
+    echo "$fdb_after" >&2
+fi
+
+log "[test 13] gRPC IpVrfState.installed_routes_count drops back to 0 for vrf1"
+if wait_pe1_installed_count 0 30; then
+    ok "installed_routes_count converged to 0 on vrf1"
+else
+    fail "installed_routes_count never reached 0"
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        -d '{"name":"vrf1"}' \
+        "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf >&2 || true
 fi
 
 print_summary

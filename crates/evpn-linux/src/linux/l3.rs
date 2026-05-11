@@ -55,7 +55,7 @@ use netlink_packet_route::route::{
 use rtnetlink::Handle;
 use rustbgpd_evpn::{EvpnIpPrefixValue, MacAddress};
 
-use super::fdb::classify_apply_error;
+use super::fdb::{classify_apply_error, classify_remove_apply_error};
 use crate::error::DataplaneError;
 
 /// `RT_TABLE_COMPAT` — the kernel UAPI sentinel
@@ -109,11 +109,10 @@ pub(crate) async fn apply_add_ip_route(
 /// # Errors
 ///
 /// Returns [`DataplaneError::InvalidArgument`] on family mismatch.
-/// Other failures (`ENOENT`, permission, ...) classify per
-/// [`classify_apply_error`]; `ENOENT` surfaces as the generic
-/// `Other` arm and is treated as a transient retryable error by
-/// the actor's backoff scheduler, but in practice means the route
-/// was already absent (idempotent delete).
+/// Other failures classify per [`classify_remove_apply_error`],
+/// which treats `ENOENT` as idempotent success — if the kernel
+/// row is already absent the post-condition holds and the actor
+/// should advance `L3OwnedState` rather than retry forever.
 pub(crate) async fn apply_remove_ip_route(
     handle: &Handle,
     prefix: EvpnIpPrefixValue,
@@ -122,12 +121,10 @@ pub(crate) async fn apply_remove_ip_route(
     next_hop: IpAddr,
 ) -> Result<(), DataplaneError> {
     let msg = build_ip_route_message(prefix, table_id, l3vxlan_ifindex, next_hop)?;
-    handle
-        .route()
-        .del(msg)
-        .execute()
-        .await
-        .map_err(|e| classify_apply_error(&e))
+    match handle.route().del(msg).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) => classify_remove_apply_error(&e),
+    }
 }
 
 fn build_ip_route_message(
@@ -226,7 +223,9 @@ pub(crate) async fn apply_add_l3_neighbor(
 ///
 /// # Errors
 ///
-/// Failures classify per [`classify_apply_error`].
+/// Failures classify per [`classify_remove_apply_error`] —
+/// `ENOENT` is idempotent success so a foreign delete or prior
+/// partial drain doesn't wedge `L3OwnedState` convergence.
 pub(crate) async fn apply_remove_l3_neighbor(
     handle: &Handle,
     l3vxlan_ifindex: u32,
@@ -245,12 +244,10 @@ pub(crate) async fn apply_remove_l3_neighbor(
             IpAddr::V4(a) => netlink_packet_route::neighbour::NeighbourAddress::Inet(a),
             IpAddr::V6(a) => netlink_packet_route::neighbour::NeighbourAddress::Inet6(a),
         }));
-    handle
-        .neighbours()
-        .del(msg)
-        .execute()
-        .await
-        .map_err(|e| classify_apply_error(&e))
+    match handle.neighbours().del(msg).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) => classify_remove_apply_error(&e),
+    }
 }
 
 /// Add (or replace) the FDB row on the L3 VXLAN device that maps
@@ -289,7 +286,9 @@ pub(crate) async fn apply_add_l3vxlan_fdb(
 ///
 /// # Errors
 ///
-/// Failures classify per [`classify_apply_error`].
+/// Failures classify per [`classify_remove_apply_error`] —
+/// `ENOENT` is idempotent success so a foreign `bridge fdb del`
+/// or prior partial drain doesn't wedge `L3OwnedState`.
 pub(crate) async fn apply_remove_l3vxlan_fdb(
     handle: &Handle,
     l3vxlan_ifindex: u32,
@@ -303,12 +302,10 @@ pub(crate) async fn apply_remove_l3vxlan_fdb(
     msg.attributes.push(NeighbourAttribute::LinkLayerAddress(
         router_mac.octets().to_vec(),
     ));
-    handle
-        .neighbours()
-        .del(msg)
-        .execute()
-        .await
-        .map_err(|e| classify_apply_error(&e))
+    match handle.neighbours().del(msg).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) => classify_remove_apply_error(&e),
+    }
 }
 
 #[cfg(test)]

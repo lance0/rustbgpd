@@ -400,6 +400,7 @@ pub fn compute_l3_diff(
                 table_id: target.table_id,
                 l3vxlan_ifindex: target.l3vxlan_ifindex,
                 next_hop: target.next_hop,
+                router_mac: target.router_mac,
             });
         }
     }
@@ -1203,6 +1204,61 @@ mod tests {
             neighbor_adds,
             vec![new_rmac],
             "neighbor lladdr drift must emit a replace op with the new router MAC",
+        );
+    }
+
+    /// Regression for Copilot finding `reconcile.rs:489`:
+    /// when config reload removes every `[[evpn_ip_vrfs]]`
+    /// entry, the `IpVrfTable` carried on `DataplaneIntent`
+    /// becomes empty, but `L3OwnedState` can still hold the
+    /// kernel rows we installed before the reload. The diff
+    /// must drain every owned row in that case — otherwise
+    /// the kernel keeps forwarding through L3VXLAN devices
+    /// whose IP-VRF config is gone.
+    #[test]
+    fn empty_intent_with_non_empty_owned_state_drains_everything() {
+        let prefix = v4([198, 51, 100, 0], 24);
+        let nh = ip4(10, 0, 0, 2);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+
+        let mut owned = L3OwnedState::default();
+        owned.installs.insert(
+            (vrf_id, prefix),
+            InstallState {
+                route_installed: true,
+                next_hop: nh,
+                router_mac: rmac,
+                l3vxlan_ifindex: 42,
+                table_id: 201,
+            },
+        );
+        owned.kernel_neighbors.insert((42, nh), rmac);
+        owned.kernel_fdb.insert((42, rmac), nh);
+
+        // Both intent tables empty — simulates "operator removed
+        // every [[evpn_ip_vrfs]] entry and reloaded".
+        let empty_intent = RemoteIpPrefixTable::new();
+        let empty_ip_vrfs = IpVrfTable::new();
+        let empty_ready: BTreeMap<IpVrfId, u32> = BTreeMap::new();
+
+        let plan = compute_l3_diff(&empty_intent, &owned, &empty_ready, &empty_ip_vrfs);
+
+        let kinds: Vec<&str> = plan
+            .ops
+            .iter()
+            .map(|op| match op {
+                DataplaneOp::RemoveRemoteIpRoute { .. } => "route_remove",
+                DataplaneOp::RemoveL3Neighbor { .. } => "neighbor_remove",
+                DataplaneOp::RemoveL3VxlanFdb { .. } => "fdb_remove",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["route_remove", "neighbor_remove", "fdb_remove"],
+            "empty intent with non-empty owned must drain in canonical phase order \
+             (Phase A route remove → Phase D neighbor remove → Phase D FDB remove)",
         );
     }
 }

@@ -347,6 +347,32 @@ pub(super) fn classify_apply_error(err: &rtnetlink::Error) -> DataplaneError {
     DataplaneError::Other(format!("rtnetlink: {err:?}"))
 }
 
+/// Variant of [`classify_apply_error`] for **remove** ops:
+/// `ENOENT` is idempotent success.
+///
+/// Remove ops have a post-condition of "the kernel row is absent
+/// when this returns Ok". If the row was already absent — manual
+/// `ip route del`, prior partial drain, kernel cleanup, foreign
+/// removal — the desired state already holds, so surfacing ENOENT
+/// as an error would wedge `L3OwnedState` convergence: the actor
+/// would never call `record_l3_success`, the owned row would stay
+/// indefinitely, and every reconcile pass would re-emit the same
+/// failing remove. Mapping ENOENT to Ok(()) lets owned state
+/// advance and matches the "idempotent delete" semantic operators
+/// expect.
+///
+/// All other errno values route through `classify_apply_error`
+/// unchanged.
+pub(super) fn classify_remove_apply_error(err: &rtnetlink::Error) -> Result<(), DataplaneError> {
+    if let rtnetlink::Error::NetlinkError(msg) = err {
+        let errno = i32::try_from(msg.raw_code().unsigned_abs()).unwrap_or(0);
+        if errno == libc::ENOENT {
+            return Ok(());
+        }
+    }
+    Err(classify_apply_error(err))
+}
+
 /// Pure-function map from a positive errno to a [`DataplaneError`].
 ///
 /// Split out from [`classify_apply_error`] so unit tests can exercise

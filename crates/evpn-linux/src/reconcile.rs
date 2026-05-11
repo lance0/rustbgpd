@@ -482,11 +482,18 @@ impl<D: Dataplane> ReconcileActor<D> {
         // leave the owned state unchanged so the next reconcile
         // pass retries with the same shape.
         //
-        // Skip the whole loop when no IP-VRFs are configured —
-        // the intent's table is empty and the desired set is
-        // therefore empty, but the explicit short-circuit
-        // documents the zero-cost RR-only deployment path.
-        if !intent.ip_vrfs.is_empty() {
+        // Skip the whole loop only when **both** the intent and
+        // the owned state are empty — the zero-cost RR-only
+        // deployment path. If config reload (or SIGHUP-driven
+        // removal of every `[[evpn_ip_vrfs]]` entry) leaves
+        // `intent.ip_vrfs` empty but `l3_owned` non-empty, the
+        // diff still has work to do: it must drain every owned
+        // route / neighbor / FDB row, otherwise the kernel keeps
+        // forwarding through L3VXLAN devices whose IP-VRF
+        // configuration is gone. The diff handles empty intent
+        // naturally — `desired_*` sets evaluate empty and Phase D
+        // removals fire for every kernel row.
+        if !intent.ip_vrfs.is_empty() || !self.state.l3_owned.is_empty() {
             let ready_l3vxlan_ifindex: std::collections::BTreeMap<IpVrfId, u32> = ip_vrf_status_map
                 .iter()
                 .filter_map(|(id, status)| match status {
@@ -505,7 +512,45 @@ impl<D: Dataplane> ReconcileActor<D> {
             for drop in &l3_plan.drops {
                 tracing::debug!(?drop, "L3 install drop");
             }
+            // Apply-time fail-stop: an `AddRemoteIpRoute` whose
+            // prerequisite `AddL3Neighbor` or `AddL3VxlanFdb` failed
+            // earlier in this pass MUST NOT proceed — otherwise the
+            // kernel ends up with a `proto bgp / onlink` route
+            // pointing at an unresolved L3VXLAN path, and operators
+            // see `installed_routes_count` incremented even though
+            // forwarding is broken. The diff's phase ordering
+            // (resolution adds in phase B, route adds in phase C)
+            // guarantees that by the time we reach an
+            // `AddRemoteIpRoute`, every prerequisite resolution add
+            // in *this* plan has already been attempted, so the
+            // failed-key sets are complete. Prerequisites already
+            // present in `l3_owned` from a prior pass are not in
+            // these sets — those routes are free to install.
+            let mut failed_neighbor_keys: std::collections::HashSet<(u32, std::net::IpAddr)> =
+                std::collections::HashSet::new();
+            let mut failed_fdb_keys: std::collections::HashSet<(u32, MacAddress)> =
+                std::collections::HashSet::new();
             for op in &l3_plan.ops {
+                if let crate::dataplane::DataplaneOp::AddRemoteIpRoute {
+                    l3vxlan_ifindex,
+                    next_hop,
+                    router_mac,
+                    ..
+                } = op
+                {
+                    let neigh_failed =
+                        failed_neighbor_keys.contains(&(*l3vxlan_ifindex, *next_hop));
+                    let fdb_failed = failed_fdb_keys.contains(&(*l3vxlan_ifindex, *router_mac));
+                    if neigh_failed || fdb_failed {
+                        tracing::warn!(
+                            ?op,
+                            neigh_failed,
+                            fdb_failed,
+                            "skipping AddRemoteIpRoute — prerequisite L3 resolution add failed in this pass; next reconcile will retry"
+                        );
+                        continue;
+                    }
+                }
                 match self.dataplane.apply(op).await {
                     Ok(()) => {
                         crate::l3_diff::record_l3_success(
@@ -522,6 +567,23 @@ impl<D: Dataplane> ReconcileActor<D> {
                             ?op,
                             "L3 op failed; preserving owned state for next reconcile retry"
                         );
+                        match op {
+                            crate::dataplane::DataplaneOp::AddL3Neighbor {
+                                l3vxlan_ifindex,
+                                next_hop,
+                                ..
+                            } => {
+                                failed_neighbor_keys.insert((*l3vxlan_ifindex, *next_hop));
+                            }
+                            crate::dataplane::DataplaneOp::AddL3VxlanFdb {
+                                l3vxlan_ifindex,
+                                router_mac,
+                                ..
+                            } => {
+                                failed_fdb_keys.insert((*l3vxlan_ifindex, *router_mac));
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -810,12 +872,22 @@ impl<D: Dataplane> ReconcileActor<D> {
         ip_vrf_routes: Option<rustbgpd_evpn::ip_vrf::IpVrfRouteDump>,
     ) {
         // Gate 9 slice 6c: snapshot installed-route counts per VRF
-        // for the gRPC `IpVrfState.installed_routes_count` surface.
+        // for the gRPC `IpVrfState.installed_routes_count` surface
+        // and the Prometheus `evpn_ip_vrf_installed_routes` gauge.
         // Only routes whose `route_installed` flag is true contribute
         // — kernel-resolution rows (neighbor / FDB) are shared
         // across prefixes and tracked separately.
+        //
+        // **Pre-populate every configured VRF at 0** before the
+        // incrementing pass: downstream consumers (notably the
+        // Prometheus gauge publisher) drive `set(label, value)` from
+        // this map, so a VRF whose count transitions from N → 0 must
+        // appear here as `(vrf_id, 0)` for the gauge to converge to
+        // zero. Without this pre-population, a VRF that drained
+        // would never reappear in the map and the gauge would retain
+        // a stale non-zero value until daemon restart.
         let mut ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32> =
-            std::collections::HashMap::new();
+            ip_vrf_status.iter().map(|row| (row.vrf_id, 0)).collect();
         for ((vrf_id, _prefix), install) in &self.state.l3_owned.installs {
             if install.route_installed {
                 *ip_vrf_installed_routes.entry(*vrf_id).or_insert(0) += 1;

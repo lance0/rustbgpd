@@ -258,6 +258,7 @@ async fn linux_dataplane_installs_and_withdraws_l3_triple() {
         table_id: TABLE_ID,
         l3vxlan_ifindex,
         next_hop,
+        router_mac,
     })
     .await
     .expect("AddRemoteIpRoute");
@@ -268,7 +269,7 @@ async fn linux_dataplane_installs_and_withdraws_l3_triple() {
     // table. Match by fields (per the review's parser-safety note),
     // not full-line equality.
     let route_dump = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
-    assert_route_present(&route_dump, "198.51.100.0/24", "10.0.0.2", "l3vxlan-test");
+    assert_owned_route_present(&route_dump, "198.51.100.0/24", "10.0.0.2", "l3vxlan-test");
 
     // Neighbor: `ip neigh show dev l3vxlan-test` must contain
     // `<next_hop> lladdr <router_mac> ... PERMANENT` with
@@ -393,13 +394,15 @@ async fn linux_dataplane_foreign_route_survives_l3_cycle() {
         table_id: TABLE_ID,
         l3vxlan_ifindex,
         next_hop,
+        router_mac,
     })
     .await
     .expect("AddRemoteIpRoute");
 
-    // Both routes should be in the table.
+    // Both routes should be in the table — the owned one with the
+    // full BGP/onlink shape, the foreign one preserved verbatim.
     let with_both = shell_capture("ip", &["route", "show", "table", &TABLE_ID.to_string()]);
-    assert_route_present(&with_both, "198.51.100.0/24", "10.0.0.2", "l3vxlan-test");
+    assert_owned_route_present(&with_both, "198.51.100.0/24", "10.0.0.2", "l3vxlan-test");
     assert_route_present(&with_both, foreign_prefix, foreign_gw, "l3vxlan-test");
 
     // Withdraw our cycle.
@@ -446,10 +449,16 @@ fn read_l3vxlan_ifindex() -> u32 {
     first.trim().parse::<u32>().expect("ifindex parse")
 }
 
-/// Match a route by destination + gateway + dev. iproute2's
-/// `ip route show` output formats each row as one line of fields;
-/// we tolerate field-order variations by matching fragments rather
-/// than full-line equality (per the review's parser-safety guide).
+/// Match a route by destination + gateway + dev + operational
+/// flags. iproute2's `ip route show` output formats each row as
+/// one line of fields; we tolerate field-order variations by
+/// matching fragments rather than full-line equality (per the
+/// review's parser-safety guide).
+///
+/// Use [`assert_owned_route_present`] for routes we installed
+/// (asserts the full `apply_add_ip_route` shape including
+/// `proto bgp` + `onlink`), and this helper for foreign routes
+/// where we only care that the destination/next-hop survived.
 fn assert_route_present(dump: &str, prefix: &str, gateway: &str, dev: &str) {
     let matched = dump.lines().any(|line| {
         line.contains(prefix)
@@ -459,6 +468,30 @@ fn assert_route_present(dump: &str, prefix: &str, gateway: &str, dev: &str) {
     assert!(
         matched,
         "route `{prefix} via {gateway} dev {dev}` missing from dump:\n{dump}",
+    );
+}
+
+/// Match a route that `apply_add_ip_route` should have installed:
+/// destination + gateway + dev plus every operational flag the
+/// L3 install path is documented to set on the same line —
+/// `proto bgp` (RTPROT_BGP, so slice 6a's local-route observer
+/// never re-originates) and `onlink` (RTNH_F_ONLINK, required
+/// for the L3VXLAN-direct topology where the next-hop is not
+/// reachable via a connected route on the output device).
+/// Tightens review finding #4: matches the operational shape
+/// the slice 6c module docs claim.
+fn assert_owned_route_present(dump: &str, prefix: &str, gateway: &str, dev: &str) {
+    let matched = dump.lines().any(|line| {
+        line.contains(prefix)
+            && line.contains(&format!("via {gateway}"))
+            && line.contains(&format!("dev {dev}"))
+            && line.contains("proto bgp")
+            && line.contains("onlink")
+    });
+    assert!(
+        matched,
+        "owned route `{prefix} via {gateway} dev {dev} proto bgp ... onlink` \
+         missing from dump:\n{dump}",
     );
 }
 
