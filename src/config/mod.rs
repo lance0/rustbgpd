@@ -1758,7 +1758,7 @@ fn parse_ethernet_segment(
 fn parse_evpn_ip_vrf(cfg: &EvpnIpVrfConfig) -> Result<IpVrf, ConfigError> {
     if cfg.name.trim().is_empty() {
         return Err(ConfigError::InvalidEvpnIpVrf {
-            reason: "name must not be empty".to_string(),
+            reason: format!("evpn_ip_vrfs[vni={}]: name must not be empty", cfg.vni),
         });
     }
     // Restrict the name to a safe identifier shape — operators may
