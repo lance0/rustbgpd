@@ -139,11 +139,15 @@ impl LinuxDataplane {
         //
         // - `RTNLGRP_NEIGH` (id 3) feeds the slice 6a/6b local-MAC
         //   observation pipeline.
-        // - `RTNLGRP_IPV4_ROUTE` (5) + `RTNLGRP_IPV6_ROUTE` (7) feed
-        //   the slice 6c kernel-event channel so `ip addr del` /
-        //   `ip route add ... table N` in an IP-VRF's custom table
-        //   triggers a reconcile pass within ~50 ms instead of
-        //   waiting for the actor's 60 s periodic dump.
+        // - `RTNLGRP_IPV4_ROUTE` (7) + `RTNLGRP_IPV6_ROUTE` (11)
+        //   feed the slice 6c kernel-event channel so `ip addr del`
+        //   / `ip route add ... table N` in an IP-VRF's custom
+        //   table triggers a reconcile pass within ~50 ms instead
+        //   of waiting for the actor's 60 s periodic dump. (5 and 7
+        //   would be `RTNLGRP_IPV4_IFADDR` / `RTNLGRP_IPV4_ROUTE` —
+        //   the off-by-one is exactly what `notify::tests::
+        //   route_rtnlgrp_constants_match_kernel_enum_values`
+        //   guards against.)
         for (group, name) in [
             (notify::RTNLGRP_NEIGH, "RTNLGRP_NEIGH"),
             (notify::RTNLGRP_IPV4_ROUTE, "RTNLGRP_IPV4_ROUTE"),
