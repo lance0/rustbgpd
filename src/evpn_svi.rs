@@ -436,6 +436,7 @@ mod tests {
             bum_enforcement: vec![],
             ip_vrf_status: vec![],
             ip_vrf_routes: Some(rustbgpd_evpn::ip_vrf::IpVrfRouteDump::default()),
+            ip_vrf_installed_routes: std::collections::HashMap::new(),
         }
     }
 

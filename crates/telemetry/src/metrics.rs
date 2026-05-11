@@ -68,6 +68,7 @@ pub struct BgpMetrics {
     evpn_ip_vrf_observed_routes: IntGaugeVec,
     evpn_ip_vrf_observed_routes_filtered: IntCounterVec,
     evpn_ip_vrf_origination_suppressed: IntCounterVec,
+    evpn_ip_vrf_installed_routes: IntGaugeVec,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -369,6 +370,17 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_ip_vrf_installed_routes = IntGaugeVec::new(
+            Opts::new(
+                "evpn_ip_vrf_installed_routes",
+                "Remote EVPN Type 5 routes currently installed in each IP-VRF's \
+                 kernel route table (Gate 9 slice 6c). Updated on every reconcile \
+                 pass from the L3 reconciler's owned-set bookkeeping.",
+            ),
+            &["vrf"],
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -496,6 +508,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_ip_vrf_origination_suppressed.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_ip_vrf_installed_routes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -540,6 +555,7 @@ impl BgpMetrics {
             evpn_ip_vrf_observed_routes,
             evpn_ip_vrf_observed_routes_filtered,
             evpn_ip_vrf_origination_suppressed,
+            evpn_ip_vrf_installed_routes,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -780,6 +796,13 @@ impl BgpMetrics {
         self.evpn_ip_vrf_origination_suppressed
             .with_label_values(&[vrf, reason])
             .inc_by(delta);
+    }
+
+    /// Set the installed-routes gauge for one VRF (Gate 9 slice 6c).
+    pub fn set_evpn_ip_vrf_installed_routes(&self, vrf: &str, count: i64) {
+        self.evpn_ip_vrf_installed_routes
+            .with_label_values(&[vrf])
+            .set(count);
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.

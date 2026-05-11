@@ -292,6 +292,14 @@ pub struct DataplaneReport {
     /// failure as "kernel has no routes" and withdraw every
     /// currently-originated Type 5.
     pub ip_vrf_routes: Option<crate::ip_vrf::IpVrfRouteDump>,
+    /// Currently-installed remote Type 5 route count per IP-VRF
+    /// (Gate 9 slice 6c). Updated on every reconcile pass from the
+    /// L3 reconciler's `l3_owned.routes` map. Empty when no
+    /// `[[evpn_ip_vrfs]]` are configured. The daemon mirrors this
+    /// onto a `tokio::sync::watch` channel so the gRPC
+    /// `IpVrfState.installed_routes_count` field reads it
+    /// lock-free.
+    pub ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32>,
 }
 
 /// Per-instance status emitted alongside every report.

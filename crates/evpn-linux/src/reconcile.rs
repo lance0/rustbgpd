@@ -809,6 +809,15 @@ impl<D: Dataplane> ReconcileActor<D> {
         ip_vrf_status: Vec<rustbgpd_evpn::IpVrfDataplaneStatus>,
         ip_vrf_routes: Option<rustbgpd_evpn::ip_vrf::IpVrfRouteDump>,
     ) {
+        // Gate 9 slice 6c: snapshot installed-route counts per VRF
+        // for the gRPC `IpVrfState.installed_routes_count` surface.
+        // Cheap — O(N) over the L3 owned set.
+        let mut ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32> =
+            std::collections::HashMap::new();
+        for (vrf_id, _prefix) in self.state.l3_owned.routes.keys() {
+            *ip_vrf_installed_routes.entry(*vrf_id).or_insert(0) += 1;
+        }
+
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
             reconcile_generation: self.state.reconcile_generation,
@@ -818,6 +827,7 @@ impl<D: Dataplane> ReconcileActor<D> {
             bum_enforcement,
             ip_vrf_status,
             ip_vrf_routes,
+            ip_vrf_installed_routes,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
