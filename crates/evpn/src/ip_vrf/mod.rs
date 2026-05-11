@@ -10,6 +10,16 @@
 //! particular §3 (observe-only Linux device lifecycle) and §4 (Router
 //! MAC is operator-supplied, never auto-derived from the kernel).
 
+pub mod origination;
+pub mod projection;
+
+pub use origination::{
+    LocalIpRoute, OriginatedIpPrefixRoute, OriginationError, originate_ip_prefix_route,
+};
+pub use projection::{
+    ProjectedIpPrefixRoute, RemoteIpPrefixEntry, RemoteIpPrefixTable, project_ip_prefix_routes,
+};
+
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 

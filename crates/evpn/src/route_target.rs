@@ -169,6 +169,81 @@ impl FromStr for RouteTarget {
     }
 }
 
+impl RouteTarget {
+    /// Encode into the 8-byte wire form of a Route Target Extended
+    /// Community (RFC 4360 §3 / RFC 5668 §2 — type byte high nibble
+    /// selects the administrator format, low nibble + subtype 0x02
+    /// marks "Route Target").
+    ///
+    /// The mapping is:
+    ///
+    /// | Variant       | Type byte | Encoding                 |
+    /// |---------------|-----------|--------------------------|
+    /// | `TwoOctetAs`  | `0x00`    | `[asn:u16, value:u32]`   |
+    /// | `Ipv4`        | `0x01`    | `[ipv4:u32, value:u16]`  |
+    /// | `FourOctetAs` | `0x02`    | `[asn:u32, value:u16]`   |
+    ///
+    /// Used by Type 2 / Type 3 / Type 4 / Type 5 origination on the
+    /// daemon side.
+    #[must_use]
+    pub fn to_extended_community(self) -> rustbgpd_wire::ExtendedCommunity {
+        match self {
+            Self::TwoOctetAs { asn, value } => {
+                let a = asn.to_be_bytes();
+                let v = value.to_be_bytes();
+                rustbgpd_wire::ExtendedCommunity::new(u64::from_be_bytes([
+                    0x00, 0x02, a[0], a[1], v[0], v[1], v[2], v[3],
+                ]))
+            }
+            Self::Ipv4 { ipv4, value } => {
+                let a = ipv4.octets();
+                let v = value.to_be_bytes();
+                rustbgpd_wire::ExtendedCommunity::new(u64::from_be_bytes([
+                    0x01, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+                ]))
+            }
+            Self::FourOctetAs { asn, value } => {
+                let a = asn.to_be_bytes();
+                let v = value.to_be_bytes();
+                rustbgpd_wire::ExtendedCommunity::new(u64::from_be_bytes([
+                    0x02, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+                ]))
+            }
+        }
+    }
+
+    /// Decode the inverse of [`Self::to_extended_community`]. Returns
+    /// `None` for any extended community that isn't a Route Target —
+    /// type byte's low nibble must be `0x02` (Route Target subtype)
+    /// and high nibble must be one of the three RFC-defined formats.
+    #[must_use]
+    pub fn from_extended_community(c: rustbgpd_wire::ExtendedCommunity) -> Option<Self> {
+        let bytes = c.as_u64().to_be_bytes();
+        // Subtype must be 0x02 (Route Target).
+        if bytes[1] != 0x02 {
+            return None;
+        }
+        // High nibble of the type byte selects the variant. Mask off
+        // the transitive bit (0x40) which the daemon may set for some
+        // RT subtypes per RFC 4360 §3.
+        match bytes[0] & 0x3F {
+            0x00 => Some(Self::TwoOctetAs {
+                asn: u16::from_be_bytes([bytes[2], bytes[3]]),
+                value: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            }),
+            0x01 => Some(Self::Ipv4 {
+                ipv4: Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]),
+                value: u16::from_be_bytes([bytes[6], bytes[7]]),
+            }),
+            0x02 => Some(Self::FourOctetAs {
+                asn: u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+                value: u16::from_be_bytes([bytes[6], bytes[7]]),
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
