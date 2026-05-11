@@ -83,6 +83,15 @@ pub struct LinuxDataplane {
     /// the daemon takes ownership. The matching sender is held by the
     /// background notify task spawned in [`Self::connect`].
     local_mac_rx: Option<mpsc::Receiver<LocalMacObservation>>,
+    /// Upward `KernelEvent` channel for the reconcile actor's
+    /// [`Dataplane::next_event`]. The notify task pushes
+    /// [`KernelEvent::KernelStateChanged`] here when an
+    /// `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` message survives
+    /// [`notify::classify_route`], so withdraws on operator
+    /// `ip addr del` (or any custom-table route change) reach the
+    /// actor within milliseconds instead of waiting for the periodic
+    /// dump cycle.
+    kernel_event_rx: mpsc::Receiver<KernelEvent>,
 }
 
 impl LinuxDataplane {
@@ -119,22 +128,34 @@ impl LinuxDataplane {
         let (mut connection, handle, messages) =
             rtnetlink::new_connection().map_err(DataplaneError::Io)?;
 
-        // Subscribe to RTNLGRP_NEIGH on the same socket that carries
-        // our solicited dump/program traffic. `add_membership` is a
+        // Subscribe to RTNLGRP_NEIGH + RTNLGRP_IPV4_ROUTE +
+        // RTNLGRP_IPV6_ROUTE on the same socket that carries our
+        // solicited dump/program traffic. `add_membership` is a
         // synchronous setsockopt call, so it must happen before we
         // hand the connection to the runtime via `tokio::spawn`.
-        // Failure here is logged but non-fatal — the dataplane still
-        // works for downward FDB programming, just without a
-        // local-MAC observation feed.
-        if let Err(e) = connection
-            .socket_mut()
-            .socket_mut()
-            .add_membership(notify::RTNLGRP_NEIGH)
-        {
-            warn!(
-                error = %e,
-                "could not subscribe to RTNLGRP_NEIGH; local-MAC observations will be silent"
-            );
+        // Failure on any subscription is logged but non-fatal — the
+        // dataplane still works for downward programming, just with
+        // the corresponding upward feed silent.
+        //
+        // - `RTNLGRP_NEIGH` (id 3) feeds the slice 6a/6b local-MAC
+        //   observation pipeline.
+        // - `RTNLGRP_IPV4_ROUTE` (5) + `RTNLGRP_IPV6_ROUTE` (7) feed
+        //   the slice 6c kernel-event channel so `ip addr del` /
+        //   `ip route add ... table N` in an IP-VRF's custom table
+        //   triggers a reconcile pass within ~50 ms instead of
+        //   waiting for the actor's 60 s periodic dump.
+        for (group, name) in [
+            (notify::RTNLGRP_NEIGH, "RTNLGRP_NEIGH"),
+            (notify::RTNLGRP_IPV4_ROUTE, "RTNLGRP_IPV4_ROUTE"),
+            (notify::RTNLGRP_IPV6_ROUTE, "RTNLGRP_IPV6_ROUTE"),
+        ] {
+            if let Err(e) = connection.socket_mut().socket_mut().add_membership(group) {
+                warn!(
+                    error = %e,
+                    group_name = name,
+                    "rtnetlink multicast subscription failed; corresponding upward feed will be silent"
+                );
+            }
         }
 
         // Spawn the netlink connection driver. rtnetlink's design has
@@ -191,12 +212,20 @@ impl LinuxDataplane {
         // treated as harmless drop because the level-triggered
         // reconcile model recovers via the periodic dump cadence.
         let (local_mac_tx, local_mac_rx) = mpsc::channel(1024);
+        // Smaller (64-slot) channel for the kernel-event wake feed.
+        // The reconcile actor's coalesce window folds bursts into a
+        // single pass, so back-pressure here is irrelevant — what
+        // matters is the next reconcile pass running, not the queue
+        // depth. Overflow drops silently and the next periodic dump
+        // recovers regardless.
+        let (kernel_event_tx, kernel_event_rx) = mpsc::channel(64);
         let cache_for_notify = Arc::clone(&link_cache);
         let on_observation_drop: ObservationDropHook = Arc::new(on_observation_drop);
         tokio::spawn(notify_loop(
             messages,
             cache_for_notify,
             local_mac_tx,
+            kernel_event_tx,
             on_observation_drop,
         ));
 
@@ -204,6 +233,7 @@ impl LinuxDataplane {
             handle,
             link_cache,
             local_mac_rx: Some(local_mac_rx),
+            kernel_event_rx,
         })
     }
 }
@@ -218,22 +248,47 @@ async fn notify_loop(
     )>,
     link_cache: Arc<Mutex<links::LinkCache>>,
     local_mac_tx: mpsc::Sender<LocalMacObservation>,
+    kernel_event_tx: mpsc::Sender<KernelEvent>,
     on_observation_drop: ObservationDropHook,
 ) {
     while let Some((msg, _src)) = messages.next().await {
         let NetlinkPayload::InnerMessage(payload) = msg.payload else {
             continue;
         };
-        let (kind, neigh) = match payload {
-            RouteNetlinkMessage::NewNeighbour(n) => (notify::NeighEventKind::New, n),
-            RouteNetlinkMessage::DelNeighbour(n) => (notify::NeighEventKind::Del, n),
-            _ => continue,
-        };
-        let cache = link_cache.lock().await.clone();
-        let Some(obs) = notify::classify_neigh(kind, &neigh, &cache) else {
-            continue;
-        };
-        forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
+        match payload {
+            RouteNetlinkMessage::NewNeighbour(neigh) => {
+                let cache = link_cache.lock().await.clone();
+                if let Some(obs) =
+                    notify::classify_neigh(notify::NeighEventKind::New, &neigh, &cache)
+                {
+                    forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
+                }
+            }
+            RouteNetlinkMessage::DelNeighbour(neigh) => {
+                let cache = link_cache.lock().await.clone();
+                if let Some(obs) =
+                    notify::classify_neigh(notify::NeighEventKind::Del, &neigh, &cache)
+                {
+                    forward_observation_or_record_drop(&local_mac_tx, obs, &on_observation_drop);
+                }
+            }
+            RouteNetlinkMessage::NewRoute(route)
+                if notify::classify_route(&route, notify::RouteEventKind::New) =>
+            {
+                // `try_send` is right here: the actor's coalesce
+                // window collapses bursts into a single pass, so
+                // backpressure adds latency, not correctness. A
+                // dropped wake is recovered by the next periodic
+                // dump anyway.
+                let _ = kernel_event_tx.try_send(KernelEvent::KernelStateChanged);
+            }
+            RouteNetlinkMessage::DelRoute(route)
+                if notify::classify_route(&route, notify::RouteEventKind::Del) =>
+            {
+                let _ = kernel_event_tx.try_send(KernelEvent::KernelStateChanged);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -479,14 +534,21 @@ impl Dataplane for LinuxDataplane {
     }
 
     fn next_event(&mut self) -> impl Future<Output = Option<KernelEvent>> + Send {
-        // RTNLGRP_LINK subscription is still a follow-up; we surface
-        // RTNLGRP_NEIGH messages through the dedicated `LocalMacObservation`
-        // channel rather than this `next_event` flow (see ADR-0054 §1's
-        // "narrow upward interface" rationale). The reconcile actor
-        // therefore relies on its 60s periodic dump cadence to catch
-        // link / FDB drift — the level-triggered design tolerates this
-        // gap.
-        std::future::pending()
+        // Drain the kernel-event channel populated by the
+        // `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` notify task.
+        // The reconcile actor awaits this in its `tokio::select!`
+        // and re-runs `coalesce_and_reconcile` on every wake — slice
+        // 6a's IP-VRF observation refreshes within milliseconds of
+        // an operator `ip addr del` / `ip route add` in a custom
+        // table, instead of waiting for the 60 s periodic dump.
+        //
+        // `RTNLGRP_NEIGH` events stay on the dedicated
+        // `LocalMacObservation` channel surfaced by
+        // `take_local_mac_rx` (ADR-0054 §1's "narrow upward
+        // interface" rationale). `RTNLGRP_LINK` subscription is
+        // still a follow-up — the periodic dump catches link/FDB
+        // drift.
+        self.kernel_event_rx.recv()
     }
 
     fn take_local_mac_rx(&mut self) -> Option<mpsc::Receiver<LocalMacObservation>> {

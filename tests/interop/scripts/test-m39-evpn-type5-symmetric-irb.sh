@@ -13,8 +13,10 @@
 #   7. Cross-subnet ping across vrf1 (PE1 192.0.2.1 ↔ PE2
 #      198.51.100.1, both ways, over the L3VNI VXLAN tunnel).
 #   8. Local-originator withdraw: removing PE1's tenant address
-#      causes FRR to drop the Type 5 within ~90 s (slice 6a's
-#      route observation refreshes via the 1-min periodic dump).
+#      causes FRR to drop the Type 5 within ~10 s (slice 6a's
+#      RTNLGRP_IPV4_ROUTE subscription wakes the reconcile actor
+#      within ~50 ms of the kernel RTM_DELROUTE; FRR sees the BGP
+#      withdraw on its next UPDATE batch).
 #   9. Reverse-direction withdraw: removing PE2's tenant address
 #      causes rustbgpd's L3 installer to clear PE1's kernel
 #      route + neighbor + FDB rows and drop
@@ -328,16 +330,17 @@ wait_frr_loses_type5() {
     return 1
 }
 
-# Slice 6a refreshes the IP-VRF route observation via the
-# reconcile actor's periodic dump (default 1 min). `RTNLGRP_IPV4_ROUTE`
-# is not yet wired into `Dataplane::next_event`, so the withdraw
-# delay is bounded by `ReconcileActorConfig.periodic_dump`. Allow
-# ~90 s to cover one full periodic cycle plus FRR's UPDATE +
-# BGP-best-path reaction.
-if wait_frr_loses_type5 "$PE1_ORIGINATED_HOST" "$PE1_ORIGINATED_PLEN" 90; then
+# Slice 6a's `RTNLGRP_IPV4_ROUTE` subscription wakes the reconcile
+# actor within ~50 ms of the kernel RTM_DELROUTE; FRR sees the
+# Type 5 withdraw on its next BGP UPDATE batch (default
+# MinRouteAdvertisementInterval ~5 s for iBGP). 15 s is a generous
+# bound that catches a regression in the subscription path —
+# anything materially over that means the route event wire broke
+# and we silently fell back to the 60 s periodic dump.
+if wait_frr_loses_type5 "$PE1_ORIGINATED_HOST" "$PE1_ORIGINATED_PLEN" 15; then
     ok "FRR dropped PE1's Type 5 for $PE1_ORIGINATED_PREFIX after withdraw"
 else
-    fail "FRR still shows PE1's Type 5 90s after withdraw"
+    fail "FRR still shows PE1's Type 5 15s after withdraw (regression in RTNLGRP_IPV4_ROUTE wake path?)"
     docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix" >&2 || true
 fi
 

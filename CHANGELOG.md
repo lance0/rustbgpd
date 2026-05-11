@@ -11,6 +11,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 9 slice 6 follow-up — `RTNLGRP_IPV4_ROUTE` /
+  `RTNLGRP_IPV6_ROUTE` subscription for sub-second IP-VRF
+  observation refresh.** The slice 6a kernel route observer
+  previously refreshed only via the reconcile actor's 1-min
+  periodic dump, which bounded local-originator withdraw
+  latency at ~60 s. `LinuxDataplane::connect` now subscribes
+  the rtnetlink socket to the IPv4 + IPv6 route multicast
+  groups; `notify::classify_route` filters by table (drops the
+  reserved main/local/default/unspec set), protocol (drops
+  RTPROT_BGP — including our own installs — plus the
+  active-routing-daemon set), and kind (RTN_UNICAST only) so
+  the kernel-event channel stays quiet during system route
+  churn. Surviving events fire `KernelEvent::KernelStateChanged`,
+  the reconcile actor wakes inside its existing 50 ms coalesce
+  window, and `dump_ip_vrf_routes` runs against the fresh
+  state. Local-originator withdraw (operator `ip addr del` on
+  a tenant dummy) now propagates to peers within ~1 s instead
+  of up to 60 s; the M39 smoke's `wait_frr_loses_type5`
+  timeout is tightened from 90 s to 15 s to catch a regression
+  in the route-event wire fast. Six new classifier unit tests
+  in `crates/evpn-linux/src/linux/notify.rs` plus a new
+  privileged netns regression
+  `linux_dataplane_route_event_wakes_within_1s` in
+  `tests/netns_l3_install.rs` that validates the full
+  subscribe → kernel-event channel round trip end-to-end
+  against a real netns under `EVPN_LINUX_NETNS=1`.
+
 - **EVPN Gate 9 slice 6 — symmetric Interface-less IRB
   end-to-end (PR A #77 + PR B #78).** Closes the Gate 9
   control + dataplane loop for RFC 9136 §4.4.2 symmetric

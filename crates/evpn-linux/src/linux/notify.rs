@@ -75,6 +75,7 @@ use netlink_packet_route::{
     neighbour::{
         NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
     },
+    route::{RouteMessage, RouteProtocol, RouteType},
 };
 use rustbgpd_evpn::{EvpnInstanceId, LocalMacObservation, MacAddress};
 use tracing::debug;
@@ -118,6 +119,39 @@ const NUD_INVALID_MASK: u16 = NUD_INCOMPLETE | NUD_DELAY | NUD_PROBE | NUD_FAILE
 /// wrong value; the M37 origination smoke caught it. Cross-checked
 /// against rtnetlink 0.14's `examples/ip_monitor.rs`.
 pub(crate) const RTNLGRP_NEIGH: u32 = 3;
+
+/// Multicast group ID for IPv4 route-table changes — enum value
+/// `RTNLGRP_IPV4_ROUTE` from `<linux/rtnetlink.h>` (the **eighth**
+/// entry in `enum rtnetlink_groups`, value `7`).
+///
+/// Same enum-vs-bitmask gotcha as [`RTNLGRP_NEIGH`]: `Socket::add_membership`
+/// takes the enum value directly, not the legacy `RTMGRP_IPV4_ROUTE = 0x40`
+/// bitmask form. Initial draft mistakenly used `5`, which is
+/// `RTNLGRP_IPV4_IFADDR` — the subscription succeeded silently but
+/// delivered address-change events instead of route events; the M39
+/// smoke's tightened withdraw timeout caught the regression.
+/// Cross-checked against `<linux/rtnetlink.h>`:
+///
+/// ```text
+/// RTNLGRP_NONE          = 0
+/// RTNLGRP_LINK          = 1
+/// RTNLGRP_NOTIFY        = 2
+/// RTNLGRP_NEIGH         = 3
+/// RTNLGRP_TC            = 4
+/// RTNLGRP_IPV4_IFADDR   = 5
+/// RTNLGRP_IPV4_MROUTE   = 6
+/// RTNLGRP_IPV4_ROUTE    = 7  ← here
+/// RTNLGRP_IPV4_RULE     = 8
+/// RTNLGRP_IPV6_IFADDR   = 9
+/// RTNLGRP_IPV6_MROUTE   = 10
+/// RTNLGRP_IPV6_ROUTE    = 11 ← and here
+/// ```
+pub(crate) const RTNLGRP_IPV4_ROUTE: u32 = 7;
+
+/// Multicast group ID for IPv6 route-table changes — enum value
+/// `RTNLGRP_IPV6_ROUTE` from `<linux/rtnetlink.h>` (the **twelfth**
+/// entry, value `11`).
+pub(crate) const RTNLGRP_IPV6_ROUTE: u32 = 11;
 
 /// Kind of `RTM_*NEIGH` message we received.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +333,86 @@ fn is_ip_neighbour_valid(state: NeighbourState) -> bool {
         }
         _ => false,
     }
+}
+
+/// Kind of `RTM_*ROUTE` message we received.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RouteEventKind {
+    /// `RTM_NEWROUTE` — kernel added (or replaced) a route.
+    New,
+    /// `RTM_DELROUTE` — kernel removed a route.
+    Del,
+}
+
+/// Linux UAPI sentinel: kernel sets `header.table = 0` when no route
+/// table is specified (unspecified) and `253`/`254`/`255` for the
+/// reserved tables (default/main/local). Routes in those tables are
+/// not part of any IP-VRF and waking the reconcile actor for them is
+/// wasted work.
+const RT_TABLE_UNSPEC: u8 = 0;
+const RT_TABLE_DEFAULT: u8 = 253;
+const RT_TABLE_MAIN: u8 = 254;
+const RT_TABLE_LOCAL: u8 = 255;
+
+/// Pre-filter for `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` events.
+///
+/// Returns `true` when the message is potentially relevant to slice
+/// 6a's IP-VRF route observation — the reconcile actor should wake
+/// and re-dump. Returns `false` for events the actor cannot care
+/// about, so the kernel-event channel stays quiet during system route
+/// churn.
+///
+/// The dataplane layer doesn't know the configured IP-VRF table set
+/// (the supervisor owns that). The filter therefore drops only the
+/// universally-irrelevant cases:
+///
+/// 1. **Reserved tables.** `RT_TABLE_MAIN` (254), `RT_TABLE_LOCAL`
+///    (255), `RT_TABLE_DEFAULT` (253), `RT_TABLE_UNSPEC` (0) — IP-VRFs
+///    use custom table ids; events in the reserved set cannot affect
+///    any observation. The kernel's `RT_TABLE_COMPAT = 252` sentinel
+///    appears in `header.table` when the real table id ≥ 256; that
+///    case still passes through because the table id will resolve to
+///    an IP-VRF via the upstream classifier in `routes.rs`.
+/// 2. **Active routing-daemon protocols.** `RTPROT_BGP`,
+///    `RTPROT_ZEBRA`, `RTPROT_OSPF`, etc. The slice 6a dump-side
+///    classifier already drops these as origination candidates, and
+///    they include our own `apply_add_ip_route` installs
+///    (`RTPROT_BGP`) — letting them through here would create a
+///    self-echo loop where every install fires a wake that triggers a
+///    reconcile that re-installs the same row.
+/// 3. **Non-forwardable route types.** `RTN_LOCAL`, `RTN_BROADCAST`,
+///    `RTN_MULTICAST`, `RTN_BLACKHOLE`, `RTN_UNREACHABLE`,
+///    `RTN_PROHIBIT`, `RTN_THROW` — same drop set as the dump
+///    classifier in `routes.rs`. Waking on a `local` row (e.g., the
+///    one `ip addr add` always emits alongside the unicast connected)
+///    would double every observation event.
+///
+/// The reconcile actor's coalesce window (50 ms default) folds bursts
+/// of accepted events into a single pass, so even a relatively chatty
+/// `Keep` outcome only triggers one dump per burst.
+#[must_use]
+pub(crate) fn classify_route(msg: &RouteMessage, _kind: RouteEventKind) -> bool {
+    let table = msg.header.table;
+    if matches!(
+        table,
+        RT_TABLE_UNSPEC | RT_TABLE_DEFAULT | RT_TABLE_MAIN | RT_TABLE_LOCAL
+    ) {
+        return false;
+    }
+
+    if !matches!(msg.header.kind, RouteType::Unicast) {
+        return false;
+    }
+
+    // Same drop set as `routes::classify` — both halves of the slice
+    // 6a pipeline (notify-side pre-filter + dump-side classifier)
+    // share the policy. The wildcard arm intentionally drops unknown
+    // protocols so a future kernel addition doesn't cause us to wake
+    // on traffic we'd never originate.
+    matches!(
+        msg.header.protocol,
+        RouteProtocol::Kernel | RouteProtocol::Static | RouteProtocol::Boot
+    )
 }
 
 fn extract_mac(msg: &NeighbourMessage) -> Option<MacAddress> {
@@ -849,5 +963,176 @@ mod tests {
     #[test]
     fn rtnlgrp_neigh_constant_matches_kernel_enum_value() {
         assert_eq!(RTNLGRP_NEIGH, 3);
+    }
+
+    /// Same enum-vs-bitmask pin for the slice 6a route subscriptions.
+    /// `RTNLGRP_IPV4_ROUTE = 7`, `RTNLGRP_IPV6_ROUTE = 11` per
+    /// `<linux/rtnetlink.h>`. The initial draft mistakenly used `5`
+    /// (`RTNLGRP_IPV4_IFADDR`) and `7` (which is the correct IPv4
+    /// route value): the subscription on `5` silently delivered
+    /// address events while the route events disappeared, and the
+    /// M39 smoke's tightened withdraw timeout caught the regression
+    /// — exactly the pattern the existing `RTNLGRP_NEIGH = 3 vs 4`
+    /// fix already documents. This pin is the structural guard
+    /// against repeating the off-by-one.
+    #[test]
+    fn route_rtnlgrp_constants_match_kernel_enum_values() {
+        assert_eq!(RTNLGRP_IPV4_ROUTE, 7);
+        assert_eq!(RTNLGRP_IPV6_ROUTE, 11);
+    }
+
+    // --- Slice 6a: RTNLGRP_IPV4/6_ROUTE classifier (`classify_route`) ---
+
+    fn route_msg(
+        family: AddressFamily,
+        table: u8,
+        protocol: RouteProtocol,
+        kind: RouteType,
+    ) -> RouteMessage {
+        use netlink_packet_route::route::{RouteFlags, RouteHeader, RouteScope};
+        let mut msg = RouteMessage::default();
+        msg.header = RouteHeader {
+            address_family: family,
+            destination_prefix_length: 24,
+            source_prefix_length: 0,
+            tos: 0,
+            table,
+            protocol,
+            scope: RouteScope::Universe,
+            kind,
+            flags: RouteFlags::empty(),
+        };
+        msg
+    }
+
+    /// The happy path: a connected route in a custom VRF table fires
+    /// the wake. Slice 6a's reconcile pass will see the change on the
+    /// next coalesce window.
+    #[test]
+    fn classify_route_wakes_on_connected_route_in_custom_table() {
+        let msg = route_msg(
+            AddressFamily::Inet,
+            100,
+            RouteProtocol::Kernel,
+            RouteType::Unicast,
+        );
+        assert!(classify_route(&msg, RouteEventKind::New));
+        assert!(classify_route(&msg, RouteEventKind::Del));
+    }
+
+    /// Manual `ip route add ... proto static` or `proto boot` in a
+    /// custom table also fires — operators sometimes pin a tenant
+    /// prefix via a static, and slice 6a's dump-side classifier keeps
+    /// both protocols.
+    #[test]
+    fn classify_route_wakes_on_static_and_boot_protocols() {
+        let static_msg = route_msg(
+            AddressFamily::Inet,
+            100,
+            RouteProtocol::Static,
+            RouteType::Unicast,
+        );
+        let boot_msg = route_msg(
+            AddressFamily::Inet,
+            100,
+            RouteProtocol::Boot,
+            RouteType::Unicast,
+        );
+        assert!(classify_route(&static_msg, RouteEventKind::New));
+        assert!(classify_route(&boot_msg, RouteEventKind::New));
+    }
+
+    /// `apply_add_ip_route` uses `RTPROT_BGP`; every install would
+    /// echo back on `RTNLGRP_IPV4_ROUTE` and re-trigger a reconcile if
+    /// we didn't drop the protocol here. Same for the rest of the
+    /// active-routing-daemon set.
+    #[test]
+    fn classify_route_drops_routing_daemon_protocols() {
+        for proto in [
+            RouteProtocol::Bgp,
+            RouteProtocol::Zebra,
+            RouteProtocol::Ospf,
+            RouteProtocol::Bird,
+            RouteProtocol::Isis,
+            RouteProtocol::Rip,
+            RouteProtocol::Babel,
+            RouteProtocol::Eigrp,
+        ] {
+            let msg = route_msg(AddressFamily::Inet, 100, proto, RouteType::Unicast);
+            assert!(
+                !classify_route(&msg, RouteEventKind::New),
+                "expected drop for protocol {proto:?}, got wake"
+            );
+        }
+    }
+
+    /// The main / local / default / unspec tables are not IP-VRFs.
+    /// System route churn would otherwise spam wakes. Custom table id
+    /// 100 + the `RT_TABLE_COMPAT = 252` sentinel (used by the kernel
+    /// when the real table id ≥ 256) must still pass.
+    #[test]
+    fn classify_route_drops_reserved_tables() {
+        for reserved in [0u8, 253, 254, 255] {
+            let msg = route_msg(
+                AddressFamily::Inet,
+                reserved,
+                RouteProtocol::Kernel,
+                RouteType::Unicast,
+            );
+            assert!(
+                !classify_route(&msg, RouteEventKind::New),
+                "expected drop for reserved table {reserved}, got wake"
+            );
+        }
+        // RT_TABLE_COMPAT (252) is the sentinel for table_id ≥ 256
+        // and must still pass — the real table id lives in
+        // RouteAttribute::Table and resolves to a real IP-VRF in the
+        // dump-side classifier.
+        let compat = route_msg(
+            AddressFamily::Inet,
+            252,
+            RouteProtocol::Kernel,
+            RouteType::Unicast,
+        );
+        assert!(classify_route(&compat, RouteEventKind::New));
+    }
+
+    /// `ip addr add 192.0.2.1/24 dev lo-vrf1` emits both an
+    /// `RTN_UNICAST` connected row AND `RTN_LOCAL` / `RTN_BROADCAST`
+    /// helpers. Slice 6a's observer only cares about the unicast row;
+    /// firing on every helper would double every observation event.
+    #[test]
+    fn classify_route_drops_non_unicast_route_types() {
+        for kind in [
+            RouteType::Local,
+            RouteType::Broadcast,
+            RouteType::Multicast,
+            RouteType::BlackHole,
+            RouteType::Unreachable,
+            RouteType::Prohibit,
+            RouteType::Throw,
+            RouteType::Anycast,
+            RouteType::Nat,
+        ] {
+            let msg = route_msg(AddressFamily::Inet, 100, RouteProtocol::Kernel, kind);
+            assert!(
+                !classify_route(&msg, RouteEventKind::New),
+                "expected drop for kind {kind:?}, got wake"
+            );
+        }
+    }
+
+    /// IPv6 path. Same classifier rules — the family bit on the
+    /// header doesn't change anything; the wake is family-agnostic.
+    #[test]
+    fn classify_route_passes_ipv6_unicast_in_custom_table() {
+        let msg = route_msg(
+            AddressFamily::Inet6,
+            100,
+            RouteProtocol::Kernel,
+            RouteType::Unicast,
+        );
+        assert!(classify_route(&msg, RouteEventKind::New));
+        assert!(classify_route(&msg, RouteEventKind::Del));
     }
 }

@@ -436,6 +436,104 @@ async fn linux_dataplane_foreign_route_survives_l3_cycle() {
     assert_route_present(&after_withdraw, foreign_prefix, foreign_gw, "l3vxlan-test");
 }
 
+/// Sub-second slice 6a withdraw: an `ip route add` / `ip route del`
+/// in a custom IP-VRF table must wake the reconcile actor via the
+/// `RTNLGRP_IPV4_ROUTE` subscription, not wait for the 60 s periodic
+/// dump. We can't drive the full reconcile actor here, but we can
+/// validate the kernel-event channel by polling [`Dataplane::next_event`]
+/// directly — if the subscription is wired correctly, the channel
+/// resolves within a few hundred milliseconds; if the regression
+/// returns the wire goes back to `pending()` and the test times out.
+#[tokio::test]
+async fn linux_dataplane_route_event_wakes_within_1s() {
+    if !netns_gate() {
+        eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged route-event wake test");
+        return;
+    }
+    let router_mac = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0xcc]);
+
+    if !is_inner() {
+        let ns = NetnsFixture::create("wake");
+        setup_topology(&ns, TABLE_ID, L3VNI, LOCAL_VTEP, router_mac);
+        run_inner(&ns, "linux_dataplane_route_event_wakes_within_1s");
+        return;
+    }
+
+    // ── inner: dataplane operates inside the netns ──
+    let mut dp = LinuxDataplane::connect()
+        .await
+        .expect("netlink connect inside netns");
+
+    // Give the kernel a beat to finalize the multicast subscription
+    // before we trigger the event. Practical observation: subscriptions
+    // applied via setsockopt during connect are active almost
+    // immediately, but a tiny sleep eliminates flakiness around the
+    // very first event after socket creation.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Fire an `ip route add` in the custom VRF table. `proto static`
+    // is one of the protocols `classify_route` keeps; `onlink` is
+    // required for the kernel to accept the route given that 10.0.0.99
+    // is not reachable via a connected route on l3vxlan-test.
+    run(
+        "ip",
+        &[
+            "route",
+            "add",
+            "203.0.113.0/24",
+            "via",
+            "10.0.0.99",
+            "dev",
+            "l3vxlan-test",
+            "table",
+            &TABLE_ID.to_string(),
+            "proto",
+            "static",
+            "onlink",
+        ],
+    );
+
+    let evt = tokio::time::timeout(std::time::Duration::from_secs(2), dp.next_event())
+        .await
+        .expect("RTNLGRP_IPV4_ROUTE add must wake next_event within 2s");
+    assert!(
+        evt.is_some(),
+        "next_event returned None on RTM_NEWROUTE — kernel-event channel closed unexpectedly"
+    );
+
+    // Drain any stray follow-up events the kernel may have batched
+    // (e.g., a duplicate broadcast). Cap the drain so we don't busy-
+    // loop indefinitely.
+    for _ in 0..4 {
+        if tokio::time::timeout(std::time::Duration::from_millis(50), dp.next_event())
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
+
+    // Symmetric: `ip route del` must also wake.
+    run(
+        "ip",
+        &[
+            "route",
+            "del",
+            "203.0.113.0/24",
+            "table",
+            &TABLE_ID.to_string(),
+        ],
+    );
+
+    let evt = tokio::time::timeout(std::time::Duration::from_secs(2), dp.next_event())
+        .await
+        .expect("RTNLGRP_IPV4_ROUTE del must wake next_event within 2s");
+    assert!(
+        evt.is_some(),
+        "next_event returned None on RTM_DELROUTE — kernel-event channel closed unexpectedly"
+    );
+}
+
 // ── shell helpers ────────────────────────────────────────────────
 
 fn shell_capture(cmd: &str, args: &[&str]) -> String {
