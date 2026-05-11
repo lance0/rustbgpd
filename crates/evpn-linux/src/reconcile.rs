@@ -186,6 +186,11 @@ struct ActorState {
     /// of the intent (operator removed the `[[evpn_ip_vrfs]]` entry)
     /// is removed from this map on the next pass.
     last_ip_vrf_status: BTreeMap<IpVrfId, IpVrfStatus>,
+    /// L3 owned set: installed routes, refcounted neighbor entries,
+    /// refcounted L3VXLAN FDB entries (Gate 9 slice 6c). Updated
+    /// only on successful kernel apply; a failed op leaves the
+    /// in-memory state unchanged so the next reconcile pass retries.
+    l3_owned: crate::l3_diff::L3OwnedState,
 }
 
 impl ActorState {
@@ -201,6 +206,7 @@ impl ActorState {
             epoch: Instant::now(),
             last_bum_plan: BTreeMap::new(),
             last_ip_vrf_status: BTreeMap::new(),
+            l3_owned: crate::l3_diff::L3OwnedState::default(),
         }
     }
 
@@ -331,6 +337,7 @@ impl<D: Dataplane> ReconcileActor<D> {
     }
 
     /// One reconcile pass: probe → dump → diff → apply → emit report.
+    #[allow(clippy::too_many_lines)]
     async fn reconcile_once(&mut self) {
         self.state.reconcile_generation = self.state.reconcile_generation.saturating_add(1);
 
@@ -465,6 +472,59 @@ impl<D: Dataplane> ReconcileActor<D> {
             // start builds a fresh actor with an empty applied-state
             // baseline.
             self.state.last_bum_plan = new_bum_plan.iter().map(|p| (p.ifindex, p.flags)).collect();
+        }
+
+        // Gate 9 slice 6c: drive the L3 install pipeline. Pure-
+        // function diff computes the ops from
+        // `intent.remote_ip_prefixes` vs the actor's `l3_owned`
+        // refcounted set; we then apply them sequentially and
+        // record successes back into the owned state. Failures
+        // leave the owned state unchanged so the next reconcile
+        // pass retries with the same shape.
+        //
+        // Skip the whole loop when no IP-VRFs are configured —
+        // the intent's table is empty and the desired set is
+        // therefore empty, but the explicit short-circuit
+        // documents the zero-cost RR-only deployment path.
+        if !intent.ip_vrfs.is_empty() {
+            let ready_l3vxlan_ifindex: std::collections::BTreeMap<IpVrfId, u32> = ip_vrf_status_map
+                .iter()
+                .filter_map(|(id, status)| match status {
+                    rustbgpd_evpn::ip_vrf::IpVrfStatus::Ready {
+                        l3vxlan_ifindex, ..
+                    } => Some((*id, *l3vxlan_ifindex)),
+                    rustbgpd_evpn::ip_vrf::IpVrfStatus::NotReady { .. } => None,
+                })
+                .collect();
+            let l3_plan = crate::l3_diff::compute_l3_diff(
+                intent.remote_ip_prefixes.as_ref(),
+                &self.state.l3_owned,
+                &ready_l3vxlan_ifindex,
+                intent.ip_vrfs.as_ref(),
+            );
+            for drop in &l3_plan.drops {
+                tracing::debug!(?drop, "L3 install drop");
+            }
+            for op in &l3_plan.ops {
+                match self.dataplane.apply(op).await {
+                    Ok(()) => {
+                        crate::l3_diff::record_l3_success(
+                            &mut self.state.l3_owned,
+                            op,
+                            &ready_l3vxlan_ifindex,
+                            intent.ip_vrfs.as_ref(),
+                            intent.remote_ip_prefixes.as_ref(),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            ?op,
+                            "L3 op failed; preserving owned state for next reconcile retry"
+                        );
+                    }
+                }
+            }
         }
 
         let status = build_instance_status(&intent.instances, &probes);
