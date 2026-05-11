@@ -387,6 +387,7 @@ fn ip_vrf_to_json(vrf: &IpVrfState) -> serde_json::Value {
         "vrf_ifindex": vrf.vrf_ifindex,
         "l3vxlan_ifindex": vrf.l3vxlan_ifindex,
         "not_ready_reasons": vrf.not_ready_reasons,
+        "originated_routes_count": vrf.originated_routes_count,
     })
 }
 
@@ -413,6 +414,7 @@ fn format_ip_vrf_human(vrf: &IpVrfState) -> String {
     if !vrf.not_ready_reasons.is_empty() {
         parts.push(format!("reasons=[{}]", vrf.not_ready_reasons.join("; ")));
     }
+    parts.push(format!("originated-routes={}", vrf.originated_routes_count));
     parts.join(" ")
 }
 

@@ -1075,6 +1075,11 @@ message IpVrfState {
   // Populated when `readiness_state == NOT_READY`. One human-readable
   // line per failing predicate from ADR-0058 §3.
   repeated string not_ready_reasons = 13;
+  // Locally-originated EVPN Type 5 routes for this IP-VRF (Gate 9
+  // slice 6b). Bumped on every `RibUpdate::InjectEvpn` accepted by
+  // the RIB; decremented on `WithdrawEvpn`. Zero when the IP-VRF is
+  // NotReady (the originator withdraws everything on readiness loss).
+  uint32 originated_routes_count = 14;
 }
 
 // Coarse readiness verdict for an IP-VRF. The detailed predicate

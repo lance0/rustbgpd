@@ -21,6 +21,7 @@ mod config;
 mod config_persister;
 mod evpn_dataplane;
 mod evpn_imet;
+mod evpn_l3_originator;
 mod evpn_originator;
 mod evpn_segment;
 mod evpn_svi;
@@ -1203,8 +1204,6 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             rustbgpd_evpn::IpVrfId,
             Vec<rustbgpd_evpn::LocalIpRouteObservation>,
         >::new()));
-    // Suppress unused-var until slice 6b lands the subscriber.
-    let _evpn_ip_vrf_routes_rx_unused = evpn_ip_vrf_routes_rx.clone();
     if let Some(handle) = evpn_dataplane_handle.as_ref() {
         let mut reports = handle.subscribe_reports();
         // Resolve IpVrfId → operator-facing name for the metric labels
@@ -1268,6 +1267,26 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         });
     }
 
+    // EVPN Type 5 originator (Gate 9 slice 6b). Subscribes to the
+    // route-observation watch channel populated above and the slice-5
+    // IP-VRF status watch. Returns `None` when no `[[evpn_ip_vrfs]]`
+    // are configured, so L2-only and RR-only deployments incur zero
+    // cost. The shared `OriginatedIpVrfRouteCounts` is read-only on
+    // the gRPC side (below) so handlers can surface
+    // `originated_routes_count` without coordinating with the actor.
+    let evpn_l3_originator_shutdown = tokio_util::sync::CancellationToken::new();
+    let evpn_originated_ip_vrf_route_counts =
+        evpn_l3_originator::OriginatedIpVrfRouteCounts::default();
+    let evpn_l3_originator_handle = evpn_l3_originator::spawn(evpn_l3_originator::SpawnConfig {
+        ip_vrfs: evpn_ip_vrfs.clone(),
+        rib_tx: rib_tx.clone(),
+        route_observations_rx: evpn_ip_vrf_routes_rx.clone(),
+        ip_vrf_status_rx: evpn_ip_vrf_status_rx.clone(),
+        metrics: metrics.clone(),
+        originated_counts: evpn_originated_ip_vrf_route_counts.clone(),
+        shutdown: evpn_l3_originator_shutdown.clone(),
+    });
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1293,6 +1312,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             // the gRPC handler returns.
             let rx = evpn_ip_vrf_status_rx.clone();
             Arc::new(move || rx.borrow().clone())
+        },
+        evpn_originated_ip_vrf_route_count: {
+            let counts = evpn_originated_ip_vrf_route_counts.clone();
+            Arc::new(move |vni| rustbgpd_evpn::IpVrfId::new(vni).map_or(0, |id| counts.count(id)))
         },
     };
     let mut grpc_handle = tokio::spawn(async move {
@@ -1563,6 +1586,16 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // must land while peer sessions are still up.
     if let Some(handle) = evpn_svi_handle {
         info!("draining EVPN SVI-MAC originator");
+        handle.shutdown().await;
+    }
+
+    // 1.9a''' Drain the EVPN L3 (Type 5) originator. Same ordering
+    // rationale: Type 5 withdraws must reach peers before BGP
+    // sessions tear down so remote VTEPs flush their kernel FIBs
+    // cleanly. The originator's diff loop emits one
+    // `RibUpdate::WithdrawEvpn` per currently-originated prefix.
+    if let Some(handle) = evpn_l3_originator_handle {
+        info!("draining EVPN L3 originator");
         handle.shutdown().await;
     }
 

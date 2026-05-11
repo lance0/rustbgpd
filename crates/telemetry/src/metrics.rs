@@ -67,6 +67,7 @@ pub struct BgpMetrics {
     evpn_df_role_changes: IntCounterVec,
     evpn_ip_vrf_observed_routes: IntGaugeVec,
     evpn_ip_vrf_observed_routes_filtered: IntCounterVec,
+    evpn_ip_vrf_origination_suppressed: IntCounterVec,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -355,6 +356,19 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_ip_vrf_origination_suppressed = IntCounterVec::new(
+            Opts::new(
+                "evpn_ip_vrf_origination_suppressed_total",
+                "EVPN Type 5 origination candidates suppressed (Gate 9 slice 6b), \
+                 per VRF and reason. `reason` ∈ {not_ready, family_mismatch}. The \
+                 `not_ready` arm bumps once per pending observation each reconcile \
+                 pass while the VRF is NotReady so the operator can see why a route \
+                 is not on the wire.",
+            ),
+            &["vrf", "reason"],
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -479,6 +493,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_ip_vrf_observed_routes_filtered.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_ip_vrf_origination_suppressed.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -522,6 +539,7 @@ impl BgpMetrics {
             evpn_df_role_changes,
             evpn_ip_vrf_observed_routes,
             evpn_ip_vrf_observed_routes_filtered,
+            evpn_ip_vrf_origination_suppressed,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -748,6 +766,18 @@ impl BgpMetrics {
             return;
         }
         self.evpn_ip_vrf_observed_routes_filtered
+            .with_label_values(&[vrf, reason])
+            .inc_by(delta);
+    }
+
+    /// Increment the EVPN Type 5 origination-suppressed counter for
+    /// one `(vrf, reason)` by the given delta (Gate 9 slice 6b).
+    /// `reason ∈ {not_ready, family_mismatch}`.
+    pub fn add_evpn_ip_vrf_origination_suppressed(&self, vrf: &str, reason: &str, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_ip_vrf_origination_suppressed
             .with_label_values(&[vrf, reason])
             .inc_by(delta);
     }
