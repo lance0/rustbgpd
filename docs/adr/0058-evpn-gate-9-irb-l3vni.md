@@ -328,29 +328,61 @@ failed" — `--json` or `evpn vrfs get <name>` expand the list.
 
 ## Rollout
 
-The work is sliced into six PRs that match the user's plan, each
-shippable independently:
+The work splits into eight shippable slices. The original plan
+called for six; the readiness step grew its own pure-logic /
+netlink-dump / trait-impl / report-wiring sub-slices so each piece
+stays small enough to review against its own test surface. Final
+shape as actually merged:
 
-1. **This ADR** — pure doc.
-2. **Config schema only.** Adds `EvpnIpVrfConfig` + parse +
-   validation + diff. No behavioral wiring. Operators can declare
-   IP-VRFs at this stage; the daemon parses + logs but does nothing
-   with them yet.
-3. **Linux probe / readiness.** Adds `IpVrfStatus` to the dataplane
-   report; the reconciler populates it. Still no FIB programming.
-4. **Pure-logic projection / origination helpers.** Adds
-   `crates/evpn/src/ip_vrf/{projection,origination}.rs` with full
-   unit-test coverage against synthetic input. Still no wiring into
-   the supervisor.
-5. **CLI visibility slice.** `rustbgpctl evpn vrfs [get NAME]`
-   plus the gRPC RPC behind it. Surfaces IP-VRF readiness state so
-   the first dataplane wiring is observable before it programs the
-   kernel.
-6. **End-to-end wiring + M39 interop smoke.** Supervisor consumes
-   the dataplane report, drives RIB inject/withdraw on local route
-   table changes, installs remote Type 5 into the kernel VRF. M39
-   manual containerlab harness validates FRR ↔ rustbgpd bidirectional
-   Type 5 against a small symmetric IRB topology.
+1. **This ADR + config schema** — pure doc + `EvpnIpVrfConfig`
+   parse / validation / diff. Operators can declare IP-VRFs at this
+   stage; the daemon parses + logs but does nothing with them yet.
+   *Shipped in #66.*
+2. **Pure-logic Type 5 helpers** —
+   `crates/evpn/src/ip_vrf/{origination,projection}.rs` with full
+   unit-test coverage against synthetic input. No wiring into the
+   supervisor yet. *Shipped in #67.*
+3. **Pure-logic readiness probe** — `IpVrfKernelSnapshot` +
+   `probe(&IpVrf, &snapshot) -> IpVrfStatus` in
+   `crates/evpn/src/ip_vrf/readiness.rs`. Kernel-free; takes a
+   portable snapshot and runs the seven §3 predicates. No netlink,
+   no tokio. *Shipped in #72 (originally #68 against a stacked
+   base).*
+4. **Linux netlink dumps (4a).** `crates/evpn-linux/src/linux/ip_vrf.rs`
+   builds `IpVrfObservations` from one `RTM_GETLINK` pass; the
+   `snapshot_for` helper composes the per-IP-VRF `IpVrfKernelSnapshot`
+   the readiness probe consumes. *PR #73.*
+5. **`Dataplane::probe_ip_vrfs` trait + Linux impl (4b).** Abstract
+   probe surface with an empty default for non-Linux / fake impls;
+   `LinuxDataplane` overrides it by running the dump and calling
+   `probe()` per configured VRF. Short-circuits when the
+   `IpVrfTable` is empty so L2-only and RR-only deployments incur
+   zero added netlink cost.
+6. **Intent plumbing + reconcile call (4c).** `DataplaneIntent`
+   gains `ip_vrfs: Arc<IpVrfTable>`; the daemon populates it once
+   at startup from config; the reconcile actor calls
+   `probe_ip_vrfs` on every pass and emits one
+   `tracing::info!` per Ready transition and one `tracing::warn!`
+   per NotReady transition. Steady-state is silent — operators get
+   edge-triggered output, not a 5 s spam loop.
+7. **CLI / report visibility slice.** Adds `IpVrfStatus` rows to
+   `DataplaneReport`, a `ListIpVrfs` / `GetIpVrf` gRPC RPC, and the
+   `rustbgpctl evpn vrfs [get NAME]` command. Surfaces IP-VRF
+   readiness so the operator can see it before any FIB programming
+   ships.
+8. **End-to-end wiring + M39 interop smoke.** Supervisor consumes
+   `DataplaneReport.ip_vrf_status`, drives Type 5 RIB
+   inject/withdraw on local IP-route changes, installs remote
+   Type 5 into the kernel VRF. M39 manual containerlab harness
+   validates FRR ↔ rustbgpd bidirectional Type 5 against a small
+   symmetric IRB topology.
+
+Slices 4–6 (the readiness path) deliberately separate "decide" from
+"observe" from "wire" so each PR's test surface is its own:
+slice 3 unit-tests against synthesized snapshots, slice 4 unit-tests
+against synthesized `LinkMessage` instances, slice 5 has only
+trait-shape glue, slice 6 has only intent + log plumbing. None of
+them need privileged runners.
 
 ## References
 

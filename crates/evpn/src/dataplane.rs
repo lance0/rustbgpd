@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::ip_vrf::IpVrfTable;
 use crate::mac::{MacAddress, RemoteMacTable};
 use crate::{DfRole, EvpnInstanceId, EvpnInstanceTable};
 use rustbgpd_wire::EthernetSegmentIdentifier;
@@ -36,9 +37,10 @@ use rustbgpd_wire::EthernetSegmentIdentifier;
 /// so the daemon can correlate "I sent gen N" with "Linux applied/failed
 /// gen N" without timestamp guesswork.
 ///
-/// `instances`, `remote_macs`, and `bum_enforcement` are `Arc` so the
-/// daemon can re-publish a near-identical snapshot (e.g., only the
-/// [`RemoteMacTable`] changed) without cloning the full instance table.
+/// `instances`, `remote_macs`, `bum_enforcement`, and `ip_vrfs` are
+/// `Arc` so the daemon can re-publish a near-identical snapshot
+/// (e.g., only the [`RemoteMacTable`] changed) without cloning the
+/// full instance / VRF tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataplaneIntent {
     /// Daemon-side monotonic counter. Strictly increases.
@@ -53,6 +55,12 @@ pub struct DataplaneIntent {
     /// identity and reports the plan, but does not mutate kernel
     /// filters until the concrete primitive is selected.
     pub bum_enforcement: Arc<BumEnforcementTable>,
+    /// Desired IP-VRF set on this VTEP (Gate 9, ADR-0058). Empty for
+    /// any deployment without `[[evpn_ip_vrfs]]` config blocks; the
+    /// Linux dataplane short-circuits its `probe_ip_vrfs` netlink dump
+    /// when this is empty, so RR-only and L2-only deployments incur
+    /// zero added cost.
+    pub ip_vrfs: Arc<IpVrfTable>,
 }
 
 impl DataplaneIntent {
@@ -66,6 +74,7 @@ impl DataplaneIntent {
             instances: Arc::new(EvpnInstanceTable::new()),
             remote_macs: Arc::new(RemoteMacTable::new()),
             bum_enforcement: Arc::new(BumEnforcementTable::new()),
+            ip_vrfs: Arc::new(IpVrfTable::new()),
         }
     }
 }

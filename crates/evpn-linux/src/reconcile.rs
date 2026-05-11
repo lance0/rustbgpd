@@ -45,7 +45,8 @@ use tokio_util::sync::CancellationToken;
 
 use std::collections::BTreeMap;
 
-use rustbgpd_evpn::{EvpnInstanceId, MacAddress};
+use rustbgpd_evpn::ip_vrf::IpVrfStatus;
+use rustbgpd_evpn::{EvpnInstanceId, IpVrfId, MacAddress};
 
 use crate::backoff::RetrySchedule;
 use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
@@ -178,6 +179,13 @@ struct ActorState {
     /// mutation is restart-required; a fresh actor starts with an
     /// empty baseline.
     last_bum_plan: BTreeMap<u32, crate::bum_filter::BumPortFlags>,
+    /// Last `IpVrfStatus` we observed for each configured IP-VRF, used
+    /// to detect transitions (`Ready` ↔ `NotReady`, or a change in the
+    /// failing-predicate set) so the per-pass `probe_ip_vrfs` call
+    /// only logs when state actually changes. An IP-VRF that drops out
+    /// of the intent (operator removed the `[[evpn_ip_vrfs]]` entry)
+    /// is removed from this map on the next pass.
+    last_ip_vrf_status: BTreeMap<IpVrfId, IpVrfStatus>,
 }
 
 impl ActorState {
@@ -192,6 +200,7 @@ impl ActorState {
             reconcile_generation: 0,
             epoch: Instant::now(),
             last_bum_plan: BTreeMap::new(),
+            last_ip_vrf_status: BTreeMap::new(),
         }
     }
 
@@ -336,6 +345,15 @@ impl<D: Dataplane> ReconcileActor<D> {
         self.state.last_intent_generation = intent.generation;
 
         let probes = self.dataplane.probe(&intent.instances).await;
+
+        // Gate 9 IP-VRF readiness pass. `probe_ip_vrfs` short-circuits
+        // when the intent's `IpVrfTable` is empty (Gate 9 opt-in via
+        // `[[evpn_ip_vrfs]]`), so L2-only and RR-only deployments
+        // never pay the netlink dump cost. Transitions are logged at
+        // info / warn; steady-state is silent.
+        let ip_vrf_status = self.dataplane.probe_ip_vrfs(&intent.ip_vrfs).await;
+        Self::log_ip_vrf_transitions(&mut self.state.last_ip_vrf_status, &ip_vrf_status);
+
         let snapshot = match self.dataplane.dump_snapshot().await {
             Ok(s) => s,
             Err(e) => {
@@ -641,6 +659,49 @@ impl<D: Dataplane> ReconcileActor<D> {
                 self.state.bum_retry.record_success(*ifindex);
             }
         }
+    }
+
+    /// Diff `current` IP-VRF readiness against `last` and emit one
+    /// log line per VRF whose status changed. `last` is updated in
+    /// place to reflect the new state. Steady-state is silent — this
+    /// is structured-log output for an operator, not a metric.
+    fn log_ip_vrf_transitions(
+        last: &mut BTreeMap<IpVrfId, IpVrfStatus>,
+        current: &std::collections::HashMap<IpVrfId, IpVrfStatus>,
+    ) {
+        for (id, status) in current {
+            let changed = match last.get(id) {
+                Some(prev) => prev != status,
+                None => true,
+            };
+            if !changed {
+                continue;
+            }
+            match status {
+                IpVrfStatus::Ready {
+                    vrf_ifindex,
+                    l3vxlan_ifindex,
+                    table_id,
+                    ..
+                } => {
+                    tracing::info!(
+                        vrf_id = id.as_u32(),
+                        vrf_ifindex,
+                        l3vxlan_ifindex,
+                        table_id,
+                        "IP-VRF ready"
+                    );
+                }
+                IpVrfStatus::NotReady { reasons } => {
+                    tracing::warn!(vrf_id = id.as_u32(), ?reasons, "IP-VRF not ready");
+                }
+            }
+            last.insert(*id, status.clone());
+        }
+        // Drop entries for IP-VRFs no longer in the intent. Operator
+        // removed `[[evpn_ip_vrfs]]` for them; future re-add must log
+        // the transition fresh, not as a delta against stale state.
+        last.retain(|id, _| current.contains_key(id));
     }
 
     /// Send a report, dropping it if the daemon-side receiver has gone

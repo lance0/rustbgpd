@@ -46,6 +46,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use rustbgpd_evpn::ip_vrf::IpVrfTable;
 use rustbgpd_evpn::{
     BumEnforcementTable, DataplaneIntent, DataplaneReport, EvpnInstanceTable, LocalMacObservation,
     ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes_with_aliases,
@@ -171,12 +172,16 @@ impl EvpnDataplaneHandle {
 pub async fn spawn(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
+    ip_vrfs: &Arc<IpVrfTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     metrics: BgpMetrics,
     daemon_shutdown: CancellationToken,
 ) -> Option<EvpnDataplaneHandle> {
-    if evpn_instances.is_empty() {
-        info!("no EVPN instances configured — dataplane actor not spawned (RR-only deployment)");
+    if evpn_instances.is_empty() && ip_vrfs.is_empty() {
+        info!(
+            "no EVPN L2 instances or IP-VRFs configured — dataplane actor not spawned \
+             (RR-only deployment)"
+        );
         return None;
     }
 
@@ -195,6 +200,7 @@ pub async fn spawn(
                 let mut handle = spawn_with_dataplane(
                     config,
                     evpn_instances,
+                    ip_vrfs,
                     rib_tx,
                     daemon_shutdown,
                     dataplane,
@@ -238,6 +244,7 @@ pub async fn spawn(
 pub fn spawn_with_dataplane<D>(
     config: SupervisorConfig,
     evpn_instances: &Arc<EvpnInstanceTable>,
+    ip_vrfs: &Arc<IpVrfTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     daemon_shutdown: CancellationToken,
     dataplane: D,
@@ -291,9 +298,11 @@ where
 
     let supervisor_shutdown = daemon_shutdown.clone();
     let supervisor_instances = evpn_instances.clone();
+    let supervisor_ip_vrfs = ip_vrfs.clone();
     let supervisor_join = tokio::spawn(supervisor_loop(
         config.poll_interval,
         supervisor_instances,
+        supervisor_ip_vrfs,
         rib_tx,
         intent_tx,
         bum_enforcement_rx,
@@ -335,6 +344,7 @@ where
 async fn supervisor_loop(
     poll_interval: Duration,
     instances: Arc<EvpnInstanceTable>,
+    ip_vrfs: Arc<IpVrfTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
     intent_tx: watch::Sender<Arc<DataplaneIntent>>,
     mut bum_enforcement_rx: watch::Receiver<Arc<BumEnforcementTable>>,
@@ -380,6 +390,7 @@ async fn supervisor_loop(
                     instances: instances.clone(),
                     remote_macs: Arc::new(table),
                     bum_enforcement: Arc::new(bum_enforcement),
+                    ip_vrfs: ip_vrfs.clone(),
                 });
                 if intent_tx.send(intent).is_err() {
                     debug!("intent receiver gone; supervisor exiting");
@@ -402,6 +413,7 @@ async fn supervisor_loop(
                     instances: instances.clone(),
                     remote_macs: Arc::new(last_table.clone()),
                     bum_enforcement: Arc::new(bum_enforcement),
+                    ip_vrfs: ip_vrfs.clone(),
                 });
                 if intent_tx.send(intent).is_err() {
                     debug!("intent receiver gone; supervisor exiting");
@@ -763,11 +775,13 @@ mod tests {
     #[tokio::test]
     async fn spawn_returns_none_for_empty_instance_table() {
         let instances = Arc::new(EvpnInstanceTable::new());
+        let ip_vrfs = Arc::new(IpVrfTable::new());
         let (rib_tx, _rib_rx) = mpsc::channel(8);
         let shutdown = CancellationToken::new();
         let h = spawn(
             SupervisorConfig::default(),
             &instances,
+            &ip_vrfs,
             rib_tx,
             BgpMetrics::new(),
             shutdown,
@@ -808,7 +822,8 @@ mod tests {
             poll_interval: Duration::from_millis(20),
             actor_config: ReconcileActorConfig::for_tests(),
         };
-        let h = spawn_with_dataplane(cfg, &instances, rib_tx, shutdown.clone(), dp);
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let h = spawn_with_dataplane(cfg, &instances, &ip_vrfs, rib_tx, shutdown.clone(), dp);
 
         // Wait for the supervisor's first tick + actor reconcile to
         // populate the kernel snapshot with the projected MAC.
@@ -863,7 +878,8 @@ mod tests {
             poll_interval: Duration::from_mins(1),
             actor_config: ReconcileActorConfig::for_tests(),
         };
-        let h = spawn_with_dataplane(cfg, &instances, rib_tx, shutdown.clone(), dp);
+        let ip_vrfs = Arc::new(IpVrfTable::new());
+        let h = spawn_with_dataplane(cfg, &instances, &ip_vrfs, rib_tx, shutdown.clone(), dp);
         let mut reports = h.subscribe_reports();
 
         let mut table = BumEnforcementTable::new();
@@ -924,9 +940,11 @@ mod tests {
         let (intent_tx, mut intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
         let (_bum_tx, bum_rx) = watch::channel(Arc::new(BumEnforcementTable::new()));
         let supervisor_shutdown = shutdown.clone();
+        let ip_vrfs = Arc::new(IpVrfTable::new());
         let join = tokio::spawn(super::supervisor_loop(
             Duration::from_millis(15),
             instances,
+            ip_vrfs,
             rib_tx,
             intent_tx,
             bum_rx,
