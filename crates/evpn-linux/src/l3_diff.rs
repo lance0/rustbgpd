@@ -8,18 +8,66 @@
 //! `tokio::select!` loop and feeds the resulting ops through
 //! `Dataplane::apply`.
 //!
-//! ## Refcounted neighbor + FDB
+//! ## Transactional ownership
 //!
-//! Two prefixes that arrive over the same remote VTEP and the same
-//! Router MAC share the kernel-side L3 neighbor and L3VXLAN FDB
-//! entries. The diff function tracks reference counts on
-//! `(l3vxlan_ifindex, next_hop)` and `(l3vxlan_ifindex, router_mac)`
-//! so the second prefix's install emits no neighbor/FDB op (the
-//! first one already programmed them), and only the *last* prefix's
-//! withdraw emits the neighbor/FDB remove. Without this, two routes
-//! sharing a VTEP would step on each other on the second withdraw:
-//! removing the neighbor while a still-installed route depends on
-//! it would leave forwarding broken.
+//! Three kernel objects per remote prefix — IP route, L3 neighbor,
+//! L3VXLAN FDB — but only one of them (the route) is uniquely owned
+//! by a single `(IpVrfId, prefix)`. The neighbor and FDB rows are
+//! *shared* across every prefix that advertises the same
+//! `(l3vxlan_ifindex, next_hop)` or `(l3vxlan_ifindex, router_mac)`
+//! tuple.
+//!
+//! [`L3OwnedState`] tracks the two layers separately so a partial-
+//! success window doesn't leak kernel state:
+//!
+//! - [`L3OwnedState::installs`] — per-`(vrf, prefix)` rows. Each
+//!   tracks `route_installed: bool` plus the cached identity needed
+//!   to emit the symmetric remove op.
+//! - [`L3OwnedState::kernel_neighbors`] — set of
+//!   `(l3vxlan_ifindex, next_hop)` keys we have confirmed are
+//!   present in the kernel (an `AddL3Neighbor` succeeded against
+//!   this key and no subsequent `RemoveL3Neighbor` succeeded).
+//! - [`L3OwnedState::kernel_fdb`] — same for `(l3vxlan_ifindex,
+//!   router_mac)` rows.
+//!
+//! With this split, the diff derives `desired_neighbors` /
+//! `desired_fdb` from the live `want` set (not from `installs`), so a
+//! prefix whose route install failed but whose neighbor/FDB adds
+//! succeeded — and that the operator subsequently removed from the
+//! intent — still triggers `RemoveL3Neighbor` + `RemoveL3VxlanFdb`
+//! cleanup on the next reconcile pass (because the kernel rows are
+//! in `kernel_neighbors` / `kernel_fdb` but not in the new
+//! `desired_*` sets).
+//!
+//! The inverse case (a `RemoveRemoteIpRoute` succeeds but the
+//! follow-up `RemoveL3Neighbor` fails) likewise stays correctly
+//! retryable: `kernel_neighbors` still contains the key, no `want`
+//! entry needs it, so the next pass re-emits the remove.
+//!
+//! ## Router MAC conflict
+//!
+//! The kernel-side FDB row is `(l3vxlan_ifindex, router_mac) → dst`.
+//! Two `want` prefixes carrying the same `router_mac` but different
+//! `next_hop` values would have the second `AddL3VxlanFdb` overwrite
+//! the first via `.replace()`, silently misforwarding the first
+//! prefix's traffic. The diff detects this as
+//! [`L3Drop::RouterMacConflict`] and drops *every* conflicting
+//! prefix (operator misconfig — fail loud).
+//!
+//! ## Apply / withdraw order
+//!
+//! Per ADR-0054 and the user's PR-B research notes, plan ops are
+//! emitted in the following four-phase order:
+//!
+//! 1. **Route removes** — routes go away first so no in-flight
+//!    encapsulation depends on resolution rows we're about to tear
+//!    down.
+//! 2. **Resolution adds** — neighbor adds then FDB adds, so any
+//!    fresh route in phase 3 has a complete inner-DMAC resolution.
+//! 3. **Route adds** — only after neighbor/FDB are in the kernel.
+//! 4. **Resolution removes** — neighbor + FDB rows the diff
+//!    determined are no longer needed (no want entry references
+//!    them after phase 1's removals).
 //!
 //! ## Foreign preservation
 //!
@@ -27,165 +75,162 @@
 //! actor's record of what *we* installed. Routes / neighbors / FDB
 //! rows the kernel learned through other paths (`ip route add` by
 //! the operator, FRR co-tenant, etc.) are structurally invisible to
-//! the withdraw path. This mirrors ADR-0054 §5's foreign-preservation
-//! rule on the L2 FDB side.
-//!
-//! ## Readiness gate
-//!
-//! For each `(IpVrfId, prefix)` in the desired projection, the diff
-//! checks `vrf_status[vrf_id] == Ready` before emitting any install
-//! ops. Not-ready VRFs implicitly drop their entries from the
-//! desired-want set so the symmetrical withdraw branch fires for
-//! everything we previously installed in that VRF — exactly the
-//! Ready→NotReady contract the L3 originator uses on the
-//! origination side (slice 6b).
-//!
-//! ## Apply / withdraw order
-//!
-//! Per the user's review (PR B research notes):
-//!
-//! - **Install** order per prefix: neighbor (if new) → FDB (if new)
-//!   → route. The route is the consumer of the shared L2 resolution
-//!   objects, so installing it after the objects guarantees the
-//!   kernel can resolve every encapsulation step the moment the
-//!   route lands.
-//! - **Withdraw** order per prefix: route → neighbor (only if last
-//!   ref) → FDB (only if last ref). Removing the route first
-//!   guarantees no in-flight encapsulation depends on the
-//!   neighbor/FDB by the time we tear them down.
+//! the withdraw path. Mirrors ADR-0054 §5's foreign-preservation
+//! rule on the L2 side.
 //!
 //! ## Family mismatch
 //!
-//! IPv6 prefix over IPv4 VTEP (and vice versa) requires
-//! `RTA_VIA` for the cross-family gateway encoding, which the
-//! current `linux::l3` apply path does not implement. The diff
-//! drops mismatched routes into [`L3Drop::FamilyMismatch`] (counted,
-//! observable) rather than half-supporting them — explicit
-//! suppression rather than a silent miscompose.
+//! IPv6 prefix over IPv4 VTEP (and vice versa) requires `RTA_VIA`
+//! for the cross-family gateway encoding, which the current
+//! `linux::l3` apply path does not implement. The diff drops
+//! mismatched routes into [`L3Drop::FamilyMismatch`] (counted,
+//! observable) — explicit suppression rather than a silent
+//! miscompose.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixEntry, RemoteIpPrefixTable};
+use rustbgpd_evpn::ip_vrf::{IpVrfTable, RemoteIpPrefixTable};
 use rustbgpd_evpn::{EvpnIpPrefixValue, IpVrfId, MacAddress};
 
 use crate::dataplane::DataplaneOp;
 
 /// State the L3 diff loop owns. Updated only on successful kernel
-/// apply by the reconcile actor (a failed inject leaves the
-/// in-memory state at the prior shape so the next reconcile pass
-/// retries).
+/// apply by the reconcile actor; a failed op leaves the in-memory
+/// state at its prior shape so the next reconcile pass retries.
+///
+/// The split between `installs` (per-prefix routes) and
+/// `kernel_neighbors` / `kernel_fdb` (shared resolution rows) is
+/// load-bearing for partial-success safety — see the module-level
+/// docs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct L3OwnedState {
-    /// `(IpVrfId, prefix) → (next_hop, router_mac, l3vxlan_ifindex,
-    /// table_id)` for every currently-installed route. The
-    /// `l3vxlan_ifindex` + `table_id` are recorded at install time
-    /// so a subsequent kernel-side reshuffle (e.g., L3VXLAN drops
-    /// and re-appears under a new ifindex) doesn't leak orphan
-    /// entries on withdraw.
-    pub routes: BTreeMap<(IpVrfId, EvpnIpPrefixValue), OwnedRoute>,
-    /// Reference count for the L3 neighbor entries
-    /// (`l3vxlan_ifindex`, `next_hop`) → count. Decremented on
-    /// withdraw; the kernel neighbor row is torn down only when the
-    /// count reaches zero.
-    pub neighbor_refs: BTreeMap<(u32, IpAddr), u32>,
-    /// Reference count for the L3VXLAN FDB entries
-    /// (`l3vxlan_ifindex`, `router_mac`) → count. Same lifecycle as
-    /// neighbor refs.
-    pub fdb_refs: BTreeMap<(u32, MacAddress), u32>,
+    /// Per-prefix install state. Created on the first successful
+    /// kernel op for that prefix; deleted only when
+    /// `route_installed` falls back to false (a `RemoveRemoteIpRoute`
+    /// has succeeded). The cached identity stays present for the
+    /// withdraw path even if the IP-VRF's `l3vxlan_device` /
+    /// `table_id` change at runtime.
+    pub installs: BTreeMap<(IpVrfId, EvpnIpPrefixValue), InstallState>,
+    /// `(l3vxlan_ifindex, next_hop)` keys the kernel currently has a
+    /// neighbor row for. Toggled by `AddL3Neighbor` /
+    /// `RemoveL3Neighbor` op successes. The diff cross-references
+    /// this against the desired set derived from `want` to compute
+    /// add / remove ops for the shared resolution rows.
+    pub kernel_neighbors: BTreeSet<(u32, IpAddr)>,
+    /// Same as `kernel_neighbors` for the L3VXLAN FDB row,
+    /// `(l3vxlan_ifindex, router_mac)`.
+    pub kernel_fdb: BTreeSet<(u32, MacAddress)>,
 }
 
-/// One row of installed-route bookkeeping. Captures everything the
-/// diff loop needs to symmetrically remove the route later, even if
-/// the IP-VRF's configured `table_id` / `l3vxlan_device` change at
-/// runtime.
+/// Per-prefix install bookkeeping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OwnedRoute {
+pub struct InstallState {
+    /// True iff the kernel has the IP route row for this prefix.
+    pub route_installed: bool,
+    /// Remote VTEP IP — cached so the symmetric remove op uses the
+    /// correct gateway even if the projection layer subsequently
+    /// changes its mind on the desired next-hop.
     pub next_hop: IpAddr,
+    /// Remote PE's router MAC.
     pub router_mac: MacAddress,
+    /// L3 VXLAN ifindex at the time of install.
     pub l3vxlan_ifindex: u32,
+    /// Kernel VRF route table id.
     pub table_id: u32,
 }
 
 impl L3OwnedState {
-    /// Number of currently-installed routes for one IP-VRF. Backing
-    /// store for the `IpVrfState.installed_routes_count` gRPC field.
+    /// Currently-installed routes for one IP-VRF. Backing store for
+    /// the `IpVrfState.installed_routes_count` gRPC field.
     #[must_use]
     pub fn route_count_for(&self, vrf_id: IpVrfId) -> u64 {
-        self.routes.keys().filter(|(id, _)| *id == vrf_id).count() as u64
+        self.installs
+            .iter()
+            .filter(|((id, _), i)| *id == vrf_id && i.route_installed)
+            .count() as u64
     }
 
-    /// True when the owned-set has no routes at all (RR-only /
-    /// no-Gate-9 default).
+    /// True when the owned set has no routes installed and no
+    /// resolution rows in the kernel.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.routes.is_empty()
+        self.installs.is_empty() && self.kernel_neighbors.is_empty() && self.kernel_fdb.is_empty()
     }
 }
 
 /// Why a desired remote prefix did not make it into the apply plan.
-/// Distinct from `RemoteIpPrefixTable::drops` (which captures
+/// Distinct from the projection layer's `DropReason` (which captures
 /// projection-time drops); this enum captures install-time drops,
 /// surfaced for per-VRF Prometheus counters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum L3Drop {
     /// IP-VRF is `NotReady` — every desired prefix in it is
-    /// suppressed. The matching withdraw branch fires symmetrically
-    /// (the diff treats NotReady-VRF prefixes as "not in want").
+    /// suppressed.
     NotReady {
         vrf_id: IpVrfId,
         prefix: EvpnIpPrefixValue,
     },
     /// Cross-family prefix vs next-hop. Slice 6c does not implement
-    /// `RTA_VIA`; the apply path would reject the op anyway. Counted
-    /// so an operator chasing "why isn't my v6 route installed?"
-    /// sees the suppression directly.
+    /// `RTA_VIA`.
     FamilyMismatch {
         vrf_id: IpVrfId,
         prefix: EvpnIpPrefixValue,
         next_hop: IpAddr,
     },
-    /// IP-VRF's `l3vxlan_ifindex` is not yet known (probe hasn't
-    /// surfaced a Ready verdict with the ifindex, or the L3VXLAN
-    /// device disappeared between probe and diff). Withdraws are
-    /// emitted normally from the cached `OwnedRoute.l3vxlan_ifindex`,
-    /// but installs cannot proceed without a current ifindex. The
-    /// next reconcile pass with a Ready probe retries.
-    NoL3VxlanIfindex {
+    /// Two or more `want` prefixes share an
+    /// `(l3vxlan_ifindex, router_mac)` key but advertise different
+    /// `next_hop` values. The kernel FDB can only store one
+    /// destination per `(idx, mac)` key, so installing both would
+    /// silently misforward one prefix's traffic to the other's
+    /// VTEP. Drop all conflicting prefixes — operator must
+    /// reconfigure.
+    RouterMacConflict {
         vrf_id: IpVrfId,
         prefix: EvpnIpPrefixValue,
+        router_mac: MacAddress,
+        conflicting_next_hop: IpAddr,
     },
 }
 
 /// Output of one L3 diff pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct L3Plan {
-    /// Ops to apply, in the install-then-withdraw order documented
-    /// at the module level. The reconcile actor feeds them through
-    /// `Dataplane::apply` sequentially; the per-op apply order is
-    /// preserved as ordered by this `Vec`.
+    /// Ops to apply, in the four-phase order documented at the
+    /// module level. The reconcile actor feeds them through
+    /// `Dataplane::apply` sequentially.
     pub ops: Vec<DataplaneOp>,
     /// Drops captured this pass, for per-`(vrf, reason)` Prometheus
     /// counters.
     pub drops: Vec<L3Drop>,
 }
 
+/// Resolved install target derived from one `(vrf, prefix)` in
+/// `want`. Carries every identity the apply path needs.
+#[derive(Debug, Clone, Copy)]
+struct Target {
+    next_hop: IpAddr,
+    router_mac: MacAddress,
+    l3vxlan_ifindex: u32,
+    table_id: u32,
+}
+
+impl Target {
+    fn shape_matches(&self, install: &InstallState) -> bool {
+        self.next_hop == install.next_hop
+            && self.router_mac == install.router_mac
+            && self.l3vxlan_ifindex == install.l3vxlan_ifindex
+            && self.table_id == install.table_id
+    }
+}
+
 /// Compute the next L3 plan from the desired projection + current
 /// owned state + the per-VRF Ready / ifindex map.
 ///
 /// `ready_l3vxlan_ifindex` is `IpVrfId → l3vxlan_ifindex` for every
-/// VRF whose readiness probe returned `Ready` with a real ifindex.
-/// Not-Ready VRFs are simply absent from the map (the diff treats
-/// them as "no install" → withdraw everything we own).
-///
-/// # Panics
-///
-/// Panics on an internal invariant violation: when a key is in
-/// `want` (which was just built up by checking the `ready_…` map and
-/// the `ip_vrfs` table) but lookup against either source fails.
-/// Both `.expect(...)` sites prove a programmer error in the diff,
-/// not a runtime condition.
-#[allow(clippy::too_many_lines)]
+/// VRF whose readiness probe returned `Ready`. Not-Ready VRFs are
+/// simply absent from the map (the diff treats them as "no install"
+/// → withdraw everything we own).
 #[must_use]
 pub fn compute_l3_diff(
     intent: &RemoteIpPrefixTable,
@@ -195,197 +240,283 @@ pub fn compute_l3_diff(
 ) -> L3Plan {
     let mut plan = L3Plan::default();
 
-    // ── Phase 1: compute `want` ────────────────────────────────
-    //
-    // `want` is the set of `(IpVrfId, prefix)` we intend to have
-    // installed after the apply phase. A prefix is in `want` only
-    // when (a) its VRF is Ready with a known L3VXLAN ifindex, (b)
-    // its prefix/next-hop family matches, and (c) the projection
-    // produced an entry for the key.
-    //
-    // Drops captured below feed per-`(vrf, reason)` counters and
-    // are *not* themselves ops — they're observability only.
-    let mut want: BTreeMap<(IpVrfId, EvpnIpPrefixValue), &RemoteIpPrefixEntry> = BTreeMap::new();
-    for ((vrf_id, prefix), entry) in intent.iter() {
-        let Some(vrf) = ip_vrfs.iter().find(|v| v.id == *vrf_id) else {
-            // projection produced an entry for an unknown VRF; drop silently
-            continue;
-        };
-        if !ready_l3vxlan_ifindex.contains_key(vrf_id) {
-            plan.drops.push(L3Drop::NotReady {
-                vrf_id: *vrf_id,
-                prefix: *prefix,
-            });
-            continue;
-        }
-        if !family_matches(*prefix, entry.next_hop) {
-            plan.drops.push(L3Drop::FamilyMismatch {
-                vrf_id: *vrf_id,
-                prefix: *prefix,
-                next_hop: entry.next_hop,
-            });
-            continue;
-        }
-        // Family also checks against the IP-VRF's local_vtep_ip
-        // (a v4 remote prefix in an IPv6-VTEP VRF would round-trip
-        // wrongly even if next_hop happens to be v4).
-        if !family_matches_vrf(*prefix, vrf.local_vtep_ip) {
-            plan.drops.push(L3Drop::FamilyMismatch {
-                vrf_id: *vrf_id,
-                prefix: *prefix,
-                next_hop: entry.next_hop,
-            });
-            continue;
-        }
-        want.insert((*vrf_id, *prefix), entry);
+    // ── Build `want` ───────────────────────────────────────────
+    let want = build_want(intent, ip_vrfs, ready_l3vxlan_ifindex, &mut plan);
+
+    // ── Compute desired resolution sets from `want` ────────────
+    let mut desired_neighbors: BTreeSet<(u32, IpAddr)> = BTreeSet::new();
+    let mut desired_fdb: BTreeSet<(u32, MacAddress)> = BTreeSet::new();
+    for target in want.values() {
+        desired_neighbors.insert((target.l3vxlan_ifindex, target.next_hop));
+        desired_fdb.insert((target.l3vxlan_ifindex, target.router_mac));
     }
 
-    // ── Phase 2: withdrawals ───────────────────────────────────
+    // ── Phase A: route removes ─────────────────────────────────
     //
-    // Walk owned routes; for any key not in `want`, emit a route
-    // remove and decrement neighbor/FDB refcounts. Build a working
-    // copy of the refcount tables so the symmetric "is this the
-    // last ref?" check uses the post-decrement value.
-    let mut sim_neighbor = owned.neighbor_refs.clone();
-    let mut sim_fdb = owned.fdb_refs.clone();
-    let to_withdraw: Vec<((IpVrfId, EvpnIpPrefixValue), OwnedRoute)> = owned
-        .routes
-        .iter()
-        .filter(|(k, _)| !want.contains_key(k))
-        .map(|(k, v)| (*k, *v))
-        .collect();
-    for ((vrf_id, prefix), route) in to_withdraw {
-        plan.ops.push(DataplaneOp::RemoveRemoteIpRoute {
-            vrf_id,
-            prefix,
-            table_id: route.table_id,
-            l3vxlan_ifindex: route.l3vxlan_ifindex,
-            next_hop: route.next_hop,
-        });
-        let neigh_key = (route.l3vxlan_ifindex, route.next_hop);
-        let new_neigh = decrement_ref(&mut sim_neighbor, neigh_key);
-        if new_neigh == 0 {
-            plan.ops.push(DataplaneOp::RemoveL3Neighbor {
-                vrf_id,
-                l3vxlan_ifindex: route.l3vxlan_ifindex,
-                next_hop: route.next_hop,
-            });
+    // Any owned install whose shape no longer matches `want` (or
+    // whose prefix dropped from `want` entirely) has its route
+    // torn down first. Resolution-row removal happens in Phase D
+    // once we've torn down every dependent route.
+    let mut shape_changed: BTreeSet<(IpVrfId, EvpnIpPrefixValue)> = BTreeSet::new();
+    for ((vrf_id, prefix), install) in &owned.installs {
+        let want_entry = want.get(&(*vrf_id, *prefix));
+        let shape_ok = want_entry.is_some_and(|t| t.shape_matches(install));
+        if shape_ok {
+            continue;
         }
-        let fdb_key = (route.l3vxlan_ifindex, route.router_mac);
-        let new_fdb = decrement_ref(&mut sim_fdb, fdb_key);
-        if new_fdb == 0 {
-            plan.ops.push(DataplaneOp::RemoveL3VxlanFdb {
-                vrf_id,
-                l3vxlan_ifindex: route.l3vxlan_ifindex,
-                router_mac: route.router_mac,
-            });
-        }
-    }
-
-    // ── Phase 3: installs ──────────────────────────────────────
-    //
-    // Walk `want`; for any key not already owned at the same shape,
-    // emit neighbor add (if first ref) → FDB add (if first ref) →
-    // route add. The kernel needs the L2 resolution objects in
-    // place before the route's recursive lookup runs, even with
-    // `RTNH_F_ONLINK`.
-    //
-    // Already-owned but shape-changed (e.g., next-hop drift on the
-    // same prefix) is handled by emitting the install as a
-    // *replace* — the apply path's `.replace()` on netlink makes
-    // the Add op idempotent over the existing entry. Refcount math
-    // still needs to handle the neighbor/FDB transition; for the
-    // first cut we drop and re-add when shape changes, treating
-    // the change as withdraw-then-install. See below.
-    for ((vrf_id, prefix), entry) in &want {
-        let l3vxlan_ifindex = *ready_l3vxlan_ifindex
-            .get(vrf_id)
-            .expect("ready_l3vxlan_ifindex membership was checked when building `want`");
-        let vrf = ip_vrfs
-            .iter()
-            .find(|v| v.id == *vrf_id)
-            .expect("`want` membership implies a configured VRF");
-        let new_route = OwnedRoute {
-            next_hop: entry.next_hop,
-            router_mac: entry.router_mac,
-            l3vxlan_ifindex,
-            table_id: vrf.table_id,
-        };
-        // Shape-changed: same prefix key, different
-        // next_hop/router_mac/ifindex/table_id. Treat as remove +
-        // add so the refcount math stays clean. The previous entry
-        // was already emitted under "to_withdraw" if `want`
-        // disagreed; but Phase 2 only catches keys absent from
-        // `want`. Need to handle shape changes here.
-        if let Some(prev) = owned.routes.get(&(*vrf_id, *prefix))
-            && prev != &new_route
-        {
+        if install.route_installed {
             plan.ops.push(DataplaneOp::RemoveRemoteIpRoute {
                 vrf_id: *vrf_id,
                 prefix: *prefix,
-                table_id: prev.table_id,
-                l3vxlan_ifindex: prev.l3vxlan_ifindex,
-                next_hop: prev.next_hop,
+                table_id: install.table_id,
+                l3vxlan_ifindex: install.l3vxlan_ifindex,
+                next_hop: install.next_hop,
             });
-            let prev_neigh = (prev.l3vxlan_ifindex, prev.next_hop);
-            if decrement_ref(&mut sim_neighbor, prev_neigh) == 0 {
-                plan.ops.push(DataplaneOp::RemoveL3Neighbor {
-                    vrf_id: *vrf_id,
-                    l3vxlan_ifindex: prev.l3vxlan_ifindex,
-                    next_hop: prev.next_hop,
-                });
-            }
-            let prev_fdb = (prev.l3vxlan_ifindex, prev.router_mac);
-            if decrement_ref(&mut sim_fdb, prev_fdb) == 0 {
-                plan.ops.push(DataplaneOp::RemoveL3VxlanFdb {
-                    vrf_id: *vrf_id,
-                    l3vxlan_ifindex: prev.l3vxlan_ifindex,
-                    router_mac: prev.router_mac,
-                });
-            }
-        } else if owned.routes.get(&(*vrf_id, *prefix)) == Some(&new_route) {
-            // Already installed at the desired shape — idempotent.
-            continue;
         }
+        if want_entry.is_some() {
+            // Shape change — the prefix is still in `want`, but the
+            // identity differs. Phase C re-installs from scratch.
+            shape_changed.insert((*vrf_id, *prefix));
+        }
+    }
 
-        let neigh_key = (l3vxlan_ifindex, entry.next_hop);
-        let prev_neigh = *sim_neighbor.get(&neigh_key).unwrap_or(&0);
-        sim_neighbor.insert(neigh_key, prev_neigh + 1);
-        if prev_neigh == 0 {
+    // ── Phase B: resolution adds ───────────────────────────────
+    //
+    // Order: neighbor adds, then FDB adds. Every (l3vxlan_ifindex,
+    // next_hop) in `desired_neighbors` that the kernel doesn't yet
+    // have gets an `AddL3Neighbor` op. Same for FDB. Picking one
+    // arbitrary `want` entry per key supplies the
+    // `vrf_id` / `router_mac` accounting tag — they're all owners
+    // of the same shared row.
+    let mut neighbor_ops: BTreeMap<(u32, IpAddr), (IpVrfId, MacAddress)> = BTreeMap::new();
+    let mut fdb_ops: BTreeMap<(u32, MacAddress), (IpVrfId, IpAddr)> = BTreeMap::new();
+    for ((vrf_id, _prefix), target) in &want {
+        neighbor_ops
+            .entry((target.l3vxlan_ifindex, target.next_hop))
+            .or_insert((*vrf_id, target.router_mac));
+        fdb_ops
+            .entry((target.l3vxlan_ifindex, target.router_mac))
+            .or_insert((*vrf_id, target.next_hop));
+    }
+    for ((idx, nh), (vrf_id, router_mac)) in &neighbor_ops {
+        if !owned.kernel_neighbors.contains(&(*idx, *nh)) {
             plan.ops.push(DataplaneOp::AddL3Neighbor {
                 vrf_id: *vrf_id,
-                l3vxlan_ifindex,
-                next_hop: entry.next_hop,
-                router_mac: entry.router_mac,
+                l3vxlan_ifindex: *idx,
+                next_hop: *nh,
+                router_mac: *router_mac,
             });
         }
-        let fdb_key = (l3vxlan_ifindex, entry.router_mac);
-        let prev_fdb = *sim_fdb.get(&fdb_key).unwrap_or(&0);
-        sim_fdb.insert(fdb_key, prev_fdb + 1);
-        if prev_fdb == 0 {
+    }
+    for ((idx, router_mac), (vrf_id, next_hop)) in &fdb_ops {
+        if !owned.kernel_fdb.contains(&(*idx, *router_mac)) {
             plan.ops.push(DataplaneOp::AddL3VxlanFdb {
                 vrf_id: *vrf_id,
-                l3vxlan_ifindex,
-                router_mac: entry.router_mac,
-                next_hop: entry.next_hop,
+                l3vxlan_ifindex: *idx,
+                router_mac: *router_mac,
+                next_hop: *next_hop,
             });
         }
-        plan.ops.push(DataplaneOp::AddRemoteIpRoute {
-            vrf_id: *vrf_id,
-            prefix: *prefix,
-            table_id: vrf.table_id,
-            l3vxlan_ifindex,
-            next_hop: entry.next_hop,
-        });
+    }
+
+    // ── Phase C: route adds ────────────────────────────────────
+    //
+    // For each `want` entry whose owned install is missing, has a
+    // shape mismatch, or has `route_installed=false`, emit
+    // `AddRemoteIpRoute`. The shape-mismatch case is covered by
+    // Phase A's RemoveRemoteIpRoute earlier in the same plan — the
+    // apply path executes them in order, so the kernel sees
+    // remove then add for shape transitions.
+    for ((vrf_id, prefix), target) in &want {
+        let needs_route = match owned.installs.get(&(*vrf_id, *prefix)) {
+            None => true,
+            Some(install) if !target.shape_matches(install) => true,
+            Some(install) => !install.route_installed,
+        };
+        if needs_route {
+            plan.ops.push(DataplaneOp::AddRemoteIpRoute {
+                vrf_id: *vrf_id,
+                prefix: *prefix,
+                table_id: target.table_id,
+                l3vxlan_ifindex: target.l3vxlan_ifindex,
+                next_hop: target.next_hop,
+            });
+        }
+    }
+
+    // ── Phase D: resolution removes ────────────────────────────
+    //
+    // Any kernel resolution row no longer in `desired_*` is torn
+    // down. Order: neighbor removes, then FDB removes (same
+    // intra-phase order as the adds in Phase B).
+    for (idx, nh) in &owned.kernel_neighbors {
+        if !desired_neighbors.contains(&(*idx, *nh)) {
+            let (vrf_id, router_mac) = remove_neighbor_owner(&owned.installs, *idx, *nh);
+            plan.ops.push(DataplaneOp::RemoveL3Neighbor {
+                vrf_id,
+                l3vxlan_ifindex: *idx,
+                next_hop: *nh,
+            });
+            let _ = router_mac; // not needed on the Remove op
+        }
+    }
+    for (idx, router_mac) in &owned.kernel_fdb {
+        if !desired_fdb.contains(&(*idx, *router_mac)) {
+            let vrf_id = remove_fdb_owner(&owned.installs, *idx, *router_mac);
+            plan.ops.push(DataplaneOp::RemoveL3VxlanFdb {
+                vrf_id,
+                l3vxlan_ifindex: *idx,
+                router_mac: *router_mac,
+            });
+        }
     }
 
     plan
 }
 
-/// Apply a successful op to the owned state. The reconcile actor
-/// calls this once per `Ok(())` returned from `Dataplane::apply`.
-/// Failed ops leave the owned state untouched so the next reconcile
-/// pass retries with the same shape.
+/// Build the validated `want` set and record drops.
+fn build_want(
+    intent: &RemoteIpPrefixTable,
+    ip_vrfs: &IpVrfTable,
+    ready_l3vxlan_ifindex: &BTreeMap<IpVrfId, u32>,
+    plan: &mut L3Plan,
+) -> BTreeMap<(IpVrfId, EvpnIpPrefixValue), Target> {
+    let mut want: BTreeMap<(IpVrfId, EvpnIpPrefixValue), Target> = BTreeMap::new();
+    for ((vrf_id, prefix), entry) in intent.iter() {
+        let Some(vrf) = ip_vrfs.iter().find(|v| v.id == *vrf_id) else {
+            // Projection produced an entry for an unknown VRF; drop
+            // silently — the projection-side `DropReason` would have
+            // already caught this if reachable.
+            continue;
+        };
+        let Some(ifindex) = ready_l3vxlan_ifindex.get(vrf_id).copied() else {
+            plan.drops.push(L3Drop::NotReady {
+                vrf_id: *vrf_id,
+                prefix: *prefix,
+            });
+            continue;
+        };
+        if !family_matches(*prefix, entry.next_hop) || !family_matches(*prefix, vrf.local_vtep_ip) {
+            plan.drops.push(L3Drop::FamilyMismatch {
+                vrf_id: *vrf_id,
+                prefix: *prefix,
+                next_hop: entry.next_hop,
+            });
+            continue;
+        }
+        want.insert(
+            (*vrf_id, *prefix),
+            Target {
+                next_hop: entry.next_hop,
+                router_mac: entry.router_mac,
+                l3vxlan_ifindex: ifindex,
+                table_id: vrf.table_id,
+            },
+        );
+        let _ = entry; // suppress accidental clippy::used-binding noise
+    }
+
+    // ── Router MAC conflict detection ──────────────────────────
+    //
+    // The kernel FDB row is `(l3vxlan_ifindex, router_mac) → dst`.
+    // If two `want` entries claim the same `(idx, router_mac)` but
+    // map it to different next-hops, the last `AddL3VxlanFdb` to
+    // win the race would silently misforward the other prefix's
+    // traffic. Drop every conflicting entry (operator misconfig —
+    // fail loud).
+    let mut by_mac: BTreeMap<(u32, MacAddress), BTreeSet<IpAddr>> = BTreeMap::new();
+    for target in want.values() {
+        by_mac
+            .entry((target.l3vxlan_ifindex, target.router_mac))
+            .or_default()
+            .insert(target.next_hop);
+    }
+    let conflicting: BTreeSet<(u32, MacAddress)> = by_mac
+        .iter()
+        .filter(|(_, hops)| hops.len() > 1)
+        .map(|(k, _)| *k)
+        .collect();
+    if !conflicting.is_empty() {
+        let conflict_keys: Vec<(IpVrfId, EvpnIpPrefixValue, MacAddress, IpAddr)> = want
+            .iter()
+            .filter_map(|((vrf_id, prefix), t)| {
+                if conflicting.contains(&(t.l3vxlan_ifindex, t.router_mac)) {
+                    Some((*vrf_id, *prefix, t.router_mac, t.next_hop))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (vrf_id, prefix, router_mac, conflicting_next_hop) in conflict_keys {
+            want.remove(&(vrf_id, prefix));
+            plan.drops.push(L3Drop::RouterMacConflict {
+                vrf_id,
+                prefix,
+                router_mac,
+                conflicting_next_hop,
+            });
+        }
+    }
+
+    want
+}
+
+/// Find an owner install for a neighbor key we're about to remove.
+/// Returns `(vrf_id_tag, router_mac_tag)` — the values are purely
+/// for accounting on the emitted op; the kernel doesn't need
+/// `router_mac` on the remove side, so the second tuple element is
+/// returned unused for callers that want it.
+fn remove_neighbor_owner(
+    installs: &BTreeMap<(IpVrfId, EvpnIpPrefixValue), InstallState>,
+    idx: u32,
+    next_hop: IpAddr,
+) -> (IpVrfId, MacAddress) {
+    installs
+        .iter()
+        .find_map(|((vrf_id, _), i)| {
+            if i.l3vxlan_ifindex == idx && i.next_hop == next_hop {
+                Some((*vrf_id, i.router_mac))
+            } else {
+                None
+            }
+        })
+        // Defensive fallback: pick the lowest-numbered IpVrfId we
+        // can synthesize. The kernel doesn't care about the
+        // accounting tag, only the `(idx, next_hop)` identity.
+        .unwrap_or_else(|| {
+            (
+                IpVrfId::new(1).expect("VNI 1 is always valid"),
+                MacAddress::new([0; 6]),
+            )
+        })
+}
+
+/// Find an owner install for an FDB key we're about to remove.
+fn remove_fdb_owner(
+    installs: &BTreeMap<(IpVrfId, EvpnIpPrefixValue), InstallState>,
+    idx: u32,
+    router_mac: MacAddress,
+) -> IpVrfId {
+    installs
+        .iter()
+        .find_map(|((vrf_id, _), i)| {
+            if i.l3vxlan_ifindex == idx && i.router_mac == router_mac {
+                Some(*vrf_id)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| IpVrfId::new(1).expect("VNI 1 is always valid"))
+}
+
+/// Apply a successful op to the owned state. Called once per
+/// `Ok(())` from `Dataplane::apply`. Failed ops leave the state
+/// unchanged so the next reconcile pass retries.
+///
+/// For `AddRemoteIpRoute` the actor needs the matching
+/// `RemoteIpPrefixEntry` and IP-VRF table to recover the install's
+/// cached identity. Pass them through; on a non-matching op variant
+/// the parameters are ignored.
 pub fn record_l3_success(
     owned: &mut L3OwnedState,
     op: &DataplaneOp,
@@ -395,122 +526,79 @@ pub fn record_l3_success(
 ) {
     match op {
         DataplaneOp::AddRemoteIpRoute { vrf_id, prefix, .. } => {
-            // Re-derive the OwnedRoute shape from the same inputs
-            // the diff used; this keeps a single source of truth
-            // and makes the test surface simpler.
-            if let (Some(ifindex), Some(entry)) = (
-                ready_l3vxlan_ifindex.get(vrf_id).copied(),
-                intent
-                    .iter()
-                    .find(|((id, p), _)| id == vrf_id && p == prefix)
-                    .map(|(_, e)| e),
-            ) {
-                let vrf = ip_vrfs.iter().find(|v| v.id == *vrf_id);
-                if let Some(vrf) = vrf {
-                    owned.routes.insert(
-                        (*vrf_id, *prefix),
-                        OwnedRoute {
-                            next_hop: entry.next_hop,
-                            router_mac: entry.router_mac,
-                            l3vxlan_ifindex: ifindex,
-                            table_id: vrf.table_id,
-                        },
-                    );
-                }
+            let entry = intent
+                .iter()
+                .find_map(|((id, p), e)| (id == vrf_id && p == prefix).then_some(e));
+            let vrf = ip_vrfs.iter().find(|v| v.id == *vrf_id);
+            let ifindex = ready_l3vxlan_ifindex.get(vrf_id).copied();
+            if let (Some(entry), Some(vrf), Some(ifindex)) = (entry, vrf, ifindex) {
+                owned.installs.insert(
+                    (*vrf_id, *prefix),
+                    InstallState {
+                        route_installed: true,
+                        next_hop: entry.next_hop,
+                        router_mac: entry.router_mac,
+                        l3vxlan_ifindex: ifindex,
+                        table_id: vrf.table_id,
+                    },
+                );
             }
         }
         DataplaneOp::RemoveRemoteIpRoute { vrf_id, prefix, .. } => {
-            owned.routes.remove(&(*vrf_id, *prefix));
+            owned.installs.remove(&(*vrf_id, *prefix));
         }
         DataplaneOp::AddL3Neighbor {
             l3vxlan_ifindex,
             next_hop,
             ..
         } => {
-            *owned
-                .neighbor_refs
-                .entry((*l3vxlan_ifindex, *next_hop))
-                .or_insert(0) += 1;
+            owned.kernel_neighbors.insert((*l3vxlan_ifindex, *next_hop));
         }
         DataplaneOp::RemoveL3Neighbor {
             l3vxlan_ifindex,
             next_hop,
             ..
         } => {
-            let key = (*l3vxlan_ifindex, *next_hop);
-            if let Some(c) = owned.neighbor_refs.get_mut(&key) {
-                *c = c.saturating_sub(1);
-                if *c == 0 {
-                    owned.neighbor_refs.remove(&key);
-                }
-            }
+            owned
+                .kernel_neighbors
+                .remove(&(*l3vxlan_ifindex, *next_hop));
         }
         DataplaneOp::AddL3VxlanFdb {
             l3vxlan_ifindex,
             router_mac,
             ..
         } => {
-            *owned
-                .fdb_refs
-                .entry((*l3vxlan_ifindex, *router_mac))
-                .or_insert(0) += 1;
+            owned.kernel_fdb.insert((*l3vxlan_ifindex, *router_mac));
         }
         DataplaneOp::RemoveL3VxlanFdb {
             l3vxlan_ifindex,
             router_mac,
             ..
         } => {
-            let key = (*l3vxlan_ifindex, *router_mac);
-            if let Some(c) = owned.fdb_refs.get_mut(&key) {
-                *c = c.saturating_sub(1);
-                if *c == 0 {
-                    owned.fdb_refs.remove(&key);
-                }
-            }
+            owned.kernel_fdb.remove(&(*l3vxlan_ifindex, *router_mac));
         }
-        // L2 FDB / BUM ops are not L3 ops; the L3 owned state is
-        // not affected.
         DataplaneOp::AddRemoteFdb { .. }
         | DataplaneOp::UpdateRemoteFdb { .. }
         | DataplaneOp::RemoveRemoteFdb { .. }
-        | DataplaneOp::SetBumPortFlags { .. } => {}
-    }
-}
-
-fn family_matches(prefix: EvpnIpPrefixValue, next_hop: IpAddr) -> bool {
-    matches!(
-        (prefix, next_hop),
-        (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
-    )
-}
-
-fn family_matches_vrf(prefix: EvpnIpPrefixValue, vtep: IpAddr) -> bool {
-    matches!(
-        (prefix, vtep),
-        (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
-    )
-}
-
-fn decrement_ref<K: Ord + Copy>(map: &mut BTreeMap<K, u32>, key: K) -> u32 {
-    let new_val = match map.get_mut(&key) {
-        Some(c) => {
-            *c = c.saturating_sub(1);
-            *c
+        | DataplaneOp::SetBumPortFlags { .. } => {
+            // L2 FDB / BUM ops have their own owned state.
         }
-        None => 0,
-    };
-    if new_val == 0 {
-        map.remove(&key);
     }
-    new_val
+}
+
+fn family_matches(prefix: EvpnIpPrefixValue, addr: IpAddr) -> bool {
+    matches!(
+        (prefix, addr),
+        (EvpnIpPrefixValue::V4(_), IpAddr::V4(_)) | (EvpnIpPrefixValue::V6(_), IpAddr::V6(_))
+    )
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use rustbgpd_evpn::ip_vrf::{IpVrf, RemoteIpPrefixEntry};
-    use rustbgpd_evpn::{IpVrfId, Ipv4Prefix, RouteDistinguisher, RouteTarget};
+    use rustbgpd_evpn::Ipv4Prefix;
+    use rustbgpd_evpn::ip_vrf::{IpVrf, ProjectedIpPrefixRoute, project_ip_prefix_routes};
     use std::net::{IpAddr, Ipv4Addr};
 
     fn mac(b: u8) -> MacAddress {
@@ -521,8 +609,14 @@ mod tests {
         IpVrf::new(
             format!("vrf{id}"),
             IpVrfId::new(id).unwrap(),
-            format!("65000:{id}").parse::<RouteDistinguisher>().unwrap(),
-            vec![format!("65000:{id}").parse::<RouteTarget>().unwrap()],
+            format!("65000:{id}")
+                .parse::<rustbgpd_evpn::RouteDistinguisher>()
+                .unwrap(),
+            vec![
+                format!("65000:{id}")
+                    .parse::<rustbgpd_evpn::RouteTarget>()
+                    .unwrap(),
+            ],
             vtep,
             mac(0x10),
             format!("vrf{id}"),
@@ -530,6 +624,12 @@ mod tests {
             table_id,
         )
         .unwrap()
+    }
+
+    fn one_vrf_table(id: u32, table_id: u32, vtep: IpAddr) -> IpVrfTable {
+        let mut t = IpVrfTable::new();
+        t.insert(vrf(id, table_id, vtep)).unwrap();
+        t
     }
 
     fn v4(octets: [u8; 4], len: u8) -> EvpnIpPrefixValue {
@@ -540,130 +640,59 @@ mod tests {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
     }
 
-    fn one_vrf_table(id: u32, table_id: u32, vtep: IpAddr) -> IpVrfTable {
-        let mut t = IpVrfTable::new();
-        t.insert(vrf(id, table_id, vtep)).unwrap();
-        t
-    }
-
-    /// Build a `RemoteIpPrefixTable` from a flat list of entries.
-    /// `RemoteIpPrefixTable::entries` is private, so the test
-    /// fixture builds it by calling the pure projection helper
-    /// with a hand-crafted input — but for this diff test we can
-    /// just construct entries via the `RemoteIpPrefixEntry` field
-    /// initializer because it's `pub`.
+    /// Build a `RemoteIpPrefixTable` containing a list of routes
+    /// for a single VRF. The routes here are pre-built
+    /// `ProjectedIpPrefixRoute`s — we pass them through the pure
+    /// projection helper so the resulting table looks identical
+    /// to one the supervisor would produce.
     fn intent_with(
-        entries: Vec<((IpVrfId, EvpnIpPrefixValue), RemoteIpPrefixEntry)>,
+        ip_vrfs: &IpVrfTable,
+        routes: Vec<ProjectedIpPrefixRoute>,
     ) -> RemoteIpPrefixTable {
-        // No public constructor for entries; build via the
-        // projection helper with a synthesized input that matches.
-        // To keep tests minimal we use a thin wrapper.
-        let mut table = RemoteIpPrefixTable::new();
-        for ((vrf_id, prefix), entry) in entries {
-            // Re-insert via a tiny helper that pushes onto the
-            // private map. The crate's projection helper does the
-            // same insertion path, but we don't want to rebuild
-            // route_targets / RT match logic for the diff test.
-            // The `pub` field initializer on `RemoteIpPrefixTable`
-            // would be ideal; in lieu of that we use the
-            // projection helper directly with a one-route input.
-            use rustbgpd_evpn::ip_vrf::{ProjectedIpPrefixRoute, project_ip_prefix_routes};
-            let mut vrfs = IpVrfTable::new();
-            vrfs.insert(
-                IpVrf::new(
-                    format!("v{}", vrf_id.as_u32()),
-                    vrf_id,
-                    "65000:1".parse().unwrap(),
-                    vec!["65000:1".parse().unwrap()],
-                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    mac(0x99),
-                    format!("v{}", vrf_id.as_u32()),
-                    format!("l3vxlan{}", vrf_id.as_u32()),
-                    100 + vrf_id.as_u32(),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            let routes = vec![ProjectedIpPrefixRoute {
-                rd: "65000:1".parse().unwrap(),
-                prefix,
-                next_hop: entry.next_hop,
-                l3vni: vrf_id.as_u32(),
-                route_targets: vec!["65000:1".parse().unwrap()],
-                router_mac: Some(entry.router_mac),
-            }];
-            let projected = project_ip_prefix_routes(&vrfs, routes);
-            for ((id, p), e) in projected.iter() {
-                let _ = e;
-                let _ = id;
-                let _ = p;
-            }
-            // The above project_ip_prefix_routes call works on a
-            // single-VRF universe; merge its output into `table`.
-            // Since `RemoteIpPrefixTable` doesn't expose a public
-            // merge API, build a fresh one for each call and rely
-            // on the test using a single VRF / single entry per
-            // table for simplicity.
-            table = projected;
-        }
-        table
+        project_ip_prefix_routes(ip_vrfs, routes)
     }
 
-    /// Cold start with one prefix → three ops in canonical order:
-    /// neighbor, FDB, route.
+    fn t5(
+        prefix: EvpnIpPrefixValue,
+        next_hop: IpAddr,
+        vni: u32,
+        rmac: MacAddress,
+    ) -> ProjectedIpPrefixRoute {
+        ProjectedIpPrefixRoute {
+            rd: format!("65000:{vni}").parse().unwrap(),
+            prefix,
+            next_hop,
+            l3vni: vni,
+            route_targets: vec![format!("65000:{vni}").parse().unwrap()],
+            router_mac: Some(rmac),
+        }
+    }
+
+    /// Cold start with one prefix → three ops in canonical phase
+    /// order: neighbor add (B) → FDB add (B) → route add (C).
     #[test]
     fn cold_start_one_prefix_emits_neighbor_then_fdb_then_route() {
         let prefix = v4([198, 51, 100, 0], 24);
         let nh = ip4(10, 0, 0, 2);
         let rmac = mac(0xaa);
-
         let vrf_id = IpVrfId::new(101).unwrap();
-        let ip_vrfs = {
-            // Match the table the test-intent builder synthesizes
-            // (table_id = 100 + vrf_id, l3vxlan = l3vxlanN).
-            let mut t = IpVrfTable::new();
-            t.insert(
-                IpVrf::new(
-                    "v101".into(),
-                    vrf_id,
-                    "65000:1".parse().unwrap(),
-                    vec!["65000:1".parse().unwrap()],
-                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    mac(0x99),
-                    "v101".into(),
-                    "l3vxlan101".into(),
-                    201,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            t
-        };
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
-        let intent = intent_with(vec![(
-            (vrf_id, prefix),
-            RemoteIpPrefixEntry {
-                prefix,
-                next_hop: nh,
-                l3vni: 101,
-                router_mac: rmac,
-            },
-        )]);
+        let intent = intent_with(&ip_vrfs, vec![t5(prefix, nh, 101, rmac)]);
         let owned = L3OwnedState::default();
-        let mut ready = BTreeMap::new();
-        ready.insert(vrf_id, 42_u32);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
 
         let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
-        assert_eq!(plan.drops, vec![], "no drops expected for ready VRF");
+        assert_eq!(plan.drops, vec![]);
         assert_eq!(plan.ops.len(), 3);
         assert!(matches!(plan.ops[0], DataplaneOp::AddL3Neighbor { .. }));
         assert!(matches!(plan.ops[1], DataplaneOp::AddL3VxlanFdb { .. }));
         assert!(matches!(plan.ops[2], DataplaneOp::AddRemoteIpRoute { .. }));
     }
 
-    /// Two prefixes sharing the same `(l3vxlan, vtep, router_mac)`
-    /// tuple emit neighbor + FDB only once; the second prefix gets
-    /// just a route op.
+    /// Two prefixes sharing `(idx, vtep, mac)` → second prefix's
+    /// plan emits only the route op; the resolution rows already
+    /// exist in `kernel_neighbors` / `kernel_fdb`.
     #[test]
     fn second_prefix_sharing_vtep_emits_route_only() {
         let prefix_a = v4([198, 51, 100, 0], 24);
@@ -671,71 +700,30 @@ mod tests {
         let nh = ip4(10, 0, 0, 2);
         let rmac = mac(0xaa);
         let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
-        // Simulate "first install already happened" via the owned
-        // state — equivalent to a previous reconcile pass having
-        // applied the cold-start plan.
+        // Simulate "first install already complete".
         let mut owned = L3OwnedState::default();
-        owned.routes.insert(
+        owned.installs.insert(
             (vrf_id, prefix_a),
-            OwnedRoute {
+            InstallState {
+                route_installed: true,
                 next_hop: nh,
                 router_mac: rmac,
                 l3vxlan_ifindex: 42,
                 table_id: 201,
             },
         );
-        owned.neighbor_refs.insert((42, nh), 1);
-        owned.fdb_refs.insert((42, rmac), 1);
+        owned.kernel_neighbors.insert((42, nh));
+        owned.kernel_fdb.insert((42, rmac));
 
-        let ip_vrfs = {
-            let mut t = IpVrfTable::new();
-            t.insert(
-                IpVrf::new(
-                    "v101".into(),
-                    vrf_id,
-                    "65000:1".parse().unwrap(),
-                    vec!["65000:1".parse().unwrap()],
-                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
-                    mac(0x99),
-                    "v101".into(),
-                    "l3vxlan101".into(),
-                    201,
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            t
-        };
-        // Intent now has both prefixes A and B.
-        let intent = {
-            use rustbgpd_evpn::ip_vrf::{ProjectedIpPrefixRoute, project_ip_prefix_routes};
-            let routes = vec![
-                ProjectedIpPrefixRoute {
-                    rd: "65000:1".parse().unwrap(),
-                    prefix: prefix_a,
-                    next_hop: nh,
-                    l3vni: 101,
-                    route_targets: vec!["65000:1".parse().unwrap()],
-                    router_mac: Some(rmac),
-                },
-                ProjectedIpPrefixRoute {
-                    rd: "65000:1".parse().unwrap(),
-                    prefix: prefix_b,
-                    next_hop: nh,
-                    l3vni: 101,
-                    route_targets: vec!["65000:1".parse().unwrap()],
-                    router_mac: Some(rmac),
-                },
-            ];
-            project_ip_prefix_routes(&ip_vrfs, routes)
-        };
-        let mut ready = BTreeMap::new();
-        ready.insert(vrf_id, 42_u32);
-
+        let intent = intent_with(
+            &ip_vrfs,
+            vec![t5(prefix_a, nh, 101, rmac), t5(prefix_b, nh, 101, rmac)],
+        );
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
         let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
-        // Only the new prefix's route is emitted — neighbor + FDB
-        // are already at refcount 1 from prefix_a.
+
         let adds: Vec<_> = plan
             .ops
             .iter()
@@ -752,9 +740,8 @@ mod tests {
         assert!(matches!(adds[0], DataplaneOp::AddRemoteIpRoute { .. }));
     }
 
-    /// Withdrawing one of two prefixes sharing a VTEP must keep the
-    /// neighbor + FDB rows alive (the other prefix still references
-    /// them).
+    /// Withdrawing one of two shared prefixes keeps the resolution
+    /// rows alive — the second prefix still needs them.
     #[test]
     fn withdraw_one_of_two_keeps_shared_neighbor_and_fdb() {
         let prefix_a = v4([198, 51, 100, 0], 24);
@@ -766,9 +753,10 @@ mod tests {
 
         let mut owned = L3OwnedState::default();
         for p in [prefix_a, prefix_b] {
-            owned.routes.insert(
+            owned.installs.insert(
                 (vrf_id, p),
-                OwnedRoute {
+                InstallState {
+                    route_installed: true,
                     next_hop: nh,
                     router_mac: rmac,
                     l3vxlan_ifindex: 42,
@@ -776,48 +764,35 @@ mod tests {
                 },
             );
         }
-        owned.neighbor_refs.insert((42, nh), 2);
-        owned.fdb_refs.insert((42, rmac), 2);
+        owned.kernel_neighbors.insert((42, nh));
+        owned.kernel_fdb.insert((42, rmac));
 
-        // Intent now only has prefix_a.
-        let intent = {
-            use rustbgpd_evpn::ip_vrf::{ProjectedIpPrefixRoute, project_ip_prefix_routes};
-            let routes = vec![ProjectedIpPrefixRoute {
-                rd: "65000:101".parse().unwrap(),
-                prefix: prefix_a,
-                next_hop: nh,
-                l3vni: 101,
-                route_targets: vec!["65000:101".parse().unwrap()],
-                router_mac: Some(rmac),
-            }];
-            project_ip_prefix_routes(&ip_vrfs, routes)
-        };
-        let mut ready = BTreeMap::new();
-        ready.insert(vrf_id, 42_u32);
-
+        let intent = intent_with(&ip_vrfs, vec![t5(prefix_a, nh, 101, rmac)]);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
         let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
-        let neighbor_removes: usize = plan
-            .ops
-            .iter()
-            .filter(|op| matches!(op, DataplaneOp::RemoveL3Neighbor { .. }))
-            .count();
-        let fdb_removes: usize = plan
-            .ops
-            .iter()
-            .filter(|op| matches!(op, DataplaneOp::RemoveL3VxlanFdb { .. }))
-            .count();
-        let route_removes: usize = plan
+
+        let route_removes = plan
             .ops
             .iter()
             .filter(|op| matches!(op, DataplaneOp::RemoveRemoteIpRoute { .. }))
             .count();
-        assert_eq!(route_removes, 1, "one route should withdraw");
-        assert_eq!(neighbor_removes, 0, "neighbor still referenced");
-        assert_eq!(fdb_removes, 0, "FDB still referenced");
+        let neighbor_removes = plan
+            .ops
+            .iter()
+            .filter(|op| matches!(op, DataplaneOp::RemoveL3Neighbor { .. }))
+            .count();
+        let fdb_removes = plan
+            .ops
+            .iter()
+            .filter(|op| matches!(op, DataplaneOp::RemoveL3VxlanFdb { .. }))
+            .count();
+        assert_eq!(route_removes, 1);
+        assert_eq!(neighbor_removes, 0, "neighbor still in desired set");
+        assert_eq!(fdb_removes, 0, "FDB still in desired set");
     }
 
-    /// Withdrawing the last prefix on a shared `(vtep, mac)` tuple
-    /// tears down the neighbor + FDB.
+    /// Withdrawing the last prefix on a shared key tears down
+    /// route + neighbor + FDB in canonical phase order.
     #[test]
     fn withdraw_last_prefix_tears_down_neighbor_and_fdb() {
         let prefix = v4([198, 51, 100, 0], 24);
@@ -827,23 +802,23 @@ mod tests {
         let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
         let mut owned = L3OwnedState::default();
-        owned.routes.insert(
+        owned.installs.insert(
             (vrf_id, prefix),
-            OwnedRoute {
+            InstallState {
+                route_installed: true,
                 next_hop: nh,
                 router_mac: rmac,
                 l3vxlan_ifindex: 42,
                 table_id: 201,
             },
         );
-        owned.neighbor_refs.insert((42, nh), 1);
-        owned.fdb_refs.insert((42, rmac), 1);
+        owned.kernel_neighbors.insert((42, nh));
+        owned.kernel_fdb.insert((42, rmac));
 
-        let intent = RemoteIpPrefixTable::new(); // empty
-        let mut ready = BTreeMap::new();
-        ready.insert(vrf_id, 42_u32);
-
+        let intent = RemoteIpPrefixTable::new();
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
         let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
+
         let kinds: Vec<&str> = plan
             .ops
             .iter()
@@ -854,12 +829,12 @@ mod tests {
                 _ => "other",
             })
             .collect();
-        // Order: route → neighbor → fdb.
+        // Phase A (route remove) → Phase D (neighbor remove → fdb remove).
         assert_eq!(kinds, vec!["route", "neighbor", "fdb"]);
     }
 
-    /// IP-VRF becomes `NotReady` → every prefix in it is withdrawn,
-    /// neighbor + FDB tear down.
+    /// IP-VRF drops out of the ready map → every prefix in it is
+    /// withdrawn.
     #[test]
     fn vrf_not_ready_drains_all_owned_routes() {
         let prefix = v4([198, 51, 100, 0], 24);
@@ -869,43 +844,30 @@ mod tests {
         let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
         let mut owned = L3OwnedState::default();
-        owned.routes.insert(
+        owned.installs.insert(
             (vrf_id, prefix),
-            OwnedRoute {
+            InstallState {
+                route_installed: true,
                 next_hop: nh,
                 router_mac: rmac,
                 l3vxlan_ifindex: 42,
                 table_id: 201,
             },
         );
-        owned.neighbor_refs.insert((42, nh), 1);
-        owned.fdb_refs.insert((42, rmac), 1);
+        owned.kernel_neighbors.insert((42, nh));
+        owned.kernel_fdb.insert((42, rmac));
 
-        // Intent says we want the prefix, but `ready_l3vxlan_ifindex`
-        // is empty (VRF probe returned NotReady).
-        let intent = {
-            use rustbgpd_evpn::ip_vrf::{ProjectedIpPrefixRoute, project_ip_prefix_routes};
-            let routes = vec![ProjectedIpPrefixRoute {
-                rd: "65000:101".parse().unwrap(),
-                prefix,
-                next_hop: nh,
-                l3vni: 101,
-                route_targets: vec!["65000:101".parse().unwrap()],
-                router_mac: Some(rmac),
-            }];
-            project_ip_prefix_routes(&ip_vrfs, routes)
-        };
-        let ready = BTreeMap::new();
+        let intent = intent_with(&ip_vrfs, vec![t5(prefix, nh, 101, rmac)]);
+        let ready = BTreeMap::new(); // no Ready ifindex → drop
 
         let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
-        assert!(matches!(plan.drops.as_slice(), [L3Drop::NotReady { .. }],));
-        // Route + neighbor + fdb all withdraw.
+        assert!(matches!(plan.drops.as_slice(), [L3Drop::NotReady { .. }]));
         assert_eq!(plan.ops.len(), 3);
     }
 
-    /// `record_l3_success` round-trips the owned state through the
-    /// full apply plan: after applying every op in order, the
-    /// owned state matches what the diff expected.
+    /// Applying the entire cold-start plan via `record_l3_success`
+    /// converges the owned state. A second diff pass against the
+    /// same intent emits zero ops.
     #[test]
     fn record_success_makes_diff_idempotent_on_next_pass() {
         let prefix = v4([198, 51, 100, 0], 24);
@@ -914,20 +876,8 @@ mod tests {
         let vrf_id = IpVrfId::new(101).unwrap();
         let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
-        let intent = {
-            use rustbgpd_evpn::ip_vrf::{ProjectedIpPrefixRoute, project_ip_prefix_routes};
-            let routes = vec![ProjectedIpPrefixRoute {
-                rd: "65000:101".parse().unwrap(),
-                prefix,
-                next_hop: nh,
-                l3vni: 101,
-                route_targets: vec!["65000:101".parse().unwrap()],
-                router_mac: Some(rmac),
-            }];
-            project_ip_prefix_routes(&ip_vrfs, routes)
-        };
-        let mut ready = BTreeMap::new();
-        ready.insert(vrf_id, 42_u32);
+        let intent = intent_with(&ip_vrfs, vec![t5(prefix, nh, 101, rmac)]);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
 
         let mut owned = L3OwnedState::default();
         let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
@@ -935,9 +885,136 @@ mod tests {
             record_l3_success(&mut owned, op, &ready, &ip_vrfs, &intent);
         }
 
-        // Second pass with the same intent must produce zero ops
-        // (idempotent).
         let plan2 = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
-        assert_eq!(plan2.ops, vec![], "idempotent on the second pass");
+        assert_eq!(plan2.ops, vec![]);
+    }
+
+    /// Regression for review finding #2 (partial-success leak):
+    /// `AddL3Neighbor` + `AddL3VxlanFdb` succeed but
+    /// `AddRemoteIpRoute` fails. If the operator then removes the
+    /// prefix from intent, the next diff pass must emit
+    /// `RemoveL3Neighbor` + `RemoveL3VxlanFdb` even though no
+    /// install ever recorded `route_installed=true`.
+    #[test]
+    fn partial_success_cleans_up_when_intent_disappears() {
+        let prefix = v4([198, 51, 100, 0], 24);
+        let nh = ip4(10, 0, 0, 2);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+
+        // Cold-start plan computed below. We only call
+        // `record_l3_success` for the neighbor + FDB ops (simulating
+        // a kernel that accepted those but rejected the route).
+        let intent = intent_with(&ip_vrfs, vec![t5(prefix, nh, 101, rmac)]);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+        let mut owned = L3OwnedState::default();
+        let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
+        for op in &plan.ops {
+            if matches!(op, DataplaneOp::AddRemoteIpRoute { .. }) {
+                continue; // simulate route apply failure
+            }
+            record_l3_success(&mut owned, op, &ready, &ip_vrfs, &intent);
+        }
+        assert!(owned.installs.is_empty(), "route never installed");
+        assert!(owned.kernel_neighbors.contains(&(42, nh)));
+        assert!(owned.kernel_fdb.contains(&(42, rmac)));
+
+        // Intent disappears.
+        let empty_intent = RemoteIpPrefixTable::new();
+        let cleanup = compute_l3_diff(&empty_intent, &owned, &ready, &ip_vrfs);
+        let kinds: Vec<&str> = cleanup
+            .ops
+            .iter()
+            .map(|op| match op {
+                DataplaneOp::RemoveL3Neighbor { .. } => "neighbor",
+                DataplaneOp::RemoveL3VxlanFdb { .. } => "fdb",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["neighbor", "fdb"],
+            "stranded kernel rows must be cleaned up on the next reconcile"
+        );
+    }
+
+    /// Regression for review finding #2 (inverse leak):
+    /// `RemoveRemoteIpRoute` succeeds, then `RemoveL3Neighbor` fails.
+    /// Owned state: route gone from `installs`, neighbor still in
+    /// `kernel_neighbors`. Next diff pass must retry the neighbor
+    /// remove even though no route remains.
+    #[test]
+    fn failed_neighbor_remove_retries_on_next_pass() {
+        let nh = ip4(10, 0, 0, 2);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+
+        // Simulate post-route-remove state: route gone, kernel
+        // resolution rows still present.
+        let mut owned = L3OwnedState::default();
+        owned.kernel_neighbors.insert((42, nh));
+        owned.kernel_fdb.insert((42, rmac));
+
+        let empty_intent = RemoteIpPrefixTable::new();
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+        let plan = compute_l3_diff(&empty_intent, &owned, &ready, &ip_vrfs);
+        let neighbor_removes = plan
+            .ops
+            .iter()
+            .filter(|op| matches!(op, DataplaneOp::RemoveL3Neighbor { .. }))
+            .count();
+        let fdb_removes = plan
+            .ops
+            .iter()
+            .filter(|op| matches!(op, DataplaneOp::RemoveL3VxlanFdb { .. }))
+            .count();
+        assert_eq!(neighbor_removes, 1, "neighbor removal must retry");
+        assert_eq!(fdb_removes, 1, "FDB removal must retry");
+    }
+
+    /// Regression for review finding #3: two prefixes claim the
+    /// same `(l3vxlan_ifindex, router_mac)` but advertise different
+    /// `next_hop` values → both dropped with
+    /// `L3Drop::RouterMacConflict`, no `AddL3VxlanFdb` emitted.
+    #[test]
+    fn router_mac_conflict_drops_both_prefixes() {
+        let prefix_a = v4([198, 51, 100, 0], 24);
+        let prefix_b = v4([198, 51, 101, 0], 24);
+        let nh_a = ip4(10, 0, 0, 2);
+        let nh_b = ip4(10, 0, 0, 3);
+        let rmac = mac(0xaa); // same MAC, different VTEPs!
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+
+        let intent = intent_with(
+            &ip_vrfs,
+            vec![t5(prefix_a, nh_a, 101, rmac), t5(prefix_b, nh_b, 101, rmac)],
+        );
+        let owned = L3OwnedState::default();
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+        let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
+
+        // Both prefixes dropped.
+        let conflict_drops: Vec<_> = plan
+            .drops
+            .iter()
+            .filter(|d| matches!(d, L3Drop::RouterMacConflict { .. }))
+            .collect();
+        assert_eq!(conflict_drops.len(), 2, "both prefixes must drop");
+        // No FDB add emitted — the conflict drops both candidates.
+        assert!(
+            plan.ops
+                .iter()
+                .all(|op| !matches!(op, DataplaneOp::AddL3VxlanFdb { .. })),
+            "no FDB add when the (idx, mac) maps to multiple VTEPs",
+        );
+        // Same for neighbor adds — neither owner survived.
+        assert!(
+            plan.ops
+                .iter()
+                .all(|op| !matches!(op, DataplaneOp::AddRemoteIpRoute { .. })),
+        );
     }
 }

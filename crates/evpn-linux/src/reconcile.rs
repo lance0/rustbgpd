@@ -811,11 +811,15 @@ impl<D: Dataplane> ReconcileActor<D> {
     ) {
         // Gate 9 slice 6c: snapshot installed-route counts per VRF
         // for the gRPC `IpVrfState.installed_routes_count` surface.
-        // Cheap — O(N) over the L3 owned set.
+        // Only routes whose `route_installed` flag is true contribute
+        // — kernel-resolution rows (neighbor / FDB) are shared
+        // across prefixes and tracked separately.
         let mut ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32> =
             std::collections::HashMap::new();
-        for (vrf_id, _prefix) in self.state.l3_owned.routes.keys() {
-            *ip_vrf_installed_routes.entry(*vrf_id).or_insert(0) += 1;
+        for ((vrf_id, _prefix), install) in &self.state.l3_owned.installs {
+            if install.route_installed {
+                *ip_vrf_installed_routes.entry(*vrf_id).or_insert(0) += 1;
+            }
         }
 
         let report = DataplaneReport {
@@ -859,9 +863,35 @@ impl<D: Dataplane> ReconcileActor<D> {
             Vec::new()
         };
 
-        if self.state.owned.is_empty() && bum_restore_ops.is_empty() {
+        // Compute the L3 drain plan up front so the early-return
+        // guard below also gates on Gate 9 owned state. Drain is
+        // built by running the diff against an empty intent — the
+        // standard remove-everything path through `compute_l3_diff`.
+        // We use the actor's current `intent_rx` ip_vrfs view so the
+        // cached identities on installs still resolve correctly even
+        // if the upstream supervisor has cleared its own table.
+        let l3_drain_plan = if self.state.l3_owned.is_empty() {
+            crate::l3_diff::L3Plan::default()
+        } else {
+            let intent_snapshot = self.intent_rx.borrow().clone();
+            crate::l3_diff::compute_l3_diff(
+                &rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new(),
+                &self.state.l3_owned,
+                &std::collections::BTreeMap::new(),
+                intent_snapshot.ip_vrfs.as_ref(),
+            )
+        };
+
+        if self.state.owned.is_empty() && bum_restore_ops.is_empty() && l3_drain_plan.ops.is_empty()
+        {
             return;
         }
+
+        let intent_for_l3 = self.intent_rx.borrow().clone();
+        let l3_intent = intent_for_l3.remote_ip_prefixes.clone();
+        let l3_ip_vrfs = intent_for_l3.ip_vrfs.clone();
+        let ready_l3vxlan_empty: std::collections::BTreeMap<IpVrfId, u32> =
+            std::collections::BTreeMap::new();
 
         let drain_fut = async {
             for op in bum_restore_ops {
@@ -892,6 +922,24 @@ impl<D: Dataplane> ReconcileActor<D> {
                     self.state.owned.record_withdrawn(vni, mac);
                 }
             }
+
+            // Gate 9 slice 6c L3 drain. Withdraw every owned route
+            // + tear down the kernel resolution rows. Failed ops are
+            // best-effort like the L2 path; the next startup's diff
+            // re-converges against whatever the kernel still has.
+            for op in &l3_drain_plan.ops {
+                if let Err(e) = self.dataplane.apply(op).await {
+                    tracing::debug!(error = %e, ?op, "L3 drain op failed");
+                } else {
+                    crate::l3_diff::record_l3_success(
+                        &mut self.state.l3_owned,
+                        op,
+                        &ready_l3vxlan_empty,
+                        l3_ip_vrfs.as_ref(),
+                        l3_intent.as_ref(),
+                    );
+                }
+            }
         };
 
         if tokio::time::timeout(self.config.drain_timeout, drain_fut)
@@ -900,7 +948,10 @@ impl<D: Dataplane> ReconcileActor<D> {
         {
             tracing::warn!(
                 remaining = self.state.owned.len(),
-                "drain timeout exceeded; remaining owned FDB entries left for next startup"
+                l3_remaining = self.state.l3_owned.installs.len(),
+                l3_neighbors_remaining = self.state.l3_owned.kernel_neighbors.len(),
+                l3_fdb_remaining = self.state.l3_owned.kernel_fdb.len(),
+                "drain timeout exceeded; remaining owned entries left for next startup"
             );
         }
     }
