@@ -138,7 +138,7 @@ pub struct RemoteIpPrefixEntry {
 /// Per-IP-VRF imported prefix table. Keyed by `(IpVrfId, prefix)` so
 /// the same prefix can legitimately appear in multiple IP-VRFs (RFC
 /// 9136 §4.4.2 allows the same RT under different tenants).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RemoteIpPrefixTable {
     entries: BTreeMap<(IpVrfId, EvpnIpPrefixValue), RemoteIpPrefixEntry>,
     drops: Vec<DropReason>,

@@ -11,6 +11,117 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 9 slice 6 — symmetric Interface-less IRB
+  end-to-end (PR A #77 + PR B #78).** Closes the Gate 9
+  control + dataplane loop for RFC 9136 §4.4.2 symmetric
+  Interface-less IRB. The previous slices unlocked the
+  readiness gate; slice 6 lights up the actual datapath in
+  both directions.
+
+  **Slice 6 PR A (#77) — local Type 5 origination.** Per
+  IP-VRF kernel-route dump on every reconcile pass through
+  `Dataplane::dump_ip_vrf_routes` (RTM_GETROUTE over
+  rtnetlink, filtered to the VRF's `table_id`). A
+  conservative classifier keeps connected (`RTPROT_KERNEL`)
+  and manual (`RTPROT_BOOT`, `RTPROT_STATIC`) routes and
+  drops other routing daemons' routes (`RTPROT_BGP`,
+  `RTPROT_ZEBRA`, `RTPROT_OSPF`, …), non-forwardable types
+  (`RTN_LOCAL`, `RTN_BROADCAST`, `RTN_MULTICAST`,
+  `RTN_UNREACHABLE`, `RTN_PROHIBIT`, `RTN_BLACKHOLE`,
+  `RTN_THROW`), link-local / multicast prefixes, and any
+  route whose output device is the IP-VRF's own L3 VXLAN
+  (these are the import path's installs — looping them back
+  as originations would be wrong). The daemon mirrors the
+  observation set onto a `tokio::sync::watch` channel that
+  the new L3 originator task subscribes to alongside the
+  slice-5 readiness watch. The originator's level-triggered
+  diff loop injects Type 5 routes when the IP-VRF is `Ready`
+  and withdraws them on readiness loss; transient netlink
+  failures preserve the last-good observation snapshot so a
+  hiccup doesn't cascade into a mass withdraw. New
+  `IpVrfState.originated_routes_count` field surfaced via
+  gRPC + CLI; new Prometheus series for observed gauge,
+  filtered counter, and origination-suppressed counter.
+
+  **Slice 6 PR B (#78) — remote Type 5 import + L3 FIB
+  programming.** The daemon subscribes to the EVPN best-path
+  broadcast, runs `project_ip_prefix_routes()` on each
+  refreshed RIB view (RT-keyed import, Router MAC
+  enforcement, self-origination filtering), and drives the
+  kernel through a transactional L3 ownership model
+  (`crates/evpn-linux/src/l3_diff.rs`):
+  - `L3OwnedState` tracks per `(IpVrfId, prefix)` install
+    state plus shared kernel resolution rows —
+    `kernel_neighbors: BTreeMap<(idx, ip), MacAddress>` and
+    `kernel_fdb: BTreeMap<(idx, MacAddress), IpAddr>`. The
+    diff catches both refcount changes *and* value drift, so
+    a Router MAC or next-hop transition under the same
+    prefix emits an atomic `.replace()` op on the kernel-side
+    row rather than silently misforwarding traffic at the
+    old VTEP.
+  - Three netlink primitives per remote prefix: kernel IP
+    route in `IpVrf.table_id` (RTPROT_BGP + RTNH_F_ONLINK,
+    via `RouteAttribute::Table` for table_id ≥ 256 with
+    RT_TABLE_COMPAT = 252), L3 neighbor `(dev, dst → lladdr)`
+    (NUD_PERMANENT + NTF_EXT_LEARNED), L3VXLAN FDB
+    `(dev, lladdr → dst)` (NTF_SELF +
+    NUD_NOARP|NUD_PERMANENT + extern_learn). Family mismatch
+    rejected at build time.
+  - Four-phase apply ordering — route-remove → resolution-add
+    (neighbor → FDB) → route-add → resolution-remove — keeps
+    the kernel forwarding-safe across transitions. Routes
+    referencing soon-to-be-added resolution land after the
+    resolution; routes referencing soon-to-be-removed
+    resolution land before the resolution goes away.
+  - Router MAC conflict detection: two prefixes mapping
+    `(L3VXLAN ifindex, router_mac)` to different next-hops
+    drops *all* conflicting prefixes with
+    `L3Drop::RouterMacConflict` rather than silently
+    misforwarding to one VTEP.
+  - Foreign-state preservation enforced by diffing only
+    against `L3OwnedState`, never the kernel dump.
+  - Shutdown drain (`reconcile::drain`) computes
+    `compute_l3_diff` against empty intent so L3 ownership
+    state unwinds before the actor exits.
+
+  Validated by 11 unit tests in `l3_diff.rs` covering cold
+  start, refcount, shape change, value drift (fdb_dst +
+  neighbor_lladdr), Router MAC conflict, partial-success
+  cleanup, failed-remove retry, NotReady drain, and
+  idempotent `record_l3_success`. Two privileged netns
+  integration tests at
+  `crates/evpn-linux/tests/netns_l3_install.rs` (gated on
+  `EVPN_LINUX_NETNS=1`) re-exec the process inside an `ip
+  netns` and assert kernel `ip route show table`, `ip neigh
+  show dev`, and `bridge fdb show dev` produce the expected
+  rows; one test pre-loads a `proto static` foreign route
+  and verifies it survives our install/withdraw cycle.
+
+  Operator surface: `IpVrfState.installed_routes_count` in
+  the gRPC `ListIpVrfs` / `GetIpVrf` responses and the
+  `rustbgpctl evpn vrfs` output;
+  `DataplaneReport.ip_vrf_installed_routes` for in-process
+  consumers.
+
+  **M39 manual containerlab smoke** at
+  `tests/interop/m39-evpn-type5-symmetric-irb.clab.yml`
+  validates the slice end-to-end against FRR 10.3.1: two
+  PEs (rustbgpd 10.0.0.1 + FRR 10.0.0.2) in direct iBGP,
+  both running vrf1 / L3VNI 100 with the L3VXLAN device
+  enslaved directly to the VRF (no bridge — ADR-0058 §3
+  Interface-less shape). Asserts BGP Established within
+  30 s; Type 5 origination both directions; PE1 kernel
+  route for 192.0.2.2/32 via 10.0.0.2 dev l3vxlan100 in
+  table 100; PE1 neighbor row `10.0.0.2 lladdr <PE2
+  router_mac> PERMANENT extern_learn`; PE1 FDB row `<PE2
+  router_mac> dev l3vxlan100 dst 10.0.0.2 self
+  extern_learn`; `IpVrfState.installed_routes_count == 1`;
+  bidirectional `ip vrf exec vrf1 ping` over the L3VNI
+  VXLAN tunnel; `ip addr del` on PE1's tenant dummy → FRR
+  drops the Type 5 within 30 s. Manual only — same
+  hosted-runner gap as M30b (Azure kernel lacks `vrf`
+  module).
+
 - **EVPN Gate 9 `DataplaneReport.ip_vrf_status` rows +
   `rustbgpctl evpn vrfs [NAME]` (slice 5).** Final operator-visibility
   slice in the Gate 9 readiness chain — closes the loop from

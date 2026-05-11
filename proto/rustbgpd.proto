@@ -1086,6 +1086,14 @@ message IpVrfState {
   // last-known view of the RIB, not as a synchronous mirror of
   // `readiness_state`.
   uint32 originated_routes_count = 14;
+  // Remote EVPN Type 5 routes currently installed in this IP-VRF's
+  // kernel route table (Gate 9 slice 6c). Updated on every
+  // reconcile pass from the L3 reconciler's owned-set bookkeeping.
+  // Eventually consistent with `readiness_state`: a Ready→NotReady
+  // transition drains the count on the next reconcile pass, but
+  // during that pass (or while retrying a rejected withdraw) the
+  // value can be non-zero alongside NOT_READY.
+  uint32 installed_routes_count = 15;
 }
 
 // Coarse readiness verdict for an IP-VRF. The detailed predicate

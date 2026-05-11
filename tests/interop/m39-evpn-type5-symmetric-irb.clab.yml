@@ -1,0 +1,101 @@
+# Containerlab topology: rustbgpd PE1 ↔ FRR PE2, bidirectional EVPN
+# Type 5 (M39 — RFC 9136 §4.4.2 symmetric Interface-less IRB)
+#
+# Validates the full Gate 9 slice 6 datapath end-to-end:
+#
+#   1. Direct iBGP L2VPN/EVPN session between two VTEPs (no RR).
+#   2. rustbgpd PE1 originates Type 5 for tenant subnet
+#      192.0.2.0/24 from its kernel routing table (slice 6a/6b),
+#      and FRR receives it on PE2.
+#   3. FRR PE2 originates Type 5 for tenant subnet 198.51.100.0/24
+#      via its `advertise ipv4 unicast` mechanism, and rustbgpd
+#      PE1 receives, projects, and installs the route into
+#      vrf1's kernel table together with the corresponding L3
+#      neighbor + L3VXLAN FDB rows (slice 6c).
+#   4. Cross-subnet ping across the L3VNI VXLAN tunnel succeeds
+#      (PE1's .1 ↔ PE2's .1 on different tenant subnets).
+#   5. Withdraw legs: removing the tenant prefix on either side
+#      tears down the kernel state on the other.
+#
+# Subnets are non-overlapping (PE1 = 192.0.2.0/24, PE2 =
+# 198.51.100.0/24) so the L3VNI carries every PE1↔PE2 packet —
+# anycast-gateway scenarios where both PEs share a subnet are
+# out of scope for this smoke.
+#
+# This is the M39 manual smoke. CI keeps Gate 9 to control-plane
+# only (M30b — decode + RR reflection). M39 requires:
+#   - CAP_NET_ADMIN
+#   - kernel `vrf` module present (Azure GHA runners have
+#     historically lacked it intermittently)
+#   - containerlab + Docker
+#
+# Topology:
+#   PE1 (rustbgpd)              PE2 (FRR 10.3.1)
+#   10.0.0.1, AS 65000          10.0.0.2, AS 65000
+#       │                            │
+#       └─── iBGP L2VPN/EVPN ────────┘
+#       │                            │
+#   vrf1 / L3VNI 100              vrf1 / L3VNI 100
+#   lo-vrf1: 192.0.2.1/24         lo-vrf1: 198.51.100.1/24
+#   advertises 192.0.2.0/24       advertises 198.51.100.0/24
+#
+# Usage:
+#   containerlab deploy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
+#   bash tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
+#   containerlab destroy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
+
+name: m39-evpn-type5-symmetric-irb
+
+topology:
+  nodes:
+    pe1:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m39-pe1.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-m39-pe1.sh:/usr/local/bin/start-rustbgpd-m39-pe1.sh:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        # Topology setup is run by the test driver after deploy so
+        # the operator can inspect device ordering issues. See
+        # tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh.
+      env:
+        RUST_LOG: info,rustbgpd_evpn_linux=debug
+
+    pe2:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m39-pe2.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-l3.sh:/usr/local/bin/start-frr-vtep-l3.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        # Kernel topology (VRF + L3VXLAN + bridge + SVI + tenant
+        # loopback) BEFORE FRR boots. zebra reads the bridge's VRF
+        # membership when it sees the VXLAN device come up — see
+        # start-frr-vtep-l3.sh for the ordering rationale.
+        - /usr/local/bin/start-frr-vtep-l3.sh 10.0.0.2 100 vrf1 198.51.100.1/24
+      env:
+        VTEP_LOOPBACK: 10.0.0.2
+        VTEP_VNI: "100"
+        TENANT_VRF: vrf1
+        TENANT_PREFIX: 198.51.100.1/24
+
+  links:
+    - endpoints: ["pe1:eth1", "pe2:eth1"]
+
+# Underlay: 10.0.0.0/24 — PE1 (10.0.0.1) ↔ PE2 (10.0.0.2)
+# L3VNI: 100 (bound to vrf1 on both PEs, encoded in Type 5 label).
+# Tenant subnets (non-overlapping so every PE↔PE packet crosses the
+# L3VNI tunnel; slice 6a's classifier filters RTN_LOCAL host-route
+# rows, so /24 on the dummy is what produces the RTN_UNICAST
+# connected route the originator picks up):
+#   - PE1: 192.0.2.1/24 on lo-vrf1 → originates 192.0.2.0/24
+#   - PE2: 198.51.100.1/24 on lo-vrf1 → originates 198.51.100.0/24
+# Router MAC: operator-supplied for rustbgpd via the `router_mac`
+# field in `[[evpn_ip_vrfs]]`; zebra-derived for FRR.

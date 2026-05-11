@@ -1204,6 +1204,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             rustbgpd_evpn::IpVrfId,
             Vec<rustbgpd_evpn::LocalIpRouteObservation>,
         >::new()));
+
+    // Latest per-VRF installed-route counts (Gate 9 slice 6c). The
+    // reconcile actor's L3 install pipeline emits these on every
+    // report; the daemon mirrors them onto a watch channel that the
+    // gRPC `IpVrfState.installed_routes_count` field reads
+    // lock-free.
+    let (evpn_ip_vrf_installed_routes_tx, evpn_ip_vrf_installed_routes_rx) =
+        tokio::sync::watch::channel(std::sync::Arc::new(std::collections::HashMap::<
+            rustbgpd_evpn::IpVrfId,
+            u32,
+        >::new()));
     if let Some(handle) = evpn_dataplane_handle.as_ref() {
         let mut reports = handle.subscribe_reports();
         // Resolve IpVrfId → operator-facing name for the metric labels
@@ -1266,6 +1277,26 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                                  last-good observation snapshot"
                             );
                         }
+                        // Slice 6c: publish installed-route counts to
+                        // the watch channel + Prometheus gauge. The
+                        // reconcile actor populates
+                        // `report.ip_vrf_installed_routes` from its
+                        // L3 owned set on every pass; this is
+                        // authoritative (no `Option` wrap needed
+                        // because a kernel dump failure during L3
+                        // install just leaves the count at its prior
+                        // value — the owned set itself doesn't
+                        // change on failure).
+                        for (vrf_id, count) in &report.ip_vrf_installed_routes {
+                            let label = vrf_id_to_name
+                                .get(vrf_id)
+                                .cloned()
+                                .unwrap_or_else(|| vrf_id.as_u32().to_string());
+                            metrics_for_routes
+                                .set_evpn_ip_vrf_installed_routes(&label, i64::from(*count));
+                        }
+                        evpn_ip_vrf_installed_routes_tx
+                            .send_replace(std::sync::Arc::new(report.ip_vrf_installed_routes));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // The reconcile actor emits at most one report
@@ -1330,6 +1361,14 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_originated_ip_vrf_route_count: {
             let counts = evpn_originated_ip_vrf_route_counts.clone();
             Arc::new(move |vni| rustbgpd_evpn::IpVrfId::new(vni).map_or(0, |id| counts.count(id)))
+        },
+        evpn_installed_ip_vrf_route_count: {
+            let rx = evpn_ip_vrf_installed_routes_rx.clone();
+            Arc::new(move |vni| {
+                rustbgpd_evpn::IpVrfId::new(vni).map_or(0, |id| {
+                    u64::from(rx.borrow().get(&id).copied().unwrap_or(0))
+                })
+            })
         },
     };
     let mut grpc_handle = tokio::spawn(async move {

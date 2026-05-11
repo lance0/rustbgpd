@@ -186,6 +186,11 @@ struct ActorState {
     /// of the intent (operator removed the `[[evpn_ip_vrfs]]` entry)
     /// is removed from this map on the next pass.
     last_ip_vrf_status: BTreeMap<IpVrfId, IpVrfStatus>,
+    /// L3 owned set: installed routes, refcounted neighbor entries,
+    /// refcounted L3VXLAN FDB entries (Gate 9 slice 6c). Updated
+    /// only on successful kernel apply; a failed op leaves the
+    /// in-memory state unchanged so the next reconcile pass retries.
+    l3_owned: crate::l3_diff::L3OwnedState,
 }
 
 impl ActorState {
@@ -201,6 +206,7 @@ impl ActorState {
             epoch: Instant::now(),
             last_bum_plan: BTreeMap::new(),
             last_ip_vrf_status: BTreeMap::new(),
+            l3_owned: crate::l3_diff::L3OwnedState::default(),
         }
     }
 
@@ -331,6 +337,7 @@ impl<D: Dataplane> ReconcileActor<D> {
     }
 
     /// One reconcile pass: probe → dump → diff → apply → emit report.
+    #[allow(clippy::too_many_lines)]
     async fn reconcile_once(&mut self) {
         self.state.reconcile_generation = self.state.reconcile_generation.saturating_add(1);
 
@@ -465,6 +472,121 @@ impl<D: Dataplane> ReconcileActor<D> {
             // start builds a fresh actor with an empty applied-state
             // baseline.
             self.state.last_bum_plan = new_bum_plan.iter().map(|p| (p.ifindex, p.flags)).collect();
+        }
+
+        // Gate 9 slice 6c: drive the L3 install pipeline. Pure-
+        // function diff computes the ops from
+        // `intent.remote_ip_prefixes` vs the actor's `l3_owned`
+        // refcounted set; we then apply them sequentially and
+        // record successes back into the owned state. Failures
+        // leave the owned state unchanged so the next reconcile
+        // pass retries with the same shape.
+        //
+        // Skip the whole loop only when **both** the intent and
+        // the owned state are empty — the zero-cost RR-only
+        // deployment path. If config reload (or SIGHUP-driven
+        // removal of every `[[evpn_ip_vrfs]]` entry) leaves
+        // `intent.ip_vrfs` empty but `l3_owned` non-empty, the
+        // diff still has work to do: it must drain every owned
+        // route / neighbor / FDB row, otherwise the kernel keeps
+        // forwarding through L3VXLAN devices whose IP-VRF
+        // configuration is gone. The diff handles empty intent
+        // naturally — `desired_*` sets evaluate empty and Phase D
+        // removals fire for every kernel row.
+        if !intent.ip_vrfs.is_empty() || !self.state.l3_owned.is_empty() {
+            let ready_l3vxlan_ifindex: std::collections::BTreeMap<IpVrfId, u32> = ip_vrf_status_map
+                .iter()
+                .filter_map(|(id, status)| match status {
+                    rustbgpd_evpn::ip_vrf::IpVrfStatus::Ready {
+                        l3vxlan_ifindex, ..
+                    } => Some((*id, *l3vxlan_ifindex)),
+                    rustbgpd_evpn::ip_vrf::IpVrfStatus::NotReady { .. } => None,
+                })
+                .collect();
+            let l3_plan = crate::l3_diff::compute_l3_diff(
+                intent.remote_ip_prefixes.as_ref(),
+                &self.state.l3_owned,
+                &ready_l3vxlan_ifindex,
+                intent.ip_vrfs.as_ref(),
+            );
+            for drop in &l3_plan.drops {
+                tracing::debug!(?drop, "L3 install drop");
+            }
+            // Apply-time fail-stop: an `AddRemoteIpRoute` whose
+            // prerequisite `AddL3Neighbor` or `AddL3VxlanFdb` failed
+            // earlier in this pass MUST NOT proceed — otherwise the
+            // kernel ends up with a `proto bgp / onlink` route
+            // pointing at an unresolved L3VXLAN path, and operators
+            // see `installed_routes_count` incremented even though
+            // forwarding is broken. The diff's phase ordering
+            // (resolution adds in phase B, route adds in phase C)
+            // guarantees that by the time we reach an
+            // `AddRemoteIpRoute`, every prerequisite resolution add
+            // in *this* plan has already been attempted, so the
+            // failed-key sets are complete. Prerequisites already
+            // present in `l3_owned` from a prior pass are not in
+            // these sets — those routes are free to install.
+            let mut failed_neighbor_keys: std::collections::HashSet<(u32, std::net::IpAddr)> =
+                std::collections::HashSet::new();
+            let mut failed_fdb_keys: std::collections::HashSet<(u32, MacAddress)> =
+                std::collections::HashSet::new();
+            for op in &l3_plan.ops {
+                if let crate::dataplane::DataplaneOp::AddRemoteIpRoute {
+                    l3vxlan_ifindex,
+                    next_hop,
+                    router_mac,
+                    ..
+                } = op
+                {
+                    let neigh_failed =
+                        failed_neighbor_keys.contains(&(*l3vxlan_ifindex, *next_hop));
+                    let fdb_failed = failed_fdb_keys.contains(&(*l3vxlan_ifindex, *router_mac));
+                    if neigh_failed || fdb_failed {
+                        tracing::warn!(
+                            ?op,
+                            neigh_failed,
+                            fdb_failed,
+                            "skipping AddRemoteIpRoute — prerequisite L3 resolution add failed in this pass; next reconcile will retry"
+                        );
+                        continue;
+                    }
+                }
+                match self.dataplane.apply(op).await {
+                    Ok(()) => {
+                        crate::l3_diff::record_l3_success(
+                            &mut self.state.l3_owned,
+                            op,
+                            &ready_l3vxlan_ifindex,
+                            intent.ip_vrfs.as_ref(),
+                            intent.remote_ip_prefixes.as_ref(),
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            ?op,
+                            "L3 op failed; preserving owned state for next reconcile retry"
+                        );
+                        match op {
+                            crate::dataplane::DataplaneOp::AddL3Neighbor {
+                                l3vxlan_ifindex,
+                                next_hop,
+                                ..
+                            } => {
+                                failed_neighbor_keys.insert((*l3vxlan_ifindex, *next_hop));
+                            }
+                            crate::dataplane::DataplaneOp::AddL3VxlanFdb {
+                                l3vxlan_ifindex,
+                                router_mac,
+                                ..
+                            } => {
+                                failed_fdb_keys.insert((*l3vxlan_ifindex, *router_mac));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
 
         let status = build_instance_status(&intent.instances, &probes);
@@ -680,6 +802,17 @@ impl<D: Dataplane> ReconcileActor<D> {
                 // Clear the BUM-side retry schedule for the ifindex.
                 self.state.bum_retry.record_success(*ifindex);
             }
+            DataplaneOp::AddRemoteIpRoute { .. }
+            | DataplaneOp::RemoveRemoteIpRoute { .. }
+            | DataplaneOp::AddL3Neighbor { .. }
+            | DataplaneOp::RemoveL3Neighbor { .. }
+            | DataplaneOp::AddL3VxlanFdb { .. }
+            | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+                // Gate 9 slice 6c L3 ops have their own owned-set
+                // and retry tracking inside the L3 diff loop
+                // (separate from this L2 FDB accounting).
+                // Handled by `record_success_l3` in the L3 path.
+            }
         }
     }
 
@@ -738,6 +871,29 @@ impl<D: Dataplane> ReconcileActor<D> {
         ip_vrf_status: Vec<rustbgpd_evpn::IpVrfDataplaneStatus>,
         ip_vrf_routes: Option<rustbgpd_evpn::ip_vrf::IpVrfRouteDump>,
     ) {
+        // Gate 9 slice 6c: snapshot installed-route counts per VRF
+        // for the gRPC `IpVrfState.installed_routes_count` surface
+        // and the Prometheus `evpn_ip_vrf_installed_routes` gauge.
+        // Only routes whose `route_installed` flag is true contribute
+        // — kernel-resolution rows (neighbor / FDB) are shared
+        // across prefixes and tracked separately.
+        //
+        // **Pre-populate every configured VRF at 0** before the
+        // incrementing pass: downstream consumers (notably the
+        // Prometheus gauge publisher) drive `set(label, value)` from
+        // this map, so a VRF whose count transitions from N → 0 must
+        // appear here as `(vrf_id, 0)` for the gauge to converge to
+        // zero. Without this pre-population, a VRF that drained
+        // would never reappear in the map and the gauge would retain
+        // a stale non-zero value until daemon restart.
+        let mut ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32> =
+            ip_vrf_status.iter().map(|row| (row.vrf_id, 0)).collect();
+        for ((vrf_id, _prefix), install) in &self.state.l3_owned.installs {
+            if install.route_installed {
+                *ip_vrf_installed_routes.entry(*vrf_id).or_insert(0) += 1;
+            }
+        }
+
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
             reconcile_generation: self.state.reconcile_generation,
@@ -747,6 +903,7 @@ impl<D: Dataplane> ReconcileActor<D> {
             bum_enforcement,
             ip_vrf_status,
             ip_vrf_routes,
+            ip_vrf_installed_routes,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
@@ -778,9 +935,35 @@ impl<D: Dataplane> ReconcileActor<D> {
             Vec::new()
         };
 
-        if self.state.owned.is_empty() && bum_restore_ops.is_empty() {
+        // Compute the L3 drain plan up front so the early-return
+        // guard below also gates on Gate 9 owned state. Drain is
+        // built by running the diff against an empty intent — the
+        // standard remove-everything path through `compute_l3_diff`.
+        // We use the actor's current `intent_rx` ip_vrfs view so the
+        // cached identities on installs still resolve correctly even
+        // if the upstream supervisor has cleared its own table.
+        let l3_drain_plan = if self.state.l3_owned.is_empty() {
+            crate::l3_diff::L3Plan::default()
+        } else {
+            let intent_snapshot = self.intent_rx.borrow().clone();
+            crate::l3_diff::compute_l3_diff(
+                &rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new(),
+                &self.state.l3_owned,
+                &std::collections::BTreeMap::new(),
+                intent_snapshot.ip_vrfs.as_ref(),
+            )
+        };
+
+        if self.state.owned.is_empty() && bum_restore_ops.is_empty() && l3_drain_plan.ops.is_empty()
+        {
             return;
         }
+
+        let intent_for_l3 = self.intent_rx.borrow().clone();
+        let l3_intent = intent_for_l3.remote_ip_prefixes.clone();
+        let l3_ip_vrfs = intent_for_l3.ip_vrfs.clone();
+        let ready_l3vxlan_empty: std::collections::BTreeMap<IpVrfId, u32> =
+            std::collections::BTreeMap::new();
 
         let drain_fut = async {
             for op in bum_restore_ops {
@@ -811,6 +994,24 @@ impl<D: Dataplane> ReconcileActor<D> {
                     self.state.owned.record_withdrawn(vni, mac);
                 }
             }
+
+            // Gate 9 slice 6c L3 drain. Withdraw every owned route
+            // + tear down the kernel resolution rows. Failed ops are
+            // best-effort like the L2 path; the next startup's diff
+            // re-converges against whatever the kernel still has.
+            for op in &l3_drain_plan.ops {
+                if let Err(e) = self.dataplane.apply(op).await {
+                    tracing::debug!(error = %e, ?op, "L3 drain op failed");
+                } else {
+                    crate::l3_diff::record_l3_success(
+                        &mut self.state.l3_owned,
+                        op,
+                        &ready_l3vxlan_empty,
+                        l3_ip_vrfs.as_ref(),
+                        l3_intent.as_ref(),
+                    );
+                }
+            }
         };
 
         if tokio::time::timeout(self.config.drain_timeout, drain_fut)
@@ -819,7 +1020,10 @@ impl<D: Dataplane> ReconcileActor<D> {
         {
             tracing::warn!(
                 remaining = self.state.owned.len(),
-                "drain timeout exceeded; remaining owned FDB entries left for next startup"
+                l3_remaining = self.state.l3_owned.installs.len(),
+                l3_neighbors_remaining = self.state.l3_owned.kernel_neighbors.len(),
+                l3_fdb_remaining = self.state.l3_owned.kernel_fdb.len(),
+                "drain timeout exceeded; remaining owned entries left for next startup"
             );
         }
     }
@@ -921,9 +1125,15 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
         DataplaneOp::AddRemoteFdb { vni, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, .. }
         | DataplaneOp::RemoveRemoteFdb { vni, .. } => *vni,
-        DataplaneOp::SetBumPortFlags { .. } => {
+        DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
             // VNI 0 is invalid in the domain type, so VNI 1 is the
-            // harmless report placeholder.
+            // harmless report placeholder for non-L2-FDB ops.
             rustbgpd_evpn::EvpnInstanceId::new(1).expect("VNI 1 is always valid")
         }
     }
@@ -937,7 +1147,13 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
         DataplaneOp::AddRemoteFdb { mac, .. }
         | DataplaneOp::UpdateRemoteFdb { mac, .. }
         | DataplaneOp::RemoveRemoteFdb { mac, .. } => *mac,
-        DataplaneOp::SetBumPortFlags { .. } => rustbgpd_evpn::MacAddress::new([0; 6]),
+        DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => rustbgpd_evpn::MacAddress::new([0; 6]),
     }
 }
 
@@ -954,6 +1170,18 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         DataplaneOp::RemoveRemoteFdb { mac, .. } => DataplaneOpKind::RemoveRemoteFdb { mac: *mac },
         DataplaneOp::SetBumPortFlags { ifindex, .. } => {
             DataplaneOpKind::SetBumPortFlags { ifindex: *ifindex }
+        }
+        // Gate 9 L3 ops use a parallel accounting surface
+        // (`AppliedL3Op` lands with the reconciler diff loop). They
+        // never reach the L2 `op_to_kind` path under the current
+        // apply_plan, so this arm is structurally unreachable.
+        DataplaneOp::AddRemoteIpRoute { .. }
+        | DataplaneOp::RemoveRemoteIpRoute { .. }
+        | DataplaneOp::AddL3Neighbor { .. }
+        | DataplaneOp::RemoveL3Neighbor { .. }
+        | DataplaneOp::AddL3VxlanFdb { .. }
+        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+            unreachable!("L3 ops use a separate AppliedL3Op accounting path")
         }
     }
 }

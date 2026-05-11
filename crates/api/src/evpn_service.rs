@@ -31,6 +31,11 @@ pub type OriginatedLocalMacCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'sta
 /// state.
 pub type OriginatedIpVrfRouteCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'static>;
 
+/// Read-side hook for per-IP-VRF Type 5 installed-route counts
+/// (Gate 9 slice 6c). The daemon backs it with a `tokio::sync::watch`
+/// fed from `DataplaneReport.ip_vrf_installed_routes`.
+pub type InstalledIpVrfRouteCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'static>;
+
 /// Read-side hook for the latest per-IP-VRF readiness snapshot.
 ///
 /// The daemon subscribes to `DataplaneReport.ip_vrf_status` and
@@ -46,6 +51,7 @@ pub struct EvpnService {
     originated_local_mac_count: OriginatedLocalMacCountFn,
     ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
+    installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
 }
 
 impl EvpnService {
@@ -60,6 +66,7 @@ impl EvpnService {
             originated_local_mac_count: Arc::new(|_| 0),
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
+            installed_ip_vrf_route_count: Arc::new(|_| 0),
         }
     }
 
@@ -78,6 +85,7 @@ impl EvpnService {
             originated_local_mac_count,
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
+            installed_ip_vrf_route_count: Arc::new(|_| 0),
         }
     }
 
@@ -94,6 +102,7 @@ impl EvpnService {
         originated_local_mac_count: OriginatedLocalMacCountFn,
         ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
         originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
+        installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
     ) -> Self {
         Self {
             instances,
@@ -101,6 +110,7 @@ impl EvpnService {
             originated_local_mac_count,
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
+            installed_ip_vrf_route_count,
         }
     }
 }
@@ -141,7 +151,8 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .iter()
             .map(|vrf| {
                 let originated = (self.originated_ip_vrf_route_count)(vrf.id.as_u32());
-                ip_vrf_to_proto(vrf, by_id.get(&vrf.id).copied(), originated)
+                let installed = (self.installed_ip_vrf_route_count)(vrf.id.as_u32());
+                ip_vrf_to_proto(vrf, by_id.get(&vrf.id).copied(), originated, installed)
             })
             .collect();
         Ok(Response::new(proto::ListIpVrfsResponse { ip_vrfs }))
@@ -159,7 +170,10 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         let snapshot = (self.ip_vrf_status_snapshot)();
         let status = snapshot.iter().find(|r| r.vrf_id == vrf.id);
         let originated = (self.originated_ip_vrf_route_count)(vrf.id.as_u32());
-        Ok(Response::new(ip_vrf_to_proto(vrf, status, originated)))
+        let installed = (self.installed_ip_vrf_route_count)(vrf.id.as_u32());
+        Ok(Response::new(ip_vrf_to_proto(
+            vrf, status, originated, installed,
+        )))
     }
 }
 
@@ -179,6 +193,7 @@ fn ip_vrf_to_proto(
     vrf: &rustbgpd_evpn::ip_vrf::IpVrf,
     status: Option<&IpVrfDataplaneStatus>,
     originated_routes_count: u64,
+    installed_routes_count: u64,
 ) -> proto::IpVrfState {
     let mut state = proto::IpVrfState {
         name: vrf.name.clone(),
@@ -195,6 +210,7 @@ fn ip_vrf_to_proto(
         l3vxlan_ifindex: 0,
         not_ready_reasons: Vec::new(),
         originated_routes_count: u32::try_from(originated_routes_count).unwrap_or(u32::MAX),
+        installed_routes_count: u32::try_from(installed_routes_count).unwrap_or(u32::MAX),
     };
 
     let Some(row) = status else {
@@ -454,6 +470,7 @@ mod tests {
                 }]
             }),
             Arc::new(|_| 0),
+            Arc::new(|_| 0),
         );
 
         let resp = svc
@@ -504,6 +521,7 @@ mod tests {
                     },
                 }]
             }),
+            Arc::new(|_| 0),
             Arc::new(|_| 0),
         );
 
@@ -559,6 +577,7 @@ mod tests {
             Arc::new(|_| 0),
             Arc::new(Vec::new),
             Arc::new(|_| 0),
+            Arc::new(|_| 0),
         );
 
         let resp = svc
@@ -604,6 +623,7 @@ mod tests {
             Arc::new(table),
             Arc::new(|_| 0),
             Arc::new(Vec::new),
+            Arc::new(|_| 0),
             Arc::new(|_| 0),
         );
 

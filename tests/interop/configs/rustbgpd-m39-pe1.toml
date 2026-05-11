@@ -1,0 +1,54 @@
+# M39 PE1 (rustbgpd) — symmetric Interface-less IRB / Gate 9 slice 6.
+#
+# Direct iBGP session to FRR PE2 (10.0.0.2). One IP-VRF (vrf1)
+# bound to L3VNI 100. The operator-managed VRF + L3VXLAN devices
+# are created by start-rustbgpd-m39-pe1.sh before the daemon
+# boots — rustbgpd observes them and originates Type 5 routes
+# from the kernel routing table inside table_id 100.
+#
+# Notes:
+#   - `router_mac` is operator-supplied (ADR-0058 §4): rustbgpd
+#     does not auto-derive from the L3VXLAN device's MAC. The
+#     startup script sets the device MAC to this value so the
+#     readiness probe passes.
+#   - The tenant address 192.0.2.1/24 lives on lo-vrf1 (created
+#     by the startup script). `ip addr add 192.0.2.1/24` produces
+#     both an `RTN_LOCAL` host row (filtered by slice 6a) AND an
+#     `RTN_UNICAST` connected route for 192.0.2.0/24 (kept by the
+#     classifier as `Connected` / `RTPROT_KERNEL`); slice 6b
+#     originates the /24 as Type 5. Using /32 here would yield
+#     only the filtered LOCAL row and the daemon would never
+#     originate.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+prometheus_addr = "0.0.0.0:9179"
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe2"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+[[evpn_ip_vrfs]]
+name = "vrf1"
+vni = 100
+rd = "65000:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+# Operator-supplied Router MAC (RFC 9135 §4.2). The startup
+# script writes this value onto the L3VXLAN device so the
+# readiness probe sees a matching kernel-side link-layer addr.
+router_mac = "02:00:00:00:01:01"
+vrf_device = "vrf1"
+l3vxlan_device = "l3vxlan100"
+table_id = 100

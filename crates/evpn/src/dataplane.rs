@@ -37,10 +37,10 @@ use rustbgpd_wire::EthernetSegmentIdentifier;
 /// so the daemon can correlate "I sent gen N" with "Linux applied/failed
 /// gen N" without timestamp guesswork.
 ///
-/// `instances`, `remote_macs`, `bum_enforcement`, and `ip_vrfs` are
-/// `Arc` so the daemon can re-publish a near-identical snapshot
-/// (e.g., only the [`RemoteMacTable`] changed) without cloning the
-/// full instance / VRF tables.
+/// `instances`, `remote_macs`, `bum_enforcement`, `ip_vrfs`, and
+/// `remote_ip_prefixes` are `Arc` so the daemon can re-publish a
+/// near-identical snapshot (e.g., only the [`RemoteMacTable`]
+/// changed) without cloning the full instance / VRF tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataplaneIntent {
     /// Daemon-side monotonic counter. Strictly increases.
@@ -61,6 +61,18 @@ pub struct DataplaneIntent {
     /// when this is empty, so RR-only and L2-only deployments incur
     /// zero added cost.
     pub ip_vrfs: Arc<IpVrfTable>,
+    /// Desired remote IP-prefix installs per `(IpVrfId, prefix)`
+    /// (Gate 9 slice 6c). The supervisor projects received Type 5
+    /// routes through `crate::ip_vrf::project_ip_prefix_routes` once
+    /// per pass and re-publishes the resulting
+    /// [`crate::ip_vrf::RemoteIpPrefixTable`] here. The Linux
+    /// reconciler turns each `RemoteIpPrefixEntry` into a kernel
+    /// route + L3VXLAN neighbor + L3VXLAN FDB triple, with
+    /// refcounting on `(IpVrfId, vtep_ip, router_mac)` so the
+    /// shared L2 resolution objects survive while any installed
+    /// prefix still needs them. Empty when no `[[evpn_ip_vrfs]]`
+    /// are configured.
+    pub remote_ip_prefixes: Arc<crate::ip_vrf::RemoteIpPrefixTable>,
 }
 
 impl DataplaneIntent {
@@ -75,6 +87,7 @@ impl DataplaneIntent {
             remote_macs: Arc::new(RemoteMacTable::new()),
             bum_enforcement: Arc::new(BumEnforcementTable::new()),
             ip_vrfs: Arc::new(IpVrfTable::new()),
+            remote_ip_prefixes: Arc::new(crate::ip_vrf::RemoteIpPrefixTable::new()),
         }
     }
 }
@@ -279,6 +292,14 @@ pub struct DataplaneReport {
     /// failure as "kernel has no routes" and withdraw every
     /// currently-originated Type 5.
     pub ip_vrf_routes: Option<crate::ip_vrf::IpVrfRouteDump>,
+    /// Currently-installed remote Type 5 route count per IP-VRF
+    /// (Gate 9 slice 6c). Updated on every reconcile pass from the
+    /// L3 reconciler's `l3_owned.routes` map. Empty when no
+    /// `[[evpn_ip_vrfs]]` are configured. The daemon mirrors this
+    /// onto a `tokio::sync::watch` channel so the gRPC
+    /// `IpVrfState.installed_routes_count` field reads it
+    /// lock-free.
+    pub ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32>,
 }
 
 /// Per-instance status emitted alongside every report.

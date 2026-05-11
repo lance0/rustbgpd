@@ -23,7 +23,10 @@ set -euo pipefail
 : "${TOPO:?TOPO must be set before sourcing test-lib.sh}"
 PROTO="proto/rustbgpd.proto"
 GRPC_ADDR=""
-RUSTBGPD="clab-${TOPO}-rustbgpd"
+# Drivers with a non-default container name (e.g. M38 / M39 use
+# `pe1` / `pe2` rather than the single-rustbgpd `rustbgpd` shape)
+# can set RUSTBGPD before sourcing this lib.
+RUSTBGPD="${RUSTBGPD:-clab-${TOPO}-rustbgpd}"
 
 pass=0
 fail=0

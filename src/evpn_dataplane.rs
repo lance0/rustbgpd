@@ -352,6 +352,7 @@ async fn supervisor_loop(
 ) {
     let mut generation: u64 = 0;
     let mut last_table = RemoteMacTable::new();
+    let mut last_ip_prefixes = rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new();
     let mut last_bum_enforcement = BumEnforcementTable::new();
     let mut tick = tokio::time::interval(poll_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -364,7 +365,7 @@ async fn supervisor_loop(
                 return;
             }
             _ = tick.tick() => {
-                let table = match build_remote_mac_table(&rib_tx, &instances).await {
+                let tables = match build_intent_tables(&rib_tx, &instances, &ip_vrfs).await {
                     Ok(t) => t,
                     Err(e) => {
                         warn!(error = %e, "EVPN dataplane supervisor: RIB query failed");
@@ -372,7 +373,11 @@ async fn supervisor_loop(
                     }
                 };
                 let bum_enforcement = bum_enforcement_rx.borrow().as_ref().clone();
-                if table == last_table && bum_enforcement == last_bum_enforcement && generation > 0 {
+                if tables.remote_macs == last_table
+                    && tables.remote_ip_prefixes == last_ip_prefixes
+                    && bum_enforcement == last_bum_enforcement
+                    && generation > 0
+                {
                     // No semantic change since the last publish.
                     // Skipping the `intent_tx.send` here keeps the
                     // reconcile actor's permanent-suppression set
@@ -383,14 +388,16 @@ async fn supervisor_loop(
                     continue;
                 }
                 generation = generation.saturating_add(1);
-                last_table = table.clone();
+                last_table = tables.remote_macs.clone();
+                last_ip_prefixes = tables.remote_ip_prefixes.clone();
                 last_bum_enforcement = bum_enforcement.clone();
                 let intent = Arc::new(DataplaneIntent {
                     generation,
                     instances: instances.clone(),
-                    remote_macs: Arc::new(table),
+                    remote_macs: Arc::new(tables.remote_macs),
                     bum_enforcement: Arc::new(bum_enforcement),
                     ip_vrfs: ip_vrfs.clone(),
+                    remote_ip_prefixes: Arc::new(tables.remote_ip_prefixes),
                 });
                 if intent_tx.send(intent).is_err() {
                     debug!("intent receiver gone; supervisor exiting");
@@ -414,6 +421,7 @@ async fn supervisor_loop(
                     remote_macs: Arc::new(last_table.clone()),
                     bum_enforcement: Arc::new(bum_enforcement),
                     ip_vrfs: ip_vrfs.clone(),
+                    remote_ip_prefixes: Arc::new(last_ip_prefixes.clone()),
                 });
                 if intent_tx.send(intent).is_err() {
                     debug!("intent receiver gone; supervisor exiting");
@@ -435,10 +443,20 @@ async fn supervisor_loop(
 /// for the same ESI. Other route types (Type 3 IMET, Type 4 ES, Type 5
 /// IP-Prefix) are ignored for Gate 7b — they're carried by the RR but
 /// the L2VNI dataplane boundary only programs Type 2 MACs.
-async fn build_remote_mac_table(
+/// Outcome of one RIB query: the L2 (Type 2) remote-MAC table plus
+/// the L3 (Type 5) remote-IP-prefix table, projected from the same
+/// `QueryEvpnRoutes` snapshot. Single function so both tables come
+/// from a consistent best-path view.
+struct IntentTables {
+    remote_macs: rustbgpd_evpn::RemoteMacTable,
+    remote_ip_prefixes: rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable,
+}
+
+async fn build_intent_tables(
     rib_tx: &mpsc::Sender<RibUpdate>,
     instances: &EvpnInstanceTable,
-) -> Result<RemoteMacTable, RibQueryError> {
+    ip_vrfs: &rustbgpd_evpn::ip_vrf::IpVrfTable,
+) -> Result<IntentTables, RibQueryError> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
     rib_tx
         .send(RibUpdate::QueryEvpnRoutes { reply: reply_tx })
@@ -477,11 +495,53 @@ async fn build_remote_mac_table(
         .iter()
         .filter_map(|r| project_ead_per_evi(r, &local_vtep_ips))
         .collect();
-    Ok(project_evpn_routes_with_aliases(
-        instances,
-        projected,
-        ead_per_evi,
-    ))
+    let remote_macs = project_evpn_routes_with_aliases(instances, projected, ead_per_evi);
+
+    // Gate 9 slice 6c: project Type 5 (`EvpnRoute::IpPrefix`) routes
+    // through the pure helper. Skip when no IP-VRFs are configured
+    // so RR-only / L2-only deployments incur no per-pass cost.
+    let remote_ip_prefixes = if ip_vrfs.is_empty() {
+        rustbgpd_evpn::ip_vrf::RemoteIpPrefixTable::new()
+    } else {
+        let projected_t5: Vec<rustbgpd_evpn::ip_vrf::ProjectedIpPrefixRoute> =
+            routes.iter().filter_map(project_type5).collect();
+        rustbgpd_evpn::ip_vrf::project_ip_prefix_routes(ip_vrfs, projected_t5)
+    };
+
+    Ok(IntentTables {
+        remote_macs,
+        remote_ip_prefixes,
+    })
+}
+
+/// Translate an `EvpnRibRoute` carrying a Type 5 NLRI into the
+/// projection's `ProjectedIpPrefixRoute` shape (Gate 9 slice 6c).
+/// Returns `None` for non-Type-5 routes. Pulls the RT list and the
+/// optional Router MAC extended community from the route's
+/// `ExtendedCommunities` attribute in one pass via the helper on
+/// `ProjectedIpPrefixRoute`.
+fn project_type5(route: &EvpnRibRoute) -> Option<rustbgpd_evpn::ip_vrf::ProjectedIpPrefixRoute> {
+    let EvpnRoute::IpPrefix(prefix_route) = &route.route else {
+        return None;
+    };
+    let ext_comms: Vec<rustbgpd_wire::ExtendedCommunity> = route
+        .attributes
+        .iter()
+        .find_map(|a| match a {
+            rustbgpd_wire::PathAttribute::ExtendedCommunities(v) => Some(v.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let (route_targets, router_mac) =
+        rustbgpd_evpn::ip_vrf::ProjectedIpPrefixRoute::extcomms_to_fields(&ext_comms);
+    Some(rustbgpd_evpn::ip_vrf::ProjectedIpPrefixRoute {
+        rd: prefix_route.rd,
+        prefix: prefix_route.prefix,
+        next_hop: route.next_hop,
+        l3vni: prefix_route.label.as_vni(),
+        route_targets,
+        router_mac,
+    })
 }
 
 /// Translate a Type 1 EAD-per-EVI [`EvpnRibRoute`] into the
