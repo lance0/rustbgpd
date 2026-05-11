@@ -11,6 +11,44 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **EVPN Gate 9 Type 5 domain helpers (pure-logic).** Two new
+  modules in `rustbgpd_evpn::ip_vrf`:
+  - `origination` — `originate_ip_prefix_route(&IpVrf,
+    &LocalIpRoute) -> Result<OriginatedIpPrefixRoute, …>` builds the
+    full RT-5 NLRI + non-MP path-attribute list for an outbound
+    advertisement. Enforces ADR-0058 §2 on every emit: `label =
+    L3VNI`, `gateway = 0.0.0.0/::` (Interface-less model), `ESI = 0`,
+    `EthernetTag = 0`, `Origin = IGP`, empty `AS_PATH`, RT extcomms
+    from `IpVrf::route_targets`, BGP Encapsulation = VXLAN, Router
+    MAC extcomm = `IpVrf::router_mac`. Rejects mixed-family
+    prefix/vtep_ip pairs structurally.
+  - `projection` — `project_ip_prefix_routes(&IpVrfTable, …) ->
+    RemoteIpPrefixTable` consumes inbound best-path Type 5 records,
+    matches each route's RT extcomms against every IP-VRF's
+    `route_targets`, fans the route out into every matching tenant
+    (RFC 9136 §4.4.2 allows the same prefix to land in multiple
+    IP-VRFs when both legitimately claim the same RT), drops routes
+    that lack the RFC 9135 Router MAC extcomm, and filters
+    self-originated routes whose `NEXT_HOP` matches any local
+    IP-VRF's `local_vtep_ip`. Every drop is reported via
+    `RemoteIpPrefixTable::drops()` with a typed reason so the
+    eventual CLI can render `"prefix dropped: missing Router MAC"`
+    instead of silently losing data.
+
+  Also adds `RouteTarget::to_extended_community` /
+  `from_extended_community` on the public surface — both were
+  previously open-coded in one place (`src/evpn_originator.rs`); the
+  Type 5 origination needs the same encoder so it's moved into the
+  domain crate alongside `RouteTarget` itself.
+
+  Pure: no I/O, no tokio, no kernel state. The daemon-side
+  supervisor lands in a follow-on slice (Step 3: Linux readiness
+  probe; Step 5: end-to-end wiring + M39 smoke). 20 new unit tests
+  (7 origination + 11 projection + 2 route-target round-trip)
+  cover happy path, family-mismatch rejection, RT match / no
+  match / multi-VRF fan-out, Router MAC enforcement, self-origin
+  filter, and IPv6 parity.
+
 - **EVPN Gate 9 foundation: ADR-0058 + `[[evpn_ip_vrfs]]` config
   schema.** New top-level TOML array declares IP-VRF / L3VNI
   tenants this VTEP serves under the RFC 9136 §4.4.2 symmetric

@@ -169,6 +169,99 @@ impl FromStr for RouteTarget {
     }
 }
 
+impl RouteTarget {
+    /// Encode into the 8-byte wire form of a Route Target Extended
+    /// Community (RFC 4360 §3 / RFC 5668 §2). The first byte is the
+    /// **type** (selects the administrator format), the second byte
+    /// is the **subtype** (`0x02` = Route Target), and the remaining
+    /// six bytes are the administrator + assigned-number value.
+    ///
+    /// | Variant       | Type byte (`bytes[0]`) | Subtype (`bytes[1]`) | Value layout                  |
+    /// |---------------|------------------------|----------------------|-------------------------------|
+    /// | `TwoOctetAs`  | `0x00`                 | `0x02`               | `[asn:u16, value:u32]`        |
+    /// | `Ipv4`        | `0x01`                 | `0x02`               | `[ipv4:[u8;4], value:u16]`    |
+    /// | `FourOctetAs` | `0x02`                 | `0x02`               | `[asn:u32, value:u16]`        |
+    ///
+    /// The type-byte's `0x40` bit is the **non-transitive** flag
+    /// (RFC 4360 §3.1 — bit set means "do not propagate across
+    /// AS boundaries"; bit clear, i.e. the value emitted here,
+    /// means transitive). The decoder
+    /// ([`Self::from_extended_community`]) clears this bit before
+    /// matching so a non-transitive-flagged community still
+    /// recognizes as the same Route Target subtype — relevant if a
+    /// peer originates RTs with the non-transitive bit set
+    /// (uncommon for RTs but RFC-permitted).
+    ///
+    /// Used by Type 2 / Type 3 / Type 4 / Type 5 origination on the
+    /// daemon side.
+    #[must_use]
+    pub fn to_extended_community(self) -> rustbgpd_wire::ExtendedCommunity {
+        match self {
+            Self::TwoOctetAs { asn, value } => {
+                let a = asn.to_be_bytes();
+                let v = value.to_be_bytes();
+                rustbgpd_wire::ExtendedCommunity::new(u64::from_be_bytes([
+                    0x00, 0x02, a[0], a[1], v[0], v[1], v[2], v[3],
+                ]))
+            }
+            Self::Ipv4 { ipv4, value } => {
+                let a = ipv4.octets();
+                let v = value.to_be_bytes();
+                rustbgpd_wire::ExtendedCommunity::new(u64::from_be_bytes([
+                    0x01, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+                ]))
+            }
+            Self::FourOctetAs { asn, value } => {
+                let a = asn.to_be_bytes();
+                let v = value.to_be_bytes();
+                rustbgpd_wire::ExtendedCommunity::new(u64::from_be_bytes([
+                    0x02, 0x02, a[0], a[1], a[2], a[3], v[0], v[1],
+                ]))
+            }
+        }
+    }
+
+    /// Decode the inverse of [`Self::to_extended_community`]. Returns
+    /// `None` for any extended community that isn't a Route Target —
+    /// the subtype byte (`bytes[1]`) must be `0x02` and the type
+    /// byte (`bytes[0]`, after clearing the non-transitive flag)
+    /// must be one of the three RFC-defined formats (`0x00` / `0x01`
+    /// / `0x02`).
+    #[must_use]
+    pub fn from_extended_community(c: rustbgpd_wire::ExtendedCommunity) -> Option<Self> {
+        let bytes = c.as_u64().to_be_bytes();
+        // Subtype must be 0x02 (Route Target).
+        if bytes[1] != 0x02 {
+            return None;
+        }
+        // Type byte selects the variant. Clear *only* the
+        // non-transitive flag bit (`0x40`, RFC 4360 §3.1) so a
+        // non-transitive RT decodes as the same format as a
+        // transitive one. RTs are conventionally transitive (bit
+        // clear), but RFC-permitted non-transitive variants must
+        // round-trip cleanly too. Critically, we keep `0x80` intact
+        // — that bit is reserved by IANA for the "Experimental"
+        // type-byte range. A community with `0x80 | 0x02` set must
+        // NOT be mistaken for a TwoOctetAs RT (which `& 0x3F` would
+        // do, because 0x80 & 0x3F == 0x00).
+        match bytes[0] & !0x40 {
+            0x00 => Some(Self::TwoOctetAs {
+                asn: u16::from_be_bytes([bytes[2], bytes[3]]),
+                value: u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            }),
+            0x01 => Some(Self::Ipv4 {
+                ipv4: Ipv4Addr::new(bytes[2], bytes[3], bytes[4], bytes[5]),
+                value: u16::from_be_bytes([bytes[6], bytes[7]]),
+            }),
+            0x02 => Some(Self::FourOctetAs {
+                asn: u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]),
+                value: u16::from_be_bytes([bytes[6], bytes[7]]),
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +372,67 @@ mod tests {
                 max: u64::from(u16::MAX),
             }
         );
+    }
+
+    #[test]
+    fn from_extended_community_round_trips_transitive_variants() {
+        for rt in [
+            RouteTarget::TwoOctetAs {
+                asn: 65000,
+                value: 100,
+            },
+            RouteTarget::Ipv4 {
+                ipv4: std::net::Ipv4Addr::new(10, 0, 0, 1),
+                value: 42,
+            },
+            RouteTarget::FourOctetAs {
+                asn: 4_200_000_000,
+                value: 7,
+            },
+        ] {
+            let ext = rt.to_extended_community();
+            assert_eq!(RouteTarget::from_extended_community(ext), Some(rt));
+        }
+    }
+
+    #[test]
+    fn from_extended_community_decodes_non_transitive_rt() {
+        // RFC 4360 §3.1: a non-transitive RT has bit 0x40 set on
+        // the type byte. We don't emit these (transitive is the
+        // default), but if a peer does, the decoder should
+        // recognize them as the same Route Target subtype.
+        let raw_transitive: u64 = 0x0002_0000_0000_0000 | (65000_u64 << 32) | 0x0000_0064;
+        let raw_non_transitive = raw_transitive | 0x4000_0000_0000_0000;
+        let ext = rustbgpd_wire::ExtendedCommunity::new(raw_non_transitive);
+        assert_eq!(
+            RouteTarget::from_extended_community(ext),
+            Some(RouteTarget::TwoOctetAs {
+                asn: 65000,
+                value: 100,
+            })
+        );
+    }
+
+    #[test]
+    fn from_extended_community_rejects_experimental_range_type_byte() {
+        // Regression for the `bytes[0] & 0x3F` bug — that mask
+        // cleared 0x80 as well as 0x40, so an extended community
+        // with type byte 0x80 (IANA Experimental range, NOT a Route
+        // Target) and subtype 0x02 would decode as TwoOctetAs.
+        // Under the fixed `bytes[0] & !0x40` mask, the high bit
+        // is preserved and the match falls through to `None`.
+        let raw: u64 = 0x8002_0000_0000_0000 | (65000_u64 << 32) | 0x0000_0064;
+        let ext = rustbgpd_wire::ExtendedCommunity::new(raw);
+        assert_eq!(RouteTarget::from_extended_community(ext), None);
+    }
+
+    #[test]
+    fn from_extended_community_rejects_wrong_subtype() {
+        // Type 0x00 + subtype 0x03 is "Route Origin", not Route
+        // Target. Must not decode.
+        let raw: u64 = 0x0003_0000_0000_0000 | (65000_u64 << 32) | 0x0000_0064;
+        let ext = rustbgpd_wire::ExtendedCommunity::new(raw);
+        assert_eq!(RouteTarget::from_extended_community(ext), None);
     }
 
     #[test]
