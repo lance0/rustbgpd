@@ -66,6 +66,7 @@ pub mod diff;
 pub mod enforcement;
 pub mod error;
 pub mod in_memory;
+pub mod l3_diff;
 pub mod reconcile;
 pub mod snapshot;
 
