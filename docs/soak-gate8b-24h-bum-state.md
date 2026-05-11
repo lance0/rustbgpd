@@ -137,14 +137,19 @@ MAC-churn variant also clears. The two unblocking conditions from
 
 ## Raw data
 
-- Per-sample CSV: `tests/soak/runs/gate8b-20260510T152451Z/samples.csv`
-- Flip event log: `tests/soak/runs/gate8b-20260510T152451Z/flips.log`
-- Harness driver log: `tests/soak/runs/gate8b-20260510T152451Z/soak.log`
-- Run manifest: `tests/soak/runs/gate8b-20260510T152451Z/run.json`
+The four load-bearing artifacts are tracked in this repository so
+the postmortem stays self-contained when the soak host is recycled:
 
-The full run directory is preserved on the soak host
-(`/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-20260510T152451Z/`)
-for re-analysis without re-running the harness.
+- Per-sample CSV: [`artifacts/soak/gate8b-20260510T152451Z/samples.csv`](artifacts/soak/gate8b-20260510T152451Z/samples.csv)
+- Flip event log: [`artifacts/soak/gate8b-20260510T152451Z/flips.log`](artifacts/soak/gate8b-20260510T152451Z/flips.log)
+- Harness driver log: [`artifacts/soak/gate8b-20260510T152451Z/soak.log`](artifacts/soak/gate8b-20260510T152451Z/soak.log)
+- Run manifest: [`artifacts/soak/gate8b-20260510T152451Z/run.json`](artifacts/soak/gate8b-20260510T152451Z/run.json)
+
+`tests/soak/runs/` stays gitignored — it's the harness's per-machine
+working directory and runs there are bulky / transient. Any future
+soak whose results we want to memorialize gets its load-bearing
+files copied into `docs/artifacts/soak/<run-id>/` and referenced
+from a postmortem the same way as this one.
 
 ## Cross-references
 

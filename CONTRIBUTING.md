@@ -63,6 +63,19 @@ against staged files: `prek run` (or `pre-commit run`).
 - Keep lines under 100 characters when possible
 - `#![deny(unsafe_code)]` on every crate — this is enforced, not advisory
 
+### Postmortem artifacts
+
+Any postmortem doc that cites raw data — soak runs, scale tests,
+interop captures — copies the load-bearing artifacts into
+`docs/artifacts/<topic>/<run-id>/` and references them by
+repo-relative path. The doc body either inlines the load-bearing
+numbers or links the in-repo files; it must not depend on machine-
+specific paths or "preserved on host X" language. Host-side run
+trees (e.g., `tests/soak/runs/...`) stay gitignored — they're
+per-machine working directories, not the published record. A
+`README.md` next to the artifacts explains what each file is and
+points back at the postmortem.
+
 ## Commit Messages
 
 - Start with a verb: Add, Fix, Update, Remove, Refactor, Bump

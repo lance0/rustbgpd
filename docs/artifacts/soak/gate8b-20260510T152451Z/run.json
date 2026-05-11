@@ -1,0 +1,13 @@
+{
+  "started_at": "20260510T152451Z",
+  "git_rev": "34d787cba71e6d321dbce7fb20eb9ee4f4785347",
+  "git_dirty": false,
+  "image_id": "sha256:1c79cce007ad88e795617958c8492a95ed1bc350ed9623c5e49d9c6a033b5fd8",
+  "kernel": "5.15.0-177-generic",
+  "soak_hours": 24,
+  "sample_interval_sec": 60,
+  "flip_interval_sec": 600,
+  "warmup_sec": 120,
+  "topology": "/home/lance/projects/rustbgpd/tests/soak/gate8b-soak.clab.yml",
+  "run_dir": "/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-20260510T152451Z"
+}
