@@ -1,4 +1,4 @@
-# Milestone History (M0–M9, M29–M38)
+# Milestone History (M0–M9, M29–M39)
 
 Archived build orders, exit criteria, and design choices from the
 initial development phase. For the current feature roadmap, see
@@ -673,17 +673,39 @@ for the architectural record.
   by `evpn_bum_filter_kernel` in CI under a Docker harness with
   `CAP_NET_ADMIN + CAP_SYS_ADMIN`. Production-default enforcement
   awaits the 24 h churn soak.
-- **Gate 9 readiness chain — in flight on `main`.** Foundation
+- **Gate 9 slice 6 — symmetric Interface-less IRB datapath
+  landed.** Foundation
   (ADR-0058 + `[[evpn_ip_vrfs]]` config schema) landed, then
   pure-logic Type 5 origination + projection helpers in
   `crates/evpn/src/ip_vrf/`, the IP-VRF readiness probe
   (`crates/evpn/src/ip_vrf/readiness.rs`), Linux IP-VRF / L3
   VXLAN netlink dumps in `crates/evpn-linux`, and
   `Dataplane::probe_ip_vrfs` plumbed through `DataplaneIntent`
-  and the reconcile call. **Still ahead:** Type 5 origination on
-  the wire + the `DataplaneReport` rows that surface it through
-  the CLI, and the Type 5 dataplane / FIB programming half with
-  its M39 manual smoke.
+  and the reconcile call. **Slice 6 PR A (#77)** wires the
+  daemon-side origination: per-pass kernel-route dump per
+  IP-VRF + conservative classifier, watch-channel publication,
+  L3 originator task with a level-triggered diff loop that
+  gates on readiness, and `IpVrfState.originated_routes_count`
+  surfaced via gRPC/CLI. **Slice 6 PR B (#78)** wires the
+  dataplane import: best-path subscription drives
+  `project_ip_prefix_routes()` against a transactional
+  `L3OwnedState` that tracks both per-prefix install state and
+  shared kernel resolution rows (`kernel_neighbors`,
+  `kernel_fdb`) with value-aware drift detection so a Router
+  MAC or next-hop transition under the same prefix triggers an
+  atomic `.replace()` rather than silent misforwarding. A
+  four-phase apply order (route-remove → resolution-add →
+  route-add → resolution-remove) keeps the kernel
+  forwarding-safe across transitions; Router MAC conflicts drop
+  conflicting prefixes with `L3Drop::RouterMacConflict`;
+  foreign state preservation is enforced by diffing only
+  against `L3OwnedState`. Validated by 11 unit tests in
+  `crates/evpn-linux/src/l3_diff.rs` and two privileged netns
+  integration tests at `crates/evpn-linux/tests/netns_l3_install.rs`
+  (gated on `EVPN_LINUX_NETNS=1`) against Linux 6.17, including
+  foreign-route preservation. **M39 containerlab smoke**
+  validates the bidirectional symmetric Interface-less IRB
+  datapath against FRR 10.3.1.
 - **Still deferred (alpha-soak follow-up):** duplicate-MAC
   quarantine action (RFC 7432 §15.1 M=180 s/N=5; detection
   counters shipped, action deferred per ADR-0055 §9), runtime
@@ -714,3 +736,4 @@ runners can't sustain:
 | **M37** | Gate 7b+1 upward path — rustbgpd-as-originator, FRR-as-consumer. Validates Type 2 + IMET origination per ADR-0055. | Manual; needs `CAP_NET_ADMIN`. |
 | **M37+IP** | Gate 7b+2 — MAC+IP Type 2 origination via ARP/ND suppression under the FRR-style replace model. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m37-evpn-mac-ip-origination.sh`. |
 | **M38** | Gate 8 — observable DF election with two rustbgpd-as-VTEPs sharing an ESI. Validates Type 1/4 origination + the Prometheus `evpn_df_role` surface. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m38-evpn-df-election.sh`. |
+| **M39** | Gate 9 slice 6 — bidirectional EVPN Type 5 / symmetric Interface-less IRB (RFC 9136 §4.4.2) between rustbgpd PE1 and FRR PE2. Validates origination + import + kernel route/neighbor/L3VXLAN FDB programming + ping over the L3VNI VXLAN tunnel + the withdraw leg. | Manual; needs `CAP_NET_ADMIN`. Same hosted-runner gap as M30b (Azure kernel lacks `vrf` module). Script: `test-m39-evpn-type5-symmetric-irb.sh`. |

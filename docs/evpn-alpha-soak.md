@@ -274,11 +274,50 @@ landing, tracked here for visibility)
     + three new Prometheus series (observed gauge, filtered
     counter, suppressed counter) expose the surface to operators.
 
-  Still ahead (slice 6 PR B):
-  - Remote Type 5 import + L3 FIB programming (kernel route +
-    neighbor on the L3 VXLAN + bridge FDB for the inner DMAC).
-  - M39 manual containerlab smoke validating the bidirectional
-    Type 5 path against FRR.
+  - **Slice 6 PR B (#78)**: remote Type 5 import + L3 FIB
+    programming. The daemon subscribes to the EVPN best-path
+    broadcast, runs `project_ip_prefix_routes()` on each
+    refreshed RIB view to derive per-IP-VRF target state, and
+    drives the kernel through a transactional L3 ownership model
+    (`L3OwnedState` in `crates/evpn-linux/src/l3_diff.rs`): per
+    `(IpVrfId, prefix)` route install state plus shared
+    `kernel_neighbors: BTreeMap<(idx, ip), MacAddress>` and
+    `kernel_fdb: BTreeMap<(idx, MacAddress), IpAddr>` so the diff
+    catches both refcount changes and value drift (next-hop or
+    Router MAC changing under the same prefix triggers
+    `.replace()` ops on the kernel-side rows). Four-phase apply
+    ordering — route removes → resolution adds (neighbor → FDB)
+    → route adds → resolution removes — keeps the kernel in a
+    forwarding-safe state across transitions. Router MAC
+    conflicts (two prefixes mapping `(L3VXLAN idx, router_mac)`
+    to different next-hops) drop all conflicting prefixes with
+    `L3Drop::RouterMacConflict` rather than silently
+    misforwarding. Foreign state preservation is enforced by
+    diffing only against `L3OwnedState`, never the kernel dump.
+    Shutdown drain (`reconcile::drain`) computes
+    `compute_l3_diff` against empty intent so the L3 ownership
+    state unwinds before exit. 11 unit tests in `l3_diff.rs`
+    cover cold start, refcount, shape change, value drift,
+    Router MAC conflict, partial-success cleanup, failed-remove
+    retry, NotReady drain, idempotent record. Two privileged
+    netns integration tests at
+    `crates/evpn-linux/tests/netns_l3_install.rs` (gated on
+    `EVPN_LINUX_NETNS=1`) re-exec the process inside an `ip
+    netns` and assert kernel `ip route show table`, `ip neigh
+    show dev`, and `bridge fdb show dev` produce the expected
+    rows, with one test pre-loading a `proto static` foreign
+    route and verifying it survives our install/withdraw cycle.
+    `IpVrfState.installed_routes_count` + install-error counters
+    expose the surface to operators.
+  - **M39 manual containerlab smoke** at
+    `tests/interop/m39-evpn-type5-symmetric-irb.clab.yml`
+    validates the bidirectional Type 5 path against FRR 10.3.1:
+    BGP Established, Type 5 origination both directions, PE1
+    kernel route + L3 neighbor + L3VXLAN FDB rows landed,
+    `installed_routes_count == 1`, bidirectional `ip vrf exec
+    vrf1 ping`, and withdraw on `ip addr del`. Same hosted-runner
+    constraint as M30b (Azure kernel lacks `vrf` module); manual
+    invocation per the row in `docs/INTEROP.md`.
 
   Follow-on optimization once the reconcile-loop integration is
   in place: share one rtnetlink link dump across
