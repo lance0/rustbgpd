@@ -1012,12 +1012,87 @@ message TriggerMrtDumpResponse {
 
 service EvpnService {
   rpc ListEvpnInstances(ListEvpnInstancesRequest) returns (ListEvpnInstancesResponse);
+  // Gate 9 — list every `[[evpn_ip_vrfs]]` entry the daemon has
+  // resolved, with the live readiness verdict from the reconcile
+  // actor's most recent `probe_ip_vrfs` pass.
+  rpc ListIpVrfs(ListIpVrfsRequest) returns (ListIpVrfsResponse);
+  // Gate 9 — fetch one IP-VRF by operator-facing `name`.
+  // Returns `NotFound` when the name is not in the resolved table.
+  rpc GetIpVrf(GetIpVrfRequest) returns (IpVrfState);
 }
 
 message ListEvpnInstancesRequest {}
 
 message ListEvpnInstancesResponse {
   repeated EvpnInstanceState instances = 1;
+}
+
+message ListIpVrfsRequest {}
+
+message ListIpVrfsResponse {
+  repeated IpVrfState ip_vrfs = 1;
+}
+
+message GetIpVrfRequest {
+  // Operator-facing handle (`name` field on `[[evpn_ip_vrfs]]`).
+  string name = 1;
+}
+
+// One installed IP-VRF (Gate 9, ADR-0058). Joins the resolved
+// `[[evpn_ip_vrfs]]` config with the live readiness verdict from the
+// Linux dataplane reconciler's most recent pass. The readiness
+// fields are populated from the same probe surface
+// `crates/evpn-linux::Dataplane::probe_ip_vrfs` returns.
+message IpVrfState {
+  // Operator-facing handle.
+  string name = 1;
+  // L3VNI (RFC 9136 §4.4.2 symmetric Interface-less IRB).
+  uint32 vni = 2;
+  // Route Distinguisher in canonical textual form (RFC 4364 §4.2).
+  string rd = 3;
+  // Bidirectional Route Targets (import + export).
+  repeated string route_targets = 4;
+  // VXLAN tunnel source IP for outbound Type 5 NEXT_HOP.
+  string local_vtep_ip = 5;
+  // Router MAC value advertised via the RFC 9135 §4.2 Router MAC
+  // extended community.
+  string router_mac = 6;
+  // Linux VRF device name (operator-managed, observe-only).
+  string vrf_device = 7;
+  // Linux L3 VXLAN device name (operator-managed, observe-only).
+  string l3vxlan_device = 8;
+  // VRF route table id, cross-checked against `vrf_device`.
+  uint32 table_id = 9;
+  // Live readiness state from the most recent reconcile pass.
+  IpVrfReadinessState readiness_state = 10;
+  // Populated when `readiness_state == READY` — kernel ifindex of
+  // the VRF master device (`IFLA_VRF_TABLE` already cross-checked
+  // against the configured `table_id`).
+  uint32 vrf_ifindex = 11;
+  // Populated when `readiness_state == READY` — kernel ifindex of
+  // the L3 VXLAN device.
+  uint32 l3vxlan_ifindex = 12;
+  // Populated when `readiness_state == NOT_READY`. One human-readable
+  // line per failing predicate from ADR-0058 §3.
+  repeated string not_ready_reasons = 13;
+}
+
+// Coarse readiness verdict for an IP-VRF. The detailed predicate
+// failures are surfaced as `not_ready_reasons` on `IpVrfState`.
+enum IpVrfReadinessState {
+  // No probe verdict is on file yet. The two real cases:
+  // (a) cold start — the daemon-side snapshot reader has not yet
+  // received its first `DataplaneReport` (e.g., the gRPC handler
+  // ran before the first reconcile pass), or
+  // (b) RR-only / dataplane-disabled deployments where no reconcile
+  // actor is running. Netlink dump failures synthesize
+  // `IP_VRF_READINESS_NOT_READY` with a concrete reason, not
+  // `UNKNOWN`.
+  IP_VRF_READINESS_UNKNOWN = 0;
+  // All seven ADR-0058 §3 predicates hold.
+  IP_VRF_READINESS_READY = 1;
+  // At least one predicate failed. See `not_ready_reasons`.
+  IP_VRF_READINESS_NOT_READY = 2;
 }
 
 // One installed local EVPN instance. Mirrors the shape of the

@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use crate::ip_vrf::IpVrfTable;
+use crate::ip_vrf::{IpVrfId, IpVrfStatus, IpVrfTable};
 use crate::mac::{MacAddress, RemoteMacTable};
 use crate::{DfRole, EvpnInstanceId, EvpnInstanceTable};
 use rustbgpd_wire::EthernetSegmentIdentifier;
@@ -261,6 +261,11 @@ pub struct DataplaneReport {
     /// slice reports what would be enforced, but intentionally does
     /// not mutate kernel filters.
     pub bum_enforcement: Vec<BumEnforcementStatus>,
+    /// One status row per configured IP-VRF in the desired snapshot
+    /// (Gate 9, ADR-0058). Empty when no `[[evpn_ip_vrfs]]` are
+    /// configured. Re-emitted on every report so the gRPC / CLI
+    /// surfaces don't need to track transitions themselves.
+    pub ip_vrf_status: Vec<IpVrfDataplaneStatus>,
 }
 
 /// Per-instance status emitted alongside every report.
@@ -297,6 +302,24 @@ pub enum InstanceState {
     /// Instance has `bridge = None` — never enters the dataplane
     /// reconcile loop. Visible via `ListEvpnInstances` but inert.
     Unbound,
+}
+
+/// Per-IP-VRF status row emitted on every report (Gate 9).
+///
+/// Mirrors the shape of [`InstanceDataplaneStatus`] for the L3 side:
+/// one row per configured `[[evpn_ip_vrfs]]` entry, carrying the
+/// operator-facing handle plus the live [`IpVrfStatus`] verdict from
+/// the reconcile actor's last `probe_ip_vrfs` pass. Empty in
+/// `DataplaneReport.ip_vrf_status` when no IP-VRFs are configured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IpVrfDataplaneStatus {
+    /// Stable identifier (the L3VNI of the IP-VRF).
+    pub vrf_id: IpVrfId,
+    /// Operator-facing handle (from the `name` field on
+    /// `[[evpn_ip_vrfs]]`).
+    pub vrf_name: String,
+    /// Live readiness verdict from the most recent reconcile pass.
+    pub status: IpVrfStatus,
 }
 
 /// A single dataplane operation that was successfully applied.

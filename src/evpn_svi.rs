@@ -434,6 +434,7 @@ mod tests {
             applied: vec![],
             failed: vec![],
             bum_enforcement: vec![],
+            ip_vrf_status: vec![],
         }
     }
 

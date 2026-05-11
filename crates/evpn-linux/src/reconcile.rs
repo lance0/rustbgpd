@@ -351,8 +351,9 @@ impl<D: Dataplane> ReconcileActor<D> {
         // `[[evpn_ip_vrfs]]`), so L2-only and RR-only deployments
         // never pay the netlink dump cost. Transitions are logged at
         // info / warn; steady-state is silent.
-        let ip_vrf_status = self.dataplane.probe_ip_vrfs(&intent.ip_vrfs).await;
-        Self::log_ip_vrf_transitions(&mut self.state.last_ip_vrf_status, &ip_vrf_status);
+        let ip_vrf_status_map = self.dataplane.probe_ip_vrfs(&intent.ip_vrfs).await;
+        Self::log_ip_vrf_transitions(&mut self.state.last_ip_vrf_status, &ip_vrf_status_map);
+        let ip_vrf_status = build_ip_vrf_status(&intent.ip_vrfs, &ip_vrf_status_map);
 
         let snapshot = match self.dataplane.dump_snapshot().await {
             Ok(s) => s,
@@ -365,7 +366,7 @@ impl<D: Dataplane> ReconcileActor<D> {
                 let status = build_instance_status(&intent.instances, &probes);
                 let bum_enforcement =
                     build_bum_enforcement_status(&intent.bum_enforcement, &KernelSnapshot::new());
-                self.emit_report(status, vec![], vec![], bum_enforcement)
+                self.emit_report(status, vec![], vec![], bum_enforcement, ip_vrf_status)
                     .await;
                 return;
             }
@@ -453,7 +454,7 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
 
         let status = build_instance_status(&intent.instances, &probes);
-        self.emit_report(status, applied, failed, bum_enforcement)
+        self.emit_report(status, applied, failed, bum_enforcement, ip_vrf_status)
             .await;
     }
 
@@ -713,6 +714,7 @@ impl<D: Dataplane> ReconcileActor<D> {
         applied: Vec<AppliedOp>,
         failed: Vec<FailedOp>,
         bum_enforcement: Vec<rustbgpd_evpn::BumEnforcementStatus>,
+        ip_vrf_status: Vec<rustbgpd_evpn::IpVrfDataplaneStatus>,
     ) {
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
@@ -721,6 +723,7 @@ impl<D: Dataplane> ReconcileActor<D> {
             applied,
             failed,
             bum_enforcement,
+            ip_vrf_status,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
@@ -806,6 +809,40 @@ async fn wait_until(deadline: Option<Instant>) {
         Some(when) => sleep_until(when).await,
         None => std::future::pending::<()>().await,
     }
+}
+
+/// Build the per-IP-VRF status block for a [`DataplaneReport`] (Gate 9).
+///
+/// Joins the operator-facing handle from the [`IpVrfTable`] with the
+/// live [`IpVrfStatus`] verdict from the reconcile actor's per-pass
+/// `probe_ip_vrfs` call. Empty when no IP-VRFs are configured —
+/// `probe_ip_vrfs` short-circuits without a netlink dump in that case.
+fn build_ip_vrf_status(
+    ip_vrfs: &rustbgpd_evpn::IpVrfTable,
+    statuses: &std::collections::HashMap<IpVrfId, IpVrfStatus>,
+) -> Vec<rustbgpd_evpn::IpVrfDataplaneStatus> {
+    let mut rows: Vec<rustbgpd_evpn::IpVrfDataplaneStatus> = ip_vrfs
+        .iter()
+        .map(|vrf| {
+            // If the probe didn't return a status for this VRF (e.g.,
+            // the netlink dump failed before this row was populated),
+            // synthesize `NotReady{VrfDeviceMissing}` so subscribers
+            // see a deterministic verdict on every report.
+            let status = statuses
+                .get(&vrf.id)
+                .cloned()
+                .unwrap_or_else(|| IpVrfStatus::NotReady {
+                    reasons: vec![rustbgpd_evpn::ip_vrf::IpVrfNotReady::VrfDeviceMissing],
+                });
+            rustbgpd_evpn::IpVrfDataplaneStatus {
+                vrf_id: vrf.id,
+                vrf_name: vrf.name.clone(),
+                status,
+            }
+        })
+        .collect();
+    rows.sort_by_key(|r| r.vrf_id);
+    rows
 }
 
 /// Build the per-instance status block for a [`DataplaneReport`].
