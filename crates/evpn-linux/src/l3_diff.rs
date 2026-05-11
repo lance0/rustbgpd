@@ -23,12 +23,17 @@
 //! - [`L3OwnedState::installs`] — per-`(vrf, prefix)` rows. Each
 //!   tracks `route_installed: bool` plus the cached identity needed
 //!   to emit the symmetric remove op.
-//! - [`L3OwnedState::kernel_neighbors`] — set of
-//!   `(l3vxlan_ifindex, next_hop)` keys we have confirmed are
-//!   present in the kernel (an `AddL3Neighbor` succeeded against
-//!   this key and no subsequent `RemoveL3Neighbor` succeeded).
-//! - [`L3OwnedState::kernel_fdb`] — same for `(l3vxlan_ifindex,
-//!   router_mac)` rows.
+//! - [`L3OwnedState::kernel_neighbors`] — `(l3vxlan_ifindex,
+//!   next_hop) → router_mac` map for every L3 neighbor row we
+//!   have programmed. The value (lladdr) is load-bearing
+//!   forwarding state; a remote PE rotating its router MAC on
+//!   the same next-hop must trigger a replace.
+//! - [`L3OwnedState::kernel_fdb`] — `(l3vxlan_ifindex,
+//!   router_mac) → next_hop` map for every L3VXLAN FDB row. The
+//!   value (dst) is load-bearing: a remote PE migrating its
+//!   VTEP behind the same router MAC must trigger a replace, or
+//!   the FDB row would silently keep encapsulating to the old
+//!   VTEP.
 //!
 //! With this split, the diff derives `desired_neighbors` /
 //! `desired_fdb` from the live `want` set (not from `installs`), so a
@@ -103,6 +108,16 @@ use crate::dataplane::DataplaneOp;
 /// `kernel_neighbors` / `kernel_fdb` (shared resolution rows) is
 /// load-bearing for partial-success safety — see the module-level
 /// docs.
+///
+/// `kernel_neighbors` and `kernel_fdb` track the row *value*, not
+/// just the row *key*. The kernel L3 neighbor row is
+/// `(dev, dst) → lladdr`; the L3VXLAN FDB row is
+/// `(dev, lladdr) → dst`. In both cases the value is load-bearing
+/// forwarding state — a remote PE rotating its router MAC, or a
+/// MAC-mobility-style next-hop change carrying the same router MAC,
+/// must trigger a replace. Tracking only the key (as a `BTreeSet`)
+/// would miss those transitions because `desired ∩ current` would
+/// look unchanged.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct L3OwnedState {
     /// Per-prefix install state. Created on the first successful
@@ -112,15 +127,19 @@ pub struct L3OwnedState {
     /// withdraw path even if the IP-VRF's `l3vxlan_device` /
     /// `table_id` change at runtime.
     pub installs: BTreeMap<(IpVrfId, EvpnIpPrefixValue), InstallState>,
-    /// `(l3vxlan_ifindex, next_hop)` keys the kernel currently has a
-    /// neighbor row for. Toggled by `AddL3Neighbor` /
-    /// `RemoveL3Neighbor` op successes. The diff cross-references
-    /// this against the desired set derived from `want` to compute
-    /// add / remove ops for the shared resolution rows.
-    pub kernel_neighbors: BTreeSet<(u32, IpAddr)>,
-    /// Same as `kernel_neighbors` for the L3VXLAN FDB row,
-    /// `(l3vxlan_ifindex, router_mac)`.
-    pub kernel_fdb: BTreeSet<(u32, MacAddress)>,
+    /// `(l3vxlan_ifindex, next_hop) → router_mac` for every L3
+    /// neighbor row we have programmed. Toggled by `AddL3Neighbor`
+    /// (insert / replace) and `RemoveL3Neighbor` (remove) op
+    /// successes. The value (lladdr) is tracked so router-MAC drift
+    /// on the same next-hop emits a replace.
+    pub kernel_neighbors: BTreeMap<(u32, IpAddr), MacAddress>,
+    /// `(l3vxlan_ifindex, router_mac) → next_hop` for every L3VXLAN
+    /// FDB row we have programmed. Same lifecycle as
+    /// `kernel_neighbors`. The value (dst) is tracked so a remote
+    /// PE rotating its VTEP while keeping the same router MAC emits
+    /// a replace — without this, the FDB row would silently keep
+    /// encapsulating to the old VTEP.
+    pub kernel_fdb: BTreeMap<(u32, MacAddress), IpAddr>,
 }
 
 /// Per-prefix install bookkeeping.
@@ -231,6 +250,15 @@ impl Target {
 /// VRF whose readiness probe returned `Ready`. Not-Ready VRFs are
 /// simply absent from the map (the diff treats them as "no install"
 /// → withdraw everything we own).
+///
+/// # Panics
+///
+/// Panics on an internal invariant violation: the diff's owner-lookup
+/// for `AddL3Neighbor` / `AddL3VxlanFdb` ops expects every key in
+/// `desired_*` to have been seen during the `want` build. Both
+/// `.expect(...)` sites prove a programmer error, not a runtime
+/// condition.
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn compute_l3_diff(
     intent: &RemoteIpPrefixTable,
@@ -243,12 +271,18 @@ pub fn compute_l3_diff(
     // ── Build `want` ───────────────────────────────────────────
     let want = build_want(intent, ip_vrfs, ready_l3vxlan_ifindex, &mut plan);
 
-    // ── Compute desired resolution sets from `want` ────────────
-    let mut desired_neighbors: BTreeSet<(u32, IpAddr)> = BTreeSet::new();
-    let mut desired_fdb: BTreeSet<(u32, MacAddress)> = BTreeSet::new();
+    // ── Compute desired resolution maps from `want` ────────────
+    //
+    // The values matter: kernel neighbor rows are
+    // `(dev, dst) → lladdr` and FDB rows are `(dev, lladdr) → dst`.
+    // The router_mac-conflict check in `build_want` already drops
+    // any `want` set with multiple distinct values per key, so each
+    // map entry has exactly one value.
+    let mut desired_neighbors: BTreeMap<(u32, IpAddr), MacAddress> = BTreeMap::new();
+    let mut desired_fdb: BTreeMap<(u32, MacAddress), IpAddr> = BTreeMap::new();
     for target in want.values() {
-        desired_neighbors.insert((target.l3vxlan_ifindex, target.next_hop));
-        desired_fdb.insert((target.l3vxlan_ifindex, target.router_mac));
+        desired_neighbors.insert((target.l3vxlan_ifindex, target.next_hop), target.router_mac);
+        desired_fdb.insert((target.l3vxlan_ifindex, target.router_mac), target.next_hop);
     }
 
     // ── Phase A: route removes ─────────────────────────────────
@@ -280,41 +314,67 @@ pub fn compute_l3_diff(
         }
     }
 
-    // ── Phase B: resolution adds ───────────────────────────────
+    // ── Phase B: resolution adds (or replaces on value drift) ──
     //
-    // Order: neighbor adds, then FDB adds. Every (l3vxlan_ifindex,
-    // next_hop) in `desired_neighbors` that the kernel doesn't yet
-    // have gets an `AddL3Neighbor` op. Same for FDB. Picking one
-    // arbitrary `want` entry per key supplies the
-    // `vrf_id` / `router_mac` accounting tag — they're all owners
-    // of the same shared row.
-    let mut neighbor_ops: BTreeMap<(u32, IpAddr), (IpVrfId, MacAddress)> = BTreeMap::new();
-    let mut fdb_ops: BTreeMap<(u32, MacAddress), (IpVrfId, IpAddr)> = BTreeMap::new();
+    // Order: neighbor adds, then FDB adds. Emit an `AddL3Neighbor`
+    // when either:
+    //   (a) the `(l3vxlan_ifindex, next_hop)` key is missing from
+    //       `kernel_neighbors`, OR
+    //   (b) the kernel has the row but its recorded `router_mac`
+    //       differs from the desired one — a remote PE's router
+    //       MAC rotated, and the kernel's `.replace()` overwrites
+    //       the existing row atomically.
+    // Same logic for FDB. Without (b) a router_mac-stable
+    // next-hop migration (operator moves the prefix's VTEP behind
+    // the same router MAC) would leave the FDB row pointing at
+    // the old VTEP — silent misforwarding.
+    //
+    // Picking one arbitrary `want` entry per key supplies the
+    // `vrf_id` accounting tag; the value (router_mac for neighbor,
+    // next_hop for FDB) comes from `desired_*`.
+    let mut neighbor_op_owners: BTreeMap<(u32, IpAddr), IpVrfId> = BTreeMap::new();
+    let mut fdb_op_owners: BTreeMap<(u32, MacAddress), IpVrfId> = BTreeMap::new();
     for ((vrf_id, _prefix), target) in &want {
-        neighbor_ops
+        neighbor_op_owners
             .entry((target.l3vxlan_ifindex, target.next_hop))
-            .or_insert((*vrf_id, target.router_mac));
-        fdb_ops
+            .or_insert(*vrf_id);
+        fdb_op_owners
             .entry((target.l3vxlan_ifindex, target.router_mac))
-            .or_insert((*vrf_id, target.next_hop));
+            .or_insert(*vrf_id);
     }
-    for ((idx, nh), (vrf_id, router_mac)) in &neighbor_ops {
-        if !owned.kernel_neighbors.contains(&(*idx, *nh)) {
+    for ((idx, nh), desired_router_mac) in &desired_neighbors {
+        let needs_install = match owned.kernel_neighbors.get(&(*idx, *nh)) {
+            None => true,
+            Some(current) => current != desired_router_mac,
+        };
+        if needs_install {
+            let vrf_id = neighbor_op_owners
+                .get(&(*idx, *nh))
+                .copied()
+                .expect("desired_neighbors keys come from neighbor_op_owners");
             plan.ops.push(DataplaneOp::AddL3Neighbor {
-                vrf_id: *vrf_id,
+                vrf_id,
                 l3vxlan_ifindex: *idx,
                 next_hop: *nh,
-                router_mac: *router_mac,
+                router_mac: *desired_router_mac,
             });
         }
     }
-    for ((idx, router_mac), (vrf_id, next_hop)) in &fdb_ops {
-        if !owned.kernel_fdb.contains(&(*idx, *router_mac)) {
+    for ((idx, router_mac), desired_next_hop) in &desired_fdb {
+        let needs_install = match owned.kernel_fdb.get(&(*idx, *router_mac)) {
+            None => true,
+            Some(current) => current != desired_next_hop,
+        };
+        if needs_install {
+            let vrf_id = fdb_op_owners
+                .get(&(*idx, *router_mac))
+                .copied()
+                .expect("desired_fdb keys come from fdb_op_owners");
             plan.ops.push(DataplaneOp::AddL3VxlanFdb {
-                vrf_id: *vrf_id,
+                vrf_id,
                 l3vxlan_ifindex: *idx,
                 router_mac: *router_mac,
-                next_hop: *next_hop,
+                next_hop: *desired_next_hop,
             });
         }
     }
@@ -346,22 +406,27 @@ pub fn compute_l3_diff(
 
     // ── Phase D: resolution removes ────────────────────────────
     //
-    // Any kernel resolution row no longer in `desired_*` is torn
-    // down. Order: neighbor removes, then FDB removes (same
-    // intra-phase order as the adds in Phase B).
-    for (idx, nh) in &owned.kernel_neighbors {
-        if !desired_neighbors.contains(&(*idx, *nh)) {
-            let (vrf_id, router_mac) = remove_neighbor_owner(&owned.installs, *idx, *nh);
+    // Any kernel resolution row whose key is no longer in
+    // `desired_*` is torn down. Order: neighbor removes, then FDB
+    // removes (same intra-phase order as the adds in Phase B).
+    //
+    // Value drift on a key that *is* still desired does NOT remove
+    // here — Phase B already emitted a `.replace()` AddL3* op for
+    // it, which the kernel applies atomically. Emitting Remove +
+    // Add for the same key would leave a brief window with no
+    // resolution row, and the AddL3* replace is sufficient.
+    for (idx, nh) in owned.kernel_neighbors.keys() {
+        if !desired_neighbors.contains_key(&(*idx, *nh)) {
+            let (vrf_id, _) = remove_neighbor_owner(&owned.installs, *idx, *nh);
             plan.ops.push(DataplaneOp::RemoveL3Neighbor {
                 vrf_id,
                 l3vxlan_ifindex: *idx,
                 next_hop: *nh,
             });
-            let _ = router_mac; // not needed on the Remove op
         }
     }
-    for (idx, router_mac) in &owned.kernel_fdb {
-        if !desired_fdb.contains(&(*idx, *router_mac)) {
+    for (idx, router_mac) in owned.kernel_fdb.keys() {
+        if !desired_fdb.contains_key(&(*idx, *router_mac)) {
             let vrf_id = remove_fdb_owner(&owned.installs, *idx, *router_mac);
             plan.ops.push(DataplaneOp::RemoveL3VxlanFdb {
                 vrf_id,
@@ -550,9 +615,15 @@ pub fn record_l3_success(
         DataplaneOp::AddL3Neighbor {
             l3vxlan_ifindex,
             next_hop,
+            router_mac,
             ..
         } => {
-            owned.kernel_neighbors.insert((*l3vxlan_ifindex, *next_hop));
+            // Insert-or-replace: the lladdr value is the load-bearing
+            // forwarding state, so a router-MAC drift on the same
+            // (idx, next_hop) key overwrites the prior value.
+            owned
+                .kernel_neighbors
+                .insert((*l3vxlan_ifindex, *next_hop), *router_mac);
         }
         DataplaneOp::RemoveL3Neighbor {
             l3vxlan_ifindex,
@@ -566,9 +637,13 @@ pub fn record_l3_success(
         DataplaneOp::AddL3VxlanFdb {
             l3vxlan_ifindex,
             router_mac,
+            next_hop,
             ..
         } => {
-            owned.kernel_fdb.insert((*l3vxlan_ifindex, *router_mac));
+            // Insert-or-replace: the dst value is load-bearing.
+            owned
+                .kernel_fdb
+                .insert((*l3vxlan_ifindex, *router_mac), *next_hop);
         }
         DataplaneOp::RemoveL3VxlanFdb {
             l3vxlan_ifindex,
@@ -714,8 +789,8 @@ mod tests {
                 table_id: 201,
             },
         );
-        owned.kernel_neighbors.insert((42, nh));
-        owned.kernel_fdb.insert((42, rmac));
+        owned.kernel_neighbors.insert((42, nh), rmac);
+        owned.kernel_fdb.insert((42, rmac), nh);
 
         let intent = intent_with(
             &ip_vrfs,
@@ -764,8 +839,8 @@ mod tests {
                 },
             );
         }
-        owned.kernel_neighbors.insert((42, nh));
-        owned.kernel_fdb.insert((42, rmac));
+        owned.kernel_neighbors.insert((42, nh), rmac);
+        owned.kernel_fdb.insert((42, rmac), nh);
 
         let intent = intent_with(&ip_vrfs, vec![t5(prefix_a, nh, 101, rmac)]);
         let ready = BTreeMap::from([(vrf_id, 42_u32)]);
@@ -812,8 +887,8 @@ mod tests {
                 table_id: 201,
             },
         );
-        owned.kernel_neighbors.insert((42, nh));
-        owned.kernel_fdb.insert((42, rmac));
+        owned.kernel_neighbors.insert((42, nh), rmac);
+        owned.kernel_fdb.insert((42, rmac), nh);
 
         let intent = RemoteIpPrefixTable::new();
         let ready = BTreeMap::from([(vrf_id, 42_u32)]);
@@ -854,8 +929,8 @@ mod tests {
                 table_id: 201,
             },
         );
-        owned.kernel_neighbors.insert((42, nh));
-        owned.kernel_fdb.insert((42, rmac));
+        owned.kernel_neighbors.insert((42, nh), rmac);
+        owned.kernel_fdb.insert((42, rmac), nh);
 
         let intent = intent_with(&ip_vrfs, vec![t5(prefix, nh, 101, rmac)]);
         let ready = BTreeMap::new(); // no Ready ifindex → drop
@@ -917,8 +992,8 @@ mod tests {
             record_l3_success(&mut owned, op, &ready, &ip_vrfs, &intent);
         }
         assert!(owned.installs.is_empty(), "route never installed");
-        assert!(owned.kernel_neighbors.contains(&(42, nh)));
-        assert!(owned.kernel_fdb.contains(&(42, rmac)));
+        assert!(owned.kernel_neighbors.contains_key(&(42, nh)));
+        assert!(owned.kernel_fdb.contains_key(&(42, rmac)));
 
         // Intent disappears.
         let empty_intent = RemoteIpPrefixTable::new();
@@ -954,8 +1029,8 @@ mod tests {
         // Simulate post-route-remove state: route gone, kernel
         // resolution rows still present.
         let mut owned = L3OwnedState::default();
-        owned.kernel_neighbors.insert((42, nh));
-        owned.kernel_fdb.insert((42, rmac));
+        owned.kernel_neighbors.insert((42, nh), rmac);
+        owned.kernel_fdb.insert((42, rmac), nh);
 
         let empty_intent = RemoteIpPrefixTable::new();
         let ready = BTreeMap::from([(vrf_id, 42_u32)]);
@@ -1015,6 +1090,119 @@ mod tests {
             plan.ops
                 .iter()
                 .all(|op| !matches!(op, DataplaneOp::AddRemoteIpRoute { .. })),
+        );
+    }
+
+    /// Regression for review finding #4 (FDB dst drift): the owned
+    /// state has an FDB row `(idx, router_mac) → vtep_A`, but the
+    /// desired intent maps the same `(idx, router_mac)` to
+    /// `vtep_B`. Without value tracking, the diff would see the
+    /// `(idx, router_mac)` key in both `desired` and `kernel` and
+    /// emit no `AddL3VxlanFdb` — leaving the FDB pointing at
+    /// `vtep_A` while the route went to `vtep_B`. Now the diff
+    /// emits `AddL3VxlanFdb` so the kernel's `.replace()`
+    /// overwrites the dst atomically.
+    #[test]
+    fn fdb_dst_drift_emits_replace() {
+        let prefix = v4([198, 51, 100, 0], 24);
+        let old_vtep = ip4(10, 0, 0, 2);
+        let new_vtep = ip4(10, 0, 0, 3);
+        let rmac = mac(0xaa);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+
+        // Simulate: a previous reconcile installed the prefix
+        // pointing at old_vtep. Now the remote PE has migrated the
+        // prefix behind the same router MAC to new_vtep — the
+        // intent now carries new_vtep for the same (idx, router_mac).
+        let mut owned = L3OwnedState::default();
+        owned.installs.insert(
+            (vrf_id, prefix),
+            InstallState {
+                route_installed: true,
+                next_hop: old_vtep,
+                router_mac: rmac,
+                l3vxlan_ifindex: 42,
+                table_id: 201,
+            },
+        );
+        owned.kernel_neighbors.insert((42, old_vtep), rmac);
+        owned.kernel_fdb.insert((42, rmac), old_vtep);
+
+        let intent = intent_with(&ip_vrfs, vec![t5(prefix, new_vtep, 101, rmac)]);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+        let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
+
+        // The prefix's identity changed (next_hop), so Phase A
+        // emits a RemoveRemoteIpRoute against the old shape, and
+        // Phase C emits AddRemoteIpRoute against the new shape.
+        // The (idx, router_mac) → dst FDB key is still in
+        // `desired_fdb`, but its value has changed → AddL3VxlanFdb
+        // is emitted to replace the row with the new dst.
+        let fdb_adds: Vec<_> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                DataplaneOp::AddL3VxlanFdb { next_hop, .. } => Some(*next_hop),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fdb_adds,
+            vec![new_vtep],
+            "FDB dst drift must emit a replace op targeting the new VTEP",
+        );
+    }
+
+    /// Regression for review finding #4 (neighbor lladdr drift):
+    /// the owned state has a neighbor row `(idx, next_hop) →
+    /// router_mac_A`, but the desired intent now maps the same
+    /// `(idx, next_hop)` to `router_mac_B` (remote PE rotated its
+    /// router MAC). Without value tracking, the diff would emit no
+    /// `AddL3Neighbor` and the kernel would keep using the old
+    /// lladdr for the inner Ethernet header.
+    #[test]
+    fn neighbor_lladdr_drift_emits_replace() {
+        let prefix = v4([198, 51, 100, 0], 24);
+        let nh = ip4(10, 0, 0, 2);
+        let old_rmac = mac(0xaa);
+        let new_rmac = mac(0xbb);
+        let vrf_id = IpVrfId::new(101).unwrap();
+        let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+
+        let mut owned = L3OwnedState::default();
+        owned.installs.insert(
+            (vrf_id, prefix),
+            InstallState {
+                route_installed: true,
+                next_hop: nh,
+                router_mac: old_rmac,
+                l3vxlan_ifindex: 42,
+                table_id: 201,
+            },
+        );
+        owned.kernel_neighbors.insert((42, nh), old_rmac);
+        owned.kernel_fdb.insert((42, old_rmac), nh);
+
+        let intent = intent_with(&ip_vrfs, vec![t5(prefix, nh, 101, new_rmac)]);
+        let ready = BTreeMap::from([(vrf_id, 42_u32)]);
+        let plan = compute_l3_diff(&intent, &owned, &ready, &ip_vrfs);
+
+        // The (idx, next_hop) key is still in `desired_neighbors`,
+        // but the value (lladdr) has changed → AddL3Neighbor emits
+        // the new router_mac.
+        let neighbor_adds: Vec<_> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                DataplaneOp::AddL3Neighbor { router_mac, .. } => Some(*router_mac),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            neighbor_adds,
+            vec![new_rmac],
+            "neighbor lladdr drift must emit a replace op with the new router MAC",
         );
     }
 }
