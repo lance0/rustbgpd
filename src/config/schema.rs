@@ -608,7 +608,7 @@ pub struct EvpnIpVrfConfig {
     /// VXLAN tunnel source IP for outbound Type 5 `NEXT_HOP`.
     pub local_vtep_ip: String,
     /// Router MAC value (RFC 9135 §4.2 / RFC 9136 Router MAC ext-community).
-    /// `aa:bb:cc:dd:ee:ff`, lowercase hex.
+    /// `aa:bb:cc:dd:ee:ff` form, hex (case-insensitive).
     pub router_mac: String,
     /// Linux VRF device name (operator-managed, observe-only).
     pub vrf_device: String,
