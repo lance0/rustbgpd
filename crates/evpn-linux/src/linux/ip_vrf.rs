@@ -65,7 +65,7 @@ use crate::error::DataplaneError;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct IpVrfObservations {
     vrfs: HashMap<String, VrfObservation>,
-    l3vxlans: HashMap<String, L3VxlanObservation>,
+    vxlans: HashMap<String, L3VxlanObservation>,
 }
 
 impl IpVrfObservations {
@@ -82,7 +82,7 @@ impl IpVrfObservations {
     ) -> IpVrfKernelSnapshot {
         IpVrfKernelSnapshot {
             vrf: self.vrfs.get(vrf_device).copied(),
-            l3vxlan: self.l3vxlans.get(l3vxlan_device).copied(),
+            l3vxlan: self.vxlans.get(l3vxlan_device).copied(),
         }
     }
 
@@ -95,7 +95,7 @@ impl IpVrfObservations {
     /// Number of VXLAN observations captured (both L2 and L3 — the
     /// reconciler decides which ones matter by name lookup).
     pub(crate) fn vxlan_count(&self) -> usize {
-        self.l3vxlans.len()
+        self.vxlans.len()
     }
 }
 
@@ -133,53 +133,36 @@ pub(crate) fn ingest_link_message(msg: &LinkMessage, out: &mut IpVrfObservations
     let Parsed {
         name,
         kind,
-        data,
         master,
         mac,
+        vrf_table_id,
+        vxlan_vni,
+        vxlan_local_vtep_ip,
     } = parse_link_message(msg);
 
     let Some(name) = name else { return };
     let up = msg.header.flags.contains(LinkFlags::Up);
     let ifindex = msg.header.index;
 
-    match (kind, data) {
-        (Some(InfoKind::Vrf), data) => {
-            // Take the first IFLA_VRF_TABLE the kernel emits. A VRF
-            // device that omits the attribute is malformed — we record
-            // `table_id = 0` so the probe surfaces an explicit
-            // VrfTableIdMismatch rather than silently dropping the
-            // observation.
-            let table_id = match data {
-                Some(InfoData::Vrf(items)) => items
-                    .iter()
-                    .find_map(|item| match item {
-                        InfoVrf::TableId(id) => Some(*id),
-                        _ => None,
-                    })
-                    .unwrap_or(0),
-                _ => 0,
-            };
+    match kind {
+        Some(LinkKind::Vrf) => {
             out.vrfs.insert(
                 name,
                 VrfObservation {
                     ifindex,
                     up,
-                    table_id,
+                    table_id: vrf_table_id.unwrap_or(0),
                 },
             );
         }
-        (Some(InfoKind::Vxlan), data) => {
-            let (vni, local_vtep_ip) = match data {
-                Some(InfoData::Vxlan(items)) => extract_vxlan_fields(&items),
-                _ => (0, None),
-            };
-            out.l3vxlans.insert(
+        Some(LinkKind::Vxlan) => {
+            out.vxlans.insert(
                 name,
                 L3VxlanObservation {
                     ifindex,
                     up,
-                    vni,
-                    local_vtep_ip,
+                    vni: vxlan_vni.unwrap_or(0),
+                    local_vtep_ip: vxlan_local_vtep_ip,
                     master_ifindex: master,
                     mac,
                 },
@@ -191,19 +174,29 @@ pub(crate) fn ingest_link_message(msg: &LinkMessage, out: &mut IpVrfObservations
 
 struct Parsed {
     name: Option<String>,
-    kind: Option<InfoKind>,
-    data: Option<InfoData>,
+    kind: Option<LinkKind>,
     master: Option<u32>,
     mac: Option<MacAddress>,
+    vrf_table_id: Option<u32>,
+    vxlan_vni: Option<u32>,
+    vxlan_local_vtep_ip: Option<IpAddr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkKind {
+    Vrf,
+    Vxlan,
 }
 
 fn parse_link_message(msg: &LinkMessage) -> Parsed {
     let mut parsed = Parsed {
         name: None,
         kind: None,
-        data: None,
         master: None,
         mac: None,
+        vrf_table_id: None,
+        vxlan_vni: None,
+        vxlan_local_vtep_ip: None,
     };
     for attr in &msg.attributes {
         match attr {
@@ -217,8 +210,19 @@ fn parse_link_message(msg: &LinkMessage) -> Parsed {
             LinkAttribute::LinkInfo(infos) => {
                 for info in infos {
                     match info {
-                        LinkInfo::Kind(k) => parsed.kind = Some(k.clone()),
-                        LinkInfo::Data(d) => parsed.data = Some(d.clone()),
+                        LinkInfo::Kind(InfoKind::Vrf) => parsed.kind = Some(LinkKind::Vrf),
+                        LinkInfo::Kind(InfoKind::Vxlan) => parsed.kind = Some(LinkKind::Vxlan),
+                        LinkInfo::Data(InfoData::Vrf(items)) => {
+                            parsed.vrf_table_id = items.iter().find_map(|item| match item {
+                                InfoVrf::TableId(id) => Some(*id),
+                                _ => None,
+                            });
+                        }
+                        LinkInfo::Data(InfoData::Vxlan(items)) => {
+                            let (vni, local_vtep_ip) = extract_vxlan_fields(items);
+                            parsed.vxlan_vni = Some(vni);
+                            parsed.vxlan_local_vtep_ip = local_vtep_ip;
+                        }
                         _ => {}
                     }
                 }
@@ -346,7 +350,7 @@ mod tests {
         assert_eq!(obs.table_id, 5000);
         // A VRF observation doesn't carry a MAC — the predicate uses
         // the L3 VXLAN's MAC for the Router MAC check.
-        assert_eq!(out.l3vxlans.len(), 0);
+        assert_eq!(out.vxlans.len(), 0);
     }
 
     #[test]
@@ -389,7 +393,7 @@ mod tests {
             ),
             &mut out,
         );
-        let obs = out.l3vxlans.get("vni5000").copied().expect("observation");
+        let obs = out.vxlans.get("vni5000").copied().expect("observation");
         assert_eq!(obs.ifindex, 12);
         assert!(obs.up);
         assert_eq!(obs.vni, 5000);
@@ -408,7 +412,7 @@ mod tests {
             &vxlan_msg(12, "vni5000", true, Some(5000), None, Some(11), None),
             &mut out,
         );
-        let obs = out.l3vxlans.get("vni5000").copied().expect("observation");
+        let obs = out.vxlans.get("vni5000").copied().expect("observation");
         assert_eq!(obs.local_vtep_ip, None);
         assert_eq!(obs.mac, None);
     }
@@ -421,7 +425,7 @@ mod tests {
             &vxlan_msg(12, "vni5000", true, Some(5000), Some(local), Some(11), None),
             &mut out,
         );
-        let obs = out.l3vxlans.get("vni5000").copied().expect("observation");
+        let obs = out.vxlans.get("vni5000").copied().expect("observation");
         assert_eq!(obs.local_vtep_ip, Some(local));
     }
 
@@ -440,7 +444,7 @@ mod tests {
             ),
             &mut out,
         );
-        let obs = out.l3vxlans.get("vni5000").copied().expect("observation");
+        let obs = out.vxlans.get("vni5000").copied().expect("observation");
         assert_eq!(obs.master_ifindex, None);
     }
 
@@ -459,7 +463,7 @@ mod tests {
         let mut out = IpVrfObservations::default();
         ingest_link_message(&msg, &mut out);
         assert_eq!(out.vrfs.len(), 0);
-        assert_eq!(out.l3vxlans.len(), 0);
+        assert_eq!(out.vxlans.len(), 0);
     }
 
     #[test]
