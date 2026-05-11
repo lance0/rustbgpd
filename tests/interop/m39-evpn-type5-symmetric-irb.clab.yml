@@ -4,17 +4,23 @@
 # Validates the full Gate 9 slice 6 datapath end-to-end:
 #
 #   1. Direct iBGP L2VPN/EVPN session between two VTEPs (no RR).
-#   2. rustbgpd PE1 originates Type 5 for tenant prefix
-#      192.0.2.1/32 from its kernel routing table (slice 6a/6b),
+#   2. rustbgpd PE1 originates Type 5 for tenant subnet
+#      192.0.2.0/24 from its kernel routing table (slice 6a/6b),
 #      and FRR receives it on PE2.
-#   3. FRR PE2 originates Type 5 for tenant prefix 192.0.2.2/32
+#   3. FRR PE2 originates Type 5 for tenant subnet 198.51.100.0/24
 #      via its `advertise ipv4 unicast` mechanism, and rustbgpd
 #      PE1 receives, projects, and installs the route into
 #      vrf1's kernel table together with the corresponding L3
 #      neighbor + L3VXLAN FDB rows (slice 6c).
-#   4. Bidirectional ping across the L3VNI VXLAN tunnel succeeds.
+#   4. Cross-subnet ping across the L3VNI VXLAN tunnel succeeds
+#      (PE1's .1 ↔ PE2's .1 on different tenant subnets).
 #   5. Withdraw legs: removing the tenant prefix on either side
 #      tears down the kernel state on the other.
+#
+# Subnets are non-overlapping (PE1 = 192.0.2.0/24, PE2 =
+# 198.51.100.0/24) so the L3VNI carries every PE1↔PE2 packet —
+# anycast-gateway scenarios where both PEs share a subnet are
+# out of scope for this smoke.
 #
 # This is the M39 manual smoke. CI keeps Gate 9 to control-plane
 # only (M30b — decode + RR reflection). M39 requires:
@@ -30,7 +36,8 @@
 #       └─── iBGP L2VPN/EVPN ────────┘
 #       │                            │
 #   vrf1 / L3VNI 100              vrf1 / L3VNI 100
-#   lo-vrf1: 192.0.2.1/32         lo-vrf1: 192.0.2.2/32
+#   lo-vrf1: 192.0.2.1/24         lo-vrf1: 198.51.100.1/24
+#   advertises 192.0.2.0/24       advertises 198.51.100.0/24
 #
 # Usage:
 #   containerlab deploy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
@@ -72,12 +79,12 @@ topology:
         # loopback) BEFORE FRR boots. zebra reads the bridge's VRF
         # membership when it sees the VXLAN device come up — see
         # start-frr-vtep-l3.sh for the ordering rationale.
-        - /usr/local/bin/start-frr-vtep-l3.sh 10.0.0.2 100 vrf1 192.0.2.2/32
+        - /usr/local/bin/start-frr-vtep-l3.sh 10.0.0.2 100 vrf1 198.51.100.1/24
       env:
         VTEP_LOOPBACK: 10.0.0.2
         VTEP_VNI: "100"
         TENANT_VRF: vrf1
-        TENANT_PREFIX: 192.0.2.2/32
+        TENANT_PREFIX: 198.51.100.1/24
 
   links:
     - endpoints: ["pe1:eth1", "pe2:eth1"]

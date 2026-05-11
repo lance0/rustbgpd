@@ -27,24 +27,41 @@
 
 TOPO="m39-evpn-type5-symmetric-irb"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=test-lib.sh
-source "$SCRIPT_DIR/test-lib.sh"
 
 # M39 has two PEs (pe1, pe2) instead of the one-rustbgpd shape
-# the shared lib assumes. Override after sourcing so the lib's
-# helpers (resolve_grpc_addr, start_rustbgpd) target pe1.
+# the shared lib assumes. Override RUSTBGPD before sourcing so
+# `preflight` (which runs at source time) checks for the right
+# container, and so the lib's helpers (resolve_grpc_addr,
+# start_rustbgpd) target pe1.
 PE1="clab-${TOPO}-pe1"
 PE2="clab-${TOPO}-pe2"
 RUSTBGPD="$PE1"
+export RUSTBGPD
+
+# shellcheck source=test-lib.sh
+source "$SCRIPT_DIR/test-lib.sh"
 
 PE1_IP="10.0.0.1"
 PE2_IP="10.0.0.2"
 
-PE1_TENANT_PREFIX="192.0.2.1/32"
+# PE1 owns 192.0.2.0/24 (dummy host at .1); PE2 owns
+# 198.51.100.0/24 (dummy host at .1). Non-overlapping so the
+# L3VNI carries every cross-PE packet. Type 5 origination
+# requires a unicast connected route in the VRF table —
+# `ip addr add 192.0.2.1/24 dev lo-vrf1` produces both an
+# RTN_LOCAL row (filtered by slice 6a's classifier) AND an
+# RTN_UNICAST connected /24 row (kept).
+PE1_TENANT_ADDR="192.0.2.1/24"
 PE1_TENANT_HOST="192.0.2.1"
 PE1_TENANT_DEV="lo-vrf1"
-PE2_TENANT_PREFIX="192.0.2.2/32"
-PE2_TENANT_HOST="192.0.2.2"
+PE1_ORIGINATED_PREFIX="192.0.2.0/24"
+PE1_ORIGINATED_HOST="192.0.2.0"
+PE1_ORIGINATED_PLEN=24
+
+PE2_TENANT_HOST="198.51.100.1"
+PE2_ORIGINATED_PREFIX="198.51.100.0/24"
+PE2_ORIGINATED_HOST="198.51.100.0"
+PE2_ORIGINATED_PLEN=24
 
 L3VNI=100
 TENANT_VRF="vrf1"
@@ -63,14 +80,15 @@ grpc_list_evpn() {
 }
 
 # Poll FRR's L2VPN/EVPN RIB for a Type 5 entry containing the
-# given /32 host. Returns 0 on success, 1 on timeout.
+# given prefix (network address + plen). Returns 0 on success.
 wait_frr_sees_type5() {
     local host=$1
-    local timeout=${2:-60}
+    local plen=$2
+    local timeout=${3:-60}
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
         if docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix json" 2>/dev/null \
-            | grep -q "\\[5\\]:\\[0\\]:\\[32\\]:\\[$host\\]"; then
+            | grep -q "\\[5\\]:\\[0\\]:\\[$plen\\]:\\[$host\\]"; then
             return 0
         fi
         sleep 2
@@ -152,7 +170,7 @@ fi
 # fully-formed L3VXLAN device.
 log "Provisioning PE1 kernel topology"
 docker exec "$PE1" /usr/local/bin/start-rustbgpd-m39-pe1.sh \
-    "$PE1_IP" "$L3VNI" "$TENANT_VRF" "$PE1_TENANT_PREFIX" "$PE1_ROUTER_MAC" >/dev/null
+    "$PE1_IP" "$L3VNI" "$TENANT_VRF" "$PE1_TENANT_ADDR" "$PE1_ROUTER_MAC" >/dev/null
 
 resolve_grpc_addr
 start_rustbgpd
@@ -166,8 +184,8 @@ wait_frr_established "$PE2" "$PE1_IP" "PE1↔PE2 L2VPN/EVPN" \
     || fail "iBGP L2VPN/EVPN session did not reach Established"
 
 # Test 2: FRR receives PE1's Type 5 origination.
-log "[test 2] FRR sees PE1's Type 5 for $PE1_TENANT_PREFIX"
-if wait_frr_sees_type5 "$PE1_TENANT_HOST" 90; then
+log "[test 2] FRR sees PE1's Type 5 for $PE1_ORIGINATED_PREFIX"
+if wait_frr_sees_type5 "$PE1_ORIGINATED_HOST" "$PE1_ORIGINATED_PLEN" 90; then
     ok "FRR's L2VPN/EVPN RIB contains Type 5 from PE1"
 else
     fail "FRR never received PE1's Type 5 within 90s"
@@ -175,8 +193,8 @@ else
 fi
 
 # Test 3: rustbgpd receives FRR's Type 5 origination.
-log "[test 3] rustbgpd sees PE2's Type 5 for $PE2_TENANT_PREFIX"
-if wait_rustbgpd_sees_type5 "$PE2_TENANT_PREFIX" 90; then
+log "[test 3] rustbgpd sees PE2's Type 5 for $PE2_ORIGINATED_PREFIX"
+if wait_rustbgpd_sees_type5 "$PE2_ORIGINATED_PREFIX" 90; then
     ok "rustbgpd's ListEvpnRoutes contains Type 5 from PE2"
 else
     fail "rustbgpd never received PE2's Type 5 within 90s"
@@ -185,8 +203,8 @@ fi
 
 # Test 4: PE1's kernel installs PE2's Type 5 into vrf1's table
 # (slice 6c reconciler + L3 netlink primitives).
-log "[test 4] PE1 kernel installs $PE2_TENANT_PREFIX in table $PE1_TABLE_ID"
-if wait_pe1_route_installed "$PE2_TENANT_PREFIX" 90; then
+log "[test 4] PE1 kernel installs $PE2_ORIGINATED_PREFIX in table $PE1_TABLE_ID"
+if wait_pe1_route_installed "$PE2_ORIGINATED_PREFIX" 90; then
     ok "kernel route present with via $PE2_IP dev $PE1_L3VXLAN"
 else
     fail "PE2's prefix never made it into PE1's kernel route table"
@@ -231,12 +249,12 @@ else
         "$GRPC_ADDR" rustbgpd.v1.EvpnService/GetIpVrf >&2 || true
 fi
 
-# Test 8: bidirectional ping across vrf1.
+# Test 8: cross-subnet ping across vrf1.
 #
-# PE1 → PE2: source from PE1's tenant /32 inside vrf1, target
-# PE2's tenant /32. Since both prefixes live on lo-vrf1 inside
-# their respective VRFs, the route through the L3VNI is what
-# carries the traffic.
+# PE1 → PE2: source from PE1's tenant host (192.0.2.1) inside
+# vrf1, target PE2's tenant host (198.51.100.1). Since the two
+# subnets are non-overlapping, the route through the L3VNI is
+# the only path that carries the traffic.
 log "[test 8] ping $PE2_TENANT_HOST from PE1 vrf1 (PE1 → PE2 datapath)"
 if docker exec "$PE1" ip vrf exec "$TENANT_VRF" \
     ping -c 3 -W 2 -I "$PE1_TENANT_HOST" "$PE2_TENANT_HOST" >/dev/null 2>&1; then
@@ -255,20 +273,21 @@ else
     docker exec "$PE2" vtysh -c "show ip route vrf vrf1" >&2 || true
 fi
 
-# Test 9: withdraw leg. Remove the tenant prefix from PE1's
+# Test 9: withdraw leg. Remove the tenant address from PE1's
 # tenant dummy; PE1's slice 6b originator should detect the
 # observation drop and emit a Type 5 withdraw; FRR should drop
 # the route from its EVPN RIB.
-log "[test 9] withdraw: remove $PE1_TENANT_PREFIX on PE1, expect FRR to drop the Type 5"
-docker exec "$PE1" ip addr del "$PE1_TENANT_PREFIX" dev "$PE1_TENANT_DEV" 2>/dev/null || true
+log "[test 9] withdraw: remove $PE1_TENANT_ADDR on PE1, expect FRR to drop the Type 5"
+docker exec "$PE1" ip addr del "$PE1_TENANT_ADDR" dev "$PE1_TENANT_DEV" 2>/dev/null || true
 
 wait_frr_loses_type5() {
     local host=$1
-    local timeout=${2:-30}
+    local plen=$2
+    local timeout=${3:-30}
     local attempts=$((timeout / 2))
     for _ in $(seq 1 "$attempts"); do
         if ! docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix json" 2>/dev/null \
-            | grep -q "\\[5\\]:\\[0\\]:\\[32\\]:\\[$host\\]"; then
+            | grep -q "\\[5\\]:\\[0\\]:\\[$plen\\]:\\[$host\\]"; then
             return 0
         fi
         sleep 2
@@ -276,10 +295,16 @@ wait_frr_loses_type5() {
     return 1
 }
 
-if wait_frr_loses_type5 "$PE1_TENANT_HOST" 30; then
-    ok "FRR dropped PE1's Type 5 for $PE1_TENANT_HOST after withdraw"
+# Slice 6a refreshes the IP-VRF route observation via the
+# reconcile actor's periodic dump (default 1 min). `RTNLGRP_IPV4_ROUTE`
+# is not yet wired into `Dataplane::next_event`, so the withdraw
+# delay is bounded by `ReconcileActorConfig.periodic_dump`. Allow
+# ~90 s to cover one full periodic cycle plus FRR's UPDATE +
+# BGP-best-path reaction.
+if wait_frr_loses_type5 "$PE1_ORIGINATED_HOST" "$PE1_ORIGINATED_PLEN" 90; then
+    ok "FRR dropped PE1's Type 5 for $PE1_ORIGINATED_PREFIX after withdraw"
 else
-    fail "FRR still shows PE1's Type 5 30s after withdraw"
+    fail "FRR still shows PE1's Type 5 90s after withdraw"
     docker exec "$PE2" vtysh -c "show bgp l2vpn evpn route type prefix" >&2 || true
 fi
 
