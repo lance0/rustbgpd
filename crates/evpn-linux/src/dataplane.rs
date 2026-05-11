@@ -26,9 +26,11 @@
 //! - ADR-0054 §3 (kernel observation surface)
 //! - ADR-0054 §6 (reconcile-on-event plus periodic full resync)
 
+use std::collections::HashMap;
 use std::net::IpAddr;
 
-use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, MacAddress};
+use rustbgpd_evpn::ip_vrf::{IpVrfStatus, IpVrfTable};
+use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, IpVrfId, LocalMacObservation, MacAddress};
 #[cfg_attr(not(test), allow(unused_imports))]
 use tokio::sync::mpsc;
 
@@ -132,6 +134,24 @@ pub trait Dataplane: Send {
         &mut self,
         instances: &EvpnInstanceTable,
     ) -> impl Future<Output = InstanceProbes> + Send;
+
+    /// Probe each configured IP-VRF against the kernel-observed
+    /// topology and produce per-VRF [`IpVrfStatus`] verdicts (Gate 9,
+    /// ADR-0058 §3). Intended to be called on every reconcile pass so
+    /// readiness reflects current kernel state; the call site itself
+    /// lives with the rest of the reconcile-actor wiring (intent
+    /// plumbing slice).
+    ///
+    /// Default returns an empty map — implementations that don't
+    /// support Gate 9 (`InMemoryDataplane`, future non-Linux impls)
+    /// silently no-op for IP-VRFs. The trait extension stays
+    /// non-breaking because of this default.
+    fn probe_ip_vrfs(
+        &mut self,
+        _ip_vrfs: &IpVrfTable,
+    ) -> impl Future<Output = HashMap<IpVrfId, IpVrfStatus>> + Send {
+        async { HashMap::new() }
+    }
 
     /// Dump the current kernel FDB + link inventory.
     fn dump_snapshot(

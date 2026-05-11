@@ -33,6 +33,7 @@
 //! - `probe()` never fails; a kernel that can't be queried surfaces
 //!   as `NotReady` with a "kernel inventory dump failed" reason.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -40,7 +41,8 @@ use netlink_packet_core::NetlinkPayload;
 use netlink_packet_route::RouteNetlinkMessage;
 use netlink_sys::AsyncSocket;
 use rtnetlink::Handle;
-use rustbgpd_evpn::{EvpnInstanceTable, LocalMacObservation};
+use rustbgpd_evpn::ip_vrf::{IpVrfNotReady, IpVrfStatus, IpVrfTable, probe as probe_ip_vrf};
+use rustbgpd_evpn::{EvpnInstanceTable, IpVrfId, LocalMacObservation};
 use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 
@@ -310,6 +312,52 @@ impl Dataplane for LinuxDataplane {
             });
         }
         Ok(snap)
+    }
+
+    async fn probe_ip_vrfs(&mut self, ip_vrfs: &IpVrfTable) -> HashMap<IpVrfId, IpVrfStatus> {
+        // Empty config — skip the netlink dump entirely. Gate 9 is
+        // opt-in, so the vast majority of deployments never reach
+        // this branch with a non-empty table.
+        if ip_vrfs.is_empty() {
+            return HashMap::new();
+        }
+        // Run one rtnetlink link dump per reconcile pass; per-VRF the
+        // probe is pure and fast (in-memory map lookup + 7 predicate
+        // checks). A dump failure means we cannot evaluate readiness;
+        // synthesize a NotReady-with-dump-failed verdict for every
+        // configured VRF so the operator-visible state reflects the
+        // outage rather than going silent.
+        let observations = match ip_vrf::dump_ip_vrf_observations(&self.handle).await {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(error = %e, "ip-vrf link dump failed");
+                let mut out: HashMap<IpVrfId, IpVrfStatus> = HashMap::with_capacity(ip_vrfs.len());
+                for vrf in ip_vrfs.iter() {
+                    out.insert(
+                        vrf.id,
+                        IpVrfStatus::NotReady {
+                            reasons: vec![
+                                // Reuse VrfDeviceMissing as the "we don't
+                                // know" signal. A future variant
+                                // (KernelDumpFailed) would be cleaner
+                                // but would expand the surface for
+                                // little gain — the operator-visible
+                                // log line says "ip-vrf link dump
+                                // failed" with the error.
+                                IpVrfNotReady::VrfDeviceMissing,
+                            ],
+                        },
+                    );
+                }
+                return out;
+            }
+        };
+        let mut out: HashMap<IpVrfId, IpVrfStatus> = HashMap::with_capacity(ip_vrfs.len());
+        for vrf in ip_vrfs.iter() {
+            let snap = observations.snapshot_for(&vrf.vrf_device, &vrf.l3vxlan_device);
+            out.insert(vrf.id, probe_ip_vrf(vrf, &snap));
+        }
+        out
     }
 
     async fn apply(&mut self, op: &DataplaneOp) -> Result<(), DataplaneError> {
