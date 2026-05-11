@@ -121,6 +121,27 @@ impl InMemoryDataplane {
         }
     }
 
+    /// Same shape as [`Self::new`] but with the kernel-event stream
+    /// pre-closed: `next_event()` resolves to `None` on the first
+    /// poll. Used by the reconcile-actor regression test that
+    /// validates the "closed event stream" guard — without the
+    /// guard, a biased `tokio::select!` arm whose future resolves
+    /// to `None` immediately starves the periodic / retry / intent
+    /// arms behind it.
+    #[must_use]
+    pub fn with_closed_event_stream() -> Self {
+        let mut dp = Self::new();
+        // Reassign `events_rx` to a fresh channel whose sender has
+        // already been dropped — `recv()` then returns `None` on
+        // the very next poll. The old `events_tx` (and any handle
+        // clones) stays valid but talks to nobody, which is fine
+        // for this regression test.
+        let (closed_tx, closed_rx) = mpsc::channel::<KernelEvent>(1);
+        drop(closed_tx);
+        dp.events_rx = closed_rx;
+        dp
+    }
+
     /// Cloneable test handle for in-process state inspection /
     /// mutation. Tests typically grab a handle before the actor
     /// starts, then use it to pre-load kernel entries, set probes,

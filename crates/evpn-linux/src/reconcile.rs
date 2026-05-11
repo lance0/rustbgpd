@@ -191,6 +191,15 @@ struct ActorState {
     /// only on successful kernel apply; a failed op leaves the
     /// in-memory state unchanged so the next reconcile pass retries.
     l3_owned: crate::l3_diff::L3OwnedState,
+    /// Tracks whether [`Dataplane::next_event`] is still expected to
+    /// yield events. `true` at startup; flipped to `false` the first
+    /// time `next_event()` resolves to `None`. While `false` the
+    /// outer `tokio::select!` disables its `next_event` arm via an
+    /// `if` guard — without the gate, a future that always resolves
+    /// to `None` (the natural shape for a closed `mpsc::Receiver`)
+    /// would spin the biased select branch and starve the
+    /// periodic / retry / shutdown work that follows it.
+    event_stream_open: bool,
 }
 
 impl ActorState {
@@ -207,6 +216,7 @@ impl ActorState {
             last_bum_plan: BTreeMap::new(),
             last_ip_vrf_status: BTreeMap::new(),
             l3_owned: crate::l3_diff::L3OwnedState::default(),
+            event_stream_open: true,
         }
     }
 
@@ -295,12 +305,43 @@ impl<D: Dataplane> ReconcileActor<D> {
                     }
                     self.coalesce_and_reconcile().await;
                 }
-                evt = self.dataplane.next_event() => {
-                    if let Some(KernelEvent::KernelStateChanged) = evt {
-                        self.coalesce_and_reconcile().await;
-                    } else if evt.is_none() {
-                        // Implementation closed its event stream.
-                        // Fall through to periodic + retry only.
+                evt = self.dataplane.next_event(), if self.state.event_stream_open => {
+                    match evt {
+                        Some(KernelEvent::KernelStateChanged) => {
+                            self.coalesce_and_reconcile().await;
+                        }
+                        Some(KernelEvent::LocalMacObservation(_)) => {
+                            // Routed via `take_local_mac_rx` directly
+                            // to the daemon's local-MAC originator
+                            // task; the reconcile actor doesn't act on
+                            // it. If an alternate `Dataplane` impl
+                            // ever surfaces a `LocalMacObservation`
+                            // here (the trait permits it), silently
+                            // drop — re-running `coalesce_and_reconcile`
+                            // wouldn't help, and waking would conflict
+                            // with the originator task's own watch
+                            // channel.
+                        }
+                        None => {
+                            // Implementation closed its event stream
+                            // (`LinuxDataplane`'s notify task exited
+                            // and dropped the `kernel_event_tx`, or a
+                            // test impl reached end-of-stream). Flip
+                            // the guard so the next iteration's
+                            // `tokio::select!` disables this arm —
+                            // without that gate, `next_event()` keeps
+                            // resolving to `None` immediately on every
+                            // poll (the closed-channel `recv()`
+                            // shape), and because the select is
+                            // `biased` and this arm sits before the
+                            // periodic / retry / shutdown arms, the
+                            // actor would spin and starve the rest
+                            // of the work.
+                            self.state.event_stream_open = false;
+                            tracing::warn!(
+                                "kernel-event stream closed; reconcile actor will rely on periodic dump + retry only"
+                            );
+                        }
                     }
                     // `LocalMacObservation` flows on the dedicated
                     // channel surfaced by [`Dataplane::take_local_mac_rx`]

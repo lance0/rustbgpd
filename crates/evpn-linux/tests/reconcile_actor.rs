@@ -832,6 +832,73 @@ async fn permanent_failure_does_not_leak_across_keys() {
     h.shutdown().await;
 }
 
+/// Regression for the "closed kernel-event stream busy-loop" review
+/// finding on PR #79: when `Dataplane::next_event()` resolves to
+/// `None` (the natural shape for a closed `mpsc::Receiver` after the
+/// notify task drops `kernel_event_tx`), the actor's biased
+/// `tokio::select!` would have spun the `next_event` arm and
+/// starved every other arm behind it — including `intent_rx` and
+/// `shutdown`. The fix gates the arm with an `event_stream_open`
+/// flag flipped to `false` on the first `None`; this test validates
+/// the actor still drives forward progress on intent changes (and
+/// shuts down cleanly) when the event stream is closed from the
+/// start.
+///
+/// Runs against **real** tokio time, not paused — the `timeout`
+/// calls below need to actually elapse if the regression returns,
+/// otherwise the busy-loop would also block the timer task and the
+/// test would hang instead of failing. The waits are tight (≤2 s)
+/// so the cost of un-paused time is minimal.
+#[tokio::test]
+async fn closed_event_stream_does_not_starve_intent_and_shutdown() {
+    let dataplane = InMemoryDataplane::with_closed_event_stream();
+    let handle = dataplane.handle();
+    let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
+    let (report_tx, mut report_rx) = mpsc::channel(64);
+    let shutdown = CancellationToken::new();
+    let actor = ReconcileActor::new(
+        ReconcileActorConfig::for_tests(),
+        dataplane,
+        intent_rx,
+        report_tx,
+        shutdown.clone(),
+    );
+    let actor_join = tokio::spawn(actor.run());
+
+    // Initial dump pass. If the actor were stuck in the next_event
+    // busy-loop, we'd never see this report.
+    tokio::task::yield_now().await;
+    let first = tokio::time::timeout(Duration::from_secs(1), report_rx.recv())
+        .await
+        .expect("initial reconcile pass timed out — closed event stream starved the actor")
+        .expect("report channel closed unexpectedly");
+    assert_eq!(first.intent_generation, 0);
+
+    // Intent change after the event stream has closed. If the
+    // busy-loop is back, this never wakes the actor and the test
+    // times out.
+    let mut inst = EvpnInstanceTable::new();
+    inst.insert(instance(100, Some("br100"), "10.0.0.1"))
+        .unwrap();
+    handle.set_probe(vni(100), InstanceProbe::Ready);
+    intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+    tokio::task::yield_now().await;
+    let second = tokio::time::timeout(Duration::from_secs(1), report_rx.recv())
+        .await
+        .expect("intent-change reconcile timed out — closed event stream starved intent_rx")
+        .expect("report channel closed unexpectedly");
+    assert_eq!(second.intent_generation, 1);
+
+    // Shutdown must complete despite the closed event stream.
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(2), actor_join)
+        .await
+        .expect("actor join timed out — shutdown was starved")
+        .expect("actor task panicked");
+}
+
 #[allow(dead_code)]
 fn _starts_anchor() -> Instant {
     Instant::now()
