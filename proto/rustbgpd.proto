@@ -1080,9 +1080,14 @@ message IpVrfState {
 // Coarse readiness verdict for an IP-VRF. The detailed predicate
 // failures are surfaced as `not_ready_reasons` on `IpVrfState`.
 enum IpVrfReadinessState {
-  // The probe has not yet emitted a verdict for this VRF (cold
-  // start before the first reconcile pass, or the netlink dump
-  // failed and the actor synthesized a placeholder).
+  // No probe verdict is on file yet. The two real cases:
+  // (a) cold start — the daemon-side snapshot reader has not yet
+  // received its first `DataplaneReport` (e.g., the gRPC handler
+  // ran before the first reconcile pass), or
+  // (b) RR-only / dataplane-disabled deployments where no reconcile
+  // actor is running. Netlink dump failures synthesize
+  // `IP_VRF_READINESS_NOT_READY` with a concrete reason, not
+  // `UNKNOWN`.
   IP_VRF_READINESS_UNKNOWN = 0;
   // All seven ADR-0058 §3 predicates hold.
   IP_VRF_READINESS_READY = 1;

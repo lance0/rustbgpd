@@ -13,9 +13,10 @@
 //! state. The same `Arc` is the unit other phases will swap atomically
 //! on SIGHUP / gRPC mutation.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use rustbgpd_evpn::ip_vrf::{IpVrfNotReady, IpVrfStatus, IpVrfTable};
+use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
 use rustbgpd_evpn::{EvpnInstanceTable, IpVrfDataplaneStatus};
 use tonic::{Request, Response, Status};
 
@@ -123,10 +124,11 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
         _request: Request<proto::ListIpVrfsRequest>,
     ) -> Result<Response<proto::ListIpVrfsResponse>, Status> {
         let snapshot = (self.ip_vrf_status_snapshot)();
+        let by_id = snapshot_index(&snapshot);
         let ip_vrfs: Vec<proto::IpVrfState> = self
             .ip_vrfs
             .iter()
-            .map(|vrf| ip_vrf_to_proto(vrf, &snapshot))
+            .map(|vrf| ip_vrf_to_proto(vrf, by_id.get(&vrf.id).copied()))
             .collect();
         Ok(Response::new(proto::ListIpVrfsResponse { ip_vrfs }))
     }
@@ -141,17 +143,26 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .get(&name)
             .ok_or_else(|| Status::not_found(format!("no IP-VRF named {name:?}")))?;
         let snapshot = (self.ip_vrf_status_snapshot)();
-        Ok(Response::new(ip_vrf_to_proto(vrf, &snapshot)))
+        let status = snapshot.iter().find(|r| r.vrf_id == vrf.id);
+        Ok(Response::new(ip_vrf_to_proto(vrf, status)))
     }
+}
+
+/// Build an `IpVrfId → &IpVrfDataplaneStatus` index from the per-call
+/// snapshot Vec so `ListIpVrfs` joins config rows with status rows
+/// in O(N) instead of O(N²). `GetIpVrf` doesn't need it (single
+/// lookup) and uses a direct `iter().find` instead.
+fn snapshot_index(snapshot: &[IpVrfDataplaneStatus]) -> HashMap<IpVrfId, &IpVrfDataplaneStatus> {
+    snapshot.iter().map(|r| (r.vrf_id, r)).collect()
 }
 
 /// Join the config-time `IpVrf` shape with a snapshot row (if any)
 /// into the wire `IpVrfState` message. Mirrored layout: cold-start
-/// rows where the probe hasn't run yet surface as
+/// rows where no snapshot row exists yet surface as
 /// `IP_VRF_READINESS_UNKNOWN` with all readiness fields empty.
 fn ip_vrf_to_proto(
     vrf: &rustbgpd_evpn::ip_vrf::IpVrf,
-    snapshot: &[IpVrfDataplaneStatus],
+    status: Option<&IpVrfDataplaneStatus>,
 ) -> proto::IpVrfState {
     let mut state = proto::IpVrfState {
         name: vrf.name.clone(),
@@ -169,7 +180,7 @@ fn ip_vrf_to_proto(
         not_ready_reasons: Vec::new(),
     };
 
-    let Some(row) = snapshot.iter().find(|r| r.vrf_id == vrf.id) else {
+    let Some(row) = status else {
         return state;
     };
 

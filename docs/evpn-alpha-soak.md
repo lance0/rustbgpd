@@ -252,11 +252,11 @@ landing, tracked here for visibility)
   - `IpVrfTable` plumbed through `DataplaneIntent`; the reconcile
     actor calls `probe_ip_vrfs` each pass and logs `Ready` ↔
     `NotReady` transitions via tracing.
+  - `DataplaneReport.ip_vrf_status` rows + `rustbgpctl evpn vrfs
+    [NAME]` CLI + `EvpnService.ListIpVrfs` / `EvpnService.GetIpVrf`
+    gRPC RPCs so operators read the verdict without scraping logs.
 
   Still ahead:
-  - `DataplaneReport.ip_vrf_status` rows + `rustbgpctl evpn vrfs
-    [get NAME]` CLI + gRPC RPC so operators can read the verdict
-    without scraping logs.
   - Type 5 origination + FIB programming, M39 manual containerlab
     smoke.
 

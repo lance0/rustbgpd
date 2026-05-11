@@ -303,10 +303,12 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
 
 /// List configured IP-VRFs and their readiness (Gate 9, ADR-0058).
 ///
-/// Read-only. Joins the daemon's resolved `IpVrfTable` (from
-/// `[[evpn_ip_vrfs]]` config) with the latest readiness verdict
-/// from the reconcile actor's `probe_ip_vrfs` pass. RR-only and
-/// L2-only deployments see an empty list.
+/// Read-only. Returns one row per `[[evpn_ip_vrfs]]` entry the daemon
+/// has resolved, joined with the latest readiness verdict from the
+/// reconcile actor's `probe_ip_vrfs` pass. Deployments without any
+/// `[[evpn_ip_vrfs]]` get an empty list; deployments that have IP-VRFs
+/// configured but no reconcile actor running (RR-only mode) see each
+/// row with `readiness=unknown` and the config fields populated.
 pub async fn list_ip_vrfs(connection: Connection, json: bool) -> Result<(), CliError> {
     let mut client =
         EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());

@@ -1181,27 +1181,28 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     };
 
     // Latest snapshot of `DataplaneReport.ip_vrf_status` rows for the
-    // gRPC `ListIpVrfs` / `GetIpVrf` surface (Gate 9 slice 5). A
-    // background task subscribes to the dataplane handle's report
-    // broadcast and writes the rows into a shared `Arc<RwLock<...>>`
-    // on every report; the gRPC service reads from it via a closure.
-    // RR-only deployments (`evpn_dataplane_handle.is_none()`) leave
-    // the snapshot at its empty default — `probe_ip_vrfs` would
-    // short-circuit to empty even if the actor ran, so the gRPC
-    // surface stays consistent without any wiring.
-    let evpn_ip_vrf_status_snapshot: Arc<
-        std::sync::RwLock<Vec<rustbgpd_evpn::IpVrfDataplaneStatus>>,
-    > = Arc::new(std::sync::RwLock::new(Vec::new()));
+    // gRPC `ListIpVrfs` / `GetIpVrf` surface (Gate 9 slice 5). Backed
+    // by a `tokio::sync::watch` so gRPC handlers can read the latest
+    // value lock-free (`.borrow().clone()`) without blocking a tokio
+    // worker; the subscriber task replaces the value on every
+    // dataplane report. RR-only deployments
+    // (`evpn_dataplane_handle.is_none()`) leave the initial empty Vec
+    // in place — `probe_ip_vrfs` would short-circuit to empty even if
+    // the actor ran, so the gRPC surface stays consistent without any
+    // wiring.
+    let (evpn_ip_vrf_status_tx, evpn_ip_vrf_status_rx) =
+        tokio::sync::watch::channel(Vec::<rustbgpd_evpn::IpVrfDataplaneStatus>::new());
     if let Some(handle) = evpn_dataplane_handle.as_ref() {
         let mut reports = handle.subscribe_reports();
-        let snapshot = evpn_ip_vrf_status_snapshot.clone();
         tokio::spawn(async move {
             loop {
                 match reports.recv().await {
                     Ok(report) => {
-                        if let Ok(mut guard) = snapshot.write() {
-                            *guard = report.ip_vrf_status;
-                        }
+                        // `send_replace` is the no-await write —
+                        // updates the value in place and wakes any
+                        // pending watchers. Safe to call from inside
+                        // a tokio task without blocking the worker.
+                        evpn_ip_vrf_status_tx.send_replace(report.ip_vrf_status);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                         // The reconcile actor emits at most one report
@@ -1237,8 +1238,11 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         },
         evpn_ip_vrfs: evpn_ip_vrfs.clone(),
         evpn_ip_vrf_status_snapshot: {
-            let snapshot = evpn_ip_vrf_status_snapshot.clone();
-            Arc::new(move || snapshot.read().map(|s| s.clone()).unwrap_or_default())
+            // `borrow()` on a watch receiver is lock-free (internal
+            // seqlock); cloning the Vec releases the borrow before
+            // the gRPC handler returns.
+            let rx = evpn_ip_vrf_status_rx.clone();
+            Arc::new(move || rx.borrow().clone())
         },
     };
     let mut grpc_handle = tokio::spawn(async move {
