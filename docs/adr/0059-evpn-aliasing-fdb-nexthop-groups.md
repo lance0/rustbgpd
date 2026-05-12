@@ -375,11 +375,15 @@ through. Each slice ships independently green.
     flag), then either `NHA_GATEWAY(IP)` for a per-VTEP member
     or `NHA_GROUP(&[nexthop_grp])` for a group. `NHA_GROUP_TYPE`
     is **not** emitted — kernel defaults to `NEXTHOP_GRP_TYPE_MPATH = 0`.
-  - `struct nexthop_grp { id: u32, weight: u8, weight_high: u8,
+  - `struct nexthop_grp { id: u32, weight: u8, resvd1: u8,
     resvd2: u16 }` = exactly 8 bytes, no implicit padding. Array
-    stride is naturally 4-aligned. `weight = 0` means "weight 1"
-    per `nexthop_grp_weight()` in `uapi/linux/nexthop.h:23-26` —
-    so uniform-weight ECMP is just `weight: 0` per member.
+    stride is naturally 4-aligned. Field names match
+    `include/uapi/linux/nexthop.h` verbatim so the future raw
+    module mirrors the kernel header (don't rename `resvd1` to
+    `weight_high` — the kernel doesn't treat it as a weight
+    high-byte). `weight = 0` means "weight 1" per
+    `nexthop_grp_weight()` in `uapi/linux/nexthop.h:23-26` — so
+    uniform-weight ECMP is just `weight: 0` per member.
   - DEL: `nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK`, body =
     `NHA_ID(u32)` only. No `NHA_FDB`, no `NHA_GROUP`.
 - **Transport**: `apply_nexthop_op` async helper uses the
@@ -401,14 +405,19 @@ through. Each slice ships independently green.
   (deliberately offset from FRR's `0x1000_0000` / `0x2000_0000`
   so concurrent FRR + rustbgpd installs are distinguishable in
   `ip nexthop show` and never collide on `NLM_F_REPLACE`).
-- **Byte-fixture test**: capture FRR's actual wire bytes via
-  `strace -e trace=sendto -x -s 4096 ip nexthop add id 200 group 12/13 fdb`
+- **Byte-fixture test**: capture iproute2's reference wire bytes
+  via `strace -e trace=sendto -x -s 4096 ip nexthop add id 200 group 12/13 fdb`
   and `... bridge fdb add 00:11:22:33:44:55 dev vxlan0 nhid 200 self`
   on a netns. Drop the captured `\x..` blobs into
   `tests/fixtures/` as byte arrays; the unit test asserts our
-  builder produces bytewise-identical output. This is also the
-  test the upstream PR #225 maintainer is asking for, so we're
-  building it once for both sides.
+  builder produces bytewise-identical output. Cross-check
+  attribute order and flag values against FRR's emit sites
+  (`zebra/rt_netlink.c:5207-5263` for `netlink_fdb_nhg_update`
+  and `zebra_evpn_mh.c:1512` for the per-VTEP NH) so the
+  fixture stays representative of what production EVPN
+  speakers put on the wire. This is also the test the
+  upstream PR #225 maintainer is asking for, so we're building
+  it once for both sides.
 - No interaction with the diff or apply layers yet.
 - Output: a tested netlink primitive ready to be called.
 
@@ -588,7 +597,7 @@ through. Each slice ships independently green.
   — nexthop: support for fdb ecmp nexthops (v5.8).
 - [`include/uapi/linux/nexthop.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/nexthop.h)
   — UAPI constants (`NHA_ID=1`, `NHA_GROUP=2`, `NHA_FDB=11`,
-  `nexthop_grp { id, weight, weight_high, resvd2 }`).
+  `nexthop_grp { id, weight, resvd1, resvd2 }`).
 - [`include/uapi/linux/neighbour.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/neighbour.h)
   — `NDA_NH_ID = 13`.
 - [CVE-2025-39851](https://www.suse.com/security/cve/CVE-2025-39851.html)
