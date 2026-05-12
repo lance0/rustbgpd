@@ -656,8 +656,11 @@ pub fn record_l3_success(
         DataplaneOp::AddRemoteFdb { .. }
         | DataplaneOp::UpdateRemoteFdb { .. }
         | DataplaneOp::RemoveRemoteFdb { .. }
-        | DataplaneOp::SetBumPortFlags { .. } => {
-            // L2 FDB / BUM ops have their own owned state.
+        | DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::InstallFdbNhg { .. }
+        | DataplaneOp::UpdateFdbNhgMembers { .. }
+        | DataplaneOp::RemoveFdbNhg { .. } => {
+            // L2 FDB / BUM / FDB-NHG ops have their own owned state.
         }
     }
 }

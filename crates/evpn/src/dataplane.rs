@@ -28,7 +28,7 @@ use std::sync::Arc;
 use crate::ip_vrf::{IpVrfId, IpVrfStatus, IpVrfTable};
 use crate::mac::{MacAddress, RemoteMacTable};
 use crate::{DfRole, EvpnInstanceId, EvpnInstanceTable};
-use rustbgpd_wire::EthernetSegmentIdentifier;
+use rustbgpd_wire::{EthernetSegmentIdentifier, EthernetTagId};
 
 /// Complete desired-state snapshot fed to the Linux dataplane.
 ///
@@ -409,6 +409,37 @@ pub enum DataplaneOpKind {
     SetBumPortFlags {
         /// CE-facing bridge port ifindex.
         ifindex: u32,
+    },
+    /// Install an FDB row pointing at an FDB nexthop group via
+    /// `NDA_NH_ID` (ADR-0059 slice 3 aliasing-ECMP). The kernel
+    /// group ID isn't reported here — operators trace it via
+    /// structured logs from the coordinator. Single entry per
+    /// `(VNI, MAC)`, like the single-dst variants.
+    InstallFdbNhg {
+        /// MAC the FDB row programs.
+        mac: MacAddress,
+    },
+    /// Update an FDB nexthop group's member set in place (atomic
+    /// alias-set swap via `NLM_F_REPLACE` — ADR-0059 §5 invariant 3).
+    /// Group-level — no `(VNI, MAC)` row identity. The `(esi,
+    /// ethernet_tag)` payload identifies which group the update
+    /// touched; `AppliedOp` separately carries the VNI, so the
+    /// three together pin down the Linux-owned `AliasGroupKey`.
+    UpdateFdbNhgMembers {
+        /// Ethernet Segment identifier of the group whose member
+        /// set was replaced.
+        esi: EthernetSegmentIdentifier,
+        /// Ethernet Tag of the EVI within the segment. Distinguishes
+        /// groups that share an ESI across multiple bridge domains.
+        ethernet_tag: EthernetTagId,
+    },
+    /// Remove an FDB row that referenced an FDB nexthop group. The
+    /// group teardown itself (and any per-VTEP-NH cleanup the
+    /// refcount triggers) is internal to the coordinator and not
+    /// reported as a separate kind row.
+    RemoveFdbNhg {
+        /// MAC the FDB row programmed.
+        mac: MacAddress,
     },
 }
 

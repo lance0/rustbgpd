@@ -243,6 +243,7 @@ mod tests {
         KernelFdbEntry {
             mac: mac(0),
             dst: Some(ip(dst)),
+            nh_id: None,
             flags: KernelFdbFlags {
                 extern_learn: true,
                 master: true,
@@ -259,14 +260,7 @@ mod tests {
 
     fn applied_one(v: EvpnInstanceId, m: MacAddress, dst: &str, seq: Option<u32>) -> OwnedSet {
         let mut o = OwnedSet::new();
-        o.record_applied(
-            v,
-            m,
-            OwnedEntry {
-                last_applied_dst: ip(dst),
-                last_applied_seq: seq,
-            },
-        );
+        o.record_applied(v, m, OwnedEntry::single_dst(ip(dst), seq));
         o
     }
 
@@ -381,6 +375,7 @@ mod tests {
             KernelFdbEntry {
                 mac: mac(1),
                 dst: Some(ip("10.0.0.99")),
+                nh_id: None,
                 flags: KernelFdbFlags {
                     permanent: true,
                     master: true,
@@ -410,6 +405,7 @@ mod tests {
             KernelFdbEntry {
                 mac: mac(1),
                 dst: None,
+                nh_id: None,
                 flags: KernelFdbFlags::default(),
             },
         );
@@ -509,6 +505,7 @@ mod tests {
             KernelFdbEntry {
                 mac: mac(9),
                 dst: Some(ip("10.0.0.99")),
+                nh_id: None,
                 flags: KernelFdbFlags {
                     permanent: true,
                     master: true,
@@ -525,10 +522,7 @@ mod tests {
         applied.record_applied(
             vni(300),
             mac(7),
-            OwnedEntry {
-                last_applied_dst: ip("10.0.0.4"),
-                last_applied_seq: None,
-            },
+            OwnedEntry::single_dst(ip("10.0.0.4"), None),
         );
 
         let probes = ready_probes(&[vni(100), vni(200)]);
@@ -555,7 +549,10 @@ mod tests {
                 | DataplaneOp::AddL3Neighbor { .. }
                 | DataplaneOp::RemoveL3Neighbor { .. }
                 | DataplaneOp::AddL3VxlanFdb { .. }
-                | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+                | DataplaneOp::RemoveL3VxlanFdb { .. }
+                | DataplaneOp::InstallFdbNhg { .. }
+                | DataplaneOp::UpdateFdbNhgMembers { .. }
+                | DataplaneOp::RemoveFdbNhg { .. } => {
                     panic!("compute_diff must only produce L2 FDB ops; got {op:?}");
                 }
             }

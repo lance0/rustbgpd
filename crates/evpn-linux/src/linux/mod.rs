@@ -54,6 +54,7 @@ use crate::snapshot::{InstanceProbes, KernelSnapshot};
 
 mod bum_filter;
 mod fdb;
+mod fdb_nhg;
 mod ip_vrf;
 mod l3;
 mod links;
@@ -538,6 +539,21 @@ impl Dataplane for LinuxDataplane {
                 router_mac,
                 ..
             } => l3::apply_remove_l3vxlan_fdb(&self.handle, *l3vxlan_ifindex, *router_mac).await,
+            // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —
+            // the reconcile actor's coordinator routes them through
+            // `NexthopOps` + `linux::fdb_nhg` directly, because they
+            // require allocator + refcount state owned by the actor.
+            // If one slips through here, the routing is broken; use
+            // `InvalidArgument` so the failure classifier marks it
+            // `Permanent` and the actor suppresses the op rather than
+            // backoff-retrying a programming bug forever.
+            DataplaneOp::InstallFdbNhg { .. }
+            | DataplaneOp::UpdateFdbNhgMembers { .. }
+            | DataplaneOp::RemoveFdbNhg { .. } => Err(DataplaneError::InvalidArgument(
+                "FDB-NHG ops must be applied via the reconcile-actor coordinator, \
+                 not Dataplane::apply"
+                    .into(),
+            )),
         }
     }
 

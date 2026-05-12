@@ -11,6 +11,75 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0059 slice 3a — FDB nexthop group state types and apply
+  primitive.** Foundation infrastructure for the aliasing-ECMP
+  dataplane; **zero operational behavior change** in this PR — slice
+  3b wires the new surface into `compute_diff` + the reconcile actor's
+  apply coordinator + startup NHID adoption + an end-to-end netns
+  test. The pieces that ship here:
+
+  - **`crates/evpn-linux/src/nh_id_alloc.rs`** —
+    `NhIdAllocator` over a `[1, 0x4000]` bitmap with tag bits
+    `0x3000_0000` (per-VTEP FDB nexthop) / `0x4000_0000` (FDB
+    nexthop group), deliberately offset from FRR's
+    `0x1000`/`0x2000` reservations so concurrent FRR + rustbgpd
+    installs never collide on `NLM_F_REPLACE` (ADR-0059 §5
+    invariant 6). `reserve()` API for slice 3b's startup
+    adoption pass.
+  - **`crates/evpn-linux/src/group_state.rs`** — `GroupOwnedMap`
+    with per-group `(VNI, ESI, EthernetTag)` refcount across
+    referring `(VNI, MAC)` rows, plus a per-VTEP-NH refcount
+    across referring groups. `RefDelta` return value tells the
+    apply coordinator when a group should be torn down on
+    `RemoveFdbNhg`. ADR-0059 §7's `share_l2_nhg` knob defaults
+    off, so the Linux-owned key includes VNI even though the
+    portable `RemoteMacEntry::alias_group_key` from slice 1
+    stays VNI-less.
+  - **`crates/evpn-linux/src/linux/fdb_nhg.rs`** —
+    `apply_install_fdb_nhg_row` / `apply_remove_fdb_nhg_row`
+    that build bridge FDB rows with `NDA_NH_ID` (= 13, via
+    `NeighbourAttribute::Other(DefaultNla)` since
+    `netlink-packet-route 0.30` has no typed variant). Inline
+    **CVE-2025-39851 guard** rejects any install whose target
+    L2VXLAN does not have `learning_disabled == Some(true)`
+    (mainline fix `6ead38147ebb`; the readiness probe is the
+    upstream guard, this is belt-and-suspenders).
+  - **`KernelFdbEntry::nh_id: Option<u32>`** + `linux/fdb.rs`
+    parse path extracts `NDA_NH_ID` from the kernel dump.
+    `merge_fdb_rows` preserves `nh_id` across the self/master
+    row split so the merged entry surfaces both halves.
+  - **`OwnedEntry` enum refactor** — replaced the field-soup
+    pre-3a `{ last_applied_dst, last_applied_seq }` shape — which
+    would have grown a third `last_applied_group_key: Option<...>`
+    flag in a naïve forward-compat extension — with an explicit
+    enum `OwnedEntryKind { SingleDst { dst, mobility_seq }, FdbNhg { group_key } }`.
+    Invalid states like "dst set AND group_key set" are
+    structurally impossible. Existing call sites use the new
+    `OwnedEntry::single_dst()` constructor; FDB-NHG-aware sites
+    land in slice 3b.
+  - **`DataplaneOp::InstallFdbNhg` / `UpdateFdbNhgMembers` /
+    `RemoveFdbNhg`** variants declared. Slice 3b will emit them
+    from `compute_diff` Pass 1b and route them through the
+    coordinator. In slice 3a they are explicitly **not yet
+    emitted** — `compute_diff` still produces only single-dst
+    ops — and `Dataplane::apply` returns
+    `InvalidArgument("must use coordinator")` if one slips
+    through.
+  - **`NexthopOps` trait** declared on `dataplane.rs` with the
+    six low-level methods the slice 3b coordinator will call
+    (`add_nexthop_member`, `add_nexthop_group`, `del_nexthop`,
+    `install_fdb_nhg_row`, `remove_fdb_nhg_row`,
+    `dump_owned_nexthops`). `KernelNexthop` +
+    `KernelNexthopKind` types for the startup-adoption dump.
+    No impls yet — slice 3b lands `LinuxDataplane` +
+    `InMemoryDataplane` impls.
+
+  Test coverage: 213 lib tests passing (13 `NhIdAllocator` + 9
+  `GroupOwnedMap` + 4 `fdb_nhg` CVE-guard tests + 1 merge-`nh_id`
+  test + 186 pre-existing). No netns test in slice 3a; the
+  end-to-end Docker-runnable test lands with slice 3b's
+  coordinator.
+
 - **ADR-0059 slice 2 — `nexthop_raw` raw-netlink module.** New
   internal `crates/evpn-linux/src/linux/nexthop_raw/` emitting
   `RTM_NEWNEXTHOP` / `RTM_DELNEXTHOP` messages with `NHA_FDB` for

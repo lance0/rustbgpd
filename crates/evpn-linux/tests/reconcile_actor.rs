@@ -548,6 +548,7 @@ async fn shutdown_drain_preserves_foreign_static_entry() {
         KernelFdbEntry {
             mac: mac(99),
             dst: Some(ipa("10.0.0.99")),
+            nh_id: None,
             flags: KernelFdbFlags {
                 permanent: true,
                 master: true,

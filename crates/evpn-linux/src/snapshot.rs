@@ -77,8 +77,14 @@ pub struct KernelFdbEntry {
     /// MAC address the entry covers.
     pub mac: MacAddress,
     /// Remote VTEP destination if the entry is a tunnel-encap entry,
-    /// `None` for bridge-port-local entries.
+    /// `None` for bridge-port-local entries and for FDB rows that
+    /// point at an FDB nexthop group via `nh_id`.
     pub dst: Option<IpAddr>,
+    /// Kernel nexthop ID this FDB row references (`NDA_NH_ID`), for
+    /// ADR-0059 aliasing-ECMP rows. `None` when the row carries
+    /// `NDA_DST` instead (single-VTEP rows). Mutually exclusive with
+    /// `dst` per `vxlan_fdb_parse` kernel rules.
+    pub nh_id: Option<u32>,
     /// Coarse-grained ownership flags.
     pub flags: KernelFdbFlags,
 }
@@ -343,18 +349,87 @@ impl OwnedSet {
 
 /// What rustbgpd remembers about each entry it programmed.
 ///
-/// `last_applied_dst` lets the diff loop detect "we programmed dst=X,
-/// kernel snapshot now shows dst=Y" — the actor re-issues the program
-/// to bring the kernel back in sync. `last_applied_seq` carries the
-/// MAC mobility sequence so a stale lower-seq snapshot doesn't trigger
-/// pointless updates.
+/// The kind variant lets the diff loop distinguish single-dst entries
+/// (which carry an applied VTEP IP + mobility sequence) from FDB-NHG
+/// entries (which carry the alias group identity instead). Invalid
+/// states like `dst=X AND group_key=Some(...)` are unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedEntry {
-    /// VTEP IP we last successfully programmed for this `(vni, mac)`.
-    pub last_applied_dst: IpAddr,
-    /// Mobility sequence we recorded at apply time, if the route
-    /// carried one.
-    pub last_applied_seq: Option<u32>,
+    pub kind: OwnedEntryKind,
+}
+
+/// Variant payload for an [`OwnedEntry`]. ADR-0059 slice 3 distinguishes
+/// single-VTEP FDB rows (`SingleDst`) from FDB-NHG rows (`FdbNhg`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedEntryKind {
+    /// Single-VTEP FDB row programmed via `RTM_NEWNEIGH` with `NDA_DST`.
+    SingleDst {
+        /// VTEP IP we last successfully programmed for this `(vni, mac)`.
+        dst: IpAddr,
+        /// Mobility sequence recorded at apply time, if the route
+        /// carried one. Lets a stale lower-seq snapshot avoid
+        /// triggering pointless updates.
+        mobility_seq: Option<u32>,
+    },
+    /// FDB-NHG row programmed via `RTM_NEWNEIGH` with `NDA_NH_ID`. The
+    /// `group_key` identifies the Linux-owned `(VNI, ESI, EthernetTag)`
+    /// tuple whose kernel `nh_id` this FDB row references. Mobility
+    /// for multi-homed entries lives at the projection layer (which
+    /// picks the winning Type 2 for a given MAC) — the group key
+    /// reflects whatever that winning Type 2 carries.
+    FdbNhg {
+        group_key: crate::group_state::AliasGroupKey,
+    },
+}
+
+impl OwnedEntry {
+    /// Convenience constructor for a single-VTEP entry. Existing
+    /// pre-slice-3 callers use this shape; FDB-NHG callers construct
+    /// `OwnedEntry { kind: FdbNhg { ... } }` directly.
+    #[must_use]
+    pub fn single_dst(dst: IpAddr, mobility_seq: Option<u32>) -> Self {
+        Self {
+            kind: OwnedEntryKind::SingleDst { dst, mobility_seq },
+        }
+    }
+
+    /// Convenience constructor for an FDB-NHG entry.
+    #[must_use]
+    pub fn fdb_nhg(group_key: crate::group_state::AliasGroupKey) -> Self {
+        Self {
+            kind: OwnedEntryKind::FdbNhg { group_key },
+        }
+    }
+
+    /// Last-applied destination if this entry is a single-dst one.
+    /// `None` for FDB-NHG entries.
+    #[must_use]
+    pub fn last_applied_dst(&self) -> Option<IpAddr> {
+        match self.kind {
+            OwnedEntryKind::SingleDst { dst, .. } => Some(dst),
+            OwnedEntryKind::FdbNhg { .. } => None,
+        }
+    }
+
+    /// Last-applied mobility sequence if this entry is a single-dst
+    /// one. `None` for FDB-NHG entries (mobility is decided at the
+    /// projection layer for those).
+    #[must_use]
+    pub fn last_applied_seq(&self) -> Option<u32> {
+        match self.kind {
+            OwnedEntryKind::SingleDst { mobility_seq, .. } => mobility_seq,
+            OwnedEntryKind::FdbNhg { .. } => None,
+        }
+    }
+
+    /// Alias group key if this entry is FDB-NHG. `None` for single-dst.
+    #[must_use]
+    pub fn group_key(&self) -> Option<crate::group_state::AliasGroupKey> {
+        match self.kind {
+            OwnedEntryKind::SingleDst { .. } => None,
+            OwnedEntryKind::FdbNhg { group_key } => Some(group_key),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -376,6 +451,7 @@ mod tests {
         let entry = KernelFdbEntry {
             mac: mac(1),
             dst: Some(ip("10.0.0.2")),
+            nh_id: None,
             flags: KernelFdbFlags {
                 extern_learn: true,
                 master: true,
@@ -393,6 +469,7 @@ mod tests {
         let entry = KernelFdbEntry {
             mac: mac(2),
             dst: None,
+            nh_id: None,
             flags: KernelFdbFlags::default(),
         };
         assert!(!entry.is_extern_learned());
@@ -404,6 +481,7 @@ mod tests {
         let entry = KernelFdbEntry {
             mac: mac(3),
             dst: None,
+            nh_id: None,
             flags: KernelFdbFlags {
                 permanent: true,
                 ..Default::default()
@@ -435,15 +513,12 @@ mod tests {
         owned.record_applied(
             vni(100),
             mac(1),
-            OwnedEntry {
-                last_applied_dst: ip("10.0.0.2"),
-                last_applied_seq: Some(0),
-            },
+            OwnedEntry::single_dst(ip("10.0.0.2"), Some(0)),
         );
         assert!(owned.contains(vni(100), mac(1)));
         assert_eq!(owned.len(), 1);
         let prev = owned.record_withdrawn(vni(100), mac(1)).unwrap();
-        assert_eq!(prev.last_applied_dst, ip("10.0.0.2"));
+        assert_eq!(prev.last_applied_dst(), Some(ip("10.0.0.2")));
         assert!(owned.is_empty());
     }
 
@@ -455,6 +530,7 @@ mod tests {
             KernelFdbEntry {
                 mac: mac(1),
                 dst: Some(ip("10.0.0.2")),
+                nh_id: None,
                 flags: KernelFdbFlags {
                     extern_learn: true,
                     master: true,
@@ -477,6 +553,7 @@ mod tests {
                 KernelFdbEntry {
                     mac: mac(1),
                     dst: Some(ip("10.0.0.2")),
+                    nh_id: None,
                     flags: KernelFdbFlags::default(),
                 },
             );

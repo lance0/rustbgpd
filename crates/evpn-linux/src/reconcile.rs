@@ -822,17 +822,13 @@ impl<D: Dataplane> ReconcileActor<D> {
             DataplaneOp::AddRemoteFdb { vni, mac, dst }
             | DataplaneOp::UpdateRemoteFdb { vni, mac, dst } => {
                 let seq = desired.get(*vni, *mac).and_then(|e| e.mobility_sequence);
-                self.state.owned.record_applied(
-                    *vni,
-                    *mac,
-                    OwnedEntry {
-                        last_applied_dst: *dst,
-                        last_applied_seq: seq,
-                    },
-                );
+                self.state
+                    .owned
+                    .record_applied(*vni, *mac, OwnedEntry::single_dst(*dst, seq));
                 self.state.retry.record_success((*vni, *mac));
             }
-            DataplaneOp::RemoveRemoteFdb { vni, mac } => {
+            DataplaneOp::RemoveRemoteFdb { vni, mac }
+            | DataplaneOp::RemoveFdbNhg { vni, mac, .. } => {
                 self.state.owned.record_withdrawn(*vni, *mac);
                 self.state.retry.record_success((*vni, *mac));
             }
@@ -843,17 +839,31 @@ impl<D: Dataplane> ReconcileActor<D> {
                 // Clear the BUM-side retry schedule for the ifindex.
                 self.state.bum_retry.record_success(*ifindex);
             }
+            DataplaneOp::InstallFdbNhg {
+                vni,
+                mac,
+                group_key,
+                ..
+            } => {
+                // Record FDB-row ownership via the new group-aware kind.
+                self.state
+                    .owned
+                    .record_applied(*vni, *mac, OwnedEntry::fdb_nhg(*group_key));
+                self.state.retry.record_success((*vni, *mac));
+            }
+            // Gate 9 slice 6c L3 ops have their own owned-set and retry
+            // tracking inside the L3 diff loop, handled by
+            // `record_success_l3`. ADR-0059 slice 3 `UpdateFdbNhgMembers`
+            // is a group-level update with no per-`(VNI, MAC)` owned-set
+            // delta — the slice 3b coordinator updates `group_state`
+            // separately. Both arms share the no-op body.
             DataplaneOp::AddRemoteIpRoute { .. }
             | DataplaneOp::RemoveRemoteIpRoute { .. }
             | DataplaneOp::AddL3Neighbor { .. }
             | DataplaneOp::RemoveL3Neighbor { .. }
             | DataplaneOp::AddL3VxlanFdb { .. }
-            | DataplaneOp::RemoveL3VxlanFdb { .. } => {
-                // Gate 9 slice 6c L3 ops have their own owned-set
-                // and retry tracking inside the L3 diff loop
-                // (separate from this L2 FDB accounting).
-                // Handled by `record_success_l3` in the L3 path.
-            }
+            | DataplaneOp::RemoveL3VxlanFdb { .. }
+            | DataplaneOp::UpdateFdbNhgMembers { .. } => {}
         }
     }
 
@@ -1165,7 +1175,10 @@ fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
     match op {
         DataplaneOp::AddRemoteFdb { vni, .. }
         | DataplaneOp::UpdateRemoteFdb { vni, .. }
-        | DataplaneOp::RemoveRemoteFdb { vni, .. } => *vni,
+        | DataplaneOp::RemoveRemoteFdb { vni, .. }
+        | DataplaneOp::InstallFdbNhg { vni, .. }
+        | DataplaneOp::RemoveFdbNhg { vni, .. } => *vni,
+        DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => group_key.vni,
         DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
@@ -1187,8 +1200,11 @@ fn fdb_op_mac(op: &DataplaneOp) -> rustbgpd_evpn::MacAddress {
     match op {
         DataplaneOp::AddRemoteFdb { mac, .. }
         | DataplaneOp::UpdateRemoteFdb { mac, .. }
-        | DataplaneOp::RemoveRemoteFdb { mac, .. } => *mac,
-        DataplaneOp::SetBumPortFlags { .. }
+        | DataplaneOp::RemoveRemoteFdb { mac, .. }
+        | DataplaneOp::InstallFdbNhg { mac, .. }
+        | DataplaneOp::RemoveFdbNhg { mac, .. } => *mac,
+        DataplaneOp::UpdateFdbNhgMembers { .. }
+        | DataplaneOp::SetBumPortFlags { .. }
         | DataplaneOp::AddRemoteIpRoute { .. }
         | DataplaneOp::RemoveRemoteIpRoute { .. }
         | DataplaneOp::AddL3Neighbor { .. }
@@ -1224,6 +1240,19 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         | DataplaneOp::RemoveL3VxlanFdb { .. } => {
             unreachable!("L3 ops use a separate AppliedL3Op accounting path")
         }
+        // ADR-0059 slice 3 FDB-NHG ops have their own kind variants
+        // so the report layer never relies on sentinel MAC/dst values
+        // (which would collide in `permanent_failures` keyed by
+        // `(VNI, MAC)` and confuse operators reading the failed-op
+        // list).
+        DataplaneOp::InstallFdbNhg { mac, .. } => DataplaneOpKind::InstallFdbNhg { mac: *mac },
+        DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+            DataplaneOpKind::UpdateFdbNhgMembers {
+                esi: group_key.esi,
+                ethernet_tag: group_key.ethernet_tag,
+            }
+        }
+        DataplaneOp::RemoveFdbNhg { mac, .. } => DataplaneOpKind::RemoveFdbNhg { mac: *mac },
     }
 }
 
