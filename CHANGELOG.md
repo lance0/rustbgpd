@@ -9,6 +9,23 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`evpn_ip_vrf_originated_routes{vrf}` Prometheus gauge.**
+  Slice 6b's originated-route count is now exposed as a
+  Prometheus gauge alongside the existing
+  `evpn_ip_vrf_installed_routes` / `evpn_ip_vrf_observed_routes`
+  series. Previously gRPC-only via
+  `IpVrfState.originated_routes_count`. The L3 originator
+  pre-populates every configured VRF at 0 on startup (so
+  dashboards see the series before the first origination)
+  and re-emits after every successful inject / withdraw /
+  drain — same pattern as the installed-routes gauge,
+  matching the gRPC field exactly. Caught during the Gate 9
+  slice 6 soak setup: the soak's CSV had to use
+  `observed_routes` as a proxy because no Prometheus
+  series existed for `originated_routes`.
+
 ## [0.18.0] — 2026-05-11
 
 Gate 9 symmetric Interface-less IRB ends here. v0.17.0 closed

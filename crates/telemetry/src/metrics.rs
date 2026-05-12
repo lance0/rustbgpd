@@ -68,6 +68,7 @@ pub struct BgpMetrics {
     evpn_ip_vrf_observed_routes: IntGaugeVec,
     evpn_ip_vrf_observed_routes_filtered: IntCounterVec,
     evpn_ip_vrf_origination_suppressed: IntCounterVec,
+    evpn_ip_vrf_originated_routes: IntGaugeVec,
     evpn_ip_vrf_installed_routes: IntGaugeVec,
 
     // ── BMP exporter ───────────────────────────────────────────
@@ -370,6 +371,18 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_ip_vrf_originated_routes = IntGaugeVec::new(
+            Opts::new(
+                "evpn_ip_vrf_originated_routes",
+                "Locally-originated EVPN Type 5 routes currently advertised from \
+                 each IP-VRF (Gate 9 slice 6b). Matches the L3 originator's \
+                 in-flight set after each reconcile pass — same value as the \
+                 gRPC `IpVrfState.originated_routes_count` field.",
+            ),
+            &["vrf"],
+        )
+        .expect("valid metric definition");
+
         let evpn_ip_vrf_installed_routes = IntGaugeVec::new(
             Opts::new(
                 "evpn_ip_vrf_installed_routes",
@@ -508,6 +521,9 @@ impl BgpMetrics {
             .register(Box::new(evpn_ip_vrf_origination_suppressed.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_ip_vrf_originated_routes.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(evpn_ip_vrf_installed_routes.clone()))
             .expect("metric not already registered");
         registry
@@ -555,6 +571,7 @@ impl BgpMetrics {
             evpn_ip_vrf_observed_routes,
             evpn_ip_vrf_observed_routes_filtered,
             evpn_ip_vrf_origination_suppressed,
+            evpn_ip_vrf_originated_routes,
             evpn_ip_vrf_installed_routes,
             bmp_source_drops,
             bmp_collector_drops,
@@ -796,6 +813,16 @@ impl BgpMetrics {
         self.evpn_ip_vrf_origination_suppressed
             .with_label_values(&[vrf, reason])
             .inc_by(delta);
+    }
+
+    /// Set the originated-routes gauge for one VRF (Gate 9 slice 6b).
+    /// Matches the gRPC `IpVrfState.originated_routes_count` field —
+    /// the count of locally-originated Type 5 routes currently
+    /// advertised by the L3 originator for that VRF.
+    pub fn set_evpn_ip_vrf_originated_routes(&self, vrf: &str, count: i64) {
+        self.evpn_ip_vrf_originated_routes
+            .with_label_values(&[vrf])
+            .set(count);
     }
 
     /// Set the installed-routes gauge for one VRF (Gate 9 slice 6c).

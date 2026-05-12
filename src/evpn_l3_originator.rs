@@ -193,6 +193,17 @@ async fn originator_loop(mut cfg: SpawnConfig) {
     // matching withdraw uses the same key).
     let mut originated: BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey> = BTreeMap::new();
 
+    // Pre-populate the originated-routes Prometheus gauge at 0 for
+    // every configured IP-VRF. Without this, a VRF that has yet to
+    // see its first observation never emits a series — Prometheus
+    // queries return "no data" for it, which most dashboards conflate
+    // with "metric unavailable" rather than "count is zero." The same
+    // pattern is used for `evpn_ip_vrf_installed_routes` by the
+    // daemon-side report subscriber (see `src/main.rs`).
+    for vrf in cfg.ip_vrfs.iter() {
+        cfg.metrics.set_evpn_ip_vrf_originated_routes(&vrf.name, 0);
+    }
+
     // Eagerly drive one reconcile so startup state aligns with whatever
     // the dataplane has already reported (the watch channels may already
     // carry a snapshot from the first reconcile pass).
@@ -292,6 +303,7 @@ async fn reconcile(
     for ((vrf_id, prefix), key) in to_withdraw {
         if withdraw_one(&cfg.rib_tx, vrf_id, key, &cfg.originated_counts).await {
             originated.remove(&(vrf_id, prefix));
+            publish_originated_gauge(cfg, vrf_id);
         }
     }
 
@@ -320,6 +332,7 @@ async fn reconcile(
         let key = route.key();
         if inject_one(&cfg.rib_tx, *vrf_id, key, route, &cfg.originated_counts).await {
             originated.insert((*vrf_id, *prefix), key);
+            publish_originated_gauge(cfg, *vrf_id);
         }
     }
 }
@@ -440,9 +453,27 @@ async fn drain_all(
 ) {
     let snapshot: Vec<_> = originated.iter().map(|(k, v)| (*k, *v)).collect();
     for ((vrf_id, _prefix), key) in &snapshot {
-        let _ = withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await;
+        if withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await {
+            publish_originated_gauge(cfg, *vrf_id);
+        }
     }
     originated.clear();
+}
+
+/// Republish the `evpn_ip_vrf_originated_routes{vrf}` Prometheus
+/// gauge from the authoritative shared counter. Called after every
+/// successful `inject_one` / `withdraw_one` so the gauge tracks the
+/// gRPC `IpVrfState.originated_routes_count` field exactly. A
+/// missing VRF (operator removed the entry mid-flight) is a no-op —
+/// we can't construct a label without a name, and the gauge will
+/// hold its last value until the daemon restarts.
+fn publish_originated_gauge(cfg: &SpawnConfig, vrf_id: IpVrfId) {
+    let Some(vrf) = cfg.ip_vrfs.iter().find(|v| v.id == vrf_id) else {
+        return;
+    };
+    let count = cfg.originated_counts.count(vrf_id);
+    cfg.metrics
+        .set_evpn_ip_vrf_originated_routes(&vrf.name, i64::try_from(count).unwrap_or(i64::MAX));
 }
 
 /// Compute the route key the originator would produce for one
@@ -1033,5 +1064,67 @@ mod tests {
                 .filter(|c| matches!(c, RibCall::Withdraw(_)))
                 .all(|c| matches!(c, RibCall::Withdraw(k) if *k == predicted)),
         );
+    }
+
+    /// Helper: scrape the metrics registry and return one labeled
+    /// value from `evpn_ip_vrf_originated_routes` (or `None` if the
+    /// series hasn't been emitted yet).
+    fn scrape_originated_gauge(cfg: &SpawnConfig, vrf_name: &str) -> Option<i64> {
+        use prometheus::Encoder;
+        let encoder = prometheus::TextEncoder::new();
+        let families = cfg.metrics.registry().gather();
+        let mut buf = Vec::new();
+        encoder.encode(&families, &mut buf).unwrap();
+        let text = String::from_utf8(buf).unwrap();
+        let needle = format!("evpn_ip_vrf_originated_routes{{vrf=\"{vrf_name}\"}}");
+        for line in text.lines() {
+            if line.starts_with(&needle) {
+                return line.split_whitespace().last().and_then(|s| s.parse().ok());
+            }
+        }
+        None
+    }
+
+    /// The `evpn_ip_vrf_originated_routes{vrf}` Prometheus gauge
+    /// must track the gRPC `IpVrfState.originated_routes_count` field
+    /// exactly. Drive a cold start → 1 origination → withdraw cycle
+    /// and assert the gauge value follows. This is the test the
+    /// soak harness's CSV would lean on if the metric ever regressed.
+    #[tokio::test]
+    async fn originated_routes_prometheus_gauge_tracks_inject_and_withdraw() {
+        let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        let mut h = Harness::new(vec![v]);
+
+        // We need to call publish_originated_gauge once at "startup"
+        // to mirror the originator_loop's pre-populate step, since
+        // tests drive `reconcile()` directly rather than entering
+        // `originator_loop`. After publish_at_zero, the gauge series
+        // must exist at 0.
+        for vrf in h.cfg.ip_vrfs.iter() {
+            h.cfg
+                .metrics
+                .set_evpn_ip_vrf_originated_routes(&vrf.name, 0);
+        }
+        assert_eq!(scrape_originated_gauge(&h.cfg, "vrf100"), Some(0));
+
+        // Drive an inject: gauge → 1.
+        h.status_tx.send_replace(vec![ready_status(100)]);
+        let mut obs_map = HashMap::new();
+        obs_map.insert(
+            IpVrfId::new(100).unwrap(),
+            vec![observation(100, [10, 1, 0, 0], 24)],
+        );
+        h.obs_tx.send_replace(Arc::new(obs_map));
+        let originated = Harness::drive_one(BTreeMap::new(), &mut h.cfg).await;
+        assert_eq!(originated.len(), 1);
+        assert_eq!(scrape_originated_gauge(&h.cfg, "vrf100"), Some(1));
+
+        // Drive a withdraw: gauge → 0.
+        let mut empty_map = HashMap::new();
+        empty_map.insert(IpVrfId::new(100).unwrap(), vec![]);
+        h.obs_tx.send_replace(Arc::new(empty_map));
+        let originated = Harness::drive_one(originated, &mut h.cfg).await;
+        assert!(originated.is_empty());
+        assert_eq!(scrape_originated_gauge(&h.cfg, "vrf100"), Some(0));
     }
 }
