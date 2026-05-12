@@ -1434,24 +1434,45 @@ where
             group_key,
             members,
         } => {
+            // Track resources newly created in this op so a later
+            // step's failure can roll them back rather than leak.
+            let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
+            let mut new_group: Option<(crate::group_state::AliasGroupKey, u32)> = None;
+
             // Step 1: install any per-VTEP members not yet present.
-            // Allocator slot reserved up front; if the netlink call
-            // fails, release the slot before returning so we don't
-            // leak allocator capacity. The actor's retry schedule
-            // will re-attempt on the next pass with a fresh alloc.
             for ip in members {
                 if state.groups.vtep_nh(ip).is_none() {
-                    let id = state.nh_id_alloc.alloc_vtep_nh().map_err(|e| {
-                        crate::error::DataplaneError::Other(format!(
-                            "ADR-0059: vtep NH alloc failed: {e}"
-                        ))
-                    })?;
+                    let id = match state.nh_id_alloc.alloc_vtep_nh() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            rollback_partial_install(
+                                dataplane,
+                                state,
+                                &new_members,
+                                new_group,
+                                "install_step1_alloc",
+                            )
+                            .await;
+                            return Err(crate::error::DataplaneError::Other(format!(
+                                "ADR-0059: vtep NH alloc failed: {e}"
+                            )));
+                        }
+                    };
                     if let Err(e) = dataplane.add_nexthop_member(id, *ip).await {
                         state.nh_id_alloc.release(id);
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            new_group,
+                            "install_step1_add",
+                        )
+                        .await;
                         return Err(e);
                     }
                     state.groups.record_member_install(*ip, id);
                     state.adopted_unreferenced.remove(&id);
+                    new_members.push((*ip, id));
                 }
             }
             // Step 2: ensure group exists with the desired member set.
@@ -1474,11 +1495,21 @@ where
                     // path. Without this, members removed by the
                     // drift heal stay orphaned in `vtep_nhs` and
                     // in-kernel.
-                    dataplane.add_nexthop_group(g_id, &member_ids).await?;
-                    let new_members: BTreeSet<_> = members.iter().copied().collect();
+                    if let Err(e) = dataplane.add_nexthop_group(g_id, &member_ids).await {
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            new_group,
+                            "install_step2_replace",
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    let new_members_set: BTreeSet<_> = members.iter().copied().collect();
                     let removed = state
                         .groups
-                        .record_group_member_change(*group_key, new_members);
+                        .record_group_member_change(*group_key, new_members_set);
                     for ip in removed {
                         if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
                             try_del_and_release_alloc(dataplane, state, vtep_id, "install_drift")
@@ -1488,11 +1519,32 @@ where
                 }
                 g_id
             } else {
-                let id = state.nh_id_alloc.alloc_nhg().map_err(|e| {
-                    crate::error::DataplaneError::Other(format!("ADR-0059: nhg alloc failed: {e}"))
-                })?;
+                let id = match state.nh_id_alloc.alloc_nhg() {
+                    Ok(id) => id,
+                    Err(e) => {
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            new_group,
+                            "install_step2_alloc",
+                        )
+                        .await;
+                        return Err(crate::error::DataplaneError::Other(format!(
+                            "ADR-0059: nhg alloc failed: {e}"
+                        )));
+                    }
+                };
                 if let Err(e) = dataplane.add_nexthop_group(id, &member_ids).await {
                     state.nh_id_alloc.release(id);
+                    rollback_partial_install(
+                        dataplane,
+                        state,
+                        &new_members,
+                        new_group,
+                        "install_step2_add",
+                    )
+                    .await;
                     return Err(e);
                 }
                 let members_set: BTreeSet<_> = members.iter().copied().collect();
@@ -1500,36 +1552,67 @@ where
                     .groups
                     .record_group_install(*group_key, id, members_set);
                 state.adopted_unreferenced.remove(&id);
+                new_group = Some((*group_key, id));
                 id
             };
-            // Step 3: install the FDB row pointing at the group.
-            // Failure here leaves the group + members installed in
-            // `state.groups` — they're refcounted, so the next pass's
-            // Install/Update for any MAC sharing this `group_key`
-            // will reuse them. Per-VTEP members not yet ref'd by any
-            // MAC stay tracked in `groups.vtep_nhs`; the GC happens
-            // on the corresponding RemoveFdbNhg path's last-ref unref.
-            dataplane.install_fdb_nhg_row(*vni, *mac, group_id).await?;
+            // Step 3: install the FDB row pointing at the group. On
+            // failure, roll back the newly-created group (if any) and
+            // members — they have no MAC ref yet, so they're true
+            // orphans without rollback.
+            if let Err(e) = dataplane.install_fdb_nhg_row(*vni, *mac, group_id).await {
+                rollback_partial_install(
+                    dataplane,
+                    state,
+                    &new_members,
+                    new_group,
+                    "install_step3",
+                )
+                .await;
+                return Err(e);
+            }
             state.groups.record_mac_ref(*group_key, *vni, *mac);
             Ok(())
         }
 
         DataplaneOp::UpdateFdbNhgMembers { group_key, members } => {
-            // Add any new per-VTEP members first; release allocator
-            // slot on netlink failure (same rollback as Install).
+            // Track newly-created per-VTEP members so Step 2 failure
+            // can roll them back; the group itself pre-exists (the
+            // op-name says "Update", not "Install") so it never
+            // appears in the rollback's `new_group` slot.
+            let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
             for ip in members {
                 if state.groups.vtep_nh(ip).is_none() {
-                    let id = state.nh_id_alloc.alloc_vtep_nh().map_err(|e| {
-                        crate::error::DataplaneError::Other(format!(
-                            "ADR-0059: vtep NH alloc failed: {e}"
-                        ))
-                    })?;
+                    let id = match state.nh_id_alloc.alloc_vtep_nh() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            rollback_partial_install(
+                                dataplane,
+                                state,
+                                &new_members,
+                                None,
+                                "update_step1_alloc",
+                            )
+                            .await;
+                            return Err(crate::error::DataplaneError::Other(format!(
+                                "ADR-0059: vtep NH alloc failed: {e}"
+                            )));
+                        }
+                    };
                     if let Err(e) = dataplane.add_nexthop_member(id, *ip).await {
                         state.nh_id_alloc.release(id);
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            None,
+                            "update_step1_add",
+                        )
+                        .await;
                         return Err(e);
                     }
                     state.groups.record_member_install(*ip, id);
                     state.adopted_unreferenced.remove(&id);
+                    new_members.push((*ip, id));
                 }
             }
             // Compute new member-id list and REPLACE the group.
@@ -1545,16 +1628,22 @@ where
                 // Surface it as a transient error (classified `Other`
                 // → retried) so it shows up in metrics rather than
                 // silently clearing retry state.
+                rollback_partial_install(dataplane, state, &new_members, None, "update_no_group")
+                    .await;
                 return Err(crate::error::DataplaneError::Other(format!(
                     "ADR-0059: UpdateFdbNhgMembers for {group_key:?} but group missing \
                      from GroupOwnedMap (owned/groups state drift)",
                 )));
             };
-            dataplane.add_nexthop_group(g_id, &member_ids).await?;
-            let new_members: BTreeSet<_> = members.iter().copied().collect();
+            if let Err(e) = dataplane.add_nexthop_group(g_id, &member_ids).await {
+                rollback_partial_install(dataplane, state, &new_members, None, "update_step2")
+                    .await;
+                return Err(e);
+            }
+            let new_members_set: BTreeSet<_> = members.iter().copied().collect();
             let removed = state
                 .groups
-                .record_group_member_change(*group_key, new_members);
+                .record_group_member_change(*group_key, new_members_set);
             // GC per-VTEP members whose last group-ref dropped.
             for ip in removed {
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
@@ -1622,32 +1711,74 @@ fn check_permanent_suppression<K: Ord>(
     }
 }
 
+/// Roll back per-VTEP members and (optionally) a group that were
+/// newly created during a partial `InstallFdbNhg` /
+/// `UpdateFdbNhgMembers` execution. Called when a later step fails
+/// — without this, the surrounding op would return `Err` and the
+/// actor would drop the `(VNI, MAC)` retry state on permanent
+/// failures, leaving the in-flight members + group permanently
+/// orphaned in the kernel + allocator. Each delete attempt routes
+/// through `try_del_and_release_alloc`, which keeps the allocator
+/// slot reserved when the kernel delete fails (transient → queued
+/// for retry; permanent → operator intervention).
+async fn rollback_partial_install<D: crate::dataplane::NexthopOps>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    new_members: &[(std::net::IpAddr, u32)],
+    new_group: Option<(crate::group_state::AliasGroupKey, u32)>,
+    site: &'static str,
+) {
+    // Group first (no FDB row exists at this point, so the ADR §5
+    // invariant-2 order reduces to group → members).
+    if let Some((group_key, group_id)) = new_group
+        && let Some((_id_from_map, _members)) = state.groups.drop_unreferenced_group(&group_key)
+    {
+        try_del_and_release_alloc(dataplane, state, group_id, site).await;
+    }
+    // Members in reverse-creation order.
+    for (ip, id) in new_members.iter().rev() {
+        state.groups.drop_vtep_nh(ip);
+        try_del_and_release_alloc(dataplane, state, *id, site).await;
+    }
+}
+
 /// Best-effort delete of a tagged kernel nexthop, releasing the
 /// allocator slot only if the delete succeeded. On `Err` the slot
 /// stays reserved (so a future `alloc_vtep_nh` / `alloc_nhg` cannot
-/// hand out an ID still live in the kernel) AND the ID is queued
-/// into `state.pending_deletes` for retry on the next reconcile
-/// pass — without that queue the orphan would be permanently stuck
-/// in the kernel once the surrounding op's `GroupOwnedMap` /
-/// `OwnedSet` entries are dropped (the next pass would have no
-/// signal to re-emit a Remove). See `drain_pending_deletes`.
+/// hand out an ID still live in the kernel). Transient failures get
+/// queued into `state.pending_deletes` for retry on the next
+/// reconcile pass — permanent failures (e.g., `PermissionDenied`,
+/// `KernelTooOld`) are NOT queued because retrying can't help; they
+/// log once at warn and the kernel orphan stays until operator
+/// intervention. See `drain_pending_deletes`.
 async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
     dataplane: &mut D,
     state: &mut ActorState,
     id: u32,
     site: &'static str,
 ) {
+    use crate::error::FailureClass;
     match dataplane.del_nexthop(id).await {
         Ok(()) => state.nh_id_alloc.release(id),
-        Err(e) => {
-            tracing::warn!(
-                ?e,
-                id,
-                site,
-                "FDB-NHG GC: del_nexthop failed; queued for retry, allocator slot retained"
-            );
-            state.pending_deletes.insert(id);
-        }
+        Err(e) => match e.class() {
+            FailureClass::Permanent => {
+                tracing::warn!(
+                    error = %e,
+                    id,
+                    site,
+                    "FDB-NHG GC: del_nexthop permanently failed; allocator slot retained, kernel orphan needs operator intervention"
+                );
+            }
+            FailureClass::Transient | FailureClass::Conflict => {
+                tracing::warn!(
+                    error = %e,
+                    id,
+                    site,
+                    "FDB-NHG GC: del_nexthop failed transiently; queued for retry, allocator slot retained"
+                );
+                state.pending_deletes.insert(id);
+            }
+        },
     }
 }
 
