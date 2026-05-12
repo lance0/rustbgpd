@@ -642,7 +642,7 @@ for the architectural record.
   EVPN originator + IMET keys before peer manager shutdown.
   M37 containerlab smoke 4/4 PASS against Linux 6.17 + FRR 10.3.1.
   ADR-0055 locks the boundary.
-- **Closed in `[Unreleased]` post-v0.16.0:**
+- **Closed in v0.17.0 (post-v0.16.0):**
   `advertise_svi_mac` consumption (`src/evpn_svi.rs`),
   `sticky_macs` config schema (ADR-0056), sub-second mobility
   convergence (Gate 7c — EVPN-keyed `EvpnRouteEvent` broadcast in
