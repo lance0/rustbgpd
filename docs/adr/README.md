@@ -65,6 +65,8 @@ consequences so future contributors understand *why*, not just *what*.
 | [0055](0055-evpn-local-mac-origination.md) | EVPN Local-MAC Origination Boundary | Accepted | 2026-05-06 |
 | [0056](0056-evpn-sticky-macs.md) | EVPN sticky-MAC operator config | Accepted | 2026-05-08 |
 | [0057](0057-evpn-gate-8-observable-df-election.md) | EVPN Gate 8 — observable DF election without forwarding enforcement | Accepted | 2026-05-09 |
+| [0058](0058-evpn-gate-9-irb-l3vni.md) | EVPN Gate 9 — symmetric IRB, L3VNI, Type 5 dataplane | Accepted | 2026-05-10 |
+| [0059](0059-evpn-aliasing-fdb-nexthop-groups.md) | EVPN aliasing dataplane via FDB nexthop groups | Accepted | 2026-05-12 |
 
 ## Template
 
