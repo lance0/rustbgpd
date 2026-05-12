@@ -99,22 +99,59 @@ at all**:
   `TrafficChain/Class/FilterHandle` — no `NextHopHandle`.
 
 We will **construct the netlink messages by hand** through the
-`netlink-packet-core` + `netlink-proto` layer that rtnetlink
-already pulls in. Concretely a new
+`netlink-packet-core` + `netlink-sys` layer. Concretely a new
 `crates/evpn-linux/src/linux/nexthop_raw.rs` module emits
-`RTM_NEWNEXTHOP=104` / `RTM_DELNEXTHOP=106` payloads with raw
-`NHA_*` attribute packing and routes them through
-`rtnetlink::Handle`'s underlying transport. The UAPI constants are
-stable (`NHA_ID=1`, `NHA_GROUP=2`, `NHA_FDB=10`, `NDA_NH_ID=13`,
-plus the `nexthop_grp { id: u32, weight: u8, resvd1: u8, resvd2: u16 }`
-struct), so the hand-rolled layer is a closed scope, not an
-ongoing maintenance liability. Upstreaming a `NextHopHandle` to
-the `rust-netlink` org is a separate workstream; not blocking.
+`RTM_NEWNEXTHOP` / `RTM_DELNEXTHOP` payloads with raw `NHA_*`
+attribute packing.
 
-The same `nexthop_raw` module will also need to encode `NDA_NH_ID`
-into the FDB add path — `NeighbourAttribute::Other(DefaultNla)`
-with the right type number, since the enum variant is
-unimplemented upstream.
+**Transport: a separate `NETLINK_ROUTE` socket** (opened via
+`netlink-sys` directly), **not** the existing
+`rtnetlink::Handle`. `Handle::request` is typed as
+`NetlinkMessage<RouteNetlinkMessage>`, and `RouteNetlinkMessage`
+has no `NewNextHop` / `DelNextHop` / `GetNextHop` variants in
+`netlink-packet-route 0.30` — there is no escape hatch on that
+path, so an implementer who tries to thread nexthop messages
+through the existing `Handle` will burn an afternoon before
+hitting that wall. The aliasing-ECMP module opens its own
+send/recv socket alongside the existing rtnetlink one and parses
+`NetlinkMessage<()>` ACK framing manually; the inner body is the
+hand-rolled byte buffer.
+
+**UAPI constants** (pinned by unit tests against
+`include/uapi/linux/rtnetlink.h` + `include/uapi/linux/nexthop.h`
++ `include/uapi/linux/neighbour.h` so a kernel-header drift or a
+typo gets caught at compile-time):
+
+| Constant            | Value | Source header                            |
+|---------------------|-------|------------------------------------------|
+| `RTM_NEWNEXTHOP`    | `104` | `uapi/linux/rtnetlink.h`                 |
+| `RTM_DELNEXTHOP`    | `105` | `uapi/linux/rtnetlink.h`                 |
+| `RTM_GETNEXTHOP`    | `106` | `uapi/linux/rtnetlink.h`                 |
+| `NHA_ID`            | `1`   | `uapi/linux/nexthop.h`                   |
+| `NHA_GROUP`         | `2`   | `uapi/linux/nexthop.h`                   |
+| `NHA_GATEWAY`       | `6`   | `uapi/linux/nexthop.h`                   |
+| `NHA_FDB`           | `11`  | `uapi/linux/nexthop.h` (`NHA_MASTER`=10) |
+| `NDA_NH_ID`         | `13`  | `uapi/linux/neighbour.h`                 |
+
+Plus the `nexthop_grp { id: u32, weight: u8, resvd1: u8, resvd2: u16 }`
+struct from `uapi/linux/nexthop.h`. (Earlier drafts of this ADR
+listed `RTM_DELNEXTHOP=106` and `NHA_FDB=10` — both wrong.
+`106` is `RTM_GETNEXTHOP`; `10` is `NHA_MASTER`. Picking those
+values would have shipped deletes that the kernel parses as
+GETs and a flag bit packed at the wrong attribute type. The
+constant pin in tests is non-negotiable.)
+
+The hand-rolled layer is a closed scope (three message
+builders, one ACK parser, one constants test), not an ongoing
+maintenance liability. Upstreaming a `NextHopHandle` to the
+`rust-netlink` org is a separate workstream; not blocking.
+
+The same `nexthop_raw` module also encodes `NDA_NH_ID` into the
+FDB add path — `NeighbourAttribute::Other(DefaultNla)` with type
+`13`, since the enum variant is unimplemented upstream in
+`netlink-packet-route 0.30`. That FDB-add path stays on the
+existing `rtnetlink::Handle` socket (it's still a `NewNeighbour`
+message; only the attribute payload differs).
 
 ### 4. Portable intent shape: add `alias_group_key` to `RemoteMacEntry`
 
@@ -195,10 +232,16 @@ The kernel ordering and error-handling rules are non-negotiable:
    successfully-installed members and surface the failure so
    the FDB row never gets installed pointing at a half-built
    group.
-8. **No multicast notification for hash-bucket rebalances**:
-   subscribe to `RTNLGRP_NEXTHOP` so out-of-band `ip nexthop
-   del` is observed and reconciled, same level-triggered
-   pattern as the rest of the dataplane.
+8. **Initial drift recovery via periodic `RTM_GETNEXTHOP` dump**:
+   the reconcile actor walks the kernel's nexthop table on every
+   periodic pass (level-triggered, same cadence as the existing
+   FDB / link / route dumps) and reconciles owned state against
+   the result. Out-of-band `ip nexthop del` is caught on the
+   next dump rather than synchronously — sub-second nexthop
+   reconcile via `RTNLGRP_NEXTHOP` subscription is a follow-up
+   after slice 4 (mirrors the same trade-off the original
+   slice 6a route observation took: dump first, multicast wake
+   second).
 
 ### 6. Implementation slicing
 
