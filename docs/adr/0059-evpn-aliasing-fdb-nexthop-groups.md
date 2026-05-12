@@ -9,9 +9,11 @@ Gate 8 / 8b shipped the EVPN multi-homing control-plane story end
 to end: DF election (ADR-0057), Type 4 ES + Type 1 EAD-per-ES /
 per-EVI origination, ES-Import RT and ESI Label extcomms, kernel
 BUM-suppression on Non-DF peers, mass-withdraw filtering, and
-**receive-side aliasing projection** in `crates/evpn/src/aliasing.rs`.
-The receive-side projection populates `RemoteMacEntry::alias_vtep_ips`
-with the additional VTEP next-hops that have advertised EAD-per-EVI
+**receive-side aliasing projection** in `crates/evpn/src/projection.rs`
+(via `project_evpn_routes_with_aliases`, backed by the pure
+`(ESI, EthernetTag)` resolver in `crates/evpn/src/aliasing.rs`).
+The projection populates `RemoteMacEntry::alias_vtep_ips` with the
+additional VTEP next-hops that have advertised EAD-per-EVI
 reachability for the same `(ESI, EthernetTag)` — exactly what RFC
 7432 §14 specifies. But the Linux dataplane (`crates/evpn-linux`)
 **reads only `remote_vtep_ip` and silently drops the alias list**:
@@ -305,10 +307,13 @@ unless this ADR explicitly diverges.
     the result. Filter by the rustbgpd tag-bits (`0x3000_0000` /
     `0x4000_0000`) so the dump-side compare only touches IDs we
     own. Out-of-band `ip nexthop del` is caught on the next dump
-    rather than synchronously — sub-second nexthop reconcile via
-    `RTNLGRP_NEXTHOP` subscription is a follow-up after slice 4
-    (mirrors the same trade-off the original slice 6a route
-    observation took: dump first, multicast wake second).
+    rather than synchronously. `RTNLGRP_NEXTHOP` multicast
+    subscription (for sub-second nexthop reconcile) is **out of
+    scope for slices 1-4** — see "Out of scope for this ADR" below.
+    The periodic-dump path is what's binding for the implementation;
+    the multicast wake-up is a future enhancement, not a slice
+    requirement (mirrors the same trade-off the original slice 6a
+    route observation took: dump first, multicast wake second).
 
 ### 6. Implementation slicing
 
@@ -530,7 +535,19 @@ through. Each slice ships independently green.
   distribution; future capability if operators ask.
 - **Cross-family aliasing** (mixed v4 / v6 VTEP members in one
   group). Same family per group is the simpler model and matches
-  FRR. Group key includes the AF implicitly.
+  FRR. The portable key `(EthernetSegmentIdentifier, EthernetTagId)`
+  does **not** carry an address-family discriminator; the invariant
+  is instead enforced by the projection layer
+  (`project_evpn_routes_with_aliases`), which asserts that all
+  resolved aliases for a given `(ESI, EthernetTag)` share the same
+  family as the primary `remote_vtep_ip`. Mixed-family observations
+  for the same key are treated as an operator misconfiguration:
+  the mismatched aliases are dropped, a `warn!` is logged with
+  `(ESI, EthernetTag, primary_af, dropped_af, dropped_vtep_ip)`,
+  and the projection emits the primary-family subset. The
+  dataplane therefore never sees a mixed-family member list and
+  the NHG installer can construct each group from a uniform
+  family.
 - **L3 EVPN aliasing** (Type 5 alongside the primary nexthop).
   Symmetric IRB / slice 6 ships with single-VTEP routes today;
   L3 multi-homing is a separate scope.
