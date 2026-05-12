@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 
 pub use rustbgpd_wire::MacAddress;
+use rustbgpd_wire::{EthernetSegmentIdentifier, EthernetTagId};
 
 use crate::EvpnInstanceId;
 
@@ -83,6 +84,18 @@ pub struct RemoteMacEntry {
     /// stays in the dedicated field and `alias_vtep_ips` carries
     /// only the *additional* VTEPs.
     pub alias_vtep_ips: Vec<IpAddr>,
+    /// Aliasing group key — `Some((ESI, EthernetTag))` when the
+    /// originating Type 2 carries a non-zero ESI **and** at least
+    /// one alias VTEP has been observed for that segment. `None`
+    /// for single-homed routes (ESI == ZERO) and for multi-homed
+    /// routes whose EAD-per-EVI peers haven't been observed yet.
+    /// The L2 dataplane uses this to key one FDB nexthop group per
+    /// Ethernet Segment instance so multiple MACs behind the same
+    /// segment share one kernel resource. Empty `alias_vtep_ips`
+    /// ⇔ `alias_group_key.is_none()`.
+    ///
+    /// See ADR-0059 §4 for the portable-intent extension rationale.
+    pub alias_group_key: Option<(EthernetSegmentIdentifier, EthernetTagId)>,
     /// How this entry came to be desired.
     pub source: RemoteMacSource,
 }
@@ -286,6 +299,7 @@ mod tests {
             remote_vtep_ip: remote.parse().unwrap(),
             mobility_sequence: None,
             alias_vtep_ips: Vec::new(),
+            alias_group_key: None,
             source: RemoteMacSource::EvpnRibBestPath,
         }
     }

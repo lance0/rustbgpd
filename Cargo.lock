@@ -2333,6 +2333,7 @@ version = "0.18.0"
 dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

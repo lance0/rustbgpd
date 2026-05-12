@@ -73,6 +73,7 @@ fn entry(remote: &str, seq: Option<u32>) -> RemoteMacEntry {
         remote_vtep_ip: ipa(remote),
         mobility_sequence: seq,
         alias_vtep_ips: Vec::new(),
+        alias_group_key: None,
         source: RemoteMacSource::EvpnRibBestPath,
     }
 }

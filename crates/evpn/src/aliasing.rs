@@ -38,10 +38,12 @@
 //!   PEs that have a local interface on the segment are valid
 //!   aliasing alternatives for known-unicast traffic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use rustbgpd_wire::{EthernetSegmentIdentifier, EthernetTagId};
+
+use crate::mac::RemoteMacEntry;
 
 /// One EAD-per-EVI advertisement, trimmed to the fields the resolver
 /// needs. Built by the daemon at the boundary between the RIB's
@@ -159,6 +161,33 @@ pub fn alias_resolved_next_hops(
         }
     }
     out
+}
+
+/// Canonical FDB nexthop group membership for `entry`: the union of
+/// `remote_vtep_ip` and `alias_vtep_ips`, sorted by `IpAddr` natural
+/// order and deduplicated. This is the set the dataplane keys an
+/// FDB nexthop group on (ADR-0059 slice 2+ wiring).
+///
+/// Returns a single-element `Vec` for single-homed entries (the
+/// primary VTEP only). For multi-homed entries the order is stable
+/// regardless of how `alias_vtep_ips` was populated — `BTreeSet`
+/// gives sort + dedup in one pass so two entries with the same
+/// member set always produce the same canonical group, which is
+/// what the dataplane needs to spot "membership unchanged" without
+/// re-emitting a `NLM_F_REPLACE`.
+///
+/// Dedup is defensive: the projection layer (`projection.rs`)
+/// already prevents the primary from appearing in `alias_vtep_ips`,
+/// but future operator-static entries or hand-rolled tests could
+/// trip the kernel if duplicates leaked through.
+#[must_use]
+pub fn group_members(entry: &RemoteMacEntry) -> Vec<IpAddr> {
+    let mut set: BTreeSet<IpAddr> = BTreeSet::new();
+    set.insert(entry.remote_vtep_ip);
+    for ip in &entry.alias_vtep_ips {
+        set.insert(*ip);
+    }
+    set.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -325,5 +354,41 @@ mod tests {
         let idx = AliasIndex::new();
         let nhs = alias_resolved_next_hops(ip("10.0.0.2"), esi(1), EthernetTagId(0), &idx);
         assert_eq!(nhs, vec![ip("10.0.0.2")]);
+    }
+
+    fn entry_with_aliases(primary: &str, aliases: &[&str]) -> RemoteMacEntry {
+        RemoteMacEntry {
+            remote_vtep_ip: ip(primary),
+            mobility_sequence: None,
+            alias_vtep_ips: aliases.iter().map(|s| ip(s)).collect(),
+            alias_group_key: None,
+            source: crate::mac::RemoteMacSource::EvpnRibBestPath,
+        }
+    }
+
+    #[test]
+    fn group_members_returns_primary_only_when_no_aliases() {
+        let entry = entry_with_aliases("10.0.0.2", &[]);
+        assert_eq!(group_members(&entry), vec![ip("10.0.0.2")]);
+    }
+
+    #[test]
+    fn group_members_combines_primary_and_aliases_sorted() {
+        // Insert in non-sorted order; output must be IpAddr-sorted.
+        let entry = entry_with_aliases("10.0.0.5", &["10.0.0.3", "10.0.0.7"]);
+        assert_eq!(
+            group_members(&entry),
+            vec![ip("10.0.0.3"), ip("10.0.0.5"), ip("10.0.0.7")],
+        );
+    }
+
+    #[test]
+    fn group_members_dedupes_primary_in_alias_list() {
+        // Defensive: if the primary leaks into alias_vtep_ips (shouldn't
+        // happen via projection, but could via operator-static or
+        // hand-rolled construction), group_members must still emit a
+        // single canonical membership set.
+        let entry = entry_with_aliases("10.0.0.2", &["10.0.0.2", "10.0.0.3"]);
+        assert_eq!(group_members(&entry), vec![ip("10.0.0.2"), ip("10.0.0.3")],);
     }
 }
