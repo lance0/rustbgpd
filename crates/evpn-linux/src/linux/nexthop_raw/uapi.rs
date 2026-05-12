@@ -144,6 +144,12 @@ mod tests {
         assert_eq!(NHA_OIF, 4);
         assert_eq!(NHA_GATEWAY, 6);
         assert_eq!(NHA_FDB, 11);
+        // ADR-0059 slice 3b dump-path tolerance — kernel may emit
+        // these on `RTM_GETNEXTHOP` even when we don't set them on
+        // add, so the parser ignores them by id. Drift here breaks
+        // the dump filter silently, so pin the values.
+        assert_eq!(NHA_GROUP_TYPE, 3);
+        assert_eq!(NHA_OP_FLAGS, 15);
         assert_eq!(NEXTHOP_GRP_TYPE_MPATH, 0);
     }
 }

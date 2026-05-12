@@ -520,28 +520,52 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "adoption: dump_owned_nexthops failed; deferring this reconcile pass to avoid allocator collisions"
-                    );
-                    let status = build_instance_status(&intent.instances, &probes);
-                    // `dump_snapshot` already succeeded — use the real
-                    // snapshot so BUM enforcement reflects actual link
-                    // state, not "no links exist".
-                    let bum_enforcement =
-                        build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
-                    self.emit_report(
-                        status,
-                        vec![],
-                        vec![],
-                        bum_enforcement,
-                        ip_vrf_status,
-                        ip_vrf_routes,
-                    )
-                    .await;
-                    return;
-                }
+                Err(e) => match e.class() {
+                    crate::error::FailureClass::Permanent => {
+                        // Permanent dump failure — `KernelTooOld` (kernel
+                        // < 5.8, no `NDA_NH_ID`), `PermissionDenied` (no
+                        // `CAP_NET_ADMIN`), or `InvalidArgument` (our
+                        // message shape is wrong). Mark adoption done
+                        // so the next pass doesn't re-attempt the dump,
+                        // and keep going with the rest of reconcile —
+                        // single-dst FDB, BUM enforcement, L3 ops don't
+                        // need the nexthop allocator and should still
+                        // work on unsupported kernels. FDB-NHG ops that
+                        // hit Pass 1b will fail with the same permanent
+                        // error at apply time and get permanently
+                        // suppressed per-op-shape.
+                        tracing::warn!(
+                            error = %e,
+                            "adoption: dump_owned_nexthops permanently failed; \
+                             FDB-NHG (slice 3b ECMP) disabled for this daemon instance, \
+                             other reconcile paths continue normally"
+                        );
+                        self.state.adoption_done = true;
+                    }
+                    crate::error::FailureClass::Transient
+                    | crate::error::FailureClass::Conflict => {
+                        tracing::warn!(
+                            error = %e,
+                            "adoption: dump_owned_nexthops failed transiently; deferring this reconcile pass to avoid allocator collisions"
+                        );
+                        let status = build_instance_status(&intent.instances, &probes);
+                        // `dump_snapshot` already succeeded — use the real
+                        // snapshot so BUM enforcement reflects actual link
+                        // state, not "no links exist".
+                        let bum_enforcement =
+                            build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
+                        self.emit_report(
+                            status,
+                            vec![],
+                            vec![],
+                            bum_enforcement,
+                            ip_vrf_status,
+                            ip_vrf_routes,
+                        )
+                        .await;
+                        return;
+                    }
+                },
             }
         }
 
@@ -1484,7 +1508,12 @@ where
                                 "install_step1_alloc",
                             )
                             .await;
-                            return Err(crate::error::DataplaneError::Other(format!(
+                            // Allocator failure (exhaustion or
+                            // tag-bit collision) won't heal on
+                            // retry — surface as permanent so the
+                            // actor suppresses + flags the op
+                            // rather than spin forever.
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
                                 "ADR-0059: vtep NH alloc failed: {e}"
                             )));
                         }
@@ -1561,7 +1590,10 @@ where
                             "install_step2_alloc",
                         )
                         .await;
-                        return Err(crate::error::DataplaneError::Other(format!(
+                        // Permanent for the same reason as the
+                        // vtep_nh path above — allocator failure
+                        // doesn't heal on retry.
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
                             "ADR-0059: nhg alloc failed: {e}"
                         )));
                     }
@@ -1624,7 +1656,12 @@ where
                                 "update_step1_alloc",
                             )
                             .await;
-                            return Err(crate::error::DataplaneError::Other(format!(
+                            // Allocator failure (exhaustion or
+                            // tag-bit collision) won't heal on
+                            // retry — surface as permanent so the
+                            // actor suppresses + flags the op
+                            // rather than spin forever.
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
                                 "ADR-0059: vtep NH alloc failed: {e}"
                             )));
                         }
@@ -1655,13 +1692,13 @@ where
                 // `compute_diff` Pass 1b only emits `UpdateFdbNhgMembers`
                 // when the group exists in `GroupOwnedMap`, so hitting
                 // this branch means `owned` and `groups` have drifted
-                // out of sync — an internal state inconsistency.
-                // Surface it as a transient error (classified `Other`
-                // → retried) so it shows up in metrics rather than
-                // silently clearing retry state.
+                // out of sync — an internal state inconsistency that
+                // won't heal on retry. Surface as permanent so the
+                // actor suppresses + flags it rather than spinning
+                // indefinitely on a bug/invariant violation.
                 rollback_partial_install(dataplane, state, &new_members, None, "update_no_group")
                     .await;
-                return Err(crate::error::DataplaneError::Other(format!(
+                return Err(crate::error::DataplaneError::InvalidArgument(format!(
                     "ADR-0059: UpdateFdbNhgMembers for {group_key:?} but group missing \
                      from GroupOwnedMap (owned/groups state drift)",
                 )));
