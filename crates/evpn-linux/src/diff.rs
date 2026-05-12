@@ -232,6 +232,28 @@ pub fn compute_diff(
     // row. Mobility-style `UpdateRemoteFdb` ops stay in `updates`
     // because they're atomic netlink REPLACE calls, no remove
     // needed.
+    // De-dupe redundant `UpdateFdbNhgMembers` ops: if the same plan
+    // also carries an `InstallFdbNhg` for the same `group_key`, the
+    // Install path's REPLACE branch in `apply_nhg_op` already covers
+    // the member-set update, so emitting the Update would be a second
+    // REPLACE on the same NHID — wasted netlink churn and a more
+    // complicated failure-classification surface.
+    let install_group_keys: BTreeSet<AliasGroupKey> = creates
+        .iter()
+        .filter_map(|op| match op {
+            DataplaneOp::InstallFdbNhg { group_key, .. } => Some(*group_key),
+            _ => None,
+        })
+        .collect();
+    if !install_group_keys.is_empty() {
+        updates.retain(|op| match op {
+            DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                !install_group_keys.contains(group_key)
+            }
+            _ => true,
+        });
+    }
+
     let mut ops = deletes;
     ops.append(&mut creates);
     ops.append(&mut updates);
