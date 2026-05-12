@@ -57,6 +57,7 @@ mod fdb;
 mod ip_vrf;
 mod l3;
 mod links;
+pub mod nexthop_raw;
 mod notify;
 mod probe;
 mod routes;
