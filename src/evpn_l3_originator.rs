@@ -245,6 +245,10 @@ async fn reconcile(
     // seqlock reads — the clones release the borrow before any await.
     let observations = cfg.route_observations_rx.borrow().clone();
     let status_rows = cfg.ip_vrf_status_rx.borrow().clone();
+    // One-shot id→name lookup for the Prometheus gauge re-emit.
+    // Built once per reconcile pass; the inject/withdraw hot paths
+    // read it in O(1).
+    let vrf_names = vrf_name_lookup(cfg);
     let ready_vrfs: HashMap<IpVrfId, &IpVrf> = cfg
         .ip_vrfs
         .iter()
@@ -303,7 +307,12 @@ async fn reconcile(
     for ((vrf_id, prefix), key) in to_withdraw {
         if withdraw_one(&cfg.rib_tx, vrf_id, key, &cfg.originated_counts).await {
             originated.remove(&(vrf_id, prefix));
-            publish_originated_gauge(cfg, vrf_id);
+            if let Some(name) = vrf_names.get(&vrf_id) {
+                publish_originated_gauge(cfg, vrf_id, name);
+            }
+            // (missing-name case: VRF removed from config mid-flight
+            // — the gauge holds its last value; the next config
+            // reload won't see this vrf_id anyway.)
         }
     }
 
@@ -332,7 +341,9 @@ async fn reconcile(
         let key = route.key();
         if inject_one(&cfg.rib_tx, *vrf_id, key, route, &cfg.originated_counts).await {
             originated.insert((*vrf_id, *prefix), key);
-            publish_originated_gauge(cfg, *vrf_id);
+            // We have `&IpVrf` in hand here (`vrf.name`), so skip
+            // the cache lookup — same value as `vrf_names[vrf_id]`.
+            publish_originated_gauge(cfg, *vrf_id, &vrf.name);
         }
     }
 }
@@ -443,18 +454,25 @@ async fn withdraw_one(
 }
 
 /// Best-effort drain on shutdown. Walks every currently-originated
-/// route and tries to withdraw it; entries whose withdraw fails stay
-/// in the map but the map is dropped at task exit anyway, so this is
-/// strictly observability. The bounded `EvpnL3OriginatorHandle::shutdown`
-/// timeout caps how long the daemon waits.
+/// route, tries to withdraw it, and clears the in-memory map at the
+/// end **regardless of withdraw success** — the task is exiting and
+/// the map is about to be dropped anyway, so retrying within the
+/// shutdown window doesn't earn anything. The bounded
+/// `EvpnL3OriginatorHandle::shutdown` timeout caps how long the
+/// daemon waits for the withdraw acks; entries whose withdraw failed
+/// are not retried here (the next daemon start would re-originate
+/// off the kernel observation, then re-issue a normal withdraw).
 async fn drain_all(
     originated: &mut BTreeMap<(IpVrfId, EvpnIpPrefixValue), EvpnRouteKey>,
     cfg: &SpawnConfig,
 ) {
+    let vrf_names = vrf_name_lookup(cfg);
     let snapshot: Vec<_> = originated.iter().map(|(k, v)| (*k, *v)).collect();
     for ((vrf_id, _prefix), key) in &snapshot {
-        if withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await {
-            publish_originated_gauge(cfg, *vrf_id);
+        if withdraw_one(&cfg.rib_tx, *vrf_id, *key, &cfg.originated_counts).await
+            && let Some(name) = vrf_names.get(vrf_id)
+        {
+            publish_originated_gauge(cfg, *vrf_id, name);
         }
     }
     originated.clear();
@@ -463,17 +481,28 @@ async fn drain_all(
 /// Republish the `evpn_ip_vrf_originated_routes{vrf}` Prometheus
 /// gauge from the authoritative shared counter. Called after every
 /// successful `inject_one` / `withdraw_one` so the gauge tracks the
-/// gRPC `IpVrfState.originated_routes_count` field exactly. A
-/// missing VRF (operator removed the entry mid-flight) is a no-op —
-/// we can't construct a label without a name, and the gauge will
-/// hold its last value until the daemon restarts.
-fn publish_originated_gauge(cfg: &SpawnConfig, vrf_id: IpVrfId) {
-    let Some(vrf) = cfg.ip_vrfs.iter().find(|v| v.id == vrf_id) else {
-        return;
-    };
+/// gRPC `IpVrfState.originated_routes_count` field exactly. The
+/// caller resolves `vrf_name` from a per-pass `IpVrfId -> name`
+/// cache (built once at the top of `reconcile` / `drain_all`) so
+/// the hot path is O(1) — earlier drafts did
+/// `cfg.ip_vrfs.iter().find(...)` per inject which was O(VRFs ×
+/// routes) and unnecessary.
+fn publish_originated_gauge(cfg: &SpawnConfig, vrf_id: IpVrfId, vrf_name: &str) {
     let count = cfg.originated_counts.count(vrf_id);
     cfg.metrics
-        .set_evpn_ip_vrf_originated_routes(&vrf.name, i64::try_from(count).unwrap_or(i64::MAX));
+        .set_evpn_ip_vrf_originated_routes(vrf_name, i64::try_from(count).unwrap_or(i64::MAX));
+}
+
+/// Build a one-shot `IpVrfId -> name` lookup. Cheap: at most a few
+/// dozen entries even in a very large deployment. Allocates one
+/// `String` per VRF; the alternative — keeping `&str` borrows —
+/// would tie the cache lifetime to `cfg`, which doesn't play with
+/// the `await` boundaries inside the reconcile loop.
+fn vrf_name_lookup(cfg: &SpawnConfig) -> BTreeMap<IpVrfId, String> {
+    cfg.ip_vrfs
+        .iter()
+        .map(|vrf| (vrf.id, vrf.name.clone()))
+        .collect()
 }
 
 /// Compute the route key the originator would produce for one
@@ -1095,15 +1124,21 @@ mod tests {
         let v = vrf(100, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
         let mut h = Harness::new(vec![v]);
 
-        // We need to call publish_originated_gauge once at "startup"
-        // to mirror the originator_loop's pre-populate step, since
-        // tests drive `reconcile()` directly rather than entering
-        // `originator_loop`. After publish_at_zero, the gauge series
-        // must exist at 0.
-        for vrf in h.cfg.ip_vrfs.iter() {
-            h.cfg
-                .metrics
-                .set_evpn_ip_vrf_originated_routes(&vrf.name, 0);
+        // Mirror the originator_loop's pre-populate step. The
+        // production path calls `publish_originated_gauge` (which
+        // reads the live count from `originated_counts`); at this
+        // point the count is 0, so the gauge lands at 0 — the
+        // intended startup state. Tests drive `reconcile` directly
+        // rather than entering `originator_loop`, so we have to
+        // call the helper ourselves.
+        let names: Vec<(IpVrfId, String)> = h
+            .cfg
+            .ip_vrfs
+            .iter()
+            .map(|v| (v.id, v.name.clone()))
+            .collect();
+        for (id, name) in &names {
+            publish_originated_gauge(&h.cfg, *id, name);
         }
         assert_eq!(scrape_originated_gauge(&h.cfg, "vrf100"), Some(0));
 
