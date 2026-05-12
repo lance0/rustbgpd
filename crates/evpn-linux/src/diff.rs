@@ -322,13 +322,35 @@ fn emit_fdb_nhg_pass(
     let owned_kind = last_applied.get(vni, mac).map(|e| e.kind.clone());
     match owned_kind {
         None => {
-            // Fresh install for this MAC.
-            creates.push(DataplaneOp::InstallFdbNhg {
-                vni,
-                mac,
-                group_key: linux_key,
-                members: canonical,
-            });
+            // Fresh install — but `last_applied` empty doesn't mean the
+            // kernel is empty: on restart we lose the in-memory owned
+            // set, and an operator may have a static row at this MAC.
+            // Foreign-entry preservation (the module-level invariant)
+            // gates Install on whichever holds:
+            //   - no kernel row, OR
+            //   - the row is `extern_learn` (our own marker — restart
+            //     case or NHG-tagged carryover; NLM_F_REPLACE heals).
+            // Operator-static / kernel-learned rows are skipped here
+            // the same way `handle_existing_kernel_entry` does for the
+            // single-dst path.
+            let install_safe = match snapshot.find_fdb(vni, mac) {
+                None => true,
+                Some(k) => k.is_extern_learned(),
+            };
+            if install_safe {
+                creates.push(DataplaneOp::InstallFdbNhg {
+                    vni,
+                    mac,
+                    group_key: linux_key,
+                    members: canonical,
+                });
+            } else {
+                tracing::trace!(
+                    ?vni,
+                    mac = %mac,
+                    "FDB-NHG install skipped: foreign kernel row at this (vni, mac)"
+                );
+            }
         }
         Some(OwnedEntryKind::SingleDst { .. }) => {
             // Single-dst → FDB-NHG transition. Remove the old row

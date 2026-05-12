@@ -438,52 +438,6 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     async fn reconcile_once(&mut self) {
         self.state.reconcile_generation = self.state.reconcile_generation.saturating_add(1);
 
-        // ADR-0059 slice 3b: one-shot startup adoption. Dump tagged
-        // nexthops from the kernel and reserve their IDs in the
-        // allocator before any `compute_diff` Pass 1b emission, so
-        // a fresh `InstallFdbNhg` can't collide with an ID left
-        // behind by a prior daemon instance. The adopted set is
-        // cleared as the coordinator records each ID in `groups`;
-        // whatever remains after `apply_plan` is true stale state
-        // and gets GC'd by `cleanup_unreferenced_adoptions` below.
-        //
-        // `dump_succeeded` carries to the post-apply gate so a failed
-        // dump (which leaves the allocator without reservations for
-        // any pre-existing kernel NHIDs) does NOT flip `adoption_done`
-        // to true. Without this, a dump failure on the first pass would
-        // permanently strand collision risk: future passes would emit
-        // `InstallFdbNhg` against an under-reserved allocator and the
-        // re-dump path would never run.
-        let mut dump_succeeded = true;
-        if !self.state.adoption_done {
-            match self.dataplane.dump_owned_nexthops().await {
-                Ok(adopted) => {
-                    for nh in adopted {
-                        match self.state.nh_id_alloc.reserve(nh.id) {
-                            Ok(()) => {
-                                self.state.adopted_unreferenced.insert(nh.id, nh);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    ?e,
-                                    id = nh.id,
-                                    "adoption: reserve failed; ignoring"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Dump failed — log + leave adoption_done false so
-                    // the next reconcile pass re-attempts the dump
-                    // before any FDB-NHG ops are applied against an
-                    // under-reserved allocator.
-                    tracing::warn!(error = %e, "adoption: dump_owned_nexthops failed");
-                    dump_succeeded = false;
-                }
-            }
-        }
-
         // Snapshot the current intent (via `borrow_and_update` so the
         // next `changed()` fires only on subsequent publishes).
         // Permanent-failure suppression is per-op-fingerprint and
@@ -535,6 +489,58 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 return;
             }
         };
+
+        // ADR-0059 slice 3b: one-shot startup adoption. Dump tagged
+        // nexthops from the kernel and reserve their IDs in the
+        // allocator before any `compute_diff` Pass 1b emission, so a
+        // fresh `InstallFdbNhg` can't collide with an ID left behind
+        // by a prior daemon instance (RTM_NEWNEXTHOP uses
+        // NLM_F_REPLACE semantics). On dump failure we short-circuit
+        // the reconcile pass entirely — proceeding would risk the
+        // allocator handing out an ID that's still live in the
+        // kernel. The actor will re-attempt on the next event /
+        // intent change / retry-timer tick.
+        if !self.state.adoption_done {
+            match self.dataplane.dump_owned_nexthops().await {
+                Ok(adopted) => {
+                    for nh in adopted {
+                        match self.state.nh_id_alloc.reserve(nh.id) {
+                            Ok(()) => {
+                                self.state.adopted_unreferenced.insert(nh.id, nh);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?e,
+                                    id = nh.id,
+                                    "adoption: reserve failed; ignoring"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "adoption: dump_owned_nexthops failed; deferring this reconcile pass to avoid allocator collisions"
+                    );
+                    let status = build_instance_status(&intent.instances, &probes);
+                    let bum_enforcement = build_bum_enforcement_status(
+                        &intent.bum_enforcement,
+                        &KernelSnapshot::new(),
+                    );
+                    self.emit_report(
+                        status,
+                        vec![],
+                        vec![],
+                        bum_enforcement,
+                        ip_vrf_status,
+                        ip_vrf_routes,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
 
         let mut plan = compute_diff(
             intent.remote_macs.as_ref(),
@@ -609,15 +615,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // not referenced by any MAC in `groups` — i.e., true stale
         // state from a prior daemon instance. Delete + release.
         //
-        // Only mark adoption complete when the pass had no apply
-        // failures, the dump succeeded, and every staged stale-delete
-        // succeeded — if any of those is false, `adopted_unreferenced`
-        // is incomplete OR the allocator hasn't fully reserved
-        // pre-existing kernel IDs. Defer cleanup to the next reconcile
-        // so a fresh dump can re-seed reservations before we
-        // accidentally delete a not-yet-adopted ID, or release an
-        // allocator slot whose ID is still live in the kernel.
-        if !self.state.adoption_done && failed.is_empty() && dump_succeeded {
+        // Mark adoption complete only when the pass had no apply
+        // failures AND every staged stale-delete succeeded. If any of
+        // those is false, leave `adopted_unreferenced` populated so
+        // the next reconcile can retry — releasing an allocator slot
+        // whose ID is still live in the kernel would re-introduce
+        // the collision adoption is supposed to prevent. (Dump
+        // failure short-circuits the pass earlier, so reaching here
+        // implies the dump succeeded.)
+        if !self.state.adoption_done && failed.is_empty() {
             let cleanup_ok = self.cleanup_unreferenced_adoptions().await;
             if cleanup_ok {
                 self.state.adoption_done = true;
