@@ -10,23 +10,35 @@
 //!
 //! ## What this module does
 //!
-//! Pure-logic indexing: given a stream of `(ESI, EthTag, PE_IP)`
-//! tuples extracted from the receiver's RIB best-path EAD-per-EVI
-//! routes, build an `AliasIndex` that answers `vtep_ips_for(esi,
-//! eth_tag)` in O(log n). Self-originated routes are filtered out
-//! at the caller (the resolver doesn't know which PE *we* are).
+//! Pure-logic indexing and portable-intent shaping for aliasing:
+//!
+//! - Given a stream of `(ESI, EthTag, PE_IP)` tuples extracted
+//!   from the receiver's RIB best-path EAD-per-EVI routes, build
+//!   an [`AliasIndex`] that answers `vtep_ips_for(esi, eth_tag)`
+//!   in O(log n). Self-originated routes are filtered at the
+//!   caller (the resolver doesn't know which PE *we* are).
+//! - [`alias_resolved_next_hops`] combines a Type 2 route's
+//!   primary next-hop with the index's aliasing alternatives,
+//!   primary-first and deduped. The projection layer
+//!   ([`crate::projection::project_evpn_routes_with_aliases`])
+//!   consumes this to populate
+//!   [`crate::mac::RemoteMacEntry::alias_vtep_ips`] and
+//!   [`crate::mac::RemoteMacEntry::alias_group_key`].
+//! - [`group_members`] returns the canonical FDB nexthop group
+//!   membership for an entry (`remote_vtep_ip` ∪
+//!   `alias_vtep_ips`, sorted + deduped). This is the portable
+//!   intent the Linux dataplane will consume in ADR-0059 slice
+//!   3+ when it programs FDB nexthop groups via
+//!   `RTM_NEWNEXTHOP` + `NHA_FDB`.
 //!
 //! ## What this module does NOT do
 //!
-//! - Mutate the projection layer or the dataplane intent. The
-//!   index is shovel-ready for the projection-side wiring slice
-//!   that will populate a future `RemoteMacEntry::alias_vtep_ips`
-//!   field, and for the dataplane-side ECMP slice that will
-//!   actually program multi-VTEP forwarding. Today's
-//!   `LinuxDataplane` programs one `dst` per MAC; surfacing
-//!   alternative VTEPs to the kernel needs a separate ECMP design
-//!   slice (FDB+`ip route`-based ECMP, or per-CE `nexthop` group
-//!   objects).
+//! - Touch the kernel. FDB nexthop group programming
+//!   (`RTM_NEWNEXTHOP` with `NHA_FDB`, `NDA_NH_ID` on the FDB
+//!   row) is owned by `crates/evpn-linux` and lives behind
+//!   ADR-0059 slices 2-4. Today's `LinuxDataplane` still
+//!   programs one `dst` per MAC; the [`group_members`] surface
+//!   is the bridge to the future FDB-NHG installer.
 //! - Decide best-path among aliased PEs. RFC 7432 §14 describes
 //!   the receiver's responsibilities (treat them as ECMP); choice
 //!   of policy (round-robin, hash-based, weighted) is a
