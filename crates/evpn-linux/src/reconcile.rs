@@ -43,7 +43,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rustbgpd_evpn::ip_vrf::IpVrfStatus;
 use rustbgpd_evpn::{EvpnInstanceId, IpVrfId, MacAddress};
@@ -171,6 +171,14 @@ struct ActorState {
     /// the FDB / BUM maps: a different member set on the same
     /// `AliasGroupKey` clears the suppression.
     nhg_permanent_failures: BTreeMap<crate::group_state::AliasGroupKey, DataplaneOp>,
+    /// `(VNI, MAC)` keys we've already warned about for the
+    /// ADR-0059 IPv6-alias fallback. The diff pass emits the set of
+    /// keys *currently* in fallback on every reconcile; the actor
+    /// only logs the warn for keys that newly entered fallback this
+    /// pass. Keys that drop out of fallback (entry went v4-only, or
+    /// was withdrawn) are also pruned so a future re-entry produces
+    /// a fresh warn.
+    warned_ipv6_fallback: BTreeSet<(EvpnInstanceId, MacAddress)>,
     /// Last `intent_generation` we successfully reconciled against.
     /// Reports echo this so the daemon can correlate.
     last_intent_generation: u64,
@@ -243,6 +251,7 @@ impl ActorState {
             bum_permanent_failures: BTreeMap::new(),
             nhg_retry: RetrySchedule::new(),
             nhg_permanent_failures: BTreeMap::new(),
+            warned_ipv6_fallback: BTreeSet::new(),
             last_intent_generation: 0,
             reconcile_generation: 0,
             epoch: Instant::now(),
@@ -524,6 +533,26 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             &probes,
             &self.state.groups,
         );
+
+        // ADR-0059 IPv6-alias-fallback warn: log only for `(VNI, MAC)`
+        // keys that newly entered the fallback this pass. The diff
+        // produces the *currently in fallback* set; we warn for new
+        // entries and prune keys that left the set so a future
+        // re-entry produces a fresh warn.
+        for key in plan
+            .ipv6_alias_fallback_keys
+            .difference(&self.state.warned_ipv6_fallback)
+        {
+            tracing::warn!(
+                vni = ?key.0,
+                mac = %key.1,
+                "ADR-0059 IPv6 alias members not yet supported (slice 2.5 follow-up); \
+                 falling back to single-dst FDB row at primary VTEP",
+            );
+        }
+        self.state
+            .warned_ipv6_fallback
+            .clone_from(&plan.ipv6_alias_fallback_keys);
 
         // Resolve the BUM-enforcement plan early so the same row set
         // both feeds report observability and (when enabled) drives

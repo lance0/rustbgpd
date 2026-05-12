@@ -51,6 +51,13 @@ pub struct Plan {
     /// (sorted by `(VNI, MAC)`), then updates, then deletes. The
     /// actor applies them serially with backoff per-op on failure.
     pub ops: Vec<DataplaneOp>,
+    /// `(VNI, MAC)` keys whose multi-homed Type 2 entry contains at
+    /// least one IPv6 alias and therefore fell back to the single-dst
+    /// path this pass. ADR-0059 slice 3b emits one warn per
+    /// *transition into fallback* — the reconcile actor compares this
+    /// set against the previous pass to suppress steady-state spam.
+    /// Empty when no entries fall back.
+    pub ipv6_alias_fallback_keys: BTreeSet<(EvpnInstanceId, MacAddress)>,
 }
 
 impl Plan {
@@ -101,6 +108,13 @@ pub fn compute_diff(
     // `UpdateFdbNhgMembers` op per pass.
     let mut group_seen: BTreeSet<AliasGroupKey> = BTreeSet::new();
 
+    // Collect every (VNI, MAC) that hit the IPv6-fallback arm this
+    // pass. The reconcile actor diffs this against the previous
+    // pass's set so the warn fires once per *transition into
+    // fallback*, not once per reconcile. Empty when no entries fall
+    // back.
+    let mut ipv6_alias_fallback_keys: BTreeSet<(EvpnInstanceId, MacAddress)> = BTreeSet::new();
+
     // Pass 1 + 1b — creates / updates. Scoped to Ready instances;
     // entries for NotReady / Unbound instances contribute zero ops.
     for (&(vni, mac), entry) in desired.iter() {
@@ -133,14 +147,12 @@ pub fn compute_diff(
             (Some(_), false) => {
                 // IPv6 fallback — slice 2 `NexthopSocket` rejects v6
                 // gateways. Diff degrades to single-dst (primary VTEP
-                // only) and emits one warn per (VNI, MAC) so the
-                // operator sees the degradation.
-                tracing::warn!(
-                    ?vni,
-                    mac = %mac,
-                    "ADR-0059 IPv6 alias members not yet supported (slice 2.5 follow-up); \
-                     falling back to single-dst FDB row at primary VTEP",
-                );
+                // only). Record the key so the reconcile actor can
+                // warn on the *enter-fallback* transition (the warn
+                // itself moved out of compute_diff because firing it
+                // every pass produces sustained log spam for stable
+                // configurations).
+                ipv6_alias_fallback_keys.insert((vni, mac));
                 emit_single_dst_pass(
                     vni,
                     mac,
@@ -218,7 +230,10 @@ pub fn compute_diff(
     let mut ops = deletes;
     ops.append(&mut creates);
     ops.append(&mut updates);
-    Plan { ops }
+    Plan {
+        ops,
+        ipv6_alias_fallback_keys,
+    }
 }
 
 /// `true` when `entry.remote_vtep_ip` and every `alias_vtep_ips`

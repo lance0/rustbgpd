@@ -680,9 +680,7 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
 fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
     match e {
         nexthop_raw::NexthopError::Io(io) => DataplaneError::Io(io),
-        nexthop_raw::NexthopError::Kernel(errno) => {
-            DataplaneError::InvalidArgument(format!("nexthop kernel errno {errno}"))
-        }
+        nexthop_raw::NexthopError::Kernel(errno) => map_nexthop_kernel_errno(errno),
         nexthop_raw::NexthopError::Validation(v) => {
             DataplaneError::InvalidArgument(format!("nexthop validation: {v}"))
         }
@@ -690,6 +688,25 @@ fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
             DataplaneError::InvalidArgument("nexthop IPv6 unsupported (slice 2.5 follow-up)".into())
         }
         other => DataplaneError::Other(format!("nexthop socket: {other}")),
+    }
+}
+
+/// Classify a positive errno from the nexthop netlink socket. Mirrors
+/// the dispatch in [`crate::linux::fdb::errno_to_dataplane_error`] so
+/// transient kernel errors (`EBUSY` / `ENOMEM` / etc.) stay
+/// `FailureClass::Transient` instead of getting trapped in the
+/// actor's permanent-failure suppression — a blanket
+/// `InvalidArgument` would suppress them forever and strand
+/// allocator reservations + kernel nexthops.
+fn map_nexthop_kernel_errno(errno: i32) -> DataplaneError {
+    let detail = format!("nexthop kernel errno {errno}");
+    match errno {
+        libc::EPERM | libc::EACCES => DataplaneError::PermissionDenied(detail),
+        libc::EOPNOTSUPP => DataplaneError::KernelTooOld {
+            feature: "NDA_NH_ID / FDB nexthop groups (Linux \u{2265} 5.8)".to_string(),
+        },
+        libc::EINVAL => DataplaneError::InvalidArgument(detail),
+        _ => DataplaneError::Other(detail),
     }
 }
 

@@ -104,7 +104,7 @@ fn is_inner() -> bool {
 
 /// Build a bridge + VXLAN port with `nolearning` in the current netns.
 /// Returns the VNI for downstream test setup.
-async fn build_l2_topology() -> EvpnInstanceId {
+fn build_l2_topology() -> EvpnInstanceId {
     run("ip", &["addr", "add", "127.0.0.10/32", "dev", "lo"]);
     run("ip", &["link", "set", "lo", "up"]);
     run("ip", &["link", "add", "name", "br100", "type", "bridge"]);
@@ -160,7 +160,7 @@ async fn round_trip_install_and_remove_fdb_nhg() {
     }
 
     // ── inner ──
-    let vni = build_l2_topology().await;
+    let vni = build_l2_topology();
     let mut dp = LinuxDataplane::connect()
         .await
         .expect("LinuxDataplane::connect");
