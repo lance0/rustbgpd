@@ -49,9 +49,10 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     `merge_fdb_rows` preserves `nh_id` across the self/master
     row split so the merged entry surfaces both halves.
   - **`OwnedEntry` enum refactor** — replaced the field-soup
-    `{ last_applied_dst, last_applied_seq, last_applied_group_key }`
-    shape with an explicit enum
-    `OwnedEntryKind { SingleDst { dst, mobility_seq }, FdbNhg { group_key } }`.
+    pre-3a `{ last_applied_dst, last_applied_seq }` shape — which
+    would have grown a third `last_applied_group_key: Option<...>`
+    flag in a naïve forward-compat extension — with an explicit
+    enum `OwnedEntryKind { SingleDst { dst, mobility_seq }, FdbNhg { group_key } }`.
     Invalid states like "dst set AND group_key set" are
     structurally impossible. Existing call sites use the new
     `OwnedEntry::single_dst()` constructor; FDB-NHG-aware sites

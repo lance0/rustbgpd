@@ -1224,9 +1224,7 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
             mac: *mac,
             dst: *dst,
         },
-        DataplaneOp::RemoveRemoteFdb { mac, .. } | DataplaneOp::RemoveFdbNhg { mac, .. } => {
-            DataplaneOpKind::RemoveRemoteFdb { mac: *mac }
-        }
+        DataplaneOp::RemoveRemoteFdb { mac, .. } => DataplaneOpKind::RemoveRemoteFdb { mac: *mac },
         DataplaneOp::SetBumPortFlags { ifindex, .. } => {
             DataplaneOpKind::SetBumPortFlags { ifindex: *ifindex }
         }
@@ -1242,27 +1240,16 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         | DataplaneOp::RemoveL3VxlanFdb { .. } => {
             unreachable!("L3 ops use a separate AppliedL3Op accounting path")
         }
-        // ADR-0059 slice 3 FDB-NHG ops surface in the kind-level
-        // report as the underlying FDB add/remove (existing kind
-        // variants) so dashboards don't sprout new buckets. The
-        // group-level UpdateFdbNhgMembers has no `(VNI, MAC)` row;
-        // it's reported as an AddRemoteFdb with a sentinel MAC so
-        // existing report consumers keep working. Slice 3.5 may
-        // extend `DataplaneOpKind` with explicit group variants.
-        DataplaneOp::InstallFdbNhg { mac, .. } => DataplaneOpKind::AddRemoteFdb {
-            mac: *mac,
-            // dst is unknown at this layer; the kind reporter doesn't
-            // expose it for FDB-NHG. Use 0.0.0.0 as a sentinel.
-            dst: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-        },
-        DataplaneOp::UpdateFdbNhgMembers { .. } => {
-            // No (VNI, MAC) key; group-level. Use UpdateRemoteFdb on
-            // a sentinel MAC so the kind layer stays uniform.
-            DataplaneOpKind::UpdateRemoteFdb {
-                mac: rustbgpd_evpn::MacAddress::new([0; 6]),
-                dst: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            }
+        // ADR-0059 slice 3 FDB-NHG ops have their own kind variants
+        // so the report layer never relies on sentinel MAC/dst values
+        // (which would collide in `permanent_failures` keyed by
+        // `(VNI, MAC)` and confuse operators reading the failed-op
+        // list).
+        DataplaneOp::InstallFdbNhg { mac, .. } => DataplaneOpKind::InstallFdbNhg { mac: *mac },
+        DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+            DataplaneOpKind::UpdateFdbNhgMembers { esi: group_key.esi }
         }
+        DataplaneOp::RemoveFdbNhg { mac, .. } => DataplaneOpKind::RemoveFdbNhg { mac: *mac },
     }
 }
 

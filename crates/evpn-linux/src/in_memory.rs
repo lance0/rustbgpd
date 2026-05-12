@@ -254,11 +254,13 @@ impl InMemoryDataplane {
             // the reconcile actor routes them through `NexthopOps` /
             // its own coordinator (because they require allocator +
             // refcount state the `Dataplane` impl doesn't own). If
-            // one slips through here it's a bug in the routing.
+            // one slips through here it's a bug in the routing; use
+            // `InvalidArgument` (classified `Permanent`) so the actor
+            // suppresses rather than backoff-retrying forever.
             DataplaneOp::InstallFdbNhg { .. }
             | DataplaneOp::UpdateFdbNhgMembers { .. }
             | DataplaneOp::RemoveFdbNhg { .. } => {
-                return Err(crate::error::DataplaneError::Other(
+                return Err(crate::error::DataplaneError::InvalidArgument(
                     "FDB-NHG ops must be applied via the reconcile-actor coordinator, \
                      not Dataplane::apply"
                         .into(),

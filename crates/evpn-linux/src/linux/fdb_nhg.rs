@@ -147,14 +147,10 @@ pub(crate) async fn apply_remove_fdb_nhg_row(
     msg.attributes
         .push(NeighbourAttribute::LinkLayerAddress(mac.octets().to_vec()));
 
-    handle
-        .neighbours()
-        .del(msg)
-        .execute()
-        .await
-        .map_err(|e| super::fdb::classify_apply_error(&e))?;
-
-    Ok(())
+    match handle.neighbours().del(msg).execute().await {
+        Ok(()) => Ok(()),
+        Err(e) => super::fdb::classify_remove_apply_error(&e),
+    }
 }
 
 /// CVE-2025-39851 guard: refuse to install an FDB-NHG row unless the

@@ -543,10 +543,13 @@ impl Dataplane for LinuxDataplane {
             // the reconcile actor's coordinator routes them through
             // `NexthopOps` + `linux::fdb_nhg` directly, because they
             // require allocator + refcount state owned by the actor.
-            // If one slips through here, the routing is broken.
+            // If one slips through here, the routing is broken; use
+            // `InvalidArgument` so the failure classifier marks it
+            // `Permanent` and the actor suppresses the op rather than
+            // backoff-retrying a programming bug forever.
             DataplaneOp::InstallFdbNhg { .. }
             | DataplaneOp::UpdateFdbNhgMembers { .. }
-            | DataplaneOp::RemoveFdbNhg { .. } => Err(DataplaneError::Other(
+            | DataplaneOp::RemoveFdbNhg { .. } => Err(DataplaneError::InvalidArgument(
                 "FDB-NHG ops must be applied via the reconcile-actor coordinator, \
                  not Dataplane::apply"
                     .into(),

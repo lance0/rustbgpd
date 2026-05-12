@@ -410,6 +410,32 @@ pub enum DataplaneOpKind {
         /// CE-facing bridge port ifindex.
         ifindex: u32,
     },
+    /// Install an FDB row pointing at an FDB nexthop group via
+    /// `NDA_NH_ID` (ADR-0059 slice 3 aliasing-ECMP). The kernel
+    /// group ID isn't reported here — operators trace it via
+    /// structured logs from the coordinator. Single entry per
+    /// `(VNI, MAC)`, like the single-dst variants.
+    InstallFdbNhg {
+        /// MAC the FDB row programs.
+        mac: MacAddress,
+    },
+    /// Update an FDB nexthop group's member set in place (atomic
+    /// alias-set swap via `NLM_F_REPLACE` — ADR-0059 §5 invariant 3).
+    /// Group-level — no `(VNI, MAC)` row identity, only an `ESI`
+    /// payload to disambiguate which group the update touched.
+    UpdateFdbNhgMembers {
+        /// Ethernet Segment identifier of the group whose member
+        /// set was replaced.
+        esi: EthernetSegmentIdentifier,
+    },
+    /// Remove an FDB row that referenced an FDB nexthop group. The
+    /// group teardown itself (and any per-VTEP-NH cleanup the
+    /// refcount triggers) is internal to the coordinator and not
+    /// reported as a separate kind row.
+    RemoveFdbNhg {
+        /// MAC the FDB row programmed.
+        mac: MacAddress,
+    },
 }
 
 #[cfg(test)]
