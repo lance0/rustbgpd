@@ -171,6 +171,15 @@ struct ActorState {
     /// the FDB / BUM maps: a different member set on the same
     /// `AliasGroupKey` clears the suppression.
     nhg_permanent_failures: BTreeMap<crate::group_state::AliasGroupKey, DataplaneOp>,
+    /// IDs whose kernel `del_nexthop` failed during steady-state
+    /// FDB-NHG GC (Install drift heal, `UpdateFdbNhgMembers`,
+    /// `RemoveFdbNhg` group teardown). The allocator slot is *not*
+    /// released until the delete actually lands, so a future
+    /// `alloc_vtep_nh` / `alloc_nhg` can't hand out an ID that's
+    /// still live in the kernel. Drained once per reconcile pass
+    /// after the apply phase — successes release the slot + drop
+    /// from the set, persistent failures keep retrying.
+    pending_deletes: BTreeSet<u32>,
     /// `(VNI, MAC)` keys we've already warned about for the
     /// ADR-0059 IPv6-alias fallback. The diff pass emits the set of
     /// keys *currently* in fallback on every reconcile; the actor
@@ -251,6 +260,7 @@ impl ActorState {
             bum_permanent_failures: BTreeMap::new(),
             nhg_retry: RetrySchedule::new(),
             nhg_permanent_failures: BTreeMap::new(),
+            pending_deletes: BTreeSet::new(),
             warned_ipv6_fallback: BTreeSet::new(),
             last_intent_generation: 0,
             reconcile_generation: 0,
@@ -583,6 +593,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
+
+        // Retry any kernel-nexthop deletes left over from steady-state
+        // FDB-NHG GC failures (see `try_del_and_release_alloc`). Runs
+        // every pass — the queue is empty in steady state, so this is
+        // a no-op cost most of the time. Independent of the one-shot
+        // adoption cleanup below: that one walks `adopted_unreferenced`
+        // (set populated at first-dump), this one walks
+        // `pending_deletes` (set populated as apply-time deletes fail).
+        self.drain_pending_deletes().await;
 
         // ADR-0059 slice 3b: one-shot stale-NHID cleanup. Anything
         // still in `adopted_unreferenced` after the first reconcile's
@@ -950,6 +969,28 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         (applied, failed)
+    }
+
+    /// Retry any kernel-nexthop deletes that failed during this or a
+    /// previous reconcile pass's steady-state GC. Successes release
+    /// the allocator slot + drop from the queue; persistent failures
+    /// stay queued for the next pass. Bounded by the count of
+    /// distinct IDs that have ever hit a transient `del_nexthop`
+    /// failure — usually empty in steady state.
+    async fn drain_pending_deletes(&mut self) {
+        let ids: Vec<u32> = self.state.pending_deletes.iter().copied().collect();
+        for id in ids {
+            match self.dataplane.del_nexthop(id).await {
+                Ok(()) => {
+                    self.state.nh_id_alloc.release(id);
+                    self.state.pending_deletes.remove(&id);
+                    tracing::debug!(id, "pending_deletes: drained on retry");
+                }
+                Err(e) => {
+                    tracing::trace!(?e, id, "pending_deletes: still failing");
+                }
+            }
+        }
     }
 
     /// ADR-0059 slice 3b cleanup helper: walk `adopted_unreferenced`
@@ -1434,13 +1475,8 @@ where
                         .record_group_member_change(*group_key, new_members);
                     for ip in removed {
                         if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
-                            try_del_and_release_alloc(
-                                dataplane,
-                                &mut state.nh_id_alloc,
-                                vtep_id,
-                                "install_drift",
-                            )
-                            .await;
+                            try_del_and_release_alloc(dataplane, state, vtep_id, "install_drift")
+                                .await;
                         }
                     }
                 }
@@ -1516,13 +1552,7 @@ where
             // GC per-VTEP members whose last group-ref dropped.
             for ip in removed {
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
-                    try_del_and_release_alloc(
-                        dataplane,
-                        &mut state.nh_id_alloc,
-                        vtep_id,
-                        "update_members",
-                    )
-                    .await;
+                    try_del_and_release_alloc(dataplane, state, vtep_id, "update_members").await;
                 }
             }
             Ok(())
@@ -1538,22 +1568,11 @@ where
             match state.groups.record_mac_unref(*group_key, *vni, *mac) {
                 RefDelta::GroupStillReferenced => Ok(()),
                 RefDelta::GroupShouldDelete { id, members } => {
-                    try_del_and_release_alloc(
-                        dataplane,
-                        &mut state.nh_id_alloc,
-                        id,
-                        "remove_group",
-                    )
-                    .await;
+                    try_del_and_release_alloc(dataplane, state, id, "remove_group").await;
                     for ip in members {
                         if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
-                            try_del_and_release_alloc(
-                                dataplane,
-                                &mut state.nh_id_alloc,
-                                vtep_id,
-                                "remove_member",
-                            )
-                            .await;
+                            try_del_and_release_alloc(dataplane, state, vtep_id, "remove_member")
+                                .await;
                         }
                     }
                     Ok(())
@@ -1599,26 +1618,30 @@ fn check_permanent_suppression<K: Ord>(
 
 /// Best-effort delete of a tagged kernel nexthop, releasing the
 /// allocator slot only if the delete succeeded. On `Err` the slot
-/// stays reserved so a future `alloc_vtep_nh` / `alloc_nhg` cannot
-/// hand out an ID that is still live in the kernel — the failure
-/// scenario flagged by ADR-0059 review. The leaked slot is bounded
-/// (per-ID, per-pass) and reclaimable on a fresh daemon start via
-/// the slice 3b adoption pass; periodic drift recovery (slice 3.5)
-/// will eventually retry orphan deletions.
+/// stays reserved (so a future `alloc_vtep_nh` / `alloc_nhg` cannot
+/// hand out an ID still live in the kernel) AND the ID is queued
+/// into `state.pending_deletes` for retry on the next reconcile
+/// pass — without that queue the orphan would be permanently stuck
+/// in the kernel once the surrounding op's `GroupOwnedMap` /
+/// `OwnedSet` entries are dropped (the next pass would have no
+/// signal to re-emit a Remove). See `drain_pending_deletes`.
 async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
     dataplane: &mut D,
-    alloc: &mut crate::nh_id_alloc::NhIdAllocator,
+    state: &mut ActorState,
     id: u32,
     site: &'static str,
 ) {
     match dataplane.del_nexthop(id).await {
-        Ok(()) => alloc.release(id),
-        Err(e) => tracing::warn!(
-            ?e,
-            id,
-            site,
-            "FDB-NHG GC: del_nexthop failed; allocator slot retained to prevent kernel-ID collision"
-        ),
+        Ok(()) => state.nh_id_alloc.release(id),
+        Err(e) => {
+            tracing::warn!(
+                ?e,
+                id,
+                site,
+                "FDB-NHG GC: del_nexthop failed; queued for retry, allocator slot retained"
+            );
+            state.pending_deletes.insert(id);
+        }
     }
 }
 

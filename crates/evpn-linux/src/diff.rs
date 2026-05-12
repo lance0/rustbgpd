@@ -368,41 +368,45 @@ fn emit_fdb_nhg_pass(
             });
         }
         Some(OwnedEntryKind::FdbNhg { .. }) => {
-            // Same key. Per-MAC FDB row already installed; check
-            // whether the group's member set needs an
-            // UpdateFdbNhgMembers (dedupe across MACs sharing the
-            // group).
-            if group_seen.insert(linux_key) {
-                if let Some(existing) = groups.group(&linux_key) {
-                    let existing_members: Vec<_> = existing.members.iter().copied().collect();
-                    if existing_members != canonical {
-                        updates.push(DataplaneOp::UpdateFdbNhgMembers {
-                            group_key: linux_key,
-                            members: canonical.clone(),
-                        });
-                    }
-                } else {
-                    // last_applied says we own it but groups map
-                    // doesn't know about it — likely a startup-
-                    // adoption mismatch. Re-install to heal.
-                    creates.push(DataplaneOp::InstallFdbNhg {
-                        vni,
-                        mac,
+            // Same key. Per-MAC FDB row already installed.
+            let tracked_group_id = groups.group(&linux_key).map(|g| g.id);
+
+            // Per-group member-set diff. Dedupe across MACs that
+            // share the group. The group-missing case (our local
+            // state doesn't track this `linux_key`) is intentionally
+            // *not* healed here — the per-MAC kernel-drift check
+            // below emits one Install per MAC, which the apply path
+            // dedupes at the group level via `record_group_install`.
+            if group_seen.insert(linux_key)
+                && let Some(existing) = groups.group(&linux_key)
+            {
+                let existing_members: Vec<_> = existing.members.iter().copied().collect();
+                if existing_members != canonical {
+                    updates.push(DataplaneOp::UpdateFdbNhgMembers {
                         group_key: linux_key,
                         members: canonical.clone(),
                     });
                 }
             }
-            // Kernel-snapshot drift check: if our last_applied
-            // says FdbNhg(same key) but the kernel row is gone
-            // (FDB row deleted out-of-band), re-emit Install for
-            // this MAC. ADR §5 invariant 8: idempotent on
-            // EEXIST so this is safe even when the row is still
-            // there.
-            let kernel_has_row = snapshot
+
+            // Per-MAC kernel-snapshot drift check. Re-emit Install
+            // when:
+            //   - kernel has no FDB row for `(vni, mac)`,
+            //   - kernel row is single-dst (no `nh_id`),
+            //   - kernel row points at an `nh_id` that doesn't
+            //     match our locally-tracked group ID (manual
+            //     `bridge fdb replace`, partial-failure carryover,
+            //     or stale state — we'd silently forward via the
+            //     wrong group otherwise),
+            //   - or we don't track the group locally
+            //     (startup-adoption mismatch).
+            // `InstallFdbNhg` is idempotent under `NLM_F_REPLACE` so
+            // re-emitting when the row is already correct is safe.
+            let kernel_row_correct = snapshot
                 .find_fdb(vni, mac)
-                .is_some_and(|k| k.nh_id.is_some());
-            if !kernel_has_row {
+                .and_then(|k| k.nh_id)
+                .is_some_and(|kernel_id| tracked_group_id == Some(kernel_id));
+            if !kernel_row_correct {
                 creates.push(DataplaneOp::InstallFdbNhg {
                     vni,
                     mac,
