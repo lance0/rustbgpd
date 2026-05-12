@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::io;
 
 use futures::stream::TryStreamExt;
+use netlink_packet_core::Nla;
 use netlink_packet_route::AddressFamily;
 use netlink_packet_route::neighbour::{
     NeighbourAddress, NeighbourAttribute, NeighbourFlags, NeighbourMessage, NeighbourState,
@@ -37,6 +38,12 @@ use crate::error::DataplaneError;
 use crate::snapshot::{KernelFdbEntry, KernelFdbFlags};
 
 use super::links::LinkCache;
+
+/// `NDA_NH_ID` neighbour attribute (kind = 13). Not exposed as a typed
+/// variant by `netlink-packet-route 0.30`; we read it via the
+/// `Nla` trait's `kind()` accessor on the `Other(DefaultNla)` escape
+/// hatch.
+const NDA_NH_ID: u16 = 13;
 
 /// `NUD_NOARP` (no-arp) — neighbor entries in this state do not
 /// participate in ARP resolution.
@@ -110,6 +117,13 @@ fn merge_fdb_rows(existing: &mut KernelFdbEntry, incoming: &KernelFdbEntry) {
     if existing.dst.is_none() && incoming.dst.is_some() {
         existing.dst = incoming.dst;
     }
+    // Preserve NDA_NH_ID across the self/master split. Kernel
+    // currently emits the nh_id only on the self row (the VXLAN-encap
+    // entry); if a future kernel emits it on either or both, the
+    // merge stays correct.
+    if existing.nh_id.is_none() && incoming.nh_id.is_some() {
+        existing.nh_id = incoming.nh_id;
+    }
     existing.flags.extern_learn |= incoming.flags.extern_learn;
     existing.flags.permanent |= incoming.flags.permanent;
     existing.flags.noarp |= incoming.flags.noarp;
@@ -134,6 +148,7 @@ fn parse_fdb_entry(
 
     let mut mac: Option<MacAddress> = None;
     let mut dst: Option<std::net::IpAddr> = None;
+    let mut nh_id: Option<u32> = None;
     for attr in &msg.attributes {
         match attr {
             NeighbourAttribute::LinkLayerAddress(bytes) if bytes.len() == 6 => {
@@ -146,6 +161,18 @@ fn parse_fdb_entry(
                 NeighbourAddress::Inet6(v6) => dst = Some(std::net::IpAddr::V6(*v6)),
                 _ => {}
             },
+            // NDA_NH_ID (kind = 13) — `netlink-packet-route 0.30` doesn't
+            // expose a typed variant, so the kernel sends it through the
+            // `Other` escape hatch with a 4-byte native-endian payload.
+            // `DefaultNla` keeps its fields private; we read via the
+            // `Nla` trait's `kind()` + `emit_value()` accessors.
+            NeighbourAttribute::Other(default_nla)
+                if Nla::kind(default_nla) == NDA_NH_ID && Nla::value_len(default_nla) == 4 =>
+            {
+                let mut bytes = [0u8; 4];
+                Nla::emit_value(default_nla, &mut bytes);
+                nh_id = Some(u32::from_ne_bytes(bytes));
+            }
             _ => {}
         }
     }
@@ -167,7 +194,15 @@ fn parse_fdb_entry(
     }
     decode_state(msg.header.state, &mut flags);
 
-    Some(((vni, mac), KernelFdbEntry { mac, dst, flags }))
+    Some((
+        (vni, mac),
+        KernelFdbEntry {
+            mac,
+            dst,
+            nh_id,
+            flags,
+        },
+    ))
 }
 
 /// Decode an `ndm_state` value into the flag fields we care about.
@@ -236,12 +271,16 @@ pub(crate) async fn apply_op(
         | DataplaneOp::AddL3Neighbor { .. }
         | DataplaneOp::RemoveL3Neighbor { .. }
         | DataplaneOp::AddL3VxlanFdb { .. }
-        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
-            // BUM port-flag ops are routed through `linux::bum_filter`
-            // and L3 ops through `linux::l3` by `LinuxDataplane::apply`;
-            // they never reach this L2 FDB helper. Arms exist so the
-            // compiler can prove exhaustiveness.
-            unreachable!("non-L2-FDB op routed to FDB apply helper")
+        | DataplaneOp::RemoveL3VxlanFdb { .. }
+        | DataplaneOp::InstallFdbNhg { .. }
+        | DataplaneOp::UpdateFdbNhgMembers { .. }
+        | DataplaneOp::RemoveFdbNhg { .. } => {
+            // BUM port-flag ops are routed through `linux::bum_filter`,
+            // L3 ops through `linux::l3`, and ADR-0059 FDB-NHG ops
+            // through the reconcile actor's coordinator (which calls
+            // `NexthopOps` and `linux::fdb_nhg` directly). They never
+            // reach this single-dst FDB helper.
+            unreachable!("non-single-dst-FDB op routed to FDB apply helper")
         }
     };
 
@@ -309,11 +348,14 @@ pub(crate) async fn apply_op(
         | DataplaneOp::AddL3Neighbor { .. }
         | DataplaneOp::RemoveL3Neighbor { .. }
         | DataplaneOp::AddL3VxlanFdb { .. }
-        | DataplaneOp::RemoveL3VxlanFdb { .. } => {
+        | DataplaneOp::RemoveL3VxlanFdb { .. }
+        | DataplaneOp::InstallFdbNhg { .. }
+        | DataplaneOp::UpdateFdbNhgMembers { .. }
+        | DataplaneOp::RemoveFdbNhg { .. } => {
             // Unreachable: the early-return at the top of `apply_op`
-            // already handled non-L2-FDB ops. Arms exist so the
-            // compiler can prove exhaustiveness.
-            unreachable!("non-L2-FDB op handled at function entry")
+            // already handled non-single-dst-FDB ops. Arms exist so
+            // the compiler can prove exhaustiveness.
+            unreachable!("non-single-dst-FDB op handled at function entry")
         }
     }
 }
@@ -437,6 +479,7 @@ mod tests {
         KernelFdbEntry {
             mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
             dst: dst.map(ipa),
+            nh_id: None,
             flags: f,
         }
     }
@@ -512,6 +555,39 @@ mod tests {
         );
         assert!(acc.flags.master);
         assert!(acc.flags.self_flag);
+    }
+
+    #[test]
+    fn merge_preserves_nh_id_across_self_master_split() {
+        // Kernel emits the FDB-NHG row only on the self leg with
+        // NDA_NH_ID; the master leg has neither dst nor nh_id. The
+        // merge must surface nh_id on the combined entry.
+        let one = FlagSet {
+            extern_learn: true,
+            self_flag: true,
+            permanent: true,
+            ..FlagSet::default()
+        };
+        let two = FlagSet {
+            master: true,
+            ..FlagSet::default()
+        };
+        let mut acc = KernelFdbEntry {
+            mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            dst: None,
+            nh_id: None,
+            flags: flags(two),
+        };
+        let nhg_row = KernelFdbEntry {
+            mac: rustbgpd_evpn::MacAddress::new([1, 2, 3, 4, 5, 6]),
+            dst: None,
+            nh_id: Some(0x4000_0001),
+            flags: flags(one),
+        };
+        merge_fdb_rows(&mut acc, &nhg_row);
+        assert_eq!(acc.nh_id, Some(0x4000_0001));
+        assert!(acc.flags.extern_learn);
+        assert!(acc.flags.master);
     }
 
     #[test]

@@ -223,6 +223,7 @@ impl InMemoryDataplane {
                     KernelFdbEntry {
                         mac: *mac,
                         dst: Some(*dst),
+                        nh_id: None,
                         flags: KernelFdbFlags {
                             extern_learn: true,
                             master: true,
@@ -249,6 +250,20 @@ impl InMemoryDataplane {
             | DataplaneOp::RemoveL3Neighbor { .. }
             | DataplaneOp::AddL3VxlanFdb { .. }
             | DataplaneOp::RemoveL3VxlanFdb { .. } => {}
+            // ADR-0059 slice 3 FDB-NHG ops never reach `Dataplane::apply` —
+            // the reconcile actor routes them through `NexthopOps` /
+            // its own coordinator (because they require allocator +
+            // refcount state the `Dataplane` impl doesn't own). If
+            // one slips through here it's a bug in the routing.
+            DataplaneOp::InstallFdbNhg { .. }
+            | DataplaneOp::UpdateFdbNhgMembers { .. }
+            | DataplaneOp::RemoveFdbNhg { .. } => {
+                return Err(crate::error::DataplaneError::Other(
+                    "FDB-NHG ops must be applied via the reconcile-actor coordinator, \
+                     not Dataplane::apply"
+                        .into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -528,6 +543,7 @@ mod tests {
             KernelFdbEntry {
                 mac: mac(9),
                 dst: None,
+                nh_id: None,
                 flags: KernelFdbFlags::default(),
             },
         );

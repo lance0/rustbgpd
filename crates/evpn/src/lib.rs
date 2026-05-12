@@ -121,5 +121,6 @@ pub use segment::{DfAlgorithm, DfRole, EthernetSegment};
 // re-exported for the same reason: slice 6 plumbing in `evpn-linux`
 // needs to spell out kernel-route prefixes without depending on wire.
 pub use rustbgpd_wire::{
-    EthernetSegmentIdentifier, EvpnIpPrefixValue, Ipv4Prefix, Ipv6Prefix, RouteDistinguisher,
+    EthernetSegmentIdentifier, EthernetTagId, EvpnIpPrefixValue, Ipv4Prefix, Ipv6Prefix,
+    RouteDistinguisher,
 };

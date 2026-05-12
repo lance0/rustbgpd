@@ -65,8 +65,10 @@ pub mod dataplane;
 pub mod diff;
 pub mod enforcement;
 pub mod error;
+pub mod group_state;
 pub mod in_memory;
 pub mod l3_diff;
+pub mod nh_id_alloc;
 pub mod reconcile;
 pub mod snapshot;
 

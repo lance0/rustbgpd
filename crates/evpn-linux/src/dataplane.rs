@@ -194,6 +194,56 @@ pub enum DataplaneOp {
         /// Remote PE's router MAC.
         router_mac: MacAddress,
     },
+    /// Install an FDB-NHG row for `(vni, mac)` pointing at the kernel
+    /// nexthop group keyed by `group_key`. The reconcile actor's
+    /// coordinator decomposes this into the actual netlink sequence:
+    /// per-VTEP member adds (for any members not yet installed), the
+    /// group add (or `NLM_F_REPLACE` if the group already exists with
+    /// a different member set), and the FDB-row install with
+    /// `NDA_NH_ID`. ADR-0059 §5 invariants 1+3 dictate the order:
+    /// members → group → FDB row.
+    InstallFdbNhg {
+        /// EVPN instance the FDB row belongs to.
+        vni: EvpnInstanceId,
+        /// MAC the entry programs.
+        mac: MacAddress,
+        /// Dataplane-owned group identity `(VNI, ESI, EthernetTag)`.
+        /// ADR-0059 §7's `share_l2_nhg` knob defaults off, so the
+        /// key includes VNI in slice 3 — two L2VNIs sharing the same
+        /// `(ESI, EthernetTag)` get separate kernel groups.
+        group_key: crate::group_state::AliasGroupKey,
+        /// Canonical sorted+deduped member VTEP IPs. Produced by
+        /// [`rustbgpd_evpn::group_members`] on the slice 1
+        /// `RemoteMacEntry`.
+        members: Vec<IpAddr>,
+    },
+    /// Update an existing FDB nexthop group's member set in place.
+    /// The reconcile actor emits this when the same `group_key` has
+    /// different members than `last_applied`. Applies as a single
+    /// `RTM_NEWNEXTHOP` with `NLM_F_CREATE | NLM_F_REPLACE` on the
+    /// same `nh_id`; FDB rows referencing the group keep pointing at
+    /// the same ID, no forwarding gap. ADR-0059 §5 invariant 3.
+    UpdateFdbNhgMembers {
+        /// Dataplane-owned group identity.
+        group_key: crate::group_state::AliasGroupKey,
+        /// New canonical member set.
+        members: Vec<IpAddr>,
+    },
+    /// Remove an FDB-NHG row for `(vni, mac)`. The reconcile actor's
+    /// coordinator consults its `GroupOwnedMap` refcount: if this MAC
+    /// is the last referrer to the group, the coordinator follows up
+    /// by removing the group and unref'ing per-VTEP members. ADR-0059
+    /// §5 invariant 2 dictates the order: FDB row → group → members.
+    RemoveFdbNhg {
+        /// EVPN instance the FDB row belonged to.
+        vni: EvpnInstanceId,
+        /// MAC the entry programmed.
+        mac: MacAddress,
+        /// Dataplane-owned group identity (needed so the coordinator
+        /// knows which group to unref without re-deriving it from
+        /// owned state).
+        group_key: crate::group_state::AliasGroupKey,
+    },
 }
 
 /// Kernel-side notifications the actor consumes through
@@ -322,4 +372,88 @@ pub trait Dataplane: Send {
         // trait extension non-breaking for downstream impls.
         None
     }
+}
+
+/// Sibling trait providing the ADR-0059 FDB nexthop group surface.
+///
+/// Separate from [`Dataplane`] because:
+///
+/// 1. The high-level `DataplaneOp::InstallFdbNhg` / `UpdateFdbNhgMembers`
+///    / `RemoveFdbNhg` ops require allocator + refcount state owned by
+///    the reconcile actor — they don't route through `apply()` because
+///    the actor needs to allocate IDs, consult its `GroupOwnedMap`,
+///    and decide per-VTEP-NH lifecycle before any netlink call.
+/// 2. The reconcile actor's coordinator calls these low-level methods
+///    directly, in the ADR-0059 §5 invariant 1+2 order (members →
+///    group → FDB row on install; FDB row → group → members on
+///    teardown).
+/// 3. `LinuxDataplane` implements via the slice-2 `NexthopSocket` plus
+///    `linux::fdb_nhg`. `InMemoryDataplane` implements via recording
+///    so the actor's coordinator is unit-testable without netlink.
+pub trait NexthopOps: Send {
+    /// Install one per-VTEP FDB nexthop. `id` is pre-allocated by the
+    /// caller (the reconcile actor's `NhIdAllocator`).
+    fn add_nexthop_member(
+        &mut self,
+        id: u32,
+        gateway: IpAddr,
+    ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
+
+    /// Install an FDB nexthop group naming the per-VTEP `member_ids`.
+    /// Uses `NLM_F_CREATE | NLM_F_REPLACE` so the same call serves
+    /// both create and replace (atomic alias-set update — ADR-0059 §5
+    /// invariant 3).
+    fn add_nexthop_group(
+        &mut self,
+        id: u32,
+        member_ids: &[u32],
+    ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
+
+    /// Remove a nexthop by ID. Idempotent: ENOENT is treated as ACK
+    /// (the slice-2 `NexthopSocket::del` handles this).
+    fn del_nexthop(&mut self, id: u32) -> impl Future<Output = Result<(), DataplaneError>> + Send;
+
+    /// Install a bridge FDB row for `(vni, mac)` pointing at the
+    /// kernel nexthop group via `NDA_NH_ID`. CVE-2025-39851 guard at
+    /// the impl: refuse install if the target L2VXLAN does not have
+    /// learning disabled.
+    fn install_fdb_nhg_row(
+        &mut self,
+        vni: EvpnInstanceId,
+        mac: MacAddress,
+        nh_id: u32,
+    ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
+
+    /// Remove the bridge FDB row for `(vni, mac)`. Idempotent.
+    fn remove_fdb_nhg_row(
+        &mut self,
+        vni: EvpnInstanceId,
+        mac: MacAddress,
+    ) -> impl Future<Output = Result<(), DataplaneError>> + Send;
+
+    /// Dump rustbgpd-owned kernel nexthops (filtered by the
+    /// `0x3000_0000` / `0x4000_0000` tag bits). Used at startup for
+    /// allocator collision avoidance (ADR-0059 review callout #3 /
+    /// slice 3 startup adoption).
+    fn dump_owned_nexthops(
+        &mut self,
+    ) -> impl Future<Output = Result<Vec<KernelNexthop>, DataplaneError>> + Send;
+}
+
+/// One nexthop entry surfaced by [`NexthopOps::dump_owned_nexthops`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KernelNexthop {
+    /// Tagged kernel nexthop ID (high nibble `0x3` or `0x4`).
+    pub id: u32,
+    /// Kind: per-VTEP (single gateway) or group (list of member IDs).
+    pub kind: KernelNexthopKind,
+}
+
+/// Discriminator for [`KernelNexthop`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KernelNexthopKind {
+    /// Per-VTEP FDB nexthop with a gateway IP.
+    Member { gateway: IpAddr },
+    /// FDB nexthop group naming a set of per-VTEP member IDs.
+    Group { member_ids: Vec<u32> },
 }
