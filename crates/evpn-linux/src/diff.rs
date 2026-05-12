@@ -1107,13 +1107,25 @@ mod tests {
     }
 
     #[test]
-    fn fdb_nhg_member_set_shrinks_to_one_stays_group_backed() {
+    fn fdb_nhg_member_set_shrinks_stays_group_backed() {
         // last_applied says FdbNhg(esi=7) with members {10.0.0.2,
-        // 10.0.0.3}, groups map reflects same; desired keeps only
-        // [10.0.0.2]. Expect UpdateFdbNhgMembers emitted once.
+        // 10.0.0.3, 10.0.0.4}, groups map reflects same; desired
+        // drops one alias keeping {primary 10.0.0.2, alias 10.0.0.3}.
+        // Expect UpdateFdbNhgMembers emitted once.
+        //
+        // The shrink must NOT bring `alias_vtep_ips` to empty — the
+        // projection invariant (`empty alias_vtep_ips ⇔
+        // alias_group_key.is_none()`) means a fully-drained set would
+        // hit the FDB-NHG→single-dst transition, not the
+        // UpdateFdbNhgMembers path. The N→1-member-but-still-grouped
+        // case can't be reached through the projection layer.
         let mut desired = RemoteMacTable::builder();
         desired
-            .insert(vni(100), mac(1), entry_multi_homed("10.0.0.2", &[], 7))
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+            )
             .unwrap();
         let desired = desired.build();
 
@@ -1145,15 +1157,17 @@ mod tests {
         let mut groups = GroupOwnedMap::new();
         groups.record_member_install(ip("10.0.0.2"), 0x3000_0001);
         groups.record_member_install(ip("10.0.0.3"), 0x3000_0002);
+        groups.record_member_install(ip("10.0.0.4"), 0x3000_0003);
         let mut members = std::collections::BTreeSet::new();
         members.insert(ip("10.0.0.2"));
         members.insert(ip("10.0.0.3"));
+        members.insert(ip("10.0.0.4"));
         groups.record_group_install(linux_key(100, 7), 0x4000_0001, members);
         groups.record_mac_ref(linux_key(100, 7), vni(100), mac(1));
 
         let plan = compute_diff(&desired, &snapshot, &applied, &probes, &groups);
 
-        // Member set should shrink to [10.0.0.2] (primary only).
+        // Member set should shrink to [10.0.0.2, 10.0.0.3].
         let updates: Vec<_> = plan
             .ops
             .iter()
@@ -1166,7 +1180,7 @@ mod tests {
             plan.ops
         );
         if let DataplaneOp::UpdateFdbNhgMembers { members, .. } = updates[0] {
-            assert_eq!(members, &vec![ip("10.0.0.2")]);
+            assert_eq!(members, &vec![ip("10.0.0.2"), ip("10.0.0.3")]);
         }
         // Also: no InstallFdbNhg / RemoveFdbNhg — N→1 keeps the group.
         assert!(

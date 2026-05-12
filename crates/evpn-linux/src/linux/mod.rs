@@ -671,12 +671,15 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
 }
 
 /// Map `NexthopError` (slice-2 socket-layer typed failure) into the
-/// dataplane-wide `DataplaneError`. `Io` propagates; `Kernel(errno)`
-/// becomes `InvalidArgument` (the actor's classifier maps it to
-/// `Permanent` so a programming bug doesn't backoff-retry forever);
-/// validation errors become `InvalidArgument`; truncation /
-/// unexpected message become `Other` (transient — the next dump pass
-/// will retry on its own cadence).
+/// dataplane-wide `DataplaneError`. `Io` propagates;
+/// `Kernel(errno)` routes through [`map_nexthop_kernel_errno`] for
+/// per-errno classification (`PermissionDenied` / `KernelTooOld` /
+/// `InvalidArgument` / `Other` — see that function for the
+/// permanent-vs-transient mapping); validation + `Ipv6Unsupported`
+/// become `InvalidArgument` (permanent — our message shape is wrong
+/// or the v6 fixture hasn't landed yet); truncation / unexpected
+/// message become `Other` (transient — the next dump pass will
+/// retry on its own cadence).
 fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
     match e {
         nexthop_raw::NexthopError::Io(io) => DataplaneError::Io(io),
