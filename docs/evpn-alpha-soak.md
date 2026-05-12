@@ -193,6 +193,16 @@ landing, tracked here for visibility)
   both Type 2 and EAD-per-EVI through from the RIB. The dataplane
   itself doesn't yet program ECMP — that's the kernel-mutation
   half tracked below.
+  - **Dataplane design** locked in [ADR-0059](adr/0059-evpn-aliasing-fdb-nexthop-groups.md):
+    Linux FDB nexthop groups (`NDA_NH_ID` + `NHA_FDB`),
+    raw-netlink construction because `rtnetlink 0.21` exposes no
+    nexthop API, group keyed by `(ESI, EthernetTag)` so multiple
+    MACs share one group. Implementation sliced into four PRs
+    (~3 days total); slice 1 (portable intent shape +
+    projection) is the first commit. Explicitly rejects a "wire
+    the data through; apply is a no-op log" first slice — it
+    would create the false impression that aliasing-ECMP is
+    partially shipped while forwarding still goes single-path.
 - [x] **Mass-withdraw receive-side filter landed (RFC 7432 §8.4).**
   The supervisor's `build_remote_mac_table` snapshots EAD-per-ES
   routes from the RIB on every pass and drops any Type 2 with
