@@ -47,9 +47,14 @@ use crate::snapshot::{InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedEntry
 /// Output of a single diff pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Plan {
-    /// Operations to attempt, in deterministic order: creates first
-    /// (sorted by `(VNI, MAC)`), then updates, then deletes. The
-    /// actor applies them serially with backoff per-op on failure.
+    /// Operations to attempt, in deterministic order: deletes first
+    /// (including transition removes pushed from Pass 1/1b — e.g.,
+    /// `SingleDst → FdbNhg` emits `RemoveRemoteFdb` here), then
+    /// creates (sorted by `(VNI, MAC)`), then updates. This ordering
+    /// makes transition pairs (`Remove → Install`) safe within a
+    /// single plan even though the per-MAC ops target the same
+    /// kernel row. The actor applies serially with per-op backoff on
+    /// failure.
     pub ops: Vec<DataplaneOp>,
     /// `(VNI, MAC)` keys whose multi-homed Type 2 entry contains at
     /// least one IPv6 alias and therefore fell back to the single-dst

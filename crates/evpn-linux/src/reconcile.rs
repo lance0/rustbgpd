@@ -524,10 +524,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                         "adoption: dump_owned_nexthops failed; deferring this reconcile pass to avoid allocator collisions"
                     );
                     let status = build_instance_status(&intent.instances, &probes);
-                    let bum_enforcement = build_bum_enforcement_status(
-                        &intent.bum_enforcement,
-                        &KernelSnapshot::new(),
-                    );
+                    // `dump_snapshot` already succeeded — use the real
+                    // snapshot so BUM enforcement reflects actual link
+                    // state, not "no links exist".
+                    let bum_enforcement =
+                        build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
                     self.emit_report(
                         status,
                         vec![],
@@ -1729,11 +1730,16 @@ async fn rollback_partial_install<D: crate::dataplane::NexthopOps>(
     site: &'static str,
 ) {
     // Group first (no FDB row exists at this point, so the ADR §5
-    // invariant-2 order reduces to group → members).
-    if let Some((group_key, group_id)) = new_group
-        && let Some((_id_from_map, _members)) = state.groups.drop_unreferenced_group(&group_key)
+    // invariant-2 order reduces to group → members). Delete the ID
+    // returned by `drop_unreferenced_group` rather than the caller-
+    // supplied one — they're expected to match (debug-asserted), but
+    // if state ever drifts, the map's ID is what we actually tracked
+    // and is the safer kernel reference.
+    if let Some((group_key, expected_id)) = new_group
+        && let Some((tracked_id, _members)) = state.groups.drop_unreferenced_group(&group_key)
     {
-        try_del_and_release_alloc(dataplane, state, group_id, site).await;
+        debug_assert_eq!(tracked_id, expected_id, "rollback ID mismatch");
+        try_del_and_release_alloc(dataplane, state, tracked_id, site).await;
     }
     // Members in reverse-creation order.
     for (ip, id) in new_members.iter().rev() {
@@ -1759,7 +1765,16 @@ async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
 ) {
     use crate::error::FailureClass;
     match dataplane.del_nexthop(id).await {
-        Ok(()) => state.nh_id_alloc.release(id),
+        Ok(()) => {
+            state.nh_id_alloc.release(id);
+            // Clear any stale retry queue entry for this ID — if a
+            // prior pass enqueued it after a transient failure and
+            // the current pass succeeded via the steady-state path,
+            // `drain_pending_deletes` would otherwise re-attempt the
+            // delete (kernel returns ENOENT → success per slice 2's
+            // idempotent ACK, but spams the log on every pass).
+            state.pending_deletes.remove(&id);
+        }
         Err(e) => match e.class() {
             FailureClass::Permanent => {
                 tracing::warn!(
