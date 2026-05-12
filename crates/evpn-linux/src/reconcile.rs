@@ -53,7 +53,9 @@ use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::diff::{Plan, compute_diff};
 use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
-use crate::snapshot::{InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedSet};
+use crate::snapshot::{
+    InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
+};
 
 /// Tunable cadence for the reconcile loop. Production values come from
 /// ADR-0054 §6; tests construct `Self::for_tests()` for a tighter
@@ -1203,6 +1205,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// entries. BUM restoration is best-effort because leaving a CE
     /// port suppressed after the daemon exits is more operator-hostile
     /// than a redundant allow-all write.
+    #[allow(clippy::too_many_lines)]
     async fn drain(&mut self) {
         let bum_restore_ops: Vec<_> = if self.config.apply_bum_enforcement {
             self.state
@@ -1267,15 +1270,42 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 }
             }
 
-            let owned_keys: Vec<_> = self.state.owned.keys().into_iter().collect();
-            for (vni, mac) in owned_keys {
-                let op = DataplaneOp::RemoveRemoteFdb { vni, mac };
-                if let Err(e) = self.dataplane.apply(&op).await {
+            // Snapshot the owned set with kind info — for FdbNhg
+            // entries we route through `apply_nhg_op` (so the FDB
+            // row → group → members teardown sequence runs and the
+            // refcount state stays consistent for sibling MACs that
+            // share the group). Without this, drain would issue
+            // `RemoveRemoteFdb` for FdbNhg-owned MACs — which
+            // `Dataplane::apply` rejects with `InvalidArgument` and
+            // the kernel group/members stay orphaned across restart.
+            let owned_drain: Vec<(EvpnInstanceId, MacAddress, OwnedEntryKind)> = self
+                .state
+                .owned
+                .iter()
+                .map(|(&(vni, mac), entry)| (vni, mac, entry.kind.clone()))
+                .collect();
+            for (vni, mac, kind) in owned_drain {
+                let op = match kind {
+                    OwnedEntryKind::SingleDst { .. } => DataplaneOp::RemoveRemoteFdb { vni, mac },
+                    OwnedEntryKind::FdbNhg { group_key } => DataplaneOp::RemoveFdbNhg {
+                        vni,
+                        mac,
+                        group_key,
+                    },
+                };
+                let res = match &op {
+                    DataplaneOp::RemoveFdbNhg { .. } => {
+                        apply_nhg_op(&mut self.dataplane, &mut self.state, &op).await
+                    }
+                    _ => self.dataplane.apply(&op).await,
+                };
+                if let Err(e) = res {
                     tracing::debug!(error = %e, ?op, "drain apply failed");
                     // Best-effort — keep going. Foreign entries in
                     // the kernel are never touched by `apply` for
                     // RemoveRemoteFdb in either the real or fake
-                    // impl.
+                    // impl; `apply_nhg_op` GC is also best-effort
+                    // for the group/member teardown.
                 } else {
                     self.state.owned.record_withdrawn(vni, mac);
                 }
@@ -1741,10 +1771,27 @@ async fn rollback_partial_install<D: crate::dataplane::NexthopOps>(
         debug_assert_eq!(tracked_id, expected_id, "rollback ID mismatch");
         try_del_and_release_alloc(dataplane, state, tracked_id, site).await;
     }
-    // Members in reverse-creation order.
+    // Members in reverse-creation order. Skip members that a still-
+    // installed group now references — this happens on the
+    // existing-group drift-heal path when Step 2's REPLACE succeeded
+    // and attached the new members to the (already-live) group, and
+    // Step 3 then failed: the members are no longer "newly-orphaned
+    // by this op", they're legitimate group members, and deleting
+    // them would leave the surviving group's `members` set pointing
+    // at gone kernel state. The next reconcile will re-emit Install
+    // for the failed MAC and heal the missing FDB row.
     for (ip, id) in new_members.iter().rev() {
-        state.groups.drop_vtep_nh(ip);
-        try_del_and_release_alloc(dataplane, state, *id, site).await;
+        if state.groups.vtep_nh_is_orphan(ip) {
+            state.groups.drop_vtep_nh(ip);
+            try_del_and_release_alloc(dataplane, state, *id, site).await;
+        } else {
+            tracing::debug!(
+                ?ip,
+                id,
+                site,
+                "rollback: member now referenced by surviving group; retaining"
+            );
+        }
     }
 }
 
