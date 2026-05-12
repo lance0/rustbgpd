@@ -537,9 +537,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // apply phase is owned by us (tag bits + FDB-NHG kind) but
         // not referenced by any MAC in `groups` — i.e., true stale
         // state from a prior daemon instance. Delete + release.
-        // Gated to the first pass so we don't re-walk an
-        // already-empty map on every reconcile.
-        if !self.state.adoption_done {
+        //
+        // Only mark adoption complete when the pass had no apply
+        // failures and the dump succeeded — if the first pass had
+        // transient errors (or the dump returned `Err` so
+        // `adopted_unreferenced` is incomplete), defer cleanup to
+        // the next reconcile so a fresh dump can re-seed reservations
+        // before we accidentally delete a not-yet-adopted ID.
+        if !self.state.adoption_done && failed.is_empty() {
             self.cleanup_unreferenced_adoptions().await;
             self.state.adoption_done = true;
         }
@@ -1305,6 +1310,10 @@ where
             members,
         } => {
             // Step 1: install any per-VTEP members not yet present.
+            // Allocator slot reserved up front; if the netlink call
+            // fails, release the slot before returning so we don't
+            // leak allocator capacity. The actor's retry schedule
+            // will re-attempt on the next pass with a fresh alloc.
             for ip in members {
                 if state.groups.vtep_nh(ip).is_none() {
                     let id = state.nh_id_alloc.alloc_vtep_nh().map_err(|e| {
@@ -1312,7 +1321,10 @@ where
                             "ADR-0059: vtep NH alloc failed: {e}"
                         ))
                     })?;
-                    dataplane.add_nexthop_member(id, *ip).await?;
+                    if let Err(e) = dataplane.add_nexthop_member(id, *ip).await {
+                        state.nh_id_alloc.release(id);
+                        return Err(e);
+                    }
                     state.groups.record_member_install(*ip, id);
                     state.adopted_unreferenced.remove(&id);
                 }
@@ -1343,7 +1355,10 @@ where
                 let id = state.nh_id_alloc.alloc_nhg().map_err(|e| {
                     crate::error::DataplaneError::Other(format!("ADR-0059: nhg alloc failed: {e}"))
                 })?;
-                dataplane.add_nexthop_group(id, &member_ids).await?;
+                if let Err(e) = dataplane.add_nexthop_group(id, &member_ids).await {
+                    state.nh_id_alloc.release(id);
+                    return Err(e);
+                }
                 let members_set: BTreeSet<_> = members.iter().copied().collect();
                 state
                     .groups
@@ -1352,13 +1367,20 @@ where
                 id
             };
             // Step 3: install the FDB row pointing at the group.
+            // Failure here leaves the group + members installed in
+            // `state.groups` — they're refcounted, so the next pass's
+            // Install/Update for any MAC sharing this `group_key`
+            // will reuse them. Per-VTEP members not yet ref'd by any
+            // MAC stay tracked in `groups.vtep_nhs`; the GC happens
+            // on the corresponding RemoveFdbNhg path's last-ref unref.
             dataplane.install_fdb_nhg_row(*vni, *mac, group_id).await?;
             state.groups.record_mac_ref(*group_key, *vni, *mac);
             Ok(())
         }
 
         DataplaneOp::UpdateFdbNhgMembers { group_key, members } => {
-            // Add any new per-VTEP members first.
+            // Add any new per-VTEP members first; release allocator
+            // slot on netlink failure (same rollback as Install).
             for ip in members {
                 if state.groups.vtep_nh(ip).is_none() {
                     let id = state.nh_id_alloc.alloc_vtep_nh().map_err(|e| {
@@ -1366,7 +1388,10 @@ where
                             "ADR-0059: vtep NH alloc failed: {e}"
                         ))
                     })?;
-                    dataplane.add_nexthop_member(id, *ip).await?;
+                    if let Err(e) = dataplane.add_nexthop_member(id, *ip).await {
+                        state.nh_id_alloc.release(id);
+                        return Err(e);
+                    }
                     state.groups.record_member_install(*ip, id);
                     state.adopted_unreferenced.remove(&id);
                 }

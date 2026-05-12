@@ -127,6 +127,7 @@ pub fn compute_diff(
                     &mut group_seen,
                     &mut creates,
                     &mut updates,
+                    &mut deletes,
                 );
             }
             (Some(_), false) => {
@@ -148,6 +149,7 @@ pub fn compute_diff(
                     last_applied,
                     &mut creates,
                     &mut updates,
+                    &mut deletes,
                 );
             }
             (None, _) => {
@@ -160,6 +162,7 @@ pub fn compute_diff(
                     last_applied,
                     &mut creates,
                     &mut updates,
+                    &mut deletes,
                 );
             }
         }
@@ -203,9 +206,18 @@ pub fn compute_diff(
         }
     }
 
-    let mut ops = creates;
+    // Order: deletes (including Pass 2 withdrawals AND transition
+    // removes from Pass 1/1b) → creates → updates. Transition pairs
+    // (`SingleDst → FdbNhg`, `FdbNhg → SingleDst`, group-key drift)
+    // push their Remove into `deletes` and their Install/Add into
+    // `creates`, so the remove always runs first within the plan
+    // even though the per-MAC remove + add target the same kernel
+    // row. Mobility-style `UpdateRemoteFdb` ops stay in `updates`
+    // because they're atomic netlink REPLACE calls, no remove
+    // needed.
+    let mut ops = deletes;
+    ops.append(&mut creates);
     ops.append(&mut updates);
-    ops.append(&mut deletes);
     Plan { ops }
 }
 
@@ -219,6 +231,7 @@ fn all_v4(entry: &RemoteMacEntry) -> bool {
 
 /// Pass 1 / IPv6-fallback emission — emit `AddRemoteFdb` /
 /// `UpdateRemoteFdb` for a single-dst entry.
+#[allow(clippy::too_many_arguments)]
 fn emit_single_dst_pass(
     vni: EvpnInstanceId,
     mac: MacAddress,
@@ -227,14 +240,19 @@ fn emit_single_dst_pass(
     last_applied: &OwnedSet,
     creates: &mut Vec<DataplaneOp>,
     updates: &mut Vec<DataplaneOp>,
+    deletes: &mut Vec<DataplaneOp>,
 ) {
     // Transition: previously installed as FdbNhg, now wants single-dst.
-    // Emit RemoveFdbNhg before the AddRemoteFdb so the FDB row is
-    // re-keyed cleanly.
+    // Emit RemoveFdbNhg into `deletes` so the plan-level ordering
+    // (deletes → creates → updates) runs the remove before the add
+    // — apply ops within the same `(vni, mac)` are serialized so
+    // this avoids kernel-side conflicts. RemoveFdbNhg is idempotent
+    // on `ENOENT` (slice 3a `classify_remove_apply_error`), so we
+    // emit unconditionally without gating on the kernel snapshot.
     if let Some(owned) = last_applied.get(vni, mac)
         && let OwnedEntryKind::FdbNhg { group_key } = owned.kind
     {
-        updates.push(DataplaneOp::RemoveFdbNhg {
+        deletes.push(DataplaneOp::RemoveFdbNhg {
             vni,
             mac,
             group_key,
@@ -282,6 +300,7 @@ fn emit_fdb_nhg_pass(
     group_seen: &mut BTreeSet<AliasGroupKey>,
     creates: &mut Vec<DataplaneOp>,
     updates: &mut Vec<DataplaneOp>,
+    deletes: &mut Vec<DataplaneOp>,
 ) {
     let canonical = group_members(entry);
 
@@ -297,9 +316,16 @@ fn emit_fdb_nhg_pass(
             });
         }
         Some(OwnedEntryKind::SingleDst { .. }) => {
-            // Single-dst → FDB-NHG transition. Remove the old row,
-            // install the group-backed one.
-            updates.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+            // Single-dst → FDB-NHG transition. Remove the old row
+            // first (goes into `deletes` so the plan-level ordering
+            // runs it before the Install). Gate on snapshot presence:
+            // `RemoveRemoteFdb` via `linux::fdb::classify_apply_error`
+            // treats `ENOENT` as transient (would backoff-retry
+            // forever), so don't emit if the kernel row is already
+            // gone.
+            if snapshot.find_fdb(vni, mac).is_some() {
+                deletes.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+            }
             creates.push(DataplaneOp::InstallFdbNhg {
                 vni,
                 mac,
@@ -311,8 +337,10 @@ fn emit_fdb_nhg_pass(
             group_key: prev_key,
         }) if prev_key != linux_key => {
             // Group-key drift on the same MAC (ESI change / VNI change).
-            // Remove old, install new.
-            updates.push(DataplaneOp::RemoveFdbNhg {
+            // RemoveFdbNhg is idempotent on ENOENT (slice 3a) so
+            // unconditional emission is safe. Goes into `deletes`
+            // for plan-level ordering.
+            deletes.push(DataplaneOp::RemoveFdbNhg {
                 vni,
                 mac,
                 group_key: prev_key,
@@ -867,7 +895,7 @@ mod tests {
 
     // ─── ADR-0059 slice 3b: Pass 1b transitions ────────────────────
 
-    use crate::group_state::{AliasGroupKey, GroupOwned};
+    use crate::group_state::AliasGroupKey;
     use rustbgpd_evpn::{EthernetSegmentIdentifier, EthernetTagId};
 
     fn esi(seed: u8) -> EthernetSegmentIdentifier {
@@ -905,7 +933,12 @@ mod tests {
             .unwrap();
         let desired = desired.build();
 
-        let snapshot = KernelSnapshot::new();
+        // Kernel still has the prior single-dst row — RemoveRemoteFdb
+        // is gated on snapshot presence to keep the op idempotent.
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("10.0.0.2");
+        e.mac = mac(1);
+        snapshot.insert_fdb(vni(100), e);
         let mut applied = OwnedSet::new();
         applied.record_applied(
             vni(100),
@@ -1191,12 +1224,5 @@ mod tests {
             "must NOT emit InstallFdbNhg when v6 aliases present: {:?}",
             plan.ops,
         );
-    }
-
-    // GroupOwned and pre-existing struct imports kept used. The
-    // `GroupOwned` type isn't directly constructed in these tests
-    // but is referenced indirectly via `GroupOwnedMap`'s helpers.
-    fn _silence_unused_import_warning() -> Option<GroupOwned> {
-        None
     }
 }

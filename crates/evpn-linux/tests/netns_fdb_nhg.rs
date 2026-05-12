@@ -262,11 +262,17 @@ async fn round_trip_install_and_remove_fdb_nhg() {
         !fdb_after.contains(&format!("nhid {expected_nhid}")),
         "FDB row should be gone: {fdb_after}",
     );
-    let nh_after = ip_nexthop_show();
+    // `ip nexthop show` is a sanity-only display; the authoritative
+    // emptiness check filters by tag bits via the kernel dump itself.
+    // (`ip` prints IDs in decimal, so a hex substring match would be
+    // unreliable even if the entries were still present.)
+    let dumped_after = dp
+        .dump_owned_nexthops()
+        .await
+        .expect("dump_owned_nexthops after teardown");
     assert!(
-        nh_after.trim().is_empty()
-            || (!nh_after.contains("0x30000001") && !nh_after.contains("0x40000001")),
-        "nexthop table should be empty (of ours): {nh_after}",
+        dumped_after.is_empty(),
+        "expected no tagged nexthops after teardown, got: {dumped_after:?}",
     );
 
     // Idempotent del — re-issuing del returns Ok (slice 3a's
