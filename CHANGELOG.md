@@ -11,6 +11,25 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0059 slice 2 — `nexthop_raw` raw-netlink module.** New
+  internal `crates/evpn-linux/src/linux/nexthop_raw/` emitting
+  `RTM_NEWNEXTHOP` / `RTM_DELNEXTHOP` messages with `NHA_FDB` for
+  FDB nexthop groups (RFC 7432 §14 aliasing dataplane).
+  `NexthopSocket::{connect, add_fdb_member, add_fdb_group, del}`
+  async API over a dedicated `netlink-sys::TokioSocket` (separate
+  from the primary `rtnetlink::Handle`); `&mut self` methods
+  serialize request/ACK pairing at the borrow checker.
+  `NexthopGroupMember::{new, with_weight}` enforces non-zero IDs
+  before encoding; `add_fdb_group` validates against empty
+  groups, duplicate member IDs, and ID 0. Clean-room from
+  `include/uapi/linux/nexthop.h`; tested against real iproute2
+  byte-fixture captures (strace decode of `ip nexthop add` /
+  `ip nexthop del` in an unprivileged userns, iproute2 6.1.0 /
+  kernel 6.17). IPv4 gateways only in this slice — `IpAddr::V6`
+  rejected with explicit `NexthopError::Ipv6Unsupported` until a
+  captured v6 fixture and matching netns test land as a
+  follow-up. No diff/apply caller yet — slice 3 wires the
+  reconcile actor.
 - **ADR-0059 slice 1 — `RemoteMacEntry::alias_group_key` portable
   intent extension.** New `Option<(EthernetSegmentIdentifier,
   EthernetTagId)>` field on `RemoteMacEntry`, populated by the

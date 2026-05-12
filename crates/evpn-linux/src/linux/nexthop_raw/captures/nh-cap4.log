@@ -1,0 +1,2 @@
+sendmsg(3, {msg_name={sa_family=AF_NETLINK, nl_pid=0, nl_groups=00000000}, msg_namelen=12, msg_iov=[{iov_base=[{nlmsg_len=32, nlmsg_type=RTM_DELNEXTHOP, nlmsg_flags=NLM_F_REQUEST|NLM_F_ACK, nlmsg_seq=1778604863, nlmsg_pid=0}, {nh_family=AF_UNSPEC, nh_scope=RT_SCOPE_UNIVERSE, nh_protocol=RTPROT_UNSPEC, nh_flags=0}, [{nla_len=8, nla_type=NHA_ID}, 200]], iov_len=32}], msg_iovlen=1, msg_controllen=0, msg_flags=0}, 0) = 32
++++ exited with 0 +++
