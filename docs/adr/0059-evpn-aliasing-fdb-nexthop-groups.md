@@ -431,9 +431,10 @@ through. Each slice ships independently green.
 - Tear-down order enforced via the existing four-phase apply
   ordering (we already have this pattern from slice 6c L3 ownership).
 - Unit tests for the diff: alias-set grows, alias-set shrinks
-  (including drain-to-one → switch back to single-dst),
-  multi-MAC sharing of one group, ESI change on a MAC (group key
-  drift), partial-success retry.
+  (including N → 1 keeping a one-member NHG and N → 0
+  uninstalling dependent FDB rows before tearing down the
+  group), multi-MAC sharing of one group, ESI change on a MAC
+  (group key drift), partial-success retry.
 - Output: kernel programming end-to-end against the apply path,
   but only validated by mocks. No netns yet.
 
@@ -466,10 +467,12 @@ through. Each slice ships independently green.
   privileged netns step doesn't drift if GitHub rolls the
   hosted image. The 24.04 Azure-tuned image ships kernel
   ≥ 6.17, iproute2 6.1 (`bridge fdb add ... nhid` supported),
-  `vrf` module built, and `CAP_NET_ADMIN` available inside
-  `unshare -rn` — all the prereqs satisfied. iproute2 < 5.10
-  prints `nhid` differently (or not at all), so the version
-  pin matters for the regex matcher above.
+  and `CAP_NET_ADMIN` available inside `unshare -rn` — all the
+  prereqs for the L2 aliasing netns test. The test still probes
+  kernel / iproute2 support at runtime and fails with a clear
+  diagnostic if the hosted image changes. iproute2 < 5.10 prints
+  `nhid` differently (or not at all), so the version pin matters
+  for the regex matcher above.
 - Docs: `docs/INTEROP.md` M40 row, `docs/evpn-alpha-soak.md`
   aliasing-dataplane bullet flipped to shipped, CHANGELOG entry.
 - Output: end-to-end multi-homing forwarding shipped.
@@ -516,7 +519,8 @@ through. Each slice ships independently green.
   learning enabled; fix train `4ff4f3104da6`, `0e8630f24c14`,
   `6ead38147ebb` landed in mainline 6.17-rc and is backported
   to stable. Slice 6c IRB already enforces `nolearning` on the
-  L3VXLAN; slice 2 must enforce the same for the L2VXLAN path.
+  L3VXLAN; the slice 3 apply / readiness path must enforce the
+  same for the L2VXLAN path before any FDB-NHG install.
 
 ## Out of scope for this ADR
 
@@ -571,8 +575,8 @@ through. Each slice ships independently green.
 - [`include/uapi/linux/neighbour.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/neighbour.h)
   — `NDA_NH_ID = 13`.
 - [CVE-2025-39851](https://www.suse.com/security/cve/CVE-2025-39851.html)
-  — VXLAN NPD when refreshing FDB-NHG with learning ON. Slice
-  2 hard-guards against this.
+  — VXLAN NPD when refreshing FDB-NHG with learning ON. The
+  slice 3 apply / readiness path hard-guards against this.
 - [`net.ipv4.nexthop_compat_mode` sysctl](https://docs.kernel.org/networking/ip-sysctl.html)
   — defaults to 1; flip to 0 to silence the per-FIB-entry
   notification storm on nexthop replace.
