@@ -1488,7 +1488,7 @@ where
                 .group(group_key)
                 .map(|g| (g.id, g.members.iter().copied().collect::<Vec<_>>()));
             let group_id = if let Some((g_id, existing_members)) = existing {
-                if existing_members != *members {
+                if existing_members.as_slice() != members.as_slice() {
                     // Member set drifted (e.g., re-install after
                     // partial-failure recovery). Atomic REPLACE, then
                     // GC any per-VTEP members whose last group-ref

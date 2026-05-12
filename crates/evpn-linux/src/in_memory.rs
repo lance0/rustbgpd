@@ -336,6 +336,23 @@ impl NexthopOps for InMemoryDataplane {
     ) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
         state.fdb_nhg_rows.insert((vni, mac), nh_id);
+        // Mirror into `state.kernel` so a subsequent `dump_snapshot`
+        // reflects the row — without this, the slice 3b drift check
+        // in `compute_diff` Pass 1b would see no row, treat it as
+        // drift, and re-emit `InstallFdbNhg` every reconcile pass.
+        state.kernel.insert_fdb(
+            vni,
+            KernelFdbEntry {
+                mac,
+                dst: None,
+                nh_id: Some(nh_id),
+                flags: KernelFdbFlags {
+                    extern_learn: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
         Ok(())
     }
 
@@ -348,6 +365,7 @@ impl NexthopOps for InMemoryDataplane {
         // Idempotent — slice 3b coordinator may issue this on
         // already-removed rows during stale cleanup.
         state.fdb_nhg_rows.remove(&(vni, mac));
+        state.kernel.remove_fdb(vni, mac);
         Ok(())
     }
 
