@@ -201,7 +201,10 @@ when to populate the key — same gate as `alias_vtep_ips` itself.
 
 ### 5. Lifecycle invariants (binding for the implementation)
 
-The kernel ordering and error-handling rules are non-negotiable:
+The kernel ordering and error-handling rules are non-negotiable.
+Every rule below has a corresponding line reference in FRR's
+`zebra/zebra_evpn_mh.c` and `zebra/rt_netlink.c` — we match FRR
+unless this ADR explicitly diverges.
 
 1. **Create order**: per-VTEP fdb-nexthops first, group second,
    FDB row third. Kernel `EINVAL`s on dangling references.
@@ -210,38 +213,102 @@ The kernel ordering and error-handling rules are non-negotiable:
    deleted while still in use.
 3. **Atomic alias-set change**: re-emit the group with
    `NLM_F_CREATE | NLM_F_REPLACE` on the *same* `nhg_id`. FDB
-   rows keep pointing at the group; no forwarding gap.
-4. **Empty-group footgun**: kernel rejects 0-member groups. When
-   the alias set drains to a single VTEP (or none), the
-   dataplane MUST switch the FDB row back to a single-dst
-   `NDA_DST` entry and delete the group. The single-MAC,
-   single-VTEP case never uses a group.
-5. **ID allocation**: use a bitmap allocator keyed by tag-bits
-   matching FRR's convention (top bit = "MAC NHG ID space") so
-   rustbgpd's IDs never collide with kernel-allocated nexthops
-   on the same box. Group ID = hash of `(ESI, EthernetTag)`
-   into the reserved range; persistent across a single run, may
-   change across daemon restarts (kernel state re-syncs via
-   `RTM_GETNEXTHOP` dump on attach).
-6. **Refcount across MACs**: maintain `nhg_refs: HashMap<(ESI,
+   rows keep pointing at the group; no forwarding gap. (FRR
+   reference: `netlink_fdb_nhg_update`, `rt_netlink.c:5207-5263`.)
+4. **N → 1 drain keeps the group**, N → 0 tears it down.
+   The kernel rejects 0-member groups but a 1-member group is
+   legal and stays at MPATH type with `weight=0` (the kernel
+   interprets `weight=0` as 1 — see
+   `nexthop_grp_weight()` in `uapi/linux/nexthop.h:23-26`). FRR
+   keeps a 1-member NHG and leaves dependent FDB rows
+   referencing it via `NDA_NH_ID` (no rewrite to `NDA_DST` —
+   `zebra_evpn_rem_mac_install` at `zebra_evpn_mac.c:185-239`
+   keys on `mac->es && ZEBRA_EVPNES_NHG_ACTIVE`, encodes
+   `NDA_NH_ID` not `NDA_DST` for any MAC behind an active ES).
+   N → 0 triggers `zebra_evpn_nhg_mac_update` at
+   `zebra_evpn_mh.c:1357-1398`: uninstall every dependent
+   remote MAC (`zebra_evpn_rem_mac_uninstall(..., force=true)`),
+   then `kernel_del_mac_nhg`. **There is no "rewrite the FDB
+   row to single-dst `NDA_DST` on drain-to-zero" path**. Match
+   this.
+5. **VTEP IP change = delete-and-recreate the per-VTEP NH,
+   not REPLACE.** FRR keys the per-VTEP nexthop hash by
+   `vtep_ip` (`zebra_evpn_l2_nh_find` at
+   `zebra_evpn_mh.c:1512`); an ES-VTEP whose IP changes goes
+   through `_deref` (frees the old `nh_id` once `ref_cnt == 0`)
+   followed by `_ref` (allocates a new `nh_id` for the new IP).
+   The parent NHG is then re-emitted via the standard `REPLACE`
+   path with the new member set. Don't try to in-place-mutate
+   `NHA_GATEWAY` on an existing `nh_id` — the kernel allows it,
+   but skipping the realloc would diverge from FRR's invariant
+   that `nh_id` is stable for the lifetime of one `vtep_ip`.
+6. **ID allocation: deliberately do NOT collide with FRR's
+   tag bits.** FRR carves IDs as `(NHG_TYPE << 28) | bitmap_id`
+   with `NHG_TYPE_L3 = 0`, `NHG_TYPE_L2_NH = 1`,
+   `NHG_TYPE_L2 = 2` (`zebra_nhg.h:179-184`,
+   `zebra_evpn_mh.h:255-261`). The per-VTEP L2-NH and the L2-NHG
+   share the same bitmap; the type bit is purely for
+   debug-discriminability in `ip nexthop show`. **The kernel
+   does not enforce per-protocol nexthop-ID ownership** — if
+   rustbgpd and FRR were both running on the same box and both
+   chose `nh_id = 0x2000_0001`, the second writer's
+   `NLM_F_REPLACE` would silently overwrite the first. We
+   therefore reserve different tag bits for rustbgpd:
+   - per-VTEP L2-NH: `0x3000_0000 | bitmap_id`
+   - L2-NHG: `0x4000_0000 | bitmap_id`
+   - `bitmap_id` range: `[1, 0x4000]` (matches FRR's
+     `EVPN_NH_ID_MAX`; index 0 reserved).
+   Allocator is a single `BitVec` of size `0x4001`, shared
+   between per-VTEP and NHG IDs; the type bit is OR'd on at
+   emit time. Kernel re-sync on attach via `RTM_GETNEXTHOP`
+   dump filters by the high nibble so rustbgpd never claims
+   ownership of an FRR-tagged ID.
+7. **Refcount across MACs**: maintain `nhg_refs: HashMap<(ESI,
    EthernetTag), HashSet<(VNI, MAC)>>` in owned state. Group
    install on first MAC referencing it; group delete on last
    MAC unreferencing it.
-7. **Partial-creation rollback**: if any member-add fails mid-
-   sequence (`EEXIST`, transient netlink failure), unwind the
+8. **Partial-creation rollback**: if any member-add fails mid-
+   sequence (transient netlink failure), unwind the
    successfully-installed members and surface the failure so
    the FDB row never gets installed pointing at a half-built
-   group.
-8. **Initial drift recovery via periodic `RTM_GETNEXTHOP` dump**:
-   the reconcile actor walks the kernel's nexthop table on every
-   periodic pass (level-triggered, same cadence as the existing
-   FDB / link / route dumps) and reconciles owned state against
-   the result. Out-of-band `ip nexthop del` is caught on the
-   next dump rather than synchronously — sub-second nexthop
-   reconcile via `RTNLGRP_NEXTHOP` subscription is a follow-up
-   after slice 4 (mirrors the same trade-off the original
-   slice 6a route observation took: dump first, multicast wake
-   second).
+   group. **`EEXIST` on `RTM_NEWNEXTHOP` and `ENOENT` on
+   `RTM_DELNEXTHOP` are benign** — FRR uses
+   `NLM_F_CREATE | NLM_F_REPLACE` on every emit (so `EEXIST`
+   doesn't happen in practice) and ignores the return of
+   `netlink_fdb_nh_del` (`zebra_evpn_mh.c:1544-1552`). Mirror
+   this: log at INFO, do not unwind. `EINVAL` on a group with
+   a dangling member is a real failure (caller violated the
+   create order rule); surface it as an error.
+9. **CVE-2025-39851 hard-guard**: kernel had a VXLAN NULL-pointer
+   deref when refreshing an FDB entry that points to a nexthop
+   group **while learning is enabled on the VXLAN device**.
+   Fixed by mainline commits `4ff4f3104da6`, `0e8630f24c14`,
+   `6ead38147ebb`; backported to stable. **The reconcile actor
+   MUST refuse to install an FDB-NHG row unless the target
+   VXLAN device has `learning off`.** Slice 6c's IP-VRF
+   readiness probe already insists on `nolearning` for the
+   L3VXLAN device; the L2VXLAN path needs the same guard. The
+   error message cites the CVE so an operator with a misconfigured
+   bridge sees what they're walking into.
+10. **Explicit failure logging** (improves on FRR). When a
+    Type-2 with non-zero ESI cannot be installed because no
+    member VTEPs are resolved, FRR currently fails silently —
+    `zebra_evpn_rem_mac_install` skips the install but emits
+    nothing. Operators chasing "why isn't my multi-homed MAC
+    forwarding?" have no log line to grep. rustbgpd must log
+    at `warn!` with `(ESI, EthernetTag, MAC, observed_aliases)`
+    so the failure mode is visible.
+11. **Initial drift recovery via periodic `RTM_GETNEXTHOP` dump**:
+    the reconcile actor walks the kernel's nexthop table on every
+    periodic pass (level-triggered, same cadence as the existing
+    FDB / link / route dumps) and reconciles owned state against
+    the result. Filter by the rustbgpd tag-bits (`0x3000_0000` /
+    `0x4000_0000`) so the dump-side compare only touches IDs we
+    own. Out-of-band `ip nexthop del` is caught on the next dump
+    rather than synchronously — sub-second nexthop reconcile via
+    `RTNLGRP_NEXTHOP` subscription is a follow-up after slice 4
+    (mirrors the same trade-off the original slice 6a route
+    observation took: dump first, multicast wake second).
 
 ### 6. Implementation slicing
 
@@ -275,25 +342,68 @@ through. Each slice ships independently green.
 
 #### Slice 2 — raw-netlink `nexthop_raw` module (~day)
 
-- New `crates/evpn-linux/src/linux/nexthop_raw.rs`. Three pure-
-  function builders:
-  - `build_fdb_nexthop(id: u32, gateway: IpAddr) -> Vec<u8>`
-    (RTM_NEWNEXTHOP body with `NHA_ID`, `NHA_FDB` flag,
-    `NHA_GATEWAY`).
-  - `build_fdb_nexthop_group(id: u32, members: &[(u32, u8)]) -> Vec<u8>`
-    (RTM_NEWNEXTHOP body with `NHA_ID`, `NHA_FDB` flag,
-    `NHA_GROUP` array of `nexthop_grp` structs).
-  - `build_delete_nexthop(id: u32) -> Vec<u8>` (RTM_DELNEXTHOP).
-- Plus an `apply_nexthop_op` async helper that wraps the
-  rtnetlink `Handle`'s transport, sends the constructed
-  `NetlinkMessage`, and awaits an ACK.
+- **Vendor source**: start from
+  [`rust-netlink/netlink-packet-route` PR #225](https://github.com/rust-netlink/netlink-packet-route/pull/225)
+  (MIT-licensed, stalled since Feb on a maintainer ask for
+  `nlmon` byte-fixture tests). The PR already contains a
+  `nexthop` module with `RouteNetlinkMessage::{New,Del,Get}Nexthop`
+  + `NexthopAttribute::{Id, Group, Fdb, Gateway, ...}` +
+  `NexthopGroupEntry { id, weight, resvd1, resvd2 }` Emitable
+  — exactly the surface area we need. Vendor it into
+  `crates/evpn-linux/src/linux/nexthop_raw/` rather than
+  forking the upstream crate; we'll satisfy the maintainer's
+  fixture-test requirement and then offer it back upstream.
+- Three message builders the dataplane calls directly (kept as
+  thin Rust wrappers over the vendored types so the call sites
+  read as `NexthopMsg::add_fdb_member(id, gateway)` /
+  `NexthopMsg::add_fdb_group(id, &members)` /
+  `NexthopMsg::del(id)`).
+- **Wire-shape mirror of FRR** (verified against
+  `netlink_fdb_nhg_update` at `zebra/rt_netlink.c:5207-5263`):
+  - Header: `nlmsg_type = RTM_NEWNEXTHOP`,
+    `nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE`
+    (FRR omits `NLM_F_ACK`; we keep it because we want strict
+    ack semantics in tokio).
+  - `nhmsg { nh_family = AF_UNSPEC, nh_scope = 0, nh_protocol = 0,
+    resvd = 0, nh_flags = 0 }`.
+  - Attributes in this order: `NHA_ID(u32)`, `NHA_FDB` (zero-length
+    flag), then either `NHA_GATEWAY(IP)` for a per-VTEP member
+    or `NHA_GROUP(&[nexthop_grp])` for a group. `NHA_GROUP_TYPE`
+    is **not** emitted — kernel defaults to `NEXTHOP_GRP_TYPE_MPATH = 0`.
+  - `struct nexthop_grp { id: u32, weight: u8, weight_high: u8,
+    resvd2: u16 }` = exactly 8 bytes, no implicit padding. Array
+    stride is naturally 4-aligned. `weight = 0` means "weight 1"
+    per `nexthop_grp_weight()` in `uapi/linux/nexthop.h:23-26` —
+    so uniform-weight ECMP is just `weight: 0` per member.
+  - DEL: `nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK`, body =
+    `NHA_ID(u32)` only. No `NHA_FDB`, no `NHA_GROUP`.
+- **Transport**: `apply_nexthop_op` async helper uses the
+  module's own dedicated `NETLINK_ROUTE` socket (opened via
+  `netlink-sys::TokioSocket` with the `tokio_socket` feature so
+  it integrates cleanly with the existing tokio runtime), sends
+  the constructed raw nexthop message, and parses the ACK via
+  `NetlinkMessage::<()>::deserialize` — `ErrorMessage::code` is
+  `None` for an ACK and `Some(-errno)` for a real error. **Does
+  NOT route through the existing `rtnetlink::Handle`** —
+  `Handle::request` is typed `NetlinkMessage<RouteNetlinkMessage>`
+  and the vendored payload type doesn't fit. The reconcile
+  actor holds both sockets (one rtnetlink for the existing
+  FDB / link / route plumbing, one raw for nexthop).
 - NHID bitmap allocator (`crates/evpn-linux/src/nhid_alloc.rs`):
-  tag-bit-tagged range, monotonic within the range, deterministic
-  per `(ESI, EthernetTag)` hash (so atomic-replace can target
-  the same ID across reconcile passes).
-- Pure-function tests asserting the byte-exact wire shape against
-  captured `RTM_NEWNEXTHOP` payloads (use `strace -e
-  trace=sendmsg` against iproute2 to capture the reference bytes).
+  single `BitVec` of size `0x4001` shared between per-VTEP L2-NH
+  and L2-NHG IDs (mirroring FRR's design). Tag bits OR'd on at
+  emit time: per-VTEP = `0x3000_0000 | id`, NHG = `0x4000_0000 | id`
+  (deliberately offset from FRR's `0x1000_0000` / `0x2000_0000`
+  so concurrent FRR + rustbgpd installs are distinguishable in
+  `ip nexthop show` and never collide on `NLM_F_REPLACE`).
+- **Byte-fixture test**: capture FRR's actual wire bytes via
+  `strace -e trace=sendto -x -s 4096 ip nexthop add id 200 group 12/13 fdb`
+  and `... bridge fdb add 00:11:22:33:44:55 dev vxlan0 nhid 200 self`
+  on a netns. Drop the captured `\x..` blobs into
+  `tests/fixtures/` as byte arrays; the unit test asserts our
+  builder produces bytewise-identical output. This is also the
+  test the upstream PR #225 maintainer is asking for, so we're
+  building it once for both sides.
 - No interaction with the diff or apply layers yet.
 - Output: a tested netlink primitive ready to be called.
 
@@ -336,27 +446,84 @@ through. Each slice ships independently green.
   assert:
   - `ip nexthop show id <nhg>` returns the group with the right
     members.
-  - `bridge fdb show dev vxlanX` shows the MAC with the right
-    `nhid` (not `dst`).
+  - `bridge fdb show dev vxlanX | grep nhid` matches the
+    iproute2 print format `<mac> dev vxlanX nhid <decimal> self
+    extern_learn` (regex anchor:
+    `\b<mac>.*\bdev vxlan\S+\b.*\bnhid (\d+)\b.*\bself\b`;
+    `extern_learn` and `offload` are conditional on
+    `NTF_EXT_LEARNED` / `NTF_OFFLOADED`).
   - Withdraw cycle removes FDB row, then the group, then the
     members. Foreign nexthop groups (operator-installed
     out-of-band) survive the cycle.
 - M40 manual containerlab smoke: three rustbgpd PEs, two of them
   sharing a non-zero ESI for VNI 100, one acting as the consumer.
   Assert the consumer's `bridge fdb show dev vxlan100` carries
-  an `nhid`, that `ip nexthop show` shows the group with both
-  remote VTEPs as members, and that one of the producer PEs
-  going down does NOT cause a forwarding gap on the consumer
-  (the alias absorbs the load).
+  an `nhid`, that `ip nexthop show fdb` shows the group with
+  both remote VTEPs as members, and that one of the producer
+  PEs going down does NOT cause a forwarding gap on the
+  consumer (the alias absorbs the load).
+- Pin **`runs-on: ubuntu-24.04`** (not `ubuntu-latest`) so the
+  privileged netns step doesn't drift if GitHub rolls the
+  hosted image. The 24.04 Azure-tuned image ships kernel
+  ≥ 6.17, iproute2 6.1 (`bridge fdb add ... nhid` supported),
+  `vrf` module built, and `CAP_NET_ADMIN` available inside
+  `unshare -rn` — all the prereqs satisfied. iproute2 < 5.10
+  prints `nhid` differently (or not at all), so the version
+  pin matters for the regex matcher above.
 - Docs: `docs/INTEROP.md` M40 row, `docs/evpn-alpha-soak.md`
   aliasing-dataplane bullet flipped to shipped, CHANGELOG entry.
 - Output: end-to-end multi-homing forwarding shipped.
 
+### 7. Configuration knobs
+
+- **`apply_aliasing_ecmp = true`** (default, but operator-
+  flippable per-instance in `[[evpn_instances]]`) — gates the
+  whole feature. Off means the dataplane keeps single-dst FDB
+  rows and ignores `alias_group_key`. Useful for incident
+  response if the feature regresses in a release.
+- **`share_l2_nhg = true`** (default, per-instance). Mirrors
+  NVIDIA Cumulus's `evpn.multihoming.shared_l2_groups`. With
+  `true`, one NHG per `(ESI, EthernetTag)` is shared across
+  every MAC behind that ES (memory win). With `false`, each
+  MAC gets its own NHG (faster ES-flap failover because there's
+  no thundering-herd FDB churn). Soak isolation knob; default
+  matches FRR's behaviour.
+
+### 8. Kernel + distro compatibility
+
+- **Minimum kernel**: 5.8 (FDB-NHG feature merged via commit
+  `38428d68719c`, "nexthop: support for fdb ecmp nexthops",
+  net-next May 2020 → mainline v5.8). Distro coverage is
+  universal across modern distros: Debian 11+ (5.10), Ubuntu
+  22.04+ (5.15 / HWE 6.5), RHEL 9+ (5.14). No mainstream distro
+  builds ≥ 5.10 without the nexthop subsystem; the only way to
+  hit "feature missing" is a custom `tinyconfig` build.
+- **Minimum iproute2**: 5.10 for `bridge fdb show ... nhid`
+  printing. Older versions print the FDB row but elide the
+  `nhid` field, which would break the slice 4 regex matcher.
+- **Sysctl `net.ipv4.nexthop_compat_mode = 1`** (default). With
+  it set, every nexthop replace emits a per-FIB-entry
+  `RTM_NEWROUTE` notification — on a 100k-MAC table this is a
+  netlink storm. We do NOT depend on the storm; the soak
+  harness should toggle `1 → 0` mid-run and assert the daemon
+  keeps converging. Document this in the runbook so an
+  operator on a tuned distro (some ship `0` by default) doesn't
+  hit surprises.
+- **CVE-2025-39851** mitigation (see §5 rule 9): refuse to
+  install an FDB-NHG row when the target VXLAN device has
+  `learning on`. The kernel had a NULL-pointer-deref when
+  refreshing an FDB entry pointing to a nexthop group with
+  learning enabled; fix train `4ff4f3104da6`, `0e8630f24c14`,
+  `6ead38147ebb` landed in mainline 6.17-rc and is backported
+  to stable. Slice 6c IRB already enforces `nolearning` on the
+  L3VXLAN; slice 2 must enforce the same for the L2VXLAN path.
+
 ## Out of scope for this ADR
 
-- **Weighted ECMP**. Initial impl uses uniform `weight = 1` per
-  member. RFC 7432 §14 doesn't mandate weighted distribution;
-  future capability if operators ask.
+- **Weighted ECMP**. Initial impl uses uniform `weight = 0` per
+  member, which the kernel reads as weight 1 per
+  `nexthop_grp_weight()`. RFC 7432 §14 doesn't mandate weighted
+  distribution; future capability if operators ask.
 - **Cross-family aliasing** (mixed v4 / v6 VTEP members in one
   group). Same family per group is the simpler model and matches
   FRR. Group key includes the AF implicitly.
@@ -367,12 +534,20 @@ through. Each slice ships independently green.
   The reconcile actor's periodic `RTM_GETNEXTHOP` dump catches
   drift on the existing cadence; sub-second nexthop reconcile is
   a follow-up after slice 4.
+- **Resilient nexthop groups** (`NEXTHOP_GRP_TYPE_RES` /
+  `NHA_RES_GROUP` / `NHA_RES_BUCKET`). Adds smooth bucket
+  rebalancing across member changes — operationally nicer but
+  needs kernel 5.12+ and changes the diagnostic surface. Defer
+  until the basic MPATH path is stable.
 - **Upstreaming `NextHopHandle` to `rust-netlink`**. Separate
-  workstream. The hand-rolled `nexthop_raw` is scoped to the
-  three operations we need; we don't owe upstream a complete
-  nexthop API.
+  workstream — once the vendored `nexthop_raw` module has its
+  byte-fixture tests (which slice 2 writes anyway), offer them
+  as the missing piece for PR #225 / #149 upstream. Not
+  blocking implementation.
 
 ## Cross-references
+
+### Internal
 
 - [ADR-0054](0054-evpn-linux-dataplane-boundary.md) — "Linux
   observes, daemon decides" and the level-triggered reconcile
@@ -380,14 +555,67 @@ through. Each slice ships independently green.
 - [ADR-0057](0057-evpn-gate-8-observable-df-election.md) — the
   control-plane multi-homing context this ADR completes the
   dataplane half of.
+
+### Specifications
+
 - [RFC 7432 §14](https://datatracker.ietf.org/doc/html/rfc7432#section-14)
   — Multi-Homing Aliasing.
-- [Linux kernel commit 38428d68719c](https://github.com/torvalds/linux/commit/38428d68719c)
+
+### Linux kernel
+
+- [Commit 38428d68719c](https://github.com/torvalds/linux/commit/38428d68719c)
   — nexthop: support for fdb ecmp nexthops (v5.8).
-- FRR reference implementation:
-  [`zebra/zebra_evpn_mh.c::zebra_evpn_nhg_update`](https://github.com/FRRouting/frr/blob/master/zebra/zebra_evpn_mh.c)
-  and [`zebra/rt_netlink.c::netlink_fdb_nhg_update`](https://github.com/FRRouting/frr/blob/master/zebra/rt_netlink.c).
 - [`include/uapi/linux/nexthop.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/nexthop.h)
-  — UAPI constants (`NHA_ID`, `NHA_GROUP`, `NHA_FDB`, `nexthop_grp`).
-- [`netlink-packet-route 0.30.0 src/neighbour/attribute.rs`](https://docs.rs/netlink-packet-route/0.30.0/src/netlink_packet_route/neighbour/attribute.rs.html)
-  — confirms `NDA_NH_ID` is unimplemented at the crate level.
+  — UAPI constants (`NHA_ID=1`, `NHA_GROUP=2`, `NHA_FDB=11`,
+  `nexthop_grp { id, weight, weight_high, resvd2 }`).
+- [`include/uapi/linux/neighbour.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/neighbour.h)
+  — `NDA_NH_ID = 13`.
+- [CVE-2025-39851](https://www.suse.com/security/cve/CVE-2025-39851.html)
+  — VXLAN NPD when refreshing FDB-NHG with learning ON. Slice
+  2 hard-guards against this.
+- [`net.ipv4.nexthop_compat_mode` sysctl](https://docs.kernel.org/networking/ip-sysctl.html)
+  — defaults to 1; flip to 0 to silence the per-FIB-entry
+  notification storm on nexthop replace.
+
+### FRR reference implementation (we mirror unless noted)
+
+- [`zebra/zebra_evpn_mh.c::zebra_evpn_nhg_update`](https://github.com/FRRouting/frr/blob/master/zebra/zebra_evpn_mh.c)
+  — group build from `es_vtep_list` (sorted by VTEP IP ascending,
+  deduplicated by `nh_ip_table` hash, member skip on missing
+  per-VTEP NH).
+- [`zebra/zebra_evpn_mh.c::zebra_evpn_nhg_mac_update`](https://github.com/FRRouting/frr/blob/master/zebra/zebra_evpn_mh.c)
+  — N→0 collapse path (uninstall dependent MACs, then
+  `kernel_del_mac_nhg`).
+- [`zebra/zebra_evpn_mac.c::zebra_evpn_rem_mac_install`](https://github.com/FRRouting/frr/blob/master/zebra/zebra_evpn_mac.c)
+  — `NDA_NH_ID` vs `NDA_DST` choice (keys on
+  `mac->es && ZEBRA_EVPNES_NHG_ACTIVE`).
+- [`zebra/rt_netlink.c::netlink_fdb_nhg_update`](https://github.com/FRRouting/frr/blob/master/zebra/rt_netlink.c)
+  — canonical `RTM_NEWNEXTHOP` wire shape.
+- [`zebra/zebra_evpn_mh.h`](https://github.com/FRRouting/frr/blob/master/zebra/zebra_evpn_mh.h)
+  — `EVPN_NH_ID_MAX = 16*1024`, type-bit constants. We diverge
+  on tag-bit values to avoid collision.
+
+### Rust netlink ecosystem
+
+- [PR rust-netlink/netlink-packet-route#225](https://github.com/rust-netlink/netlink-packet-route/pull/225)
+  — vendored as slice 2's starting point. MIT-licensed.
+- [PR rust-netlink/rtnetlink#149](https://github.com/rust-netlink/rtnetlink/pull/149)
+  — `NexthopMessageBuilder` shape; no FDB builder yet.
+- [`al8n/getifs` Rust raw-netlink scaffold](https://github.com/al8n/getifs/blob/main/src/linux/netlink.rs)
+  — 24-byte `nlmsghdr + nhmsg` framing reference for the dump
+  path.
+- [`netlink-sys::TokioSocket`](https://github.com/rust-netlink/netlink-sys/blob/main/src/tokio.rs)
+  — `AsyncFd<Socket>` wrapper, integrates with tokio via the
+  `tokio_socket` feature.
+
+### Operator references
+
+- [NVIDIA Cumulus EVPN Multihoming](https://docs.nvidia.com/networking-ethernet-software/cumulus-linux-514/Network-Virtualization/Ethernet-Virtual-Private-Network-EVPN/EVPN-Multihoming/)
+  — `evpn.multihoming.shared_l2_groups` knob is the precedent
+  for our `share_l2_nhg`.
+- [SONiC EVPN_VxLAN_Multihoming HLD](https://github.com/sonic-net/SONiC/blob/master/doc/vxlan/EVPN/EVPN_VxLAN_Multihoming.md)
+  — confirms SONiC reuses FRR/zebra's identical netlink path;
+  the SAI side is out of scope for us.
+- [`ip-nexthop(8)` man page](https://man7.org/linux/man-pages/man8/ip-nexthop.8.html)
+  — `ip nexthop show fdb`, `ip nexthop bucket show id N`,
+  `ip nexthop monitor`.
