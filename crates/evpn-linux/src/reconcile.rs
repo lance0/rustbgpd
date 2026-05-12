@@ -191,6 +191,26 @@ struct ActorState {
     /// only on successful kernel apply; a failed op leaves the
     /// in-memory state unchanged so the next reconcile pass retries.
     l3_owned: crate::l3_diff::L3OwnedState,
+    /// ADR-0059 slice 3b: NHID allocator + per-group refcount state
+    /// for FDB nexthop groups. Constructed empty; populated during
+    /// the first reconcile pass by the startup-adoption helper, then
+    /// by `record_success` as `InstallFdbNhg` / `UpdateFdbNhgMembers`
+    /// / `RemoveFdbNhg` ops land.
+    nh_id_alloc: crate::nh_id_alloc::NhIdAllocator,
+    /// FDB nexthop group + per-VTEP NH refcount map (ADR-0059 slice 3b).
+    /// Coordinator updates this on every apply; `compute_diff` reads it
+    /// to decide whether a `UpdateFdbNhgMembers` is needed.
+    groups: crate::group_state::GroupOwnedMap,
+    /// IDs the startup-adoption pass reserved from the kernel dump but
+    /// has not yet matched against a `GroupOwnedMap` entry. After the
+    /// first successful reconcile, the cleanup phase walks this set
+    /// and deletes anything still here (true stale state from a prior
+    /// crashed daemon). Drained as the coordinator records groups.
+    adopted_unreferenced: BTreeMap<u32, crate::dataplane::KernelNexthop>,
+    /// `true` once the first reconcile pass has completed adoption +
+    /// stale cleanup. Gates the one-shot adoption/cleanup phase so
+    /// subsequent passes skip the dump + sweep.
+    adoption_done: bool,
     /// Tracks whether [`Dataplane::next_event`] is still expected to
     /// yield events. `true` at startup; flipped to `false` the first
     /// time `next_event()` resolves to `None`. While `false` the
@@ -217,6 +237,10 @@ impl ActorState {
             last_ip_vrf_status: BTreeMap::new(),
             l3_owned: crate::l3_diff::L3OwnedState::default(),
             event_stream_open: true,
+            nh_id_alloc: crate::nh_id_alloc::NhIdAllocator::new(),
+            groups: crate::group_state::GroupOwnedMap::new(),
+            adopted_unreferenced: BTreeMap::new(),
+            adoption_done: false,
         }
     }
 
@@ -233,7 +257,7 @@ impl ActorState {
     }
 }
 
-impl<D: Dataplane> ReconcileActor<D> {
+impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// Build a new actor.
     pub fn new(
         config: ReconcileActorConfig,
@@ -382,6 +406,42 @@ impl<D: Dataplane> ReconcileActor<D> {
     async fn reconcile_once(&mut self) {
         self.state.reconcile_generation = self.state.reconcile_generation.saturating_add(1);
 
+        // ADR-0059 slice 3b: one-shot startup adoption. Dump tagged
+        // nexthops from the kernel and reserve their IDs in the
+        // allocator before any `compute_diff` Pass 1b emission, so
+        // a fresh `InstallFdbNhg` can't collide with an ID left
+        // behind by a prior daemon instance. The adopted set is
+        // cleared as the coordinator records each ID in `groups`;
+        // whatever remains after `apply_plan` is true stale state
+        // and gets GC'd by `cleanup_unreferenced_adoptions` below.
+        if !self.state.adoption_done {
+            match self.dataplane.dump_owned_nexthops().await {
+                Ok(adopted) => {
+                    for nh in adopted {
+                        match self.state.nh_id_alloc.reserve(nh.id) {
+                            Ok(()) => {
+                                self.state.adopted_unreferenced.insert(nh.id, nh);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?e,
+                                    id = nh.id,
+                                    "adoption: reserve failed; ignoring"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Dump failed — log + continue. The actor will
+                    // re-attempt adoption on the next pass since
+                    // adoption_done stays false until apply_plan
+                    // succeeds at least once.
+                    tracing::warn!(error = %e, "adoption: dump_owned_nexthops failed");
+                }
+            }
+        }
+
         // Snapshot the current intent (via `borrow_and_update` so the
         // next `changed()` fires only on subsequent publishes).
         // Permanent-failure suppression is per-op-fingerprint and
@@ -439,6 +499,7 @@ impl<D: Dataplane> ReconcileActor<D> {
             &snapshot,
             &self.state.owned,
             &probes,
+            &self.state.groups,
         );
 
         // Resolve the BUM-enforcement plan early so the same row set
@@ -470,6 +531,18 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
 
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
+
+        // ADR-0059 slice 3b: one-shot stale-NHID cleanup. Anything
+        // still in `adopted_unreferenced` after the first reconcile's
+        // apply phase is owned by us (tag bits + FDB-NHG kind) but
+        // not referenced by any MAC in `groups` — i.e., true stale
+        // state from a prior daemon instance. Delete + release.
+        // Gated to the first pass so we don't re-walk an
+        // already-empty map on every reconcile.
+        if !self.state.adoption_done {
+            self.cleanup_unreferenced_adoptions().await;
+            self.state.adoption_done = true;
+        }
 
         // Update the last-applied BUM plan **per port**:
         // - With `apply_bum_enforcement = false` no kernel mutation
@@ -742,7 +815,18 @@ impl<D: Dataplane> ReconcileActor<D> {
                 continue;
             }
 
-            let res = self.dataplane.apply(op).await;
+            // ADR-0059 slice 3b: FDB-NHG ops require allocator +
+            // refcount state owned by the actor. Route them through
+            // the coordinator helper instead of `Dataplane::apply`,
+            // which would reject them with `InvalidArgument`.
+            let res = match op {
+                DataplaneOp::InstallFdbNhg { .. }
+                | DataplaneOp::UpdateFdbNhgMembers { .. }
+                | DataplaneOp::RemoveFdbNhg { .. } => {
+                    apply_nhg_op(&mut self.dataplane, &mut self.state, op).await
+                }
+                _ => self.dataplane.apply(op).await,
+            };
             match res {
                 Ok(()) => {
                     self.record_success(op, desired);
@@ -812,6 +896,26 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
 
         (applied, failed)
+    }
+
+    /// ADR-0059 slice 3b cleanup helper: walk `adopted_unreferenced`
+    /// after the first reconcile's apply phase and delete any
+    /// rustbgpd-tagged kernel nexthop that didn't get claimed by a
+    /// MAC's group during apply. These are stale state from a prior
+    /// daemon instance.
+    async fn cleanup_unreferenced_adoptions(&mut self) {
+        // Drain to avoid holding the borrow across the await.
+        let stale: Vec<u32> = self.state.adopted_unreferenced.keys().copied().collect();
+        for id in stale {
+            // del_nexthop is idempotent on ENOENT (slice 2). Errors
+            // are logged at debug; the next reconcile won't try
+            // again because adoption_done is set after this loop.
+            if let Err(e) = self.dataplane.del_nexthop(id).await {
+                tracing::debug!(?e, id, "adoption cleanup: del_nexthop failed (best-effort)");
+            }
+            self.state.nh_id_alloc.release(id);
+        }
+        self.state.adopted_unreferenced.clear();
     }
 
     /// On successful apply, mirror state into `owned` so the next
@@ -1171,6 +1275,158 @@ fn build_instance_status(
 /// operator-facing key for BUM reports is the `kind` field, which
 /// carries the ifindex. The placeholder VNI is only present because
 /// `AppliedOp` / `FailedOp` predate BUM-port operations.
+/// ADR-0059 slice 3b coordinator: apply an FDB-NHG op by calling
+/// [`NexthopOps`] methods in ADR §5 invariant 1+2 order, updating
+/// the allocator + [`GroupOwnedMap`] state.
+///
+/// Free function (not a method) so it can borrow `dataplane` and
+/// `state` mutably from disjoint fields of the actor.
+///
+/// On install: per-VTEP members → group (replace if exists) → FDB row.
+/// On update: per-VTEP members (added) → group REPLACE → GC removed members.
+/// On remove: FDB row → group (if last ref) → members (each if last ref).
+#[allow(clippy::too_many_lines)] // the per-op orchestration is sequential and reads top-to-bottom
+async fn apply_nhg_op<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    op: &DataplaneOp,
+) -> Result<(), crate::error::DataplaneError>
+where
+    D: crate::dataplane::NexthopOps,
+{
+    use crate::group_state::RefDelta;
+    use std::collections::BTreeSet;
+
+    match op {
+        DataplaneOp::InstallFdbNhg {
+            vni,
+            mac,
+            group_key,
+            members,
+        } => {
+            // Step 1: install any per-VTEP members not yet present.
+            for ip in members {
+                if state.groups.vtep_nh(ip).is_none() {
+                    let id = state.nh_id_alloc.alloc_vtep_nh().map_err(|e| {
+                        crate::error::DataplaneError::Other(format!(
+                            "ADR-0059: vtep NH alloc failed: {e}"
+                        ))
+                    })?;
+                    dataplane.add_nexthop_member(id, *ip).await?;
+                    state.groups.record_member_install(*ip, id);
+                    state.adopted_unreferenced.remove(&id);
+                }
+            }
+            // Step 2: ensure group exists with the desired member set.
+            let member_ids: Vec<u32> = members
+                .iter()
+                .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
+                .collect();
+            // Snapshot the existing group ID + member set before
+            // the mutable replace call (which re-borrows `state.groups`).
+            let existing = state
+                .groups
+                .group(group_key)
+                .map(|g| (g.id, g.members.iter().copied().collect::<Vec<_>>()));
+            let group_id = if let Some((g_id, existing_members)) = existing {
+                if existing_members != *members {
+                    // Member set drifted (e.g., re-install after
+                    // partial-failure recovery). Atomic REPLACE.
+                    dataplane.add_nexthop_group(g_id, &member_ids).await?;
+                    let new_members: BTreeSet<_> = members.iter().copied().collect();
+                    state
+                        .groups
+                        .record_group_member_change(*group_key, new_members);
+                }
+                g_id
+            } else {
+                let id = state.nh_id_alloc.alloc_nhg().map_err(|e| {
+                    crate::error::DataplaneError::Other(format!("ADR-0059: nhg alloc failed: {e}"))
+                })?;
+                dataplane.add_nexthop_group(id, &member_ids).await?;
+                let members_set: BTreeSet<_> = members.iter().copied().collect();
+                state
+                    .groups
+                    .record_group_install(*group_key, id, members_set);
+                state.adopted_unreferenced.remove(&id);
+                id
+            };
+            // Step 3: install the FDB row pointing at the group.
+            dataplane.install_fdb_nhg_row(*vni, *mac, group_id).await?;
+            state.groups.record_mac_ref(*group_key, *vni, *mac);
+            Ok(())
+        }
+
+        DataplaneOp::UpdateFdbNhgMembers { group_key, members } => {
+            // Add any new per-VTEP members first.
+            for ip in members {
+                if state.groups.vtep_nh(ip).is_none() {
+                    let id = state.nh_id_alloc.alloc_vtep_nh().map_err(|e| {
+                        crate::error::DataplaneError::Other(format!(
+                            "ADR-0059: vtep NH alloc failed: {e}"
+                        ))
+                    })?;
+                    dataplane.add_nexthop_member(id, *ip).await?;
+                    state.groups.record_member_install(*ip, id);
+                    state.adopted_unreferenced.remove(&id);
+                }
+            }
+            // Compute new member-id list and REPLACE the group.
+            let member_ids: Vec<u32> = members
+                .iter()
+                .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
+                .collect();
+            let Some(g_id) = state.groups.group(group_key).map(|g| g.id) else {
+                // No record of the group — log + skip; the next
+                // InstallFdbNhg-driven pass will create it.
+                tracing::warn!(
+                    ?group_key,
+                    "UpdateFdbNhgMembers: group not in owned-state map; skipping"
+                );
+                return Ok(());
+            };
+            dataplane.add_nexthop_group(g_id, &member_ids).await?;
+            let new_members: BTreeSet<_> = members.iter().copied().collect();
+            let removed = state
+                .groups
+                .record_group_member_change(*group_key, new_members);
+            // GC per-VTEP members whose last group-ref dropped.
+            for ip in removed {
+                if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
+                    let _ = dataplane.del_nexthop(vtep_id).await;
+                    state.nh_id_alloc.release(vtep_id);
+                }
+            }
+            Ok(())
+        }
+
+        DataplaneOp::RemoveFdbNhg {
+            vni,
+            mac,
+            group_key,
+        } => {
+            // FDB row first (ADR §5 invariant 2).
+            dataplane.remove_fdb_nhg_row(*vni, *mac).await?;
+            match state.groups.record_mac_unref(*group_key, *vni, *mac) {
+                RefDelta::GroupStillReferenced => Ok(()),
+                RefDelta::GroupShouldDelete { id, members } => {
+                    let _ = dataplane.del_nexthop(id).await;
+                    state.nh_id_alloc.release(id);
+                    for ip in members {
+                        if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
+                            let _ = dataplane.del_nexthop(vtep_id).await;
+                            state.nh_id_alloc.release(vtep_id);
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        _ => unreachable!("apply_nhg_op called for non-FDB-NHG op"),
+    }
+}
+
 fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
     match op {
         DataplaneOp::AddRemoteFdb { vni, .. }

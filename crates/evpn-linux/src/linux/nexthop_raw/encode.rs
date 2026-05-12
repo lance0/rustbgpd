@@ -36,7 +36,8 @@
 use std::net::IpAddr;
 
 use super::uapi::{
-    NHA_FDB, NHA_GATEWAY, NHA_GROUP, NHA_ID, NexthopGrp, Nhmsg, RTM_DELNEXTHOP, RTM_NEWNEXTHOP,
+    NHA_FDB, NHA_GATEWAY, NHA_GROUP, NHA_ID, NexthopGrp, Nhmsg, RTM_DELNEXTHOP, RTM_GETNEXTHOP,
+    RTM_NEWNEXTHOP,
 };
 
 // ---------------------------------------------------------------------
@@ -45,6 +46,8 @@ use super::uapi::{
 
 /// `NLM_F_REQUEST` — every userspace-to-kernel message sets this.
 const NLM_F_REQUEST: u16 = 0x01;
+/// `NLM_F_DUMP` — request a multipart dump response.
+const NLM_F_DUMP: u16 = 0x300; // ROOT | MATCH
 /// `NLM_F_ACK` — request an ACK / NACK reply.
 const NLM_F_ACK: u16 = 0x04;
 /// `NLM_F_REPLACE` — replace any existing entry (idempotent).
@@ -215,6 +218,33 @@ pub(crate) fn encode_del(seq: u32, id: u32) -> Vec<u8> {
 
     let flags = NLM_F_REQUEST | NLM_F_ACK;
     let hdr = build_nlmsghdr(body.len(), RTM_DELNEXTHOP, flags, seq);
+
+    let mut out = Vec::with_capacity(16 + body.len());
+    out.extend_from_slice(&hdr);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Encode an `RTM_GETNEXTHOP` dump request — empty filter, kernel
+/// returns every nexthop. Slice 3b's startup-adoption pass filters
+/// the response client-side by tag bits (`is_ours`) since the kernel
+/// doesn't expose a tag-bit filter attribute.
+pub(crate) fn encode_dump(seq: u32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(8);
+
+    push_nhmsg(
+        &mut body,
+        Nhmsg {
+            nh_family: AF_UNSPEC,
+            nh_scope: 0,
+            nh_protocol: 0,
+            resvd: 0,
+            nh_flags: 0,
+        },
+    );
+
+    let flags = NLM_F_REQUEST | NLM_F_DUMP;
+    let hdr = build_nlmsghdr(body.len(), RTM_GETNEXTHOP, flags, seq);
 
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&hdr);

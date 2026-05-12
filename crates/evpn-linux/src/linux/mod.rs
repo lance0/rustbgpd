@@ -94,6 +94,12 @@ pub struct LinuxDataplane {
     /// actor within milliseconds instead of waiting for the periodic
     /// dump cycle.
     kernel_event_rx: mpsc::Receiver<KernelEvent>,
+    /// Dedicated `NETLINK_ROUTE` socket for ADR-0059 FDB nexthop
+    /// group programming. Distinct from `handle` so nexthop traffic
+    /// doesn't compete with FDB/link/route requests on the primary
+    /// socket. Slice 2 (`nexthop_raw::NexthopSocket`) supplies the
+    /// underlying primitive; slice 3b uses it via `NexthopOps`.
+    nexthop_socket: nexthop_raw::NexthopSocket,
 }
 
 impl LinuxDataplane {
@@ -238,11 +244,27 @@ impl LinuxDataplane {
             on_observation_drop,
         ));
 
+        // ADR-0059 slice 3b: open the dedicated NETLINK_ROUTE socket
+        // for FDB nexthop group programming. Distinct from the primary
+        // `handle` so nexthop request/reply traffic doesn't compete
+        // with FDB / link / route messages on a single socket. Startup
+        // adoption (dumping rustbgpd-tagged nexthops and reserving
+        // their IDs in the allocator) is deferred to the reconcile
+        // actor's first pass — the actor calls `dump_owned_nexthops()`
+        // through `NexthopOps` before any `compute_diff` Pass 1b
+        // emission, so allocator collisions are prevented without
+        // baking adoption into the synchronous constructor.
+        let nexthop_socket = nexthop_raw::NexthopSocket::connect().map_err(|e| match e {
+            nexthop_raw::NexthopError::Io(io_err) => DataplaneError::Io(io_err),
+            other => DataplaneError::Other(format!("nexthop socket connect: {other}")),
+        })?;
+
         Ok(Self {
             handle,
             link_cache,
             local_mac_rx: Some(local_mac_rx),
             kernel_event_rx,
+            nexthop_socket,
         })
     }
 }
@@ -577,6 +599,97 @@ impl Dataplane for LinuxDataplane {
 
     fn take_local_mac_rx(&mut self) -> Option<mpsc::Receiver<LocalMacObservation>> {
         self.local_mac_rx.take()
+    }
+}
+
+impl crate::dataplane::NexthopOps for LinuxDataplane {
+    async fn add_nexthop_member(
+        &mut self,
+        id: u32,
+        gateway: std::net::IpAddr,
+    ) -> Result<(), DataplaneError> {
+        self.nexthop_socket
+            .add_fdb_member(id, gateway)
+            .await
+            .map_err(map_nexthop_error)
+    }
+
+    async fn add_nexthop_group(
+        &mut self,
+        id: u32,
+        member_ids: &[u32],
+    ) -> Result<(), DataplaneError> {
+        // Build domain-shaped members; allocator already guarantees
+        // non-zero IDs upstream so `NexthopGroupMember::new` here
+        // can't fail except on programmer error (zero ID slipped
+        // through). Surface that as a permanent error so the actor
+        // suppresses rather than retrying.
+        let mut members = Vec::with_capacity(member_ids.len());
+        for mid in member_ids {
+            let m = nexthop_raw::NexthopGroupMember::new(*mid).map_err(|e| {
+                DataplaneError::InvalidArgument(format!("invalid group member id 0x{mid:08x}: {e}"))
+            })?;
+            members.push(m);
+        }
+        self.nexthop_socket
+            .add_fdb_group(id, &members)
+            .await
+            .map_err(map_nexthop_error)
+    }
+
+    async fn del_nexthop(&mut self, id: u32) -> Result<(), DataplaneError> {
+        self.nexthop_socket.del(id).await.map_err(map_nexthop_error)
+    }
+
+    async fn install_fdb_nhg_row(
+        &mut self,
+        vni: rustbgpd_evpn::EvpnInstanceId,
+        mac: rustbgpd_evpn::MacAddress,
+        nh_id: u32,
+    ) -> Result<(), DataplaneError> {
+        let cache = self.link_cache.lock().await.clone();
+        fdb_nhg::apply_install_fdb_nhg_row(&self.handle, &cache, vni, mac, nh_id).await
+    }
+
+    async fn remove_fdb_nhg_row(
+        &mut self,
+        vni: rustbgpd_evpn::EvpnInstanceId,
+        mac: rustbgpd_evpn::MacAddress,
+    ) -> Result<(), DataplaneError> {
+        let cache = self.link_cache.lock().await.clone();
+        fdb_nhg::apply_remove_fdb_nhg_row(&self.handle, &cache, vni, mac).await
+    }
+
+    async fn dump_owned_nexthops(
+        &mut self,
+    ) -> Result<Vec<crate::dataplane::KernelNexthop>, DataplaneError> {
+        self.nexthop_socket
+            .dump_owned()
+            .await
+            .map_err(map_nexthop_error)
+    }
+}
+
+/// Map `NexthopError` (slice-2 socket-layer typed failure) into the
+/// dataplane-wide `DataplaneError`. `Io` propagates; `Kernel(errno)`
+/// becomes `InvalidArgument` (the actor's classifier maps it to
+/// `Permanent` so a programming bug doesn't backoff-retry forever);
+/// validation errors become `InvalidArgument`; truncation /
+/// unexpected message become `Other` (transient — the next dump pass
+/// will retry on its own cadence).
+fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
+    match e {
+        nexthop_raw::NexthopError::Io(io) => DataplaneError::Io(io),
+        nexthop_raw::NexthopError::Kernel(errno) => {
+            DataplaneError::InvalidArgument(format!("nexthop kernel errno {errno}"))
+        }
+        nexthop_raw::NexthopError::Validation(v) => {
+            DataplaneError::InvalidArgument(format!("nexthop validation: {v}"))
+        }
+        nexthop_raw::NexthopError::Ipv6Unsupported => {
+            DataplaneError::InvalidArgument("nexthop IPv6 unsupported (slice 2.5 follow-up)".into())
+        }
+        other => DataplaneError::Other(format!("nexthop socket: {other}")),
     }
 }
 

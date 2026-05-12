@@ -35,10 +35,14 @@
 //! `dst` but no `extern_learn` flag — that's a foreign entry the
 //! operator placed by hand. Skip; never overwrite.
 
-use rustbgpd_evpn::{EvpnInstanceId, MacAddress, RemoteMacTable};
+use std::collections::BTreeSet;
+use std::net::IpAddr;
+
+use rustbgpd_evpn::{EvpnInstanceId, MacAddress, RemoteMacEntry, RemoteMacTable, group_members};
 
 use crate::dataplane::DataplaneOp;
-use crate::snapshot::{InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedSet};
+use crate::group_state::{AliasGroupKey, GroupOwnedMap};
+use crate::snapshot::{InstanceProbes, KernelFdbEntry, KernelSnapshot, OwnedEntryKind, OwnedSet};
 
 /// Output of a single diff pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -85,33 +89,76 @@ pub fn compute_diff(
     snapshot: &KernelSnapshot,
     last_applied: &OwnedSet,
     probes: &InstanceProbes,
+    groups: &GroupOwnedMap,
 ) -> Plan {
     let mut creates: Vec<DataplaneOp> = Vec::new();
     let mut updates: Vec<DataplaneOp> = Vec::new();
     let mut deletes: Vec<DataplaneOp> = Vec::new();
 
-    // Pass 1 — creates & updates. Scoped to Ready instances; entries
-    // for NotReady / Unbound instances contribute zero ops.
+    // Pass 1b helpers — track which (VNI, ESI, EthTag) groups have
+    // already been considered for member-set diff, so two MACs
+    // sharing the same group_key produce at most one
+    // `UpdateFdbNhgMembers` op per pass.
+    let mut group_seen: BTreeSet<AliasGroupKey> = BTreeSet::new();
+
+    // Pass 1 + 1b — creates / updates. Scoped to Ready instances;
+    // entries for NotReady / Unbound instances contribute zero ops.
     for (&(vni, mac), entry) in desired.iter() {
         if !probes.is_ready(vni) {
             continue;
         }
 
-        match snapshot.find_fdb(vni, mac) {
-            None => {
-                creates.push(DataplaneOp::AddRemoteFdb {
+        // Decide single-dst vs FDB-NHG path. The portable intent
+        // (`alias_group_key`) carries `(ESI, EthernetTag)` per slice
+        // 1; the Linux-owned key adds VNI per ADR-0059 §7's
+        // `share_l2_nhg` default-off.
+        match (entry.alias_group_key, all_v4(entry)) {
+            (Some(portable_key), true) => {
+                // FDB-NHG path.
+                let linux_key = AliasGroupKey::new(vni, portable_key.0, portable_key.1);
+                emit_fdb_nhg_pass(
                     vni,
                     mac,
-                    dst: entry.remote_vtep_ip,
-                });
-            }
-            Some(kernel_entry) => {
-                handle_existing_kernel_entry(
-                    vni,
-                    mac,
-                    kernel_entry,
-                    entry.remote_vtep_ip,
+                    entry,
+                    linux_key,
                     last_applied,
+                    snapshot,
+                    groups,
+                    &mut group_seen,
+                    &mut creates,
+                    &mut updates,
+                );
+            }
+            (Some(_), false) => {
+                // IPv6 fallback — slice 2 `NexthopSocket` rejects v6
+                // gateways. Diff degrades to single-dst (primary VTEP
+                // only) and emits one warn per (VNI, MAC) so the
+                // operator sees the degradation.
+                tracing::warn!(
+                    ?vni,
+                    mac = %mac,
+                    "ADR-0059 IPv6 alias members not yet supported (slice 2.5 follow-up); \
+                     falling back to single-dst FDB row at primary VTEP",
+                );
+                emit_single_dst_pass(
+                    vni,
+                    mac,
+                    entry,
+                    snapshot,
+                    last_applied,
+                    &mut creates,
+                    &mut updates,
+                );
+            }
+            (None, _) => {
+                // Single-homed path — existing slice 1 behavior.
+                emit_single_dst_pass(
+                    vni,
+                    mac,
+                    entry,
+                    snapshot,
+                    last_applied,
+                    &mut creates,
                     &mut updates,
                 );
             }
@@ -121,19 +168,38 @@ pub fn compute_diff(
     // Pass 2 — deletes. Iterate `last_applied`, NEVER the kernel
     // snapshot. This makes foreign-entry preservation a structural
     // property of the algorithm, not a runtime check.
-    for (&(vni, mac), _owned) in last_applied.iter() {
+    for (&(vni, mac), owned) in last_applied.iter() {
         let still_desired = desired.get(vni, mac).is_some();
         let instance_ready = probes.is_ready(vni);
-        let still_in_kernel = snapshot.find_fdb(vni, mac).is_some();
 
-        // Withdraw if (no longer desired OR instance went NotReady) AND
-        // the kernel still has the entry. If the kernel already
-        // dropped it (interface flap, manual `bridge fdb del`), we
-        // emit no op now — the actor will reconcile its OwnedSet on
-        // the next successful pass instead.
-        let should_remove = (!still_desired || !instance_ready) && still_in_kernel;
-        if should_remove {
-            deletes.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+        if still_desired && instance_ready {
+            continue;
+        }
+
+        match owned.kind {
+            OwnedEntryKind::SingleDst { .. } => {
+                // Existing single-dst delete: check kernel snapshot,
+                // emit RemoveRemoteFdb only if the kernel still has
+                // it. Interface flap / manual `bridge fdb del` is a
+                // no-op for this pass — the actor's OwnedSet drift
+                // self-heals on the next successful reconcile.
+                if snapshot.find_fdb(vni, mac).is_some() {
+                    deletes.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+                }
+            }
+            OwnedEntryKind::FdbNhg { group_key } => {
+                // FDB-NHG delete: always emit. The coordinator is
+                // idempotent (slice 3a `apply_remove_fdb_nhg_row`
+                // uses `classify_remove_apply_error` → ENOENT-as-ACK).
+                // We don't gate on kernel snapshot because nhid-row
+                // drift detection from RTNLGRP_NEIGH is incomplete
+                // per research §8.
+                deletes.push(DataplaneOp::RemoveFdbNhg {
+                    vni,
+                    mac,
+                    group_key,
+                });
+            }
         }
     }
 
@@ -141,6 +207,168 @@ pub fn compute_diff(
     ops.append(&mut updates);
     ops.append(&mut deletes);
     Plan { ops }
+}
+
+/// `true` when `entry.remote_vtep_ip` and every `alias_vtep_ips`
+/// member is IPv4. Slice 1's projection enforces same-family-per-
+/// `(ESI, EthernetTag)` so we never see mixed-family aliases; this
+/// check is the v4-only gate that triggers the FDB-NHG path.
+fn all_v4(entry: &RemoteMacEntry) -> bool {
+    entry.remote_vtep_ip.is_ipv4() && entry.alias_vtep_ips.iter().all(IpAddr::is_ipv4)
+}
+
+/// Pass 1 / IPv6-fallback emission — emit `AddRemoteFdb` /
+/// `UpdateRemoteFdb` for a single-dst entry.
+fn emit_single_dst_pass(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    entry: &RemoteMacEntry,
+    snapshot: &KernelSnapshot,
+    last_applied: &OwnedSet,
+    creates: &mut Vec<DataplaneOp>,
+    updates: &mut Vec<DataplaneOp>,
+) {
+    // Transition: previously installed as FdbNhg, now wants single-dst.
+    // Emit RemoveFdbNhg before the AddRemoteFdb so the FDB row is
+    // re-keyed cleanly.
+    if let Some(owned) = last_applied.get(vni, mac)
+        && let OwnedEntryKind::FdbNhg { group_key } = owned.kind
+    {
+        updates.push(DataplaneOp::RemoveFdbNhg {
+            vni,
+            mac,
+            group_key,
+        });
+        creates.push(DataplaneOp::AddRemoteFdb {
+            vni,
+            mac,
+            dst: entry.remote_vtep_ip,
+        });
+        return;
+    }
+
+    match snapshot.find_fdb(vni, mac) {
+        None => {
+            creates.push(DataplaneOp::AddRemoteFdb {
+                vni,
+                mac,
+                dst: entry.remote_vtep_ip,
+            });
+        }
+        Some(kernel_entry) => {
+            handle_existing_kernel_entry(
+                vni,
+                mac,
+                kernel_entry,
+                entry.remote_vtep_ip,
+                last_applied,
+                updates,
+            );
+        }
+    }
+}
+
+/// Pass 1b emission — `InstallFdbNhg` / `UpdateFdbNhgMembers` /
+/// transitions when the entry is FDB-NHG-eligible.
+#[allow(clippy::too_many_arguments)]
+fn emit_fdb_nhg_pass(
+    vni: EvpnInstanceId,
+    mac: MacAddress,
+    entry: &RemoteMacEntry,
+    linux_key: AliasGroupKey,
+    last_applied: &OwnedSet,
+    snapshot: &KernelSnapshot,
+    groups: &GroupOwnedMap,
+    group_seen: &mut BTreeSet<AliasGroupKey>,
+    creates: &mut Vec<DataplaneOp>,
+    updates: &mut Vec<DataplaneOp>,
+) {
+    let canonical = group_members(entry);
+
+    let owned_kind = last_applied.get(vni, mac).map(|e| e.kind.clone());
+    match owned_kind {
+        None => {
+            // Fresh install for this MAC.
+            creates.push(DataplaneOp::InstallFdbNhg {
+                vni,
+                mac,
+                group_key: linux_key,
+                members: canonical,
+            });
+        }
+        Some(OwnedEntryKind::SingleDst { .. }) => {
+            // Single-dst → FDB-NHG transition. Remove the old row,
+            // install the group-backed one.
+            updates.push(DataplaneOp::RemoveRemoteFdb { vni, mac });
+            creates.push(DataplaneOp::InstallFdbNhg {
+                vni,
+                mac,
+                group_key: linux_key,
+                members: canonical,
+            });
+        }
+        Some(OwnedEntryKind::FdbNhg {
+            group_key: prev_key,
+        }) if prev_key != linux_key => {
+            // Group-key drift on the same MAC (ESI change / VNI change).
+            // Remove old, install new.
+            updates.push(DataplaneOp::RemoveFdbNhg {
+                vni,
+                mac,
+                group_key: prev_key,
+            });
+            creates.push(DataplaneOp::InstallFdbNhg {
+                vni,
+                mac,
+                group_key: linux_key,
+                members: canonical,
+            });
+        }
+        Some(OwnedEntryKind::FdbNhg { .. }) => {
+            // Same key. Per-MAC FDB row already installed; check
+            // whether the group's member set needs an
+            // UpdateFdbNhgMembers (dedupe across MACs sharing the
+            // group).
+            if group_seen.insert(linux_key) {
+                if let Some(existing) = groups.group(&linux_key) {
+                    let existing_members: Vec<_> = existing.members.iter().copied().collect();
+                    if existing_members != canonical {
+                        updates.push(DataplaneOp::UpdateFdbNhgMembers {
+                            group_key: linux_key,
+                            members: canonical.clone(),
+                        });
+                    }
+                } else {
+                    // last_applied says we own it but groups map
+                    // doesn't know about it — likely a startup-
+                    // adoption mismatch. Re-install to heal.
+                    creates.push(DataplaneOp::InstallFdbNhg {
+                        vni,
+                        mac,
+                        group_key: linux_key,
+                        members: canonical.clone(),
+                    });
+                }
+            }
+            // Kernel-snapshot drift check: if our last_applied
+            // says FdbNhg(same key) but the kernel row is gone
+            // (FDB row deleted out-of-band), re-emit Install for
+            // this MAC. ADR §5 invariant 8: idempotent on
+            // EEXIST so this is safe even when the row is still
+            // there.
+            let kernel_has_row = snapshot
+                .find_fdb(vni, mac)
+                .is_some_and(|k| k.nh_id.is_some());
+            if !kernel_has_row {
+                creates.push(DataplaneOp::InstallFdbNhg {
+                    vni,
+                    mac,
+                    group_key: linux_key,
+                    members: canonical,
+                });
+            }
+        }
+    }
 }
 
 /// Decide what to do when `desired` wants `(vni, mac) -> dst` and the
@@ -271,7 +499,13 @@ mod tests {
         let snapshot = KernelSnapshot::new();
         let applied = OwnedSet::new();
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert_eq!(
             plan.ops,
             vec![DataplaneOp::AddRemoteFdb {
@@ -292,7 +526,13 @@ mod tests {
         snapshot.insert_fdb(vni(100), e);
         let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert!(plan.is_noop(), "expected no-op, got {:?}", plan.ops);
     }
 
@@ -306,7 +546,13 @@ mod tests {
         snapshot.insert_fdb(vni(100), e);
         let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert_eq!(
             plan.ops,
             vec![DataplaneOp::UpdateRemoteFdb {
@@ -327,7 +573,13 @@ mod tests {
         snapshot.insert_fdb(vni(100), e);
         let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert_eq!(
             plan.ops,
             vec![DataplaneOp::RemoveRemoteFdb {
@@ -353,7 +605,13 @@ mod tests {
                 reason: "bridge gone".into(),
             },
         );
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert_eq!(
             plan.ops,
             vec![DataplaneOp::RemoveRemoteFdb {
@@ -385,7 +643,13 @@ mod tests {
         );
         let applied = OwnedSet::new();
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert!(
             plan.is_noop(),
             "should not overwrite foreign static, got {:?}",
@@ -411,7 +675,13 @@ mod tests {
         );
         let applied = OwnedSet::new();
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert!(plan.is_noop(), "should preserve kernel-learned local");
     }
 
@@ -424,7 +694,13 @@ mod tests {
         let applied = OwnedSet::new();
         let mut probes = InstanceProbes::new();
         probes.insert(vni(100), InstanceProbe::Unbound);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert!(plan.is_noop());
     }
 
@@ -439,8 +715,20 @@ mod tests {
         snapshot.insert_fdb(vni(100), e);
         let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
         let probes = ready_probes(&[vni(100)]);
-        let plan_a = compute_diff(&desired, &snapshot, &applied, &probes);
-        let plan_b = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan_a = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
+        let plan_b = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert!(plan_a.is_noop());
         assert_eq!(plan_a, plan_b);
     }
@@ -457,7 +745,13 @@ mod tests {
         snapshot.insert_fdb(vni(100), e);
         let applied = applied_one(vni(100), mac(1), "10.0.0.2", Some(1));
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert_eq!(
             plan.ops,
             vec![DataplaneOp::UpdateRemoteFdb {
@@ -480,7 +774,13 @@ mod tests {
         let snapshot = KernelSnapshot::new();
         let applied = applied_one(vni(100), mac(1), "10.0.0.2", None);
         let probes = ready_probes(&[vni(100)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
         assert!(plan.is_noop());
     }
 
@@ -526,7 +826,13 @@ mod tests {
         );
 
         let probes = ready_probes(&[vni(100), vni(200)]);
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
 
         for op in &plan.ops {
             match op {
@@ -557,5 +863,340 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ─── ADR-0059 slice 3b: Pass 1b transitions ────────────────────
+
+    use crate::group_state::{AliasGroupKey, GroupOwned};
+    use rustbgpd_evpn::{EthernetSegmentIdentifier, EthernetTagId};
+
+    fn esi(seed: u8) -> EthernetSegmentIdentifier {
+        EthernetSegmentIdentifier::new([seed; 10])
+    }
+
+    /// Build a `RemoteMacEntry` with `alias_group_key` set (multi-homed,
+    /// FDB-NHG-eligible). `aliases` is the list of alias VTEP IPs beyond
+    /// the primary `remote`.
+    fn entry_multi_homed(remote: &str, aliases: &[&str], seg: u8) -> RemoteMacEntry {
+        RemoteMacEntry {
+            remote_vtep_ip: ip(remote),
+            mobility_sequence: None,
+            alias_vtep_ips: aliases.iter().map(|s| ip(s)).collect(),
+            alias_group_key: Some((esi(seg), EthernetTagId(0))),
+            source: RemoteMacSource::EvpnRibBestPath,
+        }
+    }
+
+    fn linux_key(v: u32, seg: u8) -> AliasGroupKey {
+        AliasGroupKey::new(vni(v), esi(seg), EthernetTagId(0))
+    }
+
+    #[test]
+    fn transition_single_dst_owned_to_desired_fdb_nhg() {
+        // Last applied: SingleDst → Desired: FdbNhg.
+        // Expect: RemoveRemoteFdb + InstallFdbNhg (in that order).
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let mut applied = OwnedSet::new();
+        applied.record_applied(
+            vni(100),
+            mac(1),
+            OwnedEntry::single_dst(ip("10.0.0.2"), None),
+        );
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
+
+        // The plan should contain both a RemoveRemoteFdb (for the old
+        // single-dst row) and an InstallFdbNhg (for the new FDB-NHG).
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::RemoveRemoteFdb { vni: v, mac: m } if *v == vni(100) && *m == mac(1))),
+            "expected RemoveRemoteFdb in {:?}",
+            plan.ops,
+        );
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::InstallFdbNhg { vni: v, mac: m, group_key, .. }
+                    if *v == vni(100) && *m == mac(1) && *group_key == linux_key(100, 7),
+            )),
+            "expected InstallFdbNhg in {:?}",
+            plan.ops,
+        );
+    }
+
+    #[test]
+    fn transition_fdb_nhg_owned_to_desired_single_dst() {
+        // Last applied: FdbNhg → Desired: single-dst (alias_group_key None).
+        // Expect: RemoveFdbNhg + AddRemoteFdb.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(vni(100), mac(1), entry("10.0.0.2", None))
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
+
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::RemoveFdbNhg { vni: v, mac: m, .. } if *v == vni(100) && *m == mac(1))),
+            "expected RemoveFdbNhg in {:?}",
+            plan.ops,
+        );
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::AddRemoteFdb { vni: v, mac: m, .. } if *v == vni(100) && *m == mac(1))),
+            "expected AddRemoteFdb in {:?}",
+            plan.ops,
+        );
+    }
+
+    #[test]
+    fn transition_fdb_nhg_group_key_changes_on_same_mac() {
+        // Last applied: FdbNhg(esi=7) → Desired: FdbNhg(esi=8).
+        // Expect: RemoveFdbNhg(old key) + InstallFdbNhg(new key).
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 8),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
+
+        // RemoveFdbNhg should carry the OLD key, Install should carry NEW.
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::RemoveFdbNhg { group_key, .. } if *group_key == linux_key(100, 7),
+            )),
+            "expected RemoveFdbNhg(old esi=7) in {:?}",
+            plan.ops,
+        );
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::InstallFdbNhg { group_key, .. } if *group_key == linux_key(100, 8),
+            )),
+            "expected InstallFdbNhg(new esi=8) in {:?}",
+            plan.ops,
+        );
+    }
+
+    #[test]
+    fn fdb_nhg_member_set_shrinks_to_one_stays_group_backed() {
+        // last_applied says FdbNhg(esi=7) with members {10.0.0.2,
+        // 10.0.0.3}, groups map reflects same; desired keeps only
+        // [10.0.0.2]. Expect UpdateFdbNhgMembers emitted once.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(vni(100), mac(1), entry_multi_homed("10.0.0.2", &[], 7))
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = {
+            let mut s = KernelSnapshot::new();
+            // Snapshot reports the FDB row still present (with the
+            // installed nh_id) so the Pass 1b drift check sees nothing
+            // missing for this MAC and skips an Install re-emit.
+            s.insert_fdb(
+                vni(100),
+                KernelFdbEntry {
+                    mac: mac(1),
+                    dst: None,
+                    nh_id: Some(0x4000_0001),
+                    flags: KernelFdbFlags {
+                        extern_learn: true,
+                        master: true,
+                        ..Default::default()
+                    },
+                },
+            );
+            s
+        };
+
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+
+        let mut groups = GroupOwnedMap::new();
+        groups.record_member_install(ip("10.0.0.2"), 0x3000_0001);
+        groups.record_member_install(ip("10.0.0.3"), 0x3000_0002);
+        let mut members = std::collections::BTreeSet::new();
+        members.insert(ip("10.0.0.2"));
+        members.insert(ip("10.0.0.3"));
+        groups.record_group_install(linux_key(100, 7), 0x4000_0001, members);
+        groups.record_mac_ref(linux_key(100, 7), vni(100), mac(1));
+
+        let plan = compute_diff(&desired, &snapshot, &applied, &probes, &groups);
+
+        // Member set should shrink to [10.0.0.2] (primary only).
+        let updates: Vec<_> = plan
+            .ops
+            .iter()
+            .filter(|o| matches!(o, DataplaneOp::UpdateFdbNhgMembers { .. }))
+            .collect();
+        assert_eq!(
+            updates.len(),
+            1,
+            "expected exactly one UpdateFdbNhgMembers; got {:?}",
+            plan.ops
+        );
+        if let DataplaneOp::UpdateFdbNhgMembers { members, .. } = updates[0] {
+            assert_eq!(members, &vec![ip("10.0.0.2")]);
+        }
+        // Also: no InstallFdbNhg / RemoveFdbNhg — N→1 keeps the group.
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. }))
+        );
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::RemoveFdbNhg { .. }))
+        );
+    }
+
+    #[test]
+    fn instance_not_ready_drains_existing_fdb_nhg_rows() {
+        // Last applied: FdbNhg, instance probes drop the VNI from
+        // Ready → expect RemoveFdbNhg per MAC even though intent
+        // still lists it.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        // probes is EMPTY → vni(100) is NotReady by default.
+        let probes = InstanceProbes::new();
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
+
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::RemoveFdbNhg { vni: v, mac: m, .. } if *v == vni(100) && *m == mac(1))),
+            "expected RemoveFdbNhg from NotReady drain in {:?}",
+            plan.ops,
+        );
+        // No Install ops — the instance is NotReady.
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. }))
+        );
+    }
+
+    #[test]
+    fn ipv6_alias_members_fall_back_to_single_dst_with_warn() {
+        // Multi-homed with an IPv6 alias → falls back to AddRemoteFdb
+        // (single-dst at primary) because slice 2's `NexthopSocket`
+        // rejects v6 gateways. Diff emits no InstallFdbNhg.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["2001:db8::1"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+        );
+
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::AddRemoteFdb { vni: v, mac: m, dst, .. } if *v == vni(100) && *m == mac(1) && *dst == ip("10.0.0.2"))),
+            "expected AddRemoteFdb fallback in {:?}",
+            plan.ops,
+        );
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
+            "must NOT emit InstallFdbNhg when v6 aliases present: {:?}",
+            plan.ops,
+        );
+    }
+
+    // GroupOwned and pre-existing struct imports kept used. The
+    // `GroupOwned` type isn't directly constructed in these tests
+    // but is referenced indirectly via `GroupOwnedMap`'s helpers.
+    fn _silence_unused_import_warning() -> Option<GroupOwned> {
+        None
     }
 }

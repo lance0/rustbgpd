@@ -25,14 +25,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-rustbgpd-netns-tests:latest}"
 DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 
-# Test-name filter mapping. Empty filter runs both gated tests in
-# the netns_bum_filter binary.
+# Test selector. `bum_*` runs the Gate 8b harness; `fdb_nhg` runs
+# the ADR-0059 slice 3b FDB nexthop group integration test.
+TEST_BIN="netns_bum_filter"
 case "${1:-all}" in
     spike)      FILTER="bum_filter_spike_validates_kernel_primitive" ;;
     roundtrip)  FILTER="linux_dataplane_set_bum_port_flags_round_trip" ;;
     all|"")     FILTER="" ;;
+    fdb_nhg)    TEST_BIN="netns_fdb_nhg"; FILTER="" ;;
+    fdb_nhg_roundtrip)  TEST_BIN="netns_fdb_nhg"; FILTER="round_trip_install_and_remove_fdb_nhg" ;;
+    fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve" >&2
         exit 2
         ;;
 esac
@@ -111,7 +115,7 @@ DOCKER_ARGS=(
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
 TEST_ARGS=(
-    cargo test -p rustbgpd-evpn-linux --test netns_bum_filter
+    cargo test -p rustbgpd-evpn-linux --test "$TEST_BIN"
     --
     --test-threads=1 --nocapture
 )

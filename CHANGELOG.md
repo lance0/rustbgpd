@@ -11,6 +11,60 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0059 slice 3b — FDB nexthop group reconcile actor + diff
+  Pass 1b + startup adoption.** Multi-homed Type 2 routes now
+  program FDB nexthop groups in the kernel (RFC 7432 §14 aliasing
+  ECMP). On the encap path, traffic to a multi-homed MAC fans out
+  across every observed alias VTEP. This is the first slice with
+  operational behavior change in the ADR-0059 chain; slice 4
+  (M40 interop against FRR) closes out the validation story.
+
+  Wiring landed in this PR:
+
+  - **`compute_diff` Pass 1b** emits `InstallFdbNhg` /
+    `UpdateFdbNhgMembers` / `RemoveFdbNhg` based on
+    `RemoteMacEntry::alias_group_key`. IPv6 alias members fall
+    back to single-dst FDB (primary VTEP only) with a `warn!` per
+    `(VNI, MAC)` — slice 2's `NexthopSocket` rejects v6 gateways,
+    so this is graceful degradation until the v6 fixture follow-up
+    lands. Six transition tests cover the owned↔desired matrix
+    (SingleDst↔FdbNhg, group-key drift, N→1 drain, NotReady
+    drain, IPv6 fallback).
+  - **`NexthopOps` impls** on `LinuxDataplane` (delegates to slice
+    2's `NexthopSocket` + slice 3a's `linux::fdb_nhg` with the
+    CVE-2025-39851 inline guard) and `InMemoryDataplane` (records
+    `add_nexthop_member` / `add_nexthop_group` / `del_nexthop` /
+    `install_fdb_nhg_row` / `remove_fdb_nhg_row` / `dump_owned_nexthops`
+    calls for unit-testing the coordinator without netlink).
+  - **Reconcile actor coordinator** intercepts the three FDB-NHG
+    op variants before `Dataplane::apply`, calls `NexthopOps`
+    methods in ADR-0059 §5 invariant 1+2 order (install: members
+    → group → FDB row; teardown: FDB row → group → members per
+    refcount), and updates `GroupOwnedMap` + `NhIdAllocator`.
+  - **`NexthopSocket::dump_owned`** — `RTM_GETNEXTHOP` multipart
+    parser tolerating `NHA_GROUP_TYPE` / `NHA_OP_FLAGS` per
+    research §1, filtering by rustbgpd tag bits + `NHA_FDB`. 7
+    unit tests on the parser.
+  - **Startup adoption + deferred stale cleanup**: first
+    `reconcile_once` pass dumps tagged nexthops, reserves their
+    IDs in the allocator (prevents fresh `NLM_F_REPLACE`
+    collisions with a prior daemon's state), and tracks them in
+    `adopted_unreferenced`. After the first apply phase, anything
+    still unreferenced by `GroupOwnedMap` is true-stale and gets
+    deleted + released. Gated to one shot via `adoption_done`.
+  - **Docker-runnable netns integration test**
+    (`crates/evpn-linux/tests/netns_fdb_nhg.rs`) covering install +
+    `ip nexthop show` + `bridge fdb show nhid` verification +
+    `dump_owned_nexthops` round-trip + idempotent del + CVE-guard
+    negative path. Harness extended with `fdb_nhg` /
+    `fdb_nhg_roundtrip` / `fdb_nhg_cve` selectors.
+
+  **Operational note**: `apply_aliasing_ecmp` defaults to on; if
+  this needs an off-switch, slice 3.5 can add the knob.
+  Periodic `RTM_GETNEXTHOP` drift recovery (research §8 confirms
+  RTNLGRP_NEIGH doesn't fire on forced NHG deletion) is also
+  deferred to slice 3.5 per the ADR.
+
 - **ADR-0059 slice 3a — FDB nexthop group state types and apply
   primitive.** Foundation infrastructure for the aliasing-ECMP
   dataplane; **zero operational behavior change** in this PR — slice

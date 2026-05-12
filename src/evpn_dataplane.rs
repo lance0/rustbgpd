@@ -250,7 +250,7 @@ pub fn spawn_with_dataplane<D>(
     dataplane: D,
 ) -> EvpnDataplaneHandle
 where
-    D: Dataplane + Send + Sync + 'static,
+    D: Dataplane + rustbgpd_evpn_linux::dataplane::NexthopOps + Send + Sync + 'static,
 {
     let (intent_tx, intent_rx) = watch::channel(Arc::new(DataplaneIntent::empty()));
     let (bum_enforcement_tx, bum_enforcement_rx) =
