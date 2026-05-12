@@ -160,6 +160,17 @@ struct ActorState {
     /// ops. Same fingerprint-equality semantics as the FDB map: a
     /// new flag triplet for the same ifindex clears the suppression.
     bum_permanent_failures: BTreeMap<u32, DataplaneOp>,
+    /// Retry schedule for ADR-0059 slice 3b `UpdateFdbNhgMembers`
+    /// ops, keyed by [`AliasGroupKey`]. Group-level ops have no
+    /// natural `(VNI, MAC)` identity, so they need their own key
+    /// space — without it, every group update within the same VNI
+    /// would collide on a placeholder all-zeros MAC.
+    nhg_retry: RetrySchedule<crate::group_state::AliasGroupKey>,
+    /// Per-group permanent-failure suppression for
+    /// `UpdateFdbNhgMembers`. Same fingerprint-equality semantics as
+    /// the FDB / BUM maps: a different member set on the same
+    /// `AliasGroupKey` clears the suppression.
+    nhg_permanent_failures: BTreeMap<crate::group_state::AliasGroupKey, DataplaneOp>,
     /// Last `intent_generation` we successfully reconciled against.
     /// Reports echo this so the daemon can correlate.
     last_intent_generation: u64,
@@ -230,6 +241,8 @@ impl ActorState {
             permanent_failures: BTreeMap::new(),
             bum_retry: RetrySchedule::new(),
             bum_permanent_failures: BTreeMap::new(),
+            nhg_retry: RetrySchedule::new(),
+            nhg_permanent_failures: BTreeMap::new(),
             last_intent_generation: 0,
             reconcile_generation: 0,
             epoch: Instant::now(),
@@ -300,18 +313,18 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         }
 
         loop {
-            // Compute the next retry deadline across both retry
-            // schedules — FDB ops keyed by `(VNI, MAC)` and BUM ops
-            // keyed by ifindex. The earlier of the two wakes the
-            // actor.
+            // Compute the next retry deadline across the three retry
+            // schedules — FDB ops keyed by `(VNI, MAC)`, BUM ops keyed
+            // by ifindex, and FDB-NHG group-level ops keyed by
+            // `AliasGroupKey`. The earliest wakes the actor.
             let next_fdb = self.state.retry.earliest_due();
             let next_bum = self.state.bum_retry.earliest_due();
-            let retry_due = match (next_fdb, next_bum) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(x), None) | (None, Some(x)) => Some(x),
-                (None, None) => None,
-            }
-            .map(|due_ms| self.state.epoch + Duration::from_millis(due_ms));
+            let next_nhg = self.state.nhg_retry.earliest_due();
+            let retry_due = [next_fdb, next_bum, next_nhg]
+                .into_iter()
+                .flatten()
+                .min()
+                .map(|due_ms| self.state.epoch + Duration::from_millis(due_ms));
 
             tokio::select! {
                 biased;
@@ -764,61 +777,42 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         for op in &plan.ops {
             // Permanent-failure suppression — dispatched per op shape
-            // so BUM port-flag ops use their ifindex-keyed map and
-            // FDB ops use their (VNI, MAC) map. No sentinel-key
-            // collision risk.
-            let permanently_suppressed = if let DataplaneOp::SetBumPortFlags { ifindex, .. } = op {
-                if let Some(recorded) = self.state.bum_permanent_failures.get(ifindex) {
-                    if recorded == op {
-                        tracing::trace!(
-                            ?op,
-                            "suppressed (permanent BUM failure, op shape unchanged)"
-                        );
-                        true
-                    } else {
-                        tracing::debug!(
-                            ?op,
-                            recorded = ?recorded,
-                            "BUM op shape changed since permanent failure; clearing suppression"
-                        );
-                        self.state.bum_permanent_failures.remove(ifindex);
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                let fdb_key = (fdb_op_vni(op), fdb_op_mac(op));
-                if let Some(recorded) = self.state.permanent_failures.get(&fdb_key) {
-                    if recorded == op {
-                        tracing::trace!(
-                            ?op,
-                            "suppressed (permanent FDB failure, op shape unchanged)"
-                        );
-                        true
-                    } else {
-                        tracing::debug!(
-                            ?op,
-                            recorded = ?recorded,
-                            "FDB op shape changed since permanent failure; clearing suppression"
-                        );
-                        self.state.permanent_failures.remove(&fdb_key);
-                        false
-                    }
-                } else {
-                    false
-                }
+            // across three key spaces: BUM (ifindex), FDB-NHG group
+            // ops (`AliasGroupKey`), and per-MAC FDB ops (`(VNI, MAC)`).
+            // No sentinel-key collision risk.
+            let permanently_suppressed = match op {
+                DataplaneOp::SetBumPortFlags { ifindex, .. } => check_permanent_suppression(
+                    &mut self.state.bum_permanent_failures,
+                    ifindex,
+                    op,
+                    "BUM",
+                ),
+                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => check_permanent_suppression(
+                    &mut self.state.nhg_permanent_failures,
+                    group_key,
+                    op,
+                    "FDB-NHG group",
+                ),
+                _ => check_permanent_suppression(
+                    &mut self.state.permanent_failures,
+                    &(fdb_op_vni(op), fdb_op_mac(op)),
+                    op,
+                    "FDB",
+                ),
             };
             if permanently_suppressed {
                 continue;
             }
 
             // Transient retry gating — skip until the per-op
-            // exponential-backoff deadline passes. Same per-shape
+            // exponential-backoff deadline passes. Same three-way
             // dispatch as permanent suppression.
             let next_due_ms_opt = match op {
                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                     self.state.bum_retry.next_due_for(*ifindex)
+                }
+                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                    self.state.nhg_retry.next_due_for(*group_key)
                 }
                 _ => self
                     .state
@@ -860,6 +854,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                                     self.state.bum_retry.record_failure(*ifindex, now_ms)
                                 }
+                                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                                    self.state.nhg_retry.record_failure(*group_key, now_ms)
+                                }
                                 _ => self.state.retry.record_failure(fdb_key_for_failed, now_ms),
                             };
                             let retry_in_ms = u32::try_from(next_due_ms.saturating_sub(now_ms))
@@ -886,16 +883,25 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                             // op-kind change clears the suppression
                             // automatically. Drop from the transient
                             // retry schedule so we don't double-tick.
-                            if let DataplaneOp::SetBumPortFlags { ifindex, .. } = op {
-                                self.state.bum_retry.record_success(*ifindex);
-                                self.state
-                                    .bum_permanent_failures
-                                    .insert(*ifindex, op.clone());
-                            } else {
-                                self.state.retry.record_success(fdb_key_for_failed);
-                                self.state
-                                    .permanent_failures
-                                    .insert(fdb_key_for_failed, op.clone());
+                            match op {
+                                DataplaneOp::SetBumPortFlags { ifindex, .. } => {
+                                    self.state.bum_retry.record_success(*ifindex);
+                                    self.state
+                                        .bum_permanent_failures
+                                        .insert(*ifindex, op.clone());
+                                }
+                                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                                    self.state.nhg_retry.record_success(*group_key);
+                                    self.state
+                                        .nhg_permanent_failures
+                                        .insert(*group_key, op.clone());
+                                }
+                                _ => {
+                                    self.state.retry.record_success(fdb_key_for_failed);
+                                    self.state
+                                        .permanent_failures
+                                        .insert(fdb_key_for_failed, op.clone());
+                                }
                             }
                             failed.push(FailedOp {
                                 vni: fdb_key_for_failed.0,
@@ -1000,13 +1006,22 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             // is a group-level update with no per-`(VNI, MAC)` owned-set
             // delta — the slice 3b coordinator updates `group_state`
             // separately. Both arms share the no-op body.
+            DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                // Group-level op — no per-MAC owned-set delta; the
+                // slice 3b coordinator updates `group_state`
+                // separately. Clear the NHG-keyed retry schedule on
+                // success so subsequent failures get a fresh backoff.
+                self.state.nhg_retry.record_success(*group_key);
+            }
+            // Gate 9 slice 6c L3 ops have their own owned-set and retry
+            // tracking inside the L3 diff loop, handled by
+            // `record_success_l3`.
             DataplaneOp::AddRemoteIpRoute { .. }
             | DataplaneOp::RemoveRemoteIpRoute { .. }
             | DataplaneOp::AddL3Neighbor { .. }
             | DataplaneOp::RemoveL3Neighbor { .. }
             | DataplaneOp::AddL3VxlanFdb { .. }
-            | DataplaneOp::RemoveL3VxlanFdb { .. }
-            | DataplaneOp::UpdateFdbNhgMembers { .. } => {}
+            | DataplaneOp::RemoveL3VxlanFdb { .. } => {}
         }
     }
 
@@ -1390,8 +1405,13 @@ where
                         .record_group_member_change(*group_key, new_members);
                     for ip in removed {
                         if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
-                            let _ = dataplane.del_nexthop(vtep_id).await;
-                            state.nh_id_alloc.release(vtep_id);
+                            try_del_and_release_alloc(
+                                dataplane,
+                                &mut state.nh_id_alloc,
+                                vtep_id,
+                                "install_drift",
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1467,8 +1487,13 @@ where
             // GC per-VTEP members whose last group-ref dropped.
             for ip in removed {
                 if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
-                    let _ = dataplane.del_nexthop(vtep_id).await;
-                    state.nh_id_alloc.release(vtep_id);
+                    try_del_and_release_alloc(
+                        dataplane,
+                        &mut state.nh_id_alloc,
+                        vtep_id,
+                        "update_members",
+                    )
+                    .await;
                 }
             }
             Ok(())
@@ -1484,12 +1509,22 @@ where
             match state.groups.record_mac_unref(*group_key, *vni, *mac) {
                 RefDelta::GroupStillReferenced => Ok(()),
                 RefDelta::GroupShouldDelete { id, members } => {
-                    let _ = dataplane.del_nexthop(id).await;
-                    state.nh_id_alloc.release(id);
+                    try_del_and_release_alloc(
+                        dataplane,
+                        &mut state.nh_id_alloc,
+                        id,
+                        "remove_group",
+                    )
+                    .await;
                     for ip in members {
                         if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
-                            let _ = dataplane.del_nexthop(vtep_id).await;
-                            state.nh_id_alloc.release(vtep_id);
+                            try_del_and_release_alloc(
+                                dataplane,
+                                &mut state.nh_id_alloc,
+                                vtep_id,
+                                "remove_member",
+                            )
+                            .await;
                         }
                     }
                     Ok(())
@@ -1498,6 +1533,63 @@ where
         }
 
         _ => unreachable!("apply_nhg_op called for non-FDB-NHG op"),
+    }
+}
+
+/// Op-shape-aware permanent-failure check. Returns `true` if the
+/// op should be skipped (recorded shape unchanged), `false` if it
+/// should run (no record, or the shape changed since the failure
+/// — in which case the suppression is cleared as a side effect).
+fn check_permanent_suppression<K: Ord>(
+    map: &mut BTreeMap<K, DataplaneOp>,
+    key: &K,
+    op: &DataplaneOp,
+    surface: &'static str,
+) -> bool {
+    let Some(recorded) = map.get(key) else {
+        return false;
+    };
+    if recorded == op {
+        tracing::trace!(
+            ?op,
+            surface,
+            "suppressed (permanent failure, op shape unchanged)"
+        );
+        true
+    } else {
+        tracing::debug!(
+            ?op,
+            recorded = ?recorded,
+            surface,
+            "op shape changed since permanent failure; clearing suppression"
+        );
+        map.remove(key);
+        false
+    }
+}
+
+/// Best-effort delete of a tagged kernel nexthop, releasing the
+/// allocator slot only if the delete succeeded. On `Err` the slot
+/// stays reserved so a future `alloc_vtep_nh` / `alloc_nhg` cannot
+/// hand out an ID that is still live in the kernel — the failure
+/// scenario flagged by ADR-0059 review. The leaked slot is bounded
+/// (per-ID, per-pass) and reclaimable on a fresh daemon start via
+/// the slice 3b adoption pass; periodic drift recovery (slice 3.5)
+/// will eventually retry orphan deletions.
+async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
+    dataplane: &mut D,
+    alloc: &mut crate::nh_id_alloc::NhIdAllocator,
+    id: u32,
+    site: &'static str,
+) {
+    match dataplane.del_nexthop(id).await {
+        Ok(()) => alloc.release(id),
+        Err(e) => tracing::warn!(
+            ?e,
+            id,
+            site,
+            "FDB-NHG GC: del_nexthop failed; allocator slot retained to prevent kernel-ID collision"
+        ),
     }
 }
 

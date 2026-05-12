@@ -241,11 +241,15 @@ impl NexthopSocket {
 
     /// Dump every rustbgpd-tagged FDB nexthop in the kernel,
     /// filtered client-side by [`NhIdAllocator::is_ours`] +
-    /// presence of `NHA_FDB`. ADR-0059 slice 3b uses this at
-    /// `LinuxDataplane::connect()` time so the allocator can
+    /// presence of `NHA_FDB`. ADR-0059 slice 3b uses this from the
+    /// reconcile actor's first `reconcile_once` pass (via the
+    /// `NexthopOps::dump_owned_nexthops` trait method on
+    /// `LinuxDataplane`, which forwards here) so the allocator can
     /// reserve any IDs left behind by a prior daemon instance,
     /// preventing accidental `NLM_F_REPLACE`-style overwrites of
-    /// kernel state still referenced by stale FDB rows.
+    /// kernel state still referenced by stale FDB rows. Adoption is
+    /// intentionally deferred past `connect()` so allocator + refcount
+    /// state stays owned by the actor (ADR-0059 §7 boundary).
     ///
     /// Kernel is allowed to emit `NHA_GROUP_TYPE` and
     /// `NHA_OP_FLAGS` on dump even when we never set them on add;
