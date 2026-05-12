@@ -414,6 +414,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // cleared as the coordinator records each ID in `groups`;
         // whatever remains after `apply_plan` is true stale state
         // and gets GC'd by `cleanup_unreferenced_adoptions` below.
+        //
+        // `dump_succeeded` carries to the post-apply gate so a failed
+        // dump (which leaves the allocator without reservations for
+        // any pre-existing kernel NHIDs) does NOT flip `adoption_done`
+        // to true. Without this, a dump failure on the first pass would
+        // permanently strand collision risk: future passes would emit
+        // `InstallFdbNhg` against an under-reserved allocator and the
+        // re-dump path would never run.
+        let mut dump_succeeded = true;
         if !self.state.adoption_done {
             match self.dataplane.dump_owned_nexthops().await {
                 Ok(adopted) => {
@@ -433,11 +442,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     }
                 }
                 Err(e) => {
-                    // Dump failed — log + continue. The actor will
-                    // re-attempt adoption on the next pass since
-                    // adoption_done stays false until apply_plan
-                    // succeeds at least once.
+                    // Dump failed — log + leave adoption_done false so
+                    // the next reconcile pass re-attempts the dump
+                    // before any FDB-NHG ops are applied against an
+                    // under-reserved allocator.
                     tracing::warn!(error = %e, "adoption: dump_owned_nexthops failed");
+                    dump_succeeded = false;
                 }
             }
         }
@@ -539,14 +549,18 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // state from a prior daemon instance. Delete + release.
         //
         // Only mark adoption complete when the pass had no apply
-        // failures and the dump succeeded — if the first pass had
-        // transient errors (or the dump returned `Err` so
-        // `adopted_unreferenced` is incomplete), defer cleanup to
-        // the next reconcile so a fresh dump can re-seed reservations
-        // before we accidentally delete a not-yet-adopted ID.
-        if !self.state.adoption_done && failed.is_empty() {
-            self.cleanup_unreferenced_adoptions().await;
-            self.state.adoption_done = true;
+        // failures, the dump succeeded, and every staged stale-delete
+        // succeeded — if any of those is false, `adopted_unreferenced`
+        // is incomplete OR the allocator hasn't fully reserved
+        // pre-existing kernel IDs. Defer cleanup to the next reconcile
+        // so a fresh dump can re-seed reservations before we
+        // accidentally delete a not-yet-adopted ID, or release an
+        // allocator slot whose ID is still live in the kernel.
+        if !self.state.adoption_done && failed.is_empty() && dump_succeeded {
+            let cleanup_ok = self.cleanup_unreferenced_adoptions().await;
+            if cleanup_ok {
+                self.state.adoption_done = true;
+            }
         }
 
         // Update the last-applied BUM plan **per port**:
@@ -908,19 +922,39 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// rustbgpd-tagged kernel nexthop that didn't get claimed by a
     /// MAC's group during apply. These are stale state from a prior
     /// daemon instance.
-    async fn cleanup_unreferenced_adoptions(&mut self) {
+    ///
+    /// Returns `true` only when every staged delete succeeded. On
+    /// per-ID failure the allocator slot stays reserved and the entry
+    /// stays in `adopted_unreferenced` so the next reconcile pass can
+    /// retry — releasing the slot on a transient netlink failure would
+    /// let a future `alloc_vtep_nh` / `alloc_nhg` hand out an ID that
+    /// still exists in the kernel, exactly the collision adoption is
+    /// supposed to prevent.
+    async fn cleanup_unreferenced_adoptions(&mut self) -> bool {
         // Drain to avoid holding the borrow across the await.
         let stale: Vec<u32> = self.state.adopted_unreferenced.keys().copied().collect();
+        let mut all_ok = true;
         for id in stale {
-            // del_nexthop is idempotent on ENOENT (slice 2). Errors
-            // are logged at debug; the next reconcile won't try
-            // again because adoption_done is set after this loop.
-            if let Err(e) = self.dataplane.del_nexthop(id).await {
-                tracing::debug!(?e, id, "adoption cleanup: del_nexthop failed (best-effort)");
+            // del_nexthop is idempotent on ENOENT (slice 2). Only
+            // release + drop tracking on Ok — on Err, leave the slot
+            // reserved + the entry in the map so the next reconcile
+            // pass retries.
+            match self.dataplane.del_nexthop(id).await {
+                Ok(()) => {
+                    self.state.nh_id_alloc.release(id);
+                    self.state.adopted_unreferenced.remove(&id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        id,
+                        "adoption cleanup: del_nexthop failed; leaving reserved for next pass"
+                    );
+                    all_ok = false;
+                }
             }
-            self.state.nh_id_alloc.release(id);
         }
-        self.state.adopted_unreferenced.clear();
+        all_ok
     }
 
     /// On successful apply, mirror state into `owned` so the next
@@ -1343,12 +1377,23 @@ where
             let group_id = if let Some((g_id, existing_members)) = existing {
                 if existing_members != *members {
                     // Member set drifted (e.g., re-install after
-                    // partial-failure recovery). Atomic REPLACE.
+                    // partial-failure recovery). Atomic REPLACE, then
+                    // GC any per-VTEP members whose last group-ref
+                    // dropped — mirrors the `UpdateFdbNhgMembers`
+                    // path. Without this, members removed by the
+                    // drift heal stay orphaned in `vtep_nhs` and
+                    // in-kernel.
                     dataplane.add_nexthop_group(g_id, &member_ids).await?;
                     let new_members: BTreeSet<_> = members.iter().copied().collect();
-                    state
+                    let removed = state
                         .groups
                         .record_group_member_change(*group_key, new_members);
+                    for ip in removed {
+                        if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
+                            let _ = dataplane.del_nexthop(vtep_id).await;
+                            state.nh_id_alloc.release(vtep_id);
+                        }
+                    }
                 }
                 g_id
             } else {
@@ -1402,13 +1447,17 @@ where
                 .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
                 .collect();
             let Some(g_id) = state.groups.group(group_key).map(|g| g.id) else {
-                // No record of the group — log + skip; the next
-                // InstallFdbNhg-driven pass will create it.
-                tracing::warn!(
-                    ?group_key,
-                    "UpdateFdbNhgMembers: group not in owned-state map; skipping"
-                );
-                return Ok(());
+                // `compute_diff` Pass 1b only emits `UpdateFdbNhgMembers`
+                // when the group exists in `GroupOwnedMap`, so hitting
+                // this branch means `owned` and `groups` have drifted
+                // out of sync — an internal state inconsistency.
+                // Surface it as a transient error (classified `Other`
+                // → retried) so it shows up in metrics rather than
+                // silently clearing retry state.
+                return Err(crate::error::DataplaneError::Other(format!(
+                    "ADR-0059: UpdateFdbNhgMembers for {group_key:?} but group missing \
+                     from GroupOwnedMap (owned/groups state drift)",
+                )));
             };
             dataplane.add_nexthop_group(g_id, &member_ids).await?;
             let new_members: BTreeSet<_> = members.iter().copied().collect();
