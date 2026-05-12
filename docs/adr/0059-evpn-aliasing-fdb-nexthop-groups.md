@@ -349,15 +349,19 @@ through. Each slice ships independently green.
 
 - **Vendor source**: start from
   [`rust-netlink/netlink-packet-route` PR #225](https://github.com/rust-netlink/netlink-packet-route/pull/225)
-  (MIT-licensed, stalled since Feb on a maintainer ask for
-  `nlmon` byte-fixture tests). The PR already contains a
+  (MIT-licensed, open but stalled — last commit 2026-01-10,
+  last maintainer activity 2026-02-01; 23 unaddressed review
+  comments from maintainer `cathay4t` covering defensive-coding
+  patterns (use `from_bits_retain()` instead of discarding
+  data, don't `unreachable!()` on unknown kernel types) and a
+  rebase against current main). The PR already contains a
   `nexthop` module with `RouteNetlinkMessage::{New,Del,Get}Nexthop`
   + `NexthopAttribute::{Id, Group, Fdb, Gateway, ...}` +
   `NexthopGroupEntry { id, weight, resvd1, resvd2 }` Emitable
   — exactly the surface area we need. Vendor it into
   `crates/evpn-linux/src/linux/nexthop_raw/` rather than
-  forking the upstream crate; we'll satisfy the maintainer's
-  fixture-test requirement and then offer it back upstream.
+  forking the upstream crate; our slice 2 work proceeds
+  independently of upstream's review-backlog state.
 - Three message builders the dataplane calls directly (kept as
   thin Rust wrappers over the vendored types so the call sites
   read as `NexthopMsg::add_fdb_member(id, gateway)` /
@@ -415,9 +419,10 @@ through. Each slice ships independently green.
   (`zebra/rt_netlink.c:5207-5263` for `netlink_fdb_nhg_update`
   and `zebra_evpn_mh.c:1512` for the per-VTEP NH) so the
   fixture stays representative of what production EVPN
-  speakers put on the wire. This is also the test the
-  upstream PR #225 maintainer is asking for, so we're building
-  it once for both sides.
+  speakers put on the wire. These tests serve rustbgpd's own
+  correctness gate first; whether the artifact also feeds an
+  upstream contribution is a separate decision (see "Out of
+  scope for this ADR" below).
 - No interaction with the diff or apply layers yet.
 - Output: a tested netlink primitive ready to be called.
 
@@ -570,10 +575,20 @@ through. Each slice ships independently green.
   needs kernel 5.12+ and changes the diagnostic surface. Defer
   until the basic MPATH path is stable.
 - **Upstreaming `NextHopHandle` to `rust-netlink`**. Separate
-  workstream — once the vendored `nexthop_raw` module has its
-  byte-fixture tests (which slice 2 writes anyway), offer them
-  as the missing piece for PR #225 / #149 upstream. Not
-  blocking implementation.
+  workstream, deliberately *not* committed to as part of this
+  ADR. PR #225 is open but has a substantial unresolved review
+  backlog (23 comments from maintainer `cathay4t` on
+  defensive-coding patterns + a rebase against current main),
+  and the original author hasn't pushed since 2026-01-10. The
+  realistic shape of a useful contribution is not "drop in our
+  byte-fixture tests" but "rebase + address the review backlog
+  + add tests + carry through review iteration" — roughly a
+  week of part-time work, on someone else's timeline. After
+  slice 4 lands, if we still want to upstream we can comment on
+  PR #225 offering to help, sharing our fixture tests as a
+  starting point. Until that decision is made, the vendored
+  module is treated as a permanent part of `crates/evpn-linux`
+  for planning purposes.
 
 ## Cross-references
 
