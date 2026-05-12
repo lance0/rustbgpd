@@ -1247,7 +1247,10 @@ fn op_to_kind(op: &DataplaneOp) -> DataplaneOpKind {
         // list).
         DataplaneOp::InstallFdbNhg { mac, .. } => DataplaneOpKind::InstallFdbNhg { mac: *mac },
         DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
-            DataplaneOpKind::UpdateFdbNhgMembers { esi: group_key.esi }
+            DataplaneOpKind::UpdateFdbNhgMembers {
+                esi: group_key.esi,
+                ethernet_tag: group_key.ethernet_tag,
+            }
         }
         DataplaneOp::RemoveFdbNhg { mac, .. } => DataplaneOpKind::RemoveFdbNhg { mac: *mac },
     }
