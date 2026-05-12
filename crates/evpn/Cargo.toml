@@ -13,3 +13,4 @@ description = "EVPN VTEP domain model — local EVPN instances, route targets, i
 [dependencies]
 rustbgpd-wire.workspace = true
 thiserror.workspace = true
+tracing.workspace = true

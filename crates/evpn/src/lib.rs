@@ -83,7 +83,7 @@ pub mod projection;
 pub mod route_target;
 pub mod segment;
 
-pub use aliasing::{AliasEadPerEvi, AliasIndex, alias_resolved_next_hops};
+pub use aliasing::{AliasEadPerEvi, AliasIndex, alias_resolved_next_hops, group_members};
 pub use dataplane::{
     AppliedOp, BumEnforcementEntry, BumEnforcementKey, BumEnforcementReadiness,
     BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,

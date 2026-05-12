@@ -33,6 +33,7 @@
 use std::net::IpAddr;
 
 use rustbgpd_wire::{MacAddress, MplsLabel, RouteDistinguisher};
+use tracing::warn;
 
 use crate::instance::{EvpnInstanceId, EvpnInstanceTable};
 use crate::mac::{RemoteMacEntry, RemoteMacSource, RemoteMacTable};
@@ -207,24 +208,64 @@ where
         // Resolve aliasing alternatives for non-zero-ESI routes.
         // `alias_resolved_next_hops` returns primary first; we want
         // only the *additional* VTEPs in `alias_vtep_ips`, so trim
-        // the primary off the front.
-        let alias_vtep_ips = if route.esi == rustbgpd_wire::EthernetSegmentIdentifier::ZERO {
-            Vec::new()
+        // the primary off the front. Then enforce ADR-0059's
+        // same-address-family-per-(ESI, EthernetTag) invariant: an
+        // EAD-per-EVI advertised under a different family than the
+        // primary is operator misconfiguration — drop it with a
+        // warn! per dropped alias so the daemon log surfaces the
+        // bad config but the dataplane never sees a mixed-family
+        // FDB-NHG member list.
+        let alias_vtep_ips: Vec<IpAddr> =
+            if route.esi == rustbgpd_wire::EthernetSegmentIdentifier::ZERO {
+                Vec::new()
+            } else {
+                let resolved = crate::alias_resolved_next_hops(
+                    route.next_hop,
+                    route.esi,
+                    route.ethernet_tag,
+                    &alias_index,
+                );
+                let primary_is_v4 = route.next_hop.is_ipv4();
+                // resolved[0] is the primary (route.next_hop). Drop it
+                // so the field carries only alternatives; then filter
+                // any AF-mismatched aliases.
+                resolved
+                    .into_iter()
+                    .skip(1)
+                    .filter(|alias_ip| {
+                        if alias_ip.is_ipv4() == primary_is_v4 {
+                            true
+                        } else {
+                            warn!(
+                                vni = vni.as_u32(),
+                                mac = %mac,
+                                esi = ?route.esi,
+                                ethernet_tag = ?route.ethernet_tag,
+                                primary_vtep_ip = %route.next_hop,
+                                dropped_vtep_ip = %alias_ip,
+                                "evpn: aliasing AF mismatch — dropping alias VTEP \
+                                 (ADR-0059 same-family-per-(ESI, EthernetTag) invariant)",
+                            );
+                            false
+                        }
+                    })
+                    .collect()
+            };
+        // Aliasing group key — `Some((ESI, EthernetTag))` only when at
+        // least one alias VTEP survived; `None` covers ESI == ZERO,
+        // ESI != ZERO with no observed aliases, and the post-AF-filter
+        // empty case. The "empty list ⇔ key is None" invariant is what
+        // the dataplane keys on (ADR-0059 §4).
+        let alias_group_key = if alias_vtep_ips.is_empty() {
+            None
         } else {
-            let resolved = crate::alias_resolved_next_hops(
-                route.next_hop,
-                route.esi,
-                route.ethernet_tag,
-                &alias_index,
-            );
-            // resolved[0] is the primary (route.next_hop). Drop it
-            // so the field carries only alternatives.
-            resolved.into_iter().skip(1).collect()
+            Some((route.esi, route.ethernet_tag))
         };
         let entry = RemoteMacEntry {
             remote_vtep_ip: route.next_hop,
             mobility_sequence: route.mobility_sequence,
             alias_vtep_ips,
+            alias_group_key,
             source: RemoteMacSource::EvpnRibBestPath,
         };
         // Builder rejects duplicates, but we already deduped via
@@ -553,6 +594,64 @@ mod tests {
         let e2 = table.get(vni(100), mac(2)).unwrap();
         assert_eq!(e1.alias_vtep_ips, vec![ipa("10.0.0.3")]);
         assert_eq!(e2.alias_vtep_ips, vec![ipa("10.0.0.5")]);
+    }
+
+    #[test]
+    fn alias_group_key_none_for_zero_esi() {
+        // ESI == ZERO routes never get a group key, regardless of
+        // whether unrelated EAD-per-EVI rows happen to be in scope.
+        let routes = vec![route(100, 1, "10.0.0.2", None)];
+        let eads = vec![ead(esi_seed(1), 0, "10.0.0.3")];
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_group_key.is_none());
+        assert!(entry.alias_vtep_ips.is_empty());
+    }
+
+    #[test]
+    fn alias_group_key_populated_when_aliases_observed() {
+        // Non-zero ESI + at least one EAD-per-EVI for that segment →
+        // group key carries the (ESI, EthernetTag).
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let eads = vec![ead(esi_seed(7), 0, "10.0.0.3")];
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(
+            entry.alias_group_key,
+            Some((esi_seed(7), rustbgpd_wire::EthernetTagId(0))),
+        );
+        assert!(!entry.alias_vtep_ips.is_empty());
+    }
+
+    #[test]
+    fn alias_group_key_none_when_nonzero_esi_but_no_aliases() {
+        // Non-zero ESI but no EAD-per-EVI observed yet → no key. The
+        // dataplane must not pre-create a group for a singleton.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(7))];
+        let eads: Vec<ProjectedEvpnEadPerEvi> = Vec::new();
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert!(entry.alias_group_key.is_none());
+        assert!(entry.alias_vtep_ips.is_empty());
+    }
+
+    #[test]
+    fn mixed_family_aliases_dropped() {
+        // IPv4 primary + one IPv4 alias + one IPv6 alias under the
+        // same (ESI, EthernetTag) → ADR-0059 invariant drops the v6
+        // alias. The v4 alias survives and `alias_group_key` is set.
+        let routes = vec![route_with_esi(100, 1, "10.0.0.2", None, esi_seed(9))];
+        let eads = vec![
+            ead(esi_seed(9), 0, "10.0.0.3"),
+            ead(esi_seed(9), 0, "2001:db8::1"),
+        ];
+        let table = project_evpn_routes_with_aliases(&one_local(100), routes, eads);
+        let entry = table.get(vni(100), mac(1)).unwrap();
+        assert_eq!(entry.alias_vtep_ips, vec![ipa("10.0.0.3")]);
+        assert_eq!(
+            entry.alias_group_key,
+            Some((esi_seed(9), rustbgpd_wire::EthernetTagId(0))),
+        );
     }
 
     #[test]

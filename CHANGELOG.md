@@ -11,6 +11,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0059 slice 1 — `RemoteMacEntry::alias_group_key` portable
+  intent extension.** New `Option<(EthernetSegmentIdentifier,
+  EthernetTagId)>` field on `RemoteMacEntry`, populated by the
+  projection layer when the originating Type 2 carries a non-zero
+  ESI and at least one EAD-per-EVI alias has been observed for
+  that segment. Identifies the Ethernet Segment instance the MAC
+  sits behind so subsequent ADR-0059 slices can key one FDB
+  nexthop group per `(ESI, EthernetTag)` instead of re-deriving
+  it at apply time. Empty `alias_vtep_ips` ⇔ `alias_group_key.is_none()`.
+  Pure-logic / portable-intent change; dataplane behaviour
+  unchanged.
+- **`aliasing::group_members(entry: &RemoteMacEntry) -> Vec<IpAddr>`**
+  helper returning the canonical FDB nexthop group membership for
+  an entry — the union of `remote_vtep_ip` and `alias_vtep_ips`,
+  sorted by `IpAddr` natural order and deduplicated. Backed by
+  `BTreeSet` so two entries with the same member set always
+  produce the same canonical group, which is what the dataplane
+  will key "membership unchanged" on to avoid spurious
+  `NLM_F_REPLACE` traffic. Defensive dedup covers operator-static
+  or hand-rolled constructions where the primary VTEP could
+  appear in `alias_vtep_ips`.
 - **`evpn_ip_vrf_originated_routes{vrf}` Prometheus gauge.**
   Slice 6b's originated-route count is now exposed as a
   Prometheus gauge alongside the existing
@@ -25,6 +46,19 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   slice 6 soak setup: the soak's CSV had to use
   `observed_routes` as a proxy because no Prometheus
   series existed for `originated_routes`.
+
+### Changed
+
+- **EVPN projection now enforces same-address-family-per-`(ESI,
+  EthernetTag)` invariant on aliasing resolution.** Mixed-family
+  EAD-per-EVI observations (e.g., an IPv6 alias under an IPv4
+  primary's Ethernet Segment) are treated as operator
+  misconfiguration: the mismatched alias VTEP is dropped from
+  `alias_vtep_ips` and a `warn!` is logged with the (VNI, MAC,
+  ESI, EthernetTag, primary, dropped) tuple so the bad config
+  surfaces in the daemon log. Backs ADR-0059's cross-family
+  out-of-scope clause with code from day one — the dataplane
+  never sees a mixed-family FDB-NHG member list.
 
 ## [0.18.0] — 2026-05-11
 
