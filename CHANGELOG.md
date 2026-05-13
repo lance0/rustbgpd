@@ -241,6 +241,45 @@ The wire crate stays at 0.9.0 — no source-level changes under
   `observed_routes` as a proxy because no Prometheus
   series existed for `originated_routes`.
 
+- **Gate 9 slice 6 24h Type 5 churn soak harness in-tree**
+  (PR #80). `tests/soak/gate9-slice6-soak.clab.yml` + driver
+  (`tests/soak/run-gate9-slice6-soak.sh`) + analyzer
+  (`tests/soak/analyze-gate9-slice6-soak.py`) — the sibling
+  to the existing Gate 8b BUM-state soak. Two-PE containerlab
+  topology (rustbgpd PE1 ↔ FRR 10.3.1 PE2) running the
+  symmetric Interface-less IRB datapath under continuous
+  tenant-prefix churn (default 30 s `ip addr add` / `del`
+  cycle on the PE1 tenant dummy for 24 h). Samples CSV every
+  60 s: ts, elapsed, both-PE RSS, installed-routes, observed-
+  routes, BGP-established, tenant-present, churn-cycles.
+  Gates: PE1/PE2 RSS slope < 1 MB/h, peak RSS < 400 MB,
+  `bgp_established == 1` post-warmup, `pe1_installed_routes ==
+  1` post-warmup, `tenant_present` ↔ `pe1_observed_routes`
+  correlation, monotone `churn_cycles`. Result for this
+  release: 24h00m clean run between v0.18.0 and v0.19.0
+  (`gate9-slice6-20260511T214936Z`) — peak PE1 RSS 14.3438 MB,
+  steady-state slope 0.025 MB/h, 0 BGP flaps, 0 route
+  oscillations. Post-mortem at
+  [`docs/soak-gate9-slice6-24h-symmetric-irb.md`](docs/soak-gate9-slice6-24h-symmetric-irb.md)
+  with raw artifacts pinned at
+  [`docs/artifacts/soak/gate9-slice6-20260511T214936Z/`](docs/artifacts/soak/gate9-slice6-20260511T214936Z/).
+  Validates the symmetric Interface-less IRB datapath that
+  shipped in v0.18.0.
+
+- **[ADR-0059](docs/adr/0059-evpn-aliasing-fdb-nexthop-groups.md)
+  EVPN aliasing dataplane via FDB nexthop groups.** Design
+  document for the four-slice receive-path aliasing-ECMP
+  implementation (PR #83). Locks the kernel surface: FDB
+  nexthop groups via `NDA_NH_ID` + `NHA_FDB`, raw-netlink
+  construction because `rtnetlink 0.21` exposes no nexthop
+  API. Group keyed by `(VNI, ESI, EthernetTag)` so multiple
+  MACs share one group. PR #85 (`docs: ADR-0059 — correct
+  rust-netlink PR #225 status and upstreaming plan`) followed
+  with a status correction on the upstream rust-netlink
+  nexthop-API track (PR #225 is open against rust-netlink,
+  not merged; rustbgpd ships the raw-netlink primitive in
+  `nexthop_raw` until that lands).
+
 ### Changed
 
 - **EVPN projection now enforces same-address-family-per-`(ESI,
@@ -253,6 +292,56 @@ The wire crate stays at 0.9.0 — no source-level changes under
   surfaces in the daemon log. Backs ADR-0059's cross-family
   out-of-scope clause with code from day one — the dataplane
   never sees a mixed-family FDB-NHG member list.
+
+- **Post-slice-4 documentation audit + refresh** (PR #90). 27
+  documentation surfaces brought back in sync with the
+  current shipped state after the v0.18.0 Gate 9 slice 6
+  release + the ADR-0059 slice chain. Highlights:
+  - **README** "Not yet supported" row drops aliasing
+    dataplane ECMP (shipped); ADR count 58 → 59; soak
+    automation note reflects both Gate 8b BUM-state and
+    Gate 9 slice 6 24h harnesses landing.
+  - **ROADMAP** flips slice 3b + slice 4 from "in flight" to
+    shipped under the EVPN Phase 3 entry; adds M40 to the
+    Interop Test Coverage section.
+  - **KNOWN_ISSUES** moves the EVPN Type 2 MAC+IP origination
+    (resolved in v0.16.0) and the EVPN sticky / static MAC
+    anti-spoof config (resolved in v0.17.0 / ADR-0056)
+    entries into the **Resolved** section.
+  - **ARCHITECTURE** + **CONTRIBUTING** crate inventories
+    grow `nexthop_raw` / `fdb_nhg` / `group_state` /
+    `nh_id_alloc` and the `RTNLGRP_IPV4/IPV6_ROUTE` route
+    observer.
+  - **CONFIGURATION** gained the missing `## [[evpn_instances]]`
+    and `## [[ethernet_segments]]` sections — both were
+    referenced throughout but never defined. The Gate 9
+    `[[evpn_ip_vrfs]]` section also lost its "Type 5
+    origination + FIB programming not yet shipped" line.
+  - **API.md** gained `ListIpVrfs` + `GetIpVrf` RPC docs
+    (proto added them in v0.18.0; doc still listed only
+    `ListEvpnInstances`).
+  - **INTEROP.md** gained the M40 row alongside M39.
+  - **evpn-vtep-troubleshooting.md** gained sections for FDB-NHG
+    / aliasing-ECMP triage and IP-VRF `NotReady` triage — both
+    shipped surfaces with no prior runbook coverage.
+  - **DESIGN / OPERATIONS / USE_CASES / COMPARISON /
+    gobgp-parity / milestones / RFC_NOTES / evpn-alpha-soak
+    / evpn-enablement** — Gate 9 slice 6 framing flipped
+    from "foundation landed" to "shipped end-to-end";
+    aliasing-ECMP framing flipped from "kernel-side follow-up"
+    to "shipped, M40-validated"; stale `Last updated:` /
+    version stamps refreshed.
+  - **ADR-0057 / 0058 / 0059** status headers updated to
+    reflect shipped state.
+  - **Crate-level docstrings** (transport, evpn, evpn-linux,
+    wire/README) refreshed: `transport` "only crate that
+    touches async I/O" narrowed to "BGP peer TCP session I/O"
+    (other crates run their own async tasks); `evpn` and
+    `evpn-linux` module lists + "Out of scope" blocks
+    updated.
+  - **docs/SECURITY.md** `CAP_NET_ADMIN` requirement section
+    extended to cover the slice 6 route-multicast + ADR-0059
+    nexthop programming.
 
 ### Fixed
 
