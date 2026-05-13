@@ -32,6 +32,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so operators can compare rustbgpd's view against `ip nexthop show`
   / `bridge fdb show` without scraping logs.
 
+### Changed
+
+- **EVPN Gate 9 documentation accuracy.** Refreshed the
+  `EvpnInstanceConfig.ip_vrf` schema comment and GoBGP parity row so
+  they describe the shipped Type 5 origination / import and L3 FIB
+  programming path instead of the earlier schema-only foundation.
+
 ### Removed
 
 - **`NexthopError::Ipv6Unsupported`.** The v0.20.0 compatibility

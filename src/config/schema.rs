@@ -538,12 +538,12 @@ pub struct EvpnInstanceConfig {
     /// (lowercase hex, six octets). Empty by default. See ADR-0056.
     #[serde(default)]
     pub sticky_macs: Vec<String>,
-    /// Optional name of an `[[evpn_ip_vrfs]]` entry that will scope this
-    /// L2VNI's future IRB behavior. Gate 9's schema foundation validates
-    /// that the name resolves to a declared `[[evpn_ip_vrfs]]` entry, but
-    /// this field does not yet originate Type 5 routes or program kernel
-    /// IRB state. Empty / unset means this L2VNI remains bridging-only.
-    /// See ADR-0058.
+    /// Optional name of an `[[evpn_ip_vrfs]]` entry that binds this
+    /// L2VNI into Gate 9 symmetric Interface-less IRB. When set, the
+    /// daemon validates the referenced IP-VRF, originates local Type 5
+    /// routes from that VRF's kernel table, and imports remote Type 5
+    /// routes into the corresponding L3 FIB. Empty / unset means this
+    /// L2VNI remains bridging-only. See ADR-0058.
     #[serde(default)]
     pub ip_vrf: Option<String>,
     /// Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes
