@@ -145,13 +145,10 @@ pub enum NexthopError {
     /// by `add_fdb_member`. Will be removed in v0.21.0.
     #[deprecated(
         since = "0.20.0",
-        note = "IPv6 gateways are now supported; this variant is no longer produced. \
-                Slated for removal in v0.21.0."
+        note = "IPv6 gateways are now supported; this variant is no longer produced. Slated for removal in v0.21.0."
     )]
     #[error(
-        "deprecated NexthopError::Ipv6Unsupported (slice-2 era variant; ADR-0059 slice 3.5 PR 3 \
-         enabled IPv6 gateways — this variant is no longer produced by `add_fdb_member` and is \
-         slated for removal in v0.21.0)"
+        "deprecated NexthopError::Ipv6Unsupported (slice-2 era variant; ADR-0059 slice 3.5 PR 3 enabled IPv6 gateways — this variant is no longer produced by `add_fdb_member` and is slated for removal in v0.21.0)"
     )]
     Ipv6Unsupported,
 }

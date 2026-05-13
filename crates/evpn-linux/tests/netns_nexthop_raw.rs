@@ -239,8 +239,10 @@ async fn add_fdb_member_v6_installs_and_round_trips() {
     // Verify via the iproute2 CLI that the row landed with the
     // expected `via 2001:db8::1 ... fdb` form. Uses the module's
     // `run` helper so a missing `ip` binary, permission issue, or
-    // non-zero exit fails loudly with stderr in the panic, matching
-    // the v4 round-trip test.
+    // non-zero exit fails loudly with stderr in the panic — the
+    // v4 sibling tests check the *output* substring but skip the
+    // exit-status check; using `run()` here gives the v6 path
+    // strictly tighter coverage at no cost.
     let id_str = id.to_string();
     let out = run("ip", &["nexthop", "show", "id", &id_str]);
     let stdout = String::from_utf8_lossy(&out.stdout);

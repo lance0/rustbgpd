@@ -100,6 +100,7 @@ impl Plan {
 ///
 /// See module docs for the foreign-entry preservation invariant.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compute_diff(
     desired: &RemoteMacTable,
     snapshot: &KernelSnapshot,
@@ -151,7 +152,11 @@ pub fn compute_diff(
         //     the dispatch is just "go to single-dst", same as
         //     single-homed.
         let aliasing_enabled = instances.get(vni).is_none_or(|i| i.apply_aliasing_ecmp);
-        match (entry.alias_group_key, all_same_family(entry), aliasing_enabled) {
+        match (
+            entry.alias_group_key,
+            all_same_family(entry),
+            aliasing_enabled,
+        ) {
             (Some(portable_key), true, true) => {
                 // FDB-NHG path.
                 let linux_key = AliasGroupKey::new(vni, portable_key.0, portable_key.1);

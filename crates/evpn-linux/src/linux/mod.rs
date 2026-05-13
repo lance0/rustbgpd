@@ -694,9 +694,7 @@ fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
             DataplaneError::InvalidArgument(format!("nexthop validation: {v}"))
         }
         nexthop_raw::NexthopError::Ipv6Unsupported => DataplaneError::InvalidArgument(
-            "nexthop IPv6 unsupported — deprecated variant retained for source compat \
-                 (removed in v0.21.0)"
-                .into(),
+            "nexthop IPv6 unsupported — deprecated variant retained for source compat (removed in v0.21.0)".into(),
         ),
         other => DataplaneError::Other(format!("nexthop socket: {other}")),
     }
