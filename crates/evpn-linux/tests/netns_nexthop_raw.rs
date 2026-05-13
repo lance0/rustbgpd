@@ -237,15 +237,16 @@ async fn add_fdb_member_v6_installs_and_round_trips() {
         .expect("v6 add should succeed (PR 3 enabled IPv6 alias members)");
 
     // Verify via the iproute2 CLI that the row landed with the
-    // expected `via <v6> fdb` form.
-    let out = Command::new("ip")
-        .args(["nexthop", "show", "id", &id.to_string()])
-        .output()
-        .expect("ip nexthop show");
+    // expected `via 2001:db8::1 ... fdb` form. Uses the module's
+    // `run` helper so a missing `ip` binary, permission issue, or
+    // non-zero exit fails loudly with stderr in the panic, matching
+    // the v4 round-trip test.
+    let id_str = id.to_string();
+    let out = run("ip", &["nexthop", "show", "id", &id_str]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("2001:db8::1") && stdout.contains("fdb"),
-        "expected v6 fdb nexthop, got: {stdout}"
+        stdout.contains("via 2001:db8::1") && stdout.contains("fdb"),
+        "expected 'via 2001:db8::1 ... fdb' in: {stdout}"
     );
 
     // Cleanup so subsequent tests aren't disturbed.
