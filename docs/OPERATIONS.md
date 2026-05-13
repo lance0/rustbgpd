@@ -627,7 +627,7 @@ session machinery:
 > FIB programming through a transactional `L3OwnedState` model,
 > `RTNLGRP_IPV4/IPV6_ROUTE` multicast for sub-second withdraw,
 > `ListIpVrfs`/`GetIpVrf` gRPC + `rustbgpctl evpn vrfs` CLI,
-> M39 manual containerlab smoke. **ADR-0059** (post-v0.18.0)
+> M39 manual containerlab smoke. **ADR-0059** (v0.19.0)
 > adds receive-path aliasing-ECMP via FDB nexthop groups
 > (slices 1-4, M40 FRR-validated). Still ahead: MAC-churn variant
 > of the Gate 8b 24h soak before flipping `apply_bum_enforcement`

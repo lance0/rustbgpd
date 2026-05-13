@@ -47,7 +47,7 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
   import + L3 FIB programming through a transactional
   `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast for
   sub-second withdraw, `ListIpVrfs`/`GetIpVrf` gRPC +
-  `rustbgpctl evpn vrfs` CLI. ADR-0059 (post-v0.18.0) adds
+  `rustbgpctl evpn vrfs` CLI. ADR-0059 (v0.19.0) adds
   receive-path aliasing-ECMP via FDB nexthop groups, validated
   against FRR EVPN-MH by the M40 manual smoke. Remaining big
   investments (overlay-index IRB / RFC 9135, production-default

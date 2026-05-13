@@ -816,7 +816,7 @@ implemented per ADR-0040.
   surfaces let operators read it without scraping logs.
   **M39 manual containerlab smoke** validates the bidirectional
   Type 5 path against FRR 10.3.1.
-- **Still ahead in Gate 9 (post-v0.18.0):** full RFC 9135
+- **Still ahead in Gate 9 (v0.19.0):** full RFC 9135
   overlay-index IRB (Gate 9 ships the Interface-less variant
   only), auto-derived Route Targets (RFC 8365 §5.1.2.1),
   privileged-runner CI gate for the M39 + M40 smokes.
@@ -868,7 +868,7 @@ implemented per ADR-0040.
   via `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast,
   `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
   M39 manual smoke against FRR 10.3.1.
-- **Still ahead (post-v0.18.0):** full RFC 9135 overlay-index
+- **Still ahead (v0.19.0):** full RFC 9135 overlay-index
   IRB, auto-derived Route Targets (RFC 8365 §5.1.2.1).
 
 ---

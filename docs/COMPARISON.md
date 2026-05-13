@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-13 (v0.18.0 + ADR-0059 slice chain on `main`)
+Last updated: 2026-05-13 (v0.18.0 + ADR-0059 slice chain in v0.19.0)
 
 ## Overview
 

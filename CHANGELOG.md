@@ -9,6 +9,29 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-05-13
+
+ADR-0059 EVPN aliasing dataplane ECMP via FDB nexthop groups ships
+end-to-end here: multi-homed Type 2 routes program FDB nexthop
+groups (`NDA_NH_ID` / `NHA_FDB`) on the receiving VTEP with proper
+refcounting, atomic REPLACE on member-set drift, partial-install
+rollback, snapshot-aware startup adoption, per-key-space retry
+schedules, and a steady-state delete-retry queue. The M40 manual
+containerlab smoke validates the end-to-end path against FRR
+EVPN-MH 10.3.1 (16/16 PASS first-shot).
+
+Also rolls up the post-v0.18.0 documentation audit (`docs:
+post-slice-4 documentation audit + refresh`, PR #90) that touched
+27 doc surfaces — flipped Gate 9 slice 6 and ADR-0059 from
+"still ahead" to "shipped" across READMEs, ADR status headers,
+crate docstrings, and operator runbooks; added missing
+`[[evpn_instances]]` / `[[ethernet_segments]]` CONFIGURATION
+sections; added `ListIpVrfs` / `GetIpVrf` to API.md; added M40 to
+INTEROP.md; added FDB-NHG + IP-VRF `NotReady` troubleshooting.
+
+The wire crate stays at 0.9.0 — no source-level changes under
+`crates/wire/src/` since v0.18.0.
+
 ### Added
 
 - **ADR-0059 slice 4 — M40 manual containerlab smoke against FRR

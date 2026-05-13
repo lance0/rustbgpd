@@ -722,7 +722,7 @@ for the architectural record.
   with conflict detection. Full RFC 9135 overlay-index IRB
   remains deferred.
 - **ADR-0059 EVPN aliasing dataplane via FDB nexthop groups** —
-  shipped on `main` post-v0.18.0 across slices 1-4 + M40 manual
+  shipped on `main` v0.19.0 across slices 1-4 + M40 manual
   smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
   program FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` on the
   receive path; FRR-validated against EVPN-MH 10.3.1.

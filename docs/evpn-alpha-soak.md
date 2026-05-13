@@ -5,7 +5,7 @@ Post-merge confidence list for the bidirectional EVPN VTEP loop
 8b enforcement intent + kernel primitive layered in across v0.16.0
 and v0.17.0; Gate 9 symmetric Interface-less IRB end-to-end in
 v0.18.0 — PRs #77 / #78 / #79; ADR-0059 aliasing dataplane ECMP
-via FDB nexthop groups fully landed on `main` after v0.18.0 — PRs
+via FDB nexthop groups fully landed in v0.19.0 — PRs
 #84 / #86 / #87 / #88 / #89). The branch landed the control-plane,
 kernel, L3, and aliasing-ECMP paths; this file tracks what we
 still need to retire residual alpha-VTEP risk before claiming
@@ -194,7 +194,7 @@ landing, tracked here for visibility)
   `AliasIndex`. The supervisor at `src/evpn_dataplane.rs` plumbs
   both Type 2 and EAD-per-EVI through from the RIB.
   [ADR-0059](adr/0059-evpn-aliasing-fdb-nexthop-groups.md) is
-  fully shipped on `main` across four implementation slices
+  fully shipped in v0.19.0 across four implementation slices
   (PRs #84 / #86 / #87 / #88) plus the M40 manual containerlab
   smoke (PR #89): slice 1 added `RemoteMacEntry::alias_group_key`
   + same-AF projection invariant; slice 2 added the
