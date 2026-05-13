@@ -7,7 +7,8 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddEvpnRouteRequest, DeleteEvpnRouteRequest, GetIpVrfRequest, IpVrfReadinessState, IpVrfState,
-    ListEvpnInstancesRequest, ListEvpnRequest, ListIpVrfsRequest, MetricsRequest,
+    ListEvpnInstancesRequest, ListEvpnNexthopsRequest, ListEvpnRequest, ListIpVrfsRequest,
+    MetricsRequest,
 };
 
 const EVPN_DIAGNOSE_METRIC_PREFIXES: &[&str] = &[
@@ -296,6 +297,92 @@ pub async fn list_instances(connection: Connection, json: bool) -> Result<(), Cl
                 inst.originated_local_macs_count
             ));
             println!("{}", detail.join(" "));
+        }
+    }
+    Ok(())
+}
+
+/// List owned ADR-0059 FDB nexthop groups.
+///
+/// Read-only. Surfaces the reconciler's actor-owned view of FDB-NHG
+/// groups, per-VTEP member IDs, MAC refs, and orphan / pending-delete
+/// cleanup counters. Empty in RR-only deployments and on VTEPs with no
+/// multi-homed Type 2 state currently installed.
+pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        EvpnServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_evpn_nexthops(ListEvpnNexthopsRequest {})
+        .await?
+        .into_inner();
+
+    if json {
+        let groups: Vec<serde_json::Value> = resp
+            .groups
+            .iter()
+            .map(|g| {
+                serde_json::json!({
+                    "vni": g.vni,
+                    "esi": g.esi,
+                    "ethernet_tag": g.ethernet_tag,
+                    "group_id": g.group_id,
+                    "members": g.members.iter().map(|m| {
+                        serde_json::json!({
+                            "gateway": m.gateway,
+                            "nexthop_id": m.nexthop_id,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "ref_macs": g.ref_macs,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "groups": groups,
+                "orphan_nexthops_count": resp.orphan_nexthops_count,
+                "pending_delete_count": resp.pending_delete_count,
+                "drift_recovery_disabled": resp.drift_recovery_disabled,
+            }))
+            .expect("failed to serialize EVPN nexthop list as JSON")
+        );
+    } else {
+        // Print the latch directly rather than label it as
+        // "enabled" / "disabled" — `drift_recovery_disabled = false`
+        // is also the default state of an empty snapshot (RR-only,
+        // non-Linux build, pre-first-report) where no drift loop is
+        // running at all, so a derived "enabled" label would
+        // misrepresent those cases.
+        println!(
+            "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery-disabled={}",
+            resp.groups.len(),
+            resp.orphan_nexthops_count,
+            resp.pending_delete_count,
+            resp.drift_recovery_disabled,
+        );
+        if resp.groups.is_empty() {
+            println!("No owned FDB nexthop groups");
+        } else {
+            for group in &resp.groups {
+                // Use `nh_id=N via <gw>` per-member so IPv6 gateways
+                // (which contain colons natively) don't collide with
+                // any `gateway:nh_id` delimiter.
+                let members = group
+                    .members
+                    .iter()
+                    .map(|m| format!("nh_id={} via {}", m.nexthop_id, m.gateway))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "vni={} esi={} tag={} group-id={} members=[{}] mac-refs=[{}]",
+                    group.vni,
+                    group.esi,
+                    group.ethernet_tag,
+                    group.group_id,
+                    members,
+                    group.ref_macs.join(","),
+                );
+            }
         }
     }
     Ok(())
@@ -793,5 +880,19 @@ evpn_duplicate_mac_moves_total{vni="100",mac="02:aa:bb:cc:dd:01"} 2
             .await
             .unwrap();
         super::diagnose(connection, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn list_nexthops_command_runs_against_mock_service() {
+        let server = crate::test_support::spawn_mock_server(None).await;
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_nexthops(connection, false).await.unwrap();
+
+        let connection = crate::connection::connect(&server.addr, None)
+            .await
+            .unwrap();
+        super::list_nexthops(connection, true).await.unwrap();
     }
 }

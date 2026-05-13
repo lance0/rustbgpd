@@ -109,8 +109,8 @@ pub use aliasing::{AliasEadPerEvi, AliasIndex, alias_resolved_next_hops, group_m
 pub use dataplane::{
     AppliedOp, BumEnforcementEntry, BumEnforcementKey, BumEnforcementReadiness,
     BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,
-    DataplaneOpKind, DataplaneReport, FailedOp, InstanceDataplaneStatus, InstanceState,
-    IpVrfDataplaneStatus,
+    DataplaneOpKind, DataplaneReport, FailedOp, FdbNexthopDataplaneStatus, FdbNexthopGroupStatus,
+    FdbNexthopMemberStatus, InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use instance::{

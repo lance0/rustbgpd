@@ -300,6 +300,61 @@ pub struct DataplaneReport {
     /// `IpVrfState.installed_routes_count` field reads it
     /// lock-free.
     pub ip_vrf_installed_routes: std::collections::HashMap<IpVrfId, u32>,
+    /// Latest owned ADR-0059 FDB nexthop-group state. Empty / zeroed
+    /// when no FDB-NHG rows are installed or when the Linux dataplane
+    /// actor is not running (RR-only deployments).
+    pub fdb_nexthops: FdbNexthopDataplaneStatus,
+}
+
+/// Operator-facing summary of owned ADR-0059 FDB nexthop-group state.
+///
+/// This is intentionally a compact report shape, not a full kernel
+/// dump. The Linux reconciler owns the allocator, group refcounts, and
+/// stale-adoption bookkeeping; the daemon and gRPC layers only need a
+/// stable snapshot that helps operators answer "what does rustbgpd
+/// think it owns?" without shelling out to `ip nexthop show`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FdbNexthopDataplaneStatus {
+    /// One row per owned FDB nexthop group.
+    pub groups: Vec<FdbNexthopGroupStatus>,
+    /// Count of rustbgpd-tagged kernel nexthops discovered during
+    /// startup adoption / drift recovery but not yet associated with
+    /// a live owned group. These are retained or cleaned by the
+    /// reconciler depending on current kernel FDB references.
+    pub orphan_nexthops_count: u32,
+    /// Count of tagged nexthop IDs queued for retry because a kernel
+    /// delete failed during GC / teardown.
+    pub pending_delete_count: u32,
+    /// `true` when steady-state `RTM_GETNEXTHOP` drift recovery was
+    /// disabled for this daemon instance after a permanent dump
+    /// failure. Normal FDB-NHG apply paths can still work.
+    pub drift_recovery_disabled: bool,
+}
+
+/// One owned FDB nexthop group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdbNexthopGroupStatus {
+    /// VNI that scoped the Linux-owned alias group.
+    pub vni: EvpnInstanceId,
+    /// Ethernet Segment Identifier for this alias group.
+    pub esi: EthernetSegmentIdentifier,
+    /// Ethernet Tag carried by the aliasing control-plane key.
+    pub ethernet_tag: EthernetTagId,
+    /// Kernel nexthop group ID (`NHG_TAG | bitmap_id`).
+    pub group_id: u32,
+    /// Canonical member set, rendered with the per-VTEP kernel NHID.
+    pub members: Vec<FdbNexthopMemberStatus>,
+    /// MACs whose FDB rows currently reference `group_id`.
+    pub ref_macs: Vec<MacAddress>,
+}
+
+/// One per-VTEP member of an FDB nexthop group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FdbNexthopMemberStatus {
+    /// Remote VTEP gateway address.
+    pub gateway: IpAddr,
+    /// Kernel per-VTEP nexthop ID (`VTEP_NH_TAG | bitmap_id`).
+    pub nexthop_id: u32,
 }
 
 /// Per-instance status emitted alongside every report.

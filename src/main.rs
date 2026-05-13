@@ -1215,6 +1215,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             rustbgpd_evpn::IpVrfId,
             u32,
         >::new()));
+    // Latest owned FDB nexthop-group state (ADR-0059). The reconciler
+    // publishes the actor-owned group/refcount snapshot on every
+    // report; gRPC reads this watch channel lock-free for
+    // `EvpnService.ListEvpnNexthops`.
+    let (evpn_fdb_nexthops_tx, evpn_fdb_nexthops_rx) =
+        tokio::sync::watch::channel(rustbgpd_evpn::FdbNexthopDataplaneStatus::default());
     if let Some(handle) = evpn_dataplane_handle.as_ref() {
         let mut reports = handle.subscribe_reports();
         // Resolve IpVrfId → operator-facing name for the metric labels
@@ -1233,6 +1239,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         // updates the value in place and wakes any
                         // pending watchers. Safe to call from inside
                         // a tokio task without blocking the worker.
+                        evpn_fdb_nexthops_tx.send_replace(report.fdb_nexthops);
                         evpn_ip_vrf_status_tx.send_replace(report.ip_vrf_status);
                         // Slice 6a: publish per-VRF observed-routes
                         // gauge values and bump filtered-routes
@@ -1369,6 +1376,10 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                     u64::from(rx.borrow().get(&id).copied().unwrap_or(0))
                 })
             })
+        },
+        evpn_fdb_nexthop_snapshot: {
+            let rx = evpn_fdb_nexthops_rx.clone();
+            Arc::new(move || rx.borrow().clone())
         },
     };
     let mut grpc_handle = tokio::spawn(async move {

@@ -464,6 +464,34 @@ impl rustbgpd_api::proto::evpn_service_server::EvpnService for MockEvpnService {
         }))
     }
 
+    async fn list_evpn_nexthops(
+        &self,
+        _request: Request<server_proto::ListEvpnNexthopsRequest>,
+    ) -> Result<Response<server_proto::ListEvpnNexthopsResponse>, Status> {
+        Ok(Response::new(server_proto::ListEvpnNexthopsResponse {
+            groups: vec![server_proto::EvpnFdbNexthopGroup {
+                vni: 100,
+                esi: "03:00:00:00:00:00:00:00:00:07".to_string(),
+                ethernet_tag: "0".to_string(),
+                group_id: 0x4000_0001,
+                members: vec![
+                    server_proto::EvpnFdbNexthopMember {
+                        gateway: "10.0.0.2".to_string(),
+                        nexthop_id: 0x3000_0001,
+                    },
+                    server_proto::EvpnFdbNexthopMember {
+                        gateway: "10.0.0.3".to_string(),
+                        nexthop_id: 0x3000_0002,
+                    },
+                ],
+                ref_macs: vec!["02:aa:bb:cc:dd:01".to_string()],
+            }],
+            orphan_nexthops_count: 1,
+            pending_delete_count: 0,
+            drift_recovery_disabled: false,
+        }))
+    }
+
     async fn list_ip_vrfs(
         &self,
         _request: Request<server_proto::ListIpVrfsRequest>,

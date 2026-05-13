@@ -983,6 +983,78 @@ async fn fdb_nhg_multihomed_intent_installs_members_group_and_row() {
     h.shutdown().await;
 }
 
+// 1b. The `DataplaneReport.fdb_nexthops` projection mirrors the
+//     actor's `GroupOwnedMap` + adoption-state surface so the
+//     `ListEvpnNexthops` gRPC / CLI consumer can render rustbgpd's
+//     owned state without scraping logs. Verifies that on a
+//     successful multi-homed install the projection reports one
+//     group with the right `(vni, esi, ethernet_tag, group_id)`,
+//     both per-VTEP members (non-zero nh_ids, matching gateways),
+//     the one MAC ref, and zero orphan / pending-delete / drift-
+//     disabled state.
+#[tokio::test]
+async fn fdb_nhg_dataplane_report_projection_matches_owned_state() {
+    use std::collections::BTreeSet;
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "{:?}", last.failed);
+
+    // Cross-check the fake's kernel state — the projection is
+    // expected to mirror these IDs.
+    let (kernel_members, kernel_groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert_eq!(kernel_groups.len(), 1);
+    assert_eq!(kernel_members.len(), 2);
+    let kernel_group_id = kernel_groups[0].id;
+    let kernel_member_ids: BTreeSet<u32> = kernel_members.iter().map(|m| m.id).collect();
+
+    // Now assert the projection.
+    let status = &last.fdb_nexthops;
+    assert_eq!(status.orphan_nexthops_count, 0);
+    assert_eq!(status.pending_delete_count, 0);
+    assert!(!status.drift_recovery_disabled);
+    assert_eq!(status.groups.len(), 1, "expected 1 group row");
+
+    let g = &status.groups[0];
+    assert_eq!(g.vni, vni(100));
+    assert_eq!(g.ethernet_tag, EthernetTagId(0));
+    assert_eq!(g.esi, EthernetSegmentIdentifier::new([7; 10]));
+    assert_eq!(g.group_id, kernel_group_id);
+    assert_eq!(g.ref_macs, vec![mac(1)]);
+    assert_eq!(g.members.len(), 2);
+    // Gateways must match the intent; nh_ids must match the kernel
+    // (and be non-zero).
+    let projected_member_ids: BTreeSet<u32> = g.members.iter().map(|m| m.nexthop_id).collect();
+    assert_eq!(projected_member_ids, kernel_member_ids);
+    let mut projected_gateways: Vec<IpAddr> = g.members.iter().map(|m| m.gateway).collect();
+    projected_gateways.sort();
+    assert_eq!(
+        projected_gateways,
+        vec![ipa("10.0.0.2"), ipa("10.0.0.3")],
+        "projection must report the primary + alias gateways from the intent"
+    );
+    for m in &g.members {
+        assert_ne!(m.nexthop_id, 0, "projection must never report nh_id=0");
+    }
+
+    h.shutdown().await;
+}
+
 // 2. Two MACs share one group: withdraw one leaves group + members
 //    in place; withdraw last tears down.
 #[tokio::test]

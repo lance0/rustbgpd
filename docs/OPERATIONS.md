@@ -669,6 +669,21 @@ rustbgpctl evpn diagnose                    # alpha VTEP summary
 `tunnel_type=8` in the output indicates the RFC 8365 VXLAN
 encapsulation extended community is present.
 
+#### Inspect the dataplane (ADR-0059 FDB nexthop groups)
+
+```bash
+rustbgpctl evpn nexthops                    # owned FDB-NHG groups / members / MAC refs
+rustbgpctl evpn nexthops --json             # JSON for scripting
+```
+
+This is the rustbgpd-owned view of ADR-0059 aliasing-ECMP state —
+distinct from the RIB above. Compare its `group-id`, member
+`nh_id`s, and `mac-refs` against `ip nexthop show` / `bridge fdb
+show` when debugging multi-homed Type 2 forwarding. The top-line
+header reports `orphan-nexthops`, `pending-deletes`, and
+`drift-recovery-disabled` so the periodic drift-recovery latch and
+allocator GC backlog are visible without log scraping.
+
 #### Inject a route from a controller
 
 ```bash

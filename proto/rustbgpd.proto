@@ -1012,6 +1012,16 @@ message TriggerMrtDumpResponse {
 
 service EvpnService {
   rpc ListEvpnInstances(ListEvpnInstancesRequest) returns (ListEvpnInstancesResponse);
+  // ADR-0059 — list the FDB nexthop groups rustbgpd currently owns
+  // in the Linux dataplane reconciler. The `groups` list is empty
+  // when no FDB-NHG state is installed (RR-only deployment,
+  // single-homed VTEP, or every multi-homed VNI flipped to
+  // `apply_aliasing_ecmp = false`) or when the dataplane actor is
+  // not running. The top-level `orphan_nexthops_count`,
+  // `pending_delete_count`, and `drift_recovery_disabled` fields
+  // are always populated and may be non-zero / `true` even when
+  // `groups` is empty.
+  rpc ListEvpnNexthops(ListEvpnNexthopsRequest) returns (ListEvpnNexthopsResponse);
   // Gate 9 — list every `[[evpn_ip_vrfs]]` entry the daemon has
   // resolved, with the live readiness verdict from the reconcile
   // actor's most recent `probe_ip_vrfs` pass.
@@ -1025,6 +1035,47 @@ message ListEvpnInstancesRequest {}
 
 message ListEvpnInstancesResponse {
   repeated EvpnInstanceState instances = 1;
+}
+
+message ListEvpnNexthopsRequest {}
+
+message ListEvpnNexthopsResponse {
+  // One row per rustbgpd-owned FDB nexthop group.
+  repeated EvpnFdbNexthopGroup groups = 1;
+  // Rustbgpd-tagged kernel nexthops discovered during startup
+  // adoption / drift recovery but not currently associated with an
+  // owned group. These are retained or cleaned by the reconciler
+  // depending on live kernel FDB references.
+  uint32 orphan_nexthops_count = 2;
+  // Tagged nexthop IDs queued for retry because kernel deletion
+  // failed during teardown / GC.
+  uint32 pending_delete_count = 3;
+  // True after steady-state RTM_GETNEXTHOP drift recovery latched off
+  // due to a permanent dump failure. Normal apply paths may still
+  // work; this only describes the periodic drift-recovery loop.
+  bool drift_recovery_disabled = 4;
+}
+
+message EvpnFdbNexthopGroup {
+  // L2VNI scoping this Linux-owned alias group.
+  uint32 vni = 1;
+  // Ethernet Segment Identifier in canonical colon-hex form.
+  string esi = 2;
+  // Ethernet Tag ID as rendered in the EVPN NLRI key.
+  string ethernet_tag = 3;
+  // Kernel FDB nexthop group ID (`NHG_TAG | bitmap_id`).
+  uint32 group_id = 4;
+  // Per-VTEP member nexthops that compose this group.
+  repeated EvpnFdbNexthopMember members = 5;
+  // MACs whose FDB rows point at `group_id`.
+  repeated string ref_macs = 6;
+}
+
+message EvpnFdbNexthopMember {
+  // Remote VTEP gateway address.
+  string gateway = 1;
+  // Kernel per-VTEP nexthop ID (`VTEP_NH_TAG | bitmap_id`).
+  uint32 nexthop_id = 2;
 }
 
 message ListIpVrfsRequest {}

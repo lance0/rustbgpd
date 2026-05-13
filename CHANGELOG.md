@@ -9,6 +9,18 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **EVPN FDB nexthop-group operator visibility.** New
+  `EvpnService.ListEvpnNexthops` gRPC RPC and
+  `rustbgpctl evpn nexthops` CLI command expose the reconciler's
+  owned ADR-0059 FDB-NHG state: per-VNI groups, ESI / Ethernet Tag,
+  kernel group ID, per-VTEP member nexthop IDs, MAC refs, orphan
+  nexthop count, pending-delete count, and drift-recovery latch state.
+  The surface is read-only and backed by `DataplaneReport.fdb_nexthops`
+  so operators can compare rustbgpd's view against `ip nexthop show`
+  / `bridge fdb show` without scraping logs.
+
 ## [0.20.0] — 2026-05-13
 
 ADR-0059 slice 3.5 hardening shipped end-to-end in three follow-up
