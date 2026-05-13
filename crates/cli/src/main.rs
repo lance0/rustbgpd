@@ -95,7 +95,7 @@ enum Command {
         #[arg(long)]
         origin_asn: Option<u32>,
 
-        /// Filter by community (e.g., 65001:100); may be repeated
+        /// Filter by community (e.g., 65001:100 or BLACKHOLE); may be repeated
         #[arg(short = 'c', long, value_delimiter = ',')]
         community: Vec<String>,
 
@@ -407,7 +407,7 @@ enum RibAction {
         /// AS path (space-separated)
         #[arg(long, value_delimiter = ' ')]
         as_path: Vec<u32>,
-        /// Communities (e.g., 65001:100)
+        /// Communities (e.g., 65001:100 or BLACKHOLE)
         #[arg(long, value_delimiter = ',')]
         communities: Vec<String>,
         /// Large communities (e.g., 65001:100:200)
@@ -556,11 +556,22 @@ fn resolve_family(family: &Option<String>) -> Result<Option<i32>, CliError> {
     }
 }
 
-/// Parse community string "ASN:value" into u32.
+/// Parse community string "ASN:value" or a well-known alias into u32.
 fn parse_community_str(s: &str) -> Result<u32, String> {
-    let (high, low) = s
-        .split_once(':')
-        .ok_or_else(|| format!("invalid community: {s} (expected ASN:value)"))?;
+    match s {
+        "BLACKHOLE" => return Ok(rustbgpd_wire::COMMUNITY_BLACKHOLE),
+        "NO_EXPORT" => return Ok(rustbgpd_wire::COMMUNITY_NO_EXPORT),
+        "NO_ADVERTISE" => return Ok(rustbgpd_wire::COMMUNITY_NO_ADVERTISE),
+        "NO_EXPORT_SUBCONFED" => return Ok(rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED),
+        "GRACEFUL_SHUTDOWN" => return Ok(rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN),
+        "LLGR_STALE" => return Ok(rustbgpd_wire::COMMUNITY_LLGR_STALE),
+        "NO_LLGR" => return Ok(rustbgpd_wire::COMMUNITY_NO_LLGR),
+        _ => {}
+    }
+
+    let (high, low) = s.split_once(':').ok_or_else(|| {
+        format!("invalid community: {s} (expected ASN:value or well-known alias)")
+    })?;
     let h: u32 = high
         .parse()
         .map_err(|_| format!("invalid community ASN: {high}"))?;
@@ -1275,6 +1286,34 @@ mod tests {
         assert_eq!(
             parse_community_str("65001:100").unwrap(),
             (65001 << 16) | 100
+        );
+        assert_eq!(
+            parse_community_str("BLACKHOLE").unwrap(),
+            rustbgpd_wire::COMMUNITY_BLACKHOLE
+        );
+        assert_eq!(
+            parse_community_str("NO_EXPORT").unwrap(),
+            rustbgpd_wire::COMMUNITY_NO_EXPORT
+        );
+        assert_eq!(
+            parse_community_str("NO_ADVERTISE").unwrap(),
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE
+        );
+        assert_eq!(
+            parse_community_str("NO_EXPORT_SUBCONFED").unwrap(),
+            rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED
+        );
+        assert_eq!(
+            parse_community_str("GRACEFUL_SHUTDOWN").unwrap(),
+            rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN
+        );
+        assert_eq!(
+            parse_community_str("LLGR_STALE").unwrap(),
+            rustbgpd_wire::COMMUNITY_LLGR_STALE
+        );
+        assert_eq!(
+            parse_community_str("NO_LLGR").unwrap(),
+            rustbgpd_wire::COMMUNITY_NO_LLGR
         );
         assert!(parse_community_str("invalid").is_err());
         assert!(parse_community_str("70000:1").is_err());

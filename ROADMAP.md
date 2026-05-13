@@ -304,6 +304,15 @@ this document is reference / long-tail.
       appends an EBGP import chain-tail rule
       (`match BLACKHOLE → permit, add BLACKHOLE + NO_ADVERTISE`) and
       hot-applies on SIGHUP through the peer manager.
+    - **Operator surface**: `rustbgpctl` accepts and renders
+      `BLACKHOLE`, `NO_EXPORT`, `NO_ADVERTISE`,
+      `NO_EXPORT_SUBCONFED`, `GRACEFUL_SHUTDOWN`, `LLGR_STALE`, and
+      `NO_LLGR` anywhere the CLI parses or displays standard
+      communities.
+    - **Interop**: M41 is CI-gated against FRR 10.3.1. FRR advertises
+      a host route with `65535:666`; rustbgpd verifies receiver-side
+      scoping by preserving `BLACKHOLE` and adding `NO_ADVERTISE`
+      under `[global] honor_blackhole = true`.
   Remaining BLACKHOLE work:
     - **Dataplane discard**: install a kernel discard/null route for
       authorized tagged prefixes, subject to RFC 7999 safety checks
@@ -313,9 +322,8 @@ this document is reference / long-tail.
       enabled }` or operator-policy attachment via
       `set_community_add = ["BLACKHOLE"]` on a per-prefix import
       filter. Per-prefix route injection is the likely surface.
-    - **Interop test**: rustbgpd ↔ FRR or BIRD, advertise a blackhole
-      community on a host route and assert receiver-side scoping now,
-      then discard behavior once the FIB slice lands.
+    - **FIB interop**: extend M41 or add a sibling milestone that
+      asserts discard behavior once the FIB slice lands.
 - [x] **Resolve open `cargo audit` findings** (v0.13.2 / v0.14.0) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
   unreachable in v0.13.2; v0.14.0 follow-up granted `checks: write`
