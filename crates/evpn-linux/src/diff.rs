@@ -38,7 +38,9 @@
 use std::collections::BTreeSet;
 use std::net::IpAddr;
 
-use rustbgpd_evpn::{EvpnInstanceId, MacAddress, RemoteMacEntry, RemoteMacTable, group_members};
+use rustbgpd_evpn::{
+    EvpnInstanceId, EvpnInstanceTable, MacAddress, RemoteMacEntry, RemoteMacTable, group_members,
+};
 
 use crate::dataplane::DataplaneOp;
 use crate::group_state::{AliasGroupKey, GroupOwnedMap};
@@ -92,7 +94,10 @@ impl Plan {
 /// Compute the operations needed to bring `snapshot` (kernel state)
 /// into agreement with `desired` (the intent), using `last_applied`
 /// to identify rustbgpd-owned entries and `probes` to scope work to
-/// Ready instances.
+/// Ready instances. `instances` carries the per-VNI policy bits
+/// (currently `apply_aliasing_ecmp`); VNIs absent from the table
+/// default to the production posture (aliasing enabled) — the
+/// `probes` readiness gate is the real install/no-install boundary.
 ///
 /// See module docs for the foreign-entry preservation invariant.
 #[must_use]
@@ -102,6 +107,7 @@ pub fn compute_diff(
     last_applied: &OwnedSet,
     probes: &InstanceProbes,
     groups: &GroupOwnedMap,
+    instances: &EvpnInstanceTable,
 ) -> Plan {
     let mut creates: Vec<DataplaneOp> = Vec::new();
     let mut updates: Vec<DataplaneOp> = Vec::new();
@@ -130,9 +136,15 @@ pub fn compute_diff(
         // Decide single-dst vs FDB-NHG path. The portable intent
         // (`alias_group_key`) carries `(ESI, EthernetTag)` per slice
         // 1; the Linux-owned key adds VNI per ADR-0059 §7's
-        // `share_l2_nhg` default-off.
-        match (entry.alias_group_key, all_v4(entry)) {
-            (Some(portable_key), true) => {
+        // `share_l2_nhg` default-off. ADR-0059 slice 3.5 adds the
+        // per-instance `apply_aliasing_ecmp` off-switch: any VNI
+        // whose `EvpnInstance.apply_aliasing_ecmp` is `false` routes
+        // multi-homed entries through the single-dst path. VNIs
+        // absent from `instances` default to enabled (the production
+        // posture).
+        let aliasing_enabled = instances.get(vni).is_none_or(|i| i.apply_aliasing_ecmp);
+        match (entry.alias_group_key, all_v4(entry), aliasing_enabled) {
+            (Some(portable_key), true, true) => {
                 // FDB-NHG path.
                 let linux_key = AliasGroupKey::new(vni, portable_key.0, portable_key.1);
                 emit_fdb_nhg_pass(
@@ -149,7 +161,7 @@ pub fn compute_diff(
                     &mut deletes,
                 );
             }
-            (Some(_), false) => {
+            (Some(_), false, _) => {
                 // IPv6 fallback — slice 2 `NexthopSocket` rejects v6
                 // gateways. Diff degrades to single-dst (primary VTEP
                 // only). Record the key so the reconcile actor can
@@ -169,8 +181,13 @@ pub fn compute_diff(
                     &mut deletes,
                 );
             }
-            (None, _) => {
-                // Single-homed path — existing slice 1 behavior.
+            (Some(_), true, false) | (None, _, _) => {
+                // Single-homed path — or multi-homed with the
+                // operator off-switch flipped on this VNI. The
+                // `FdbNhg → SingleDst` transition is handled inside
+                // `emit_single_dst_pass` via `last_applied` lookup,
+                // so toggling the knob with the daemon running
+                // converges cleanly.
                 emit_single_dst_pass(
                     vni,
                     mac,
@@ -526,7 +543,8 @@ mod tests {
     use std::net::IpAddr;
 
     use rustbgpd_evpn::{
-        EvpnInstanceId, MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable,
+        EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress, RemoteMacEntry,
+        RemoteMacSource, RemoteMacTable, RouteTarget,
     };
 
     use super::*;
@@ -551,6 +569,29 @@ mod tests {
             p.insert(v, InstanceProbe::Ready);
         }
         p
+    }
+
+    /// Build an `EvpnInstanceTable` with one entry per VNI, all
+    /// flipped to `apply_aliasing_ecmp = false`. Used by the slice
+    /// 3.5 off-switch tests. (Tests that want the production-default
+    /// posture pass an empty `EvpnInstanceTable::new()` — unknown
+    /// VNIs default to aliasing-enabled.)
+    fn instances_disabled(vnis: &[EvpnInstanceId]) -> EvpnInstanceTable {
+        let mut t = EvpnInstanceTable::new();
+        for &v in vnis {
+            let inst = EvpnInstance::new(
+                v,
+                "65000:1".parse().unwrap(),
+                vec!["65000:1".parse::<RouteTarget>().unwrap()],
+                "10.0.0.1".parse().unwrap(),
+                None,
+                false,
+            )
+            .unwrap()
+            .with_apply_aliasing_ecmp(false);
+            t.insert(inst).unwrap();
+        }
+        t
     }
 
     fn entry(remote: &str, seq: Option<u32>) -> RemoteMacEntry {
@@ -601,6 +642,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert_eq!(
             plan.ops,
@@ -628,6 +670,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert!(plan.is_noop(), "expected no-op, got {:?}", plan.ops);
     }
@@ -648,6 +691,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert_eq!(
             plan.ops,
@@ -675,6 +719,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert_eq!(
             plan.ops,
@@ -707,6 +752,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert_eq!(
             plan.ops,
@@ -745,6 +791,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert!(
             plan.is_noop(),
@@ -777,6 +824,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert!(plan.is_noop(), "should preserve kernel-learned local");
     }
@@ -796,6 +844,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert!(plan.is_noop());
     }
@@ -817,6 +866,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         let plan_b = compute_diff(
             &desired,
@@ -824,6 +874,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert!(plan_a.is_noop());
         assert_eq!(plan_a, plan_b);
@@ -847,6 +898,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert_eq!(
             plan.ops,
@@ -876,6 +928,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
         assert!(plan.is_noop());
     }
@@ -928,6 +981,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
 
         for op in &plan.ops {
@@ -1021,6 +1075,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
 
         // The plan should contain both a RemoveRemoteFdb (for the old
@@ -1064,6 +1119,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
 
         assert!(
@@ -1107,6 +1163,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
 
         // RemoveFdbNhg should carry the OLD key, Install should carry NEW.
@@ -1187,7 +1244,14 @@ mod tests {
         groups.record_group_install(linux_key(100, 7), 0x4000_0001, members);
         groups.record_mac_ref(linux_key(100, 7), vni(100), mac(1));
 
-        let plan = compute_diff(&desired, &snapshot, &applied, &probes, &groups);
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &groups,
+            &EvpnInstanceTable::new(),
+        );
 
         // Member set should shrink to [10.0.0.2, 10.0.0.3].
         let updates: Vec<_> = plan
@@ -1246,6 +1310,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
 
         assert!(
@@ -1289,6 +1354,7 @@ mod tests {
             &applied,
             &probes,
             &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
         );
 
         assert!(
@@ -1304,6 +1370,163 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
             "must NOT emit InstallFdbNhg when v6 aliases present: {:?}",
+            plan.ops,
+        );
+    }
+
+    // ─── ADR-0059 slice 3.5: per-VNI apply_aliasing_ecmp off-switch ───
+
+    #[test]
+    fn apply_aliasing_ecmp_false_emits_single_dst_for_multihomed_entry() {
+        // Multi-homed v4 entry on a VNI whose `apply_aliasing_ecmp` is
+        // `false` → AddRemoteFdb at the primary VTEP, no InstallFdbNhg.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_disabled(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::AddRemoteFdb { vni: v, mac: m, dst, .. }
+                    if *v == vni(100) && *m == mac(1) && *dst == ip("10.0.0.2")
+            )),
+            "expected single-dst AddRemoteFdb fallback, got {:?}",
+            plan.ops,
+        );
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
+            "must NOT emit InstallFdbNhg when apply_aliasing_ecmp=false: {:?}",
+            plan.ops,
+        );
+        // IPv6 fallback set should stay empty — this isn't an IPv6
+        // alias case, the gate is the operator off-switch.
+        assert!(plan.ipv6_alias_fallback_keys.is_empty());
+    }
+
+    #[test]
+    fn apply_aliasing_ecmp_false_emits_transition_when_last_applied_fdb_nhg() {
+        // Flip the knob with the daemon already running and a
+        // previously-installed FDB-NHG → emit RemoveFdbNhg + AddRemoteFdb
+        // (the standard `FdbNhg → SingleDst` transition).
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let mut applied = OwnedSet::new();
+        applied.record_applied(vni(100), mac(1), OwnedEntry::fdb_nhg(linux_key(100, 7)));
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_disabled(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::RemoveFdbNhg { vni: v, mac: m, .. }
+                    if *v == vni(100) && *m == mac(1)
+            )),
+            "expected RemoveFdbNhg in transition, got {:?}",
+            plan.ops,
+        );
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::AddRemoteFdb { vni: v, mac: m, dst, .. }
+                    if *v == vni(100) && *m == mac(1) && *dst == ip("10.0.0.2")
+            )),
+            "expected AddRemoteFdb in transition, got {:?}",
+            plan.ops,
+        );
+        // Plan-level ordering: deletes precede creates.
+        let remove_idx = plan
+            .ops
+            .iter()
+            .position(|o| matches!(o, DataplaneOp::RemoveFdbNhg { .. }))
+            .expect("RemoveFdbNhg present");
+        let add_idx = plan
+            .ops
+            .iter()
+            .position(|o| matches!(o, DataplaneOp::AddRemoteFdb { .. }))
+            .expect("AddRemoteFdb present");
+        assert!(
+            remove_idx < add_idx,
+            "RemoveFdbNhg must precede AddRemoteFdb in {:?}",
+            plan.ops,
+        );
+    }
+
+    #[test]
+    fn apply_aliasing_ecmp_unknown_vni_defaults_to_enabled() {
+        // A VNI not yet in the `EvpnInstanceTable` (race window
+        // during config reload) defaults to aliasing-enabled — the
+        // `probes` readiness gate is the real install/no-install
+        // boundary, not the instance-table presence check.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let instances = EvpnInstanceTable::new(); // empty
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
+            "unknown VNI must default to aliasing-enabled (InstallFdbNhg expected), got {:?}",
             plan.ops,
         );
     }

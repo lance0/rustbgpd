@@ -110,6 +110,15 @@ pub struct EvpnInstance {
     /// bit on Type 2s emitted as a result of normal kernel learning.
     /// See ADR-0056 for the schema choice and naming rationale.
     pub sticky_macs: BTreeSet<MacAddress>,
+    /// Program ADR-0059 FDB nexthop groups for multi-homed Type 2
+    /// routes on this VNI. `true` by default ([`EvpnInstance::new`]
+    /// initializes it on); use [`EvpnInstance::with_apply_aliasing_ecmp`]
+    /// at config-parse time to flip it off for a specific L2VNI. When
+    /// disabled, the dataplane diff routes multi-homed entries to the
+    /// single-dst FDB path (primary VTEP only) — same behavior as
+    /// single-homed Type 2 entries. Single-homed entries are
+    /// unaffected by this flag.
+    pub apply_aliasing_ecmp: bool,
 }
 
 impl EvpnInstance {
@@ -147,6 +156,7 @@ impl EvpnInstance {
             bridge,
             advertise_svi_mac,
             sticky_macs: BTreeSet::new(),
+            apply_aliasing_ecmp: true,
         })
     }
 
@@ -156,6 +166,19 @@ impl EvpnInstance {
     #[must_use]
     pub fn with_sticky_macs(mut self, sticky_macs: BTreeSet<MacAddress>) -> Self {
         self.sticky_macs = sticky_macs;
+        self
+    }
+
+    /// Override the per-instance ADR-0059 FDB-NHG application gate.
+    /// `true` is the default and matches the post-slice-3b/slice-4
+    /// production shape; `false` rolls this L2VNI back to single-dst
+    /// FDB rows for multi-homed Type 2 entries. Used by the config
+    /// layer to apply the operator's `apply_aliasing_ecmp` choice
+    /// after the rest of the instance has been validated by
+    /// [`Self::new`].
+    #[must_use]
+    pub fn with_apply_aliasing_ecmp(mut self, enabled: bool) -> Self {
+        self.apply_aliasing_ecmp = enabled;
         self
     }
 }

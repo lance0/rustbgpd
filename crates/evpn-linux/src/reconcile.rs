@@ -575,6 +575,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             &self.state.owned,
             &probes,
             &self.state.groups,
+            intent.instances.as_ref(),
         );
 
         // ADR-0059 IPv6-alias-fallback warn: log only for `(VNI, MAC)`
