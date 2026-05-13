@@ -62,6 +62,10 @@ name: Interop
 #     and initiator behavior. M35 covers IPv4 unicast, M35b FlowSpec,
 #     M35c L2VPN/EVPN so all outbound attach sites are exercised
 #     against FRR.
+#   - M41 (~15 s test): RFC 7999 BLACKHOLE (65535:666) — FRR tags a
+#     /32 with BLACKHOLE, rustbgpd's `honor_blackhole = true` chain-
+#     tail rule preserves it and adds NO_ADVERTISE while an untagged
+#     /32 stays untouched. Plain BGP + IPv4 unicast.
 #
 # M30b/M31/M32/M33 stay manual: M30b needs the missing `vrf` module
 # for L3VNI binding (RFC 9136 Type 5); M32 needs a bond ES; M33 needs
@@ -720,3 +724,48 @@ jobs:
         if: always()
         run: |
           sudo containerlab destroy -t tests/interop/m35c-graceful-shutdown-evpn-frr.clab.yml --cleanup || true
+
+  m41:
+    name: M41 — RFC 7999 BLACKHOLE (FRR 10.3.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://github.com/srl-labs/containerlab/releases/download/v0.74.3/containerlab_0.74.3_linux_amd64.deb \
+            -o /tmp/clab.deb
+          sudo dpkg -i /tmp/clab.deb
+
+      - name: Install grpcurl + jq
+        # jq parses `ListReceivedRoutes` JSON for the per-prefix
+        # community assertions (BLACKHOLE + implicit NO_ADVERTISE
+        # on tagged /32, neither on untagged /32).
+        run: |
+          curl -sL https://github.com/fullstorydev/grpcurl/releases/download/v1.9.1/grpcurl_1.9.1_linux_x86_64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin grpcurl
+          sudo apt-get update -y && sudo apt-get install -y jq
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build rustbgpd:dev
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: rustbgpd:dev
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy M41 topology
+        run: sudo containerlab deploy -t tests/interop/m41-blackhole-frr.clab.yml
+
+      - name: Run M41 test
+        run: bash tests/interop/scripts/test-m41-blackhole-frr.sh
+
+      - name: Destroy topology
+        if: always()
+        run: |
+          sudo containerlab destroy -t tests/interop/m41-blackhole-frr.clab.yml --cleanup || true

@@ -15,8 +15,8 @@ control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Kernel FIB
 integration and broader router features remain future work. Validated with
-a workspace test suite, fuzz targets, and 35 automated interop suites against
-FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR — 15 of those interop
+a workspace test suite, fuzz targets, and 36 automated interop suites against
+FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR — 16 of those interop
 tests run on every PR; the rest are gated locally for runtime or kernel
 reasons.
 
@@ -306,7 +306,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | Kernel FIB integration (unicast), EVPN duplicate-MAC quarantine action / production-default multi-homing enforcement / RFC 9135 overlay-index IRB, VPNv4/v6, Confederation, TCP-AO |
-| **Tests** | Workspace test suite, fuzz targets, 35 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (15 interop tests gated on every PR; M36/M37 run locally with privileged kernel access) |
+| **Tests** | Workspace test suite, fuzz targets, 36 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (16 interop tests gated on every PR; M36/M37 run locally with privileged kernel access) |
 
 ## Documentation
 
