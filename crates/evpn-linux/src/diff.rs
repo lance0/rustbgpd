@@ -1516,10 +1516,13 @@ mod tests {
 
     #[test]
     fn apply_aliasing_ecmp_unknown_vni_defaults_to_enabled() {
-        // A VNI not yet in the `EvpnInstanceTable` (race window
-        // during config reload) defaults to aliasing-enabled — the
-        // `probes` readiness gate is the real install/no-install
-        // boundary, not the instance-table presence check.
+        // A VNI not present in the `EvpnInstanceTable` (e.g.,
+        // partially-constructed test intent, or a synthetic
+        // `RemoteMacEntry` that references a VNI we don't have
+        // an instance config for) defaults to aliasing-enabled —
+        // the `probes` readiness gate is the real install /
+        // no-install boundary, not the instance-table presence
+        // check.
         let mut desired = RemoteMacTable::builder();
         desired
             .insert(
