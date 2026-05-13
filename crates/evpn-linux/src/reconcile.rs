@@ -262,6 +262,16 @@ struct ActorState {
     ///    re-run on every reconcile via the same `adoption_done`
     ///    gate path) processes them with the retention-set logic.
     last_drift_check: Option<Instant>,
+    /// Permanent shut-down latch for the slice 3.5 drift-recovery
+    /// cycle. Flipped to `true` when `dump_owned_nexthops` returns a
+    /// permanent failure (`KernelTooOld`, `PermissionDenied`,
+    /// `InvalidArgument`) — the same error classes the one-shot
+    /// startup-adoption block uses to decide whether to give up.
+    /// Once latched, the drift gate skips entirely so the actor
+    /// stops re-attempting the dump (and emitting a warn) on every
+    /// reconcile trigger. Transient/conflict failures leave this
+    /// false; the next reconcile pass retries.
+    drift_disabled: bool,
     /// Tracks whether [`Dataplane::next_event`] is still expected to
     /// yield events. `true` at startup; flipped to `false` the first
     /// time `next_event()` resolves to `None`. While `false` the
@@ -297,6 +307,7 @@ impl ActorState {
             adopted_unreferenced: BTreeMap::new(),
             adoption_done: false,
             last_drift_check: None,
+            drift_disabled: false,
         }
     }
 
@@ -723,7 +734,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // `last_drift_check` advances only when the dump succeeds —
         // a transient `dump_owned_nexthops` failure must not
         // postpone the next attempt by a full interval.
-        if self.state.adoption_done && !adoption_flipped_this_pass {
+        if self.state.adoption_done && !adoption_flipped_this_pass && !self.state.drift_disabled {
             let due = self
                 .state
                 .last_drift_check
@@ -1289,14 +1300,35 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         use crate::dataplane::KernelNexthopKind;
         use crate::nh_id_alloc::NhIdAllocator;
 
-        // (0) Re-dump tagged NHIDs.
+        // (0) Re-dump tagged NHIDs. Mirror the startup-adoption
+        //     error-class dispatch: permanent failures (kernel too
+        //     old, no `CAP_NET_ADMIN`, message-shape rejection)
+        //     latch `drift_disabled` so subsequent reconcile passes
+        //     stop attempting the dump entirely. Transient /
+        //     conflict failures leave drift enabled — the next
+        //     reconcile pass will retry.
         let actual = match self.dataplane.dump_owned_nexthops().await {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "drift: dump_owned_nexthops failed; deferring this drift cycle"
-                );
+                match e.class() {
+                    crate::error::FailureClass::Permanent => {
+                        tracing::warn!(
+                            error = %e,
+                            "drift: dump_owned_nexthops permanently failed; \
+                             disabling drift recovery for this daemon instance \
+                             (matches startup-adoption permanent-failure semantics)"
+                        );
+                        self.state.drift_disabled = true;
+                    }
+                    crate::error::FailureClass::Transient
+                    | crate::error::FailureClass::Conflict => {
+                        tracing::warn!(
+                            error = %e,
+                            "drift: dump_owned_nexthops failed transiently; \
+                             deferring this drift cycle"
+                        );
+                    }
+                }
                 return false;
             }
         };
@@ -1474,12 +1506,23 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
         if adopted_any {
-            // Give cleanup_unreferenced_adoptions a turn next pass.
-            self.state.adoption_done = false;
             tracing::info!(
                 adopted = self.state.adopted_unreferenced.len(),
-                "drift: discovered untracked tagged NHIDs; queued for adoption cleanup"
+                "drift: discovered untracked tagged NHIDs; running adoption cleanup in-line"
             );
+            // Run cleanup directly with the snapshot we already have
+            // rather than clearing `adoption_done`. Clearing it would
+            // reopen the startup-adoption `dump_owned_nexthops` path
+            // on the next reconcile pass (a second netlink dump, plus
+            // `reserve()` warnings for IDs we already reserved here)
+            // AND defer the actual delete by up to another
+            // `periodic_dump` interval. The retention set is built
+            // from the current snapshot; any FDB row drift's step (3)
+            // removed earlier this pass is still listed there (the
+            // snapshot was taken before our removes), so the orphan
+            // NHID may retain this pass and clean up cleanly on the
+            // next drift cycle when the snapshot is fresh.
+            let _ = self.cleanup_unreferenced_adoptions(snapshot).await;
         }
         true
     }

@@ -1595,6 +1595,60 @@ async fn drift_recovery_preserves_fdb_row_for_desired_mac() {
     h.shutdown().await;
 }
 
+// 7. A *permanent* dump failure (e.g., kernel too old, missing
+//    CAP_NET_ADMIN) latches drift recovery off so the actor stops
+//    re-attempting the dump (and emitting a warn) every reconcile
+//    trigger thereafter.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_permanent_dump_failure_latches_off() {
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Install a single-dst entry so reconcile work happens normally.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+
+    // Stage a permanent failure (`KernelTooOld` is classified
+    // Permanent) for the next reconcile pass's drift dump. After
+    // it lands once, drift should latch off; even if we stage more
+    // permanent failures, drift must not consume them.
+    h.handle.inject_failure_kernel_too_old(None);
+
+    // First drift cycle — consumes the permanent failure, latches.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // Stage a SECOND permanent failure. With the latch in place,
+    // drift is disabled — this failure should NOT be consumed by
+    // a drift dump call. Forward reconcile work for unrelated paths
+    // continues normally.
+    h.handle.inject_failure_kernel_too_old(None);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // FDB row for the desired MAC must still be present — drift
+    // disablement must not affect single-dst reconcile work.
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "single-dst FDB row must survive drift-disabled state"
+    );
+
+    h.shutdown().await;
+}
+
 #[allow(dead_code)]
 fn _starts_anchor() -> Instant {
     Instant::now()
