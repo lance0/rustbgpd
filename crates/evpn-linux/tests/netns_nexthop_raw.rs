@@ -16,9 +16,11 @@
 //! 3. `del` removes the named nexthop and a re-`del` of the same
 //!    id returns Ok (ENOENT-as-idempotent semantics).
 //!
-//! Plus three negative paths:
+//! Plus the slice 3.5 PR 3 IPv6 add round-trip and two negative
+//! paths:
 //!
-//! 4. `add_fdb_member` with `IpAddr::V6` → `NexthopError::Ipv6Unsupported`.
+//! 4. `add_fdb_member` with `IpAddr::V6` — installs successfully and
+//!    `ip nexthop show` round-trips `via <v6> fdb`.
 //! 5. `add_fdb_group` with no members → `NexthopValidationError::EmptyGroup`.
 //! 6. `add_fdb_group` with duplicate member ids →
 //!    `NexthopValidationError::DuplicateMemberId`.
@@ -209,27 +211,42 @@ async fn round_trip_add_fdb_group_then_del() {
     );
 }
 
-/// IPv6 gateway should be rejected at the API boundary with a typed
-/// error, not a kernel netlink failure.
+/// IPv6 gateway accepted end-to-end (ADR-0059 slice 3.5 PR 3): the
+/// encoder picks `AF_INET6`, the kernel installs the row, and the
+/// subsequent dump round-trips a `Member { gateway: V6 }` back.
 #[tokio::test]
-async fn add_fdb_member_v6_returns_ipv6_unsupported() {
+async fn add_fdb_member_v6_installs_and_round_trips() {
     if !netns_gate() {
         return;
     }
 
     if !is_inner() {
-        let ns = NetnsFixture::create("v6reject");
-        run_inner(&ns, "add_fdb_member_v6_returns_ipv6_unsupported");
+        let ns = NetnsFixture::create("v6install");
+        run_inner(&ns, "add_fdb_member_v6_installs_and_round_trips");
         return;
     }
 
     let mut sock = NexthopSocket::connect().expect("connect");
+    let id: u32 = 99;
     let v6: IpAddr = "2001:db8::1".parse().unwrap();
-    let err = sock.add_fdb_member(99, v6).await.unwrap_err();
+    sock.add_fdb_member(id, v6)
+        .await
+        .expect("v6 add should succeed (PR 3 enabled IPv6 alias members)");
+
+    // Verify via the iproute2 CLI that the row landed with the
+    // expected `via <v6> fdb` form.
+    let out = Command::new("ip")
+        .args(["nexthop", "show", "id", &id.to_string()])
+        .output()
+        .expect("ip nexthop show");
+    let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        matches!(err, NexthopError::Ipv6Unsupported),
-        "expected Ipv6Unsupported, got {err:?}"
+        stdout.contains("2001:db8::1") && stdout.contains("fdb"),
+        "expected v6 fdb nexthop, got: {stdout}"
     );
+
+    // Cleanup so subsequent tests aren't disturbed.
+    sock.del(id).await.expect("v6 del should succeed");
 }
 
 /// Empty group → validation error before any netlink send.

@@ -58,6 +58,9 @@ const NLM_F_CREATE: u16 = 0x400;
 /// `AF_INET` — IPv4 family marker for the `nhmsg.nh_family` byte.
 const AF_INET: u8 = 2;
 
+/// `AF_INET6` — IPv6 family marker for the `nhmsg.nh_family` byte.
+const AF_INET6: u8 = 10;
+
 /// `AF_UNSPEC` — used by groups and deletes.
 const AF_UNSPEC: u8 = 0;
 
@@ -113,19 +116,21 @@ fn build_nlmsghdr(body_len: usize, msg_type: u16, flags: u16, seq: u32) -> [u8; 
 /// at `gateway`. The on-wire attribute order is `NHA_ID`,
 /// `NHA_GATEWAY`, `NHA_FDB` — matches iproute2's `ip nexthop add`.
 ///
-/// Caller has already validated `id != 0` and that `gateway` is
-/// IPv4 ([`super::NexthopError::Ipv6Unsupported`] guards the v6 case
-/// at the socket layer).
+/// IPv4 gateways encode `nh_family = AF_INET` with a 4-byte
+/// `NHA_GATEWAY` payload; IPv6 gateways encode `nh_family = AF_INET6`
+/// with a 16-byte payload (ADR-0059 slice 3.5 PR 3). Caller is
+/// responsible for `id != 0`.
 pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u8> {
-    let mut body = Vec::with_capacity(8 + 8 + 8 + 4);
+    // Initial capacity sized to the v6 worst case (16 + 8 + 8 +
+    // 20 + 4 = 56 bytes); v4 path reuses the same buffer at 44.
+    let mut body = Vec::with_capacity(8 + 8 + 20 + 4);
 
-    // nhmsg: AF_INET when a v4 gateway is present (iproute2 sets
-    // family from the gateway form). v6 callers are rejected at the
-    // socket layer; extracting `family` + the on-wire gateway bytes
-    // from one match keeps the two derivations from drifting.
-    let (family, gateway_bytes) = match gateway {
-        IpAddr::V4(v4) => (AF_INET, v4.octets()),
-        IpAddr::V6(_) => unreachable!("v6 gateways rejected at NexthopSocket boundary"),
+    // nhmsg: family follows the gateway form (iproute2 convention).
+    // The on-wire payload is the gateway as it appears on the network
+    // — `octets()` returns big-endian bytes for both v4 and v6.
+    let (family, gateway_bytes): (u8, Vec<u8>) = match gateway {
+        IpAddr::V4(v4) => (AF_INET, v4.octets().to_vec()),
+        IpAddr::V6(v6) => (AF_INET6, v6.octets().to_vec()),
     };
     push_nhmsg(
         &mut body,

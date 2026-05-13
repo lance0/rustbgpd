@@ -63,6 +63,30 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   with startup adoption; it shares the existing 60 s
   `periodic_dump` cadence so there is no new timer or config
   knob.
+- **ADR-0059 slice 3.5 PR 3 — IPv6 FDB-NHG alias members.** The
+  `rustbgpd-evpn-linux` netlink encoder now accepts homogeneous
+  IPv6 alias VTEPs alongside IPv4. Multi-homed Type 2 entries
+  whose primary VTEP and every alias share the IPv6 family land
+  on the FDB nexthop group path (kernel programs the same
+  aliasing-ECMP shape as v4), instead of falling back to single-
+  dst at the primary. Mixed-family entries still degrade to
+  single-dst, but projection (`crates/evpn/src/projection.rs`)
+  normally drops mismatched aliases before the diff sees them.
+
+  Wiring: `encode_add_fdb_member` now picks `nh_family = AF_INET`
+  / `AF_INET6` from the gateway form; `NexthopSocket::add_fdb_member`
+  no longer rejects `IpAddr::V6` at the boundary; the diff layer's
+  `all_v4` predicate becomes `all_same_family` to cover the
+  homogeneous-v6 case. The wire parser at
+  `socket.rs#parse_dump_message` already handles 16-byte
+  `NHA_GATEWAY` payloads — no changes needed.
+
+### Deprecated
+
+- **`NexthopError::Ipv6Unsupported` variant.** The slice-2-era
+  error path is no longer produced (IPv6 is now supported); the
+  variant is kept for one release as a source-compatibility shim
+  and is slated for removal in v0.21.0.
 
 ## [0.19.0] — 2026-05-13
 
