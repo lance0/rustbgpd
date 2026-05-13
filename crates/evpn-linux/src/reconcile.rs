@@ -728,7 +728,11 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 .state
                 .last_drift_check
                 .is_none_or(|t| t.elapsed() >= self.config.periodic_dump);
-            if due && self.reconcile_drift(&snapshot).await {
+            if due
+                && self
+                    .reconcile_drift(&snapshot, intent.remote_macs.as_ref())
+                    .await
+            {
                 self.state.last_drift_check = Some(Instant::now());
             }
         }
@@ -1268,8 +1272,20 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// failure (caller leaves `last_drift_check` alone so the next
     /// reconcile pass re-attempts immediately rather than waiting
     /// a full `periodic_dump` interval).
+    ///
+    /// `desired` is the current intent — used by step (3) to skip
+    /// stale-row cleanup for any `(VNI, MAC)` we're still trying
+    /// to program. Without this guard, a permanent / transient
+    /// apply failure on a desired MAC would cause drift recovery
+    /// to delete the (possibly stale-NHID) row that's standing in
+    /// for the eventual install, widening blast radius beyond what
+    /// drift recovery is designed to handle.
     #[allow(clippy::too_many_lines)]
-    async fn reconcile_drift(&mut self, snapshot: &KernelSnapshot) -> bool {
+    async fn reconcile_drift(
+        &mut self,
+        snapshot: &KernelSnapshot,
+        desired: &RemoteMacTable,
+    ) -> bool {
         use crate::dataplane::KernelNexthopKind;
         use crate::nh_id_alloc::NhIdAllocator;
 
@@ -1372,7 +1388,18 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         // (3) Stale tagged FDB rows from a prior daemon — emit
         //     `remove_fdb_nhg_row` for any FDB row whose `nh_id` is
-        //     in our tag space but neither tracked nor owned.
+        //     in our tag space but neither tracked nor owned **and
+        //     not currently desired**. The `desired` guard is the
+        //     safety net for a `(VNI, MAC)` whose install hasn't
+        //     succeeded yet (apply failure, race window between
+        //     intent arrival and the first reconcile, or a stuck
+        //     permanent failure on an op we're still retrying):
+        //     deleting the row would temporarily remove forwarding
+        //     state for a MAC we intend to program. Skipping it
+        //     here lets the next reconcile pass re-emit the install
+        //     op naturally; if the row is *also* genuinely stale,
+        //     the install path's REPLACE semantics will overwrite
+        //     the `nh_id` cleanly.
         let stale_rows: Vec<(EvpnInstanceId, MacAddress)> = snapshot
             .iter_fdb()
             .filter_map(|(&(vni, mac), entry)| {
@@ -1384,6 +1411,9 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     return None;
                 }
                 if self.state.owned.contains(vni, mac) {
+                    return None;
+                }
+                if desired.get(vni, mac).is_some() {
                     return None;
                 }
                 Some((vni, mac))

@@ -1522,6 +1522,78 @@ async fn drift_recovery_dump_failure_does_not_block_other_paths() {
     h.shutdown().await;
 }
 
+// 6. Drift recovery must not delete an FDB row whose `(vni, mac)`
+//    is still in the desired intent — even if the row's nh_id
+//    looks like a prior-daemon orphan. This is the safety guard
+//    against widening blast radius during transient apply
+//    failures.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_preserves_fdb_row_for_desired_mac() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Pre-load a tagged kernel state from a "prior daemon run":
+    //   - a tagged-NHID nexthop (in our group-tag range) that we
+    //     don't track today,
+    //   - an FDB row at (vni 100, mac 1) referencing that nh_id.
+    let stale_nh_id: u32 = 0x4000_0BAD;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: stale_nh_id,
+        kind: KernelNexthopKind::Group { member_ids: vec![] },
+    });
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(1),
+            dst: None,
+            nh_id: Some(stale_nh_id),
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        },
+    );
+
+    // Intent has (vni 100, mac 1) as a desired single-dst entry.
+    // The apply path may or may not succeed depending on the order
+    // of operations; the safety property the test pins is that
+    // *drift recovery* — running on the periodic tick — won't
+    // delete the row underneath us just because `owned` and
+    // `tracked_ids` don't claim it yet.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+
+    // Advance past the periodic dump window so drift recovery runs.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // The FDB row for (vni 100, mac 1) MUST still be present —
+    // drift recovery saw it referencing an untracked tagged nh_id
+    // but skipped removal because the entry is in `desired`.
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "drift recovery must not remove FDB row for desired (vni, mac); \
+         kernel state: {:?}",
+        h.handle.kernel_snapshot(),
+    );
+
+    h.shutdown().await;
+}
 
 #[allow(dead_code)]
 fn _starts_anchor() -> Instant {
