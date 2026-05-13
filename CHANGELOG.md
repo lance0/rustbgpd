@@ -32,10 +32,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   drain-to-single-dst transition the projection invariant
   produces when an alias withdraws (`empty alias_vtep_ips ⇔
   alias_group_key.is_none()` — N=2 → N=1 collapses to single-dst,
-  not "group with one member"). Manual / local only;
-  containerlab requires privileges the GitHub runner doesn't
-  carry. M39-style privileged-runner CI gate is the next
-  ROADMAP follow-up.
+  not "group with one member"). **First-shot green on the laptop
+  privileged runner** (Linux 6.17 + containerlab + FRR 10.3.1):
+  16/16 assertions PASS in ~17 s, with the NHIDs landing under
+  the expected `NHG_TAG | n` / `VTEP_NH_TAG | n` tag scheme.
+  Manual / local only; containerlab requires privileges the
+  GitHub runner doesn't carry. M39-style privileged-runner CI
+  gate is the next ROADMAP follow-up.
 
 - **ADR-0059 slice 3b — FDB nexthop group reconcile actor + diff
   Pass 1b + startup adoption.** Multi-homed Type 2 routes now

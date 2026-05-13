@@ -126,19 +126,26 @@ wait_frr_established "$PE_A" "10.0.0.1" "pe-a EVPN" || print_summary
 wait_frr_established "$PE_C" "10.0.1.1" "pe-c EVPN" || print_summary
 
 log "[baseline] both FRR nodes have local ES1"
+# `show evpn es` rows are `<ESI>  <Flags>  ...` where Flags
+# includes `L` for a locally-configured ES (vs `R` for a remote
+# reflected one). Matching the ESI prefix alone would pass even
+# if a node only saw the reflected route, which would silently
+# mask a misconfigured esdummy bond and produce a confusing
+# Phase-1 NHG timeout. Require the `L` flag.
+local_es_re='^03:aa:bb:cc:dd:ee:ff:00:00:01[[:space:]]+[A-Za-z]*L[A-Za-z]*[[:space:]]'
 for node in "$PE_A" "$PE_C"; do
     es_out=""
     for _ in $(seq 1 30); do
         es_out=$(docker exec "$node" vtysh -c "show evpn es" 2>/dev/null || true)
-        if echo "$es_out" | grep -qE '^03:aa:bb:cc:dd:ee:ff:00:00:01\b'; then
+        if echo "$es_out" | grep -qE "$local_es_re"; then
             break
         fi
         sleep 2
     done
-    if echo "$es_out" | grep -qE '^03:aa:bb:cc:dd:ee:ff:00:00:01\b'; then
+    if echo "$es_out" | grep -qE "$local_es_re"; then
         ok "$node has local ES1"
     else
-        fail "$node missing local ES1"
+        fail "$node missing local ES1 (need the 'L' flag, not a reflected 'R')"
         echo "--- $node show evpn es ---" >&2
         echo "$es_out" | head -20 >&2
     fi

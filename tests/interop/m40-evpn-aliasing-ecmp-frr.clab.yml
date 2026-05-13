@@ -21,8 +21,10 @@
 #     +- eth1 -- pe-a (10.0.0.2, ES1) — FRR VTEP with shared ES
 #     +- eth2 -- pe-c (10.0.1.2, ES1) — FRR VTEP with shared ES
 #
-#   Shared ESI Type 0 derived from es-sys-mac aa:bb:cc:dd:ee:ff +
-#   es-id 1 (matches the M32 convention). pe-a and pe-c don't
+#   Shared ESI Type 3 (MAC-based per RFC 7432 §5) derived from
+#   es-sys-mac aa:bb:cc:dd:ee:ff + es-id 1 — wire form
+#   03:aa:bb:cc:dd:ee:ff:00:00:01, matches the M32 convention.
+#   pe-a and pe-c don't
 #   peer directly with each other — we don't need their Type 4
 #   ES routes to cross-validate DF election here; rustbgpd's
 #   view of both EAD-per-EVI routes is what the test asserts.
