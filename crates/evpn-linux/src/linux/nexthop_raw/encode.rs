@@ -120,10 +120,11 @@ pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u
     let mut body = Vec::with_capacity(8 + 8 + 8 + 4);
 
     // nhmsg: AF_INET when a v4 gateway is present (iproute2 sets
-    // family from the gateway form). v6 callers are rejected at
-    // the socket layer; here we'd set AF_INET6 if we encoded v6.
-    let family = match gateway {
-        IpAddr::V4(_) => AF_INET,
+    // family from the gateway form). v6 callers are rejected at the
+    // socket layer; extracting `family` + the on-wire gateway bytes
+    // from one match keeps the two derivations from drifting.
+    let (family, gateway_bytes) = match gateway {
+        IpAddr::V4(v4) => (AF_INET, v4.octets()),
         IpAddr::V6(_) => unreachable!("v6 gateways rejected at NexthopSocket boundary"),
     };
     push_nhmsg(
@@ -139,12 +140,7 @@ pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u
 
     // Attributes in iproute2 order: NHA_ID, NHA_GATEWAY, NHA_FDB.
     push_attr(&mut body, NHA_ID, &id.to_ne_bytes());
-
-    match gateway {
-        IpAddr::V4(v4) => push_attr(&mut body, NHA_GATEWAY, &v4.octets()),
-        IpAddr::V6(_) => unreachable!(),
-    }
-
+    push_attr(&mut body, NHA_GATEWAY, &gateway_bytes);
     push_attr(&mut body, NHA_FDB, &[]); // zero-length flag.
 
     let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;

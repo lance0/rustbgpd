@@ -638,20 +638,30 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
         // ADR-0059 slice 3b: one-shot stale-NHID cleanup. Anything
         // still in `adopted_unreferenced` after the first reconcile's
-        // apply phase is owned by us (tag bits + FDB-NHG kind) but
-        // not referenced by any MAC in `groups` — i.e., true stale
-        // state from a prior daemon instance. Delete + release.
+        // apply phase is *potentially* stale state from a prior
+        // daemon instance — but only "potentially" because:
+        //   1. Permanently-suppressed FDB-NHG ops `continue` out of
+        //      `apply_plan` and never land in `failed`, so once any
+        //      InstallFdbNhg has been recorded permanent, the next
+        //      pass sees `failed.is_empty()` even though the desired
+        //      Install never executed. A future operator config
+        //      change (or kernel upgrade) could clear the
+        //      suppression, at which point those NHIDs would have
+        //      been claimed. Cleanup must therefore block when any
+        //      FDB-NHG op is permanently suppressed.
+        //   2. Even with no suppression, the kernel snapshot may
+        //      still hold FDB rows referencing adopted NHIDs (e.g.,
+        //      a MAC whose Install hasn't been emitted yet because
+        //      its instance is NotReady). `cleanup_unreferenced_adoptions`
+        //      reads `snapshot.iter_fdb()` to compute a retention
+        //      set: any adopted ID a kernel FDB row points at, plus
+        //      its group members.
         //
-        // Mark adoption complete only when the pass had no apply
-        // failures AND every staged stale-delete succeeded. If any of
-        // those is false, leave `adopted_unreferenced` populated so
-        // the next reconcile can retry — releasing an allocator slot
-        // whose ID is still live in the kernel would re-introduce
-        // the collision adoption is supposed to prevent. (Dump
-        // failure short-circuits the pass earlier, so reaching here
-        // implies the dump succeeded.)
+        // Marks `adoption_done` only on a fully-clean cleanup: no
+        // apply failures, no NHG suppression, every staged
+        // stale-delete succeeded. Otherwise next pass retries.
         if !self.state.adoption_done && failed.is_empty() {
-            let cleanup_ok = self.cleanup_unreferenced_adoptions().await;
+            let cleanup_ok = self.cleanup_unreferenced_adoptions(&snapshot).await;
             if cleanup_ok {
                 self.state.adoption_done = true;
             }
@@ -1011,8 +1021,20 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// distinct IDs that have ever hit a transient `del_nexthop`
     /// failure — usually empty in steady state.
     async fn drain_pending_deletes(&mut self) {
-        let ids: Vec<u32> = self.state.pending_deletes.iter().copied().collect();
-        for id in ids {
+        // Drain in dependency order: NHG IDs first, then VTEP member
+        // IDs. `BTreeSet<u32>` iterates ascending, and our tag scheme
+        // puts members at `0x3000_xxxx` and groups at `0x4000_xxxx`
+        // — naive iteration would delete members before their parent
+        // group, which the kernel can reject with `EINVAL` and which
+        // also defeats ADR-0059 §5 invariant 2 (FDB row → group →
+        // members). Partition by `is_nhg` first.
+        let (groups, members): (Vec<u32>, Vec<u32>) = self
+            .state
+            .pending_deletes
+            .iter()
+            .copied()
+            .partition(|id| crate::nh_id_alloc::NhIdAllocator::is_nhg(*id));
+        for id in groups.into_iter().chain(members) {
             match self.dataplane.del_nexthop(id).await {
                 Ok(()) => {
                     self.state.nh_id_alloc.release(id);
@@ -1028,26 +1050,98 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
 
     /// ADR-0059 slice 3b cleanup helper: walk `adopted_unreferenced`
     /// after the first reconcile's apply phase and delete any
-    /// rustbgpd-tagged kernel nexthop that didn't get claimed by a
-    /// MAC's group during apply. These are stale state from a prior
-    /// daemon instance.
+    /// rustbgpd-tagged kernel nexthop that's *both* unclaimed by a
+    /// MAC in `groups` *and* unreferenced by any FDB row in the
+    /// kernel snapshot.
     ///
-    /// Returns `true` only when every staged delete succeeded. On
-    /// per-ID failure the allocator slot stays reserved and the entry
-    /// stays in `adopted_unreferenced` so the next reconcile pass can
-    /// retry — releasing the slot on a transient netlink failure would
-    /// let a future `alloc_vtep_nh` / `alloc_nhg` hand out an ID that
-    /// still exists in the kernel, exactly the collision adoption is
-    /// supposed to prevent.
-    async fn cleanup_unreferenced_adoptions(&mut self) -> bool {
-        // Drain to avoid holding the borrow across the await.
-        let stale: Vec<u32> = self.state.adopted_unreferenced.keys().copied().collect();
+    /// Two-layer safety against deleting live state:
+    ///
+    /// 1. **Suppression gate** — if any FDB-NHG op is permanently
+    ///    suppressed (`nhg_permanent_failures` non-empty, or
+    ///    `permanent_failures` contains any of `InstallFdbNhg` /
+    ///    `UpdateFdbNhgMembers` / `RemoveFdbNhg`), block cleanup
+    ///    entirely. Permanently-suppressed ops `continue` out of
+    ///    `apply_plan` without joining `failed`, so the outer
+    ///    `failed.is_empty()` gate alone can't detect this case;
+    ///    a future config change could clear the suppression and
+    ///    those NHIDs would have been claimed if Install had
+    ///    succeeded, so we mustn't pre-emptively delete them.
+    ///
+    /// 2. **Retention set** — even without suppression, scan
+    ///    `snapshot.iter_fdb()` for FDB rows whose `nh_id` is in
+    ///    `adopted_unreferenced`. Retain those IDs *and* recursively
+    ///    the member IDs of retained groups (a kernel FDB row
+    ///    pointing at a group implies all its member NHs are still
+    ///    in use even though we don't track them in `groups` yet).
+    ///
+    /// Returns `true` only when (a) the suppression gate let
+    /// cleanup proceed, and (b) every staged delete succeeded. On
+    /// per-ID failure the allocator slot stays reserved and the
+    /// entry stays in `adopted_unreferenced` so the next reconcile
+    /// pass retries — releasing the slot on a transient netlink
+    /// failure would let a future `alloc_vtep_nh` / `alloc_nhg`
+    /// hand out an ID still live in the kernel, exactly the
+    /// collision adoption is supposed to prevent.
+    async fn cleanup_unreferenced_adoptions(&mut self, snapshot: &KernelSnapshot) -> bool {
+        // (1) Suppression gate.
+        let any_fdb_nhg_perm_failure = !self.state.nhg_permanent_failures.is_empty()
+            || self.state.permanent_failures.values().any(|op| {
+                matches!(
+                    op,
+                    DataplaneOp::InstallFdbNhg { .. }
+                        | DataplaneOp::UpdateFdbNhgMembers { .. }
+                        | DataplaneOp::RemoveFdbNhg { .. }
+                )
+            });
+        if any_fdb_nhg_perm_failure {
+            tracing::warn!(
+                adopted = self.state.adopted_unreferenced.len(),
+                "adoption cleanup blocked: FDB-NHG op(s) permanently suppressed; \
+                 adopted IDs retained until suppression clears (op-shape change \
+                 or daemon restart)"
+            );
+            return false;
+        }
+
+        // (2) Retention set from kernel snapshot. Walk every FDB row;
+        //     if its `nh_id` is one we adopted, retain it. For each
+        //     retained group, recursively retain its members (a
+        //     kernel row pointing at the group keeps every member NH
+        //     in use even before we record the group locally).
+        let mut retain: BTreeSet<u32> = BTreeSet::new();
+        for (_, entry) in snapshot.iter_fdb() {
+            let Some(nh_id) = entry.nh_id else { continue };
+            if !self.state.adopted_unreferenced.contains_key(&nh_id) {
+                continue;
+            }
+            retain.insert(nh_id);
+            if let Some(adopted) = self.state.adopted_unreferenced.get(&nh_id)
+                && let crate::dataplane::KernelNexthopKind::Group { member_ids } = &adopted.kind
+            {
+                for mid in member_ids {
+                    retain.insert(*mid);
+                }
+            }
+        }
+
+        // Drain in dependency order: NHG IDs before per-VTEP members
+        // (Copilot finding — `BTreeSet<u32>` ascending iteration plus
+        // our tag scheme would delete members first and let the
+        // kernel reject the group del with `EINVAL`).
+        let (stale_groups, stale_members): (Vec<u32>, Vec<u32>) = self
+            .state
+            .adopted_unreferenced
+            .keys()
+            .copied()
+            .filter(|id| !retain.contains(id))
+            .partition(|id| crate::nh_id_alloc::NhIdAllocator::is_nhg(*id));
+
         let mut all_ok = true;
-        for id in stale {
-            // del_nexthop is idempotent on ENOENT (slice 2). Only
-            // release + drop tracking on Ok — on Err, leave the slot
-            // reserved + the entry in the map so the next reconcile
-            // pass retries.
+        for id in stale_groups.into_iter().chain(stale_members) {
+            // `del_nexthop` is idempotent on `ENOENT` (slice 2). Only
+            // release + drop tracking on `Ok` — on `Err`, leave the
+            // slot reserved + the entry in the map so the next
+            // reconcile pass retries.
             match self.dataplane.del_nexthop(id).await {
                 Ok(()) => {
                     self.state.nh_id_alloc.release(id);
@@ -1063,6 +1157,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 }
             }
         }
+        // Retained IDs stay in `adopted_unreferenced` so the next
+        // pass re-evaluates them — if a kernel FDB row gets removed
+        // or replaced, they become deletable; if a MAC's Install
+        // succeeds, `apply_nhg_op` removes them at record time.
         all_ok
     }
 

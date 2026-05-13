@@ -285,6 +285,17 @@ impl InMemoryDataplane {
     }
 }
 
+/// Pop the next "universal" (`target: None`) injected failure from
+/// the queue, if any. `NexthopOps` methods (called via
+/// `apply_nhg_op`) do not carry a `DataplaneOp` to match against,
+/// so they can only consume failures the test left targetless.
+/// Returns the realized error; caller short-circuits.
+fn take_universal_failure(state: &mut State) -> Option<DataplaneError> {
+    let idx = state.failures.iter().position(|f| f.target.is_none())?;
+    let f = state.failures.remove(idx).unwrap();
+    Some(f.error.realize())
+}
+
 impl NexthopOps for InMemoryDataplane {
     async fn add_nexthop_member(
         &mut self,
@@ -292,6 +303,9 @@ impl NexthopOps for InMemoryDataplane {
         gateway: std::net::IpAddr,
     ) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
         state.nexthop_ops.insert(
             id,
             KernelNexthop {
@@ -308,6 +322,9 @@ impl NexthopOps for InMemoryDataplane {
         member_ids: &[u32],
     ) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
         state.nexthop_ops.insert(
             id,
             KernelNexthop {
@@ -322,6 +339,9 @@ impl NexthopOps for InMemoryDataplane {
 
     async fn del_nexthop(&mut self, id: u32) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
         // Idempotent: dropping a non-existent entry is fine, matching
         // the slice-2 `NexthopSocket::del` ENOENT-as-ACK contract.
         state.nexthop_ops.remove(&id);
@@ -335,6 +355,9 @@ impl NexthopOps for InMemoryDataplane {
         nh_id: u32,
     ) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
         state.fdb_nhg_rows.insert((vni, mac), nh_id);
         // Mirror into `state.kernel` so a subsequent `dump_snapshot`
         // reflects the row — without this, the slice 3b drift check
@@ -362,6 +385,9 @@ impl NexthopOps for InMemoryDataplane {
         mac: MacAddress,
     ) -> Result<(), DataplaneError> {
         let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
         // Idempotent — slice 3b coordinator may issue this on
         // already-removed rows during stale cleanup.
         state.fdb_nhg_rows.remove(&(vni, mac));
@@ -519,6 +545,38 @@ impl InMemoryHandle {
         &self,
     ) -> std::collections::BTreeMap<u32, crate::bum_filter::BumPortFlags> {
         self.state.lock().expect("poisoned").bum_port_flags.clone()
+    }
+
+    /// Pre-load a kernel-side nexthop op so the actor's startup
+    /// adoption pass (`dump_owned_nexthops`) sees it — used for
+    /// "daemon restarts with prior NHIDs left over" tests.
+    pub fn pre_load_nexthop_op(&self, nh: KernelNexthop) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .nexthop_ops
+            .insert(nh.id, nh);
+    }
+
+    /// Snapshot the current nexthop-op map for assertion — every ID
+    /// the actor has installed (or test pre-loaded) and not yet
+    /// deleted.
+    #[must_use]
+    pub fn nexthop_ops(&self) -> BTreeMap<u32, KernelNexthop> {
+        self.state.lock().expect("poisoned").nexthop_ops.clone()
+    }
+
+    /// Read the `nh_id` field of an FDB row at `(vni, mac)`, if the
+    /// row exists. Tests use this to verify an `InstallFdbNhg`
+    /// landed and points at the right group.
+    #[must_use]
+    pub fn kernel_fdb_nh_id(&self, vni: EvpnInstanceId, mac: MacAddress) -> Option<u32> {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .find_fdb(vni, mac)
+            .and_then(|e| e.nh_id)
     }
 }
 
