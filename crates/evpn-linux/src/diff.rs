@@ -186,8 +186,12 @@ pub fn compute_diff(
                 // operator off-switch flipped on this VNI. The
                 // `FdbNhg → SingleDst` transition is handled inside
                 // `emit_single_dst_pass` via `last_applied` lookup,
-                // so toggling the knob with the daemon running
-                // converges cleanly.
+                // so the diff converges cleanly *if* the instance
+                // table ever mutates at runtime. Today the instance
+                // table is pinned at startup (`[[evpn_instances]]`
+                // reload reverts edits) — the transition only fires
+                // across a daemon restart that takes the flip via
+                // the startup config snapshot.
                 emit_single_dst_pass(
                     vni,
                     mac,
@@ -1428,9 +1432,14 @@ mod tests {
 
     #[test]
     fn apply_aliasing_ecmp_false_emits_transition_when_last_applied_fdb_nhg() {
-        // Flip the knob with the daemon already running and a
-        // previously-installed FDB-NHG → emit RemoveFdbNhg + AddRemoteFdb
-        // (the standard `FdbNhg → SingleDst` transition).
+        // Pin the diff-algorithm property that an `EvpnInstance` with
+        // `apply_aliasing_ecmp = false` plus a previously-installed
+        // FDB-NHG emits `RemoveFdbNhg + AddRemoteFdb` (the standard
+        // `FdbNhg → SingleDst` transition). Today this only fires
+        // across a daemon restart that picks up the flip from the
+        // startup config; the test is structured around the diff
+        // algorithm, not against a runtime mutation path that doesn't
+        // exist yet.
         let mut desired = RemoteMacTable::builder();
         desired
             .insert(

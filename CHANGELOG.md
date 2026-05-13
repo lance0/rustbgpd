@@ -17,11 +17,13 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a given L2VNI, multi-homed Type 2 entries on that VNI route
   through the single-dst FDB path (primary VTEP only) instead of
   programming FDB nexthop groups; other L2VNIs in the same daemon
-  are unaffected. Toggling the knob with the daemon running
-  converges via the standard `FdbNhg → SingleDst` transition (the
-  diff layer emits `RemoveFdbNhg` + `AddRemoteFdb` for any
-  previously-installed entry). Restart-required posture matches
-  the rest of `[[evpn_instances]]`. `EvpnInstance::new` still
+  are unaffected. Restart-required posture matches the rest of
+  `[[evpn_instances]]` — config reload pins the instance table
+  back to the startup snapshot, so operators must restart the
+  daemon to apply a flip. The diff layer would converge cleanly
+  via the standard `FdbNhg → SingleDst` transition (`RemoveFdbNhg`
+  + `AddRemoteFdb` for any previously-installed entry) if and when
+  a runtime instance-mutation surface lands. `EvpnInstance::new` still
   defaults the field on; the `with_apply_aliasing_ecmp` builder
   applies the operator's choice at config-parse time, and
   `compute_diff` now takes a `&EvpnInstanceTable` parameter so the

@@ -1296,8 +1296,14 @@ apply_aliasing_ecmp = true             # program FDB nexthop groups for multi-ho
 `apply_aliasing_ecmp = false` routes multi-homed Type 2 entries on the
 target L2VNI through the single-dst FDB path (primary VTEP only, no
 kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
-Flipping the knob with the daemon running converges via the standard
-`FdbNhg → SingleDst` transition.
+
+**Restart required**: `[[evpn_instances]]` is pinned at startup today
+— config reload reverts instance-table edits — so flipping
+`apply_aliasing_ecmp` requires a daemon restart to take effect. The
+diff layer is written so that a future runtime instance-mutation
+surface (RPC etc.) would converge cleanly via the standard
+`FdbNhg → SingleDst` transition, but operators cannot drive that
+path today.
 
 **Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
 restart the daemon while tagged FDB nexthop groups from the prior run
