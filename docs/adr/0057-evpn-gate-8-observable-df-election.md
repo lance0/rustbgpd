@@ -93,10 +93,13 @@ The Gate 8 surface is:
   `single_active = false` (all-active default). Gate 8b also adds
   the load-bearing half: opt-in dataplane filtering that suppresses
   segment BUM on non-DF receivers.
-- **Aliasing / backup paths (RFC 7432 §14) — control-plane half
-  closed in Gate 8b.** Projection now resolves Type 1 EAD-per-EVI
-  alternatives into `RemoteMacEntry::alias_vtep_ips`; Linux ECMP /
-  multi-destination programming remains a kernel-side follow-up.
+- **Aliasing / backup paths (RFC 7432 §14) — closed end-to-end.**
+  Projection resolves Type 1 EAD-per-EVI alternatives into
+  `RemoteMacEntry::alias_vtep_ips`; the kernel-side ECMP /
+  multi-destination programming subsequently shipped under
+  [ADR-0059](0059-evpn-aliasing-fdb-nexthop-groups.md) (FDB
+  nexthop groups via `NDA_NH_ID` / `NHA_FDB`, slices 1-4,
+  M40 manual smoke against FRR EVPN-MH 10.3.1).
 - **Mass withdraw — receive-side filter closed in Gate 8b.** The
   dataplane supervisor snapshots EAD-per-ES reachability and drops
   non-zero-ESI Type 2 routes whose `(origin VTEP next-hop, ESI)` is

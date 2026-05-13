@@ -231,6 +231,27 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   out-of-scope clause with code from day one — the dataplane
   never sees a mixed-family FDB-NHG member list.
 
+### Fixed
+
+- **ADR-0059 FDB-NHG startup adoption could delete still-live
+  adopted NHIDs after install suppression.** Found in deep
+  review during PR #88. After a permanent `InstallFdbNhg`
+  failure, the suppression branch `continue`s out of
+  `apply_plan` without joining `failed`, so the next pass's
+  `failed.is_empty()` gate would let
+  `cleanup_unreferenced_adoptions` delete adopted NHIDs that
+  still had kernel FDB rows pointing at them. Two-layer fix:
+  (1) cleanup blocks entirely when any FDB-NHG op is permanently
+  suppressed (`nhg_permanent_failures` non-empty or
+  `permanent_failures` contains an FDB-NHG variant);
+  (2) `cleanup_unreferenced_adoptions` now takes
+  `&KernelSnapshot` and builds a retention set from
+  `snapshot.iter_fdb()` of every adopted NHID a kernel FDB row
+  references, recursively including the members of retained
+  groups. Regression-tested at the actor level via
+  `fdb_nhg_adoption_retains_live_kernel_fdb_refs` and
+  `fdb_nhg_perm_suppressed_install_blocks_adoption_cleanup`.
+
 ## [0.18.0] — 2026-05-11
 
 Gate 9 symmetric Interface-less IRB ends here. v0.17.0 closed

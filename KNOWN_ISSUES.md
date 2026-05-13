@@ -55,6 +55,24 @@ resolved.
   losing the original byte. Fixed by adding `Unknown(u8)` variant to
   `NotificationCode`. See ADR-0011.
 
+- **EVPN Type 2 MAC+IP origination (resolved).** Gate 7b+2 (v0.16.0)
+  added the parallel `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH`
+  subscription that correlates ARP/ND-suppression bindings with
+  bridge FDB learns. The `LocalMacIpOriginator` task originates
+  MAC+IP Type 2 under the FRR-style replace model — `IpAdded`
+  upgrades a MAC-only Type 2 to MAC+IP, the last `IpRemoved`
+  downgrades back. Predicated on `bridge link set ... neigh_suppress
+  on` per the kernel snooping path. ADR-0055 §7 + ADR-0056.
+
+- **EVPN sticky / static MAC anti-spoof config (resolved).** v0.17.0
+  added the operator-facing `[[evpn_instances]].sticky_macs` schema
+  (a list of MAC addresses to originate with the RFC 7432 §15.4
+  sticky bit set). The originator consults the list on every
+  observed local MAC and propagates the sticky flag through
+  `OriginationAction::Inject` into the Extended Community on the
+  wire. SVI MAC origination follows the same list when
+  `advertise_svi_mac = true`. ADR-0056.
+
 - **Single task per peer (resolved).** The peer session task no longer
   owns the TCP write half. A dedicated writer task per peer (ADR-0051,
   commits `9675ecb` → `bcd2e0d` → `56c7527`) holds the `OwnedWriteHalf`
@@ -142,25 +160,6 @@ resolved.
 - **Injected routes support multiple paths via path_id.** `InjectionService`
   supports multiple injected routes per prefix using explicit `path_id`.
   Path ID 0 is the default path.
-- **EVPN Type 2 origination is MAC-only (no host IP).** Gate 7b+1
-  (v0.15.0) emits Type 2 routes
-  derived from `RTNLGRP_NEIGH AF_BRIDGE` events, which surface bridge
-  FDB learns but not ARP/ND-suppression IP bindings. The wire codec
-  already supports the MAC-with-IP form (`EvpnRouteKey::MacIp.ip` is
-  `Option<IpAddr>`); only the consumer is deferred. Lighting it up
-  requires a separate `AF_INET` / `AF_INET6` `RTNLGRP_NEIGH`
-  subscription correlated by MAC. Tracked as Gate 7b+2 in
-  `docs/evpn-enablement.md`. ADR-0055 §7 documents the deferral.
-- **EVPN sticky / static MAC anti-spoof config is wire-plumbed but
-  not operator-facing.** The wire codec for the MAC Mobility sticky
-  bit (RFC 7432 §15.4) is in scope for Gate 7b+1 — the state machine
-  and `OriginationAction::Inject` carry a `sticky: bool` field, the
-  daemon encodes it in the extended community when set. The
-  operator-facing config field (e.g., a `static_macs: BTreeSet<
-  MacAddress>` on `EvpnInstance`) is **not** yet defined; the daemon
-  always passes `sticky = false` until a follow-up ADR settles the
-  schema (per-MAC vs per-port? imported from sysctl? gRPC mutation?).
-  ADR-0055 §8.
 - **EVPN MAC-mobility convergence is poll-bounded (5s).** The
   originator polls the RIB on a 5s cadence to detect remote
   contention; sub-second mobility detection requires an EVPN-specific

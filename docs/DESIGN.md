@@ -4,7 +4,7 @@ A modern, API-first BGP daemon in Rust, inspired by GoBGP's ergonomics and "driv
 
 **Author:** lance0
 **Status:** pre-1.0 hardening — P0/P1/P2/P2.5 complete, publishing prep
-**Last updated:** 2026-03-05
+**Last updated:** 2026-05-13
 
 ---
 
@@ -32,7 +32,7 @@ This is not a full routing suite replacement. rustbgpd will not implement OSPF, 
 
 **EVPN VTEP — bidirectional (Phase 2 Gates 7a + 7b + 7b+1 + 7b+2 + 7c).** Local EVI/VNI domain types (`crates/evpn`) and an `[[evpn_instances]]` TOML schema with a read-only `EvpnService.ListEvpnInstances` gRPC surface (Gate 7a, ADR-0052). Linux kernel reconciliation programs remote-MAC FDB entries from received Type 2 routes (Gate 7b, ADR-0054). Local-MAC origination subscribes to `RTNLGRP_NEIGH` and emits Type 2 routes per RFC 7432 §15.1 mobility sequencing, plus one Type 3 IMET per L2VNI carrying the PMSI Tunnel attribute (Gate 7b+1, ADR-0055). `advertise_svi_mac` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready by surfacing the bridge link-layer address through `InstanceDataplaneStatus.bridge_mac`; `sticky_macs` (ADR-0056) marks origination with the RFC 7432 §15.4 sticky bit. Gate 7b+2 closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model — one Type 2 per MAC at any time, `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back. Mobility events propagate sub-second via the EVPN-keyed `EvpnRouteEvent` broadcast in `crates/rib`; the 5 s `QueryEvpnRoutes` poll stays as a `Lagged` / cold-start backstop (Gate 7c). RR-only deployments (empty `[[evpn_instances]]`) spawn no kernel-facing tasks for either direction.
 
-**Later:** Duplicate-MAC quarantine action (ADR-0055 §9), aliasing dataplane ECMP and production-default multi-homing enforcement (Gate 8b follow-ups), remote Type 5 import + L3 FIB programming and the M39 manual containerlab smoke (Gate 9 slice 6 PR B — the `[[evpn_ip_vrfs]]` schema, readiness probe, and local Type 5 origination ship in PR A per RFC 9136 §4.4.2 / ADR-0058), VPNv4/v6, MPLS-EVPN encap.
+**Later:** Duplicate-MAC quarantine action (ADR-0055 §9), production-default multi-homing enforcement after the MAC-churn variant of the Gate 8b 24h soak, RFC 9135 overlay-index IRB (Gate 9 ships the Interface-less variant per RFC 9136 §4.4.2 / ADR-0058), auto-derived Route Targets (RFC 8365 §5.1.2.1), VPNv4/v6, MPLS-EVPN encap.
 
 ---
 
@@ -458,18 +458,27 @@ controller-driven injection for Type 2 / Type 3. What remains:
   originator from a 5 s poll to a push-notified RIB broadcast for
   sub-second mobility convergence. **Still ahead in Phase 2:**
   duplicate-MAC quarantine action.
-- **Multi-homing execution:** Gate 8/8b now covers rustbgpd-as-VTEP
+- **Multi-homing execution:** Gate 8/8b covers rustbgpd-as-VTEP
   DF election (RFC 7432 §8 + RFC 8584), Type 1/4 origination, opt-in
   Non-DF BUM suppression, ESI-aware Type 2 origination, aliasing
   projection, and receive-side EAD-per-ES mass-withdraw filtering.
-  Still ahead: aliasing dataplane ECMP and the 24 h soak before
-  enabling enforcement by default.
-- **Symmetric IRB semantics:** wire-level round-trip is in (`label2` +
-  Router MAC ext community preserved); Gate 9 foundation adds the
-  `[[evpn_ip_vrfs]]` config object (RFC 9136 §4.4.2 / ADR-0058) and a
-  Linux IP-VRF readiness probe. Type 5 origination, Type 5 FIB
-  programming, and the symmetric-IRB dataplane proper remain ahead in
-  Gate 9.
+  ADR-0059 closes the aliasing-ECMP receive-path data path via
+  FDB nexthop groups (slices 1-4 shipped on `main`, M40 manual
+  smoke validated against FRR EVPN-MH 10.3.1). Still ahead: the
+  MAC-churn variant of the Gate 8b soak before flipping the
+  `apply_bum_enforcement` default to `true`, plus slice 3.5
+  knobs (operator off-switch, periodic drift recovery, IPv6
+  alias members).
+- **Symmetric Interface-less IRB:** Gate 9 ships end-to-end in
+  v0.18.0 — RFC 9136 §4.4.2 / ADR-0058. The `[[evpn_ip_vrfs]]`
+  config object, `IpVrfStatus` readiness probe, Linux VRF +
+  L3VXLAN dumps, per-IP-VRF kernel-route observation, Type 5
+  origination via `RibUpdate::InjectEvpn`, remote Type 5 import
+  through the transactional `L3OwnedState` model with four-phase
+  apply ordering, Router MAC conflict detection, and the M39
+  manual containerlab smoke are all on `main`. RFC 9135
+  overlay-index IRB and auto-derived RTs (RFC 8365 §5.1.2.1)
+  remain follow-ups.
 - **Controller injection beyond Type 2 / Type 3:** Type 5 IP-Prefix and
   Type 1 / Type 4 multi-homing route injection are not yet exposed in
   the injection RPCs. Native daemon Type 1/4 origination exists via

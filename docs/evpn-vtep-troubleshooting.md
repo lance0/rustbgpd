@@ -246,3 +246,80 @@ M37_CHURN_MACS=1000 M37_CHURN_ROUNDS=60 \
 ```
 
 Watch RSS, `originated-local-macs`, and the EVPN metrics while it runs.
+
+## Multi-homed MAC not load-sharing across alias VTEPs
+
+ADR-0059 ships aliasing dataplane ECMP via FDB nexthop groups
+(`NDA_NH_ID` + `NHA_FDB`). A multi-homed Type 2 with ESI on a
+shared Ethernet Segment should land as an FDB row referencing a
+nexthop **group**, not a single-dst `dst <ip>` row.
+
+**Symptom**: traffic to a multi-homed MAC only hits one alias VTEP.
+
+**Triage**:
+
+1. `bridge fdb show dev vxlanNNN | grep -i <mac>` — a correctly
+   programmed multi-homed row shows `nhid <id>` (decimal) instead
+   of `dst <ip>`.
+2. `ip nexthop show` — expect one group line `id <gid> group
+   <mid>/<mid> ... fdb` and the corresponding member lines `id
+   <mid> via <ip> fdb`. NHIDs are tagged: groups at
+   `0x4000_xxxx`, members at `0x3000_xxxx`.
+3. Confirm rustbgpd actually observed both alias VTEPs' Type 1
+   EAD-per-EVI routes for the shared ESI — check
+   `rustbgpctl evpn instances` or the gRPC `ListEvpnInstances`,
+   and verify peer sessions are Established.
+4. If the FDB row has `dst <ip>` (not `nhid`), the entry is in
+   the single-dst fallback path. Common causes:
+   - IPv6 alias members (slice 3b warns once per `(VNI, MAC)` —
+     `tracing::warn!` "IPv6 alias members not yet supported").
+   - All but one alias VTEP withdrew their EAD-per-EVI (the
+     projection invariant `empty alias_vtep_ips ⇔
+     alias_group_key.is_none()` collapses N→1 alias to
+     single-dst).
+   - CVE-2025-39851 guard: rustbgpd refuses to install FDB-NHG
+     rows on a VXLAN device with `learning on`. `ip -d link
+     show vxlanNNN | grep learning` — must say `nolearning`.
+
+The slice 4 / M40 smoke
+(`tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh`)
+runs end-to-end against FRR EVPN-MH and is the canonical
+correctness reference if you suspect the daemon path itself.
+
+## IP-VRF stuck in `NotReady`
+
+Gate 9 slice 6 surfaces per-VRF readiness via gRPC
+(`EvpnService.GetIpVrf` / `ListIpVrfs`) and the CLI
+(`rustbgpctl evpn vrfs [NAME]`). The probe checks the seven
+ADR-0058 §3 predicates; `NotReady { reasons }` reports every
+failing predicate at once.
+
+**Symptom**: an `[[evpn_ip_vrfs]]` entry never originates Type 5
+or installs remote prefixes.
+
+**Triage**:
+
+1. `rustbgpctl evpn vrfs <name>` and read the `not_ready_reasons`
+   list. Common entries:
+   - `vrf_device_missing` / `not_up` — the VRF master device must
+     exist and be UP before the probe runs.
+   - `vrf_table_id_mismatch` — the kernel's VRF `table` must
+     match the configured `table_id`.
+   - `l3vxlan_device_missing` / `not_up` / `vni_mismatch` /
+     `local_ip_mismatch` / `not_enslaved_to_vrf` /
+     `router_mac_mismatch` — covers the L3VXLAN device side.
+2. `ip link show type vrf` + `ip -d link show type vxlan` to
+   confirm the kernel side matches the rustbgpd config.
+3. If the probe is `Ready` but `originated_routes_count == 0`,
+   inspect the per-IP-VRF kernel route table: `ip route show
+   table <table_id>`. The slice 6a classifier filters out
+   routes installed by other routing daemons (any `proto` other
+   than `kernel`/`static`/`boot`/`zebra`-with-EVPN-marker),
+   non-forwardable types, and routes whose output device is the
+   IP-VRF's own L3 VXLAN.
+4. If `installed_routes_count == 0` despite a remote PE
+   advertising Type 5: check the Router MAC extcomm conflict
+   path. Two prefixes mapping `(L3VXLAN ifindex, router_mac)` to
+   different next-hops trip
+   `L3Drop::RouterMacConflict` and drop both. Look for
+   `evpn_l3_dropped_router_mac_conflict_total` in Prometheus.

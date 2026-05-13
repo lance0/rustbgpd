@@ -151,11 +151,27 @@ operations the EVPN reconciler issues:
    to receive unsolicited `RTM_NEWNEIGH` / `RTM_DELNEIGH` events
    for kernel-learned local MACs. This is a kernel-side privilege
    separate from gRPC management security.
-3. **IP-VRF / L3 VXLAN link dumps** (Gate 9 foundation, ADR-0058).
-   When `[[evpn_ip_vrfs]]` is non-empty, the reconcile actor issues
-   `RTM_GETLINK` against the same rtnetlink socket to populate the
-   IP-VRF readiness probe. Dumps are observe-only; no kernel state
-   is mutated by the Gate 9 foundation slice.
+3. **IP-VRF / L3 VXLAN link + route dumps + multicast**
+   (Gate 9 slice 6, ADR-0058 — v0.18.0). When `[[evpn_ip_vrfs]]`
+   is non-empty, the reconcile actor issues `RTM_GETLINK` to
+   populate the IP-VRF readiness probe and `RTM_GETROUTE` per
+   IP-VRF `table_id` for the slice 6a kernel-route observer.
+   The notify task additionally subscribes to
+   `RTNLGRP_IPV4_ROUTE` + `RTNLGRP_IPV6_ROUTE` for sub-second
+   tenant `ip addr del` withdraw. Slice 6 PR B mutates kernel
+   state: `RTM_NEWROUTE` / `RTM_DELROUTE` to program L3 FIB
+   entries inside the IP-VRF's `table_id`, plus `RTM_NEWNEIGH` /
+   `RTM_DELNEIGH` and bridge FDB ops for the L3 neighbor +
+   L3VXLAN FDB rows that resolve the remote Router MAC.
+4. **FDB nexthop group programming** (ADR-0059, slices 1-4 on
+   `main`). When a multi-homed Type 2 lands, the reconcile actor
+   constructs an FDB nexthop group via the `nexthop_raw`
+   raw-netlink primitive (`rtnetlink 0.21` exposes no nexthop
+   API) and points an FDB row at it via `NDA_NH_ID`. Requires
+   `CAP_NET_ADMIN` for the nexthop add/del + FDB write paths,
+   plus a Linux kernel ≥ 5.8 for `NDA_NH_ID` support. The
+   apply layer refuses to install on a VXLAN device with
+   `learning on` per CVE-2025-39851's mainline fix.
 
 If `CAP_NET_ADMIN` is not granted:
 

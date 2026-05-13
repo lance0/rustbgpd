@@ -1,7 +1,12 @@
 # ADR-0058: EVPN Gate 9 — symmetric IRB, L3VNI, Type 5 dataplane
 
-**Status:** Accepted; rollout slices 1–6 shipped on main
-(PRs #66, #67, #72, #73, #74, #75); slices 7–8 pending
+**Status:** Accepted; fully shipped. Slices 1-7 (config schema +
+pure-logic helpers + readiness probe + gRPC/CLI surface) landed
+in v0.17.0 (PRs #66, #67, #72, #73, #74, #75, #76); slice 8
+(origination + remote import + L3 FIB programming + M39 manual
+smoke) landed in v0.18.0 (PRs #77, #78, #79). Sub-second
+`RTNLGRP_IPV4/IPV6_ROUTE` multicast refresh shipped as the
+v0.18.0 follow-up.
 **Date:** 2026-05-10
 
 ## Context

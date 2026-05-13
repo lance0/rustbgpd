@@ -1246,19 +1246,119 @@ See [ADR-0044](adr/0044-mrt-dump-export.md) for design details.
 
 ---
 
+## `[[evpn_instances]]`
+
+Optional, repeatable. Declares the local L2VNI / EVPN-instance tenants
+this VTEP serves (Gate 7a foundation, ADR-0052 + ADR-0055). Empty by
+default — RR-only deployments leave it empty.
+
+```toml
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"                       # Linux bridge name (optional — RR-only deployments omit)
+advertise_svi_mac = false              # originate Type 2 for the bridge's own MAC (RFC 9135 §6.1)
+sticky_macs = ["aa:bb:cc:dd:ee:01"]    # MACs to originate with RFC 7432 §15.4 sticky bit (ADR-0056)
+ip_vrf = "vrf1"                        # link this L2VNI to a declared [[evpn_ip_vrfs]] entry (Gate 9 / ADR-0058)
+```
+
+### Fields
+
+| Field               | Type     | Required | Default | Description |
+|---------------------|----------|----------|---------|-------------|
+| `vni`               | u32      | yes      | --      | 24-bit VNI (RFC 8365 §5) |
+| `rd`                | string   | yes      | --      | Route Distinguisher in RFC 4364 form (`asn:value`, `ipv4:value`, or 4-octet AS variants) |
+| `route_targets`     | string[] | yes      | --      | One or more EVPN Route Targets in the same encodings |
+| `local_vtep_ip`     | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
+| `bridge`            | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Must be a non-VLAN-aware bridge with the VXLAN port carrying `nolearning` |
+| `advertise_svi_mac` | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1). Requires `bridge` to be set |
+| `sticky_macs`       | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
+| `ip_vrf`            | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
+
+### Validation
+
+- The combined table enforces uniqueness on both `vni` and `rd` —
+  duplicates on either column reject config load.
+- `bridge` (when set) must reference a Linux bridge created out of
+  band; rustbgpd does not create/delete netdevs (ADR-0054 §4).
+- `advertise_svi_mac = true` requires `bridge` non-empty.
+- `ip_vrf` (when set) must name an `[[evpn_ip_vrfs]]` entry declared
+  in the same config.
+- Same VNI must not appear in multiple `[[ethernet_segments]]`
+  `member_vnis` lists until per-port learned disambiguation is plumbed.
+
+Restart-required: `[[evpn_instances]]` is pinned at startup. Runtime
+mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`) are a
+follow-up.
+
+---
+
+## `[[ethernet_segments]]`
+
+Optional, repeatable. Declares local Ethernet Segments for active-active
+multi-homing (Gate 8 + 8b, RFC 7432 §8 + RFC 8584 + ADR-0057). Empty by
+default — single-homed VTEPs leave it empty.
+
+```toml
+[[ethernet_segments]]
+esi = "00:00:00:00:00:00:00:00:00:01"          # 10-byte ESI (Type 0 here; Types 1–5 also accepted)
+member_vnis = [100, 200]                       # L2VNIs this ES is reachable on
+df_preference = 32768                          # RFC 8584 DF preference (default 32768)
+df_algorithm = "preference"                    # "modulo" (RFC 7432 §8.5) or "preference" (RFC 8584)
+originator_ip = "10.0.0.1"                     # source IP used for Type 1/4 origination (defaults to a member VNI's local_vtep_ip)
+```
+
+### Fields
+
+| Field           | Type     | Required | Default       | Description |
+|-----------------|----------|----------|---------------|-------------|
+| `esi`           | string   | yes      | --            | 10-byte ESI in colon-separated hex (RFC 7432 §5). All ESI Types accepted; Type 0 is the operator-static form, Type 3 is MAC-based (`03:<sys-mac>:<id-be>`), etc. |
+| `member_vnis`   | u32[]    | yes      | --            | L2VNIs this segment is reachable on. Each must match a configured `[[evpn_instances]].vni` |
+| `df_preference` | u16      | no       | `32768`       | RFC 8584 §3 DF preference. Higher wins; ties break by lowest VTEP IP |
+| `df_algorithm`  | string   | no       | `"preference"`| `"modulo"` (RFC 7432 §8.5 round-robin) or `"preference"` (RFC 8584 highest-preference) |
+| `originator_ip` | string   | no       | first member  | Source IP carried in Type 1/4 origination. Defaults to the `local_vtep_ip` of the first member VNI |
+
+### What gets originated
+
+When `[[ethernet_segments]]` is non-empty and the EVPN reconcile actor
+is running, each segment originates:
+
+- **Type 4 (ES route)** — one per `[[ethernet_segments]]` block, with
+  ES-Import Route Target derived from the ESI per RFC 7432 §7.6.
+- **Type 1 EAD-per-ES** — one per ES with `ethernet_tag = MAX_ET`.
+- **Type 1 EAD-per-EVI** — one per `(ES, member_vni)` pair, with the
+  per-ESI label assigned by `EsiLabelAllocator` (ADR-0057 §6).
+
+The DF election runs on the union of locally configured ES and
+remote Type 4 routes for the same ESI; the elected DF role drives
+Type 2 origination ESI tagging and the optional BUM-suppression
+filter (see `apply_bum_enforcement` in `[global]`).
+
+Restart-required: `[[ethernet_segments]]` is pinned at startup.
+
+---
+
 ## `[[evpn_ip_vrfs]]`
 
 Optional, repeatable. Declares the local IP-VRF / L3VNI tenants this VTEP
 serves under the RFC 9136 §4.4.2 symmetric Interface-less IRB model
-(Gate 9 foundation, ADR-0058). Empty by default — L2-only VTEPs and
-RR-only deployments leave it empty.
+(Gate 9, ADR-0058). Empty by default — L2-only VTEPs and RR-only
+deployments leave it empty.
 
-Today the daemon parses and validates this block, builds an
-`IpVrfTable`, and runs a per-pass readiness probe in the EVPN reconcile
-actor (Linux netlink dumps of the VRF and L3 VXLAN devices, logged
-Ready / NotReady transitions). Type 5 origination, Type 5 FIB
-programming, and the matching `rustbgpctl evpn vrfs` CLI surface are
-not yet shipped — they ride on follow-on Gate 9 slices.
+The daemon parses and validates this block, builds an `IpVrfTable`,
+runs the per-pass `IpVrfStatus` readiness probe (the seven ADR-0058
+§3 predicates), originates Type 5 routes from observed local
+forwarding routes when the IP-VRF is `Ready`, imports remote Type 5
+routes through the transactional `L3OwnedState` model, and programs
+kernel routes + L3 neighbor + L3VXLAN FDB rows atomically with
+four-phase apply ordering (route-remove → resolution-add → route-add
+→ resolution-remove) and Router MAC conflict detection. Operators
+read readiness, originated-route count, and installed-route count
+via `rustbgpctl evpn vrfs [NAME]` and the `EvpnService.ListIpVrfs` /
+`EvpnService.GetIpVrf` gRPC RPCs. Sub-second tenant withdraw is
+driven by `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast.
 
 ```toml
 [[evpn_ip_vrfs]]

@@ -4,8 +4,10 @@ Post-merge confidence list for the bidirectional EVPN VTEP loop
 (Gates 7a + 7b + 7b+1 in v0.15.0; Gates 7b+2 / 7c / 8 / 8b prep /
 8b enforcement intent + kernel primitive layered in across v0.16.0
 and v0.17.0; Gate 9 symmetric Interface-less IRB end-to-end in
-v0.18.0 — PRs #77 / #78 / #79). The branch landed the
-control-plane, kernel, and L3 paths; this file tracks what we
+v0.18.0 — PRs #77 / #78 / #79; ADR-0059 aliasing dataplane ECMP
+via FDB nexthop groups fully landed on `main` after v0.18.0 — PRs
+#84 / #86 / #87 / #88 / #89). The branch landed the control-plane,
+kernel, L3, and aliasing-ECMP paths; this file tracks what we
 still need to retire residual alpha-VTEP risk before claiming
 v1.0-grade production readiness.
 
@@ -185,24 +187,33 @@ landing, tracked here for visibility)
   `MassWithdrawTrigger { origin_vtep, esi }` for fingerprint
   changes. The RIB-side sweep that consumes triggers remains a
   follow-up integration slice.
-- [x] **Aliasing receive-side projection wiring landed.** The
-  daemon's projection layer now resolves
+- [x] **Aliasing receive-side projection + dataplane wiring
+  landed.** The daemon's projection layer resolves
   `RemoteMacEntry::alias_vtep_ips` for non-zero-ESI Type 2 routes
   by combining them with EAD-per-EVI advertisements via the
   `AliasIndex`. The supervisor at `src/evpn_dataplane.rs` plumbs
-  both Type 2 and EAD-per-EVI through from the RIB. The dataplane
-  itself doesn't yet program ECMP — that's the kernel-mutation
-  half tracked below.
-  - **Dataplane design** locked in [ADR-0059](adr/0059-evpn-aliasing-fdb-nexthop-groups.md):
-    Linux FDB nexthop groups (`NDA_NH_ID` + `NHA_FDB`),
-    raw-netlink construction because `rtnetlink 0.21` exposes no
-    nexthop API, group keyed by `(ESI, EthernetTag)` so multiple
-    MACs share one group. Implementation sliced into four PRs
-    (~3 days total); slice 1 (portable intent shape +
-    projection) is the first commit. Explicitly rejects a "wire
-    the data through; apply is a no-op log" first slice — it
-    would create the false impression that aliasing-ECMP is
-    partially shipped while forwarding still goes single-path.
+  both Type 2 and EAD-per-EVI through from the RIB.
+  [ADR-0059](adr/0059-evpn-aliasing-fdb-nexthop-groups.md) is
+  fully shipped on `main` across four implementation slices
+  (PRs #84 / #86 / #87 / #88) plus the M40 manual containerlab
+  smoke (PR #89): slice 1 added `RemoteMacEntry::alias_group_key`
+  + same-AF projection invariant; slice 2 added the
+  `nexthop_raw` raw-netlink primitive (rtnetlink 0.21 has no
+  nexthop API); slice 3a added the state types, apply primitive,
+  and CVE-2025-39851 inline guard; slice 3b is the
+  operational-behavior-change slice that wires the FDB nexthop
+  group programming into the reconcile actor's apply path
+  (Pass 1b diff, `NexthopOps` impls on LinuxDataplane +
+  InMemoryDataplane, startup NHID adoption with snapshot-aware
+  retention, partial-install rollback, three-key-space retry
+  schedule). Multi-homed Type 2 routes now program an FDB
+  nexthop group via `NDA_NH_ID` on the receive path. M40 in
+  PR #89 validated end-to-end against FRR EVPN-MH 10.3.1 —
+  16/16 PASS first-shot with the expected `NHG_TAG | n` /
+  `VTEP_NH_TAG | n` tag scheme and a clean drain-to-single-dst
+  transition. Slice 3.5 deferred follow-ups: periodic
+  `RTM_GETNEXTHOP` drift recovery, `apply_aliasing_ecmp`
+  operator off-switch, IPv6 alias members.
 - [x] **Mass-withdraw receive-side filter landed (RFC 7432 §8.4).**
   The supervisor's `build_remote_mac_table` snapshots EAD-per-ES
   routes from the RIB on every pass and drops any Type 2 with
@@ -213,12 +224,12 @@ landing, tracked here for visibility)
   `mass_withdraw::AsPathTracker` shipped earlier remains for
   future event-driven RIB-side work where sub-poll latency
   matters.
-- [ ] **Gate 8b — remaining multi-homing enforcement work.** Three
-  concrete slices left:
-  1. **Privileged-runner 24 h soak validation** before flipping the
-     `apply_bum_enforcement` default to `true`. Single-pass
+- [ ] **Gate 8b — remaining multi-homing enforcement work.** Two
+  concrete slices left (the aliasing-dataplane slice landed via
+  ADR-0059, see above):
+  1. **MAC-churn variant of the 24 h BUM-state soak.** Single-pass
      primitive validation already landed via the Docker harness; the
-     24 h BUM-state soak completed 2026-05-11
+     baseline 24 h BUM-state soak completed 2026-05-11
      (full postmortem: [`docs/soak-gate8b-24h-bum-state.md`](soak-gate8b-24h-bum-state.md)).
      PE1 RSS plateaued at 13.9453 MB after a one-time 3h 32m settle
      and stayed there for the remaining 20.5h (steady-state slope
@@ -229,26 +240,18 @@ landing, tracked here for visibility)
      origination paths get the same sustained-churn confidence
      under realistic timing. The MAC-churn variant reuses
      `tests/soak/run-gate8b-soak.sh` with an additional ~10 Hz
-     `bridge fdb add / del` loop on the per-cycle hook.
-  2. **Aliasing dataplane forwarding.** The control-plane half
-     (above) populates `alias_vtep_ips` cleanly; the
-     `LinuxDataplane` consumer still programs only the primary
-     `dst` per FDB row. Multi-VTEP forwarding needs `nexthop`
-     groups or L3-route-based ECMP — a separate kernel-side
-     design slice. The current receive-side mass-withdraw filter is
-     level-triggered; event-driven consumption of the
-     `MassWithdrawTrigger` helper can ride with this slice if
-     sub-poll latency becomes necessary.
-  3. Optional import-side ES-Import RT filtering on the daemon's
+     `bridge fdb add / del` loop on the per-cycle hook. This is
+     the gate to flip the `apply_bum_enforcement` default to
+     `true`.
+  2. Optional import-side ES-Import RT filtering on the daemon's
      own RIB import path (we already *originate* the RT in Gate 8b
      prep; this would also *import* by it).
-  Estimated ~3-4 weeks once started.
-- [ ] **Gate 9 — symmetric IRB (RFC 9135) + L3VNI / Type 5
-  dataplane.** Per-VRF IP routes via Type 5, MAC-VRF + IP-VRF
-  separation, Router MAC extended community lifecycle, the
-  symmetric IRB packet path through the kernel. The
-  `crates/rib` Type 5 codec already round-trips. Readiness chain
-  is in place (v0.18.0):
+  Estimated ~1-2 weeks once started.
+- [x] **Gate 9 — symmetric Interface-less IRB end-to-end (v0.18.0).**
+  Per-VRF IP routes via Type 5, MAC-VRF + IP-VRF separation,
+  Router MAC extended community lifecycle, the symmetric IRB
+  packet path through the kernel. Full readiness + origination +
+  import + L3 FIB programming chain shipped in v0.18.0:
   - `[[evpn_ip_vrfs]]` TOML schema + validation, optional
     `ip_vrf` field on `[[evpn_instances]]` (config foundation).
   - Pure-logic `ip_vrf::readiness` probe against ADR-0058 §3's
@@ -365,7 +368,11 @@ landing, tracked here for visibility)
 
 - ADR-0054 — Linux dataplane boundary (Gate 7b)
 - ADR-0055 — Local-MAC origination boundary (Gate 7b+1)
+- ADR-0058 — Gate 9 symmetric Interface-less IRB design
+- ADR-0059 — EVPN aliasing dataplane via FDB nexthop groups
 - `docs/evpn-enablement.md` — gate ladder + still-ahead lists
+- `docs/soak-gate8b-24h-bum-state.md` — Gate 8b BUM-state 24h soak
+- `docs/soak-gate9-slice6-24h-symmetric-irb.md` — Gate 9 slice 6 24h soak
 - `docs/evpn-vtep-troubleshooting.md` — bidirectional VTEP runbook
 - `docs/INTEROP.md` — M36, M37 test coverage
 - `KNOWN_ISSUES.md` — by-design alpha limitations

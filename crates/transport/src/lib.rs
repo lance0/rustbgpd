@@ -1,7 +1,9 @@
-//! rustbgpd-transport — TCP connection management
+//! rustbgpd-transport — BGP peer TCP connection management
 //!
 //! Tokio-based read/write loops, session runtime, bounded channels.
-//! This is the only crate that touches async I/O.
+//! This is the only crate that owns BGP peer TCP session I/O —
+//! `bmp`, `rpki`, `api`, and `mrt` each run their own async tasks
+//! for their respective collector / RTR / gRPC / dump-writer I/O.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]

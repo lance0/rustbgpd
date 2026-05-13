@@ -1,6 +1,16 @@
 # ADR-0059: EVPN aliasing dataplane via FDB nexthop groups
 
-**Status:** Accepted; implementation pending (slicing in §6 below)
+**Status:** Accepted; slices 1-4 shipped on main (PRs #84, #86, #87,
+#88, #89). Slice 1 (portable intent + projection AF guard,
+PR #84), slice 2 (`nexthop_raw` raw-netlink primitive, PR #86),
+slice 3a (state types + apply primitive + CVE-2025-39851 guard,
+PR #87), slice 3b (operational-behavior-change wiring through
+the reconcile actor + diff Pass 1b + startup NHID adoption +
+actor-level FDB-NHG test coverage, PR #88), and slice 4 (M40
+manual containerlab smoke against FRR EVPN-MH 10.3.1, 16/16
+PASS, PR #89). Slice 3.5 deferred per §5/§6 — operator
+`apply_aliasing_ecmp` off-switch, periodic `RTM_GETNEXTHOP`
+drift recovery, IPv6 alias members.
 **Date:** 2026-05-12
 
 ## Context
