@@ -1311,9 +1311,10 @@ are still in the kernel, the orphaned tagged FDB rows remain bound to
 the stale `nh_id` until the next periodic drift cycle cleans them up
 (≤ 60 s, ADR-0059 slice 3.5 PR 2).
 
-Restart-required: `[[evpn_instances]]` is pinned at startup. Runtime
-mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`) are a
-follow-up.
+Runtime mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`) are
+a follow-up; when they land, the diff layer's
+`FdbNhg → SingleDst` transition path will be the active convergence
+route for live edits.
 
 ---
 
