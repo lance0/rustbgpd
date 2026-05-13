@@ -1390,6 +1390,21 @@ async fn install_and_settle_multihomed(h: &mut Harness) -> (u32, Vec<u32>) {
     (group_id, member_ids)
 }
 
+fn sum_fdb_nhg_drift_counters(
+    reports: &[rustbgpd_evpn::DataplaneReport],
+) -> rustbgpd_evpn::FdbNhgDriftCounters {
+    reports.iter().fold(
+        rustbgpd_evpn::FdbNhgDriftCounters::default(),
+        |mut acc, r| {
+            acc.members_repaired += r.fdb_nhg_drift_counters.members_repaired;
+            acc.groups_replaced += r.fdb_nhg_drift_counters.groups_replaced;
+            acc.orphans_cleaned += r.fdb_nhg_drift_counters.orphans_cleaned;
+            acc.drift_disabled += r.fdb_nhg_drift_counters.drift_disabled;
+            acc
+        },
+    )
+}
+
 // 1. Drift recovery re-adds a member that was deleted out-of-band.
 #[tokio::test(start_paused = true)]
 async fn drift_recovery_re_adds_missing_member() {
@@ -1412,7 +1427,9 @@ async fn drift_recovery_re_adds_missing_member() {
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
-    let _ = h.try_drain_reports().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.members_repaired, 1);
 
     // Member should be back at the same kernel ID.
     assert!(
@@ -1458,7 +1475,9 @@ async fn drift_recovery_replaces_member_with_wrong_gateway() {
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
-    let _ = h.try_drain_reports().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.members_repaired, 1);
 
     let nhs = h.handle.nexthop_ops();
     let nh = nhs
@@ -1492,7 +1511,9 @@ async fn drift_recovery_re_adds_missing_group() {
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
-    let _ = h.try_drain_reports().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.groups_replaced, 1);
 
     assert!(
         h.handle.nexthop_ops().contains_key(&group_id),
@@ -1520,7 +1541,9 @@ async fn drift_recovery_replaces_wrong_member_set() {
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
-    let _ = h.try_drain_reports().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.groups_replaced, 1);
 
     // Group's member set should be restored to both members.
     let nhs = h.handle.nexthop_ops();
@@ -1595,7 +1618,9 @@ async fn drift_recovery_deletes_untracked_tagged_group_without_fdb_ref() {
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
-    let _ = h.try_drain_reports().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.orphans_cleaned, 1);
 
     assert!(
         !h.handle.nexthop_ops().contains_key(&drift_id),
@@ -1750,7 +1775,9 @@ async fn drift_recovery_permanent_dump_failure_latches_off() {
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
-    let _ = h.try_drain_reports().await;
+    let reports = h.try_drain_reports().await;
+    let counters = sum_fdb_nhg_drift_counters(&reports);
+    assert_eq!(counters.drift_disabled, 1);
 
     // Stage a SECOND permanent failure. With the latch in place,
     // drift is disabled — this failure should NOT be consumed by

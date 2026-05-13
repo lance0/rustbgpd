@@ -438,6 +438,7 @@ mod tests {
             ip_vrf_routes: Some(rustbgpd_evpn::ip_vrf::IpVrfRouteDump::default()),
             ip_vrf_installed_routes: std::collections::HashMap::new(),
             fdb_nexthops: rustbgpd_evpn::FdbNexthopDataplaneStatus::default(),
+            fdb_nhg_drift_counters: rustbgpd_evpn::FdbNhgDriftCounters::default(),
         }
     }
 

@@ -304,6 +304,25 @@ pub struct DataplaneReport {
     /// when no FDB-NHG rows are installed or when the Linux dataplane
     /// actor is not running (RR-only deployments).
     pub fdb_nexthops: FdbNexthopDataplaneStatus,
+    /// Per-report deltas for ADR-0059 FDB-NHG drift-recovery /
+    /// cleanup events. The daemon consumes these deltas into
+    /// Prometheus counters; each report carries only events since the
+    /// prior report.
+    pub fdb_nhg_drift_counters: FdbNhgDriftCounters,
+}
+
+/// Per-report deltas for FDB-NHG drift recovery and stale-NHID
+/// cleanup.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FdbNhgDriftCounters {
+    /// Per-VTEP member nexthops repaired by drift recovery.
+    pub members_repaired: u64,
+    /// FDB nexthop groups re-created or replaced by drift recovery.
+    pub groups_replaced: u64,
+    /// Adopted / unreferenced rustbgpd-tagged nexthops cleaned up.
+    pub orphans_cleaned: u64,
+    /// Permanent drift-dump failures that latched drift recovery off.
+    pub drift_disabled: u64,
 }
 
 /// Operator-facing summary of owned ADR-0059 FDB nexthop-group state.

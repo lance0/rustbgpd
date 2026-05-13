@@ -48,8 +48,9 @@ use std::time::Duration;
 
 use rustbgpd_evpn::ip_vrf::IpVrfTable;
 use rustbgpd_evpn::{
-    BumEnforcementTable, DataplaneIntent, DataplaneReport, EvpnInstanceTable, LocalMacObservation,
-    ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, RemoteMacTable, project_evpn_routes_with_aliases,
+    BumEnforcementTable, DataplaneIntent, DataplaneReport, EvpnInstanceTable, FdbNhgDriftCounters,
+    LocalMacObservation, ProjectedEvpnEadPerEvi, ProjectedEvpnRoute, RemoteMacTable,
+    project_evpn_routes_with_aliases,
 };
 use rustbgpd_evpn_linux::{Dataplane, ReconcileActor, ReconcileActorConfig};
 use rustbgpd_rib::{RibUpdate, route::EvpnRibRoute};
@@ -202,6 +203,7 @@ pub async fn spawn(
                     evpn_instances,
                     ip_vrfs,
                     rib_tx,
+                    &metrics,
                     daemon_shutdown,
                     dataplane,
                 );
@@ -246,6 +248,7 @@ pub fn spawn_with_dataplane<D>(
     evpn_instances: &Arc<EvpnInstanceTable>,
     ip_vrfs: &Arc<IpVrfTable>,
     rib_tx: mpsc::Sender<RibUpdate>,
+    metrics: &BgpMetrics,
     daemon_shutdown: CancellationToken,
     dataplane: D,
 ) -> EvpnDataplaneHandle
@@ -272,8 +275,10 @@ where
     // existing operator-visible warn/debug surface is unchanged.
     {
         let report_tx = report_broadcast_tx.clone();
+        let metrics = metrics.clone();
         tokio::spawn(async move {
             while let Some(report) = report_mpsc_rx.recv().await {
+                record_fdb_nhg_drift_metrics(&metrics, report.fdb_nhg_drift_counters);
                 if !report.failed.is_empty() {
                     warn!(
                         intent_generation = report.intent_generation,
@@ -326,6 +331,13 @@ where
         report_tx: report_broadcast_tx,
         bum_enforcement_tx,
     }
+}
+
+fn record_fdb_nhg_drift_metrics(metrics: &BgpMetrics, counters: FdbNhgDriftCounters) {
+    metrics.add_evpn_fdb_nhg_drift_members_repaired(counters.members_repaired);
+    metrics.add_evpn_fdb_nhg_drift_groups_replaced(counters.groups_replaced);
+    metrics.add_evpn_fdb_nhg_orphans_cleaned(counters.orphans_cleaned);
+    metrics.add_evpn_fdb_nhg_drift_disabled(counters.drift_disabled);
 }
 
 /// Periodic supervisor loop: query the RIB, project, publish.
@@ -645,9 +657,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::net::IpAddr;
 
+    use prometheus::Encoder;
     use rustbgpd_evpn::{
         BumEnforcementReadiness, BumEnforcementTable, DfRole, EvpnInstance, EvpnInstanceId,
-        EvpnInstanceTable, MacAddress, RouteDistinguisher, RouteTarget,
+        EvpnInstanceTable, FdbNhgDriftCounters, MacAddress, RouteDistinguisher, RouteTarget,
     };
     use rustbgpd_evpn_linux::{
         InMemoryDataplane, InstanceProbe, KernelLinkInfo, snapshot::KernelVxlanInfo,
@@ -665,6 +678,14 @@ mod tests {
     }
     fn ipa(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    fn gather_metrics_text(metrics: &BgpMetrics) -> String {
+        let encoder = prometheus::TextEncoder::new();
+        let families = metrics.registry().gather();
+        let mut buf = Vec::new();
+        encoder.encode(&families, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
     }
 
     fn local_instance_table(v: u32, bridge: Option<&str>) -> EvpnInstanceTable {
@@ -716,6 +737,26 @@ mod tests {
             is_stale: false,
             is_llgr_stale: false,
         }
+    }
+
+    #[test]
+    fn fdb_nhg_drift_report_deltas_feed_metrics() {
+        let metrics = BgpMetrics::new();
+        record_fdb_nhg_drift_metrics(
+            &metrics,
+            FdbNhgDriftCounters {
+                members_repaired: 2,
+                groups_replaced: 3,
+                orphans_cleaned: 4,
+                drift_disabled: 1,
+            },
+        );
+
+        let text = gather_metrics_text(&metrics);
+        assert!(text.contains("evpn_fdb_nhg_drift_members_repaired_total 2"));
+        assert!(text.contains("evpn_fdb_nhg_drift_groups_replaced_total 3"));
+        assert!(text.contains("evpn_fdb_nhg_orphans_cleaned_total 4"));
+        assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
     }
 
     #[test]
@@ -883,7 +924,15 @@ mod tests {
             actor_config: ReconcileActorConfig::for_tests(),
         };
         let ip_vrfs = Arc::new(IpVrfTable::new());
-        let h = spawn_with_dataplane(cfg, &instances, &ip_vrfs, rib_tx, shutdown.clone(), dp);
+        let h = spawn_with_dataplane(
+            cfg,
+            &instances,
+            &ip_vrfs,
+            rib_tx,
+            &BgpMetrics::new(),
+            shutdown.clone(),
+            dp,
+        );
 
         // Wait for the supervisor's first tick + actor reconcile to
         // populate the kernel snapshot with the projected MAC.
@@ -939,7 +988,15 @@ mod tests {
             actor_config: ReconcileActorConfig::for_tests(),
         };
         let ip_vrfs = Arc::new(IpVrfTable::new());
-        let h = spawn_with_dataplane(cfg, &instances, &ip_vrfs, rib_tx, shutdown.clone(), dp);
+        let h = spawn_with_dataplane(
+            cfg,
+            &instances,
+            &ip_vrfs,
+            rib_tx,
+            &BgpMetrics::new(),
+            shutdown.clone(),
+            dp,
+        );
         let mut reports = h.subscribe_reports();
 
         let mut table = BumEnforcementTable::new();

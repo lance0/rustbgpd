@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use prometheus::{IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 
 /// Prometheus metrics for the BGP daemon.
 ///
@@ -70,6 +70,10 @@ pub struct BgpMetrics {
     evpn_ip_vrf_origination_suppressed: IntCounterVec,
     evpn_ip_vrf_originated_routes: IntGaugeVec,
     evpn_ip_vrf_installed_routes: IntGaugeVec,
+    evpn_fdb_nhg_drift_members_repaired: IntCounter,
+    evpn_fdb_nhg_drift_groups_replaced: IntCounter,
+    evpn_fdb_nhg_orphans_cleaned: IntCounter,
+    evpn_fdb_nhg_drift_disabled: IntCounter,
 
     // ── BMP exporter ───────────────────────────────────────────
     bmp_source_drops: IntCounterVec,
@@ -394,6 +398,30 @@ impl BgpMetrics {
         )
         .expect("valid metric definition");
 
+        let evpn_fdb_nhg_drift_members_repaired = IntCounter::new(
+            "evpn_fdb_nhg_drift_members_repaired_total",
+            "FDB-NHG per-VTEP member nexthops repaired by ADR-0059 drift recovery.",
+        )
+        .expect("valid metric definition");
+
+        let evpn_fdb_nhg_drift_groups_replaced = IntCounter::new(
+            "evpn_fdb_nhg_drift_groups_replaced_total",
+            "FDB nexthop groups re-created or replaced by ADR-0059 drift recovery.",
+        )
+        .expect("valid metric definition");
+
+        let evpn_fdb_nhg_orphans_cleaned = IntCounter::new(
+            "evpn_fdb_nhg_orphans_cleaned_total",
+            "Adopted / unreferenced rustbgpd-tagged FDB nexthops cleaned up by ADR-0059 GC.",
+        )
+        .expect("valid metric definition");
+
+        let evpn_fdb_nhg_drift_disabled = IntCounter::new(
+            "evpn_fdb_nhg_drift_disabled_total",
+            "Permanent drift-dump failures that disabled ADR-0059 FDB-NHG drift recovery for this daemon instance.",
+        )
+        .expect("valid metric definition");
+
         let bmp_source_drops = IntCounterVec::new(
             Opts::new(
                 "bmp_source_drops_total",
@@ -527,6 +555,18 @@ impl BgpMetrics {
             .register(Box::new(evpn_ip_vrf_installed_routes.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(evpn_fdb_nhg_drift_members_repaired.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_fdb_nhg_drift_groups_replaced.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_fdb_nhg_orphans_cleaned.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(evpn_fdb_nhg_drift_disabled.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(bmp_source_drops.clone()))
             .expect("metric not already registered");
         registry
@@ -573,6 +613,10 @@ impl BgpMetrics {
             evpn_ip_vrf_origination_suppressed,
             evpn_ip_vrf_originated_routes,
             evpn_ip_vrf_installed_routes,
+            evpn_fdb_nhg_drift_members_repaired,
+            evpn_fdb_nhg_drift_groups_replaced,
+            evpn_fdb_nhg_orphans_cleaned,
+            evpn_fdb_nhg_drift_disabled,
             bmp_source_drops,
             bmp_collector_drops,
             bmp_replay_attempts,
@@ -830,6 +874,38 @@ impl BgpMetrics {
         self.evpn_ip_vrf_installed_routes
             .with_label_values(&[vrf])
             .set(count);
+    }
+
+    /// Increment repaired FDB-NHG per-VTEP member counter.
+    pub fn add_evpn_fdb_nhg_drift_members_repaired(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_fdb_nhg_drift_members_repaired.inc_by(delta);
+    }
+
+    /// Increment re-created / replaced FDB-NHG group counter.
+    pub fn add_evpn_fdb_nhg_drift_groups_replaced(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_fdb_nhg_drift_groups_replaced.inc_by(delta);
+    }
+
+    /// Increment cleaned FDB-NHG orphan counter.
+    pub fn add_evpn_fdb_nhg_orphans_cleaned(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_fdb_nhg_orphans_cleaned.inc_by(delta);
+    }
+
+    /// Increment permanent drift-disable counter.
+    pub fn add_evpn_fdb_nhg_drift_disabled(&self, delta: u64) {
+        if delta == 0 {
+            return;
+        }
+        self.evpn_fdb_nhg_drift_disabled.inc_by(delta);
     }
 
     /// Record a BMP event dropped at the PeerSession→BmpManager channel.
@@ -1152,6 +1228,26 @@ mod tests {
                 "evpn_duplicate_mac_first_move_timestamp_seconds{vni=\"100\",mac=\"02:aa:bb:cc:dd:01\"}"
             )
         );
+    }
+
+    #[test]
+    fn evpn_fdb_nhg_drift_counters_are_exported() {
+        let m = BgpMetrics::new();
+        m.add_evpn_fdb_nhg_drift_members_repaired(2);
+        m.add_evpn_fdb_nhg_drift_groups_replaced(3);
+        m.add_evpn_fdb_nhg_orphans_cleaned(4);
+        m.add_evpn_fdb_nhg_drift_disabled(1);
+
+        assert_eq!(m.evpn_fdb_nhg_drift_members_repaired.get(), 2);
+        assert_eq!(m.evpn_fdb_nhg_drift_groups_replaced.get(), 3);
+        assert_eq!(m.evpn_fdb_nhg_orphans_cleaned.get(), 4);
+        assert_eq!(m.evpn_fdb_nhg_drift_disabled.get(), 1);
+
+        let text = gather_text(&m);
+        assert!(text.contains("evpn_fdb_nhg_drift_members_repaired_total 2"));
+        assert!(text.contains("evpn_fdb_nhg_drift_groups_replaced_total 3"));
+        assert!(text.contains("evpn_fdb_nhg_orphans_cleaned_total 4"));
+        assert!(text.contains("evpn_fdb_nhg_drift_disabled_total 1"));
     }
 
     #[test]

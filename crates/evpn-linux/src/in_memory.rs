@@ -396,7 +396,10 @@ impl NexthopOps for InMemoryDataplane {
     }
 
     async fn dump_owned_nexthops(&mut self) -> Result<Vec<KernelNexthop>, DataplaneError> {
-        let state = self.state.lock().expect("poisoned");
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
         // Mirror the LinuxDataplane filter: return only rustbgpd-tagged
         // entries. Tests can stage foreign-tagged entries to verify
         // adoption filtering.

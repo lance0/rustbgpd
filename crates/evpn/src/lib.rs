@@ -110,7 +110,8 @@ pub use dataplane::{
     AppliedOp, BumEnforcementEntry, BumEnforcementKey, BumEnforcementReadiness,
     BumEnforcementStatus, BumEnforcementTable, BumForwardingAction, DataplaneIntent,
     DataplaneOpKind, DataplaneReport, FailedOp, FdbNexthopDataplaneStatus, FdbNexthopGroupStatus,
-    FdbNexthopMemberStatus, InstanceDataplaneStatus, InstanceState, IpVrfDataplaneStatus,
+    FdbNexthopMemberStatus, FdbNhgDriftCounters, InstanceDataplaneStatus, InstanceState,
+    IpVrfDataplaneStatus,
 };
 pub use df_election::{DfCandidate, DfElection, DfElectionError};
 pub use instance::{

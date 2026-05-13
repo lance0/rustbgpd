@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use rustbgpd_evpn::{
     AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, EvpnInstanceTable, FailedOp,
-    FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus,
+    FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus, FdbNhgDriftCounters,
     InstanceDataplaneStatus, InstanceState, RemoteMacTable,
 };
 use tokio::sync::{mpsc, watch};
@@ -273,6 +273,11 @@ struct ActorState {
     /// reconcile trigger. Transient/conflict failures leave this
     /// false; the next reconcile pass retries.
     drift_disabled: bool,
+    /// Drift / orphan-cleanup deltas accumulated since the last
+    /// [`DataplaneReport`]. Drained into the report so the daemon can
+    /// increment Prometheus counters without coupling this crate to
+    /// the telemetry crate.
+    fdb_nhg_drift_since_report: FdbNhgDriftCounters,
     /// Tracks whether [`Dataplane::next_event`] is still expected to
     /// yield events. `true` at startup; flipped to `false` the first
     /// time `next_event()` resolves to `None`. While `false` the
@@ -309,6 +314,7 @@ impl ActorState {
             adoption_done: false,
             last_drift_check: None,
             drift_disabled: false,
+            fdb_nhg_drift_since_report: FdbNhgDriftCounters::default(),
         }
     }
 
@@ -1228,6 +1234,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 Ok(()) => {
                     self.state.nh_id_alloc.release(id);
                     self.state.adopted_unreferenced.remove(&id);
+                    self.state.fdb_nhg_drift_since_report.orphans_cleaned += 1;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1325,6 +1332,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                              (matches startup-adoption permanent-failure semantics)"
                         );
                         self.state.drift_disabled = true;
+                        self.state.fdb_nhg_drift_since_report.drift_disabled += 1;
                     }
                     crate::error::FailureClass::Transient
                     | crate::error::FailureClass::Conflict => {
@@ -1384,11 +1392,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 continue;
             }
             match self.dataplane.add_nexthop_member(*id, *ip).await {
-                Ok(()) => tracing::info!(
-                    id = *id,
-                    gateway = %ip,
-                    "drift: re-installed FDB nexthop member (missing or kind/gateway drift)"
-                ),
+                Ok(()) => {
+                    self.state.fdb_nhg_drift_since_report.members_repaired += 1;
+                    tracing::info!(
+                        id = *id,
+                        gateway = %ip,
+                        "drift: re-installed FDB nexthop member (missing or kind/gateway drift)"
+                    );
+                }
                 Err(e) => tracing::warn!(
                     error = %e,
                     id = *id,
@@ -1426,12 +1437,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 .add_nexthop_group(*g_id, &expected_member_ids)
                 .await
             {
-                Ok(()) => tracing::info!(
-                    id = *g_id,
-                    ?key,
-                    members = expected_member_ids.len(),
-                    "drift: re-added/replaced FDB nexthop group"
-                ),
+                Ok(()) => {
+                    self.state.fdb_nhg_drift_since_report.groups_replaced += 1;
+                    tracing::info!(
+                        id = *g_id,
+                        ?key,
+                        members = expected_member_ids.len(),
+                        "drift: re-added/replaced FDB nexthop group"
+                    );
+                }
                 Err(e) => tracing::warn!(
                     error = %e,
                     id = *g_id,
@@ -1661,7 +1675,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// away (it shouldn't during normal operation, but it's not worth
     /// crashing the actor over).
     async fn emit_report(
-        &self,
+        &mut self,
         instance_status: Vec<InstanceDataplaneStatus>,
         applied: Vec<AppliedOp>,
         failed: Vec<FailedOp>,
@@ -1691,6 +1705,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 *ip_vrf_installed_routes.entry(*vrf_id).or_insert(0) += 1;
             }
         }
+        let fdb_nhg_drift_counters = std::mem::take(&mut self.state.fdb_nhg_drift_since_report);
 
         let report = DataplaneReport {
             intent_generation: self.state.last_intent_generation,
@@ -1703,6 +1718,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             ip_vrf_routes,
             ip_vrf_installed_routes,
             fdb_nexthops: build_fdb_nexthop_status(&self.state),
+            fdb_nhg_drift_counters,
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");

@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
+  counters expose the periodic nexthop drift-recovery path without
+  scraping logs: `evpn_fdb_nhg_drift_members_repaired_total`,
+  `evpn_fdb_nhg_drift_groups_replaced_total`,
+  `evpn_fdb_nhg_orphans_cleaned_total`, and
+  `evpn_fdb_nhg_drift_disabled_total`. The Linux reconcile actor
+  reports per-`DataplaneReport` deltas for member repairs, group
+  re-adds / replaces, orphan cleanup, and permanent drift-disable
+  latches; the daemon consumes those deltas into process-level
+  Prometheus counters.
+
 - **EVPN FDB nexthop-group operator visibility.** New
   `EvpnService.ListEvpnNexthops` gRPC RPC and
   `rustbgpctl evpn nexthops` CLI command expose the reconciler's
