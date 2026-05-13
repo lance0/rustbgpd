@@ -1252,11 +1252,12 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// between rustbgpd's `GroupOwnedMap` + `OwnedSet` and the
     /// kernel:
     ///
-    /// 1. **Missing per-VTEP members.** A tracked member ID isn't in
-    ///    the kernel dump (out-of-band `ip nexthop del`, competing
-    ///    daemon, etc.). Re-add at the same kernel ID via
-    ///    `add_nexthop_member`. Slot stays reserved; no allocator
-    ///    churn.
+    /// 1. **Missing or mis-shaped per-VTEP members.** A tracked
+    ///    member ID is absent from the kernel dump, has the wrong
+    ///    gateway, or has been overwritten with a group object.
+    ///    Re-add at the same kernel ID via `add_nexthop_member`
+    ///    (`NLM_F_CREATE | NLM_F_REPLACE`). Slot stays reserved;
+    ///    no allocator churn.
     /// 2. **Missing or member-set-drifted groups.** A tracked group
     ///    ID is either absent or has a different member set than
     ///    `GroupOwnedMap` expects. `add_nexthop_group` is
@@ -1265,13 +1266,22 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// 3. **Stale tagged FDB rows from a prior daemon.** A kernel
     ///    FDB row's `nh_id` is in our tag space but neither tracked
     ///    in `GroupOwnedMap` nor recorded in `OwnedSet`. Emits
-    ///    `remove_fdb_nhg_row`. Closes the slice 3.5 PR 1 cold-start
-    ///    gap (restart-with-disable leaves orphan rows).
+    ///    `remove_fdb_nhg_row` — but only when the `(VNI, MAC)` is
+    ///    *also not in the current desired intent*: an apply
+    ///    failure on a desired MAC must not cause the row to
+    ///    disappear underneath the eventual install. Closes the
+    ///    slice 3.5 PR 1 cold-start gap (restart-with-disable
+    ///    leaves orphan rows).
     /// 4. **Untracked tagged NHIDs in the kernel.** Folded into
-    ///    `adopted_unreferenced` so the next reconcile pass routes
-    ///    them through `cleanup_unreferenced_adoptions` — the
-    ///    retention-set logic correctly retains anything still
-    ///    referenced by an FDB row and deletes the rest.
+    ///    `adopted_unreferenced`, then `cleanup_unreferenced_adoptions`
+    ///    runs **in-line** against the snapshot we already have.
+    ///    The cleanup may retain the orphan this pass (the snapshot
+    ///    pre-dates step (3) FDB-row removals); the next drift
+    ///    cycle deletes it cleanly with a fresh snapshot. Keeping
+    ///    `adoption_done` sticky avoids reopening the startup
+    ///    adoption-dump path on the next reconcile pass, which
+    ///    would issue an extra `dump_owned_nexthops` and warn for
+    ///    every ID we just reserved here.
     ///
     /// All failures are non-fatal: logged + deferred. Allocator
     /// integrity is preserved end-to-end — we never release a slot
@@ -1279,18 +1289,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// `try_del_and_release_alloc` invariant from slice 3b).
     ///
     /// Returns `true` when the dump succeeded (caller advances
-    /// `last_drift_check`), `false` on a transient/permanent dump
-    /// failure (caller leaves `last_drift_check` alone so the next
-    /// reconcile pass re-attempts immediately rather than waiting
-    /// a full `periodic_dump` interval).
-    ///
-    /// `desired` is the current intent — used by step (3) to skip
-    /// stale-row cleanup for any `(VNI, MAC)` we're still trying
-    /// to program. Without this guard, a permanent / transient
-    /// apply failure on a desired MAC would cause drift recovery
-    /// to delete the (possibly stale-NHID) row that's standing in
-    /// for the eventual install, widening blast radius beyond what
-    /// drift recovery is designed to handle.
+    /// `last_drift_check`), `false` on dump failure. On a
+    /// **permanent** dump failure class (kernel too old, no
+    /// `CAP_NET_ADMIN`, malformed message) we latch the
+    /// `drift_disabled` flag so subsequent reconcile passes skip
+    /// the drift gate entirely — mirrors the startup-adoption
+    /// permanent-failure semantics. Transient / conflict failures
+    /// leave drift enabled; the next reconcile pass retries.
     #[allow(clippy::too_many_lines)]
     async fn reconcile_drift(
         &mut self,
@@ -1355,16 +1360,33 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             .chain(tracked_groups.iter().map(|(_, id, _)| *id))
             .collect();
 
-        // (1) Missing per-VTEP members — re-add at the same ID.
+        // (1) Missing or mis-shaped per-VTEP members — re-add at
+        //     the same ID via `add_nexthop_member` (which is
+        //     `NLM_F_CREATE | NLM_F_REPLACE`, so it heals "wrong
+        //     gateway / wrong kind at our ID" with the same call
+        //     that creates a fresh one). "Healthy" requires:
+        //       - kernel kind is `Member` (not `Group` — pathological
+        //         re-use of our ID slot as a group object),
+        //       - kernel gateway matches the tracked IP exactly.
+        //     An external actor replacing `0x3000_xxxx` with a wrong
+        //     gateway or a group object would otherwise look healthy
+        //     to a `contains_key` check and never get repaired.
         for (ip, id) in &tracked_vteps {
-            if actual_by_id.contains_key(id) {
+            let needs_action = match actual_by_id.get(id) {
+                None => true,
+                Some(nh) => match &nh.kind {
+                    KernelNexthopKind::Member { gateway } => gateway != ip,
+                    KernelNexthopKind::Group { .. } => true,
+                },
+            };
+            if !needs_action {
                 continue;
             }
             match self.dataplane.add_nexthop_member(*id, *ip).await {
                 Ok(()) => tracing::info!(
                     id = *id,
                     gateway = %ip,
-                    "drift: re-added missing FDB nexthop member"
+                    "drift: re-installed FDB nexthop member (missing or kind/gateway drift)"
                 ),
                 Err(e) => tracing::warn!(
                     error = %e,

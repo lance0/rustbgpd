@@ -1351,6 +1351,59 @@ async fn drift_recovery_re_adds_missing_member() {
     h.shutdown().await;
 }
 
+// 1b. Drift recovery REPLACEs a per-VTEP member whose kernel-side
+//     gateway no longer matches the tracked IP. An external actor
+//     replacing the gateway under our tag-space ID can't be caught
+//     by a `contains_key`-only check.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_replaces_member_with_wrong_gateway() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+
+    let (_group_id, member_ids) = install_and_settle_multihomed(&mut h).await;
+    // First member of the multi-homed install tracks 10.0.0.2.
+    let drifted_id = member_ids[0];
+
+    // Out-of-band: replace the kernel-side member at `drifted_id`
+    // with a different gateway. This is exactly what a competing
+    // daemon (or an `ip nexthop replace ... via 192.0.2.99 fdb`)
+    // could leave behind — same ID, wrong gateway.
+    h.handle
+        .force_remove_nexthop_op(drifted_id)
+        .expect("member should have been installed");
+    let wrong_gateway: IpAddr = "192.0.2.99".parse().unwrap();
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: drifted_id,
+        kind: KernelNexthopKind::Member {
+            gateway: wrong_gateway,
+        },
+    });
+
+    // Drift cycle should detect the gateway mismatch and re-issue
+    // `add_nexthop_member` with the *correct* IP at the same ID.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    let nhs = h.handle.nexthop_ops();
+    let nh = nhs
+        .get(&drifted_id)
+        .expect("member should still exist after repair");
+    match &nh.kind {
+        KernelNexthopKind::Member { gateway } => assert_eq!(
+            *gateway,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            "drift recovery must restore the tracked gateway; got {gateway}"
+        ),
+        other => panic!("expected Member kind, got {other:?}"),
+    }
+
+    h.shutdown().await;
+}
+
 // 2. Drift recovery re-adds a group that was deleted out-of-band.
 #[tokio::test(start_paused = true)]
 async fn drift_recovery_re_adds_missing_group() {
