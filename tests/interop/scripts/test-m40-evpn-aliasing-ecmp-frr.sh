@@ -36,12 +36,21 @@
 
 TOPO="m40-evpn-aliasing-ecmp-frr"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=test-lib.sh
-source "$SCRIPT_DIR/test-lib.sh"
 
+# M40 names the rustbgpd node `pe-rb` (matches the FRR `pe-a` /
+# `pe-c` shape) rather than the shared lib's default
+# `clab-${TOPO}-rustbgpd`. Override `RUSTBGPD` before sourcing so
+# `preflight` (which runs at source time) inspects the right
+# container.
 PE_RB="clab-${TOPO}-pe-rb"
 PE_A="clab-${TOPO}-pe-a"
 PE_C="clab-${TOPO}-pe-c"
+RUSTBGPD="$PE_RB"
+export RUSTBGPD
+
+# shellcheck source=test-lib.sh
+source "$SCRIPT_DIR/test-lib.sh"
+
 PE_A_IP="10.0.0.2"
 PE_C_IP="10.0.1.2"
 TEST_MAC="02:aa:bb:cc:dd:40"
@@ -83,8 +92,24 @@ wait_for_rb() {
 # Tests
 # ---------------------------------------------------------------------------
 
+# rustbgpd is already running — the clab `exec` block runs
+# `start-rustbgpd-vtep.sh` which launches the daemon in the
+# background. Calling `start_rustbgpd` here would race a second
+# instance against the first. Just resolve the gRPC address and
+# wait for the endpoint to become reachable (same pattern as
+# M36).
 resolve_grpc_addr
-start_rustbgpd
+log "Waiting for rustbgpd gRPC endpoint..."
+for i in $(seq 1 15); do
+    if grpc_health >/dev/null 2>&1; then
+        ok "gRPC endpoint ready (attempt $i)"
+        break
+    fi
+    if [ "$i" -eq 15 ]; then
+        fail "gRPC endpoint not reachable within 30s"
+    fi
+    sleep 2
+done
 
 log "[baseline] both FRR peers Established to rustbgpd"
 wait_frr_established "$PE_A" "10.0.0.1" "pe-a EVPN" \
@@ -196,9 +221,13 @@ fi
 #     re-appears), but the test doesn't assert on that.
 
 log "[phase 2] stop pe-c — withdrawal of EAD-per-EVI must drain the group"
-docker exec "$PE_C" sh -c "pkill -TERM bgpd || true; sleep 1; pkill -KILL bgpd || true" \
-    >/dev/null 2>&1
-ok "pe-c bgpd stopped"
+# `docker stop` brings down watchfrr + bgpd together. Killing only
+# bgpd inside the container would race a watchfrr restart and
+# re-originate EAD-per-EVI mid-drain (M1's test relies on that
+# auto-restart behavior; M40 needs the opposite).
+docker stop --time 5 "$PE_C" >/dev/null 2>&1 \
+    && ok "pe-c container stopped" \
+    || fail "could not stop pe-c container"
 
 wait_for_rb \
     "FDB row falls back to single-dst (no nhid)" \
