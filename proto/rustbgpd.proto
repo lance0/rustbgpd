@@ -1013,8 +1013,14 @@ message TriggerMrtDumpResponse {
 service EvpnService {
   rpc ListEvpnInstances(ListEvpnInstancesRequest) returns (ListEvpnInstancesResponse);
   // ADR-0059 — list the FDB nexthop groups rustbgpd currently owns
-  // in the Linux dataplane reconciler. Empty when no FDB-NHG state
-  // is installed or when the dataplane actor is not running.
+  // in the Linux dataplane reconciler. The `groups` list is empty
+  // when no FDB-NHG state is installed (RR-only deployment,
+  // single-homed VTEP, or every multi-homed VNI flipped to
+  // `apply_aliasing_ecmp = false`) or when the dataplane actor is
+  // not running. The top-level `orphan_nexthops_count`,
+  // `pending_delete_count`, and `drift_recovery_disabled` fields
+  // are always populated and may be non-zero / `true` even when
+  // `groups` is empty.
   rpc ListEvpnNexthops(ListEvpnNexthopsRequest) returns (ListEvpnNexthopsResponse);
   // Gate 9 — list every `[[evpn_ip_vrfs]]` entry the daemon has
   // resolved, with the live readiness verdict from the reconcile

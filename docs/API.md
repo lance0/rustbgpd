@@ -681,6 +681,7 @@ boundaries.
 | RPC | Description |
 |-----|-------------|
 | `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, route_targets, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count) |
+| `ListEvpnNexthops`  | List Linux dataplane reconciler-owned ADR-0059 FDB nexthop groups (per-VNI groups with ESI / Ethernet Tag / kernel group ID, per-VTEP member nexthop IDs + gateways, MAC refs) plus top-level orphan-NH count, pending-delete count, and the `drift_recovery_disabled` latch — read-only operator visibility |
 | `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, route_targets, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
 | `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
 
@@ -738,8 +739,10 @@ rustbgpctl evpn nexthops          # human format
 rustbgpctl evpn nexthops --json   # JSON output
 ```
 
-Empty output is normal on RR-only deployments, single-homed VTEPs, or
-multi-homed VNIs with `apply_aliasing_ecmp = false`.
+An empty `groups` list is normal on RR-only deployments, single-homed
+VTEPs, or multi-homed VNIs with `apply_aliasing_ecmp = false` — the
+top-level `orphan_nexthops_count`, `pending_delete_count`, and
+`drift_recovery_disabled` fields are always populated regardless.
 
 ### List IP-VRFs / L3VNI tenants
 

@@ -97,9 +97,12 @@ impl EvpnService {
         }
     }
 
-    /// Construct a service exposing the full Gate 9 surface — the
-    /// L2 EVPN instance table, the L3 IP-VRF table, and a live read
-    /// of the most recent `DataplaneReport.ip_vrf_status` rows. The
+    /// Construct a service exposing the full EVPN surface — the L2
+    /// EVPN instance table, the L3 IP-VRF table, a live read of the
+    /// most recent `DataplaneReport.ip_vrf_status` rows (Gate 9),
+    /// and a live read of the most recent
+    /// `DataplaneReport.fdb_nexthops` projection (ADR-0059 slice
+    /// 3.5 operator visibility — backs `ListEvpnNexthops`). The
     /// daemon uses this constructor; older callers that only need
     /// the L2 surface stay on [`Self::new`] /
     /// [`Self::with_originated_local_mac_count`].

@@ -347,27 +347,32 @@ pub async fn list_nexthops(connection: Connection, json: bool) -> Result<(), Cli
             .expect("failed to serialize EVPN nexthop list as JSON")
         );
     } else {
+        // Print the latch directly rather than label it as
+        // "enabled" / "disabled" — `drift_recovery_disabled = false`
+        // is also the default state of an empty snapshot (RR-only,
+        // non-Linux build, pre-first-report) where no drift loop is
+        // running at all, so a derived "enabled" label would
+        // misrepresent those cases.
         println!(
-            "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery={}",
+            "FDB nexthop groups: {} orphan-nexthops={} pending-deletes={} drift-recovery-disabled={}",
             resp.groups.len(),
             resp.orphan_nexthops_count,
             resp.pending_delete_count,
-            if resp.drift_recovery_disabled {
-                "disabled"
-            } else {
-                "enabled"
-            }
+            resp.drift_recovery_disabled,
         );
         if resp.groups.is_empty() {
             println!("No owned FDB nexthop groups");
         } else {
             for group in &resp.groups {
+                // Use `nh_id=N via <gw>` per-member so IPv6 gateways
+                // (which contain colons natively) don't collide with
+                // any `gateway:nh_id` delimiter.
                 let members = group
                     .members
                     .iter()
-                    .map(|m| format!("{}:{}", m.gateway, m.nexthop_id))
+                    .map(|m| format!("nh_id={} via {}", m.nexthop_id, m.gateway))
                     .collect::<Vec<_>>()
-                    .join(",");
+                    .join(", ");
                 println!(
                     "vni={} esi={} tag={} group-id={} members=[{}] mac-refs=[{}]",
                     group.vni,
