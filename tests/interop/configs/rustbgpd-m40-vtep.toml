@@ -1,0 +1,44 @@
+# M40 — rustbgpd as EVPN VTEP, peering with two FRR VTEPs that
+# share an Ethernet Segment. The slice 3b coordinator should
+# observe both peers' Type 1 EAD-per-EVI routes, resolve the
+# alias set for any Type 2 originated on the shared ES, and
+# program an FDB row referencing an FDB nexthop group via
+# NDA_NH_ID. See `m40-evpn-aliasing-ecmp-frr.clab.yml`.
+
+[global]
+asn = 65000
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+
+# Single L2 EVPN instance bound to br100 / vxlan100. The startup
+# script `start-rustbgpd-vtep.sh` pre-creates the bridge + VXLAN
+# port with `nolearning` so the slice 3b CVE-2025-39851 guard is
+# satisfied (rustbgpd refuses to install FDB-NHG rows on a learning-
+# enabled VXLAN device).
+[[evpn_instances]]
+vni = 100
+rd = "10.0.0.1:100"
+route_targets = ["65000:100"]
+local_vtep_ip = "10.0.0.1"
+bridge = "br100"
+advertise_svi_mac = false
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65000
+description = "pe-a-es1"
+hold_time = 180
+families = ["l2vpn_evpn"]
+
+[[neighbors]]
+address = "10.0.1.2"
+remote_asn = 65000
+description = "pe-c-es1"
+hold_time = 180
+families = ["l2vpn_evpn"]

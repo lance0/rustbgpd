@@ -1,0 +1,96 @@
+# Containerlab topology: rustbgpd VTEP observer ↔ 2× FRR VTEPs
+# sharing an Ethernet Segment (M40 — ADR-0059 slice 4: aliasing
+# dataplane ECMP via FDB nexthop groups against real FRR EVPN-MH).
+#
+# Tests the slice 3b coordinator end-to-end on receive: rustbgpd
+# observes a Type 2 route from pe-a plus Type 1 EAD-per-EVI from
+# both pe-a and pe-c (shared ES), resolves the alias set
+# `{pe-a, pe-c}`, and programs an FDB row that references an FDB
+# nexthop group via `NDA_NH_ID`. The test asserts via
+# `bridge fdb show` + `ip nexthop show` on the rustbgpd container
+# that the kernel programming matches what `apply_nhg_op`
+# orchestrates.
+#
+# This is the gating evidence to flip aliasing-ECMP from
+# "shipped, manual smoke green" to "production-default" — once
+# M40 passes against FRR 10.3.1, the README's "Not yet supported"
+# row for aliasing dataplane ECMP comes off.
+#
+# Topology:
+#   pe-rb (10.0.0.1, AS 65000)        — rustbgpd VTEP, no local ES
+#     +- eth1 -- pe-a (10.0.0.2, ES1) — FRR VTEP with shared ES
+#     +- eth2 -- pe-c (10.0.1.2, ES1) — FRR VTEP with shared ES
+#
+#   Shared ESI Type 3 (MAC-based per RFC 7432 §5) derived from
+#   es-sys-mac aa:bb:cc:dd:ee:ff + es-id 1 — wire form
+#   03:aa:bb:cc:dd:ee:ff:00:00:01, matches the M32 convention.
+#   pe-a and pe-c don't
+#   peer directly with each other — we don't need their Type 4
+#   ES routes to cross-validate DF election here; rustbgpd's
+#   view of both EAD-per-EVI routes is what the test asserts.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
+#   bash tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
+#   containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
+#
+# Manual / local only. Not wired into CI — containerlab requires
+# privileges the GitHub runner doesn't have. M39's privileged-
+# runner gate (ROADMAP follow-up) would cover this slot once it
+# exists.
+
+name: m40-evpn-aliasing-ecmp-frr
+
+topology:
+  nodes:
+    pe-rb:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m40-vtep.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd-vtep.sh:/usr/local/bin/start-rustbgpd-vtep.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip addr add 10.0.1.1/24 dev eth2
+        - ip link set eth2 up
+        - /usr/local/bin/start-rustbgpd-vtep.sh 10.0.0.1 100
+      env:
+        RUST_LOG: info
+
+    pe-a:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m40-vtep-a.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-mh.sh:/usr/local/bin/start-frr-vtep-mh.sh:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-mh.sh 10.0.0.2 100 1 aa:bb:cc:dd:ee:ff
+
+    pe-c:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m40-vtep-c.conf:/etc/frr/frr.conf:ro
+        - ./scripts/start-frr-vtep-mh.sh:/usr/local/bin/start-frr-vtep-mh.sh:ro
+      exec:
+        - ip addr add 10.0.1.2/24 dev eth1
+        - ip link set eth1 up
+        - /usr/local/bin/start-frr-vtep-mh.sh 10.0.1.2 100 1 aa:bb:cc:dd:ee:ff
+
+  links:
+    - endpoints: ["pe-rb:eth1", "pe-a:eth1"]
+    - endpoints: ["pe-rb:eth2", "pe-c:eth1"]
+
+# Subnet A: 10.0.0.0/24 — pe-rb (10.0.0.1) <-> pe-a (10.0.0.2)
+# Subnet C: 10.0.1.0/24 — pe-rb (10.0.1.1) <-> pe-c (10.0.1.2)
+# Shared ESI: Type 3 (MAC-based) — 03:<es-sys-mac>:<es-id-big-endian>,
+# i.e. 03:aa:bb:cc:dd:ee:ff:00:00:01 with the values configured on
+# the bond. Per RFC 7432 §5; matches start-frr-vtep-mh.sh and the
+# Phase-1 `show evpn es` assertion in the driver.
