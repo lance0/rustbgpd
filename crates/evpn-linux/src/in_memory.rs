@@ -558,6 +558,37 @@ impl InMemoryHandle {
             .insert(nh.id, nh);
     }
 
+    /// Out-of-band kernel-side delete of a nexthop op — drops the
+    /// fake's tracking without going through the dataplane API. Used
+    /// by ADR-0059 slice 3.5 PR 2 drift-recovery tests to simulate
+    /// an operator or competing daemon issuing `ip nexthop del`
+    /// behind rustbgpd's back. Returns the removed [`KernelNexthop`]
+    /// for assertions.
+    #[must_use]
+    pub fn force_remove_nexthop_op(&self, id: u32) -> Option<KernelNexthop> {
+        self.state.lock().expect("poisoned").nexthop_ops.remove(&id)
+    }
+
+    /// Out-of-band kernel-side group-member-set mutation. Replaces
+    /// the kernel's tracked member list for the group at `id`
+    /// without going through the dataplane API. Returns the prior
+    /// member list when `id` is a group; `None` when `id` is absent
+    /// or a per-VTEP member. Used by drift-recovery tests to
+    /// simulate "operator changed the group out of band".
+    #[must_use]
+    pub fn force_set_group_members(&self, id: u32, members: Vec<u32>) -> Option<Vec<u32>> {
+        let mut state = self.state.lock().expect("poisoned");
+        let nh = state.nexthop_ops.get_mut(&id)?;
+        match &mut nh.kind {
+            crate::dataplane::KernelNexthopKind::Group { member_ids } => {
+                let prev = member_ids.clone();
+                *member_ids = members;
+                Some(prev)
+            }
+            crate::dataplane::KernelNexthopKind::Member { .. } => None,
+        }
+    }
+
     /// Snapshot the current nexthop-op map for assertion — every ID
     /// the actor has installed (or test pre-loaded) and not yet
     /// deleted.

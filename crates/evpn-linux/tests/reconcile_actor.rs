@@ -1285,6 +1285,421 @@ async fn fdb_nhg_off_switch_disabled_skips_install() {
     h.shutdown().await;
 }
 
+// ─── ADR-0059 slice 3.5 PR 2: periodic RTM_GETNEXTHOP drift recovery ───
+
+/// Helper for drift tests: install a multi-homed entry, drain reports
+/// until adoption is done and the FDB-NHG path has installed the group
+/// + members. Returns `(group_id, member_ids)` for the test to drive.
+async fn install_and_settle_multihomed(h: &mut Harness) -> (u32, Vec<u32>) {
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(last.failed.is_empty(), "install failed: {:?}", last.failed);
+
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert_eq!(groups.len(), 1, "expected 1 group, got {groups:?}");
+    assert_eq!(members.len(), 2, "expected 2 members, got {members:?}");
+    let group_id = groups[0].id;
+    let member_ids: Vec<u32> = members.iter().map(|m| m.id).collect();
+    (group_id, member_ids)
+}
+
+// 1. Drift recovery re-adds a member that was deleted out-of-band.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_re_adds_missing_member() {
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+
+    let (_group_id, member_ids) = install_and_settle_multihomed(&mut h).await;
+    let removed_id = member_ids[0];
+
+    // Out-of-band: delete the member from the fake kernel.
+    h.handle
+        .force_remove_nexthop_op(removed_id)
+        .expect("member should have been installed");
+    assert!(
+        !h.handle.nexthop_ops().contains_key(&removed_id),
+        "force_remove should drop the kernel-side record"
+    );
+
+    // Advance past the periodic_dump window so drift recovery runs.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // Member should be back at the same kernel ID.
+    assert!(
+        h.handle.nexthop_ops().contains_key(&removed_id),
+        "drift recovery should re-install the deleted member at the same kernel ID"
+    );
+
+    h.shutdown().await;
+}
+
+// 1b. Drift recovery REPLACEs a per-VTEP member whose kernel-side
+//     gateway no longer matches the tracked IP. An external actor
+//     replacing the gateway under our tag-space ID can't be caught
+//     by a `contains_key`-only check.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_replaces_member_with_wrong_gateway() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+
+    let (_group_id, member_ids) = install_and_settle_multihomed(&mut h).await;
+    // First member of the multi-homed install tracks 10.0.0.2.
+    let drifted_id = member_ids[0];
+
+    // Out-of-band: replace the kernel-side member at `drifted_id`
+    // with a different gateway. This is exactly what a competing
+    // daemon (or an `ip nexthop replace ... via 192.0.2.99 fdb`)
+    // could leave behind — same ID, wrong gateway.
+    h.handle
+        .force_remove_nexthop_op(drifted_id)
+        .expect("member should have been installed");
+    let wrong_gateway: IpAddr = "192.0.2.99".parse().unwrap();
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: drifted_id,
+        kind: KernelNexthopKind::Member {
+            gateway: wrong_gateway,
+        },
+    });
+
+    // Drift cycle should detect the gateway mismatch and re-issue
+    // `add_nexthop_member` with the *correct* IP at the same ID.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    let nhs = h.handle.nexthop_ops();
+    let nh = nhs
+        .get(&drifted_id)
+        .expect("member should still exist after repair");
+    match &nh.kind {
+        KernelNexthopKind::Member { gateway } => assert_eq!(
+            *gateway,
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            "drift recovery must restore the tracked gateway; got {gateway}"
+        ),
+        other => panic!("expected Member kind, got {other:?}"),
+    }
+
+    h.shutdown().await;
+}
+
+// 2. Drift recovery re-adds a group that was deleted out-of-band.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_re_adds_missing_group() {
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+
+    let (group_id, _member_ids) = install_and_settle_multihomed(&mut h).await;
+
+    // Out-of-band: delete the group from the fake kernel.
+    h.handle
+        .force_remove_nexthop_op(group_id)
+        .expect("group should have been installed");
+
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    assert!(
+        h.handle.nexthop_ops().contains_key(&group_id),
+        "drift recovery should re-install the deleted group at the same kernel ID"
+    );
+
+    h.shutdown().await;
+}
+
+// 3. Drift recovery REPLACEs a group whose member set drifted.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_replaces_wrong_member_set() {
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+
+    let (group_id, member_ids) = install_and_settle_multihomed(&mut h).await;
+    let kept_member = member_ids[0];
+
+    // Out-of-band: corrupt the kernel-side group to point at only one
+    // member instead of two.
+    h.handle
+        .force_set_group_members(group_id, vec![kept_member])
+        .expect("should be a group");
+
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // Group's member set should be restored to both members.
+    let nhs = h.handle.nexthop_ops();
+    let group = nhs.get(&group_id).expect("group exists");
+    match &group.kind {
+        rustbgpd_evpn_linux::dataplane::KernelNexthopKind::Group { member_ids: m } => {
+            let expected: std::collections::BTreeSet<u32> = member_ids.iter().copied().collect();
+            let got: std::collections::BTreeSet<u32> = m.iter().copied().collect();
+            assert_eq!(
+                expected, got,
+                "drift recovery should REPLACE the group member set; expected {expected:?}, got {got:?}"
+            );
+        }
+        other => panic!("expected Group kind, got {other:?}"),
+    }
+
+    h.shutdown().await;
+}
+
+// 4. Drift recovery folds untracked tagged NHIDs into adopted_unreferenced.
+//    On the next reconcile pass, cleanup_unreferenced_adoptions deletes
+//    them (no kernel FDB row references them, no group tracks them).
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_deletes_untracked_tagged_group_without_fdb_ref() {
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Pre-load a tagged NHID in the rustbgpd group-tag range with no
+    // tracking on our side and no FDB row referencing it.
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+    let stale_id: u32 = 0x4000_0BAD;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: stale_id,
+        kind: KernelNexthopKind::Group { member_ids: vec![] },
+    });
+
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst, RemoteMacTable::new()))
+        .unwrap();
+
+    // First pass — adoption pass should pick up the stale ID, then
+    // cleanup deletes it.
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    // Already deleted by startup adoption-cleanup. Drift recovery is
+    // the steady-state safety net for the *post-startup* drift case;
+    // we exercise that next.
+    assert!(
+        !h.handle.nexthop_ops().contains_key(&stale_id),
+        "startup adoption-cleanup should have already deleted the stale tagged group"
+    );
+
+    // Inject a *new* stale tagged group after adoption_done is set —
+    // this is the steady-state drift case PR 2 was added for. The ID
+    // sits inside the allocator's reservable bitmap range (matches
+    // FRR's `EVPN_NH_ID_MAX`) so drift recovery can reserve + cleanup.
+    let drift_id: u32 = 0x4000_0BAE;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: drift_id,
+        kind: KernelNexthopKind::Group { member_ids: vec![] },
+    });
+
+    // First drift tick — folds drift_id into adopted_unreferenced
+    // AND runs `cleanup_unreferenced_adoptions` in-line against the
+    // current snapshot. The snapshot has no FDB row referencing
+    // drift_id, so retention is empty and the cleanup deletes it
+    // on this pass.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    assert!(
+        !h.handle.nexthop_ops().contains_key(&drift_id),
+        "drift recovery folds + in-line-cleans untracked tagged NHIDs in one pass; nhs={:?}",
+        h.handle.nexthop_ops()
+    );
+
+    h.shutdown().await;
+}
+
+// 5. Drift dump failure is non-fatal — other reconcile work proceeds.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_dump_failure_does_not_block_other_paths() {
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Install a single-dst entry — no FDB-NHG involvement.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(1)));
+
+    // Trip an Io (transient) failure that the drift cycle's
+    // dump_owned_nexthops will consume; the FDB op stays untouched
+    // because compute_diff produces no ops (kernel matches desired).
+    // Drift returns early via the dump-failed branch — no panic, no
+    // log explosion. Verify the existing FDB row survived.
+    h.handle.inject_failure_io(None);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "single-dst FDB row should be unaffected by drift dump failure"
+    );
+
+    h.shutdown().await;
+}
+
+// 6. Drift recovery must not delete an FDB row whose `(vni, mac)`
+//    is still in the desired intent — even if the row's nh_id
+//    looks like a prior-daemon orphan. This is the safety guard
+//    against widening blast radius during transient apply
+//    failures.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_preserves_fdb_row_for_desired_mac() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Pre-load a tagged kernel state from a "prior daemon run":
+    //   - a tagged-NHID nexthop (in our group-tag range) that we
+    //     don't track today,
+    //   - an FDB row at (vni 100, mac 1) referencing that nh_id.
+    let stale_nh_id: u32 = 0x4000_0BAD;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: stale_nh_id,
+        kind: KernelNexthopKind::Group { member_ids: vec![] },
+    });
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(1),
+            dst: None,
+            nh_id: Some(stale_nh_id),
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        },
+    );
+
+    // Intent has (vni 100, mac 1) as a desired single-dst entry.
+    // The apply path may or may not succeed depending on the order
+    // of operations; the safety property the test pins is that
+    // *drift recovery* — running on the periodic tick — won't
+    // delete the row underneath us just because `owned` and
+    // `tracked_ids` don't claim it yet.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+
+    // Advance past the periodic dump window so drift recovery runs.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // The FDB row for (vni 100, mac 1) MUST still be present —
+    // drift recovery saw it referencing an untracked tagged nh_id
+    // but skipped removal because the entry is in `desired`.
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "drift recovery must not remove FDB row for desired (vni, mac); \
+         kernel state: {:?}",
+        h.handle.kernel_snapshot(),
+    );
+
+    h.shutdown().await;
+}
+
+// 7. A *permanent* dump failure (e.g., kernel too old, missing
+//    CAP_NET_ADMIN) latches drift recovery off so the actor stops
+//    re-attempting the dump (and emitting a warn) every reconcile
+//    trigger thereafter.
+#[tokio::test(start_paused = true)]
+async fn drift_recovery_permanent_dump_failure_latches_off() {
+    let cfg = ReconcileActorConfig::for_tests();
+    let mut h = Harness::spawn(cfg);
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Install a single-dst entry so reconcile work happens normally.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(vni(100), mac(1), entry("10.0.0.2", None))
+        .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+
+    // Stage a permanent failure (`KernelTooOld` is classified
+    // Permanent) for the next reconcile pass's drift dump. After
+    // it lands once, drift should latch off; even if we stage more
+    // permanent failures, drift must not consume them.
+    h.handle.inject_failure_kernel_too_old(None);
+
+    // First drift cycle — consumes the permanent failure, latches.
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // Stage a SECOND permanent failure. With the latch in place,
+    // drift is disabled — this failure should NOT be consumed by
+    // a drift dump call. Forward reconcile work for unrelated paths
+    // continues normally.
+    h.handle.inject_failure_kernel_too_old(None);
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    let _ = h.try_drain_reports().await;
+
+    // FDB row for the desired MAC must still be present — drift
+    // disablement must not affect single-dst reconcile work.
+    assert!(
+        h.handle.kernel_has_fdb(vni(100), mac(1)),
+        "single-dst FDB row must survive drift-disabled state"
+    );
+
+    h.shutdown().await;
+}
+
 #[allow(dead_code)]
 fn _starts_anchor() -> Instant {
     Instant::now()

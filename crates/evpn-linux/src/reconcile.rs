@@ -32,6 +32,7 @@
 //! - ADR-0054 §7 (shutdown leaves host topology intact)
 //! - ADR-0054 §8 (failures surface as status, not domain mutation)
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -241,6 +242,36 @@ struct ActorState {
     /// stale cleanup. Gates the one-shot adoption/cleanup phase so
     /// subsequent passes skip the dump + sweep.
     adoption_done: bool,
+    /// Last time the steady-state drift-recovery pass ran. ADR-0059
+    /// slice 3.5 PR 2: every `periodic_dump` interval (≥ 60 s by
+    /// default) after `adoption_done`, the actor re-dumps tagged
+    /// kernel NHIDs and heals four shapes of drift:
+    ///
+    /// 1. **Missing per-VTEP members** — re-add via
+    ///    `add_nexthop_member` at the same kernel ID we already
+    ///    tracked in `groups`.
+    /// 2. **Missing or member-set-drifted groups** — re-add via
+    ///    `add_nexthop_group` (which is `NLM_F_CREATE | REPLACE`).
+    /// 3. **Stale tagged FDB rows from a prior daemon instance**
+    ///    (the PR 1 cold-start gap) — emit `remove_fdb_nhg_row`
+    ///    when a kernel FDB row points at a tagged NHID we don't
+    ///    track and never recorded under `owned`.
+    /// 4. **Stale tagged NHIDs in kernel with no local tracking** —
+    ///    fold into `adopted_unreferenced` so the existing
+    ///    `cleanup_unreferenced_adoptions` pass (now eligible to
+    ///    re-run on every reconcile via the same `adoption_done`
+    ///    gate path) processes them with the retention-set logic.
+    last_drift_check: Option<Instant>,
+    /// Permanent shut-down latch for the slice 3.5 drift-recovery
+    /// cycle. Flipped to `true` when `dump_owned_nexthops` returns a
+    /// permanent failure (`KernelTooOld`, `PermissionDenied`,
+    /// `InvalidArgument`) — the same error classes the one-shot
+    /// startup-adoption block uses to decide whether to give up.
+    /// Once latched, the drift gate skips entirely so the actor
+    /// stops re-attempting the dump (and emitting a warn) on every
+    /// reconcile trigger. Transient/conflict failures leave this
+    /// false; the next reconcile pass retries.
+    drift_disabled: bool,
     /// Tracks whether [`Dataplane::next_event`] is still expected to
     /// yield events. `true` at startup; flipped to `false` the first
     /// time `next_event()` resolves to `None`. While `false` the
@@ -275,6 +306,8 @@ impl ActorState {
             groups: crate::group_state::GroupOwnedMap::new(),
             adopted_unreferenced: BTreeMap::new(),
             adoption_done: false,
+            last_drift_check: None,
+            drift_disabled: false,
         }
     }
 
@@ -661,10 +694,57 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // Marks `adoption_done` only on a fully-clean cleanup: no
         // apply failures, no NHG suppression, every staged
         // stale-delete succeeded. Otherwise next pass retries.
-        if !self.state.adoption_done && failed.is_empty() {
+        // Track whether adoption flipped to `true` *this* pass — the
+        // first drift cycle has to wait one full `periodic_dump`
+        // interval after that, otherwise we'd issue a second
+        // `dump_owned_nexthops()` netlink call on top of the startup
+        // adoption dump in the same reconcile pass.
+        let adoption_flipped_this_pass = !self.state.adoption_done && failed.is_empty() && {
             let cleanup_ok = self.cleanup_unreferenced_adoptions(&snapshot).await;
             if cleanup_ok {
                 self.state.adoption_done = true;
+            }
+            cleanup_ok
+        };
+        if adoption_flipped_this_pass {
+            // Seed `last_drift_check` so the gate (elapsed >=
+            // periodic_dump) defers the first drift cycle by one
+            // interval instead of firing immediately on top of the
+            // startup dump.
+            self.state.last_drift_check = Some(Instant::now());
+        }
+
+        // ADR-0059 slice 3.5 PR 2: steady-state drift recovery.
+        // Re-dumps tagged NHIDs ≥ `periodic_dump` after the last check
+        // and heals four shapes of drift between rustbgpd's tracked
+        // state and the kernel:
+        //   1. Missing per-VTEP members (out-of-band `ip nexthop del`).
+        //   2. Missing or member-set-drifted groups.
+        //   3. Stale tagged FDB rows from a prior daemon instance
+        //      (closes the slice 3.5 PR 1 cold-start gap).
+        //   4. Stale tagged NHIDs in kernel that we don't track —
+        //      folded into `adopted_unreferenced` so the next pass's
+        //      `cleanup_unreferenced_adoptions` runs the retention-set
+        //      logic over them.
+        //
+        // Only runs after `adoption_done` to avoid colliding with
+        // startup adoption + cleanup. Gated by an elapsed-time check
+        // so unrelated reconcile triggers (intent change, kernel
+        // event) don't push extra netlink dumps onto the actor.
+        // `last_drift_check` advances only when the dump succeeds —
+        // a transient `dump_owned_nexthops` failure must not
+        // postpone the next attempt by a full interval.
+        if self.state.adoption_done && !adoption_flipped_this_pass && !self.state.drift_disabled {
+            let due = self
+                .state
+                .last_drift_check
+                .is_none_or(|t| t.elapsed() >= self.config.periodic_dump);
+            if due
+                && self
+                    .reconcile_drift(&snapshot, intent.remote_macs.as_ref())
+                    .await
+            {
+                self.state.last_drift_check = Some(Instant::now());
             }
         }
 
@@ -1163,6 +1243,312 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // or replaced, they become deletable; if a MAC's Install
         // succeeds, `apply_nhg_op` removes them at record time.
         all_ok
+    }
+
+    /// ADR-0059 slice 3.5 PR 2 — steady-state drift recovery.
+    ///
+    /// Walks the rustbgpd-tagged nexthop space (`VTEP_NH_TAG` /
+    /// `NHG_TAG` ID ranges) and reconciles four shapes of drift
+    /// between rustbgpd's `GroupOwnedMap` + `OwnedSet` and the
+    /// kernel:
+    ///
+    /// 1. **Missing or mis-shaped per-VTEP members.** A tracked
+    ///    member ID is absent from the kernel dump, has the wrong
+    ///    gateway, or has been overwritten with a group object.
+    ///    Re-add at the same kernel ID via `add_nexthop_member`
+    ///    (`NLM_F_CREATE | NLM_F_REPLACE`). Slot stays reserved;
+    ///    no allocator churn.
+    /// 2. **Missing or member-set-drifted groups.** A tracked group
+    ///    ID is either absent or has a different member set than
+    ///    `GroupOwnedMap` expects. `add_nexthop_group` is
+    ///    `NLM_F_CREATE | NLM_F_REPLACE`, so the same call serves
+    ///    create-from-missing and replace-on-drift.
+    /// 3. **Stale tagged FDB rows from a prior daemon.** A kernel
+    ///    FDB row's `nh_id` is in our tag space but neither tracked
+    ///    in `GroupOwnedMap` nor recorded in `OwnedSet`. Emits
+    ///    `remove_fdb_nhg_row` — but only when the `(VNI, MAC)` is
+    ///    *also not in the current desired intent*: an apply
+    ///    failure on a desired MAC must not cause the row to
+    ///    disappear underneath the eventual install. Closes the
+    ///    slice 3.5 PR 1 cold-start gap (restart-with-disable
+    ///    leaves orphan rows).
+    /// 4. **Untracked tagged NHIDs in the kernel.** Folded into
+    ///    `adopted_unreferenced`, then `cleanup_unreferenced_adoptions`
+    ///    runs **in-line** against the snapshot we already have.
+    ///    The cleanup may retain the orphan this pass (the snapshot
+    ///    pre-dates step (3) FDB-row removals); the next drift
+    ///    cycle deletes it cleanly with a fresh snapshot. Keeping
+    ///    `adoption_done` sticky avoids reopening the startup
+    ///    adoption-dump path on the next reconcile pass, which
+    ///    would issue an extra `dump_owned_nexthops` and warn for
+    ///    every ID we just reserved here.
+    ///
+    /// All failures are non-fatal: logged + deferred. Allocator
+    /// integrity is preserved end-to-end — we never release a slot
+    /// before the kernel confirms the delete (the
+    /// `try_del_and_release_alloc` invariant from slice 3b).
+    ///
+    /// Returns `true` when the dump succeeded (caller advances
+    /// `last_drift_check`), `false` on dump failure. On a
+    /// **permanent** dump failure class (kernel too old, no
+    /// `CAP_NET_ADMIN`, malformed message) we latch the
+    /// `drift_disabled` flag so subsequent reconcile passes skip
+    /// the drift gate entirely — mirrors the startup-adoption
+    /// permanent-failure semantics. Transient / conflict failures
+    /// leave drift enabled; the next reconcile pass retries.
+    #[allow(clippy::too_many_lines)]
+    async fn reconcile_drift(
+        &mut self,
+        snapshot: &KernelSnapshot,
+        desired: &RemoteMacTable,
+    ) -> bool {
+        use crate::dataplane::KernelNexthopKind;
+        use crate::nh_id_alloc::NhIdAllocator;
+
+        // (0) Re-dump tagged NHIDs. Mirror the startup-adoption
+        //     error-class dispatch: permanent failures (kernel too
+        //     old, no `CAP_NET_ADMIN`, message-shape rejection)
+        //     latch `drift_disabled` so subsequent reconcile passes
+        //     stop attempting the dump entirely. Transient /
+        //     conflict failures leave drift enabled — the next
+        //     reconcile pass will retry.
+        let actual = match self.dataplane.dump_owned_nexthops().await {
+            Ok(v) => v,
+            Err(e) => {
+                match e.class() {
+                    crate::error::FailureClass::Permanent => {
+                        tracing::warn!(
+                            error = %e,
+                            "drift: dump_owned_nexthops permanently failed; \
+                             disabling drift recovery for this daemon instance \
+                             (matches startup-adoption permanent-failure semantics)"
+                        );
+                        self.state.drift_disabled = true;
+                    }
+                    crate::error::FailureClass::Transient
+                    | crate::error::FailureClass::Conflict => {
+                        tracing::warn!(
+                            error = %e,
+                            "drift: dump_owned_nexthops failed transiently; \
+                             deferring this drift cycle"
+                        );
+                    }
+                }
+                return false;
+            }
+        };
+        let actual_by_id: BTreeMap<u32, crate::dataplane::KernelNexthop> =
+            actual.into_iter().map(|nh| (nh.id, nh)).collect();
+
+        // Snapshot tracked state so the &mut self loops below can call
+        // dataplane methods without holding a borrow across .await.
+        let tracked_vteps: Vec<(IpAddr, u32)> = self
+            .state
+            .groups
+            .iter_vtep_nhs()
+            .map(|(ip, nh)| (*ip, nh.id))
+            .collect();
+        let tracked_groups: Vec<(crate::group_state::AliasGroupKey, u32, BTreeSet<IpAddr>)> = self
+            .state
+            .groups
+            .iter_groups()
+            .map(|(k, g)| (*k, g.id, g.members.clone()))
+            .collect();
+        let tracked_ids: BTreeSet<u32> = tracked_vteps
+            .iter()
+            .map(|(_, id)| *id)
+            .chain(tracked_groups.iter().map(|(_, id, _)| *id))
+            .collect();
+
+        // (1) Missing or mis-shaped per-VTEP members — re-add at
+        //     the same ID via `add_nexthop_member` (which is
+        //     `NLM_F_CREATE | NLM_F_REPLACE`, so it heals "wrong
+        //     gateway / wrong kind at our ID" with the same call
+        //     that creates a fresh one). "Healthy" requires:
+        //       - kernel kind is `Member` (not `Group` — pathological
+        //         re-use of our ID slot as a group object),
+        //       - kernel gateway matches the tracked IP exactly.
+        //     An external actor replacing `0x3000_xxxx` with a wrong
+        //     gateway or a group object would otherwise look healthy
+        //     to a `contains_key` check and never get repaired.
+        for (ip, id) in &tracked_vteps {
+            let needs_action = match actual_by_id.get(id) {
+                None => true,
+                Some(nh) => match &nh.kind {
+                    KernelNexthopKind::Member { gateway } => gateway != ip,
+                    KernelNexthopKind::Group { .. } => true,
+                },
+            };
+            if !needs_action {
+                continue;
+            }
+            match self.dataplane.add_nexthop_member(*id, *ip).await {
+                Ok(()) => tracing::info!(
+                    id = *id,
+                    gateway = %ip,
+                    "drift: re-installed FDB nexthop member (missing or kind/gateway drift)"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    id = *id,
+                    gateway = %ip,
+                    "drift: re-add member failed; deferring"
+                ),
+            }
+        }
+
+        // (2) Missing or member-set-drifted groups — re-add (REPLACE).
+        for (key, g_id, members) in &tracked_groups {
+            // Resolve expected kernel-side member IDs through the
+            // current `groups` map (post step 1 re-adds, in case the
+            // group depended on a member we just re-installed).
+            let expected_member_ids: Vec<u32> = members
+                .iter()
+                .filter_map(|ip| self.state.groups.vtep_nh(ip).map(|nh| nh.id))
+                .collect();
+            let needs_action = match actual_by_id.get(g_id) {
+                None => true,
+                Some(nh) => match &nh.kind {
+                    KernelNexthopKind::Group { member_ids } => {
+                        let kset: BTreeSet<u32> = member_ids.iter().copied().collect();
+                        let eset: BTreeSet<u32> = expected_member_ids.iter().copied().collect();
+                        kset != eset
+                    }
+                    KernelNexthopKind::Member { .. } => true,
+                },
+            };
+            if !needs_action {
+                continue;
+            }
+            match self
+                .dataplane
+                .add_nexthop_group(*g_id, &expected_member_ids)
+                .await
+            {
+                Ok(()) => tracing::info!(
+                    id = *g_id,
+                    ?key,
+                    members = expected_member_ids.len(),
+                    "drift: re-added/replaced FDB nexthop group"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    id = *g_id,
+                    ?key,
+                    "drift: re-add group failed; deferring"
+                ),
+            }
+        }
+
+        // (3) Stale tagged FDB rows from a prior daemon — emit
+        //     `remove_fdb_nhg_row` for any FDB row whose `nh_id` is
+        //     in our tag space but neither tracked nor owned **and
+        //     not currently desired**. The `desired` guard is the
+        //     safety net for a `(VNI, MAC)` whose install hasn't
+        //     succeeded yet (apply failure, race window between
+        //     intent arrival and the first reconcile, or a stuck
+        //     permanent failure on an op we're still retrying):
+        //     deleting the row would temporarily remove forwarding
+        //     state for a MAC we intend to program. Skipping it
+        //     here lets the next reconcile pass re-emit the install
+        //     op naturally; if the row is *also* genuinely stale,
+        //     the install path's REPLACE semantics will overwrite
+        //     the `nh_id` cleanly.
+        let stale_rows: Vec<(EvpnInstanceId, MacAddress)> = snapshot
+            .iter_fdb()
+            .filter_map(|(&(vni, mac), entry)| {
+                let nh_id = entry.nh_id?;
+                if !NhIdAllocator::is_ours(nh_id) {
+                    return None;
+                }
+                if tracked_ids.contains(&nh_id) {
+                    return None;
+                }
+                if self.state.owned.contains(vni, mac) {
+                    return None;
+                }
+                if desired.get(vni, mac).is_some() {
+                    return None;
+                }
+                Some((vni, mac))
+            })
+            .collect();
+        for (vni, mac) in stale_rows {
+            match self.dataplane.remove_fdb_nhg_row(vni, mac).await {
+                Ok(()) => tracing::info!(
+                    ?vni,
+                    %mac,
+                    "drift: removed stale tagged FDB row left over from prior daemon"
+                ),
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    ?vni,
+                    %mac,
+                    "drift: stale FDB row remove failed; deferring"
+                ),
+            }
+        }
+
+        // (4) Untracked tagged NHIDs — fold into adopted_unreferenced
+        //     and run `cleanup_unreferenced_adoptions` IN-LINE below.
+        //     We don't clear `adoption_done`: doing so would reopen
+        //     the startup-adoption `dump_owned_nexthops` block on the
+        //     next reconcile pass and warn for every ID we just
+        //     reserved here. See the in-line cleanup call after this
+        //     loop.
+        let mut adopted_any = false;
+        for (id, nh) in actual_by_id {
+            if tracked_ids.contains(&id) {
+                continue;
+            }
+            if self.state.adopted_unreferenced.contains_key(&id) {
+                continue;
+            }
+            match self.state.nh_id_alloc.reserve(id) {
+                Ok(()) => {
+                    self.state.adopted_unreferenced.insert(id, nh);
+                    adopted_any = true;
+                }
+                Err(e) => {
+                    // Allocator rejected: the ID's high-nibble
+                    // doesn't match our tag space (foreign tag), or
+                    // its bitmap slot is outside `NH_ID_MAX`, or a
+                    // prior pass already reserved it. The first two
+                    // cases are operator-visible drift that we can't
+                    // adopt-and-cleanup ourselves; log so they
+                    // surface in operator runs instead of silently
+                    // hanging around in the kernel forever.
+                    tracing::warn!(
+                        ?e,
+                        id,
+                        "drift: untracked tagged NHID could not be reserved; \
+                         operator intervention may be required (rustbgpd cannot \
+                         take ownership of kernel-orphaned IDs outside its \
+                         reservable range)"
+                    );
+                }
+            }
+        }
+        if adopted_any {
+            tracing::info!(
+                adopted = self.state.adopted_unreferenced.len(),
+                "drift: discovered untracked tagged NHIDs; running adoption cleanup in-line"
+            );
+            // Run cleanup directly with the snapshot we already have
+            // rather than clearing `adoption_done`. Clearing it would
+            // reopen the startup-adoption `dump_owned_nexthops` path
+            // on the next reconcile pass (a second netlink dump, plus
+            // `reserve()` warnings for IDs we already reserved here)
+            // AND defer the actual delete by up to another
+            // `periodic_dump` interval. The retention set is built
+            // from the current snapshot; any FDB row drift's step (3)
+            // removed earlier this pass is still listed there (the
+            // snapshot was taken before our removes), so the orphan
+            // NHID may retain this pass and clean up cleanly on the
+            // next drift cycle when the snapshot is fresh.
+            let _ = self.cleanup_unreferenced_adoptions(snapshot).await;
+        }
+        true
     }
 
     /// On successful apply, mirror state into `owned` so the next

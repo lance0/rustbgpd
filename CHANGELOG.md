@@ -34,6 +34,35 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   prior run leaves the orphaned rows in place until slice 3.5
   PR 2's periodic drift cycle cleans them up (≤ 60 s); documented
   in `docs/evpn-vtep-troubleshooting.md`.
+- **ADR-0059 slice 3.5 PR 2 — periodic `RTM_GETNEXTHOP` drift
+  recovery.** The reconcile actor now runs a steady-state safety
+  net every `periodic_dump` interval (60 s production default)
+  after the one-shot startup adoption completes. The drift cycle
+  re-dumps tagged kernel NHIDs and heals four shapes of drift
+  between rustbgpd's `GroupOwnedMap` + `OwnedSet` and the
+  kernel:
+  - **Missing per-VTEP members** — re-add at the same kernel ID
+    via `add_nexthop_member` (no allocator churn).
+  - **Missing or member-set-drifted groups** — re-add via
+    `add_nexthop_group` (`NLM_F_CREATE | NLM_F_REPLACE`).
+  - **Stale tagged FDB rows from a prior daemon** — emits
+    `remove_fdb_nhg_row` for any kernel FDB row whose `nh_id`
+    is in our tag space but neither tracked in `GroupOwnedMap`
+    nor recorded in `OwnedSet`. **Closes the slice 3.5 PR 1
+    cold-start gap** where flipping `apply_aliasing_ecmp =
+    false` and restarting left orphan tagged rows behind.
+  - **Untracked tagged NHIDs in kernel** — folded into
+    `adopted_unreferenced` so the next reconcile pass routes
+    them through `cleanup_unreferenced_adoptions` with the
+    retention-set logic.
+
+  All failures are non-fatal: logged + deferred. Allocator
+  integrity is preserved end-to-end (allocator slots are never
+  released before the kernel confirms the delete). The drift
+  cycle is gated on `adoption_done = true` to avoid colliding
+  with startup adoption; it shares the existing 60 s
+  `periodic_dump` cadence so there is no new timer or config
+  knob.
 
 ## [0.19.0] — 2026-05-13
 
