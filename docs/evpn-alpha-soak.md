@@ -215,6 +215,14 @@ landing, tracked here for visibility)
   #91 (operator `apply_aliasing_ecmp` off-switch), #92 (periodic
   `RTM_GETNEXTHOP` drift recovery), and #93 (homogeneous IPv6
   alias members).
+- [x] **Privileged EVPN Linux netns wrapper.**
+  `scripts/test-evpn-linux-netns.sh` runs the local real-kernel
+  validation bundle in one command: Gate 8b BUM port flags, Gate 7b
+  single-dst VTEP FDB programming, Gate 9 L3 route / neighbor / FDB
+  programming, ADR-0059 FDB-NHG, and ADR-0059 raw `nexthop_raw`. The
+  script preflights Linux, `cargo`, iproute2 / `ping`, and
+  network-namespace privileges before setting `EVPN_LINUX_NETNS=1`
+  and running the gated cargo test binaries sequentially.
 - [x] **Mass-withdraw receive-side filter landed (RFC 7432 §8.4).**
   The supervisor's `build_remote_mac_table` snapshots EAD-per-ES
   routes from the RIB on every pass and drops any Type 2 with

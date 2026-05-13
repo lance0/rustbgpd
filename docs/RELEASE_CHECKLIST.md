@@ -75,6 +75,21 @@ Verify the daemon creates the gRPC socket at the configured
 ls -la /tmp/rustbgpd/grpc.sock   # should exist after daemon start
 ```
 
+### EVPN Linux netns smoke
+
+On a Linux host with iproute2, `ping`, and namespace privileges
+(`CAP_NET_ADMIN` + `CAP_SYS_ADMIN`), run the privileged EVPN Linux
+bundle:
+
+```bash
+sudo -E env "PATH=$PATH" bash scripts/test-evpn-linux-netns.sh
+```
+
+This wrapper runs the gated BUM, single-dst VTEP FDB, L3, FDB-NHG,
+and raw `nexthop_raw` netns tests sequentially with
+`EVPN_LINUX_NETNS=1`. If prerequisites are missing, it exits before
+cargo with the failing `ip netns add` diagnostic.
+
 ### Token auth smoke
 
 ```bash
