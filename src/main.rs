@@ -3398,6 +3398,93 @@ hold_time = 90
         std::fs::remove_file(&path).ok();
     }
 
+    #[tokio::test]
+    async fn reload_hot_applies_graceful_shutdown_and_blackhole_together() {
+        let path = unique_temp_path("reload-honor-gshut-blackhole-hot-apply");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(!initial.global.honor_graceful_shutdown);
+        assert!(!initial.global.honor_blackhole);
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_graceful_shutdown = true
+honor_blackhole = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            let mut commands = Vec::new();
+            for _ in 0..2 {
+                match peer_mgr_rx.recv().await {
+                    Some(PeerManagerCommand::SetHonorGracefulShutdown { enabled, reply }) => {
+                        let _ = reply.send(Ok(()));
+                        commands.push(("gshut", enabled));
+                    }
+                    Some(PeerManagerCommand::SetHonorBlackhole { enabled, reply }) => {
+                        let _ = reply.send(Ok(()));
+                        commands.push(("blackhole", enabled));
+                    }
+                    _ => panic!("unexpected peer manager command"),
+                }
+            }
+            commands
+        });
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should hot-apply both honor knobs");
+
+        assert!(returned.global.honor_graceful_shutdown);
+        assert!(returned.global.honor_blackhole);
+        assert_eq!(
+            peer_mgr.await.unwrap(),
+            vec![("gshut", true), ("blackhole", true)]
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn gr_restart_marker_invalid_version_rejected() {
         let path = unique_temp_path("gr-restart-bad-version");

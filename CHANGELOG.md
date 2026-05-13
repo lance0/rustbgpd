@@ -22,6 +22,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the safe control-plane scoping half only; kernel discard/null-route
   programming remains a future FIB integration slice.
 
+- **RFC 7999 operator follow-through.** ADR-0060 records the
+  control-plane-only BLACKHOLE decision and the future FIB discard
+  requirements; `examples/ddos-mitigation/config.toml` now shows
+  `[global] honor_blackhole = true` plus an explicit host-route-only
+  import guard; M41 adds a manual FRR interop skeleton for BLACKHOLE
+  receiver scoping; and `rustbgpctl` renders `65535:666` as
+  `BLACKHOLE` in route community output.
+
 - **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
   counters expose the periodic nexthop drift-recovery path without
   scraping logs: `evpn_fdb_nhg_drift_members_repaired_total`,

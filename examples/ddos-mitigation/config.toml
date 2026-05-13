@@ -14,6 +14,13 @@
 asn = 65500
 router_id = "10.255.0.1"
 listen_port = 179
+# RFC 7999 receiver scoping. When an EBGP peer sends BLACKHOLE
+# (65535:666), rustbgpd preserves BLACKHOLE and adds NO_ADVERTISE so
+# the route is not propagated beyond this mitigation domain.
+#
+# This is control-plane scoping only: rustbgpd does not install a local
+# kernel discard route for BLACKHOLE-tagged prefixes.
+honor_blackhole = true
 
 [global.telemetry]
 prometheus_addr = "127.0.0.1:9179"
@@ -33,6 +40,45 @@ address = "127.0.0.1:50051"
 sys_name = "rustbgpd-ddos"
 [[bmp.collectors]]
 address = "10.0.0.100:5000"
+
+# --- RTBH safety guard ---
+# Keep BLACKHOLE strict at the import policy edge: allow only exact host
+# routes and reject broader BLACKHOLE-tagged prefixes. The global
+# honor_blackhole knob above still appends the implicit RFC 7999 scoping rule
+# after this chain, so accepted BLACKHOLE routes also get NO_ADVERTISE.
+[policy.definitions.blackhole-host-routes]
+default_action = "permit"
+
+[[policy.definitions.blackhole-host-routes.statements]]
+prefix = "0.0.0.0/0"
+ge = 32
+le = 32
+match_community = ["BLACKHOLE"]
+action = "permit"
+
+[[policy.definitions.blackhole-host-routes.statements]]
+prefix = "::/0"
+ge = 128
+le = 128
+match_community = ["BLACKHOLE"]
+action = "permit"
+
+[[policy.definitions.blackhole-host-routes.statements]]
+prefix = "0.0.0.0/0"
+ge = 0
+le = 31
+match_community = ["BLACKHOLE"]
+action = "deny"
+
+[[policy.definitions.blackhole-host-routes.statements]]
+prefix = "::/0"
+ge = 0
+le = 127
+match_community = ["BLACKHOLE"]
+action = "deny"
+
+[policy]
+import_chain = ["blackhole-host-routes"]
 
 # --- Edge routers ---
 # These enforce FlowSpec rules in hardware. Use short hold times so

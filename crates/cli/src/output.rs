@@ -37,8 +37,19 @@ pub fn format_as_path(as_path: &[u32]) -> String {
         .join(" ")
 }
 
-/// Format a standard community (u32) as ASN:value.
+/// Format a standard community (u32), using RFC aliases for well-known values.
 pub fn format_community(c: u32) -> String {
+    match c {
+        rustbgpd_wire::COMMUNITY_NO_EXPORT => return "NO_EXPORT".to_string(),
+        rustbgpd_wire::COMMUNITY_NO_ADVERTISE => return "NO_ADVERTISE".to_string(),
+        rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED => return "NO_EXPORT_SUBCONFED".to_string(),
+        rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN => return "GRACEFUL_SHUTDOWN".to_string(),
+        rustbgpd_wire::COMMUNITY_BLACKHOLE => return "BLACKHOLE".to_string(),
+        rustbgpd_wire::COMMUNITY_LLGR_STALE => return "LLGR_STALE".to_string(),
+        rustbgpd_wire::COMMUNITY_NO_LLGR => return "NO_LLGR".to_string(),
+        _ => {}
+    }
+
     let high = c >> 16;
     let low = c & 0xFFFF;
     format!("{high}:{low}")
@@ -527,6 +538,18 @@ mod tests {
     fn test_format_community() {
         assert_eq!(format_community(0xFFFF_0001), "65535:1");
         assert_eq!(format_community(0x0001_0064), "1:100");
+        assert_eq!(
+            format_community(rustbgpd_wire::COMMUNITY_NO_ADVERTISE),
+            "NO_ADVERTISE"
+        );
+        assert_eq!(
+            format_community(rustbgpd_wire::COMMUNITY_BLACKHOLE),
+            "BLACKHOLE"
+        );
+        assert_eq!(
+            format_community(rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN),
+            "GRACEFUL_SHUTDOWN"
+        );
     }
 
     #[test]

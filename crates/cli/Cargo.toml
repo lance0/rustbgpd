@@ -29,6 +29,7 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 owo-colors.workspace = true
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
+rustbgpd-wire.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
@@ -38,4 +39,3 @@ tempfile = "3"
 tokio-stream = { workspace = true, features = ["net"] }
 rustbgpd-api.workspace = true
 rustbgpd-evpn.workspace = true
-rustbgpd-wire.workspace = true
