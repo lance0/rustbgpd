@@ -121,21 +121,25 @@ fn build_nlmsghdr(body_len: usize, msg_type: u16, flags: u16, seq: u32) -> [u8; 
 /// with a 16-byte payload (ADR-0059 slice 3.5 PR 3). Caller is
 /// responsible for `id != 0`.
 pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u8> {
-    // Initial capacity sized to the v6 worst case (16 + 8 + 8 +
-    // 20 + 4 = 56 bytes); v4 path reuses the same buffer at 44.
+    // Body capacity sized to the v6 worst case = 8 (nhmsg) + 8
+    // (NHA_ID) + 20 (NHA_GATEWAY: 4 header + 16 payload) + 4
+    // (NHA_FDB) = 40 bytes. The total message (body + 16-byte
+    // nlmsghdr) tops out at 56 for v6, 44 for v4.
     let mut body = Vec::with_capacity(8 + 8 + 20 + 4);
 
     // nhmsg: family follows the gateway form (iproute2 convention).
     // The on-wire payload is the gateway as it appears on the network
-    // — `octets()` returns big-endian bytes for both v4 and v6.
-    let (family, gateway_bytes): (u8, Vec<u8>) = match gateway {
-        IpAddr::V4(v4) => (AF_INET, v4.octets().to_vec()),
-        IpAddr::V6(v6) => (AF_INET6, v6.octets().to_vec()),
+    // — `octets()` returns big-endian bytes for both v4 (4) and v6 (16).
+    // Both arms pass a stack-backed array directly to `push_attr` to
+    // avoid a heap allocation per encode on the hot path.
+    let nh_family = match gateway {
+        IpAddr::V4(_) => AF_INET,
+        IpAddr::V6(_) => AF_INET6,
     };
     push_nhmsg(
         &mut body,
         Nhmsg {
-            nh_family: family,
+            nh_family,
             nh_scope: 0,
             nh_protocol: 0,
             resvd: 0,
@@ -145,7 +149,10 @@ pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u
 
     // Attributes in iproute2 order: NHA_ID, NHA_GATEWAY, NHA_FDB.
     push_attr(&mut body, NHA_ID, &id.to_ne_bytes());
-    push_attr(&mut body, NHA_GATEWAY, &gateway_bytes);
+    match gateway {
+        IpAddr::V4(v4) => push_attr(&mut body, NHA_GATEWAY, &v4.octets()),
+        IpAddr::V6(v6) => push_attr(&mut body, NHA_GATEWAY, &v6.octets()),
+    }
     push_attr(&mut body, NHA_FDB, &[]); // zero-length flag.
 
     let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
@@ -320,6 +327,42 @@ mod tests {
         0x0B, 0x00, // nla_type = NHA_FDB
     ];
 
+    /// Expected bytes for `encode_add_fdb_member(seq=0, id=14, 2001:db8::2)`.
+    ///
+    /// Total 56 bytes = 16 `nlmsghdr` + 8 `nhmsg` + 8 `NHA_ID` + 20
+    /// `NHA_GATEWAY` (4 header + 16 IPv6 payload) + 4 `NHA_FDB`.
+    /// ADR-0059 slice 3.5 PR 3 — IPv6 alias members; pins the encoder
+    /// byte-for-byte the same way the v4 tests pin the v4 shape, so
+    /// alignment / family / attribute order can't regress.
+    const ADD_FDB_MEMBER_ID14_TO_2001_DB8_2: &[u8] = &[
+        // nlmsghdr (16 bytes)
+        0x38, 0x00, 0x00, 0x00, // nlmsg_len = 56
+        0x68, 0x00, // RTM_NEWNEXTHOP
+        0x05, 0x05, // flags = REQUEST | ACK | CREATE | REPLACE
+        0x00, 0x00, 0x00, 0x00, // seq (normalized)
+        0x00, 0x00, 0x00, 0x00, // pid
+        // nhmsg (8 bytes)
+        0x0A, // nh_family = AF_INET6
+        0x00, // nh_scope
+        0x00, // nh_protocol
+        0x00, // resvd
+        0x00, 0x00, 0x00, 0x00, // nh_flags
+        // NHA_ID (8 bytes: 4 header + 4 payload)
+        0x08, 0x00, // nla_len = 8
+        0x01, 0x00, // nla_type = NHA_ID
+        0x0E, 0x00, 0x00, 0x00, // id = 14
+        // NHA_GATEWAY (20 bytes: 4 header + 16 IPv6 payload)
+        0x14, 0x00, // nla_len = 20
+        0x06, 0x00, // nla_type = NHA_GATEWAY
+        0x20, 0x01, 0x0D, 0xB8, // 2001:0DB8
+        0x00, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x00, //
+        0x00, 0x00, 0x00, 0x02, // ::2
+        // NHA_FDB (4 bytes: header only)
+        0x04, 0x00, // nla_len = 4
+        0x0B, 0x00, // nla_type = NHA_FDB
+    ];
+
     /// Expected bytes for `encode_add_fdb_member(seq=0, id=13, 10.0.0.3)`.
     /// Identical shape to `ADD_FDB_MEMBER_ID12_TO_10_0_0_2` with id and
     /// gateway bytes substituted.
@@ -388,6 +431,16 @@ mod tests {
         assert_outbound_pid_zero(&bytes);
         normalize_seq(&mut bytes);
         assert_eq!(bytes, ADD_FDB_MEMBER_ID13_TO_10_0_0_3);
+    }
+
+    #[test]
+    fn add_fdb_member_v6_matches_expected_bytes() {
+        // ADR-0059 slice 3.5 PR 3: the v6 path picks `nh_family =
+        // AF_INET6` and lays out a 16-byte `NHA_GATEWAY` payload.
+        let mut bytes = encode_add_fdb_member(42, 14, "2001:db8::2".parse().unwrap());
+        assert_outbound_pid_zero(&bytes);
+        normalize_seq(&mut bytes);
+        assert_eq!(bytes, ADD_FDB_MEMBER_ID14_TO_2001_DB8_2);
     }
 
     #[test]

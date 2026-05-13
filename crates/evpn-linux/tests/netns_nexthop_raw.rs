@@ -212,8 +212,11 @@ async fn round_trip_add_fdb_group_then_del() {
 }
 
 /// IPv6 gateway accepted end-to-end (ADR-0059 slice 3.5 PR 3): the
-/// encoder picks `AF_INET6`, the kernel installs the row, and the
-/// subsequent dump round-trips a `Member { gateway: V6 }` back.
+/// encoder picks `AF_INET6`, the kernel installs the row, and `ip
+/// nexthop show` confirms the row landed with the `via <v6> fdb`
+/// form. Verification is via the iproute2 CLI rather than a socket-
+/// level dump; the encode-side wire-byte round-trip is covered by
+/// `add_fdb_member_v6_matches_expected_bytes` in `encode.rs`.
 #[tokio::test]
 async fn add_fdb_member_v6_installs_and_round_trips() {
     if !netns_gate() {
