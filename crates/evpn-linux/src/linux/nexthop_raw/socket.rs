@@ -31,8 +31,10 @@ use netlink_sys::{AsyncSocket, AsyncSocketExt, SocketAddr, TokioSocket, protocol
 use thiserror::Error;
 use tracing::debug;
 
-use super::encode::{encode_add_fdb_group, encode_add_fdb_member, encode_del};
-use super::uapi::NexthopGrp;
+use super::encode::{encode_add_fdb_group, encode_add_fdb_member, encode_del, encode_dump};
+use super::uapi::{NHA_FDB, NHA_GATEWAY, NHA_GROUP, NHA_ID, NexthopGrp, RTM_NEWNEXTHOP};
+use crate::dataplane::{KernelNexthop, KernelNexthopKind};
+use crate::nh_id_alloc::NhIdAllocator;
 
 /// Netlink message type for ACK / error responses.
 const NLMSG_ERROR: u16 = 2;
@@ -237,6 +239,46 @@ impl NexthopSocket {
             .await
     }
 
+    /// Dump every rustbgpd-tagged FDB nexthop in the kernel,
+    /// filtered client-side by [`NhIdAllocator::is_ours`] +
+    /// presence of `NHA_FDB`. ADR-0059 slice 3b uses this from the
+    /// reconcile actor's first `reconcile_once` pass (via the
+    /// `NexthopOps::dump_owned_nexthops` trait method on
+    /// `LinuxDataplane`, which forwards here) so the allocator can
+    /// reserve any IDs left behind by a prior daemon instance,
+    /// preventing accidental `NLM_F_REPLACE`-style overwrites of
+    /// kernel state still referenced by stale FDB rows. Adoption is
+    /// intentionally deferred past `connect()` so allocator + refcount
+    /// state stays owned by the actor (ADR-0059 §7 boundary).
+    ///
+    /// Kernel is allowed to emit `NHA_GROUP_TYPE` and
+    /// `NHA_OP_FLAGS` on dump even when we never set them on add;
+    /// the parser tolerates both gracefully (research §1).
+    ///
+    /// # Errors
+    ///
+    /// - [`NexthopError::Io`] on socket failure.
+    /// - [`NexthopError::Kernel`] on a kernel-side error frame.
+    /// - [`NexthopError::Truncated`] / [`NexthopError::UnexpectedMessage`]
+    ///   if the multipart parser hits a malformed datagram.
+    pub async fn dump_owned(&mut self) -> Result<Vec<KernelNexthop>, NexthopError> {
+        let seq = self.next_seq();
+        let bytes = encode_dump(seq);
+        self.socket.send(&bytes).await?;
+
+        let mut out: Vec<KernelNexthop> = Vec::new();
+        // Multipart dumps can span many datagrams; keep reading
+        // until we see NLMSG_DONE (or NLMSG_ERROR).
+        loop {
+            let (buf, _addr) = self.socket.recv_from_full().await?;
+            match drain_dump_datagram(&buf, seq, &mut out)? {
+                DumpProgress::Continue => {}
+                DumpProgress::Done => return Ok(out),
+                DumpProgress::KernelError(e) => return Err(NexthopError::Kernel(e)),
+            }
+        }
+    }
+
     /// Remove the nexthop named by `id`. Returns Ok if the entry
     /// didn't exist (`ENOENT` is treated as idempotent ACK per
     /// ADR-0059 §5 invariant 8).
@@ -373,6 +415,171 @@ const fn nla_align(len: usize) -> usize {
     (len + 3) & !3
 }
 
+/// Per-datagram dump-pump state.
+enum DumpProgress {
+    /// Keep reading: this datagram had only `RTM_NEWNEXTHOP` rows and
+    /// no terminator. Multipart dumps span many datagrams.
+    Continue,
+    /// Saw `NLMSG_DONE` — dump complete.
+    Done,
+    /// Kernel returned an error frame for our seq.
+    KernelError(i32),
+}
+
+/// Size of the on-wire `nhmsg` struct (`u8` family + `u8` scope +
+/// `u8` protocol + `u8` resvd + `u32` flags = 8 bytes natural).
+const NHMSG_SIZE: usize = 8;
+
+/// Walk `buf` as a sequence of netlink messages. For each
+/// `RTM_NEWNEXTHOP` matching our `seq`, parse it through
+/// [`parse_dump_message`] and append owned entries (filtered by
+/// tag bits + `NHA_FDB`) to `out`. Returns the per-datagram
+/// progress state.
+fn drain_dump_datagram(
+    buf: &[u8],
+    seq: u32,
+    out: &mut Vec<KernelNexthop>,
+) -> Result<DumpProgress, NexthopError> {
+    let mut offset = 0;
+    while offset + NLMSGHDR_SIZE <= buf.len() {
+        let hdr = &buf[offset..offset + NLMSGHDR_SIZE];
+        let nlmsg_len = u32::from_ne_bytes(hdr[0..4].try_into().unwrap()) as usize;
+        let nlmsg_type = u16::from_ne_bytes(hdr[4..6].try_into().unwrap());
+        let nlmsg_seq = u32::from_ne_bytes(hdr[8..12].try_into().unwrap());
+
+        if nlmsg_len < NLMSGHDR_SIZE || offset + nlmsg_len > buf.len() {
+            return Err(NexthopError::Truncated);
+        }
+
+        // Multipart messages share our seq; non-matching seqs are
+        // either someone else's traffic (impossible on our dedicated
+        // socket but cheap to skip) or noise.
+        if nlmsg_seq != seq {
+            offset += nla_align(nlmsg_len);
+            continue;
+        }
+
+        match nlmsg_type {
+            NLMSG_DONE => return Ok(DumpProgress::Done),
+            NLMSG_ERROR => {
+                if nlmsg_len < NLMSGHDR_SIZE + 4 {
+                    return Err(NexthopError::Truncated);
+                }
+                let errno_bytes: [u8; 4] = buf[offset + NLMSGHDR_SIZE..offset + NLMSGHDR_SIZE + 4]
+                    .try_into()
+                    .unwrap();
+                let raw = i32::from_ne_bytes(errno_bytes);
+                if raw == 0 {
+                    // Kernel-side ACK with no data (shouldn't happen on
+                    // a dump request) — treat as end-of-dump.
+                    return Ok(DumpProgress::Done);
+                }
+                let positive = i32::try_from(raw.unsigned_abs()).unwrap_or(i32::MAX);
+                return Ok(DumpProgress::KernelError(positive));
+            }
+            RTM_NEWNEXTHOP => {
+                if let Some(entry) =
+                    parse_dump_message(&buf[offset + NLMSGHDR_SIZE..offset + nlmsg_len])?
+                {
+                    out.push(entry);
+                }
+                offset += nla_align(nlmsg_len);
+            }
+            NLMSG_NOOP => {
+                offset += nla_align(nlmsg_len);
+            }
+            other => return Err(NexthopError::UnexpectedMessage(other)),
+        }
+    }
+    Ok(DumpProgress::Continue)
+}
+
+/// Parse one `RTM_NEWNEXTHOP` body (without the `nlmsghdr`). Returns
+/// `Some` if the entry passes the rustbgpd-owned filter (tag bits +
+/// `NHA_FDB`); `None` if it's a foreign nexthop or non-FDB entry we
+/// should ignore on adoption.
+///
+/// Tolerates unknown attributes including `NHA_GROUP_TYPE` and
+/// `NHA_OP_FLAGS` (research §1).
+fn parse_dump_message(body: &[u8]) -> Result<Option<KernelNexthop>, NexthopError> {
+    if body.len() < NHMSG_SIZE {
+        return Err(NexthopError::Truncated);
+    }
+    // Skip the nhmsg fixed header; we don't read its fields for dump.
+    let mut attrs = &body[NHMSG_SIZE..];
+
+    let mut id: Option<u32> = None;
+    let mut is_fdb = false;
+    let mut gateway: Option<IpAddr> = None;
+    let mut member_ids: Option<Vec<u32>> = None;
+
+    while attrs.len() >= 4 {
+        let nla_len = u16::from_ne_bytes(attrs[0..2].try_into().unwrap()) as usize;
+        let nla_type = u16::from_ne_bytes(attrs[2..4].try_into().unwrap());
+        if nla_len < 4 || nla_len > attrs.len() {
+            return Err(NexthopError::Truncated);
+        }
+        let payload = &attrs[4..nla_len];
+        match nla_type {
+            NHA_ID if payload.len() == 4 => {
+                id = Some(u32::from_ne_bytes(payload.try_into().unwrap()));
+            }
+            NHA_FDB => {
+                is_fdb = true;
+            }
+            NHA_GATEWAY => match payload.len() {
+                4 => {
+                    let v4: [u8; 4] = payload.try_into().unwrap();
+                    gateway = Some(IpAddr::V4(v4.into()));
+                }
+                16 => {
+                    let v6: [u8; 16] = payload.try_into().unwrap();
+                    gateway = Some(IpAddr::V6(v6.into()));
+                }
+                _ => {} // malformed; ignore
+            },
+            NHA_GROUP => {
+                // Payload is an array of `nexthop_grp` (8 bytes each).
+                let mut ids = Vec::with_capacity(payload.len() / 8);
+                let mut off = 0;
+                while off + 8 <= payload.len() {
+                    let id_bytes: [u8; 4] = payload[off..off + 4].try_into().unwrap();
+                    ids.push(u32::from_ne_bytes(id_bytes));
+                    off += 8;
+                }
+                member_ids = Some(ids);
+            }
+            // Tolerate NHA_GROUP_TYPE, NHA_OP_FLAGS, NHA_OIF, etc. —
+            // we don't need them for adoption.
+            _ => {}
+        }
+        // Advance past the aligned attribute.
+        let advance = nla_align(nla_len);
+        if advance > attrs.len() {
+            break;
+        }
+        attrs = &attrs[advance..];
+    }
+
+    // Filter: must have an ID, must be rustbgpd-tagged, must be FDB.
+    let Some(nh_id) = id else { return Ok(None) };
+    if !NhIdAllocator::is_ours(nh_id) || !is_fdb {
+        return Ok(None);
+    }
+
+    let kind = if let Some(member_ids) = member_ids {
+        KernelNexthopKind::Group { member_ids }
+    } else if let Some(gateway) = gateway {
+        KernelNexthopKind::Member { gateway }
+    } else {
+        // Tagged + FDB but neither group nor gateway — malformed;
+        // skip rather than fail the whole dump.
+        return Ok(None);
+    };
+
+    Ok(Some(KernelNexthop { id: nh_id, kind }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,5 +664,168 @@ mod tests {
         let m = NexthopGroupMember::with_weight(7, 42).unwrap();
         assert_eq!(m.id(), 7);
         assert_eq!(m.weight(), 42);
+    }
+
+    // -----------------------------------------------------------------
+    // dump_owned multipart parser tests
+    // -----------------------------------------------------------------
+
+    use super::super::uapi::{NHA_GROUP_TYPE, NHA_OP_FLAGS};
+
+    /// Build an `RTM_NEWNEXTHOP` body (nhmsg + attrs). The caller
+    /// wraps it with `wrap_dump_msg` to produce a full netlink
+    /// message including `nlmsghdr`.
+    fn build_dump_body(attrs: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        // nhmsg: 8 bytes zeroed.
+        body.extend_from_slice(&[0u8; NHMSG_SIZE]);
+        for (kind, payload) in attrs {
+            let nla_len = 4 + payload.len();
+            let nla_len_u16 = u16::try_from(nla_len).expect("test payload fits u16");
+            body.extend_from_slice(&nla_len_u16.to_ne_bytes());
+            body.extend_from_slice(&kind.to_ne_bytes());
+            body.extend_from_slice(payload);
+            // Pad to 4-byte alignment.
+            let pad = nla_align(nla_len) - nla_len;
+            body.resize(body.len() + pad, 0);
+        }
+        body
+    }
+
+    /// Wrap a body in an `RTM_NEWNEXTHOP` nlmsghdr with seq=42.
+    fn wrap_dump_msg(body: &[u8]) -> Vec<u8> {
+        let total = NLMSGHDR_SIZE + body.len();
+        let mut buf = Vec::with_capacity(total);
+        let total_u32 = u32::try_from(total).expect("test datagram fits u32");
+        buf.extend_from_slice(&total_u32.to_ne_bytes());
+        buf.extend_from_slice(&RTM_NEWNEXTHOP.to_ne_bytes());
+        buf.extend_from_slice(&0u16.to_ne_bytes()); // flags
+        buf.extend_from_slice(&42u32.to_ne_bytes()); // seq
+        buf.extend_from_slice(&0u32.to_ne_bytes()); // pid
+        buf.extend_from_slice(body);
+        buf
+    }
+
+    /// Append an `NLMSG_DONE` terminator.
+    fn nlmsg_done(seq: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(NLMSGHDR_SIZE);
+        let size_u32 = u32::try_from(NLMSGHDR_SIZE).expect("NLMSGHDR_SIZE fits u32");
+        buf.extend_from_slice(&size_u32.to_ne_bytes());
+        buf.extend_from_slice(&NLMSG_DONE.to_ne_bytes());
+        buf.extend_from_slice(&0u16.to_ne_bytes());
+        buf.extend_from_slice(&seq.to_ne_bytes());
+        buf.extend_from_slice(&0u32.to_ne_bytes());
+        buf
+    }
+
+    #[test]
+    fn parse_member_dump_decodes_id_and_gateway() {
+        let id = 0x3000_0001u32;
+        let body = build_dump_body(&[
+            (NHA_ID, id.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 2]),
+            (NHA_FDB, vec![]),
+        ]);
+        let entry = parse_dump_message(&body).unwrap().expect("entry");
+        assert_eq!(entry.id, id);
+        match entry.kind {
+            KernelNexthopKind::Member { gateway } => {
+                assert_eq!(gateway, "10.0.0.2".parse::<IpAddr>().unwrap());
+            }
+            KernelNexthopKind::Group { .. } => panic!("expected Member, got Group"),
+        }
+    }
+
+    #[test]
+    fn parse_group_dump_decodes_member_ids() {
+        let id = 0x4000_0001u32;
+        // Two members: (id=12, weight=0, resvd1=0, resvd2=0), (id=13, …)
+        let mut group_payload = Vec::new();
+        for member_id in [12u32, 13u32] {
+            group_payload.extend_from_slice(&member_id.to_ne_bytes());
+            group_payload.extend_from_slice(&[0u8, 0, 0, 0]);
+        }
+        let body = build_dump_body(&[
+            (NHA_ID, id.to_ne_bytes().to_vec()),
+            (NHA_GROUP, group_payload),
+            (NHA_FDB, vec![]),
+        ]);
+        let entry = parse_dump_message(&body).unwrap().expect("entry");
+        assert_eq!(entry.id, id);
+        match entry.kind {
+            KernelNexthopKind::Group { member_ids } => {
+                assert_eq!(member_ids, vec![12, 13]);
+            }
+            KernelNexthopKind::Member { .. } => panic!("expected Group, got Member"),
+        }
+    }
+
+    #[test]
+    fn parse_dump_tolerates_unknown_attrs() {
+        // Kernel often emits NHA_GROUP_TYPE + NHA_OP_FLAGS on dump
+        // even when we didn't set them; parser must skip them.
+        let id = 0x3000_0007u32;
+        let body = build_dump_body(&[
+            (NHA_ID, id.to_ne_bytes().to_vec()),
+            (NHA_GROUP_TYPE, vec![0, 0]),
+            (NHA_OP_FLAGS, vec![0, 0, 0, 0]),
+            (NHA_GATEWAY, vec![10, 0, 0, 9]),
+            (NHA_FDB, vec![]),
+        ]);
+        let entry = parse_dump_message(&body).unwrap().expect("entry");
+        assert!(matches!(entry.kind, KernelNexthopKind::Member { .. }));
+    }
+
+    #[test]
+    fn parse_dump_filters_by_tag_bits() {
+        // FRR-tagged ID (0x1000_xxxx) — not ours.
+        let body = build_dump_body(&[
+            (NHA_ID, 0x1000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 5]),
+            (NHA_FDB, vec![]),
+        ]);
+        assert!(parse_dump_message(&body).unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_dump_skips_non_fdb() {
+        // Rustbgpd-tagged but no NHA_FDB attribute — L3 nexthop, not ours.
+        let body = build_dump_body(&[
+            (NHA_ID, 0x3000_0001u32.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 2]),
+        ]);
+        assert!(parse_dump_message(&body).unwrap().is_none());
+    }
+
+    #[test]
+    fn drain_dump_datagram_terminates_on_nlmsg_done() {
+        let id = 0x3000_0001u32;
+        let entry_body = build_dump_body(&[
+            (NHA_ID, id.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 2]),
+            (NHA_FDB, vec![]),
+        ]);
+        let mut buf = wrap_dump_msg(&entry_body);
+        buf.extend_from_slice(&nlmsg_done(42));
+
+        let mut out = Vec::new();
+        let progress = drain_dump_datagram(&buf, 42, &mut out).unwrap();
+        assert!(matches!(progress, DumpProgress::Done));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, id);
+    }
+
+    #[test]
+    fn drain_dump_datagram_continues_without_terminator() {
+        let entry_body = build_dump_body(&[
+            (NHA_ID, 0x3000_0002u32.to_ne_bytes().to_vec()),
+            (NHA_GATEWAY, vec![10, 0, 0, 3]),
+            (NHA_FDB, vec![]),
+        ]);
+        let buf = wrap_dump_msg(&entry_body);
+        let mut out = Vec::new();
+        let progress = drain_dump_datagram(&buf, 42, &mut out).unwrap();
+        assert!(matches!(progress, DumpProgress::Continue));
+        assert_eq!(out.len(), 1);
     }
 }

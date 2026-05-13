@@ -49,6 +49,15 @@ pub(crate) const NHA_GATEWAY: u16 = 6;
 /// FDB rows.
 pub(crate) const NHA_FDB: u16 = 11;
 
+/// `NHA_GROUP_TYPE` — `u16` discriminator for group flavor
+/// (MPATH vs resilient). Kernel may include this on dump even when
+/// we don't set it on add; slice 3b's parser tolerates and ignores.
+pub(crate) const NHA_GROUP_TYPE: u16 = 3;
+
+/// `NHA_OP_FLAGS` — bitmask added in newer kernels; emitted on
+/// dump regardless of whether userspace set it. Parser tolerates.
+pub(crate) const NHA_OP_FLAGS: u16 = 15;
+
 /// `NEXTHOP_GRP_TYPE_MPATH` — kernel default; we omit
 /// `NHA_GROUP_TYPE` entirely, which yields MPATH semantics.
 pub(crate) const NEXTHOP_GRP_TYPE_MPATH: u16 = 0;
@@ -135,6 +144,12 @@ mod tests {
         assert_eq!(NHA_OIF, 4);
         assert_eq!(NHA_GATEWAY, 6);
         assert_eq!(NHA_FDB, 11);
+        // ADR-0059 slice 3b dump-path tolerance — kernel may emit
+        // these on `RTM_GETNEXTHOP` even when we don't set them on
+        // add, so the parser ignores them by id. Drift here breaks
+        // the dump filter silently, so pin the values.
+        assert_eq!(NHA_GROUP_TYPE, 3);
+        assert_eq!(NHA_OP_FLAGS, 15);
         assert_eq!(NEXTHOP_GRP_TYPE_MPATH, 0);
     }
 }

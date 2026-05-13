@@ -20,8 +20,11 @@ use std::sync::{Arc, Mutex};
 use rustbgpd_evpn::{EvpnInstanceId, EvpnInstanceTable, LocalMacObservation, MacAddress};
 use tokio::sync::mpsc;
 
-use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
+use crate::dataplane::{
+    Dataplane, DataplaneOp, KernelEvent, KernelNexthop, KernelNexthopKind, NexthopOps,
+};
 use crate::error::DataplaneError;
+use crate::nh_id_alloc::NhIdAllocator;
 use crate::snapshot::{
     InstanceProbe, InstanceProbes, KernelFdbEntry, KernelFdbFlags, KernelLinkInfo, KernelSnapshot,
 };
@@ -66,6 +69,15 @@ struct State {
     /// flag triplet — the in-memory backend doesn't have a real
     /// kernel to inspect.
     bum_port_flags: std::collections::BTreeMap<u32, crate::bum_filter::BumPortFlags>,
+    /// Recorded FDB nexthop state — tracks per-VTEP nexthops and
+    /// groups installed via [`NexthopOps`]. ADR-0059 slice 3b's
+    /// coordinator drives this; tests stage it pre-startup to
+    /// exercise the adoption path.
+    nexthop_ops: BTreeMap<u32, KernelNexthop>,
+    /// Recorded FDB-NHG rows keyed by `(VNI, MAC)` → `nh_id`. Mirrors
+    /// the kernel's `NDA_NH_ID` row, distinct from the single-dst
+    /// `KernelFdbEntry::dst` path.
+    fdb_nhg_rows: BTreeMap<(EvpnInstanceId, MacAddress), u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +120,8 @@ impl InMemoryDataplane {
         let (local_mac_tx, local_mac_rx) = mpsc::channel(1024);
         Self {
             state: Arc::new(Mutex::new(State {
+                nexthop_ops: BTreeMap::new(),
+                fdb_nhg_rows: BTreeMap::new(),
                 kernel: KernelSnapshot::new(),
                 probes: InstanceProbes::new(),
                 failures: VecDeque::new(),
@@ -271,6 +285,130 @@ impl InMemoryDataplane {
     }
 }
 
+/// Pop the next "universal" (`target: None`) injected failure from
+/// the queue, if any. `NexthopOps` methods (called via
+/// `apply_nhg_op`) do not carry a `DataplaneOp` to match against,
+/// so they can only consume failures the test left targetless.
+/// Returns the realized error; caller short-circuits.
+fn take_universal_failure(state: &mut State) -> Option<DataplaneError> {
+    let idx = state.failures.iter().position(|f| f.target.is_none())?;
+    let f = state.failures.remove(idx).unwrap();
+    Some(f.error.realize())
+}
+
+impl NexthopOps for InMemoryDataplane {
+    async fn add_nexthop_member(
+        &mut self,
+        id: u32,
+        gateway: std::net::IpAddr,
+    ) -> Result<(), DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        state.nexthop_ops.insert(
+            id,
+            KernelNexthop {
+                id,
+                kind: KernelNexthopKind::Member { gateway },
+            },
+        );
+        Ok(())
+    }
+
+    async fn add_nexthop_group(
+        &mut self,
+        id: u32,
+        member_ids: &[u32],
+    ) -> Result<(), DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        state.nexthop_ops.insert(
+            id,
+            KernelNexthop {
+                id,
+                kind: KernelNexthopKind::Group {
+                    member_ids: member_ids.to_vec(),
+                },
+            },
+        );
+        Ok(())
+    }
+
+    async fn del_nexthop(&mut self, id: u32) -> Result<(), DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        // Idempotent: dropping a non-existent entry is fine, matching
+        // the slice-2 `NexthopSocket::del` ENOENT-as-ACK contract.
+        state.nexthop_ops.remove(&id);
+        Ok(())
+    }
+
+    async fn install_fdb_nhg_row(
+        &mut self,
+        vni: EvpnInstanceId,
+        mac: MacAddress,
+        nh_id: u32,
+    ) -> Result<(), DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        state.fdb_nhg_rows.insert((vni, mac), nh_id);
+        // Mirror into `state.kernel` so a subsequent `dump_snapshot`
+        // reflects the row — without this, the slice 3b drift check
+        // in `compute_diff` Pass 1b would see no row, treat it as
+        // drift, and re-emit `InstallFdbNhg` every reconcile pass.
+        state.kernel.insert_fdb(
+            vni,
+            KernelFdbEntry {
+                mac,
+                dst: None,
+                nh_id: Some(nh_id),
+                flags: KernelFdbFlags {
+                    extern_learn: true,
+                    master: true,
+                    ..Default::default()
+                },
+            },
+        );
+        Ok(())
+    }
+
+    async fn remove_fdb_nhg_row(
+        &mut self,
+        vni: EvpnInstanceId,
+        mac: MacAddress,
+    ) -> Result<(), DataplaneError> {
+        let mut state = self.state.lock().expect("poisoned");
+        if let Some(e) = take_universal_failure(&mut state) {
+            return Err(e);
+        }
+        // Idempotent — slice 3b coordinator may issue this on
+        // already-removed rows during stale cleanup.
+        state.fdb_nhg_rows.remove(&(vni, mac));
+        state.kernel.remove_fdb(vni, mac);
+        Ok(())
+    }
+
+    async fn dump_owned_nexthops(&mut self) -> Result<Vec<KernelNexthop>, DataplaneError> {
+        let state = self.state.lock().expect("poisoned");
+        // Mirror the LinuxDataplane filter: return only rustbgpd-tagged
+        // entries. Tests can stage foreign-tagged entries to verify
+        // adoption filtering.
+        Ok(state
+            .nexthop_ops
+            .values()
+            .filter(|n| NhIdAllocator::is_ours(n.id))
+            .cloned()
+            .collect())
+    }
+}
+
 /// Test-side handle for inspecting / mutating fake state.
 #[derive(Debug, Clone)]
 pub struct InMemoryHandle {
@@ -407,6 +545,38 @@ impl InMemoryHandle {
         &self,
     ) -> std::collections::BTreeMap<u32, crate::bum_filter::BumPortFlags> {
         self.state.lock().expect("poisoned").bum_port_flags.clone()
+    }
+
+    /// Pre-load a kernel-side nexthop op so the actor's startup
+    /// adoption pass (`dump_owned_nexthops`) sees it — used for
+    /// "daemon restarts with prior NHIDs left over" tests.
+    pub fn pre_load_nexthop_op(&self, nh: KernelNexthop) {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .nexthop_ops
+            .insert(nh.id, nh);
+    }
+
+    /// Snapshot the current nexthop-op map for assertion — every ID
+    /// the actor has installed (or test pre-loaded) and not yet
+    /// deleted.
+    #[must_use]
+    pub fn nexthop_ops(&self) -> BTreeMap<u32, KernelNexthop> {
+        self.state.lock().expect("poisoned").nexthop_ops.clone()
+    }
+
+    /// Read the `nh_id` field of an FDB row at `(vni, mac)`, if the
+    /// row exists. Tests use this to verify an `InstallFdbNhg`
+    /// landed and points at the right group.
+    #[must_use]
+    pub fn kernel_fdb_nh_id(&self, vni: EvpnInstanceId, mac: MacAddress) -> Option<u32> {
+        self.state
+            .lock()
+            .expect("poisoned")
+            .kernel
+            .find_fdb(vni, mac)
+            .and_then(|e| e.nh_id)
     }
 }
 

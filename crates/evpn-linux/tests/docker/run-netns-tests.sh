@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
-# Run the Gate 8b privileged netns tests inside a Docker container
-# so the host kernel doesn't need iproute2 / iputils-ping / a Rust
-# toolchain pre-installed and the test artifacts can't leak netnses
-# into the host.
+# Run the privileged netns integration tests inside a Docker
+# container so the host kernel doesn't need iproute2 / iputils-ping /
+# a Rust toolchain pre-installed and the test artifacts can't leak
+# netnses into the host.
+#
+# Two test bundles live here:
+#   - Gate 8b BUM port-flag tests (`netns_bum_filter`).
+#   - ADR-0059 slice 3b FDB nexthop group tests
+#     (`netns_fdb_nhg`) — requires kernel >= 5.8 for NDA_NH_ID.
 #
 # Requires:
-#   - Docker daemon running on a Linux host with kernel >= 4.18
-#     (the host kernel is what the netns sees; the container shares
-#     the host's `net` capabilities via `--cap-add=NET_ADMIN`).
+#   - Docker daemon running on a Linux host with kernel >= 5.8 for
+#     the fdb_nhg selectors (>= 4.18 if running only the Gate 8b
+#     bundle). The container shares the host's `net` capabilities
+#     via `--cap-add=NET_ADMIN --cap-add=SYS_ADMIN --security-opt
+#     apparmor=unconfined`.
 #   - Repo checkout at the script's grand-grand-grand-parent (the
 #     workspace root containing Cargo.toml).
 #
 # Usage:
-#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh           # both tests
-#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh spike     # spike only
-#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh roundtrip # netlink round-trip only
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh
+#       (default: Gate 8b "all" — both spike + roundtrip)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh spike
+#       (Gate 8b spike only)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh roundtrip
+#       (Gate 8b netlink round-trip only)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg
+#       (ADR-0059 slice 3b: both fdb_nhg tests)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_roundtrip
+#       (slice 3b round-trip install/remove only)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_cve
+#       (slice 3b CVE-2025-39851 guard negative path only)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -25,14 +41,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 IMAGE_TAG="${IMAGE_TAG:-rustbgpd-netns-tests:latest}"
 DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 
-# Test-name filter mapping. Empty filter runs both gated tests in
-# the netns_bum_filter binary.
+# Test selector. `bum_*` runs the Gate 8b harness; `fdb_nhg` runs
+# the ADR-0059 slice 3b FDB nexthop group integration test.
+TEST_BIN="netns_bum_filter"
 case "${1:-all}" in
     spike)      FILTER="bum_filter_spike_validates_kernel_primitive" ;;
     roundtrip)  FILTER="linux_dataplane_set_bum_port_flags_round_trip" ;;
     all|"")     FILTER="" ;;
+    fdb_nhg)    TEST_BIN="netns_fdb_nhg"; FILTER="" ;;
+    fdb_nhg_roundtrip)  TEST_BIN="netns_fdb_nhg"; FILTER="round_trip_install_and_remove_fdb_nhg" ;;
+    fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve" >&2
         exit 2
         ;;
 esac
@@ -111,7 +131,7 @@ DOCKER_ARGS=(
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
 TEST_ARGS=(
-    cargo test -p rustbgpd-evpn-linux --test netns_bum_filter
+    cargo test -p rustbgpd-evpn-linux --test "$TEST_BIN"
     --
     --test-threads=1 --nocapture
 )

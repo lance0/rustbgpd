@@ -43,7 +43,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{Instant, MissedTickBehavior, sleep_until};
 use tokio_util::sync::CancellationToken;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rustbgpd_evpn::ip_vrf::IpVrfStatus;
 use rustbgpd_evpn::{EvpnInstanceId, IpVrfId, MacAddress};
@@ -53,7 +53,9 @@ use crate::dataplane::{Dataplane, DataplaneOp, KernelEvent};
 use crate::diff::{Plan, compute_diff};
 use crate::enforcement::build_bum_enforcement_status;
 use crate::error::FailureClass;
-use crate::snapshot::{InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedSet};
+use crate::snapshot::{
+    InstanceProbe, InstanceProbes, KernelSnapshot, OwnedEntry, OwnedEntryKind, OwnedSet,
+};
 
 /// Tunable cadence for the reconcile loop. Production values come from
 /// ADR-0054 §6; tests construct `Self::for_tests()` for a tighter
@@ -160,6 +162,34 @@ struct ActorState {
     /// ops. Same fingerprint-equality semantics as the FDB map: a
     /// new flag triplet for the same ifindex clears the suppression.
     bum_permanent_failures: BTreeMap<u32, DataplaneOp>,
+    /// Retry schedule for ADR-0059 slice 3b `UpdateFdbNhgMembers`
+    /// ops, keyed by [`AliasGroupKey`]. Group-level ops have no
+    /// natural `(VNI, MAC)` identity, so they need their own key
+    /// space — without it, every group update within the same VNI
+    /// would collide on a placeholder all-zeros MAC.
+    nhg_retry: RetrySchedule<crate::group_state::AliasGroupKey>,
+    /// Per-group permanent-failure suppression for
+    /// `UpdateFdbNhgMembers`. Same fingerprint-equality semantics as
+    /// the FDB / BUM maps: a different member set on the same
+    /// `AliasGroupKey` clears the suppression.
+    nhg_permanent_failures: BTreeMap<crate::group_state::AliasGroupKey, DataplaneOp>,
+    /// IDs whose kernel `del_nexthop` failed during steady-state
+    /// FDB-NHG GC (Install drift heal, `UpdateFdbNhgMembers`,
+    /// `RemoveFdbNhg` group teardown). The allocator slot is *not*
+    /// released until the delete actually lands, so a future
+    /// `alloc_vtep_nh` / `alloc_nhg` can't hand out an ID that's
+    /// still live in the kernel. Drained once per reconcile pass
+    /// after the apply phase — successes release the slot + drop
+    /// from the set, persistent failures keep retrying.
+    pending_deletes: BTreeSet<u32>,
+    /// `(VNI, MAC)` keys we've already warned about for the
+    /// ADR-0059 IPv6-alias fallback. The diff pass emits the set of
+    /// keys *currently* in fallback on every reconcile; the actor
+    /// only logs the warn for keys that newly entered fallback this
+    /// pass. Keys that drop out of fallback (entry went v4-only, or
+    /// was withdrawn) are also pruned so a future re-entry produces
+    /// a fresh warn.
+    warned_ipv6_fallback: BTreeSet<(EvpnInstanceId, MacAddress)>,
     /// Last `intent_generation` we successfully reconciled against.
     /// Reports echo this so the daemon can correlate.
     last_intent_generation: u64,
@@ -191,6 +221,26 @@ struct ActorState {
     /// only on successful kernel apply; a failed op leaves the
     /// in-memory state unchanged so the next reconcile pass retries.
     l3_owned: crate::l3_diff::L3OwnedState,
+    /// ADR-0059 slice 3b: NHID allocator + per-group refcount state
+    /// for FDB nexthop groups. Constructed empty; populated during
+    /// the first reconcile pass by the startup-adoption helper, then
+    /// by `record_success` as `InstallFdbNhg` / `UpdateFdbNhgMembers`
+    /// / `RemoveFdbNhg` ops land.
+    nh_id_alloc: crate::nh_id_alloc::NhIdAllocator,
+    /// FDB nexthop group + per-VTEP NH refcount map (ADR-0059 slice 3b).
+    /// Coordinator updates this on every apply; `compute_diff` reads it
+    /// to decide whether a `UpdateFdbNhgMembers` is needed.
+    groups: crate::group_state::GroupOwnedMap,
+    /// IDs the startup-adoption pass reserved from the kernel dump but
+    /// has not yet matched against a `GroupOwnedMap` entry. After the
+    /// first successful reconcile, the cleanup phase walks this set
+    /// and deletes anything still here (true stale state from a prior
+    /// crashed daemon). Drained as the coordinator records groups.
+    adopted_unreferenced: BTreeMap<u32, crate::dataplane::KernelNexthop>,
+    /// `true` once the first reconcile pass has completed adoption +
+    /// stale cleanup. Gates the one-shot adoption/cleanup phase so
+    /// subsequent passes skip the dump + sweep.
+    adoption_done: bool,
     /// Tracks whether [`Dataplane::next_event`] is still expected to
     /// yield events. `true` at startup; flipped to `false` the first
     /// time `next_event()` resolves to `None`. While `false` the
@@ -210,6 +260,10 @@ impl ActorState {
             permanent_failures: BTreeMap::new(),
             bum_retry: RetrySchedule::new(),
             bum_permanent_failures: BTreeMap::new(),
+            nhg_retry: RetrySchedule::new(),
+            nhg_permanent_failures: BTreeMap::new(),
+            pending_deletes: BTreeSet::new(),
+            warned_ipv6_fallback: BTreeSet::new(),
             last_intent_generation: 0,
             reconcile_generation: 0,
             epoch: Instant::now(),
@@ -217,6 +271,10 @@ impl ActorState {
             last_ip_vrf_status: BTreeMap::new(),
             l3_owned: crate::l3_diff::L3OwnedState::default(),
             event_stream_open: true,
+            nh_id_alloc: crate::nh_id_alloc::NhIdAllocator::new(),
+            groups: crate::group_state::GroupOwnedMap::new(),
+            adopted_unreferenced: BTreeMap::new(),
+            adoption_done: false,
         }
     }
 
@@ -233,7 +291,7 @@ impl ActorState {
     }
 }
 
-impl<D: Dataplane> ReconcileActor<D> {
+impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// Build a new actor.
     pub fn new(
         config: ReconcileActorConfig,
@@ -276,18 +334,18 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
 
         loop {
-            // Compute the next retry deadline across both retry
-            // schedules — FDB ops keyed by `(VNI, MAC)` and BUM ops
-            // keyed by ifindex. The earlier of the two wakes the
-            // actor.
+            // Compute the next retry deadline across the three retry
+            // schedules — FDB ops keyed by `(VNI, MAC)`, BUM ops keyed
+            // by ifindex, and FDB-NHG group-level ops keyed by
+            // `AliasGroupKey`. The earliest wakes the actor.
             let next_fdb = self.state.retry.earliest_due();
             let next_bum = self.state.bum_retry.earliest_due();
-            let retry_due = match (next_fdb, next_bum) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(x), None) | (None, Some(x)) => Some(x),
-                (None, None) => None,
-            }
-            .map(|due_ms| self.state.epoch + Duration::from_millis(due_ms));
+            let next_nhg = self.state.nhg_retry.earliest_due();
+            let retry_due = [next_fdb, next_bum, next_nhg]
+                .into_iter()
+                .flatten()
+                .min()
+                .map(|due_ms| self.state.epoch + Duration::from_millis(due_ms));
 
             tokio::select! {
                 biased;
@@ -434,12 +492,110 @@ impl<D: Dataplane> ReconcileActor<D> {
             }
         };
 
+        // ADR-0059 slice 3b: one-shot startup adoption. Dump tagged
+        // nexthops from the kernel and reserve their IDs in the
+        // allocator before any `compute_diff` Pass 1b emission, so a
+        // fresh `InstallFdbNhg` can't collide with an ID left behind
+        // by a prior daemon instance (RTM_NEWNEXTHOP uses
+        // NLM_F_REPLACE semantics). On dump failure we short-circuit
+        // the reconcile pass entirely — proceeding would risk the
+        // allocator handing out an ID that's still live in the
+        // kernel. The actor will re-attempt on the next event /
+        // intent change / retry-timer tick.
+        if !self.state.adoption_done {
+            match self.dataplane.dump_owned_nexthops().await {
+                Ok(adopted) => {
+                    for nh in adopted {
+                        match self.state.nh_id_alloc.reserve(nh.id) {
+                            Ok(()) => {
+                                self.state.adopted_unreferenced.insert(nh.id, nh);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    ?e,
+                                    id = nh.id,
+                                    "adoption: reserve failed; ignoring"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => match e.class() {
+                    crate::error::FailureClass::Permanent => {
+                        // Permanent dump failure — `KernelTooOld` (kernel
+                        // < 5.8, no `NDA_NH_ID`), `PermissionDenied` (no
+                        // `CAP_NET_ADMIN`), or `InvalidArgument` (our
+                        // message shape is wrong). Mark adoption done
+                        // so the next pass doesn't re-attempt the dump,
+                        // and keep going with the rest of reconcile —
+                        // single-dst FDB, BUM enforcement, L3 ops don't
+                        // need the nexthop allocator and should still
+                        // work on unsupported kernels. FDB-NHG ops that
+                        // hit Pass 1b will fail with the same permanent
+                        // error at apply time and get permanently
+                        // suppressed per-op-shape.
+                        tracing::warn!(
+                            error = %e,
+                            "adoption: dump_owned_nexthops permanently failed; \
+                             FDB-NHG (slice 3b ECMP) disabled for this daemon instance, \
+                             other reconcile paths continue normally"
+                        );
+                        self.state.adoption_done = true;
+                    }
+                    crate::error::FailureClass::Transient
+                    | crate::error::FailureClass::Conflict => {
+                        tracing::warn!(
+                            error = %e,
+                            "adoption: dump_owned_nexthops failed transiently; deferring this reconcile pass to avoid allocator collisions"
+                        );
+                        let status = build_instance_status(&intent.instances, &probes);
+                        // `dump_snapshot` already succeeded — use the real
+                        // snapshot so BUM enforcement reflects actual link
+                        // state, not "no links exist".
+                        let bum_enforcement =
+                            build_bum_enforcement_status(&intent.bum_enforcement, &snapshot);
+                        self.emit_report(
+                            status,
+                            vec![],
+                            vec![],
+                            bum_enforcement,
+                            ip_vrf_status,
+                            ip_vrf_routes,
+                        )
+                        .await;
+                        return;
+                    }
+                },
+            }
+        }
+
         let mut plan = compute_diff(
             intent.remote_macs.as_ref(),
             &snapshot,
             &self.state.owned,
             &probes,
+            &self.state.groups,
         );
+
+        // ADR-0059 IPv6-alias-fallback warn: log only for `(VNI, MAC)`
+        // keys that newly entered the fallback this pass. The diff
+        // produces the *currently in fallback* set; we warn for new
+        // entries and prune keys that left the set so a future
+        // re-entry produces a fresh warn.
+        for key in plan
+            .ipv6_alias_fallback_keys
+            .difference(&self.state.warned_ipv6_fallback)
+        {
+            tracing::warn!(
+                vni = ?key.0,
+                mac = %key.1,
+                "ADR-0059 IPv6 alias members not yet supported (slice 2.5 follow-up); \
+                 falling back to single-dst FDB row at primary VTEP",
+            );
+        }
+        self.state
+            .warned_ipv6_fallback
+            .clone_from(&plan.ipv6_alias_fallback_keys);
 
         // Resolve the BUM-enforcement plan early so the same row set
         // both feeds report observability and (when enabled) drives
@@ -470,6 +626,46 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
 
         let (applied, failed) = self.apply_plan(&plan, intent.remote_macs.as_ref()).await;
+
+        // Retry any kernel-nexthop deletes left over from steady-state
+        // FDB-NHG GC failures (see `try_del_and_release_alloc`). Runs
+        // every pass — the queue is empty in steady state, so this is
+        // a no-op cost most of the time. Independent of the one-shot
+        // adoption cleanup below: that one walks `adopted_unreferenced`
+        // (set populated at first-dump), this one walks
+        // `pending_deletes` (set populated as apply-time deletes fail).
+        self.drain_pending_deletes().await;
+
+        // ADR-0059 slice 3b: one-shot stale-NHID cleanup. Anything
+        // still in `adopted_unreferenced` after the first reconcile's
+        // apply phase is *potentially* stale state from a prior
+        // daemon instance — but only "potentially" because:
+        //   1. Permanently-suppressed FDB-NHG ops `continue` out of
+        //      `apply_plan` and never land in `failed`, so once any
+        //      InstallFdbNhg has been recorded permanent, the next
+        //      pass sees `failed.is_empty()` even though the desired
+        //      Install never executed. A future operator config
+        //      change (or kernel upgrade) could clear the
+        //      suppression, at which point those NHIDs would have
+        //      been claimed. Cleanup must therefore block when any
+        //      FDB-NHG op is permanently suppressed.
+        //   2. Even with no suppression, the kernel snapshot may
+        //      still hold FDB rows referencing adopted NHIDs (e.g.,
+        //      a MAC whose Install hasn't been emitted yet because
+        //      its instance is NotReady). `cleanup_unreferenced_adoptions`
+        //      reads `snapshot.iter_fdb()` to compute a retention
+        //      set: any adopted ID a kernel FDB row points at, plus
+        //      its group members.
+        //
+        // Marks `adoption_done` only on a fully-clean cleanup: no
+        // apply failures, no NHG suppression, every staged
+        // stale-delete succeeded. Otherwise next pass retries.
+        if !self.state.adoption_done && failed.is_empty() {
+            let cleanup_ok = self.cleanup_unreferenced_adoptions(&snapshot).await;
+            if cleanup_ok {
+                self.state.adoption_done = true;
+            }
+        }
 
         // Update the last-applied BUM plan **per port**:
         // - With `apply_bum_enforcement = false` no kernel mutation
@@ -672,61 +868,42 @@ impl<D: Dataplane> ReconcileActor<D> {
 
         for op in &plan.ops {
             // Permanent-failure suppression — dispatched per op shape
-            // so BUM port-flag ops use their ifindex-keyed map and
-            // FDB ops use their (VNI, MAC) map. No sentinel-key
-            // collision risk.
-            let permanently_suppressed = if let DataplaneOp::SetBumPortFlags { ifindex, .. } = op {
-                if let Some(recorded) = self.state.bum_permanent_failures.get(ifindex) {
-                    if recorded == op {
-                        tracing::trace!(
-                            ?op,
-                            "suppressed (permanent BUM failure, op shape unchanged)"
-                        );
-                        true
-                    } else {
-                        tracing::debug!(
-                            ?op,
-                            recorded = ?recorded,
-                            "BUM op shape changed since permanent failure; clearing suppression"
-                        );
-                        self.state.bum_permanent_failures.remove(ifindex);
-                        false
-                    }
-                } else {
-                    false
-                }
-            } else {
-                let fdb_key = (fdb_op_vni(op), fdb_op_mac(op));
-                if let Some(recorded) = self.state.permanent_failures.get(&fdb_key) {
-                    if recorded == op {
-                        tracing::trace!(
-                            ?op,
-                            "suppressed (permanent FDB failure, op shape unchanged)"
-                        );
-                        true
-                    } else {
-                        tracing::debug!(
-                            ?op,
-                            recorded = ?recorded,
-                            "FDB op shape changed since permanent failure; clearing suppression"
-                        );
-                        self.state.permanent_failures.remove(&fdb_key);
-                        false
-                    }
-                } else {
-                    false
-                }
+            // across three key spaces: BUM (ifindex), FDB-NHG group
+            // ops (`AliasGroupKey`), and per-MAC FDB ops (`(VNI, MAC)`).
+            // No sentinel-key collision risk.
+            let permanently_suppressed = match op {
+                DataplaneOp::SetBumPortFlags { ifindex, .. } => check_permanent_suppression(
+                    &mut self.state.bum_permanent_failures,
+                    ifindex,
+                    op,
+                    "BUM",
+                ),
+                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => check_permanent_suppression(
+                    &mut self.state.nhg_permanent_failures,
+                    group_key,
+                    op,
+                    "FDB-NHG group",
+                ),
+                _ => check_permanent_suppression(
+                    &mut self.state.permanent_failures,
+                    &(fdb_op_vni(op), fdb_op_mac(op)),
+                    op,
+                    "FDB",
+                ),
             };
             if permanently_suppressed {
                 continue;
             }
 
             // Transient retry gating — skip until the per-op
-            // exponential-backoff deadline passes. Same per-shape
+            // exponential-backoff deadline passes. Same three-way
             // dispatch as permanent suppression.
             let next_due_ms_opt = match op {
                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                     self.state.bum_retry.next_due_for(*ifindex)
+                }
+                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                    self.state.nhg_retry.next_due_for(*group_key)
                 }
                 _ => self
                     .state
@@ -742,7 +919,18 @@ impl<D: Dataplane> ReconcileActor<D> {
                 continue;
             }
 
-            let res = self.dataplane.apply(op).await;
+            // ADR-0059 slice 3b: FDB-NHG ops require allocator +
+            // refcount state owned by the actor. Route them through
+            // the coordinator helper instead of `Dataplane::apply`,
+            // which would reject them with `InvalidArgument`.
+            let res = match op {
+                DataplaneOp::InstallFdbNhg { .. }
+                | DataplaneOp::UpdateFdbNhgMembers { .. }
+                | DataplaneOp::RemoveFdbNhg { .. } => {
+                    apply_nhg_op(&mut self.dataplane, &mut self.state, op).await
+                }
+                _ => self.dataplane.apply(op).await,
+            };
             match res {
                 Ok(()) => {
                     self.record_success(op, desired);
@@ -756,6 +944,9 @@ impl<D: Dataplane> ReconcileActor<D> {
                             let next_due_ms = match op {
                                 DataplaneOp::SetBumPortFlags { ifindex, .. } => {
                                     self.state.bum_retry.record_failure(*ifindex, now_ms)
+                                }
+                                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                                    self.state.nhg_retry.record_failure(*group_key, now_ms)
                                 }
                                 _ => self.state.retry.record_failure(fdb_key_for_failed, now_ms),
                             };
@@ -783,16 +974,25 @@ impl<D: Dataplane> ReconcileActor<D> {
                             // op-kind change clears the suppression
                             // automatically. Drop from the transient
                             // retry schedule so we don't double-tick.
-                            if let DataplaneOp::SetBumPortFlags { ifindex, .. } = op {
-                                self.state.bum_retry.record_success(*ifindex);
-                                self.state
-                                    .bum_permanent_failures
-                                    .insert(*ifindex, op.clone());
-                            } else {
-                                self.state.retry.record_success(fdb_key_for_failed);
-                                self.state
-                                    .permanent_failures
-                                    .insert(fdb_key_for_failed, op.clone());
+                            match op {
+                                DataplaneOp::SetBumPortFlags { ifindex, .. } => {
+                                    self.state.bum_retry.record_success(*ifindex);
+                                    self.state
+                                        .bum_permanent_failures
+                                        .insert(*ifindex, op.clone());
+                                }
+                                DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                                    self.state.nhg_retry.record_success(*group_key);
+                                    self.state
+                                        .nhg_permanent_failures
+                                        .insert(*group_key, op.clone());
+                                }
+                                _ => {
+                                    self.state.retry.record_success(fdb_key_for_failed);
+                                    self.state
+                                        .permanent_failures
+                                        .insert(fdb_key_for_failed, op.clone());
+                                }
                             }
                             failed.push(FailedOp {
                                 vni: fdb_key_for_failed.0,
@@ -812,6 +1012,156 @@ impl<D: Dataplane> ReconcileActor<D> {
         }
 
         (applied, failed)
+    }
+
+    /// Retry any kernel-nexthop deletes that failed during this or a
+    /// previous reconcile pass's steady-state GC. Successes release
+    /// the allocator slot + drop from the queue; persistent failures
+    /// stay queued for the next pass. Bounded by the count of
+    /// distinct IDs that have ever hit a transient `del_nexthop`
+    /// failure — usually empty in steady state.
+    async fn drain_pending_deletes(&mut self) {
+        // Drain in dependency order: NHG IDs first, then VTEP member
+        // IDs. `BTreeSet<u32>` iterates ascending, and our tag scheme
+        // puts members at `0x3000_xxxx` and groups at `0x4000_xxxx`
+        // — naive iteration would delete members before their parent
+        // group, which the kernel can reject with `EINVAL` and which
+        // also defeats ADR-0059 §5 invariant 2 (FDB row → group →
+        // members). Partition by `is_nhg` first.
+        let (groups, members): (Vec<u32>, Vec<u32>) = self
+            .state
+            .pending_deletes
+            .iter()
+            .copied()
+            .partition(|id| crate::nh_id_alloc::NhIdAllocator::is_nhg(*id));
+        for id in groups.into_iter().chain(members) {
+            match self.dataplane.del_nexthop(id).await {
+                Ok(()) => {
+                    self.state.nh_id_alloc.release(id);
+                    self.state.pending_deletes.remove(&id);
+                    tracing::debug!(id, "pending_deletes: drained on retry");
+                }
+                Err(e) => {
+                    tracing::trace!(?e, id, "pending_deletes: still failing");
+                }
+            }
+        }
+    }
+
+    /// ADR-0059 slice 3b cleanup helper: walk `adopted_unreferenced`
+    /// after the first reconcile's apply phase and delete any
+    /// rustbgpd-tagged kernel nexthop that's *both* unclaimed by a
+    /// MAC in `groups` *and* unreferenced by any FDB row in the
+    /// kernel snapshot.
+    ///
+    /// Two-layer safety against deleting live state:
+    ///
+    /// 1. **Suppression gate** — if any FDB-NHG op is permanently
+    ///    suppressed (`nhg_permanent_failures` non-empty, or
+    ///    `permanent_failures` contains any of `InstallFdbNhg` /
+    ///    `UpdateFdbNhgMembers` / `RemoveFdbNhg`), block cleanup
+    ///    entirely. Permanently-suppressed ops `continue` out of
+    ///    `apply_plan` without joining `failed`, so the outer
+    ///    `failed.is_empty()` gate alone can't detect this case;
+    ///    a future config change could clear the suppression and
+    ///    those NHIDs would have been claimed if Install had
+    ///    succeeded, so we mustn't pre-emptively delete them.
+    ///
+    /// 2. **Retention set** — even without suppression, scan
+    ///    `snapshot.iter_fdb()` for FDB rows whose `nh_id` is in
+    ///    `adopted_unreferenced`. Retain those IDs *and* recursively
+    ///    the member IDs of retained groups (a kernel FDB row
+    ///    pointing at a group implies all its member NHs are still
+    ///    in use even though we don't track them in `groups` yet).
+    ///
+    /// Returns `true` only when (a) the suppression gate let
+    /// cleanup proceed, and (b) every staged delete succeeded. On
+    /// per-ID failure the allocator slot stays reserved and the
+    /// entry stays in `adopted_unreferenced` so the next reconcile
+    /// pass retries — releasing the slot on a transient netlink
+    /// failure would let a future `alloc_vtep_nh` / `alloc_nhg`
+    /// hand out an ID still live in the kernel, exactly the
+    /// collision adoption is supposed to prevent.
+    async fn cleanup_unreferenced_adoptions(&mut self, snapshot: &KernelSnapshot) -> bool {
+        // (1) Suppression gate.
+        let any_fdb_nhg_perm_failure = !self.state.nhg_permanent_failures.is_empty()
+            || self.state.permanent_failures.values().any(|op| {
+                matches!(
+                    op,
+                    DataplaneOp::InstallFdbNhg { .. }
+                        | DataplaneOp::UpdateFdbNhgMembers { .. }
+                        | DataplaneOp::RemoveFdbNhg { .. }
+                )
+            });
+        if any_fdb_nhg_perm_failure {
+            tracing::warn!(
+                adopted = self.state.adopted_unreferenced.len(),
+                "adoption cleanup blocked: FDB-NHG op(s) permanently suppressed; \
+                 adopted IDs retained until suppression clears (op-shape change \
+                 or daemon restart)"
+            );
+            return false;
+        }
+
+        // (2) Retention set from kernel snapshot. Walk every FDB row;
+        //     if its `nh_id` is one we adopted, retain it. For each
+        //     retained group, recursively retain its members (a
+        //     kernel row pointing at the group keeps every member NH
+        //     in use even before we record the group locally).
+        let mut retain: BTreeSet<u32> = BTreeSet::new();
+        for (_, entry) in snapshot.iter_fdb() {
+            let Some(nh_id) = entry.nh_id else { continue };
+            if !self.state.adopted_unreferenced.contains_key(&nh_id) {
+                continue;
+            }
+            retain.insert(nh_id);
+            if let Some(adopted) = self.state.adopted_unreferenced.get(&nh_id)
+                && let crate::dataplane::KernelNexthopKind::Group { member_ids } = &adopted.kind
+            {
+                for mid in member_ids {
+                    retain.insert(*mid);
+                }
+            }
+        }
+
+        // Drain in dependency order: NHG IDs before per-VTEP members
+        // (Copilot finding — `BTreeSet<u32>` ascending iteration plus
+        // our tag scheme would delete members first and let the
+        // kernel reject the group del with `EINVAL`).
+        let (stale_groups, stale_members): (Vec<u32>, Vec<u32>) = self
+            .state
+            .adopted_unreferenced
+            .keys()
+            .copied()
+            .filter(|id| !retain.contains(id))
+            .partition(|id| crate::nh_id_alloc::NhIdAllocator::is_nhg(*id));
+
+        let mut all_ok = true;
+        for id in stale_groups.into_iter().chain(stale_members) {
+            // `del_nexthop` is idempotent on `ENOENT` (slice 2). Only
+            // release + drop tracking on `Ok` — on `Err`, leave the
+            // slot reserved + the entry in the map so the next
+            // reconcile pass retries.
+            match self.dataplane.del_nexthop(id).await {
+                Ok(()) => {
+                    self.state.nh_id_alloc.release(id);
+                    self.state.adopted_unreferenced.remove(&id);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        ?e,
+                        id,
+                        "adoption cleanup: del_nexthop failed; leaving reserved for next pass"
+                    );
+                    all_ok = false;
+                }
+            }
+        }
+        // Retained IDs stay in `adopted_unreferenced` so the next
+        // pass re-evaluates them — if a kernel FDB row gets removed
+        // or replaced, they become deletable; if a MAC's Install
+        // succeeds, `apply_nhg_op` removes them at record time.
+        all_ok
     }
 
     /// On successful apply, mirror state into `owned` so the next
@@ -857,13 +1207,22 @@ impl<D: Dataplane> ReconcileActor<D> {
             // is a group-level update with no per-`(VNI, MAC)` owned-set
             // delta — the slice 3b coordinator updates `group_state`
             // separately. Both arms share the no-op body.
+            DataplaneOp::UpdateFdbNhgMembers { group_key, .. } => {
+                // Group-level op — no per-MAC owned-set delta; the
+                // slice 3b coordinator updates `group_state`
+                // separately. Clear the NHG-keyed retry schedule on
+                // success so subsequent failures get a fresh backoff.
+                self.state.nhg_retry.record_success(*group_key);
+            }
+            // Gate 9 slice 6c L3 ops have their own owned-set and retry
+            // tracking inside the L3 diff loop, handled by
+            // `record_success_l3`.
             DataplaneOp::AddRemoteIpRoute { .. }
             | DataplaneOp::RemoveRemoteIpRoute { .. }
             | DataplaneOp::AddL3Neighbor { .. }
             | DataplaneOp::RemoveL3Neighbor { .. }
             | DataplaneOp::AddL3VxlanFdb { .. }
-            | DataplaneOp::RemoveL3VxlanFdb { .. }
-            | DataplaneOp::UpdateFdbNhgMembers { .. } => {}
+            | DataplaneOp::RemoveL3VxlanFdb { .. } => {}
         }
     }
 
@@ -968,6 +1327,7 @@ impl<D: Dataplane> ReconcileActor<D> {
     /// entries. BUM restoration is best-effort because leaving a CE
     /// port suppressed after the daemon exits is more operator-hostile
     /// than a redundant allow-all write.
+    #[allow(clippy::too_many_lines)]
     async fn drain(&mut self) {
         let bum_restore_ops: Vec<_> = if self.config.apply_bum_enforcement {
             self.state
@@ -1032,15 +1392,42 @@ impl<D: Dataplane> ReconcileActor<D> {
                 }
             }
 
-            let owned_keys: Vec<_> = self.state.owned.keys().into_iter().collect();
-            for (vni, mac) in owned_keys {
-                let op = DataplaneOp::RemoveRemoteFdb { vni, mac };
-                if let Err(e) = self.dataplane.apply(&op).await {
+            // Snapshot the owned set with kind info — for FdbNhg
+            // entries we route through `apply_nhg_op` (so the FDB
+            // row → group → members teardown sequence runs and the
+            // refcount state stays consistent for sibling MACs that
+            // share the group). Without this, drain would issue
+            // `RemoveRemoteFdb` for FdbNhg-owned MACs — which
+            // `Dataplane::apply` rejects with `InvalidArgument` and
+            // the kernel group/members stay orphaned across restart.
+            let owned_drain: Vec<(EvpnInstanceId, MacAddress, OwnedEntryKind)> = self
+                .state
+                .owned
+                .iter()
+                .map(|(&(vni, mac), entry)| (vni, mac, entry.kind.clone()))
+                .collect();
+            for (vni, mac, kind) in owned_drain {
+                let op = match kind {
+                    OwnedEntryKind::SingleDst { .. } => DataplaneOp::RemoveRemoteFdb { vni, mac },
+                    OwnedEntryKind::FdbNhg { group_key } => DataplaneOp::RemoveFdbNhg {
+                        vni,
+                        mac,
+                        group_key,
+                    },
+                };
+                let res = match &op {
+                    DataplaneOp::RemoveFdbNhg { .. } => {
+                        apply_nhg_op(&mut self.dataplane, &mut self.state, &op).await
+                    }
+                    _ => self.dataplane.apply(&op).await,
+                };
+                if let Err(e) = res {
                     tracing::debug!(error = %e, ?op, "drain apply failed");
                     // Best-effort — keep going. Foreign entries in
                     // the kernel are never touched by `apply` for
                     // RemoveRemoteFdb in either the real or fake
-                    // impl.
+                    // impl; `apply_nhg_op` GC is also best-effort
+                    // for the group/member teardown.
                 } else {
                     self.state.owned.record_withdrawn(vni, mac);
                 }
@@ -1171,6 +1558,427 @@ fn build_instance_status(
 /// operator-facing key for BUM reports is the `kind` field, which
 /// carries the ifindex. The placeholder VNI is only present because
 /// `AppliedOp` / `FailedOp` predate BUM-port operations.
+/// ADR-0059 slice 3b coordinator: apply an FDB-NHG op by calling
+/// [`NexthopOps`] methods in ADR §5 invariant 1+2 order, updating
+/// the allocator + [`GroupOwnedMap`] state.
+///
+/// Free function (not a method) so it can borrow `dataplane` and
+/// `state` mutably from disjoint fields of the actor.
+///
+/// On install: per-VTEP members → group (replace if exists) → FDB row.
+/// On update: per-VTEP members (added) → group REPLACE → GC removed members.
+/// On remove: FDB row → group (if last ref) → members (each if last ref).
+#[allow(clippy::too_many_lines)] // the per-op orchestration is sequential and reads top-to-bottom
+async fn apply_nhg_op<D>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    op: &DataplaneOp,
+) -> Result<(), crate::error::DataplaneError>
+where
+    D: crate::dataplane::NexthopOps,
+{
+    use crate::group_state::RefDelta;
+    use std::collections::BTreeSet;
+
+    match op {
+        DataplaneOp::InstallFdbNhg {
+            vni,
+            mac,
+            group_key,
+            members,
+        } => {
+            // Track resources newly created in this op so a later
+            // step's failure can roll them back rather than leak.
+            let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
+            let mut new_group: Option<(crate::group_state::AliasGroupKey, u32)> = None;
+
+            // Step 1: install any per-VTEP members not yet present.
+            for ip in members {
+                if state.groups.vtep_nh(ip).is_none() {
+                    let id = match state.nh_id_alloc.alloc_vtep_nh() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            rollback_partial_install(
+                                dataplane,
+                                state,
+                                &new_members,
+                                new_group,
+                                "install_step1_alloc",
+                            )
+                            .await;
+                            // Allocator failure (exhaustion or
+                            // tag-bit collision) won't heal on
+                            // retry — surface as permanent so the
+                            // actor suppresses + flags the op
+                            // rather than spin forever.
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                                "ADR-0059: vtep NH alloc failed: {e}"
+                            )));
+                        }
+                    };
+                    if let Err(e) = dataplane.add_nexthop_member(id, *ip).await {
+                        state.nh_id_alloc.release(id);
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            new_group,
+                            "install_step1_add",
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    state.groups.record_member_install(*ip, id);
+                    state.adopted_unreferenced.remove(&id);
+                    new_members.push((*ip, id));
+                }
+            }
+            // Step 2: ensure group exists with the desired member set.
+            let member_ids: Vec<u32> = members
+                .iter()
+                .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
+                .collect();
+            // Snapshot the existing group ID + member set before
+            // the mutable replace call (which re-borrows `state.groups`).
+            let existing = state
+                .groups
+                .group(group_key)
+                .map(|g| (g.id, g.members.iter().copied().collect::<Vec<_>>()));
+            let group_id = if let Some((g_id, existing_members)) = existing {
+                if existing_members.as_slice() != members.as_slice() {
+                    // Member set drifted (e.g., re-install after
+                    // partial-failure recovery). Atomic REPLACE, then
+                    // GC any per-VTEP members whose last group-ref
+                    // dropped — mirrors the `UpdateFdbNhgMembers`
+                    // path. Without this, members removed by the
+                    // drift heal stay orphaned in `vtep_nhs` and
+                    // in-kernel.
+                    if let Err(e) = dataplane.add_nexthop_group(g_id, &member_ids).await {
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            new_group,
+                            "install_step2_replace",
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    let new_members_set: BTreeSet<_> = members.iter().copied().collect();
+                    let removed = state
+                        .groups
+                        .record_group_member_change(*group_key, new_members_set);
+                    for ip in removed {
+                        if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
+                            try_del_and_release_alloc(dataplane, state, vtep_id, "install_drift")
+                                .await;
+                        }
+                    }
+                }
+                g_id
+            } else {
+                let id = match state.nh_id_alloc.alloc_nhg() {
+                    Ok(id) => id,
+                    Err(e) => {
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            new_group,
+                            "install_step2_alloc",
+                        )
+                        .await;
+                        // Permanent for the same reason as the
+                        // vtep_nh path above — allocator failure
+                        // doesn't heal on retry.
+                        return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                            "ADR-0059: nhg alloc failed: {e}"
+                        )));
+                    }
+                };
+                if let Err(e) = dataplane.add_nexthop_group(id, &member_ids).await {
+                    state.nh_id_alloc.release(id);
+                    rollback_partial_install(
+                        dataplane,
+                        state,
+                        &new_members,
+                        new_group,
+                        "install_step2_add",
+                    )
+                    .await;
+                    return Err(e);
+                }
+                let members_set: BTreeSet<_> = members.iter().copied().collect();
+                state
+                    .groups
+                    .record_group_install(*group_key, id, members_set);
+                state.adopted_unreferenced.remove(&id);
+                new_group = Some((*group_key, id));
+                id
+            };
+            // Step 3: install the FDB row pointing at the group. On
+            // failure, roll back the newly-created group (if any) and
+            // members — they have no MAC ref yet, so they're true
+            // orphans without rollback.
+            if let Err(e) = dataplane.install_fdb_nhg_row(*vni, *mac, group_id).await {
+                rollback_partial_install(
+                    dataplane,
+                    state,
+                    &new_members,
+                    new_group,
+                    "install_step3",
+                )
+                .await;
+                return Err(e);
+            }
+            state.groups.record_mac_ref(*group_key, *vni, *mac);
+            Ok(())
+        }
+
+        DataplaneOp::UpdateFdbNhgMembers { group_key, members } => {
+            // Track newly-created per-VTEP members so Step 2 failure
+            // can roll them back; the group itself pre-exists (the
+            // op-name says "Update", not "Install") so it never
+            // appears in the rollback's `new_group` slot.
+            let mut new_members: Vec<(std::net::IpAddr, u32)> = Vec::new();
+            for ip in members {
+                if state.groups.vtep_nh(ip).is_none() {
+                    let id = match state.nh_id_alloc.alloc_vtep_nh() {
+                        Ok(id) => id,
+                        Err(e) => {
+                            rollback_partial_install(
+                                dataplane,
+                                state,
+                                &new_members,
+                                None,
+                                "update_step1_alloc",
+                            )
+                            .await;
+                            // Allocator failure (exhaustion or
+                            // tag-bit collision) won't heal on
+                            // retry — surface as permanent so the
+                            // actor suppresses + flags the op
+                            // rather than spin forever.
+                            return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                                "ADR-0059: vtep NH alloc failed: {e}"
+                            )));
+                        }
+                    };
+                    if let Err(e) = dataplane.add_nexthop_member(id, *ip).await {
+                        state.nh_id_alloc.release(id);
+                        rollback_partial_install(
+                            dataplane,
+                            state,
+                            &new_members,
+                            None,
+                            "update_step1_add",
+                        )
+                        .await;
+                        return Err(e);
+                    }
+                    state.groups.record_member_install(*ip, id);
+                    state.adopted_unreferenced.remove(&id);
+                    new_members.push((*ip, id));
+                }
+            }
+            // Compute new member-id list and REPLACE the group.
+            let member_ids: Vec<u32> = members
+                .iter()
+                .map(|ip| state.groups.vtep_nh(ip).expect("just installed").id)
+                .collect();
+            let Some(g_id) = state.groups.group(group_key).map(|g| g.id) else {
+                // `compute_diff` Pass 1b only emits `UpdateFdbNhgMembers`
+                // when the group exists in `GroupOwnedMap`, so hitting
+                // this branch means `owned` and `groups` have drifted
+                // out of sync — an internal state inconsistency that
+                // won't heal on retry. Surface as permanent so the
+                // actor suppresses + flags it rather than spinning
+                // indefinitely on a bug/invariant violation.
+                rollback_partial_install(dataplane, state, &new_members, None, "update_no_group")
+                    .await;
+                return Err(crate::error::DataplaneError::InvalidArgument(format!(
+                    "ADR-0059: UpdateFdbNhgMembers for {group_key:?} but group missing \
+                     from GroupOwnedMap (owned/groups state drift)",
+                )));
+            };
+            if let Err(e) = dataplane.add_nexthop_group(g_id, &member_ids).await {
+                rollback_partial_install(dataplane, state, &new_members, None, "update_step2")
+                    .await;
+                return Err(e);
+            }
+            let new_members_set: BTreeSet<_> = members.iter().copied().collect();
+            let removed = state
+                .groups
+                .record_group_member_change(*group_key, new_members_set);
+            // GC per-VTEP members whose last group-ref dropped.
+            for ip in removed {
+                if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
+                    try_del_and_release_alloc(dataplane, state, vtep_id, "update_members").await;
+                }
+            }
+            Ok(())
+        }
+
+        DataplaneOp::RemoveFdbNhg {
+            vni,
+            mac,
+            group_key,
+        } => {
+            // FDB row first (ADR §5 invariant 2).
+            dataplane.remove_fdb_nhg_row(*vni, *mac).await?;
+            match state.groups.record_mac_unref(*group_key, *vni, *mac) {
+                RefDelta::GroupStillReferenced => Ok(()),
+                RefDelta::GroupShouldDelete { id, members } => {
+                    try_del_and_release_alloc(dataplane, state, id, "remove_group").await;
+                    for ip in members {
+                        if let Some(vtep_id) = state.groups.record_member_unref(ip, *group_key) {
+                            try_del_and_release_alloc(dataplane, state, vtep_id, "remove_member")
+                                .await;
+                        }
+                    }
+                    Ok(())
+                }
+            }
+        }
+
+        _ => unreachable!("apply_nhg_op called for non-FDB-NHG op"),
+    }
+}
+
+/// Op-shape-aware permanent-failure check. Returns `true` if the
+/// op should be skipped (recorded shape unchanged), `false` if it
+/// should run (no record, or the shape changed since the failure
+/// — in which case the suppression is cleared as a side effect).
+fn check_permanent_suppression<K: Ord>(
+    map: &mut BTreeMap<K, DataplaneOp>,
+    key: &K,
+    op: &DataplaneOp,
+    surface: &'static str,
+) -> bool {
+    let Some(recorded) = map.get(key) else {
+        return false;
+    };
+    if recorded == op {
+        tracing::trace!(
+            ?op,
+            surface,
+            "suppressed (permanent failure, op shape unchanged)"
+        );
+        true
+    } else {
+        tracing::debug!(
+            ?op,
+            recorded = ?recorded,
+            surface,
+            "op shape changed since permanent failure; clearing suppression"
+        );
+        map.remove(key);
+        false
+    }
+}
+
+/// Roll back per-VTEP members and (optionally) a group that were
+/// newly created during a partial `InstallFdbNhg` /
+/// `UpdateFdbNhgMembers` execution. Called when a later step fails
+/// — without this, the surrounding op would return `Err` and the
+/// actor would drop the `(VNI, MAC)` retry state on permanent
+/// failures, leaving the in-flight members + group permanently
+/// orphaned in the kernel + allocator. Each delete attempt routes
+/// through `try_del_and_release_alloc`, which keeps the allocator
+/// slot reserved when the kernel delete fails (transient → queued
+/// for retry; permanent → operator intervention).
+async fn rollback_partial_install<D: crate::dataplane::NexthopOps>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    new_members: &[(std::net::IpAddr, u32)],
+    new_group: Option<(crate::group_state::AliasGroupKey, u32)>,
+    site: &'static str,
+) {
+    // Group first (no FDB row exists at this point, so the ADR §5
+    // invariant-2 order reduces to group → members). Delete the ID
+    // returned by `drop_unreferenced_group` rather than the caller-
+    // supplied one — they're expected to match (debug-asserted), but
+    // if state ever drifts, the map's ID is what we actually tracked
+    // and is the safer kernel reference.
+    if let Some((group_key, expected_id)) = new_group
+        && let Some((tracked_id, _members)) = state.groups.drop_unreferenced_group(&group_key)
+    {
+        debug_assert_eq!(tracked_id, expected_id, "rollback ID mismatch");
+        try_del_and_release_alloc(dataplane, state, tracked_id, site).await;
+    }
+    // Members in reverse-creation order. Skip members that a still-
+    // installed group now references — this happens on the
+    // existing-group drift-heal path when Step 2's REPLACE succeeded
+    // and attached the new members to the (already-live) group, and
+    // Step 3 then failed: the members are no longer "newly-orphaned
+    // by this op", they're legitimate group members, and deleting
+    // them would leave the surviving group's `members` set pointing
+    // at gone kernel state. The next reconcile will re-emit Install
+    // for the failed MAC and heal the missing FDB row.
+    for (ip, id) in new_members.iter().rev() {
+        if state.groups.vtep_nh_is_orphan(ip) {
+            state.groups.drop_vtep_nh(ip);
+            try_del_and_release_alloc(dataplane, state, *id, site).await;
+        } else {
+            tracing::debug!(
+                ?ip,
+                id,
+                site,
+                "rollback: member now referenced by surviving group; retaining"
+            );
+        }
+    }
+}
+
+/// Best-effort delete of a tagged kernel nexthop, releasing the
+/// allocator slot only if the delete succeeded. On `Err` the slot
+/// stays reserved (so a future `alloc_vtep_nh` / `alloc_nhg` cannot
+/// hand out an ID still live in the kernel). Transient failures get
+/// queued into `state.pending_deletes` for retry on the next
+/// reconcile pass — permanent failures (e.g., `PermissionDenied`,
+/// `KernelTooOld`) are NOT queued because retrying can't help; they
+/// log once at warn and the kernel orphan stays until operator
+/// intervention. See `drain_pending_deletes`.
+async fn try_del_and_release_alloc<D: crate::dataplane::NexthopOps>(
+    dataplane: &mut D,
+    state: &mut ActorState,
+    id: u32,
+    site: &'static str,
+) {
+    use crate::error::FailureClass;
+    match dataplane.del_nexthop(id).await {
+        Ok(()) => {
+            state.nh_id_alloc.release(id);
+            // Clear any stale retry queue entry for this ID — if a
+            // prior pass enqueued it after a transient failure and
+            // the current pass succeeded via the steady-state path,
+            // `drain_pending_deletes` would otherwise re-attempt the
+            // delete (kernel returns ENOENT → success per slice 2's
+            // idempotent ACK, but spams the log on every pass).
+            state.pending_deletes.remove(&id);
+        }
+        Err(e) => match e.class() {
+            FailureClass::Permanent => {
+                tracing::warn!(
+                    error = %e,
+                    id,
+                    site,
+                    "FDB-NHG GC: del_nexthop permanently failed; allocator slot retained, kernel orphan needs operator intervention"
+                );
+            }
+            FailureClass::Transient | FailureClass::Conflict => {
+                tracing::warn!(
+                    error = %e,
+                    id,
+                    site,
+                    "FDB-NHG GC: del_nexthop failed transiently; queued for retry, allocator slot retained"
+                );
+                state.pending_deletes.insert(id);
+            }
+        },
+    }
+}
+
 fn fdb_op_vni(op: &DataplaneOp) -> rustbgpd_evpn::EvpnInstanceId {
     match op {
         DataplaneOp::AddRemoteFdb { vni, .. }

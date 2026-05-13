@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use rustbgpd_evpn::{
     BumEnforcementReadiness, BumEnforcementTable, DataplaneIntent, DfRole,
-    EthernetSegmentIdentifier, EvpnInstance, EvpnInstanceId, EvpnInstanceTable, MacAddress,
-    RemoteMacEntry, RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
+    EthernetSegmentIdentifier, EthernetTagId, EvpnInstance, EvpnInstanceId, EvpnInstanceTable,
+    MacAddress, RemoteMacEntry, RemoteMacSource, RemoteMacTable, RouteDistinguisher, RouteTarget,
 };
 use rustbgpd_evpn_linux::snapshot::KernelVxlanInfo;
 use rustbgpd_evpn_linux::{
@@ -899,6 +899,328 @@ async fn closed_event_stream_does_not_starve_intent_and_shutdown() {
         .await
         .expect("actor join timed out — shutdown was starved")
         .expect("actor task panicked");
+}
+
+// ADR-0059 slice 3b: actor-level FDB-NHG coverage. The diff-level
+// unit tests exercise `compute_diff` Pass 1b in isolation, and the
+// privileged netns test (`tests/netns_fdb_nhg.rs`) validates the raw
+// netlink primitives. These tests close the gap on the coordinator
+// + adoption state machine through `ReconcileActor::apply_nhg_op` +
+// `cleanup_unreferenced_adoptions`.
+
+fn entry_multi_homed(remote: &str, aliases: &[&str], seg: u8) -> RemoteMacEntry {
+    RemoteMacEntry {
+        remote_vtep_ip: ipa(remote),
+        mobility_sequence: None,
+        alias_vtep_ips: aliases.iter().map(|s| ipa(s)).collect(),
+        alias_group_key: Some((EthernetSegmentIdentifier::new([seg; 10]), EthernetTagId(0))),
+        source: RemoteMacSource::EvpnRibBestPath,
+    }
+}
+
+/// Returns `(members, groups)` partitioned out of the in-memory
+/// nexthop_ops map by kind.
+fn split_nexthop_ops(
+    nhs: &std::collections::BTreeMap<u32, rustbgpd_evpn_linux::dataplane::KernelNexthop>,
+) -> (
+    Vec<rustbgpd_evpn_linux::dataplane::KernelNexthop>,
+    Vec<rustbgpd_evpn_linux::dataplane::KernelNexthop>,
+) {
+    use rustbgpd_evpn_linux::dataplane::KernelNexthopKind;
+    let mut members = Vec::new();
+    let mut groups = Vec::new();
+    for nh in nhs.values() {
+        match &nh.kind {
+            KernelNexthopKind::Member { .. } => members.push(nh.clone()),
+            KernelNexthopKind::Group { .. } => groups.push(nh.clone()),
+        }
+    }
+    (members, groups)
+}
+
+// 1. Multi-homed Type 2 intent installs member NHs + group + FDB row
+//    end-to-end through the actor.
+#[tokio::test]
+async fn fdb_nhg_multihomed_intent_installs_members_group_and_row() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(last.intent_generation, 1);
+    assert!(
+        last.failed.is_empty(),
+        "expected no failures: {:?}",
+        last.failed
+    );
+
+    let nhs = h.handle.nexthop_ops();
+    let (members, groups) = split_nexthop_ops(&nhs);
+    assert_eq!(members.len(), 2, "expected 2 per-VTEP members; got {nhs:?}");
+    assert_eq!(groups.len(), 1, "expected 1 group; got {nhs:?}");
+
+    // FDB row exists and points at the group.
+    let group_id = groups[0].id;
+    assert_eq!(
+        h.handle.kernel_fdb_nh_id(vni(100), mac(1)),
+        Some(group_id),
+        "FDB row should reference the installed group"
+    );
+
+    h.shutdown().await;
+}
+
+// 2. Two MACs share one group: withdraw one leaves group + members
+//    in place; withdraw last tears down.
+#[tokio::test]
+async fn fdb_nhg_shared_group_refcount_teardown() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+
+    // Phase 1: both MACs ref the same `(ESI=7, EthTag=0)` group.
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    macs.insert(
+        vni(100),
+        mac(2),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.clone()))
+        .unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(last.intent_generation, 1);
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert_eq!(members.len(), 2);
+    assert_eq!(groups.len(), 1, "two MACs should share one group");
+    let group_id = groups[0].id;
+    assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(1)), Some(group_id));
+    assert_eq!(h.handle.kernel_fdb_nh_id(vni(100), mac(2)), Some(group_id));
+
+    // Phase 2: withdraw MAC(1). Group + members must remain (MAC(2)
+    // still refs); FDB row for MAC(1) gone.
+    let mut macs2 = RemoteMacTable::builder();
+    macs2
+        .insert(
+            vni(100),
+            mac(2),
+            entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+        )
+        .unwrap();
+    let macs2 = macs2.build();
+    h.intent_tx.send(intent(2, inst.clone(), macs2)).unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 2 {
+        last = h.next_report().await;
+    }
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert_eq!(
+        members.len(),
+        2,
+        "members must survive while a sibling MAC refs the group"
+    );
+    assert_eq!(groups.len(), 1, "group must survive last-ref shrink");
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(1)));
+    assert!(h.handle.kernel_has_fdb(vni(100), mac(2)));
+
+    // Phase 3: withdraw MAC(2). Last ref → group + members torn down.
+    let macs3 = RemoteMacTable::new();
+    h.intent_tx.send(intent(3, inst, macs3)).unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation < 3 {
+        last = h.next_report().await;
+    }
+    let (members, groups) = split_nexthop_ops(&h.handle.nexthop_ops());
+    assert!(
+        members.is_empty(),
+        "members must be GC'd after last ref drops; got {members:?}"
+    );
+    assert!(
+        groups.is_empty(),
+        "group must be GC'd after last MAC unref; got {groups:?}"
+    );
+    assert!(!h.handle.kernel_has_fdb(vni(100), mac(2)));
+
+    h.shutdown().await;
+}
+
+// 3. Adoption with a preloaded tagged NHG + member + matching kernel
+//    FDB row (no desired intent referencing them): cleanup must
+//    retain the IDs because the FDB row still points at the group.
+#[tokio::test]
+async fn fdb_nhg_adoption_retains_live_kernel_fdb_refs() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+    use rustbgpd_evpn_linux::nh_id_alloc::{NHG_TAG, VTEP_NH_TAG};
+
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Pre-load a prior daemon's group + member, plus a kernel FDB
+    // row pointing at the group (the "live ref" the cleanup must
+    // see).
+    let member_id = VTEP_NH_TAG | 1;
+    let group_id = NHG_TAG | 1;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: member_id,
+        kind: KernelNexthopKind::Member {
+            gateway: ipa("10.0.0.2"),
+        },
+    });
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: group_id,
+        kind: KernelNexthopKind::Group {
+            member_ids: vec![member_id],
+        },
+    });
+    h.handle.pre_load_fdb(
+        vni(100),
+        KernelFdbEntry {
+            mac: mac(99),
+            dst: None,
+            nh_id: Some(group_id),
+            flags: KernelFdbFlags {
+                extern_learn: true,
+                master: true,
+                ..Default::default()
+            },
+        },
+    );
+
+    // Empty intent — no MAC will claim these IDs through Install.
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    let macs = RemoteMacTable::new();
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(last.intent_generation, 1);
+
+    // Cleanup ran; both IDs must still be present because the kernel
+    // FDB row references the group.
+    let nhs = h.handle.nexthop_ops();
+    assert!(
+        nhs.contains_key(&group_id),
+        "adoption cleanup must retain group ID still referenced by a kernel FDB row; got {nhs:?}"
+    );
+    assert!(
+        nhs.contains_key(&member_id),
+        "adoption cleanup must retain member of a retained group; got {nhs:?}"
+    );
+
+    h.shutdown().await;
+}
+
+// 4. Permanent-suppressed InstallFdbNhg blocks adoption cleanup
+//    across passes — even when `failed.is_empty()` because the op
+//    `continue`s out of `apply_plan` instead of joining `failed`.
+#[tokio::test]
+async fn fdb_nhg_perm_suppressed_install_blocks_adoption_cleanup() {
+    use rustbgpd_evpn_linux::dataplane::{KernelNexthop, KernelNexthopKind};
+    use rustbgpd_evpn_linux::nh_id_alloc::{NHG_TAG, VTEP_NH_TAG};
+
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    // Pre-load a prior daemon's group + member with NO kernel FDB
+    // row referencing them. Without the suppression gate they would
+    // be cleaned up as stale on the first successful pass.
+    let member_id = VTEP_NH_TAG | 1;
+    let group_id = NHG_TAG | 1;
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: member_id,
+        kind: KernelNexthopKind::Member {
+            gateway: ipa("10.0.0.2"),
+        },
+    });
+    h.handle.pre_load_nexthop_op(KernelNexthop {
+        id: group_id,
+        kind: KernelNexthopKind::Group {
+            member_ids: vec![member_id],
+        },
+    });
+
+    // Inject a Permanent failure (KernelTooOld) on EVERY apply call
+    // so the first InstallFdbNhg fails permanently AND the next
+    // pass's suppressed retry leaves `failed.is_empty()`.
+    h.handle.inject_failure_kernel_too_old(None);
+    h.handle.inject_failure_kernel_too_old(None);
+    h.handle.inject_failure_kernel_too_old(None);
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(instance(100, Some("br100"), "10.0.0.1"));
+    h.intent_tx
+        .send(intent(1, inst.clone(), macs.clone()))
+        .unwrap();
+
+    // Pass 1: Install fails permanent → recorded in
+    // `permanent_failures` → joins `failed` → cleanup skipped.
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(last.intent_generation, 1);
+    assert!(
+        !last.failed.is_empty(),
+        "expected the first-pass permanent failure to surface in `failed`"
+    );
+
+    // Push a kernel event to trigger another reconcile pass.
+    // On this pass the same InstallFdbNhg is permanently
+    // suppressed (`continue`s out of apply_plan), so `failed` is
+    // empty — the suppression gate is what must block cleanup.
+    h.handle.push_event(KernelEvent::KernelStateChanged).await;
+    let mut next = h.next_report().await;
+    // Discard the cold-start / earlier reports; wait for one after
+    // the kernel event.
+    while next.applied.is_empty() && !next.failed.is_empty() {
+        next = h.next_report().await;
+    }
+    // At least one pass after the suppression took effect must have
+    // had `failed.is_empty()`. Regardless of which pass it was, the
+    // adopted IDs must STILL be present.
+    let nhs = h.handle.nexthop_ops();
+    assert!(
+        nhs.contains_key(&group_id),
+        "adoption cleanup must be blocked while an FDB-NHG op is permanently suppressed; group missing from {nhs:?}"
+    );
+    assert!(
+        nhs.contains_key(&member_id),
+        "adoption cleanup must be blocked while an FDB-NHG op is permanently suppressed; member missing from {nhs:?}"
+    );
+
+    h.shutdown().await;
 }
 
 #[allow(dead_code)]

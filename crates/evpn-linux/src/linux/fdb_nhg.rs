@@ -39,15 +39,13 @@
 //! refreshing an FDB entry with a nexthop object"), backported to
 //! stable trees.
 //!
-//! ## Slice 3a status
+//! ## Slice 3b status
 //!
-//! These functions exist on the branch but are not yet wired to a
-//! caller — slice 3b lands the reconcile-actor coordinator that
-//! invokes them. Slice 3a ships the implementation so it's
-//! testable in isolation (CVE guard + wire shape) before the
-//! coordinator brings them onto the apply path.
-
-#![allow(dead_code)] // slice 3b wires these into the reconcile actor's apply coordinator
+//! Slice 3b wired these functions into `LinuxDataplane`'s
+//! `NexthopOps` impl: the reconcile-actor coordinator drives them
+//! during apply for `InstallFdbNhg` / `RemoveFdbNhg` ops. The CVE
+//! guard runs inline on every install (belt-and-suspenders behind
+//! the readiness probe).
 
 use netlink_packet_core::DefaultNla;
 use netlink_packet_route::AddressFamily;

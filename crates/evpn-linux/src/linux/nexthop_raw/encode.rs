@@ -36,7 +36,8 @@
 use std::net::IpAddr;
 
 use super::uapi::{
-    NHA_FDB, NHA_GATEWAY, NHA_GROUP, NHA_ID, NexthopGrp, Nhmsg, RTM_DELNEXTHOP, RTM_NEWNEXTHOP,
+    NHA_FDB, NHA_GATEWAY, NHA_GROUP, NHA_ID, NexthopGrp, Nhmsg, RTM_DELNEXTHOP, RTM_GETNEXTHOP,
+    RTM_NEWNEXTHOP,
 };
 
 // ---------------------------------------------------------------------
@@ -45,6 +46,8 @@ use super::uapi::{
 
 /// `NLM_F_REQUEST` — every userspace-to-kernel message sets this.
 const NLM_F_REQUEST: u16 = 0x01;
+/// `NLM_F_DUMP` — request a multipart dump response.
+const NLM_F_DUMP: u16 = 0x300; // ROOT | MATCH
 /// `NLM_F_ACK` — request an ACK / NACK reply.
 const NLM_F_ACK: u16 = 0x04;
 /// `NLM_F_REPLACE` — replace any existing entry (idempotent).
@@ -117,10 +120,11 @@ pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u
     let mut body = Vec::with_capacity(8 + 8 + 8 + 4);
 
     // nhmsg: AF_INET when a v4 gateway is present (iproute2 sets
-    // family from the gateway form). v6 callers are rejected at
-    // the socket layer; here we'd set AF_INET6 if we encoded v6.
-    let family = match gateway {
-        IpAddr::V4(_) => AF_INET,
+    // family from the gateway form). v6 callers are rejected at the
+    // socket layer; extracting `family` + the on-wire gateway bytes
+    // from one match keeps the two derivations from drifting.
+    let (family, gateway_bytes) = match gateway {
+        IpAddr::V4(v4) => (AF_INET, v4.octets()),
         IpAddr::V6(_) => unreachable!("v6 gateways rejected at NexthopSocket boundary"),
     };
     push_nhmsg(
@@ -136,12 +140,7 @@ pub(crate) fn encode_add_fdb_member(seq: u32, id: u32, gateway: IpAddr) -> Vec<u
 
     // Attributes in iproute2 order: NHA_ID, NHA_GATEWAY, NHA_FDB.
     push_attr(&mut body, NHA_ID, &id.to_ne_bytes());
-
-    match gateway {
-        IpAddr::V4(v4) => push_attr(&mut body, NHA_GATEWAY, &v4.octets()),
-        IpAddr::V6(_) => unreachable!(),
-    }
-
+    push_attr(&mut body, NHA_GATEWAY, &gateway_bytes);
     push_attr(&mut body, NHA_FDB, &[]); // zero-length flag.
 
     let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
@@ -215,6 +214,33 @@ pub(crate) fn encode_del(seq: u32, id: u32) -> Vec<u8> {
 
     let flags = NLM_F_REQUEST | NLM_F_ACK;
     let hdr = build_nlmsghdr(body.len(), RTM_DELNEXTHOP, flags, seq);
+
+    let mut out = Vec::with_capacity(16 + body.len());
+    out.extend_from_slice(&hdr);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Encode an `RTM_GETNEXTHOP` dump request — empty filter, kernel
+/// returns every nexthop. Slice 3b's startup-adoption pass filters
+/// the response client-side by tag bits (`is_ours`) since the kernel
+/// doesn't expose a tag-bit filter attribute.
+pub(crate) fn encode_dump(seq: u32) -> Vec<u8> {
+    let mut body = Vec::with_capacity(8);
+
+    push_nhmsg(
+        &mut body,
+        Nhmsg {
+            nh_family: AF_UNSPEC,
+            nh_scope: 0,
+            nh_protocol: 0,
+            resvd: 0,
+            nh_flags: 0,
+        },
+    );
+
+    let flags = NLM_F_REQUEST | NLM_F_DUMP;
+    let hdr = build_nlmsghdr(body.len(), RTM_GETNEXTHOP, flags, seq);
 
     let mut out = Vec::with_capacity(16 + body.len());
     out.extend_from_slice(&hdr);

@@ -1,0 +1,17 @@
+{
+  "started_at": "20260511T214936Z",
+  "git_rev": "5619aceffeb6e71a75ae76cc44d8f88835385509",
+  "git_dirty": false,
+  "image_id": "sha256:30fd891d5603a36047b2640ed9ac99da5950c27436ceed04f06226551304d066",
+  "kernel": "5.15.0-177-generic",
+  "soak_hours": 24,
+  "sample_interval_sec": 60,
+  "churn_interval_sec": 30,
+  "warmup_sec": 120,
+  "tenant_cidr": "192.0.2.1/24",
+  "tenant_dev": "lo-vrf1",
+  "vrf_name": "vrf1",
+  "l3vni": 100,
+  "topology": "/home/lance/projects/rustbgpd/tests/soak/gate9-slice6-soak.clab.yml",
+  "run_dir": "/home/lance/projects/rustbgpd/tests/soak/runs/gate9-slice6-20260511T214936Z"
+}

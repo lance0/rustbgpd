@@ -261,6 +261,30 @@ impl GroupOwnedMap {
         self.vtep_nhs.remove(ip).map(|v| v.id)
     }
 
+    /// Roll back a group that has no live MAC refs (e.g., partial-
+    /// install failure where the group was created but no
+    /// `record_mac_ref` ran). Removes the group from tracking and
+    /// clears each member's `ref_groups` for this key; returns the
+    /// `(group_id, members)` so the caller can delete the kernel
+    /// object and release the allocator slot. Returns `None` if the
+    /// group is not tracked or still has MAC refs (in which case the
+    /// caller should use `record_mac_unref` instead).
+    pub fn drop_unreferenced_group(&mut self, key: &AliasGroupKey) -> Option<(u32, Vec<IpAddr>)> {
+        let group = self.groups.get(key)?;
+        if !group.ref_macs.is_empty() {
+            return None;
+        }
+        let id = group.id;
+        let members: Vec<IpAddr> = group.members.iter().copied().collect();
+        for ip in &members {
+            if let Some(vtep) = self.vtep_nhs.get_mut(ip) {
+                vtep.ref_groups.remove(key);
+            }
+        }
+        self.groups.remove(key);
+        Some((id, members))
+    }
+
     /// Iterate all groups (deterministic order by key).
     pub fn iter_groups(&self) -> impl Iterator<Item = (&AliasGroupKey, &GroupOwned)> {
         self.groups.iter()
