@@ -211,9 +211,10 @@ landing, tracked here for visibility)
   PR #89 validated end-to-end against FRR EVPN-MH 10.3.1 —
   16/16 PASS first-shot with the expected `NHG_TAG | n` /
   `VTEP_NH_TAG | n` tag scheme and a clean drain-to-single-dst
-  transition. Slice 3.5 deferred follow-ups: periodic
-  `RTM_GETNEXTHOP` drift recovery, `apply_aliasing_ecmp`
-  operator off-switch, IPv6 alias members.
+  transition. Slice 3.5 follow-ups shipped post-v0.19.0 in PRs
+  #91 (operator `apply_aliasing_ecmp` off-switch), #92 (periodic
+  `RTM_GETNEXTHOP` drift recovery), and #93 (homogeneous IPv6
+  alias members).
 - [x] **Mass-withdraw receive-side filter landed (RFC 7432 §8.4).**
   The supervisor's `build_remote_mac_table` snapshots EAD-per-ES
   routes from the RIB on every pass and drops any Type 2 with

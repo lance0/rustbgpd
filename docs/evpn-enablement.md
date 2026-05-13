@@ -537,16 +537,16 @@ Concrete remaining slices:
    `apply_bum_enforcement` default to `true`. The baseline
    BUM-state soak completed clean (see
    `docs/soak-gate8b-24h-bum-state.md`).
-2. **ADR-0059 slice 3.5 follow-ups** — `apply_aliasing_ecmp`
-   operator off-switch, periodic `RTM_GETNEXTHOP` drift recovery
-   (forced NHG deletion doesn't emit `RTNLGRP_NEIGH`), and IPv6
-   alias members. The aliasing dataplane forwarding base is
-   shipped (slices 1-4, M40 green); these are operational knobs.
-3. **Optional import-side ES-Import RT filtering** — apply the
+2. **Optional import-side ES-Import RT filtering** — apply the
    ES-Import RT origination from Gate 8b prep on the daemon's own
    RIB import path so unrelated segments are filtered before they
    reach LocRib. Currently rustbgpd originates the RT but imports via
    user-configured RTs only.
+
+ADR-0059 slice 3.5 hardening (`apply_aliasing_ecmp` off-switch,
+periodic `RTM_GETNEXTHOP` drift recovery, IPv6 alias members)
+shipped post-v0.19.0 in PRs #91 / #92 / #93 and is no longer on
+the remaining-slices list.
 
 **Operator note:** multi-homing enforcement is no longer merely
 observable, but it is still alpha and opt-in. Leave

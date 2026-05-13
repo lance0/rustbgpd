@@ -629,11 +629,13 @@ session machinery:
 > `ListIpVrfs`/`GetIpVrf` gRPC + `rustbgpctl evpn vrfs` CLI,
 > M39 manual containerlab smoke. **ADR-0059** (v0.19.0)
 > adds receive-path aliasing-ECMP via FDB nexthop groups
-> (slices 1-4, M40 FRR-validated). Still ahead: MAC-churn variant
-> of the Gate 8b 24h soak before flipping `apply_bum_enforcement`
-> default to `true`; RFC 9135 overlay-index IRB; auto-derived RTs;
-> ADR-0059 slice 3.5 knobs (operator off-switch, periodic drift
-> recovery, IPv6 alias members). See
+> (slices 1-4, M40 FRR-validated); **slice 3.5 hardening**
+> (PRs #91 / #92 / #93) added the `apply_aliasing_ecmp`
+> per-instance off-switch, periodic `RTM_GETNEXTHOP` drift
+> recovery, and homogeneous IPv6 alias members. Still ahead:
+> MAC-churn variant of the Gate 8b 24h soak before flipping
+> `apply_bum_enforcement` default to `true`; RFC 9135 overlay-
+> index IRB; auto-derived RTs. See
 > [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
 > [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
 > alpha-confidence checklist, and

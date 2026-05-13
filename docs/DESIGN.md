@@ -464,11 +464,13 @@ controller-driven injection for Type 2 / Type 3. What remains:
   projection, and receive-side EAD-per-ES mass-withdraw filtering.
   ADR-0059 closes the aliasing-ECMP receive-path data path via
   FDB nexthop groups (slices 1-4 shipped on `main`, M40 manual
-  smoke validated against FRR EVPN-MH 10.3.1). Still ahead: the
-  MAC-churn variant of the Gate 8b soak before flipping the
-  `apply_bum_enforcement` default to `true`, plus slice 3.5
-  knobs (operator off-switch, periodic drift recovery, IPv6
-  alias members).
+  smoke validated against FRR EVPN-MH 10.3.1); slice 3.5
+  hardening (PRs #91 / #92 / #93) followed up with the
+  `apply_aliasing_ecmp` per-instance off-switch, periodic
+  `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6 alias
+  members. Still ahead: the MAC-churn variant of the Gate 8b
+  soak before flipping the `apply_bum_enforcement` default to
+  `true`.
 - **Symmetric Interface-less IRB:** Gate 9 ships end-to-end in
   v0.18.0 — RFC 9136 §4.4.2 / ADR-0058. The `[[evpn_ip_vrfs]]`
   config object, `IpVrfStatus` readiness probe, Linux VRF +
