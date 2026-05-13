@@ -258,6 +258,14 @@ pub enum PeerManagerCommand {
         /// Reply channel for success/failure.
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Hot-apply `[global] honor_blackhole` by recomputing effective runtime
+    /// policies for EBGP peers.
+    SetHonorBlackhole {
+        /// Whether RFC 7999 receiver scoping behavior is enabled.
+        enabled: bool,
+        /// Reply channel for success/failure.
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     /// Query per-neighbor named import/export chains.
     GetNeighborPolicyChains {
         /// Neighbor address.

@@ -72,7 +72,22 @@ fn parse_community_match_standard() {
 fn parse_community_match_well_known() {
     assert_eq!(
         parse_community_match("NO_EXPORT").unwrap(),
-        CommunityMatch::Standard { value: 0xFFFF_FF01 }
+        CommunityMatch::Standard {
+            value: rustbgpd_wire::COMMUNITY_NO_EXPORT,
+        }
+    );
+}
+
+#[test]
+fn parse_community_match_blackhole_alias() {
+    // RFC 7999 §5 — the alias must resolve to the wire-crate constant,
+    // not a duplicated literal, so the spec-mandated value lives in
+    // exactly one place.
+    assert_eq!(
+        parse_community_match("BLACKHOLE").unwrap(),
+        CommunityMatch::Standard {
+            value: rustbgpd_wire::COMMUNITY_BLACKHOLE,
+        }
     );
 }
 

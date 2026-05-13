@@ -292,6 +292,7 @@ impl PeerManager {
                     },
                     dynamic_neighbor_limit: None,
                     honor_graceful_shutdown: false,
+                    honor_blackhole: false,
                 },
                 neighbors: Vec::new(),
                 peer_groups: HashMap::new(),
@@ -1199,6 +1200,77 @@ impl PeerManager {
         }
     }
 
+    async fn set_honor_blackhole(&mut self, enabled: bool) -> Result<(), String> {
+        if self.current_config.global.honor_blackhole == enabled {
+            return Ok(());
+        }
+
+        let mut next_config = self.current_config.clone();
+        next_config.global.honor_blackhole = enabled;
+
+        let targets: Vec<IpAddr> = self
+            .peers
+            .iter()
+            .filter_map(|(&address, managed)| {
+                (managed.remote_asn != self.local_asn).then_some(address)
+            })
+            .collect();
+
+        let mut failures: Vec<String> = Vec::new();
+        for address in targets {
+            let Some(managed) = self.peers.get(&address) else {
+                continue;
+            };
+            let neighbor = Self::policy_resolution_neighbor(&next_config, address, managed);
+            let chains = next_config.effective_policy_chains_for_neighbor(&neighbor);
+            let (import_policy, export_policy) = match chains {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(
+                        %address,
+                        error = %e,
+                        "honor_blackhole: failed to resolve effective chain — skipping peer"
+                    );
+                    failures.push(format!("{address}: chain-resolve: {e}"));
+                    continue;
+                }
+            };
+            if let Err(e) = self
+                .update_runtime_policies(address, import_policy, export_policy)
+                .await
+            {
+                warn!(
+                    %address,
+                    error = %e,
+                    "honor_blackhole: failed to hot-apply on peer — desired snapshot \
+                     advances anyway; bail-and-carry will retry on next policy edit"
+                );
+                failures.push(format!("{address}: hot-apply: {e}"));
+            }
+        }
+
+        self.current_config = next_config;
+
+        if failures.is_empty() {
+            info!(
+                enabled,
+                "hot-applied [global] honor_blackhole to EBGP peers"
+            );
+            Ok(())
+        } else {
+            Err(format!(
+                "honor_blackhole applied with {} of {} EBGP peers failing \
+                 (snapshot advanced anyway): {}",
+                failures.len(),
+                self.peers
+                    .values()
+                    .filter(|m| m.remote_asn != self.local_asn)
+                    .count(),
+                failures.join("; ")
+            ))
+        }
+    }
+
     fn peer_manager_config_from_resolved(
         resolved: crate::config::ResolvedNeighbor,
         gr_restart_eligible: bool,
@@ -1972,6 +2044,10 @@ impl PeerManager {
                             let result = self.set_honor_graceful_shutdown(enabled).await;
                             let _ = reply.send(result);
                         }
+                        PeerManagerCommand::SetHonorBlackhole { enabled, reply } => {
+                            let result = self.set_honor_blackhole(enabled).await;
+                            let _ = reply.send(result);
+                        }
                         PeerManagerCommand::GetNeighborPolicyChains { address, reply } => {
                             let _ = reply.send(neighbor_policy_chains_from_config(&self.current_config, address));
                         }
@@ -2153,6 +2229,7 @@ mod tests {
                 },
                 dynamic_neighbor_limit: Some(100),
                 honor_graceful_shutdown: false,
+                honor_blackhole: false,
             },
             neighbors: Vec::new(),
             peer_groups,

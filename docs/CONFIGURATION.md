@@ -28,6 +28,7 @@ Required. Defines the local BGP speaker identity.
 | `runtime_state_dir` | string | no       | `"/var/lib/rustbgpd"` | Directory for daemon-owned runtime state (GR restart marker today) |
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 | `honor_graceful_shutdown` | bool | no  | `false`              | Enable RFC 8326 §4 receiver behavior on EBGP imports — see below |
+| `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
 
 ```toml
 [global]
@@ -36,6 +37,7 @@ router_id = "10.0.0.1"
 listen_port = 179
 runtime_state_dir = "/var/lib/rustbgpd"
 honor_graceful_shutdown = true
+honor_blackhole = true
 ```
 
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
@@ -98,6 +100,36 @@ The `"GRACEFUL_SHUTDOWN"` alias is also accepted everywhere
 `match_community` / `set_community_add` / `set_community_remove` parse
 community values, so policies can refer to it by name without repeating
 `65535:0`.
+
+### `honor_blackhole` — RFC 7999 receiver scoping
+
+When `true`, rustbgpd appends an implicit chain-tail rule on every
+EBGP peer's import chain:
+
+```
+match community = BLACKHOLE (65535:666) → permit, add BLACKHOLE + NO_ADVERTISE
+```
+
+RFC 7999 deliberately requires an explicit operator directive before a router
+discards traffic for tagged prefixes. This knob is that directive for the
+control-plane scoping behavior rustbgpd can enforce today: it preserves the
+`BLACKHOLE` marker and adds `NO_ADVERTISE` at the chain tail so a blackhole
+request is not propagated to other peers unless the operator writes a more
+specific policy. Earlier operator denies still short-circuit normally.
+
+This does **not** install a kernel discard/null route. The dataplane RTBH
+piece is still a future FIB integration slice with prefix-authorization and
+maximum-prefix-length guardrails. Operators who want stricter behavior today
+can still write explicit import policy around the `"BLACKHOLE"` alias.
+
+SIGHUP hot-applies this field with the same best-effort partial-apply
+semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies
+for EBGP peers, advances the live snapshot, and retries transient per-peer
+refresh failures through the existing pending-refresh path.
+
+The `"BLACKHOLE"` alias is accepted everywhere `match_community`,
+`set_community_add`, and `set_community_remove` parse community values, so
+policies can refer to it by name without repeating `65535:666`.
 
 ---
 
@@ -904,7 +936,7 @@ accept these formats:
 | Format | Example | Type |
 |--------|---------|------|
 | `ASN:VALUE` | `"65001:100"` | Standard community |
-| Well-known name | `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"` | Standard community |
+| Well-known name | `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`, `"BLACKHOLE"`, `"GRACEFUL_SHUTDOWN"` | Standard community |
 | `RT:ASN:VALUE` | `"RT:65001:100"` | Extended community (route target) |
 | `RO:ASN:VALUE` | `"RO:65001:200"` | Extended community (route origin) |
 | `LC:G:L1:L2` | `"LC:65001:100:200"` | Large community (RFC 8092) |

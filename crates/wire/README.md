@@ -14,7 +14,7 @@ analyzers, test harnesses, MRT readers, etc.
 
 | RFC | Feature |
 |-----|---------|
-| 1997 | Standard communities (4-byte) |
+| 1997 | Standard communities (4-byte), including `NO_EXPORT`, `NO_ADVERTISE`, and `NO_EXPORT_SUBCONFED` well-known constants |
 | 2545 | IPv6 link-local next-hop in `MP_REACH_NLRI` (32-byte form); second-segment validated as `fe80::/10` on receive (rejects malformed advertisements) |
 | 2918 | Route Refresh capability |
 | 4271 | BGP-4 core: OPEN, UPDATE, NOTIFICATION, KEEPALIVE |
@@ -31,6 +31,7 @@ analyzers, test harnesses, MRT readers, etc.
 | 7385 | PMSI Tunnel Type IANA registry — `PmsiTunnelType` preserves unknown values via an `Other(u8)` variant |
 | 7432 | EVPN: Types 1–4 (EAD, MAC/IP, IMET, Ethernet Segment) including MAC Mobility extended community (§7.7) |
 | 7674 | Clarification of MP_REACH_NLRI next-hop encoding |
+| 7999 | `BLACKHOLE` well-known community (`0xFFFF_029A`, rendered as `65535:666`) |
 | 7911 | Add-Path: path ID in NLRI encode/decode |
 | 8092 | Large communities (3× u32) |
 | 8203 | Admin shutdown communication |

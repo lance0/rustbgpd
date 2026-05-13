@@ -280,16 +280,61 @@ impl Config {
         }
     }
 
+    /// Build the implicit RFC 7999 chain-tail import rule:
+    /// `match community = BLACKHOLE → permit, add BLACKHOLE + NO_ADVERTISE`.
+    ///
+    /// RFC 7999 leaves honoring semantics to explicit operator policy. This
+    /// built-in receiver rule does the safe control-plane half only: it keeps
+    /// the `BLACKHOLE` marker present even if an earlier policy tried to
+    /// remove it, and adds `NO_ADVERTISE` so the request stays local unless an
+    /// operator deliberately writes a different policy. It does not install a
+    /// kernel discard route; that belongs to a later FIB integration slice.
+    fn build_implicit_blackhole_policy() -> Policy {
+        Policy {
+            entries: vec![PolicyStatement {
+                prefix: None,
+                ge: None,
+                le: None,
+                action: PolicyAction::Permit,
+                match_community: vec![CommunityMatch::Standard {
+                    value: rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                }],
+                match_as_path: None,
+                match_neighbor_set: None,
+                match_route_type: None,
+                match_evpn_route_type: None,
+                match_rpki_validation: None,
+                match_aspa_validation: None,
+                match_as_path_length_ge: None,
+                match_as_path_length_le: None,
+                match_local_pref_ge: None,
+                match_local_pref_le: None,
+                match_med_ge: None,
+                match_med_le: None,
+                match_next_hop: None,
+                modifications: RouteModifications {
+                    communities_add: vec![
+                        rustbgpd_wire::COMMUNITY_BLACKHOLE,
+                        rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+                    ],
+                    ..Default::default()
+                },
+            }],
+            default_action: PolicyAction::Permit,
+        }
+    }
+
     /// Resolve the effective import/export policy chains for one neighbor.
     ///
     /// Per-neighbor named chain overrides per-neighbor inline policy, which
     /// overrides the corresponding global named chain or global inline policy.
     ///
-    /// When `[global] honor_graceful_shutdown = true` AND the neighbor is
-    /// EBGP, the resolved import chain is prepended with an implicit RFC
-    /// 8326 §4 receiver rule. iBGP is intentionally exempt — `LOCAL_PREF`
-    /// is preserved within an AS, so re-applying the rule per iBGP hop
-    /// would clobber values set legitimately upstream at the EBGP edge.
+    /// When `[global] honor_graceful_shutdown = true` and/or
+    /// `[global] honor_blackhole = true` AND the neighbor is EBGP, the
+    /// resolved import chain is appended with the corresponding implicit
+    /// receiver rule. iBGP is intentionally exempt — these are EBGP-edge
+    /// receiver behaviors, and re-applying them per iBGP hop would overwrite
+    /// values or scoping set legitimately upstream at the EBGP edge.
     pub fn effective_policy_chains_for_neighbor(
         &self,
         neighbor: &Neighbor,
@@ -378,13 +423,11 @@ impl Config {
         }
         .or_else(|| global_export.clone());
 
-        // RFC 8326 §4 receiver: append implicit GShut rule to the end
-        // of the EBGP import chain when honor_graceful_shutdown is on.
-        // Running LAST guarantees the `GShut` demotion (set_local_pref=0)
-        // wins over any operator policy that also sets local_pref —
-        // PolicyChain::evaluate accumulates with last-writer-wins
-        // semantics on scalar fields. Operator denies still
-        // short-circuit (no demotion needed if the route is dropped).
+        // RFC 8326 §4 / RFC 7999 receiver behavior: append implicit rules to
+        // the end of the EBGP import chain when the corresponding honor knob
+        // is on. Running LAST guarantees the implicit modification wins over
+        // earlier operator policy modifications. Operator denies still
+        // short-circuit.
         //
         // FUTURE: when confederation support lands, the EBGP gate
         // should key off an explicit `is_external_neighbor()` helper
@@ -392,14 +435,19 @@ impl Config {
         // the simple `remote_asn != global.asn` shortcut. Tracked in
         // ROADMAP under "RFC 8326 confederation gating".
         let is_ebgp = neighbor.remote_asn != self.global.asn;
-        let import = if self.global.honor_graceful_shutdown && is_ebgp {
-            let gshut = Self::build_implicit_gshut_policy();
-            let mut chain = import.unwrap_or_default();
-            chain.policies.push(gshut);
-            Some(chain)
-        } else {
-            import
-        };
+        let import =
+            if (self.global.honor_graceful_shutdown || self.global.honor_blackhole) && is_ebgp {
+                let mut chain = import.unwrap_or_default();
+                if self.global.honor_graceful_shutdown {
+                    chain.policies.push(Self::build_implicit_gshut_policy());
+                }
+                if self.global.honor_blackhole {
+                    chain.policies.push(Self::build_implicit_blackhole_policy());
+                }
+                Some(chain)
+            } else {
+                import
+            };
 
         Ok((import, export))
     }

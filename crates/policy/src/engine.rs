@@ -348,27 +348,15 @@ impl CommunityMatch {
 /// - Standard community: `"65001:100"` (`{ASN}:{value}`, both u16)
 /// - Large community: `"LC:65001:100:200"` (`LC:{global}:{local1}:{local2}`)
 /// - Well-known names: `"NO_EXPORT"`, `"NO_ADVERTISE"`, `"NO_EXPORT_SUBCONFED"`,
-///   `"GRACEFUL_SHUTDOWN"` (RFC 8326 §3, `0xFFFF_0000`)
+///   `"BLACKHOLE"` (RFC 7999 §5, `0xFFFF_029A`), `"GRACEFUL_SHUTDOWN"`
+///   (RFC 8326 §3, `0xFFFF_0000`)
 ///
 /// # Errors
 ///
 /// Returns an error if the string cannot be parsed as any of the above formats.
 pub fn parse_community_match(s: &str) -> Result<CommunityMatch, String> {
-    // Well-known community names (RFC 1997 + RFC 8326).
-    // The same alias surface is used by `parse_community_values` for the
-    // policy *set* side (set_community_add / set_community_remove), so
-    // operators can write `"GRACEFUL_SHUTDOWN"` in either match or set
-    // positions without repeating the numeric value.
-    match s {
-        "NO_EXPORT" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF01 }),
-        "NO_ADVERTISE" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF02 }),
-        "NO_EXPORT_SUBCONFED" => return Ok(CommunityMatch::Standard { value: 0xFFFF_FF03 }),
-        "GRACEFUL_SHUTDOWN" => {
-            return Ok(CommunityMatch::Standard {
-                value: rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN,
-            });
-        }
-        _ => {}
+    if let Some(value) = well_known_community_value(s) {
+        return Ok(CommunityMatch::Standard { value });
     }
 
     // Check for LC: prefix first (4 parts with LC: prefix)
@@ -453,6 +441,23 @@ pub fn parse_community_match(s: &str) -> Result<CommunityMatch, String> {
         _ => Err(format!(
             "expected ASN:VALUE, TYPE:GLOBAL:LOCAL, LC:G:L1:L2, or well-known name, got {s:?}"
         )),
+    }
+}
+
+/// Resolve well-known standard community aliases.
+///
+/// The same alias surface is used by `parse_community_values` for the policy
+/// *set* side (`set_community_add` / `set_community_remove`), so operators can
+/// write aliases in either match or set positions without repeating numeric
+/// values.
+fn well_known_community_value(s: &str) -> Option<u32> {
+    match s {
+        "NO_EXPORT" => Some(rustbgpd_wire::COMMUNITY_NO_EXPORT),
+        "NO_ADVERTISE" => Some(rustbgpd_wire::COMMUNITY_NO_ADVERTISE),
+        "NO_EXPORT_SUBCONFED" => Some(rustbgpd_wire::COMMUNITY_NO_EXPORT_SUBCONFED),
+        "BLACKHOLE" => Some(rustbgpd_wire::COMMUNITY_BLACKHOLE),
+        "GRACEFUL_SHUTDOWN" => Some(rustbgpd_wire::COMMUNITY_GRACEFUL_SHUTDOWN),
+        _ => None,
     }
 }
 

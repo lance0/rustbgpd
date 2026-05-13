@@ -172,11 +172,22 @@ pub struct Global {
     /// `LOCAL_PREF` is preserved within an AS and re-clobbering it here
     /// would overwrite values set legitimately upstream.
     ///
-    /// SIGHUP-restart-required: `reload_config` pins this field back to
-    /// the live value because the implicit rule is composed at session-
-    /// spawn / policy-update time, not on reload.
+    /// SIGHUP hot-applies through the peer manager, recomputing EBGP
+    /// runtime policies for already-managed peers.
     #[serde(default)]
     pub honor_graceful_shutdown: bool,
+    /// Honor RFC 7999 `BLACKHOLE` community on inbound EBGP routes by
+    /// appending an implicit chain-tail rule that preserves the `BLACKHOLE`
+    /// marker and adds `NO_ADVERTISE` to keep the request local. Off by
+    /// default; RFC 7999 §4 says receivers should not discard traffic without
+    /// an explicit operator directive. This knob scopes the control-plane
+    /// route today; kernel discard/null-route installation remains a separate
+    /// FIB integration slice.
+    ///
+    /// SIGHUP hot-applies through the peer manager, matching
+    /// `honor_graceful_shutdown`.
+    #[serde(default)]
+    pub honor_blackhole: bool,
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,

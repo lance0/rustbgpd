@@ -1929,7 +1929,7 @@ async fn apply_reload_outcome(
 ///    global chain references — additions and edits first so later
 ///    referrers resolve cleanly.
 /// 2. Reconcile `[[neighbors]]` (existing path).
-/// 3. Hot-apply `[global] honor_graceful_shutdown` if it changed.
+/// 3. Hot-apply implicit receiver-behavior knobs if they changed.
 /// 4. Remove obsolete peer groups, named policies, and neighbor sets
 ///    in reverse-dependency order so a `still referenced` rejection
 ///    doesn't fire transiently.
@@ -1965,13 +1965,16 @@ async fn reload_config(
 
     let honor_graceful_shutdown_changed =
         new_config.global.honor_graceful_shutdown != current.global.honor_graceful_shutdown;
+    let honor_blackhole_changed =
+        new_config.global.honor_blackhole != current.global.honor_blackhole;
 
-    // Warn about sections that require restart. The RFC 8326 honor
-    // knob is hot-applied below, so ignore it for this broad restart
-    // warning.
+    // Warn about sections that require restart. The implicit receiver
+    // honor knobs are hot-applied below, so ignore them for this broad
+    // restart warning.
     let mut restart_new_global = new_config.global.clone();
     let restart_current_global = current.global.clone();
     restart_new_global.honor_graceful_shutdown = restart_current_global.honor_graceful_shutdown;
+    restart_new_global.honor_blackhole = restart_current_global.honor_blackhole;
     if restart_new_global != restart_current_global {
         warn!("[global] changed — requires full restart to take effect");
     }
@@ -2080,6 +2083,7 @@ async fn reload_config(
         && peer_groups_unchanged
         && neighbors_unchanged
         && !honor_graceful_shutdown_changed
+        && !honor_blackhole_changed
     {
         info!("config reloaded — no neighbor / policy / peer-group changes detected");
         return Some(new_config);
@@ -2558,7 +2562,7 @@ async fn reload_config(
         }
     }
 
-    // 6. Hot-apply RFC 8326 receiver behavior. This must run after
+    // 6. Hot-apply implicit receiver behavior. This must run after
     //    policy/peer-group/global-chain edits and neighbor reconcile
     //    so the peer manager recomputes effective chains from the
     //    same live snapshot the rest of this reload has just shaped.
@@ -2600,6 +2604,30 @@ async fn reload_config(
                      policy edit"
                 );
                 working_config.global.honor_graceful_shutdown = enabled;
+            }
+        }
+    }
+    if honor_blackhole_changed {
+        let enabled = new_config.global.honor_blackhole;
+        match send_pm_step(peer_mgr_tx, |reply| PeerManagerCommand::SetHonorBlackhole {
+            enabled,
+            reply,
+        })
+        .await
+        {
+            Ok(()) => {
+                working_config.global.honor_blackhole = enabled;
+                info!(enabled, "reload: [global] honor_blackhole hot-applied");
+            }
+            Err(error) => {
+                warn!(
+                    enabled,
+                    error,
+                    "reload: [global] honor_blackhole partial-apply — snapshot \
+                     advanced anyway; bail-and-carry will retry failed peers on next \
+                     policy edit"
+                );
+                working_config.global.honor_blackhole = enabled;
             }
         }
     }
@@ -3291,6 +3319,85 @@ hold_time = 90
         std::fs::remove_file(&path).ok();
     }
 
+    #[tokio::test]
+    async fn reload_hot_applies_honor_blackhole() {
+        let path = unique_temp_path("reload-honor-blackhole-hot-apply");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+        assert!(!initial.global.honor_blackhole);
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, mut peer_mgr_rx) = mpsc::channel(8);
+        let peer_mgr = tokio::spawn(async move {
+            match peer_mgr_rx.recv().await {
+                Some(PeerManagerCommand::SetHonorBlackhole { enabled, reply }) => {
+                    let _ = reply.send(Ok(()));
+                    enabled
+                }
+                _ => panic!("expected SetHonorBlackhole command"),
+            }
+        });
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should hot-apply honor_blackhole");
+
+        assert!(
+            returned.global.honor_blackhole,
+            "reload must advance honor_blackhole after peer manager hot-apply succeeds"
+        );
+        assert!(
+            peer_mgr.await.unwrap(),
+            "peer manager command must carry enabled=true"
+        );
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn gr_restart_marker_invalid_version_rejected() {
         let path = unique_temp_path("gr-restart-bad-version");
@@ -3319,6 +3426,7 @@ hold_time = 90
                 },
                 dynamic_neighbor_limit: None,
                 honor_graceful_shutdown: false,
+                honor_blackhole: false,
             },
             neighbors: vec![
                 crate::config::Neighbor {

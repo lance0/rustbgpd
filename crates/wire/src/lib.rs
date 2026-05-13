@@ -184,7 +184,21 @@ pub use evpn::{
     encode_evpn_nlri,
 };
 
-// Well-known communities (RFC 1997 + RFC 8326 + RFC 9494)
+// Well-known communities (RFC 1997 + RFC 7999 + RFC 8326 + RFC 9494)
+/// `NO_EXPORT` community (RFC 1997): routes carrying this community must not
+/// be advertised outside a BGP confederation boundary.
+pub const COMMUNITY_NO_EXPORT: u32 = 0xFFFF_FF01;
+/// `NO_ADVERTISE` community (RFC 1997): routes carrying this community must
+/// not be advertised to any other BGP peer.
+pub const COMMUNITY_NO_ADVERTISE: u32 = 0xFFFF_FF02;
+/// `NO_EXPORT_SUBCONFED` community (RFC 1997): routes carrying this community
+/// must not be advertised to external BGP peers, including confederation
+/// external peers.
+pub const COMMUNITY_NO_EXPORT_SUBCONFED: u32 = 0xFFFF_FF03;
+/// `BLACKHOLE` community (RFC 7999 §5): advisory signal that traffic destined
+/// toward the tagged prefix should be discarded by receivers that explicitly
+/// opted in to honoring the request.
+pub const COMMUNITY_BLACKHOLE: u32 = 0xFFFF_029A;
 /// `GRACEFUL_SHUTDOWN` community (RFC 8326 §3): tags routes on a session
 /// being brought down for maintenance so receivers de-prefer them by
 /// setting `LOCAL_PREF` to a low value (canonical: 0).
@@ -207,6 +221,10 @@ mod well_known_community_tests {
     /// drift loud.
     #[test]
     fn well_known_community_values_match_specs() {
+        assert_eq!(COMMUNITY_NO_EXPORT, 0xFFFF_FF01, "RFC 1997");
+        assert_eq!(COMMUNITY_NO_ADVERTISE, 0xFFFF_FF02, "RFC 1997");
+        assert_eq!(COMMUNITY_NO_EXPORT_SUBCONFED, 0xFFFF_FF03, "RFC 1997");
+        assert_eq!(COMMUNITY_BLACKHOLE, 0xFFFF_029A, "RFC 7999 §5");
         assert_eq!(COMMUNITY_GRACEFUL_SHUTDOWN, 0xFFFF_0000, "RFC 8326 §3");
         assert_eq!(COMMUNITY_LLGR_STALE, 0xFFFF_0006, "RFC 9494 §4.6");
         assert_eq!(COMMUNITY_NO_LLGR, 0xFFFF_0007, "RFC 9494 §4.7");

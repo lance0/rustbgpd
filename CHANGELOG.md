@@ -11,6 +11,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **RFC 7999 BLACKHOLE control-plane receiver support.** The wire crate now
+  exposes `COMMUNITY_BLACKHOLE` (`0xFFFF_029A`, rendered as `65535:666`) plus
+  RFC 1997 well-known community constants for `NO_EXPORT`, `NO_ADVERTISE`, and
+  `NO_EXPORT_SUBCONFED`. The policy parser accepts `"BLACKHOLE"` everywhere
+  `match_community`, `set_community_add`, and `set_community_remove` parse
+  community values. New opt-in `[global] honor_blackhole = true` appends an
+  EBGP import chain-tail rule (`match BLACKHOLE → permit, add BLACKHOLE +
+  NO_ADVERTISE`) and hot-applies on SIGHUP through the peer manager. This is
+  the safe control-plane scoping half only; kernel discard/null-route
+  programming remains a future FIB integration slice.
+
 - **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
   counters expose the periodic nexthop drift-recovery path without
   scraping logs: `evpn_fdb_nhg_drift_members_repaired_total`,

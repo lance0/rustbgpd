@@ -287,54 +287,35 @@ this document is reference / long-tail.
   IPv4 unicast, M35b injects FlowSpec and toggles GShut without route
   churn, and M35c injects an EVPN Type 2 route and toggles GShut
   without route churn.
-- [ ] **RFC 7999 BLACKHOLE community.** Natural sibling to RFC 8326
+- [x] **RFC 7999 BLACKHOLE control-plane receiver support.** Natural sibling to RFC 8326
   GShut. Well-known `BLACKHOLE` community (`65535:666`) signals
   "drop traffic to this prefix" for DDoS mitigation. Different
   semantic class from GShut: receiver behavior is **data-plane**
-  (install a discard/null route) not control-plane (de-pref). Four-
-  part landing mirrors RFC 8326 architecturally:
-    - **Wire**: `pub const COMMUNITY_BLACKHOLE: u32 = 0xFFFF_029A;`
-      next to `COMMUNITY_GRACEFUL_SHUTDOWN`. Non-breaking pub
-      addition. ADR-0053's "future outbound-attribute toggles will
-      use the same `RibUpdate::RefreshPeerOutbound` variant" applies
-      directly.
+  (install a discard/null route) not control-plane (de-pref). The
+  control-plane half is now wired:
+    - **Wire**: `COMMUNITY_BLACKHOLE: u32 = 0xFFFF_029A` next to
+      `COMMUNITY_GRACEFUL_SHUTDOWN`, plus RFC 1997 well-known
+      constants for `NO_EXPORT`, `NO_ADVERTISE`, and
+      `NO_EXPORT_SUBCONFED`.
     - **Policy alias**: `parse_community_match` accepts `"BLACKHOLE"`
       everywhere `match_community` / `set_community_add` /
-      `set_community_remove` parse community values, mirroring the
-      `GRACEFUL_SHUTDOWN` alias work.
-    - **Inbound honor (opt-in)**: TOML knob `[global]
-      honor_blackhole = true`. Receiver behavior depends on whether
-      FIB integration has landed:
-        * Pre-FIB-integration: match-and-flag in policy with no
-          built-in action (operator writes the action via
-          `match_community = ["BLACKHOLE"] action = "deny"` or
-          equivalent). Document this constraint clearly so operators
-          aren't surprised that the knob is mostly a no-op without
-          FIB integration.
-        * Post-FIB-integration (Phase-2 EVPN VTEP track unblocks
-          this): install a kernel discard route for the prefix,
-          subject to RFC 7999 §3.1 max-prefix-length safety
-          (typically /32 for IPv4, /128 for IPv6).
+      `set_community_remove` parse community values.
+    - **Inbound scoping (opt-in)**: `[global] honor_blackhole = true`
+      appends an EBGP import chain-tail rule
+      (`match BLACKHOLE → permit, add BLACKHOLE + NO_ADVERTISE`) and
+      hot-applies on SIGHUP through the peer manager.
+  Remaining BLACKHOLE work:
+    - **Dataplane discard**: install a kernel discard/null route for
+      authorized tagged prefixes, subject to RFC 7999 safety checks
+      (especially prefix authorization and max-prefix-length guardrails,
+      typically /32 for IPv4 and /128 for IPv6).
     - **Outbound advertise**: gRPC `SetBlackhole { peer, prefix,
       enabled }` or operator-policy attachment via
       `set_community_add = ["BLACKHOLE"]` on a per-prefix import
-      filter. Per-peer toggle shape is more useful than the
-      per-prefix policy (operator targets the *destination* prefix,
-      not the *advertising* peer). Likely lands as a new
-      `InjectionService.AddPath` flag rather than a runtime toggle
-      on the peer session.
-    - **Interop test (M36-ish)**: rustbgpd ↔ FRR or Bird, advertise
-      blackhole community on a /32; assert the receiver-side
-      install / de-pref / drop behavior depending on the receiver
-      side's mode.
-  Net: ~150 LOC for the control-plane signaling parts (wire +
-  policy alias + community match) without FIB integration. With FIB
-  integration, ~50 LOC more for the kernel discard install + the
-  RFC 7999 §3.1 max-prefix-length safety check. Ranks just behind
-  GShut on operator-lifecycle utility because the receiver side is
-  meaningfully gated on FIB integration; the wire + policy alias
-  parts can ship now and unblock operators who hand-write the
-  receiver action.
+      filter. Per-prefix route injection is the likely surface.
+    - **Interop test**: rustbgpd ↔ FRR or BIRD, advertise a blackhole
+      community on a host route and assert receiver-side scoping now,
+      then discard behavior once the FIB slice lands.
 - [x] **Resolve open `cargo audit` findings** (v0.13.2 / v0.14.0) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
   unreachable in v0.13.2; v0.14.0 follow-up granted `checks: write`

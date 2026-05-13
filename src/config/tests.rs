@@ -3503,6 +3503,151 @@ import_policy_chain = ["bump-local-pref"]
     );
 }
 
+// -----------------------------------------------------------------------
+// RFC 7999 — honor_blackhole implicit chain-tail import rule
+// -----------------------------------------------------------------------
+
+fn blackhole_toml(honor: bool, peer_asn: u32) -> String {
+    format!(
+        r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = {honor}
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = {peer_asn}
+hold_time = 90
+"#
+    )
+}
+
+#[test]
+fn effective_chain_appends_blackhole_when_honor_enabled_for_ebgp() {
+    let cfg = parse(&blackhole_toml(true, 65002)).unwrap();
+    let neighbor = &cfg.neighbors[0];
+    let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
+    let chain = import.expect("EBGP + honor enabled must yield an import chain");
+    let last = chain.policies.last().expect("chain not empty");
+    let stmt = &last.entries[0];
+    assert_eq!(
+        stmt.match_community,
+        vec![rustbgpd_policy::CommunityMatch::Standard {
+            value: rustbgpd_wire::COMMUNITY_BLACKHOLE,
+        }],
+        "tail statement must match BLACKHOLE"
+    );
+    assert_eq!(
+        stmt.modifications.communities_add,
+        vec![
+            rustbgpd_wire::COMMUNITY_BLACKHOLE,
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        ],
+        "RFC 7999 receiver scoping must preserve BLACKHOLE and add NO_ADVERTISE"
+    );
+}
+
+#[test]
+fn effective_chain_does_not_append_blackhole_for_ibgp() {
+    let cfg = parse(&blackhole_toml(true, 65001)).unwrap();
+    let neighbor = &cfg.neighbors[0];
+    let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
+    assert!(
+        import.is_none(),
+        "iBGP must not get the implicit BLACKHOLE receiver rule"
+    );
+}
+
+#[test]
+fn effective_chain_does_not_append_blackhole_when_honor_disabled() {
+    let cfg = parse(&blackhole_toml(false, 65002)).unwrap();
+    let neighbor = &cfg.neighbors[0];
+    let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
+    assert!(
+        import.is_none(),
+        "honor_blackhole = false must leave the chain untouched"
+    );
+}
+
+#[test]
+fn blackhole_tail_readds_marker_and_no_advertise_after_operator_remove() {
+    use rustbgpd_policy::{RouteContext, evaluate_chain};
+    use rustbgpd_wire::{AspaValidation, RpkiValidation};
+
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = true
+
+[global.telemetry]
+log_format = "json"
+
+[policy.definitions.strip-communities]
+default_action = "permit"
+
+  [[policy.definitions.strip-communities.statements]]
+  prefix = "0.0.0.0/0"
+  ge = 0
+  action = "permit"
+  set_community_remove = ["BLACKHOLE", "NO_ADVERTISE"]
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+import_policy_chain = ["strip-communities"]
+"#;
+    let cfg = parse(toml).unwrap();
+    let neighbor = &cfg.neighbors[0];
+    let (import, _export) = cfg.effective_policy_chains_for_neighbor(neighbor).unwrap();
+    let chain = import.expect("EBGP + honor enabled must yield an import chain");
+
+    let prefix = rustbgpd_wire::Prefix::V4(rustbgpd_wire::Ipv4Prefix::new(
+        std::net::Ipv4Addr::new(10, 0, 0, 0),
+        8,
+    ));
+    let comms = [rustbgpd_wire::COMMUNITY_BLACKHOLE];
+    let ctx = RouteContext {
+        prefix,
+        next_hop: None,
+        extended_communities: &[],
+        communities: &comms,
+        large_communities: &[],
+        as_path_str: "",
+        as_path_len: 0,
+        validation_state: RpkiValidation::NotFound,
+        aspa_state: AspaValidation::Unknown,
+        peer_address: None,
+        peer_asn: None,
+        peer_group: None,
+        route_type: None,
+        evpn_route_type: None,
+        local_pref: None,
+        med: None,
+    };
+    let result = evaluate_chain(Some(&chain), &ctx);
+    assert_eq!(result.action, rustbgpd_policy::PolicyAction::Permit);
+    assert_eq!(
+        result.modifications.communities_add,
+        vec![
+            rustbgpd_wire::COMMUNITY_BLACKHOLE,
+            rustbgpd_wire::COMMUNITY_NO_ADVERTISE,
+        ],
+        "BLACKHOLE chain-tail rule must win after an earlier remove"
+    );
+    assert!(
+        result.modifications.communities_remove.is_empty(),
+        "tail add should cancel earlier removes for BLACKHOLE / NO_ADVERTISE"
+    );
+}
+
 #[test]
 fn evpn_instance_ipv6_vtep_accepted() {
     let toml = evpn_toml_with(
