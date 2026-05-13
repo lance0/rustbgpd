@@ -726,7 +726,7 @@ for the architectural record.
   smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
   program FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` on the
   receive path; FRR-validated against EVPN-MH 10.3.1.
-  Slice 3.5 hardening follow-ups shipped post-v0.19.0 in PRs
+  Slice 3.5 hardening follow-ups shipped in v0.20.0 — PRs
   #91 / #92 / #93: per-instance `apply_aliasing_ecmp` off-switch,
   periodic `RTM_GETNEXTHOP` drift recovery, and homogeneous IPv6
   alias members.

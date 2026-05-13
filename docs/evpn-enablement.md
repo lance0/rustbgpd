@@ -545,7 +545,7 @@ Concrete remaining slices:
 
 ADR-0059 slice 3.5 hardening (`apply_aliasing_ecmp` off-switch,
 periodic `RTM_GETNEXTHOP` drift recovery, IPv6 alias members)
-shipped post-v0.19.0 in PRs #91 / #92 / #93 and is no longer on
+shipped in v0.20.0 — PRs #91 / #92 / #93 — and is no longer on
 the remaining-slices list.
 
 **Operator note:** multi-homing enforcement is no longer merely

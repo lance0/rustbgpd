@@ -211,7 +211,7 @@ landing, tracked here for visibility)
   PR #89 validated end-to-end against FRR EVPN-MH 10.3.1 —
   16/16 PASS first-shot with the expected `NHG_TAG | n` /
   `VTEP_NH_TAG | n` tag scheme and a clean drain-to-single-dst
-  transition. Slice 3.5 follow-ups shipped post-v0.19.0 in PRs
+  transition. Slice 3.5 follow-ups shipped in v0.20.0 — PRs
   #91 (operator `apply_aliasing_ecmp` off-switch), #92 (periodic
   `RTM_GETNEXTHOP` drift recovery), and #93 (homogeneous IPv6
   alias members).

@@ -9,6 +9,22 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-05-13
+
+ADR-0059 slice 3.5 hardening shipped end-to-end in three follow-up
+PRs after the v0.19.0 baseline: per-instance `apply_aliasing_ecmp`
+off-switch (PR #91), periodic `RTM_GETNEXTHOP` drift recovery
+(PR #92), and homogeneous IPv6 alias members (PR #93). Documentation
+across `ROADMAP.md`, `docs/adr/0059-evpn-aliasing-fdb-nexthop-groups.md`,
+and the operator-facing handbooks (`docs/OPERATIONS.md`,
+`docs/DESIGN.md`, `docs/evpn-enablement.md`, `docs/evpn-alpha-soak.md`,
+`docs/milestones.md`) was refreshed to reflect the shipped state.
+
+Production-default multi-homing enforcement remains gated on a
+clean Gate 8b 24h MAC-churn soak with `apply_bum_enforcement = true`
++ `apply_aliasing_ecmp = on`. The wire crate stays at 0.9.0 — no
+source-level changes under `crates/wire/src/` since v0.18.0.
+
 ### Added
 
 - **ADR-0059 slice 3.5 PR 1 — per-instance `apply_aliasing_ecmp`

@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpctl"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -2260,7 +2260,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "axum",
  "bytes",
@@ -2295,7 +2295,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-api"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "bytes",
  "prometheus",
@@ -2318,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-bmp"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "bytes",
  "rustbgpd-telemetry",
@@ -2329,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.18",
@@ -2338,7 +2338,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn-linux"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "futures",
  "libc",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-evpn-load"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2372,7 +2372,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-fsm"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "bytes",
  "proptest",
@@ -2382,7 +2382,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-mrt"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -2397,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-policy"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "regex",
  "rustbgpd-wire",
@@ -2406,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rib"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2423,7 +2423,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-rpki"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "rustbgpd-wire",
  "thiserror 2.0.18",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-telemetry"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "prometheus",
  "thiserror 2.0.18",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "rustbgpd-transport"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "bytes",
  "libc",
