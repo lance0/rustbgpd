@@ -546,6 +546,24 @@ pub struct EvpnInstanceConfig {
     /// See ADR-0058.
     #[serde(default)]
     pub ip_vrf: Option<String>,
+    /// Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes
+    /// (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Default `true`.
+    /// Operators flip to `false` to roll a single L2VNI back to the
+    /// single-dst FDB path (primary VTEP only, no kernel-side ECMP).
+    /// Single-homed entries are unaffected — they always take the
+    /// single-dst path regardless of this flag.
+    ///
+    /// **Restart-required.** `[[evpn_instances]]` is pinned at startup
+    /// today (config reload reverts edits to the instance table), so
+    /// changing this knob requires a daemon restart. Across a
+    /// restart with stale tagged FDB rows from a prior run, the
+    /// orphaned rows stay in place until the next periodic drift
+    /// cycle (≤ 60 s, slice 3.5 PR 2). The diff layer is written so
+    /// that a future runtime instance-mutation surface (RPC etc.)
+    /// would converge cleanly via the standard `FdbNhg → SingleDst`
+    /// transition, but operators cannot drive that path today.
+    #[serde(default = "default_enabled")]
+    pub apply_aliasing_ecmp: bool,
 }
 
 /// One IP-VRF / L3VNI tenant served by this VTEP (Gate 9 symmetric

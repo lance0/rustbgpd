@@ -1633,7 +1633,9 @@ fn parse_evpn_instance(cfg: &EvpnInstanceConfig) -> Result<EvpnInstance, ConfigE
     .map_err(|e| ConfigError::InvalidEvpnInstance {
         reason: format!("vni {}: {e}", cfg.vni),
     })?;
-    Ok(inst.with_sticky_macs(sticky_macs))
+    Ok(inst
+        .with_sticky_macs(sticky_macs)
+        .with_apply_aliasing_ecmp(cfg.apply_aliasing_ecmp))
 }
 
 /// Parse a `aa:bb:cc:dd:ee:ff` MAC string into a [`MacAddress`]. The

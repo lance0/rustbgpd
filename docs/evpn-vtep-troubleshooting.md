@@ -280,11 +280,36 @@ nexthop **group**, not a single-dst `dst <ip>` row.
    - CVE-2025-39851 guard: rustbgpd refuses to install FDB-NHG
      rows on a VXLAN device with `learning on`. `ip -d link
      show vxlanNNN | grep learning` — must say `nolearning`.
+   - `apply_aliasing_ecmp = false` on the `[[evpn_instances]]`
+     entry for the VNI. Slice 3.5 added a per-L2VNI off-switch
+     that routes multi-homed entries through the single-dst path.
+     Check the config + restart-required flip semantics in
+     `docs/CONFIGURATION.md`.
 
 The slice 4 / M40 smoke
 (`tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh`)
 runs end-to-end against FRR EVPN-MH and is the canonical
 correctness reference if you suspect the daemon path itself.
+
+### Stale tagged FDB rows after `apply_aliasing_ecmp` restart-flip
+
+**Symptom**: after flipping `apply_aliasing_ecmp = true → false` in
+`[[evpn_instances]]` and restarting the daemon, `bridge fdb show`
+still has `nhid <id>` rows that the daemon now refuses to install.
+
+**Cause**: the slice 3b adoption pass reserves the tagged kernel
+NHIDs from the prior run into the allocator, but with the gate
+flipped off the diff layer emits no `RemoveFdbNhg` (the FDB
+nexthop group path is gated off). The orphaned FDB row stays
+bound to the stale `nh_id` until something overwrites it.
+
+**Resolution**: slice 3.5 PR 2 (periodic `RTM_GETNEXTHOP` drift
+recovery) closes this gap as part of the 60 s reconcile cadence —
+the orphaned tagged rows are cleaned up within ≤ 60 s of daemon
+start. If you are on a build that predates PR 2 and need an
+immediate cleanup, `bridge fdb del <mac> dev vxlanNNN nhid <id>`
+the stale rows by hand, or flip the knob back to `true`, restart
+once to re-adopt cleanly, then flip back to `false`.
 
 ## IP-VRF stuck in `NotReady`
 

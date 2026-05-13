@@ -1223,6 +1223,68 @@ async fn fdb_nhg_perm_suppressed_install_blocks_adoption_cleanup() {
     h.shutdown().await;
 }
 
+// ─── ADR-0059 slice 3.5: per-VNI apply_aliasing_ecmp off-switch ───
+
+// 1. Actor-level: a multi-homed Type 2 entry on a VNI with
+//    `apply_aliasing_ecmp = false` programs a single-dst FDB row at
+//    the primary VTEP — no NHGs are installed.
+#[tokio::test]
+async fn fdb_nhg_off_switch_disabled_skips_install() {
+    let mut h = Harness::spawn(ReconcileActorConfig::for_tests());
+    h.handle.set_probe(vni(100), InstanceProbe::Ready);
+
+    let mut macs = RemoteMacTable::builder();
+    macs.insert(
+        vni(100),
+        mac(1),
+        entry_multi_homed("10.0.0.2", &["10.0.0.3"], 7),
+    )
+    .unwrap();
+    let macs = macs.build();
+    let inst = one_instance_table(
+        instance(100, Some("br100"), "10.0.0.1").with_apply_aliasing_ecmp(false),
+    );
+    h.intent_tx.send(intent(1, inst, macs)).unwrap();
+
+    let mut last = h.next_report().await;
+    while last.intent_generation == 0 {
+        last = h.next_report().await;
+    }
+    assert_eq!(last.intent_generation, 1);
+    assert!(
+        last.failed.is_empty(),
+        "expected no failures: {:?}",
+        last.failed
+    );
+
+    // No NHG members, no NHG groups — the off-switch routes through
+    // the single-dst path.
+    let nhs = h.handle.nexthop_ops();
+    let (members, groups) = split_nexthop_ops(&nhs);
+    assert!(
+        members.is_empty() && groups.is_empty(),
+        "off-switch must skip NHG install; got {nhs:?}"
+    );
+
+    // FDB row exists and points at the primary VTEP (no nh_id).
+    assert!(
+        h.handle.kernel_fdb_nh_id(vni(100), mac(1)).is_none(),
+        "FDB row must NOT reference an NHG when off-switch is engaged"
+    );
+    let snapshot = h.handle.kernel_snapshot();
+    let row = snapshot
+        .find_fdb(vni(100), mac(1))
+        .expect("FDB row should exist for (vni 100, mac 1)");
+    assert_eq!(
+        row.dst,
+        Some(ipa("10.0.0.2")),
+        "single-dst row must point at primary VTEP, got {:?}",
+        row.dst,
+    );
+
+    h.shutdown().await;
+}
+
 #[allow(dead_code)]
 fn _starts_anchor() -> Instant {
     Instant::now()

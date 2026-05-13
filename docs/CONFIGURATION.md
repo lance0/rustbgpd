@@ -1262,20 +1262,22 @@ bridge = "br100"                       # Linux bridge name (optional — RR-only
 advertise_svi_mac = false              # originate Type 2 for the bridge's own MAC (RFC 9135 §6.1)
 sticky_macs = ["aa:bb:cc:dd:ee:01"]    # MACs to originate with RFC 7432 §15.4 sticky bit (ADR-0056)
 ip_vrf = "vrf1"                        # link this L2VNI to a declared [[evpn_ip_vrfs]] entry (Gate 9 / ADR-0058)
+apply_aliasing_ecmp = true             # program FDB nexthop groups for multi-homed Type 2 (ADR-0059)
 ```
 
 ### Fields
 
-| Field               | Type     | Required | Default | Description |
-|---------------------|----------|----------|---------|-------------|
-| `vni`               | u32      | yes      | --      | 24-bit VNI (RFC 8365 §5) |
-| `rd`                | string   | yes      | --      | Route Distinguisher in RFC 4364 form (`asn:value`, `ipv4:value`, or 4-octet AS variants) |
-| `route_targets`     | string[] | yes      | --      | One or more EVPN Route Targets in the same encodings |
-| `local_vtep_ip`     | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
-| `bridge`            | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Must be a non-VLAN-aware bridge with the VXLAN port carrying `nolearning` |
-| `advertise_svi_mac` | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1). Requires `bridge` to be set |
-| `sticky_macs`       | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
-| `ip_vrf`            | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
+| Field                 | Type     | Required | Default | Description |
+|-----------------------|----------|----------|---------|-------------|
+| `vni`                 | u32      | yes      | --      | 24-bit VNI (RFC 8365 §5) |
+| `rd`                  | string   | yes      | --      | Route Distinguisher in RFC 4364 form (`asn:value`, `ipv4:value`, or 4-octet AS variants) |
+| `route_targets`       | string[] | yes      | --      | One or more EVPN Route Targets in the same encodings |
+| `local_vtep_ip`       | string   | yes      | --      | Source IP for VXLAN encap on this VTEP |
+| `bridge`              | string   | no       | --      | Linux bridge name for kernel reconciliation. Omit for RR-only deployments. Must be a non-VLAN-aware bridge with the VXLAN port carrying `nolearning` |
+| `advertise_svi_mac`   | bool     | no       | `false` | Originate a Type 2 route for the bridge's own MAC (RFC 9135 §6.1). Requires `bridge` to be set |
+| `sticky_macs`         | string[] | no       | `[]`    | MAC addresses to originate with the RFC 7432 §15.4 sticky bit; SVI MAC origination honors the same list (ADR-0056) |
+| `ip_vrf`              | string   | no       | --      | Name of an `[[evpn_ip_vrfs]]` entry to link this L2VNI to (Gate 9 IRB binding) |
+| `apply_aliasing_ecmp` | bool     | no       | `true`  | Program ADR-0059 FDB nexthop groups for multi-homed Type 2 routes (aliasing-ECMP via `NDA_NH_ID` + `NHA_FDB`). Flip to `false` to roll this L2VNI back to single-dst FDB rows at the primary VTEP. Single-homed Type 2 entries are unaffected |
 
 ### Validation
 
@@ -1289,9 +1291,30 @@ ip_vrf = "vrf1"                        # link this L2VNI to a declared [[evpn_ip
 - Same VNI must not appear in multiple `[[ethernet_segments]]`
   `member_vnis` lists until per-port learned disambiguation is plumbed.
 
-Restart-required: `[[evpn_instances]]` is pinned at startup. Runtime
-mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`) are a
-follow-up.
+### Aliasing-ECMP off-switch behavior
+
+`apply_aliasing_ecmp = false` routes multi-homed Type 2 entries on the
+target L2VNI through the single-dst FDB path (primary VTEP only, no
+kernel-side ECMP); other L2VNIs in the same daemon are unaffected.
+
+**Restart required**: `[[evpn_instances]]` is pinned at startup today
+— config reload reverts instance-table edits — so flipping
+`apply_aliasing_ecmp` requires a daemon restart to take effect. The
+diff layer is written so that a future runtime instance-mutation
+surface (RPC etc.) would converge cleanly via the standard
+`FdbNhg → SingleDst` transition, but operators cannot drive that
+path today.
+
+**Restart edge case**: if you flip `apply_aliasing_ecmp = false` and
+restart the daemon while tagged FDB nexthop groups from the prior run
+are still in the kernel, the orphaned tagged FDB rows remain bound to
+the stale `nh_id` until the next periodic drift cycle cleans them up
+(≤ 60 s, ADR-0059 slice 3.5 PR 2).
+
+Runtime mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`) are
+a follow-up; when they land, the diff layer's
+`FdbNhg → SingleDst` transition path will be the active convergence
+route for live edits.
 
 ---
 

@@ -9,6 +9,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **ADR-0059 slice 3.5 PR 1 — per-instance `apply_aliasing_ecmp`
+  off-switch.** New `[[evpn_instances]].apply_aliasing_ecmp` bool
+  on the TOML schema (default `true`). When flipped to `false` for
+  a given L2VNI, multi-homed Type 2 entries on that VNI route
+  through the single-dst FDB path (primary VTEP only) instead of
+  programming FDB nexthop groups; other L2VNIs in the same daemon
+  are unaffected. Restart-required posture matches the rest of
+  `[[evpn_instances]]` — config reload pins the instance table
+  back to the startup snapshot, so operators must restart the
+  daemon to apply a flip. The diff layer would converge cleanly
+  via the standard `FdbNhg → SingleDst` transition (`RemoveFdbNhg`
+  + `AddRemoteFdb` for any previously-installed entry) if and when
+  a runtime instance-mutation surface lands. `EvpnInstance::new` still
+  defaults the field on; the `with_apply_aliasing_ecmp` builder
+  applies the operator's choice at config-parse time, and
+  `compute_diff` now takes a `&EvpnInstanceTable` parameter so the
+  diff layer can consult the per-VNI bit (unknown VNIs default to
+  enabled — the `InstanceProbes` readiness gate remains the real
+  install/no-install boundary). Known cold-start gap: restart with
+  `apply_aliasing_ecmp = false` + stale tagged FDB rows from a
+  prior run leaves the orphaned rows in place until slice 3.5
+  PR 2's periodic drift cycle cleans them up (≤ 60 s); documented
+  in `docs/evpn-vtep-troubleshooting.md`.
+
 ## [0.19.0] — 2026-05-13
 
 ADR-0059 EVPN aliasing dataplane ECMP via FDB nexthop groups ships
