@@ -163,14 +163,17 @@ wait_for_rb \
     45 \
     || { print_summary; }
 
-# Capture the row + nhid for the next assertions.
+# Capture the row + nhid for the next assertions. Hard prereq —
+# every Phase-1 / Phase-2 assertion below indexes by $nhid; if the
+# parse fails, subsequent greps would run with an empty pattern
+# and generate misleading cascade failures.
 fdb_row=$(fdb_show_test_mac)
 nhid=$(echo "$fdb_row" | grep -oE ' nhid [0-9]+' | awk '{print $2}' | head -1)
 if [ -z "$nhid" ]; then
     fail "could not parse nhid from FDB row: $fdb_row"
-else
-    log "captured nhid=$nhid for $TEST_MAC"
+    print_summary
 fi
+log "captured nhid=$nhid for $TEST_MAC"
 
 log "[phase 1] ip nexthop show has the matching group with two members"
 # Group line shape: `id <gid> group <mid>/<mid> ... fdb`. Members
@@ -208,11 +211,17 @@ for mid in $member_ids; do
         member_ips="$member_ips $mip"
     fi
 done
-member_ips=$(echo "$member_ips" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ')
-if echo "$member_ips" | grep -qw "$PE_A_IP" && echo "$member_ips" | grep -qw "$PE_C_IP"; then
-    ok "group members cover both pe-a ($PE_A_IP) and pe-c ($PE_C_IP)"
+# Sort + dedupe so we count distinct gateways (one IP shouldn't
+# appear twice in a healthy group; the count check below rules
+# that out).
+member_ip_list=$(echo "$member_ips" | tr ' ' '\n' | sort -u | grep -v '^$')
+member_ip_count=$(echo "$member_ip_list" | grep -c .)
+if [ "$member_ip_count" -eq 2 ] \
+    && echo "$member_ip_list" | grep -qw "$PE_A_IP" \
+    && echo "$member_ip_list" | grep -qw "$PE_C_IP"; then
+    ok "group has exactly 2 members covering pe-a ($PE_A_IP) + pe-c ($PE_C_IP)"
 else
-    fail "group members do not cover both VTEPs (got: $member_ips)"
+    fail "group members must be exactly {$PE_A_IP, $PE_C_IP}; got ($member_ip_count distinct): $(echo "$member_ip_list" | tr '\n' ' ')"
 fi
 
 # ---------------------------------------------------------------------------
@@ -232,10 +241,14 @@ log "[phase 2] stop pe-c — withdrawal of EAD-per-EVI must drain the group"
 # `docker stop` brings down watchfrr + bgpd together. Killing only
 # bgpd inside the container would race a watchfrr restart and
 # re-originate EAD-per-EVI mid-drain (M1's test relies on that
-# auto-restart behavior; M40 needs the opposite).
-docker stop --time 5 "$PE_C" >/dev/null 2>&1 \
-    && ok "pe-c container stopped" \
-    || fail "could not stop pe-c container"
+# auto-restart behavior; M40 needs the opposite). Hard prereq —
+# Phase-2 assertions all check the post-stop state.
+if docker stop --time 5 "$PE_C" >/dev/null 2>&1; then
+    ok "pe-c container stopped"
+else
+    fail "could not stop pe-c container"
+    print_summary
+fi
 
 wait_for_rb \
     "FDB row falls back to single-dst (no nhid)" \
