@@ -618,10 +618,10 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             intent.instances.as_ref(),
         );
 
-        // ADR-0059 IPv6-alias-fallback warn: log only for `(VNI, MAC)`
-        // keys that newly entered the fallback this pass. The diff
-        // produces the *currently in fallback* set; we warn for new
-        // entries and prune keys that left the set so a future
+        // ADR-0059 mixed-family alias fallback warn: log only for
+        // `(VNI, MAC)` keys that newly entered the fallback this pass.
+        // The diff produces the *currently in fallback* set; we warn
+        // for new entries and prune keys that left the set so a future
         // re-entry produces a fresh warn.
         for key in plan
             .ipv6_alias_fallback_keys
@@ -630,7 +630,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             tracing::warn!(
                 vni = ?key.0,
                 mac = %key.1,
-                "ADR-0059 IPv6 alias members not yet supported (slice 2.5 follow-up); \
+                "ADR-0059 mixed address-family alias members cannot share one FDB nexthop group; \
                  falling back to single-dst FDB row at primary VTEP",
             );
         }

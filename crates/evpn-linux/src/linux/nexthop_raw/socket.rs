@@ -20,10 +20,7 @@
 //!
 //! `add_fdb_member` accepts both IPv4 and IPv6 gateways (ADR-0059
 //! slice 3.5 PR 3). The encoder picks `nh_family = AF_INET` /
-//! `AF_INET6` from the gateway form. The slice-2-era
-//! [`NexthopError::Ipv6Unsupported`] variant is `#[deprecated]`
-//! and no longer produced; it remains in the enum for one release
-//! as a compatibility shim and is slated for removal in v0.21.0.
+//! `AF_INET6` from the gateway form.
 
 use std::io;
 use std::net::IpAddr;
@@ -139,18 +136,6 @@ pub enum NexthopError {
     /// Caller-side validation failed before the send.
     #[error("nexthop validation: {0}")]
     Validation(#[from] NexthopValidationError),
-    /// Reserved for the slice-2 era IPv6-unsupported case. ADR-0059
-    /// slice 3.5 PR 3 enabled IPv6 gateways; the variant is kept for
-    /// one release as a compatibility shim and is no longer produced
-    /// by `add_fdb_member`. Will be removed in v0.21.0.
-    #[deprecated(
-        since = "0.20.0",
-        note = "IPv6 gateways are now supported; this variant is no longer produced. Slated for removal in v0.21.0."
-    )]
-    #[error(
-        "deprecated NexthopError::Ipv6Unsupported (slice-2 era variant; ADR-0059 slice 3.5 PR 3 enabled IPv6 gateways — this variant is no longer produced by `add_fdb_member` and is slated for removal in v0.21.0)"
-    )]
-    Ipv6Unsupported,
 }
 
 /// A `NETLINK_ROUTE` socket dedicated to FDB nexthop group

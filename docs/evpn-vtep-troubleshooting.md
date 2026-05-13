@@ -271,8 +271,11 @@ nexthop **group**, not a single-dst `dst <ip>` row.
    and verify peer sessions are Established.
 4. If the FDB row has `dst <ip>` (not `nhid`), the entry is in
    the single-dst fallback path. Common causes:
-   - IPv6 alias members (slice 3b warns once per `(VNI, MAC)` —
-     `tracing::warn!` "IPv6 alias members not yet supported").
+   - Mixed address-family alias members: one FDB nexthop group
+     cannot mix IPv4 and IPv6 VTEPs, so rustbgpd warns once per
+     `(VNI, MAC)` and falls back to the primary VTEP. Homogeneous
+     IPv4 aliases and homogeneous IPv6 aliases both use the FDB-NHG
+     path.
    - All but one alias VTEP withdrew their EAD-per-EVI (the
      projection invariant `empty alias_vtep_ips ⇔
      alias_group_key.is_none()` collapses N→1 alias to

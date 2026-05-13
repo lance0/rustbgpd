@@ -32,6 +32,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   so operators can compare rustbgpd's view against `ip nexthop show`
   / `bridge fdb show` without scraping logs.
 
+### Removed
+
+- **`NexthopError::Ipv6Unsupported`.** The v0.20.0 compatibility
+  shim is gone now that ADR-0059 slice 3.5 supports homogeneous IPv6
+  alias members. `NexthopSocket::add_fdb_member` accepts IPv4 and
+  IPv6 gateways; socket-layer error mapping no longer carries the
+  obsolete IPv6-only branch.
+
 ## [0.20.0] — 2026-05-13
 
 ADR-0059 slice 3.5 hardening shipped end-to-end in three follow-up

@@ -679,23 +679,13 @@ impl crate::dataplane::NexthopOps for LinuxDataplane {
 /// `InvalidArgument` (permanent — our message shape is wrong);
 /// truncation / unexpected message become `Other` (transient — the
 /// next dump pass will retry on its own cadence).
-///
-/// The slice-2-era `Ipv6Unsupported` branch is retained behind
-/// `#[allow(deprecated)]` for source compatibility — IPv6 is now
-/// supported (ADR-0059 slice 3.5 PR 3), so the variant is no longer
-/// produced. The arm is slated for deletion with the variant in
-/// v0.21.0.
 fn map_nexthop_error(e: nexthop_raw::NexthopError) -> DataplaneError {
-    #[allow(deprecated)]
     match e {
         nexthop_raw::NexthopError::Io(io) => DataplaneError::Io(io),
         nexthop_raw::NexthopError::Kernel(errno) => map_nexthop_kernel_errno(errno),
         nexthop_raw::NexthopError::Validation(v) => {
             DataplaneError::InvalidArgument(format!("nexthop validation: {v}"))
         }
-        nexthop_raw::NexthopError::Ipv6Unsupported => DataplaneError::InvalidArgument(
-            "nexthop IPv6 unsupported — deprecated variant retained for source compat (removed in v0.21.0)".into(),
-        ),
         other => DataplaneError::Other(format!("nexthop socket: {other}")),
     }
 }
