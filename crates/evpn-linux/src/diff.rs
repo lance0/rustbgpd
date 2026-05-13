@@ -36,7 +36,6 @@
 //! operator placed by hand. Skip; never overwrite.
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
 
 use rustbgpd_evpn::{
     EvpnInstanceId, EvpnInstanceTable, MacAddress, RemoteMacEntry, RemoteMacTable, group_members,
@@ -101,6 +100,7 @@ impl Plan {
 ///
 /// See module docs for the foreign-entry preservation invariant.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compute_diff(
     desired: &RemoteMacTable,
     snapshot: &KernelSnapshot,
@@ -137,20 +137,26 @@ pub fn compute_diff(
         //   - `alias_group_key`: Some(_) when the wire intent
         //     carries a multi-homed `(ESI, EthernetTag)` group key
         //     (slice 1).
-        //   - `all_v4`: false when any alias / primary is IPv6.
-        //     Slice 2 `NexthopSocket` rejects v6 gateways, so the
-        //     FDB-NHG path can't handle it yet — diff degrades to
-        //     single-dst at the primary VTEP and records the key
-        //     so the reconcile actor can warn once per
-        //     enter-fallback transition.
+        //   - `all_same_family`: false when the entry mixes v4 and
+        //     v6 across primary + aliases. Homogeneous v4 OR v6
+        //     both program through the FDB-NHG path (slice 3.5
+        //     PR 3 enabled IPv6 alias members; projection
+        //     normally drops mismatched aliases before the diff
+        //     sees them, so the false arm here is mostly defensive).
+        //     Records the key so the reconcile actor can warn once
+        //     per enter-fallback transition.
         //   - `aliasing_enabled`: false when the operator set
         //     `apply_aliasing_ecmp = false` for this VNI (slice
         //     3.5 PR 1 off-switch). When the operator turned it
-        //     off, there's no IPv6 fallback to warn about — the
-        //     dispatch is just "go to single-dst", same as
+        //     off, there's no mixed-family fallback to warn about —
+        //     the dispatch is just "go to single-dst", same as
         //     single-homed.
         let aliasing_enabled = instances.get(vni).is_none_or(|i| i.apply_aliasing_ecmp);
-        match (entry.alias_group_key, all_v4(entry), aliasing_enabled) {
+        match (
+            entry.alias_group_key,
+            all_same_family(entry),
+            aliasing_enabled,
+        ) {
             (Some(portable_key), true, true) => {
                 // FDB-NHG path.
                 let linux_key = AliasGroupKey::new(vni, portable_key.0, portable_key.1);
@@ -169,15 +175,24 @@ pub fn compute_diff(
                 );
             }
             (Some(_), false, true) => {
-                // IPv6 fallback — alias-aware *and* aliasing is
-                // enabled, but at least one alias is IPv6. The
-                // FDB-NHG path can't program v6 gateways in slice
-                // 2; record so the actor warns once on the
+                // Mixed-family fallback — alias-aware *and*
+                // aliasing is enabled, but the entry mixes v4 and
+                // v6. Projection (`crates/evpn/src/projection.rs`)
+                // normally drops mismatched aliases before the
+                // diff sees them, so this arm is a defensive
+                // safety net for hand-rolled / operator-static
+                // entries that bypassed projection. Records the
+                // key so the reconcile actor can warn once on the
                 // transition into fallback. NOT reached when
-                // `aliasing_enabled = false` (the off-switch
-                // arm handles all multi-homed entries on that VNI
-                // regardless of family — no misleading IPv6 warn
-                // when the operator intentionally disabled aliasing).
+                // `aliasing_enabled = false` (the off-switch arm
+                // handles all multi-homed entries on that VNI
+                // regardless of family — no misleading warn when
+                // the operator intentionally disabled aliasing).
+                // The `ipv6_alias_fallback_keys` field name is
+                // retained for one release — the keys now
+                // identify entries that *fell back* to single-dst,
+                // regardless of the family-mix shape that
+                // triggered it.
                 ipv6_alias_fallback_keys.insert((vni, mac));
                 emit_single_dst_pass(
                     vni,
@@ -298,11 +313,20 @@ pub fn compute_diff(
 }
 
 /// `true` when `entry.remote_vtep_ip` and every `alias_vtep_ips`
-/// member is IPv4. Slice 1's projection enforces same-family-per-
-/// `(ESI, EthernetTag)` so we never see mixed-family aliases; this
-/// check is the v4-only gate that triggers the FDB-NHG path.
-fn all_v4(entry: &RemoteMacEntry) -> bool {
-    entry.remote_vtep_ip.is_ipv4() && entry.alias_vtep_ips.iter().all(IpAddr::is_ipv4)
+/// member share the same address family (all IPv4 or all IPv6).
+/// Slice 1's projection enforces same-family-per-`(ESI,
+/// EthernetTag)` so mixed-family entries are normally dropped
+/// before the diff sees them; this check is the defensive guard
+/// for hand-rolled / operator-static entries that bypassed
+/// projection. ADR-0059 slice 3.5 PR 3 enabled homogeneous v6
+/// alias members alongside v4, so the gate moved from "all v4"
+/// to "homogeneous family".
+fn all_same_family(entry: &RemoteMacEntry) -> bool {
+    let primary_is_v4 = entry.remote_vtep_ip.is_ipv4();
+    entry
+        .alias_vtep_ips
+        .iter()
+        .all(|ip| ip.is_ipv4() == primary_is_v4)
 }
 
 /// Pass 1 / IPv6-fallback emission — emit `AddRemoteFdb` /
@@ -1347,10 +1371,12 @@ mod tests {
     }
 
     #[test]
-    fn ipv6_alias_members_fall_back_to_single_dst_with_warn() {
-        // Multi-homed with an IPv6 alias → falls back to AddRemoteFdb
-        // (single-dst at primary) because slice 2's `NexthopSocket`
-        // rejects v6 gateways. Diff emits no InstallFdbNhg.
+    fn mixed_family_aliases_fall_back_to_single_dst() {
+        // Multi-homed entry with mixed-family aliases (v4 primary +
+        // v6 alias) → falls back to AddRemoteFdb (single-dst at the
+        // primary VTEP). The projection layer normally drops the
+        // mismatched alias before the diff sees it, but the
+        // defensive arm is exercised here to pin the behavior.
         let mut desired = RemoteMacTable::builder();
         desired
             .insert(
@@ -1386,7 +1412,103 @@ mod tests {
                 .ops
                 .iter()
                 .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
-            "must NOT emit InstallFdbNhg when v6 aliases present: {:?}",
+            "must NOT emit InstallFdbNhg for mixed-family entries: {:?}",
+            plan.ops,
+        );
+        // The "fallback keys" set tracks any entry that hit the
+        // mixed-family arm.
+        assert!(plan.ipv6_alias_fallback_keys.contains(&(vni(100), mac(1))));
+    }
+
+    // ─── ADR-0059 slice 3.5 PR 3: IPv6 alias members ───────────────
+
+    #[test]
+    fn ipv6_homogeneous_emits_install_fdb_nhg() {
+        // All-v6 multi-homed entry → FDB-NHG path, same shape as
+        // the all-v4 equivalent, no mixed-family fallback.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("2001:db8::2", &["2001:db8::3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
+            "expected InstallFdbNhg for all-v6 multi-homed entry, got {:?}",
+            plan.ops,
+        );
+        assert!(
+            plan.ipv6_alias_fallback_keys.is_empty(),
+            "homogeneous v6 must NOT enter the mixed-family fallback set"
+        );
+    }
+
+    #[test]
+    fn transition_single_dst_owned_to_desired_fdb_nhg_ipv6() {
+        // Same shape as the v4 SingleDst → FdbNhg transition test,
+        // with v6 primary + v6 alias.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("2001:db8::2", &["2001:db8::3"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let mut snapshot = KernelSnapshot::new();
+        let mut e = ours("2001:db8::2");
+        e.mac = mac(1);
+        snapshot.insert_fdb(vni(100), e);
+        let mut applied = OwnedSet::new();
+        applied.record_applied(
+            vni(100),
+            mac(1),
+            OwnedEntry::single_dst(ip("2001:db8::2"), None),
+        );
+        let probes = ready_probes(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &EvpnInstanceTable::new(),
+        );
+
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::RemoveRemoteFdb { vni: v, mac: m } if *v == vni(100) && *m == mac(1))),
+            "expected RemoveRemoteFdb in transition, got {:?}",
+            plan.ops,
+        );
+        assert!(
+            plan.ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
+            "expected InstallFdbNhg in transition, got {:?}",
             plan.ops,
         );
     }

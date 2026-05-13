@@ -16,13 +16,14 @@
 //! on every operation. Slice 3's reconcile actor owns exactly one
 //! [`NexthopSocket`], so the constraint is free in practice.
 //!
-//! ## IPv4 only (slice 2)
+//! ## Address-family coverage
 //!
-//! `add_fdb_member` rejects [`IpAddr::V6`] with
-//! [`NexthopError::Ipv6Unsupported`]. The kernel accepts v6 next-hops
-//! for FDB nexthops, but we haven't captured a v6 fixture and haven't
-//! round-tripped it on a real kernel; deferring to a follow-up keeps
-//! the slice tight.
+//! `add_fdb_member` accepts both IPv4 and IPv6 gateways (ADR-0059
+//! slice 3.5 PR 3). The encoder picks `nh_family = AF_INET` /
+//! `AF_INET6` from the gateway form. The slice-2-era
+//! [`NexthopError::Ipv6Unsupported`] variant is `#[deprecated]`
+//! and no longer produced; it remains in the enum for one release
+//! as a compatibility shim and is slated for removal in v0.21.0.
 
 use std::io;
 use std::net::IpAddr;
@@ -138,8 +139,17 @@ pub enum NexthopError {
     /// Caller-side validation failed before the send.
     #[error("nexthop validation: {0}")]
     Validation(#[from] NexthopValidationError),
-    /// Slice 2 does not support IPv6 gateways yet.
-    #[error("IPv6 gateways are not supported in this slice; capture a v6 fixture first")]
+    /// Reserved for the slice-2 era IPv6-unsupported case. ADR-0059
+    /// slice 3.5 PR 3 enabled IPv6 gateways; the variant is kept for
+    /// one release as a compatibility shim and is no longer produced
+    /// by `add_fdb_member`. Will be removed in v0.21.0.
+    #[deprecated(
+        since = "0.20.0",
+        note = "IPv6 gateways are now supported; this variant is no longer produced. Slated for removal in v0.21.0."
+    )]
+    #[error(
+        "deprecated NexthopError::Ipv6Unsupported (slice-2 era variant; ADR-0059 slice 3.5 PR 3 enabled IPv6 gateways — this variant is no longer produced by `add_fdb_member` and is slated for removal in v0.21.0)"
+    )]
     Ipv6Unsupported,
 }
 
@@ -168,22 +178,19 @@ impl NexthopSocket {
     }
 
     /// Install one per-VTEP FDB nexthop. The nexthop ID must be
-    /// non-zero and the gateway must be IPv4 (slice 2 limitation).
+    /// non-zero. ADR-0059 slice 3.5 PR 3 enables IPv6 gateways
+    /// alongside IPv4 — the encoder picks `nh_family = AF_INET` or
+    /// `AF_INET6` from the gateway form.
     ///
     /// # Errors
     ///
     /// - [`NexthopError::Validation`] with `ZeroId` if `id == 0`.
-    /// - [`NexthopError::Ipv6Unsupported`] if `gateway` is IPv6.
     /// - [`NexthopError::Io`] on socket failure.
     /// - [`NexthopError::Kernel`] on kernel-side errno ≠ 0
     ///   (`EEXIST` is treated as idempotent ACK).
     pub async fn add_fdb_member(&mut self, id: u32, gateway: IpAddr) -> Result<(), NexthopError> {
         if id == 0 {
             return Err(NexthopValidationError::ZeroId.into());
-        }
-        match gateway {
-            IpAddr::V4(_) => {}
-            IpAddr::V6(_) => return Err(NexthopError::Ipv6Unsupported),
         }
         let seq = self.next_seq();
         let bytes = encode_add_fdb_member(seq, id, gateway);
