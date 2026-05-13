@@ -117,10 +117,13 @@ if [ "$grpc_ready" -ne 1 ]; then
 fi
 
 log "[baseline] both FRR peers Established to rustbgpd"
-wait_frr_established "$PE_A" "10.0.0.1" "pe-a EVPN" \
-    && ok "pe-a Established" || fail "pe-a not Established"
-wait_frr_established "$PE_C" "10.0.1.1" "pe-c EVPN" \
-    && ok "pe-c Established" || fail "pe-c not Established"
+# `wait_frr_established` already calls `ok`/`fail` internally; the
+# `&& ok || fail` wrapper used by the older M-series tests
+# (M32, etc.) double-counts. Just dispatch and let the helper own
+# the counter; abort the whole test on a failed prereq so the
+# Phase-1 assertions don't run against an unestablished session.
+wait_frr_established "$PE_A" "10.0.0.1" "pe-a EVPN" || print_summary
+wait_frr_established "$PE_C" "10.0.1.1" "pe-c EVPN" || print_summary
 
 log "[baseline] both FRR nodes have local ES1"
 for node in "$PE_A" "$PE_C"; do
