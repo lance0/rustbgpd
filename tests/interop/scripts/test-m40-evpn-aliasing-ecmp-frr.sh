@@ -168,7 +168,12 @@ wait_for_rb \
 # parse fails, subsequent greps would run with an empty pattern
 # and generate misleading cascade failures.
 fdb_row=$(fdb_show_test_mac)
-nhid=$(echo "$fdb_row" | grep -oE ' nhid [0-9]+' | awk '{print $2}' | head -1)
+# `|| true` on every captured grep pipeline: test-lib.sh sets
+# `set -euo pipefail`, and `inherit_errexit` is one `shopt` away
+# from making a no-match grep abort the script before our explicit
+# empty-checks run. The empty-checks already cover the "no output"
+# case, so let grep's non-zero exits flow into them.
+nhid=$(echo "$fdb_row" | grep -oE ' nhid [0-9]+' | awk '{print $2}' | head -1 || true)
 if [ -z "$nhid" ]; then
     fail "could not parse nhid from FDB row: $fdb_row"
     print_summary
@@ -194,7 +199,8 @@ fi
 member_ids=$(echo "$group_line" \
     | grep -oE 'group [0-9/]+' \
     | awk '{print $2}' \
-    | tr '/' ' ')
+    | tr '/' ' ' \
+    || true)
 if [ -n "$member_ids" ]; then
     ok "parsed group member IDs: $member_ids"
 else
@@ -206,7 +212,7 @@ fi
 member_ips=""
 for mid in $member_ids; do
     mline=$(echo "$nh_dump" | grep -E "^id $mid via [0-9.]+ .*fdb" || true)
-    mip=$(echo "$mline" | grep -oE 'via [0-9.]+' | awk '{print $2}')
+    mip=$(echo "$mline" | grep -oE 'via [0-9.]+' | awk '{print $2}' || true)
     if [ -n "$mip" ]; then
         member_ips="$member_ips $mip"
     fi
@@ -214,8 +220,11 @@ done
 # Sort + dedupe so we count distinct gateways (one IP shouldn't
 # appear twice in a healthy group; the count check below rules
 # that out).
-member_ip_list=$(echo "$member_ips" | tr ' ' '\n' | sort -u | grep -v '^$')
-member_ip_count=$(echo "$member_ip_list" | grep -c .)
+member_ip_list=$(echo "$member_ips" | tr ' ' '\n' | sort -u | grep -v '^$' || true)
+# `grep -c .` returns 1 on zero matches (and prints `0`); the
+# trailing `|| true` keeps the empty-list path from tripping
+# pipefail.
+member_ip_count=$(echo "$member_ip_list" | grep -c . || true)
 if [ "$member_ip_count" -eq 2 ] \
     && echo "$member_ip_list" | grep -qw "$PE_A_IP" \
     && echo "$member_ip_list" | grep -qw "$PE_C_IP"; then
