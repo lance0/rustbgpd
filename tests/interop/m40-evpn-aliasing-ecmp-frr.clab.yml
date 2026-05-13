@@ -88,4 +88,7 @@ topology:
 
 # Subnet A: 10.0.0.0/24 — pe-rb (10.0.0.1) <-> pe-a (10.0.0.2)
 # Subnet C: 10.0.1.0/24 — pe-rb (10.0.1.1) <-> pe-c (10.0.1.2)
-# Shared ESI: Type 0 derived from es-sys-mac aa:bb:cc:dd:ee:ff + es-id 1
+# Shared ESI: Type 3 (MAC-based) — 03:<es-sys-mac>:<es-id-big-endian>,
+# i.e. 03:aa:bb:cc:dd:ee:ff:00:00:01 with the values configured on
+# the bond. Per RFC 7432 §5; matches start-frr-vtep-mh.sh and the
+# Phase-1 `show evpn es` assertion in the driver.

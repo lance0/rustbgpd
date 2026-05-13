@@ -100,16 +100,21 @@ wait_for_rb() {
 # M36).
 resolve_grpc_addr
 log "Waiting for rustbgpd gRPC endpoint..."
+grpc_ready=0
 for i in $(seq 1 15); do
     if grpc_health >/dev/null 2>&1; then
         ok "gRPC endpoint ready (attempt $i)"
+        grpc_ready=1
         break
-    fi
-    if [ "$i" -eq 15 ]; then
-        fail "gRPC endpoint not reachable within 30s"
     fi
     sleep 2
 done
+if [ "$grpc_ready" -ne 1 ]; then
+    fail "gRPC endpoint not reachable within 30s"
+    # Hard prereq — every subsequent assertion depends on the daemon
+    # being responsive. Abort rather than emit cascade failures.
+    print_summary
+fi
 
 log "[baseline] both FRR peers Established to rustbgpd"
 wait_frr_established "$PE_A" "10.0.0.1" "pe-a EVPN" \
@@ -149,11 +154,14 @@ docker exec "$PE_A" bridge fdb add "$TEST_MAC" \
 log "[phase 1] rustbgpd installs FDB row with nhid"
 # `nhid N` (decimal). The FDB row landing implies Type 2 from pe-a
 # was observed AND pe-c's EAD-per-EVI was observed AND the alias
-# set resolved AND apply_nhg_op succeeded.
+# set resolved AND apply_nhg_op succeeded. Hard prereq — Phase 2
+# and Phase 3 both inspect the row this assertion establishes;
+# bail out on failure rather than emit cascading false negatives.
 wait_for_rb \
     "FDB row for $TEST_MAC has nhid" \
     "bridge fdb show dev $VXLAN | grep -i '$TEST_MAC' | grep -E ' nhid [0-9]+'" \
-    45
+    45 \
+    || { print_summary; }
 
 # Capture the row + nhid for the next assertions.
 fdb_row=$(fdb_show_test_mac)
@@ -232,7 +240,8 @@ docker stop --time 5 "$PE_C" >/dev/null 2>&1 \
 wait_for_rb \
     "FDB row falls back to single-dst (no nhid)" \
     "bridge fdb show dev $VXLAN | grep -i '$TEST_MAC' | grep -vE ' nhid [0-9]+' | grep -E ' dst $PE_A_IP'" \
-    45
+    45 \
+    || { print_summary; }
 
 log "[phase 2] group nhid=$nhid removed from ip nexthop show"
 post_drain=$(nexthop_show)
@@ -256,7 +265,8 @@ docker exec "$PE_A" bridge fdb del "$TEST_MAC" \
 wait_for_rb \
     "FDB row for $TEST_MAC removed from rustbgpd's bridge FDB" \
     "! bridge fdb show dev $VXLAN | grep -qi '$TEST_MAC'" \
-    45
+    45 \
+    || { print_summary; }
 
 # Any remaining FDB-NHG-tagged nexthop should be cleaned up by the
 # reconcile coordinator. Plain single-dst members + remaining
