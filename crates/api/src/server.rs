@@ -76,6 +76,10 @@ pub struct ServeConfig {
     /// IP-VRF (Gate 9 slice 6c). Returns 0 when no `[[evpn_ip_vrfs]]`
     /// are configured.
     pub evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
+    /// Live snapshot reader for ADR-0059 FDB nexthop-group owned
+    /// state. Returns an empty summary when the dataplane actor is
+    /// not running.
+    pub evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
 }
 
 /// Resolved gRPC listener configuration.
@@ -257,6 +261,7 @@ async fn run_listener(
     let evpn_ip_vrf_status_snapshot = config.evpn_ip_vrf_status_snapshot;
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
+    let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
 
     match listener.endpoint {
         ListenerEndpoint::Tcp(addr) => {
@@ -280,6 +285,7 @@ async fn run_listener(
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
+                evpn_fdb_nexthop_snapshot,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -307,6 +313,7 @@ async fn run_listener(
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
+                evpn_fdb_nexthop_snapshot,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -337,6 +344,7 @@ async fn run_tcp_listener(
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
+    evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -399,6 +407,7 @@ async fn run_tcp_listener(
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
+                evpn_fdb_nexthop_snapshot,
             ),
             interceptor.clone(),
         ))
@@ -440,6 +449,7 @@ async fn run_uds_listener(
     evpn_ip_vrf_status_snapshot: crate::evpn_service::IpVrfStatusSnapshotFn,
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
+    evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -492,6 +502,7 @@ async fn run_uds_listener(
                 evpn_ip_vrf_status_snapshot,
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
+                evpn_fdb_nexthop_snapshot,
             ),
             interceptor.clone(),
         ))

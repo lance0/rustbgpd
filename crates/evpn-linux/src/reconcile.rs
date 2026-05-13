@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use rustbgpd_evpn::{
     AppliedOp, DataplaneIntent, DataplaneOpKind, DataplaneReport, EvpnInstanceTable, FailedOp,
+    FdbNexthopDataplaneStatus, FdbNexthopGroupStatus, FdbNexthopMemberStatus,
     InstanceDataplaneStatus, InstanceState, RemoteMacTable,
 };
 use tokio::sync::{mpsc, watch};
@@ -1701,6 +1702,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             ip_vrf_status,
             ip_vrf_routes,
             ip_vrf_installed_routes,
+            fdb_nexthops: build_fdb_nexthop_status(&self.state),
         };
         if let Err(e) = self.report_tx.send(report).await {
             tracing::trace!(error = %e, "report receiver gone; report dropped");
@@ -1939,6 +1941,48 @@ fn build_instance_status(
         .collect();
     rows.sort_by_key(|r| r.vni);
     rows
+}
+
+/// Build the operator-facing FDB-NHG snapshot for a
+/// [`DataplaneReport`].
+///
+/// This is a projection of the actor-owned allocator/refcount state,
+/// not a raw kernel dump. The fields are the pieces operators need
+/// when comparing rustbgpd's view against `ip nexthop show` and
+/// `bridge fdb show`: group ID, per-VTEP member IDs, MAC refs, and
+/// counts for orphan / retry cleanup state.
+fn build_fdb_nexthop_status(state: &ActorState) -> FdbNexthopDataplaneStatus {
+    let mut groups: Vec<FdbNexthopGroupStatus> = state
+        .groups
+        .iter_groups()
+        .map(|(key, group)| {
+            let members: Vec<FdbNexthopMemberStatus> = group
+                .members
+                .iter()
+                .map(|gateway| FdbNexthopMemberStatus {
+                    gateway: *gateway,
+                    nexthop_id: state.groups.vtep_nh(gateway).map_or(0, |nh| nh.id),
+                })
+                .collect();
+            let ref_macs: Vec<MacAddress> = group.ref_macs.iter().map(|(_, mac)| *mac).collect();
+            FdbNexthopGroupStatus {
+                vni: key.vni,
+                esi: key.esi,
+                ethernet_tag: key.ethernet_tag,
+                group_id: group.id,
+                members,
+                ref_macs,
+            }
+        })
+        .collect();
+    groups.sort_by_key(|g| (g.vni, g.esi, g.ethernet_tag, g.group_id));
+
+    FdbNexthopDataplaneStatus {
+        groups,
+        orphan_nexthops_count: u32::try_from(state.adopted_unreferenced.len()).unwrap_or(u32::MAX),
+        pending_delete_count: u32::try_from(state.pending_deletes.len()).unwrap_or(u32::MAX),
+        drift_recovery_disabled: state.drift_disabled,
+    }
 }
 
 /// VNI carried by an FDB op. BUM ops have no VNI surface — the

@@ -291,6 +291,12 @@ The slice 4 / M40 smoke
 runs end-to-end against FRR EVPN-MH and is the canonical
 correctness reference if you suspect the daemon path itself.
 
+For live systems, `rustbgpctl evpn nexthops` shows the reconciler's
+owned FDB-NHG view: per-VNI groups, member nexthop IDs, MAC refs,
+orphan tagged nexthop count, pending-delete count, and drift-recovery
+state. Use it before falling back to raw `ip nexthop show` / `bridge
+fdb show` output.
+
 ### Stale tagged FDB rows after `apply_aliasing_ecmp` restart-flip
 
 **Symptom**: after flipping `apply_aliasing_ecmp = true → false` in

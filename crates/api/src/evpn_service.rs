@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rustbgpd_evpn::ip_vrf::{IpVrfId, IpVrfNotReady, IpVrfStatus, IpVrfTable};
-use rustbgpd_evpn::{EvpnInstanceTable, IpVrfDataplaneStatus};
+use rustbgpd_evpn::{EvpnInstanceTable, FdbNexthopDataplaneStatus, IpVrfDataplaneStatus};
 use tonic::{Request, Response, Status};
 
 use crate::proto;
@@ -44,6 +44,11 @@ pub type InstalledIpVrfRouteCountFn = Arc<dyn Fn(u32) -> u64 + Send + Sync + 'st
 /// deterministic snapshot.
 pub type IpVrfStatusSnapshotFn = Arc<dyn Fn() -> Vec<IpVrfDataplaneStatus> + Send + Sync + 'static>;
 
+/// Read-side hook for the latest FDB nexthop-group owned-state
+/// snapshot. The daemon backs it with `DataplaneReport.fdb_nexthops`;
+/// tests can inject a deterministic value.
+pub type FdbNexthopSnapshotFn = Arc<dyn Fn() -> FdbNexthopDataplaneStatus + Send + Sync + 'static>;
+
 /// Read-only EVPN service backed by shared resolved tables.
 pub struct EvpnService {
     instances: Arc<EvpnInstanceTable>,
@@ -52,6 +57,7 @@ pub struct EvpnService {
     ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
     originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
     installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
+    fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
 }
 
 impl EvpnService {
@@ -67,6 +73,7 @@ impl EvpnService {
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
+            fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
         }
     }
 
@@ -86,6 +93,7 @@ impl EvpnService {
             ip_vrf_status_snapshot: Arc::new(Vec::new),
             originated_ip_vrf_route_count: Arc::new(|_| 0),
             installed_ip_vrf_route_count: Arc::new(|_| 0),
+            fdb_nexthop_snapshot: Arc::new(FdbNexthopDataplaneStatus::default),
         }
     }
 
@@ -103,6 +111,7 @@ impl EvpnService {
         ip_vrf_status_snapshot: IpVrfStatusSnapshotFn,
         originated_ip_vrf_route_count: OriginatedIpVrfRouteCountFn,
         installed_ip_vrf_route_count: InstalledIpVrfRouteCountFn,
+        fdb_nexthop_snapshot: FdbNexthopSnapshotFn,
     ) -> Self {
         Self {
             instances,
@@ -111,6 +120,7 @@ impl EvpnService {
             ip_vrf_status_snapshot,
             originated_ip_vrf_route_count,
             installed_ip_vrf_route_count,
+            fdb_nexthop_snapshot,
         }
     }
 }
@@ -137,6 +147,38 @@ impl proto::evpn_service_server::EvpnService for EvpnService {
             .collect();
         Ok(Response::new(proto::ListEvpnInstancesResponse {
             instances,
+        }))
+    }
+
+    async fn list_evpn_nexthops(
+        &self,
+        _request: Request<proto::ListEvpnNexthopsRequest>,
+    ) -> Result<Response<proto::ListEvpnNexthopsResponse>, Status> {
+        let snapshot = (self.fdb_nexthop_snapshot)();
+        let groups = snapshot
+            .groups
+            .iter()
+            .map(|group| proto::EvpnFdbNexthopGroup {
+                vni: group.vni.as_u32(),
+                esi: group.esi.to_string(),
+                ethernet_tag: group.ethernet_tag.to_string(),
+                group_id: group.group_id,
+                members: group
+                    .members
+                    .iter()
+                    .map(|member| proto::EvpnFdbNexthopMember {
+                        gateway: member.gateway.to_string(),
+                        nexthop_id: member.nexthop_id,
+                    })
+                    .collect(),
+                ref_macs: group.ref_macs.iter().map(ToString::to_string).collect(),
+            })
+            .collect();
+        Ok(Response::new(proto::ListEvpnNexthopsResponse {
+            groups,
+            orphan_nexthops_count: snapshot.orphan_nexthops_count,
+            pending_delete_count: snapshot.pending_delete_count,
+            drift_recovery_disabled: snapshot.drift_recovery_disabled,
         }))
     }
 
@@ -394,6 +436,64 @@ mod tests {
         assert_eq!(resp.instances[0].originated_local_macs_count, 7);
     }
 
+    #[tokio::test]
+    async fn list_evpn_nexthops_surfaces_owned_state() {
+        let svc = EvpnService::with_full_surface(
+            Arc::new(EvpnInstanceTable::new()),
+            Arc::new(IpVrfTable::new()),
+            Arc::new(|_| 0),
+            Arc::new(Vec::new),
+            Arc::new(|_| 0),
+            Arc::new(|_| 0),
+            Arc::new(|| rustbgpd_evpn::FdbNexthopDataplaneStatus {
+                groups: vec![rustbgpd_evpn::FdbNexthopGroupStatus {
+                    vni: EvpnInstanceId::new(100).unwrap(),
+                    esi: rustbgpd_evpn::EthernetSegmentIdentifier::new([
+                        3, 0, 0, 0, 0, 0, 0, 0, 0, 7,
+                    ]),
+                    ethernet_tag: rustbgpd_evpn::EthernetTagId(0),
+                    group_id: 0x4000_0001,
+                    members: vec![
+                        rustbgpd_evpn::FdbNexthopMemberStatus {
+                            gateway: "10.0.0.2".parse().unwrap(),
+                            nexthop_id: 0x3000_0001,
+                        },
+                        rustbgpd_evpn::FdbNexthopMemberStatus {
+                            gateway: "10.0.0.3".parse().unwrap(),
+                            nexthop_id: 0x3000_0002,
+                        },
+                    ],
+                    ref_macs: vec![
+                        MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x01]),
+                        MacAddress::new([0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0x02]),
+                    ],
+                }],
+                orphan_nexthops_count: 2,
+                pending_delete_count: 1,
+                drift_recovery_disabled: true,
+            }),
+        );
+
+        let resp = svc
+            .list_evpn_nexthops(Request::new(proto::ListEvpnNexthopsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(resp.groups.len(), 1);
+        let group = &resp.groups[0];
+        assert_eq!(group.vni, 100);
+        assert_eq!(group.esi, "03:00:00:00:00:00:00:00:00:07");
+        assert_eq!(group.ethernet_tag, "0");
+        assert_eq!(group.group_id, 0x4000_0001);
+        assert_eq!(group.members.len(), 2);
+        assert_eq!(group.members[0].gateway, "10.0.0.2");
+        assert_eq!(group.members[0].nexthop_id, 0x3000_0001);
+        assert_eq!(group.ref_macs.len(), 2);
+        assert_eq!(resp.orphan_nexthops_count, 2);
+        assert_eq!(resp.pending_delete_count, 1);
+        assert!(resp.drift_recovery_disabled);
+    }
+
     // -- Gate 9 IP-VRF surface --------------------------------------
 
     use rustbgpd_evpn::IpVrfDataplaneStatus;
@@ -471,6 +571,7 @@ mod tests {
             }),
             Arc::new(|_| 0),
             Arc::new(|_| 0),
+            Arc::new(rustbgpd_evpn::FdbNexthopDataplaneStatus::default),
         );
 
         let resp = svc
@@ -523,6 +624,7 @@ mod tests {
             }),
             Arc::new(|_| 0),
             Arc::new(|_| 0),
+            Arc::new(rustbgpd_evpn::FdbNexthopDataplaneStatus::default),
         );
 
         let resp = svc
@@ -578,6 +680,7 @@ mod tests {
             Arc::new(Vec::new),
             Arc::new(|_| 0),
             Arc::new(|_| 0),
+            Arc::new(rustbgpd_evpn::FdbNexthopDataplaneStatus::default),
         );
 
         let resp = svc
@@ -625,6 +728,7 @@ mod tests {
             Arc::new(Vec::new),
             Arc::new(|_| 0),
             Arc::new(|_| 0),
+            Arc::new(rustbgpd_evpn::FdbNexthopDataplaneStatus::default),
         );
 
         let resp = svc

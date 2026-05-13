@@ -663,11 +663,17 @@ rustbgpctl evpn                             # all EVPN routes
 rustbgpctl evpn --route-type 2              # MAC/IP only
 rustbgpctl evpn --rd 65000:100              # filter by RD
 rustbgpctl evpn --peer 10.0.1.1             # filter by source peer
+rustbgpctl evpn nexthops                    # owned FDB-NHG groups / members / MAC refs
 rustbgpctl evpn diagnose                    # alpha VTEP summary
 ```
 
 `tunnel_type=8` in the output indicates the RFC 8365 VXLAN
 encapsulation extended community is present.
+
+`rustbgpctl evpn nexthops` is the rustbgpd-owned view of ADR-0059
+aliasing ECMP state. Compare its `group-id`, member `nexthop-id`s,
+and `mac-refs` against `ip nexthop show` / `bridge fdb show` when
+debugging multi-homed Type 2 forwarding.
 
 #### Inject a route from a controller
 

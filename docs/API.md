@@ -717,6 +717,30 @@ gRPC expose the same value as `originated_local_macs_count`; it counts
 MAC-only Type 2 routes currently originated by this daemon for the
 instance and accepted by the RIB.
 
+### List EVPN FDB nexthop groups
+
+ADR-0059 operator-visibility surface. Returns the Linux dataplane
+reconciler's owned FDB nexthop-group state: one row per group with
+VNI, ESI, Ethernet Tag, kernel group ID, per-VTEP member nexthop IDs,
+and MAC refs. The response also includes orphan tagged nexthop count,
+pending-delete count, and whether periodic drift recovery latched off
+after a permanent dump failure.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.EvpnService/ListEvpnNexthops
+```
+
+Or via CLI:
+
+```bash
+rustbgpctl evpn nexthops          # human format
+rustbgpctl evpn nexthops --json   # JSON output
+```
+
+Empty output is normal on RR-only deployments, single-homed VTEPs, or
+multi-homed VNIs with `apply_aliasing_ecmp = false`.
+
 ### List IP-VRFs / L3VNI tenants
 
 Gate 9 / ADR-0058 surface. Returns one row per `[[evpn_ip_vrfs]]`
