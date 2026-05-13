@@ -26,32 +26,44 @@
 //!   per-instance state.
 //! - [`diff::compute_diff`] — pure function that produces a [`Plan`]
 //!   of dataplane operations from `(desired, snapshot, last_applied,
-//!   probes)`. The heart of the crate; backed by 11 explicit case
-//!   tests in `src/diff.rs`.
+//!   probes)`. The heart of the crate; backed by case tests in
+//!   `src/diff.rs` covering both the single-dst path and the
+//!   FDB-NHG Pass 1b (ADR-0059).
 //! - [`DataplaneOp`] — what the actor asks the dataplane to apply.
 //! - [`enforcement::build_bum_enforcement_status`] — Gate 8b
-//!   observable split-horizon plan derivation. Resolves
-//!   `(ESI, VNI) -> DF role` intent into bridge / VXLAN /
-//!   CE-facing-port status rows, without mutating kernel filters.
+//!   split-horizon plan derivation. Resolves `(ESI, VNI) -> DF role`
+//!   intent into bridge / VXLAN / CE-facing-port status rows.
+//!   `apply_bum_enforcement = true` actually programs the kernel
+//!   filter; `false` (default) reports the plan only.
+//! - [`bum_filter`] — Gate 8b BUM-port flag-flip kernel primitive.
+//! - [`l3_diff`] — Gate 9 slice 6 transactional L3 ownership model
+//!   for symmetric Interface-less IRB (per-prefix install state +
+//!   shared kernel-neighbor / L3VXLAN-FDB refcount, value-aware
+//!   drift detection, four-phase apply ordering).
+//! - [`group_state`], [`nh_id_alloc`] — ADR-0059 FDB nexthop
+//!   group refcount state + tag-bit allocator (`VTEP_NH_TAG`
+//!   `0x3000_xxxx`, `NHG_TAG` `0x4000_xxxx`).
 //!
-//! ## Out of scope (Gate 7b)
+//! ## Out of scope
 //!
 //! - Creating or deleting bridge / VXLAN netdevs (ADR-0054 §4).
 //! - VLAN-aware bridges (ADR-0054 §4 — needs schema extension).
-//! - L3VNI / IRB / Type 5 dataplane.
-//! - Applying split-horizon / BUM suppression filters. Gate 8b's
-//!   first slice reports the desired enforcement plan only.
-//! - Local-MAC origination policy knobs. This crate emits *observations*
-//!   via [`rustbgpd_evpn::LocalMacObservation`]; the daemon/domain
-//!   originator consumes them for MAC-only Type 2 mobility. Sticky/static
-//!   MAC config, MAC-with-IP correlation, and anti-spoof policy remain
-//!   follow-ups.
+//! - Full RFC 9135 overlay-index IRB (Gate 9 ships the
+//!   Interface-less variant per RFC 9136 §4.4.2).
+//! - EVPN duplicate-MAC quarantine action.
+//! - Anti-spoof policy beyond the operator-facing `sticky_macs`
+//!   list (ADR-0056) and the same-AF projection invariant
+//!   (ADR-0059 §7).
 //!
 //! ## Reference
 //!
 //! - ADR-0054 (`docs/adr/0054-evpn-linux-dataplane-boundary.md`)
+//! - ADR-0057 (`docs/adr/0057-evpn-gate-8-observable-df-election.md`)
+//! - ADR-0058 (`docs/adr/0058-evpn-gate-9-irb-l3vni.md`)
+//! - ADR-0059 (`docs/adr/0059-evpn-aliasing-fdb-nexthop-groups.md`)
 //! - RFC 7432 — BGP MPLS-Based Ethernet VPN
 //! - RFC 8365 — Network Virtualization Overlay Solution Using EVPN
+//! - RFC 9136 — IP Prefix Advertisement (Type 5)
 //!
 //! [`DataplaneIntent`]: rustbgpd_evpn::DataplaneIntent
 

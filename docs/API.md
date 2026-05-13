@@ -570,14 +570,18 @@ Encapsulation extended community (tunnel-type=8) is attached
 automatically. Set `disable_vxlan_encap: true` for MPLS-over-GRE
 deployments. Phase 1 supports `route_type` 2 (MAC/IP) and 3 (IMET);
 Type 5 IP-Prefix injection is not exposed via the injection API.
-Native Gate 9 Type 5 origination from `[[evpn_ip_vrfs]]` ships in
-slice 6 PR A (#77): the daemon dumps kernel routes per IP-VRF
-`table_id`, classifies them (connected/static/manual only — routes
-installed by other routing daemons or whose output device is the
-L3 VXLAN are filtered), and originates a Type 5 per surviving prefix
-when the IP-VRF's readiness probe says `Ready`. Remote Type 5
-import + L3 FIB programming (kernel route + neighbor + L3VXLAN FDB)
-remain ahead in slice 6 PR B.
+Native Gate 9 Type 5 origination from `[[evpn_ip_vrfs]]` shipped in
+v0.18.0 (slice 6 PR A #77): the daemon dumps kernel routes per
+IP-VRF `table_id`, classifies them (connected/static/manual only —
+routes installed by other routing daemons or whose output device is
+the L3 VXLAN are filtered), and originates a Type 5 per surviving
+prefix when the IP-VRF's readiness probe says `Ready`. Remote
+Type 5 import + L3 FIB programming (kernel route + neighbor +
+L3VXLAN FDB) shipped in v0.18.0 (slice 6 PR B #78) through the
+transactional `L3OwnedState` model with four-phase apply ordering,
+Router MAC conflict detection, and foreign-state preservation;
+`RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast (#79) drives
+sub-second withdraw on tenant `ip addr del`.
 Native Type 1/4 multi-homing origination is driven by
 `[[ethernet_segments]]`; the injection API does not expose those route
 types yet (the RR still reflects them when received from peers).
@@ -677,6 +681,8 @@ boundaries.
 | RPC | Description |
 |-----|-------------|
 | `ListEvpnInstances` | List configured local EVPN instances sorted by VNI (vni, rd, route_targets, local_vtep_ip, optional bridge, advertise_svi_mac flag, originated_local_macs_count) |
+| `ListIpVrfs`        | List configured IP-VRFs / L3VNI tenants (name, l3vni, rd, route_targets, local_vtep_ip, router_mac, optional `evpn_instance` link, readiness state, originated_routes_count, installed_routes_count) — Gate 9 / ADR-0058 |
+| `GetIpVrf`          | Detail view of a single IP-VRF including the seven readiness predicates (`not_ready_reasons`) when `readiness_state != Ready` |
 
 Mutation (`AddEvpnInstance` / `DeleteEvpnInstance`) is still out of
 scope. With the kernel reconciler and originator now live (Gates
@@ -710,6 +716,38 @@ The human CLI includes `originated-local-macs=N` per instance. JSON and
 gRPC expose the same value as `originated_local_macs_count`; it counts
 MAC-only Type 2 routes currently originated by this daemon for the
 instance and accepted by the RIB.
+
+### List IP-VRFs / L3VNI tenants
+
+Gate 9 / ADR-0058 surface. Returns one row per `[[evpn_ip_vrfs]]`
+entry with the readiness verdict the EVPN reconcile actor most
+recently published, plus the Type 5 origination + install counters.
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.EvpnService/ListIpVrfs
+```
+
+Or via CLI:
+
+```bash
+rustbgpctl evpn vrfs                  # human format
+rustbgpctl evpn vrfs --json           # JSON output
+rustbgpctl evpn vrfs vrf1             # single-VRF detail (matches GetIpVrf)
+```
+
+### Get IP-VRF detail
+
+Returns the same row as `ListIpVrfs` plus, when `readiness_state` is
+not `Ready`, the `not_ready_reasons` list — one entry per failing
+ADR-0058 §3 predicate (e.g., `vrf_table_id_mismatch`,
+`l3vxlan_router_mac_mismatch`).
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"name": "vrf1"}' \
+  localhost:50051 rustbgpd.v1.EvpnService/GetIpVrf
+```
 
 ---
 

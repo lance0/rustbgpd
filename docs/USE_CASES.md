@@ -605,15 +605,19 @@ thousands of VTEPs, and gives you structured observability.
   production until the churn soak closes.
 - **VXLAN data plane** — kernel VXLAN interfaces + bridge setup is the
   VTEP's job.
-- **IRB / L3VNI / Type 5 dataplane** — Gate 9 readiness chain
-  (ADR-0058) is in flight on `main`: `[[evpn_ip_vrfs]]` config
-  schema, pure-logic Type 5 origination + projection helpers, the
-  IP-VRF readiness probe, Linux IP-VRF / L3 VXLAN netlink dumps,
-  and `Dataplane::probe_ip_vrfs` are landed. Type 5 origination
-  on the wire and FIB programming through the reconciler are still
-  ahead. rustbgpd preserves Type 2 `label2` and the Router MAC ext
-  community across reflection today but doesn't interpret them for
-  IRB.
+- **IRB / L3VNI / Type 5 dataplane** — Gate 9 symmetric
+  Interface-less IRB shipped end-to-end in v0.18.0 (ADR-0058):
+  `[[evpn_ip_vrfs]]` config schema, `IpVrfStatus` readiness probe,
+  Linux IP-VRF / L3 VXLAN netlink dumps, `Dataplane::probe_ip_vrfs`,
+  per-IP-VRF kernel-route observation with conservative classifier,
+  Type 5 origination via `RibUpdate::InjectEvpn`, remote import +
+  L3 FIB programming through the transactional `L3OwnedState` model
+  with four-phase apply ordering, sub-second
+  `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn vrfs` CLI +
+  `ListIpVrfs`/`GetIpVrf` gRPC, M39 manual smoke against FRR 10.3.1.
+  ADR-0059 (post-v0.18.0) adds receive-path aliasing-ECMP via FDB
+  nexthop groups (slices 1-4 + M40 FRR-validated). Still ahead:
+  RFC 9135 overlay-index IRB.
 
 **Why the API-first shape matters for DC fabric:**
 
@@ -669,16 +673,15 @@ measurement path.
   followed with ESI-aware Type 2 origination, RFC 7432 §14 aliasing
   receive-side projection, RFC 7432 §8.4 mass-withdraw filtering,
   and opt-in kernel BUM-port enforcement (RFC 7432 §8.5) gated
-  behind `apply_bum_enforcement`. **Gate 9 readiness chain** is in
-  flight on `main`: `[[evpn_ip_vrfs]]` config schema, pure-logic
-  Type 5 origination + projection helpers, IP-VRF readiness probe,
-  Linux IP-VRF / L3 VXLAN netlink dumps, and `Dataplane::probe_ip_vrfs`
-  plumbed through `DataplaneIntent` — Type 5 origination on the wire
-  and FIB programming through the reconciler are still ahead. VTEPs
-  (SONiC / FRR leaves) still cover MAC-with-IP via ARP/ND
-  suppression (Gate 7b+2 in rustbgpd; alpha-supported under the
-  FRR-style replace model) and symmetric IRB / L3VNI dataplane
-  (Gate 9 remaining slices, RFC 9135). See
+  behind `apply_bum_enforcement`. **Gate 9 symmetric Interface-less
+  IRB shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]` config
+  schema, IP-VRF readiness probe, Type 5 origination + remote
+  import + L3 FIB programming through the transactional
+  `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast,
+  `rustbgpctl evpn vrfs` CLI, M39 manual smoke. **ADR-0059**
+  (post-v0.18.0) adds receive-path aliasing-ECMP via FDB nexthop
+  groups (slices 1-4 + M40 FRR-validated). Still ahead: full
+  RFC 9135 overlay-index IRB. See
   [docs/evpn-enablement.md](evpn-enablement.md)
   for the full gate ladder and
   [docs/evpn-alpha-soak.md](evpn-alpha-soak.md) for the residual
@@ -775,19 +778,21 @@ Be honest about where rustbgpd isn't the right tool:
   ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side
   projection, RFC 7432 §8.4 mass-withdraw filtering, and opt-in
   kernel BUM-port enforcement (RFC 7432 §8.5) behind
-  `apply_bum_enforcement`. **Gate 9 readiness chain** is in flight
-  on `main`: `[[evpn_ip_vrfs]]`, pure-logic Type 5 origination +
-  projection, IP-VRF readiness probe, Linux IP-VRF / L3 VXLAN
-  netlink dumps, and `Dataplane::probe_ip_vrfs`. **Still missing
-  for full VTEP parity:** Type 5 origination on the wire and Type 5
-  FIB programming through the reconciler (remaining Gate 9 slices);
-  aliasing dataplane ECMP; 24 h multi-homing churn soak before
-  enabling BUM enforcement by default; optional import-side
-  ES-Import RT filtering; symmetric IRB (Gate 9, RFC 9135); and
-  duplicate-MAC quarantine action (ADR-0055 §9). For a single-homed
-  L2VNI fabric where IRB isn't load-bearing, rustbgpd is a fit
-  today; full FRR-equivalent VTEP coverage closes in the remaining
-  Gate 9 slices.
+  `apply_bum_enforcement`. **Gate 9 symmetric Interface-less IRB
+  shipped end-to-end in v0.18.0**: `[[evpn_ip_vrfs]]`, IP-VRF
+  readiness probe, Type 5 origination + remote import + L3 FIB
+  programming through the transactional `L3OwnedState` model,
+  sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn
+  vrfs` CLI, M39 manual smoke. **ADR-0059** (post-v0.18.0) adds
+  receive-path aliasing-ECMP via FDB nexthop groups (slices 1-4 +
+  M40 FRR-validated). **Still missing for full VTEP parity:**
+  RFC 9135 overlay-index IRB; MAC-churn variant of the Gate 8b
+  24h soak before enabling BUM enforcement by default; optional
+  import-side ES-Import RT filtering; auto-derived RTs (RFC 8365
+  §5.1.2.1); duplicate-MAC quarantine action (ADR-0055 §9). For a
+  single-homed L2VNI fabric without overlay-index IRB
+  requirements, rustbgpd is a fit today; full FRR-equivalent VTEP
+  coverage closes when RFC 9135 overlay-index IRB ships.
 - **VPLS fabrics** — No RFC 4761 VPLS address family support.
 - **Service provider core** — No Confederation (RFC 5065), no labeled unicast,
   no VPNv4/v6. Use FRR or commercial NOS.

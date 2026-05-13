@@ -617,18 +617,26 @@ session machinery:
 > wakeups. Gate 8/8b adds alpha multi-homing execution: DF election,
 > Type 1/4 origination, opt-in BUM suppression, ESI-aware Type 2
 > origination, aliasing projection, and receive-side mass-withdraw
-> filtering. Gate 9 foundation has landed for symmetric IRB
-> (RFC 9136 §4.4.2): `[[evpn_ip_vrfs]]` config schema +
-> `[[evpn_instances]].ip_vrf` binding, the pure-logic IP-VRF
-> readiness probe, and Linux netlink dumps consumed by the
-> reconcile actor (logs Ready / NotReady transitions per
-> `(name, L3VNI)`). Still ahead in Gate 9: Type 5 origination,
-> Type 5 FIB programming, the matching `rustbgpctl evpn vrfs` CLI
-> surface, and the M39 containerlab smoke. Other gaps: aliasing
-> dataplane ECMP and production-default multi-homing enforcement
-> after soak. See [`evpn-enablement.md`](evpn-enablement.md) for the
-> gate ladder, [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the
-> residual alpha-confidence checklist, and
+> filtering. **Gate 9** ships symmetric Interface-less IRB
+> end-to-end in v0.18.0 (RFC 9136 §4.4.2 / ADR-0058):
+> `[[evpn_ip_vrfs]]` config schema + `[[evpn_instances]].ip_vrf`
+> binding, `IpVrfStatus` readiness probe, Linux VRF / L3VXLAN
+> netlink dumps, per-IP-VRF kernel-route observation with
+> conservative classifier, Type 5 origination via
+> `RibUpdate::InjectEvpn` gated on readiness, remote import + L3
+> FIB programming through a transactional `L3OwnedState` model,
+> `RTNLGRP_IPV4/IPV6_ROUTE` multicast for sub-second withdraw,
+> `ListIpVrfs`/`GetIpVrf` gRPC + `rustbgpctl evpn vrfs` CLI,
+> M39 manual containerlab smoke. **ADR-0059** (post-v0.18.0)
+> adds receive-path aliasing-ECMP via FDB nexthop groups
+> (slices 1-4, M40 FRR-validated). Still ahead: MAC-churn variant
+> of the Gate 8b 24h soak before flipping `apply_bum_enforcement`
+> default to `true`; RFC 9135 overlay-index IRB; auto-derived RTs;
+> ADR-0059 slice 3.5 knobs (operator off-switch, periodic drift
+> recovery, IPv6 alias members). See
+> [`evpn-enablement.md`](evpn-enablement.md) for the gate ladder,
+> [`evpn-alpha-soak.md`](evpn-alpha-soak.md) for the residual
+> alpha-confidence checklist, and
 > [`evpn-vtep-troubleshooting.md`](evpn-vtep-troubleshooting.md) for
 > the operator runbook.
 

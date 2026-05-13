@@ -711,9 +711,23 @@ for the architectural record.
   counters shipped, action deferred per ADR-0055 §9), runtime
   mutation RPCs (`AddEvpnInstance` / `DeleteEvpnInstance`).
   Tracked in [docs/evpn-alpha-soak.md](evpn-alpha-soak.md).
-- **Symmetric IRB semantics** (RFC 9135) — still deferred. `label2`
-  and Router MAC are preserved across reflection but not yet
-  interpreted on the dataplane.
+- **Symmetric Interface-less IRB** (RFC 9136 §4.4.2) — shipped
+  end-to-end in v0.18.0 (Gate 9 slice 6 PR A #77 origination +
+  PR B #78 import/install + PR #79 sub-second route-event
+  refresh + M39 manual smoke). `label2` and Router MAC are now
+  interpreted: Router MAC is operator-supplied via
+  `[[evpn_ip_vrfs]].router_mac`, `label2` carries the L3VNI on
+  origination, and remote Type 5 import maps `(L3VXLAN ifindex,
+  router_mac)` to the next-hop's L3 neighbor + L3VXLAN FDB rows
+  with conflict detection. Full RFC 9135 overlay-index IRB
+  remains deferred.
+- **ADR-0059 EVPN aliasing dataplane via FDB nexthop groups** —
+  shipped on `main` post-v0.18.0 across slices 1-4 + M40 manual
+  smoke (PRs #84/#86/#87/#88/#89). Multi-homed Type 2 routes
+  program FDB nexthop groups via `NDA_NH_ID` / `NHA_FDB` on the
+  receive path; FRR-validated against EVPN-MH 10.3.1.
+  Slice 3.5 deferred follow-ups: operator off-switch, periodic
+  drift recovery, IPv6 alias members.
 - **Type 5 / Type 1 / Type 4 origination via gRPC** — still
   deferred. Native Type 1/4 origination ships through
   `[[ethernet_segments]]`; controller injection for those route

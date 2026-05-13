@@ -1,6 +1,6 @@
 # EVPN Enablement Roadmap
 
-Last updated: 2026-05-11
+Last updated: 2026-05-13
 
 Gate-by-gate plan for turning rustbgpd's Phase 1 EVPN Route Reflector into a
 production-ready control plane and, eventually, a VTEP-capable daemon.
@@ -37,14 +37,22 @@ record, [gobgp-parity.md](gobgp-parity.md) for the cross-daemon comparison.
 - **Gate 8/8b** adds active-active multi-homing alpha execution:
   DF election, Type 1/4 origination, opt-in BUM suppression,
   ESI-aware Type 2 origination, aliasing projection, and
-  receive-side mass-withdraw filtering. **Gate 9** expands into IRB;
-  the readiness chain has landed (`[[evpn_ip_vrfs]]` config schema,
-  pure-logic `IpVrfStatus` probe, Linux VRF + L3 VXLAN netlink
-  dumps, `Dataplane::probe_ip_vrfs` trait + Linux impl, plumbed
-  through `DataplaneIntent` with `Ready` ↔ `NotReady` transitions
-  logged). Type 5 origination + FIB programming and the operator-
-  facing `vrfs` CLI / gRPC surface are still ahead.
-  Remaining big investments are gated by operator demand and soak.
+  receive-side mass-withdraw filtering. **Gate 9** ships symmetric
+  Interface-less IRB end-to-end (v0.18.0): `[[evpn_ip_vrfs]]`
+  config schema, `IpVrfStatus` readiness probe (seven ADR-0058
+  §3 predicates), Linux VRF + L3 VXLAN netlink dumps,
+  `Dataplane::probe_ip_vrfs`, per-IP-VRF kernel-route observation
+  with conservative classifier, Type 5 origination via
+  `RibUpdate::InjectEvpn` gated on readiness, remote Type 5
+  import + L3 FIB programming through a transactional
+  `L3OwnedState` model, `RTNLGRP_IPV4/IPV6_ROUTE` multicast for
+  sub-second withdraw, `ListIpVrfs`/`GetIpVrf` gRPC +
+  `rustbgpctl evpn vrfs` CLI. ADR-0059 (post-v0.18.0) adds
+  receive-path aliasing-ECMP via FDB nexthop groups, validated
+  against FRR EVPN-MH by the M40 manual smoke. Remaining big
+  investments (overlay-index IRB / RFC 9135, production-default
+  multi-homing enforcement) are gated by operator demand and
+  the MAC-churn variant of the Gate 8b soak.
 
 ## Current Position
 
@@ -416,7 +424,7 @@ flow that Gate 7b's foundation left as a stub.
 | Task | File / location |
 |------|----------------|
 | MAC duplication detection (RFC 7432 §15.1 M=180s/N=5 quarantine action) — detection counters shipped; the operator-facing escalation channel and quarantine action are deferred per ADR-0055 §9 | `crates/evpn/src/origination.rs` (extend) |
-| Type 5 IP Prefix origination per L3VNI | (Gate 9 — pure-logic origination/projection helpers landed in `[Unreleased]`; daemon-side wiring + FIB programming still ahead) |
+| Type 5 IP Prefix origination per L3VNI | ✅ Gate 9 slice 6 (v0.18.0) — kernel-route observation, `IpVrfStatus`-gated origination via `RibUpdate::InjectEvpn`, remote import + transactional L3 FIB programming (`L3OwnedState`), Router MAC conflict detection, four-phase apply ordering, foreign-state preservation. `RTNLGRP_IPV4/IPV6_ROUTE` multicast added sub-second withdraw on tenant `ip addr del`. |
 | Mutation surface (`AddEvpnInstance` / `DeleteEvpnInstance`) | `crates/api/src/evpn_service.rs` |
 | Kernel VXLAN interface config generator? | ops question — maybe not |
 
@@ -507,11 +515,15 @@ Shipped pieces:
    carry that segment's ESI. Config rejects a VNI shared across
    multiple local segments until learned-port-to-ESI disambiguation
    is plumbed.
-5. **Aliasing receive-side projection** — the dataplane projection
-   combines non-zero-ESI Type 2 routes with EAD-per-EVI routes and
-   populates `RemoteMacEntry::alias_vtep_ips` with backup VTEPs.
-   The Linux dataplane still programs only the primary `dst` per FDB
-   row; ECMP-to-multiple-VTEPs remains a kernel-side follow-up.
+5. **Aliasing receive-side projection + FDB-NHG dataplane** — the
+   projection layer combines non-zero-ESI Type 2 routes with
+   EAD-per-EVI routes and populates `RemoteMacEntry::alias_vtep_ips`
+   + `alias_group_key`. ADR-0059 wires the kernel side: multi-homed
+   Type 2 entries program an FDB nexthop group via `NDA_NH_ID` /
+   `NHA_FDB`, with members keyed by per-VTEP IP and the group
+   keyed by `(VNI, ESI, EthernetTag)`. Receive-path ECMP fans out
+   across every observed alias VTEP. M40 manual containerlab smoke
+   validates the end-to-end path against FRR EVPN-MH 10.3.1.
 6. **Mass-withdraw receive-side filter** — every supervisor pass
    snapshots EAD-per-ES routes and drops non-zero-ESI Type 2 routes
    whose `(origin VTEP next-hop, ESI)` is not active. This gives
@@ -520,11 +532,16 @@ Shipped pieces:
 
 Concrete remaining slices:
 
-1. **Privileged-runner 24 h soak validation** — synthetic DF flips,
-   MAC churn, and concurrent FDB programming before flipping
-   `apply_bum_enforcement` default to `true`.
-2. **Aliasing dataplane forwarding** — consume `alias_vtep_ips` in
-   `LinuxDataplane` via `nexthop` groups or L3-route-based ECMP.
+1. **MAC-churn variant of the 24 h Gate 8b soak** — synthetic DF
+   flips with concurrent FDB programming before flipping
+   `apply_bum_enforcement` default to `true`. The baseline
+   BUM-state soak completed clean (see
+   `docs/soak-gate8b-24h-bum-state.md`).
+2. **ADR-0059 slice 3.5 follow-ups** — `apply_aliasing_ecmp`
+   operator off-switch, periodic `RTM_GETNEXTHOP` drift recovery
+   (forced NHG deletion doesn't emit `RTNLGRP_NEIGH`), and IPv6
+   alias members. The aliasing dataplane forwarding base is
+   shipped (slices 1-4, M40 green); these are operational knobs.
 3. **Optional import-side ES-Import RT filtering** — apply the
    ES-Import RT origination from Gate 8b prep on the daemon's own
    RIB import path so unrelated segments are filtered before they
@@ -540,15 +557,15 @@ above closes; enable it deliberately in labs or controlled trials.
 
 ### Gate 9 — Symmetric IRB (RFC 9135), adjacent standards
 
-Status: readiness chain landed in `[Unreleased]` · Type 5 origination
-+ FIB programming still ahead · Blockers cleared from Gate 7
+Status: end-to-end shipped in v0.18.0 · auto-derived RTs +
+overlay-index IRB (full RFC 9135) remain follow-ups
 
 Unlocks: L3 routing between EVPN tenants on the same VTEP under the
 RFC 9136 §4.4.2 symmetric Interface-less IRB model (matches FRR's
 default). Operator-supplied Router MAC, Type 2 + Type 5 coordination,
 L3VNI mapping.
 
-Shipped pieces (`[Unreleased]`):
+Shipped pieces (v0.18.0):
 
 - `[[evpn_ip_vrfs]]` TOML schema declares IP-VRF / L3VNI tenants
   with name, RD, RT list, local VTEP IP, operator-supplied Router
@@ -578,10 +595,10 @@ Shipped pieces (`[Unreleased]`):
 
 Still ahead:
 
-- Type 5 origination + FIB programming (consume the pure-logic
-  helpers from the daemon), M39 manual containerlab smoke
-  against FRR.
 - Auto-derived Route Targets (RFC 8365 §5.1.2.1).
+- Overlay-index IRB (RFC 9135 overlay-index model — Gate 9 ships
+  the Interface-less variant only).
+- Privileged-runner CI gate for the M39 + M40 manual smokes.
 
 Further out on this track:
 
@@ -603,7 +620,8 @@ Gate 6 (controller inject)      ── ✅ done   << full Phase 1 RR bundle comp
 Gate 7 (VTEP mode)               ── ✅ done
 Gate 8 (multi-homing foundation) ── ✅ done   << observable DF election, M38 smoke
 Gate 8b (multi-homing enforcement) ── ✅ alpha, opt-in
-Gate 9 (IRB, Type 5)             ── readiness chain landed; origination + FIB ahead
+Gate 9 (IRB, Type 5)             ── ✅ symmetric Interface-less IRB end-to-end (v0.18.0)
+ADR-0059 (aliasing FDB-NHG)      ── ✅ shipped (slices 1-4); M40 FRR-validated
 Gate 9+ (MVPN, PBB, MPLS)        ── furthest horizon
 ```
 
@@ -630,8 +648,7 @@ did not take on:
 
 - VTEP mode (landed across Gates 7a/7b/7b+1/7b+2/7c)
 - DF election execution (landed in Gate 8; enforcement alpha in Gate 8b)
-- Symmetric IRB semantics (Gate 9 — readiness chain landed; Type 5
-  origination + FIB programming still ahead)
+- Symmetric Interface-less IRB semantics (Gate 9, v0.18.0 — end-to-end shipped)
 - Auto-derivation of Route Targets
 - PBB-EVPN (RFC 7623)
 - EVPN-MVPN (RFC 9251)

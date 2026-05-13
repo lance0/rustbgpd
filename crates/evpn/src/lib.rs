@@ -40,12 +40,25 @@
 //!   collisions between two instances using the same Route
 //!   Distinguisher.
 //!
+//! IP-VRF / Gate 9 symmetric IRB types:
+//!
+//! - [`ip_vrf::IpVrf`] / [`ip_vrf::IpVrfTable`] — declared
+//!   IP-VRF tenants with VRF / L3VXLAN binding + operator-supplied
+//!   Router MAC (ADR-0058 §4). The `ip_vrf::readiness` probe
+//!   checks the seven ADR-0058 §3 predicates.
+//! - Pure-logic Type 5 origination + projection helpers
+//!   (RFC 9136 §4.4.2 Interface-less IRB) shipped in v0.18.0;
+//!   `RemoteIpPrefixTable` and `OriginatedIpPrefixRoute` flow
+//!   through `DataplaneIntent`.
+//!
 //! Dataplane boundary (consumed by `crates/evpn-linux` per
-//! ADR-0054):
+//! ADR-0054 / ADR-0058 / ADR-0059):
 //!
 //! - [`RemoteMacTable`] / [`DataplaneIntent`] / [`DataplaneReport`].
 //!   Portable domain surface; the kernel-side reconciler lives in
 //!   `crates/evpn-linux`. This crate stays kernel-free.
+//!   `RemoteMacEntry` carries `alias_vtep_ips` + `alias_group_key`
+//!   for ADR-0059 aliasing-ECMP wire intent.
 //!
 //! Origination state machines (pure deterministic, RFC 7432 §15.1
 //! mobility sequencing):
@@ -57,12 +70,21 @@
 //! - [`LocalEsOriginator`], [`LocalEadPerEsOriginator`],
 //!   [`LocalEadPerEviOriginator`] — Type 4 ES and Type 1 EAD
 //!   origination state machines for Gate 8 multi-homing.
+//! - `ip_vrf::originate_ip_prefix_route` — pure helper for Type 5
+//!   construction (the daemon's `evpn_l3_originator` task drives
+//!   it under `IpVrfStatus::Ready`).
+//!
+//! Other modules: `aliasing` (canonical alias VTEP set per
+//! `RemoteMacEntry`), `df_election` (Gate 8 RFC 7432 §8.5),
+//! `label_allocator` (Gate 8b per-ESI EVPN label),
+//! `mass_withdraw` (Gate 8b RFC 7432 §8.4 receive-side filter),
+//! `projection` (RIB → `RemoteMacTable` with same-AF
+//! invariant enforcement).
 //!
 //! Type 3 IMET origination is implemented in the daemon binary
 //! (`src/evpn_imet.rs`) rather than here because it depends on the
 //! wire encoder; the domain shape is captured by [`EvpnInstance`]
-//! alone. Type 5 (IP-Prefix) origination remains a follow-up tracked
-//! in `docs/evpn-enablement.md`.
+//! alone.
 
 #![deny(unsafe_code)]
 #![deny(clippy::all)]
