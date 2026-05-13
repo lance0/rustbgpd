@@ -683,11 +683,24 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // Marks `adoption_done` only on a fully-clean cleanup: no
         // apply failures, no NHG suppression, every staged
         // stale-delete succeeded. Otherwise next pass retries.
-        if !self.state.adoption_done && failed.is_empty() {
+        // Track whether adoption flipped to `true` *this* pass — the
+        // first drift cycle has to wait one full `periodic_dump`
+        // interval after that, otherwise we'd issue a second
+        // `dump_owned_nexthops()` netlink call on top of the startup
+        // adoption dump in the same reconcile pass.
+        let adoption_flipped_this_pass = !self.state.adoption_done && failed.is_empty() && {
             let cleanup_ok = self.cleanup_unreferenced_adoptions(&snapshot).await;
             if cleanup_ok {
                 self.state.adoption_done = true;
             }
+            cleanup_ok
+        };
+        if adoption_flipped_this_pass {
+            // Seed `last_drift_check` so the gate (elapsed >=
+            // periodic_dump) defers the first drift cycle by one
+            // interval instead of firing immediately on top of the
+            // startup dump.
+            self.state.last_drift_check = Some(Instant::now());
         }
 
         // ADR-0059 slice 3.5 PR 2: steady-state drift recovery.
@@ -707,13 +720,15 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
         // startup adoption + cleanup. Gated by an elapsed-time check
         // so unrelated reconcile triggers (intent change, kernel
         // event) don't push extra netlink dumps onto the actor.
-        if self.state.adoption_done {
+        // `last_drift_check` advances only when the dump succeeds —
+        // a transient `dump_owned_nexthops` failure must not
+        // postpone the next attempt by a full interval.
+        if self.state.adoption_done && !adoption_flipped_this_pass {
             let due = self
                 .state
                 .last_drift_check
                 .is_none_or(|t| t.elapsed() >= self.config.periodic_dump);
-            if due {
-                self.reconcile_drift(&snapshot).await;
+            if due && self.reconcile_drift(&snapshot).await {
                 self.state.last_drift_check = Some(Instant::now());
             }
         }
@@ -1247,8 +1262,14 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
     /// integrity is preserved end-to-end — we never release a slot
     /// before the kernel confirms the delete (the
     /// `try_del_and_release_alloc` invariant from slice 3b).
+    ///
+    /// Returns `true` when the dump succeeded (caller advances
+    /// `last_drift_check`), `false` on a transient/permanent dump
+    /// failure (caller leaves `last_drift_check` alone so the next
+    /// reconcile pass re-attempts immediately rather than waiting
+    /// a full `periodic_dump` interval).
     #[allow(clippy::too_many_lines)]
-    async fn reconcile_drift(&mut self, snapshot: &KernelSnapshot) {
+    async fn reconcile_drift(&mut self, snapshot: &KernelSnapshot) -> bool {
         use crate::dataplane::KernelNexthopKind;
         use crate::nh_id_alloc::NhIdAllocator;
 
@@ -1260,7 +1281,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                     error = %e,
                     "drift: dump_owned_nexthops failed; deferring this drift cycle"
                 );
-                return;
+                return false;
             }
         };
         let actual_by_id: BTreeMap<u32, crate::dataplane::KernelNexthop> =
@@ -1397,15 +1418,30 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             if self.state.adopted_unreferenced.contains_key(&id) {
                 continue;
             }
-            if let Ok(()) = self.state.nh_id_alloc.reserve(id) {
-                self.state.adopted_unreferenced.insert(id, nh);
-                adopted_any = true;
+            match self.state.nh_id_alloc.reserve(id) {
+                Ok(()) => {
+                    self.state.adopted_unreferenced.insert(id, nh);
+                    adopted_any = true;
+                }
+                Err(e) => {
+                    // Allocator rejected: the ID's high-nibble
+                    // doesn't match our tag space (foreign tag), or
+                    // its bitmap slot is outside `NH_ID_MAX`, or a
+                    // prior pass already reserved it. The first two
+                    // cases are operator-visible drift that we can't
+                    // adopt-and-cleanup ourselves; log so they
+                    // surface in operator runs instead of silently
+                    // hanging around in the kernel forever.
+                    tracing::warn!(
+                        ?e,
+                        id,
+                        "drift: untracked tagged NHID could not be reserved; \
+                         operator intervention may be required (rustbgpd cannot \
+                         take ownership of kernel-orphaned IDs outside its \
+                         reservable range)"
+                    );
+                }
             }
-            // else: allocator rejected (already reserved, foreign
-            // tag, or out-of-range bitmap slot). Skip — either a
-            // prior drift pass got there first, or the ID is
-            // outside our reservable range and needs operator
-            // intervention.
         }
         if adopted_any {
             // Give cleanup_unreferenced_adoptions a turn next pass.
@@ -1415,6 +1451,7 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
                 "drift: discovered untracked tagged NHIDs; queued for adoption cleanup"
             );
         }
+        true
     }
 
     /// On successful apply, mirror state into `owned` so the next

@@ -1454,8 +1454,8 @@ async fn drift_recovery_deletes_untracked_tagged_group_without_fdb_ref() {
 
     // Inject a *new* stale tagged group after adoption_done is set —
     // this is the steady-state drift case PR 2 was added for. The ID
-    // sits inside the allocator's reservable range (`NH_ID_MAX`
-    // currently 8192) so drift recovery can reserve + cleanup.
+    // sits inside the allocator's reservable bitmap range (matches
+    // FRR's `EVPN_NH_ID_MAX`) so drift recovery can reserve + cleanup.
     let drift_id: u32 = 0x4000_0BAE;
     h.handle.pre_load_nexthop_op(KernelNexthop {
         id: drift_id,
