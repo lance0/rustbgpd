@@ -133,15 +133,22 @@ pub fn compute_diff(
             continue;
         }
 
-        // Decide single-dst vs FDB-NHG path. The portable intent
-        // (`alias_group_key`) carries `(ESI, EthernetTag)` per slice
-        // 1; the Linux-owned key adds VNI per ADR-0059 §7's
-        // `share_l2_nhg` default-off. ADR-0059 slice 3.5 adds the
-        // per-instance `apply_aliasing_ecmp` off-switch: any VNI
-        // whose `EvpnInstance.apply_aliasing_ecmp` is `false` routes
-        // multi-homed entries through the single-dst path. VNIs
-        // absent from `instances` default to enabled (the production
-        // posture).
+        // Decide single-dst vs FDB-NHG path on three dimensions:
+        //   - `alias_group_key`: Some(_) when the wire intent
+        //     carries a multi-homed `(ESI, EthernetTag)` group key
+        //     (slice 1).
+        //   - `all_v4`: false when any alias / primary is IPv6.
+        //     Slice 2 `NexthopSocket` rejects v6 gateways, so the
+        //     FDB-NHG path can't handle it yet — diff degrades to
+        //     single-dst at the primary VTEP and records the key
+        //     so the reconcile actor can warn once per
+        //     enter-fallback transition.
+        //   - `aliasing_enabled`: false when the operator set
+        //     `apply_aliasing_ecmp = false` for this VNI (slice
+        //     3.5 PR 1 off-switch). When the operator turned it
+        //     off, there's no IPv6 fallback to warn about — the
+        //     dispatch is just "go to single-dst", same as
+        //     single-homed.
         let aliasing_enabled = instances.get(vni).is_none_or(|i| i.apply_aliasing_ecmp);
         match (entry.alias_group_key, all_v4(entry), aliasing_enabled) {
             (Some(portable_key), true, true) => {
@@ -161,14 +168,16 @@ pub fn compute_diff(
                     &mut deletes,
                 );
             }
-            (Some(_), false, _) => {
-                // IPv6 fallback — slice 2 `NexthopSocket` rejects v6
-                // gateways. Diff degrades to single-dst (primary VTEP
-                // only). Record the key so the reconcile actor can
-                // warn on the *enter-fallback* transition (the warn
-                // itself moved out of compute_diff because firing it
-                // every pass produces sustained log spam for stable
-                // configurations).
+            (Some(_), false, true) => {
+                // IPv6 fallback — alias-aware *and* aliasing is
+                // enabled, but at least one alias is IPv6. The
+                // FDB-NHG path can't program v6 gateways in slice
+                // 2; record so the actor warns once on the
+                // transition into fallback. NOT reached when
+                // `aliasing_enabled = false` (the off-switch
+                // arm handles all multi-homed entries on that VNI
+                // regardless of family — no misleading IPv6 warn
+                // when the operator intentionally disabled aliasing).
                 ipv6_alias_fallback_keys.insert((vni, mac));
                 emit_single_dst_pass(
                     vni,
@@ -181,17 +190,21 @@ pub fn compute_diff(
                     &mut deletes,
                 );
             }
-            (Some(_), true, false) | (None, _, _) => {
-                // Single-homed path — or multi-homed with the
-                // operator off-switch flipped on this VNI. The
-                // `FdbNhg → SingleDst` transition is handled inside
-                // `emit_single_dst_pass` via `last_applied` lookup,
-                // so the diff converges cleanly *if* the instance
-                // table ever mutates at runtime. Today the instance
-                // table is pinned at startup (`[[evpn_instances]]`
-                // reload reverts edits) — the transition only fires
-                // across a daemon restart that takes the flip via
-                // the startup config snapshot.
+            _ => {
+                // Catch-all single-dst:
+                //   - (None, _, _) — single-homed entry, slice 1 shape.
+                //   - (Some(_), _, false) — multi-homed entry on a VNI
+                //     with the operator off-switch flipped. Same path
+                //     as single-homed; no fallback record. The
+                //     `FdbNhg → SingleDst` transition (when last_applied
+                //     carries FdbNhg) is handled inside
+                //     `emit_single_dst_pass` via `last_applied` lookup,
+                //     so the diff converges cleanly *if* the instance
+                //     table ever mutates at runtime. Today the table
+                //     is pinned at startup (`[[evpn_instances]]`
+                //     reload reverts edits) — the transition only
+                //     fires across a daemon restart that takes the
+                //     flip via the startup config snapshot.
                 emit_single_dst_pass(
                     vni,
                     mac,
@@ -1537,6 +1550,66 @@ mod tests {
                 .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
             "unknown VNI must default to aliasing-enabled (InstallFdbNhg expected), got {:?}",
             plan.ops,
+        );
+    }
+
+    #[test]
+    fn apply_aliasing_ecmp_false_with_ipv6_alias_does_not_record_fallback() {
+        // Multi-homed entry with an IPv6 alias on a VNI whose
+        // `apply_aliasing_ecmp = false` → routes through single-dst
+        // BUT must NOT record the (VNI, MAC) into
+        // `ipv6_alias_fallback_keys`. The operator turned aliasing
+        // off; the reconcile actor would otherwise emit a
+        // misleading "IPv6 alias unsupported" warn even though the
+        // single-dst path was the intentional configuration.
+        let mut desired = RemoteMacTable::builder();
+        desired
+            .insert(
+                vni(100),
+                mac(1),
+                entry_multi_homed("10.0.0.2", &["2001:db8::1"], 7),
+            )
+            .unwrap();
+        let desired = desired.build();
+
+        let snapshot = KernelSnapshot::new();
+        let applied = OwnedSet::new();
+        let probes = ready_probes(&[vni(100)]);
+        let instances = instances_disabled(&[vni(100)]);
+
+        let plan = compute_diff(
+            &desired,
+            &snapshot,
+            &applied,
+            &probes,
+            &GroupOwnedMap::new(),
+            &instances,
+        );
+
+        assert!(
+            plan.ops.iter().any(|o| matches!(
+                o,
+                DataplaneOp::AddRemoteFdb { vni: v, mac: m, dst, .. }
+                    if *v == vni(100) && *m == mac(1) && *dst == ip("10.0.0.2")
+            )),
+            "expected single-dst AddRemoteFdb at the primary VTEP, got {:?}",
+            plan.ops,
+        );
+        assert!(
+            !plan
+                .ops
+                .iter()
+                .any(|o| matches!(o, DataplaneOp::InstallFdbNhg { .. })),
+            "off-switch must skip FDB-NHG install: {:?}",
+            plan.ops,
+        );
+        // The key invariant this test pins: no entry in the IPv6
+        // fallback set, even though one of the aliases is IPv6.
+        assert!(
+            plan.ipv6_alias_fallback_keys.is_empty(),
+            "off-switch must not record a misleading IPv6 fallback warning; \
+             got fallback keys: {:?}",
+            plan.ipv6_alias_fallback_keys,
         );
     }
 }
