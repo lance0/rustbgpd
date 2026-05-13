@@ -11,6 +11,32 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **ADR-0059 slice 4 — M40 manual containerlab smoke against FRR
+  EVPN-MH.** First end-to-end validation that rustbgpd consumes
+  real FRR Type 1 EAD-per-EVI + Type 2 routes from a shared
+  Ethernet Segment and programs an FDB nexthop group via
+  `NDA_NH_ID` on the receiving VTEP. Gating evidence for flipping
+  aliasing-ECMP from "shipped, kernel-primitive smoke green" to
+  "production-default". Topology:
+  `tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml` — rustbgpd
+  VTEP observer ↔ 2× FRR VTEPs sharing ES1; FRR's bond-as-ES
+  shape via `tests/interop/scripts/start-frr-vtep-mh.sh` (reused
+  from M32). Driver
+  `tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh`
+  injects a test MAC on pe-a's ES bond and asserts on
+  `bridge fdb show` + `ip nexthop show`: the FDB row has a
+  decimal `nhid N`, `ip nexthop show` lists an `id N group X/Y …
+  fdb` line whose members resolve to pe-a's and pe-c's VTEP IPs,
+  and a clean teardown removes all three layers in ADR-0059 §5
+  invariant-2 order. Phase 2 of the driver exercises the
+  drain-to-single-dst transition the projection invariant
+  produces when an alias withdraws (`empty alias_vtep_ips ⇔
+  alias_group_key.is_none()` — N=2 → N=1 collapses to single-dst,
+  not "group with one member"). Manual / local only;
+  containerlab requires privileges the GitHub runner doesn't
+  carry. M39-style privileged-runner CI gate is the next
+  ROADMAP follow-up.
+
 - **ADR-0059 slice 3b — FDB nexthop group reconcile actor + diff
   Pass 1b + startup adoption.** Multi-homed Type 2 routes now
   program FDB nexthop groups in the kernel (RFC 7432 §14 aliasing
