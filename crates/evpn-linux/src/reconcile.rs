@@ -1489,11 +1489,13 @@ impl<D: Dataplane + crate::dataplane::NexthopOps> ReconcileActor<D> {
             }
         }
 
-        // (4) Untracked tagged NHIDs — fold into adopted_unreferenced.
-        //     The next reconcile pass's `cleanup_unreferenced_adoptions`
-        //     gate already re-runs whenever `failed.is_empty() && !adoption_done`,
-        //     so we also need to clear `adoption_done` to give it a turn
-        //     when we surface new orphans.
+        // (4) Untracked tagged NHIDs — fold into adopted_unreferenced
+        //     and run `cleanup_unreferenced_adoptions` IN-LINE below.
+        //     We don't clear `adoption_done`: doing so would reopen
+        //     the startup-adoption `dump_owned_nexthops` block on the
+        //     next reconcile pass and warn for every ID we just
+        //     reserved here. See the in-line cleanup call after this
+        //     loop.
         let mut adopted_any = false;
         for (id, nh) in actual_by_id {
             if tracked_ids.contains(&id) {

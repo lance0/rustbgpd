@@ -1515,21 +1515,19 @@ async fn drift_recovery_deletes_untracked_tagged_group_without_fdb_ref() {
         kind: KernelNexthopKind::Group { member_ids: vec![] },
     });
 
-    // First drift tick — folds drift_id into adopted_unreferenced.
+    // First drift tick — folds drift_id into adopted_unreferenced
+    // AND runs `cleanup_unreferenced_adoptions` in-line against the
+    // current snapshot. The snapshot has no FDB row referencing
+    // drift_id, so retention is empty and the cleanup deletes it
+    // on this pass.
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
     let _ = h.try_drain_reports().await;
 
-    // Second reconcile (kernel event) — `cleanup_unreferenced_adoptions`
-    // runs because drift cleared `adoption_done`; deletes the stale ID.
-    h.handle.push_event(KernelEvent::KernelStateChanged).await;
-    let _ = h.next_report().await;
-    let _ = h.try_drain_reports().await;
-
     assert!(
         !h.handle.nexthop_ops().contains_key(&drift_id),
-        "drift recovery should fold the stale ID into adoption set so the next pass deletes it; nhs={:?}",
+        "drift recovery folds + in-line-cleans untracked tagged NHIDs in one pass; nhs={:?}",
         h.handle.nexthop_ops()
     );
 
