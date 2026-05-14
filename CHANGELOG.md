@@ -41,6 +41,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustbgpctl` renders `65535:666` as `BLACKHOLE` in route community
   output.
 
+- **ADR-0061 general unicast FIB runtime actor.** Configured
+  `[[fib_tables]]` now start a default-off Linux route reconciler that
+  projects unicast Loc-RIB best routes into explicit non-reserved FIB
+  tables, preserves foreign kernel rows, drains daemon-owned rows on
+  shutdown, and exposes status through `RibService.ListFibRoutes`,
+  `rustbgpctl rib fib`, and Prometheus install / withdraw / reject /
+  kernel-failure counters. Empty `fib_tables` keeps the daemon
+  control-plane-only.
+
 - **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
   counters expose the periodic nexthop drift-recovery path without
   scraping logs: `evpn_fdb_nhg_drift_members_repaired_total`,

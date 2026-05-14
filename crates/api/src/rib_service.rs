@@ -19,10 +19,15 @@ use rustbgpd_wire::{Afi, AsPath, AsPathSegment, EvpnRoute, PathAttribute, Prefix
 pub type BlackholeDiscardSnapshotFn =
     std::sync::Arc<dyn Fn() -> Vec<proto::BlackholeDiscard> + Send + Sync + 'static>;
 
+/// Live snapshot provider for daemon-owned general FIB route status.
+pub type FibRouteSnapshotFn =
+    std::sync::Arc<dyn Fn() -> Vec<proto::FibRouteStatus> + Send + Sync + 'static>;
+
 /// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
     blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+    fib_route_snapshot: FibRouteSnapshotFn,
 }
 
 impl RibService {
@@ -32,17 +37,33 @@ impl RibService {
         Self {
             rib_tx,
             blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
+            fib_route_snapshot: std::sync::Arc::new(Vec::new),
         }
     }
 
     /// Create a RIB service with a live BLACKHOLE discard snapshot.
+    #[allow(dead_code)]
     pub fn with_blackhole_snapshot(
         rib_tx: mpsc::Sender<RibUpdate>,
         blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
     ) -> Self {
+        Self::with_status_snapshots(
+            rib_tx,
+            blackhole_discard_snapshot,
+            std::sync::Arc::new(Vec::new),
+        )
+    }
+
+    /// Create a RIB service with live kernel route status snapshots.
+    pub fn with_status_snapshots(
+        rib_tx: mpsc::Sender<RibUpdate>,
+        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+        fib_route_snapshot: FibRouteSnapshotFn,
+    ) -> Self {
         Self {
             rib_tx,
             blackhole_discard_snapshot,
+            fib_route_snapshot,
         }
     }
 
@@ -646,6 +667,15 @@ impl proto::rib_service_server::RibService for RibService {
     ) -> Result<Response<proto::ListBlackholeDiscardsResponse>, Status> {
         Ok(Response::new(proto::ListBlackholeDiscardsResponse {
             discards: (self.blackhole_discard_snapshot)(),
+        }))
+    }
+
+    async fn list_fib_routes(
+        &self,
+        _request: Request<proto::ListFibRoutesRequest>,
+    ) -> Result<Response<proto::ListFibRoutesResponse>, Status> {
+        Ok(Response::new(proto::ListFibRoutesResponse {
+            routes: (self.fib_route_snapshot)(),
         }))
     }
 
@@ -1302,6 +1332,46 @@ mod tests {
         assert_eq!(row.prefix_length, 32);
         assert_eq!(row.peer_address, "192.0.2.1");
         assert_eq!(row.state, proto::BlackholeDiscardState::Installed as i32);
+        assert_eq!(row.reason, "owned");
+    }
+
+    #[tokio::test]
+    async fn list_fib_routes_returns_live_snapshot() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_status_snapshots(
+            tx,
+            Arc::new(Vec::new),
+            Arc::new(|| {
+                vec![proto::FibRouteStatus {
+                    table_name: "edge".to_string(),
+                    table_id: 1000,
+                    metric: 200,
+                    prefix: "203.0.113.0".to_string(),
+                    prefix_length: 24,
+                    next_hop: "192.0.2.1".to_string(),
+                    peer_address: "198.51.100.1".to_string(),
+                    state: proto::FibRouteState::Installed as i32,
+                    reason: "owned".to_string(),
+                }]
+            }),
+        );
+
+        let resp = svc
+            .list_fib_routes(Request::new(proto::ListFibRoutesRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.routes.len(), 1);
+        let row = &resp.routes[0];
+        assert_eq!(row.table_name, "edge");
+        assert_eq!(row.table_id, 1000);
+        assert_eq!(row.metric, 200);
+        assert_eq!(row.prefix, "203.0.113.0");
+        assert_eq!(row.prefix_length, 24);
+        assert_eq!(row.next_hop, "192.0.2.1");
+        assert_eq!(row.peer_address, "198.51.100.1");
+        assert_eq!(row.state, proto::FibRouteState::Installed as i32);
         assert_eq!(row.reason, "owned");
     }
 

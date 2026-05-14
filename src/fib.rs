@@ -1,14 +1,14 @@
 //! Pure ADR-0061 general unicast FIB projection and diff model.
 //!
-//! This module intentionally has no runtime actor and no Linux netlink apply
-//! path. It translates configured `[[fib_tables]]` plus Loc-RIB best routes
-//! into desired kernel route intent, then compares that intent with daemon-owned
-//! and observed kernel state. The future Linux actor can consume the same
+//! This module intentionally keeps policy and ownership decisions separate from
+//! Linux netlink I/O. It translates configured `[[fib_tables]]` plus Loc-RIB
+//! best routes into desired kernel route intent, then compares that intent with
+//! daemon-owned and observed kernel state. The runtime actor consumes the same
 //! `FibPlan` shape without deciding ownership or foreign-route policy inline.
 
 #![allow(
     dead_code,
-    reason = "ADR-0061 Slice 2 deliberately lands the pure model before the runtime actor consumes it"
+    reason = "ADR-0061 keeps the pure FIB model usable from focused tests and runtime code"
 )]
 
 use std::cmp::Ordering;

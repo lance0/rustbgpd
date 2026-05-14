@@ -45,6 +45,10 @@ pub struct BgpMetrics {
     blackhole_discard_withdrawn: IntCounter,
     blackhole_discard_rejected: IntCounterVec,
     blackhole_discard_kernel_failures: IntCounterVec,
+    fib_routes_installed: IntCounter,
+    fib_routes_withdrawn: IntCounter,
+    fib_routes_rejected: IntCounterVec,
+    fib_kernel_failures: IntCounterVec,
 
     // ── Loop detection ─────────────────────────────────────────
     as_path_loop_detected: IntCounterVec,
@@ -245,6 +249,36 @@ impl BgpMetrics {
             Opts::new(
                 "bgp_blackhole_discard_kernel_failures_total",
                 "Kernel failures while applying RFC 7999 BLACKHOLE discard routes by action.",
+            ),
+            &["action"],
+        )
+        .expect("valid metric definition");
+
+        let fib_routes_installed = IntCounter::new(
+            "bgp_fib_routes_installed_total",
+            "General unicast FIB routes successfully installed or replaced.",
+        )
+        .expect("valid metric definition");
+
+        let fib_routes_withdrawn = IntCounter::new(
+            "bgp_fib_routes_withdrawn_total",
+            "Daemon-owned general unicast FIB routes successfully removed.",
+        )
+        .expect("valid metric definition");
+
+        let fib_routes_rejected = IntCounterVec::new(
+            Opts::new(
+                "bgp_fib_routes_rejected_total",
+                "General unicast FIB route candidates rejected before kernel install by reason.",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
+
+        let fib_kernel_failures = IntCounterVec::new(
+            Opts::new(
+                "bgp_fib_kernel_failures_total",
+                "Kernel failures while applying general unicast FIB routes by action.",
             ),
             &["action"],
         )
@@ -544,6 +578,18 @@ impl BgpMetrics {
             .register(Box::new(blackhole_discard_kernel_failures.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(fib_routes_installed.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(fib_routes_withdrawn.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(fib_routes_rejected.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(fib_kernel_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(as_path_loop_detected.clone()))
             .expect("metric not already registered");
         registry
@@ -644,6 +690,10 @@ impl BgpMetrics {
             blackhole_discard_withdrawn,
             blackhole_discard_rejected,
             blackhole_discard_kernel_failures,
+            fib_routes_installed,
+            fib_routes_withdrawn,
+            fib_routes_rejected,
+            fib_kernel_failures,
             as_path_loop_detected,
             rr_loop_detected,
             gr_active_peers,
@@ -795,6 +845,29 @@ impl BgpMetrics {
         self.blackhole_discard_kernel_failures
             .with_label_values(&[action])
             .inc();
+    }
+
+    /// Record a successful general unicast FIB route install or replace.
+    pub fn record_fib_route_installed(&self) {
+        self.fib_routes_installed.inc();
+    }
+
+    /// Record a successful daemon-owned general unicast FIB route removal.
+    pub fn record_fib_route_withdrawn(&self) {
+        self.fib_routes_withdrawn.inc();
+    }
+
+    /// Record a rejected general unicast FIB route candidate.
+    pub fn record_fib_route_rejected(&self, reason: &str) {
+        self.fib_routes_rejected.with_label_values(&[reason]).inc();
+    }
+
+    /// Record a kernel apply failure for general unicast FIB state.
+    ///
+    /// `action` is expected to be `setup`, `dump`, `install`,
+    /// `replace`, `remove`, or `unsupported_platform`.
+    pub fn record_fib_kernel_failure(&self, action: &str) {
+        self.fib_kernel_failures.with_label_values(&[action]).inc();
     }
 
     /// Record `AS_PATH` loop detection: increment by the number of rejected prefixes.
@@ -1100,6 +1173,27 @@ mod tests {
                 .get(),
             1
         );
+    }
+
+    #[test]
+    fn fib_route_counters_register_expected_labels() {
+        let m = BgpMetrics::new();
+        m.record_fib_route_installed();
+        m.record_fib_route_withdrawn();
+        m.record_fib_route_rejected("foreign_route_exists");
+        m.record_fib_kernel_failure("setup");
+        m.record_fib_kernel_failure("dump");
+
+        assert_eq!(m.fib_routes_installed.get(), 1);
+        assert_eq!(m.fib_routes_withdrawn.get(), 1);
+        assert_eq!(
+            m.fib_routes_rejected
+                .with_label_values(&["foreign_route_exists"])
+                .get(),
+            1
+        );
+        assert_eq!(m.fib_kernel_failures.with_label_values(&["setup"]).get(), 1);
+        assert_eq!(m.fib_kernel_failures.with_label_values(&["dump"]).get(), 1);
     }
 
     #[test]

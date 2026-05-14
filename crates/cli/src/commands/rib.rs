@@ -7,7 +7,8 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, BlackholeDiscardState, DeletePathRequest, ExplainAdvertisedRouteRequest,
-    ExplainBestPathRequest, ExplainDecision, ListBlackholeDiscardsRequest, ListRoutesRequest,
+    ExplainBestPathRequest, ExplainDecision, FibRouteState, ListBlackholeDiscardsRequest,
+    ListFibRoutesRequest, ListRoutesRequest,
 };
 use serde::Serialize;
 
@@ -89,6 +90,18 @@ struct JsonBlackholeDiscard {
     reason: String,
 }
 
+#[derive(Serialize)]
+struct JsonFibRouteStatus {
+    table_name: String,
+    table_id: u32,
+    metric: u32,
+    prefix: String,
+    next_hop: String,
+    peer_address: String,
+    state: String,
+    reason: String,
+}
+
 fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: bool) {
     if json {
         let out: Vec<JsonBlackholeDiscard> = discards
@@ -122,12 +135,63 @@ fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: b
     }
 }
 
+fn print_fib_routes(routes: &[crate::proto::FibRouteStatus], json: bool) {
+    if json {
+        let out: Vec<JsonFibRouteStatus> = routes
+            .iter()
+            .map(|r| JsonFibRouteStatus {
+                table_name: r.table_name.clone(),
+                table_id: r.table_id,
+                metric: r.metric,
+                prefix: format!("{}/{}", r.prefix, r.prefix_length),
+                next_hop: r.next_hop.clone(),
+                peer_address: r.peer_address.clone(),
+                state: fib_state_label(r.state).to_string(),
+                reason: r.reason.clone(),
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .expect("failed to serialize general FIB route list as JSON")
+        );
+    } else if routes.is_empty() {
+        println!("No general FIB routes");
+    } else {
+        println!(
+            "{:<16} {:<10} {:<43} {:<39} {:<10} Reason",
+            "Table", "Metric", "Prefix", "Next hop", "State"
+        );
+        println!("{}", "-".repeat(132));
+        for r in routes {
+            println!(
+                "{:<16} {:<10} {:<43} {:<39} {:<10} {}",
+                r.table_name,
+                r.metric,
+                format!("{}/{}", r.prefix, r.prefix_length),
+                r.next_hop,
+                fib_state_label(r.state),
+                r.reason
+            );
+        }
+    }
+}
+
 fn blackhole_state_label(state: i32) -> &'static str {
     match BlackholeDiscardState::try_from(state) {
         Ok(BlackholeDiscardState::Installed) => "installed",
         Ok(BlackholeDiscardState::Rejected) => "rejected",
         Ok(BlackholeDiscardState::Failed) => "failed",
         Ok(BlackholeDiscardState::Unspecified) | Err(_) => "unknown",
+    }
+}
+
+fn fib_state_label(state: i32) -> &'static str {
+    match FibRouteState::try_from(state) {
+        Ok(FibRouteState::Installed) => "installed",
+        Ok(FibRouteState::Rejected) => "rejected",
+        Ok(FibRouteState::Failed) => "failed",
+        Ok(FibRouteState::Unspecified) | Err(_) => "unknown",
     }
 }
 
@@ -495,6 +559,17 @@ pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliErr
     Ok(())
 }
 
+pub async fn fib(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_fib_routes(ListFibRoutesRequest {})
+        .await?
+        .into_inner();
+    print_fib_routes(&resp.routes, json);
+    Ok(())
+}
+
 pub async fn received(
     connection: Connection,
     address: &str,
@@ -647,6 +722,14 @@ mod tests {
         let connection = connect(&server.addr, None).await.unwrap();
 
         blackholes(connection, true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fib_calls_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        fib(connection, true).await.unwrap();
     }
 
     /// Pre-existing `best_route` and per-candidate `route` keys
