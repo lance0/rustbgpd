@@ -331,7 +331,7 @@ async fn reconcile_once<F>(
             Err(e) => {
                 metrics.record_fib_kernel_failure("dump");
                 warn!(error = %e, "failed to dump configured FIB tables");
-                status_tx.send_replace(failed_dump_statuses(owned, &e));
+                status_tx.send_replace(failed_dump_statuses(&intent, owned, &e));
                 return;
             }
         }
@@ -449,7 +449,7 @@ async fn drain_owned<F>(
         Err(e) => {
             metrics.record_fib_kernel_failure("dump");
             warn!(error = %e, "failed to dump configured FIB tables before shutdown drain");
-            status_tx.send_replace(failed_dump_statuses(owned, &e));
+            status_tx.send_replace(failed_dump_statuses(&FibIntent::default(), owned, &e));
             return;
         }
     };
@@ -614,18 +614,36 @@ fn table_name_for_key(config: &FibRuntimeConfig, key: FibRouteKey) -> String {
         )
 }
 
-fn failed_dump_statuses(owned: &FibOwnedState, error: &str) -> Vec<FibRuntimeStatus> {
-    owned
-        .routes
-        .values()
-        .map(|route| {
-            status_for_route(
+fn failed_dump_statuses(
+    intent: &FibIntent,
+    owned: &FibOwnedState,
+    error: &str,
+) -> Vec<FibRuntimeStatus> {
+    let reason = format!("dump_failed:{error}");
+    let mut out = Vec::new();
+    // Owned rows the current intent no longer covers — and, during a
+    // shutdown drain, every owned row, since `intent` is empty there.
+    for (key, route) in &owned.routes {
+        if !intent.routes.contains_key(key) {
+            out.push(status_for_route(
                 route,
                 FibRuntimeState::Failed,
-                format!("dump_failed:{error}"),
-            )
-        })
-        .collect()
+                reason.clone(),
+            ));
+        }
+    }
+    // Every desired route. Without this, a dump failure on the first
+    // reconcile — or for any best route not yet installed — would leave
+    // `ListFibRoutes` empty instead of surfacing the promised
+    // `dump_failed:*` per-route status.
+    for route in intent.routes.values() {
+        out.push(status_for_route(
+            route,
+            FibRuntimeState::Failed,
+            reason.clone(),
+        ));
+    }
+    out
 }
 
 fn failed_rib_query_statuses(owned: &FibOwnedState, reason: &str) -> Vec<FibRuntimeStatus> {
@@ -1457,6 +1475,26 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Failed);
         assert!(statuses[0].reason.contains("install_failed"));
+    }
+
+    #[tokio::test]
+    async fn dump_failure_reports_failed_status_for_desired_routes_with_empty_owned() {
+        // First reconcile: owned is empty. A dump failure must still
+        // surface the promised `dump_failed:*` per-route status for the
+        // desired route rather than leaving `ListFibRoutes` empty.
+        let mut fib = FakeFib {
+            fail_dump: Some("netlink unavailable".to_string()),
+            ..FakeFib::default()
+        };
+        let mut owned = FibOwnedState::default();
+
+        let statuses =
+            reconcile_for_test(vec![route(v4(24), ip("192.0.2.1"))], &mut fib, &mut owned).await;
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Failed);
+        assert!(statuses[0].reason.starts_with("dump_failed:"));
+        assert!(owned.routes.is_empty());
     }
 
     #[tokio::test]
