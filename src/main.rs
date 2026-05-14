@@ -32,6 +32,7 @@ mod peer_manager;
 mod policy_admin;
 
 use std::net::Ipv4Addr;
+use std::ops::Deref;
 use std::path::Path;
 use std::process;
 use std::sync::Arc;
@@ -959,9 +960,12 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     //   * `event_tx` — gRPC layer pushes per-mutation `ConfigEvent`s;
     //     the bridge applies each onto its locally held snapshot and
     //     then forwards a full `ReplaceConfig` to the persister.
-    //   * `bridge_replace_tx` — the SIGHUP path pushes the
-    //     authoritative reloaded snapshot. The bridge swaps it into
-    //     its locally held snapshot AND forwards to the persister.
+    //   * `bridge_replace_tx` — the SIGHUP path pushes the desired
+    //     reloaded TOML snapshot. The bridge swaps it into its
+    //     locally held snapshot and refreshes the persister base
+    //     without writing it back to disk. Runtime may stay pinned for
+    //     restart-required fields; disk must preserve the operator's
+    //     edit-then-restart intent.
     //
     // The replace path MUST go through the bridge (not directly to
     // the persister) so the bridge's snapshot stays consistent with
@@ -1553,7 +1557,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // post-reload sync. A SIGHUP that arrives while a reload is still
     // running is logged and dropped — the operator-facing back-pressure
     // surface.
-    let mut reload_in_flight: Option<tokio::task::JoinHandle<Option<Config>>> = None;
+    let mut reload_in_flight: Option<tokio::task::JoinHandle<Option<ReloadedConfig>>> = None;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -1846,6 +1850,26 @@ struct ReloadStepFailure {
     error: String,
 }
 
+#[derive(Clone)]
+struct ReloadedConfig {
+    runtime: Config,
+    desired: Config,
+}
+
+impl ReloadedConfig {
+    fn new(runtime: Config, desired: Config) -> Self {
+        Self { runtime, desired }
+    }
+}
+
+impl Deref for ReloadedConfig {
+    type Target = Config;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
 /// Send a single `PeerManagerCommand` and await its `Result<(), String>`
 /// reply. Maps both channel-send and dropped-reply errors to a single
 /// `String` so callers can record one structured failure per step.
@@ -1874,8 +1898,11 @@ async fn send_pm_step(
 ///     event is folded onto the bridge-held snapshot via
 ///     `apply_config_event`, then the full result is forwarded to
 ///     the persister as `ReplaceConfig`.
-///   * `bridge_replace_rx` — SIGHUP-reloaded snapshots. The bridge
-///     swaps its held snapshot AND forwards to the persister.
+///   * `bridge_replace_rx` — SIGHUP-reloaded desired snapshots. The
+///     bridge swaps its held snapshot and forwards a no-persist
+///     refresh to the persister so future gRPC mutations apply on top
+///     of the operator's edited TOML without writing a pinned runtime
+///     snapshot back to disk.
 ///
 /// Replacement is `biased` over events so a backlog of events
 /// cannot delay reload visibility — without this, an operator who
@@ -1894,40 +1921,56 @@ async fn run_config_bridge(
     initial: Config,
 ) {
     let mut current_config = initial;
+    let mut event_rx_open = true;
+    let mut bridge_replace_rx_open = true;
     loop {
+        if !event_rx_open && !bridge_replace_rx_open {
+            break;
+        }
+
         tokio::select! {
             biased;
-            replace = bridge_replace_rx.recv() => {
-                let Some(new_snapshot) = replace else { break; };
-                current_config = *new_snapshot;
-                if mutation_tx
-                    .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
-                    .await
-                    .is_err()
-                {
-                    break;
+            replace = bridge_replace_rx.recv(), if bridge_replace_rx_open => {
+                match replace {
+                    Some(new_snapshot) => {
+                        current_config = *new_snapshot;
+                        if mutation_tx
+                            .send(ConfigMutation::RefreshSnapshotNoPersist(Box::new(
+                                current_config.clone(),
+                            )))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    None => bridge_replace_rx_open = false,
                 }
             }
-            event = event_rx.recv() => {
-                let Some(event) = event else { break; };
-                if let Err(error) = apply_config_event(&mut current_config, &event) {
-                    error!(error = %error, "failed to apply config event before persistence");
-                    continue;
-                }
-                if mutation_tx
-                    .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
-                    .await
-                    .is_err()
-                {
-                    break;
+            event = event_rx.recv(), if event_rx_open => {
+                match event {
+                    Some(event) => {
+                        if let Err(error) = apply_config_event(&mut current_config, &event) {
+                            error!(error = %error, "failed to apply config event before persistence");
+                            continue;
+                        }
+                        if mutation_tx
+                            .send(ConfigMutation::ReplaceConfig(Box::new(current_config.clone())))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    None => event_rx_open = false,
                 }
             }
         }
     }
 }
 
-/// Forward a freshly reloaded `Config` to the peer manager and the
-/// config bridge, in that order. Returns the same `Config` on success
+/// Forward a freshly reloaded config to the peer manager and the
+/// config bridge, in that order. Returns the runtime `Config` on success
 /// so the caller can advance its in-memory snapshot in one step
 /// (`config = apply_reload_outcome(...).await?;`).
 ///
@@ -1940,11 +1983,12 @@ async fn run_config_bridge(
 /// first.
 ///
 /// The bridge — not a direct persister send — is the right
-/// destination for the reloaded snapshot. The bridge owns its own
-/// pre-persist snapshot that subsequent gRPC mutations apply to;
-/// bypassing it would leave that snapshot stale and the next mutation
-/// would overwrite the persisted file with the pre-reload snapshot
-/// plus that one mutation.
+/// destination for the reloaded desired snapshot. `reload_config`
+/// may pin restart-required fields back in the runtime snapshot, but
+/// the bridge/persister must refresh their base from the operator's
+/// edited TOML without writing the pinned runtime view back to disk.
+/// Otherwise an edit-then-restart workflow gets destroyed by SIGHUP
+/// and the next gRPC mutation applies to the wrong base.
 ///
 /// Both `Err` returns name the failing stage (`peer_mgr_snapshot` or
 /// `config_bridge`) so the caller's log line carries actionable
@@ -1959,24 +2003,24 @@ async fn run_config_bridge(
     reason = "uniform async caller signature in the SIGHUP path"
 )]
 async fn apply_reload_outcome(
-    new_config: Config,
+    reloaded: ReloadedConfig,
     peer_mgr_internal_tx: &mpsc::UnboundedSender<InternalCommand>,
     bridge_replace_tx: Option<&mpsc::UnboundedSender<Box<Config>>>,
 ) -> Result<Config, &'static str> {
     if peer_mgr_internal_tx
         .send(InternalCommand::ReplaceConfigSnapshot(Box::new(
-            new_config.clone(),
+            reloaded.runtime.clone(),
         )))
         .is_err()
     {
         return Err("peer_mgr_snapshot");
     }
     if let Some(tx) = bridge_replace_tx
-        && tx.send(Box::new(new_config.clone())).is_err()
+        && tx.send(Box::new(reloaded.desired.clone())).is_err()
     {
         return Err("config_bridge");
     }
-    Ok(new_config)
+    Ok(reloaded.runtime)
 }
 
 /// Reload configuration from disk and reconcile runtime state.
@@ -2011,14 +2055,15 @@ async fn reload_config(
     live_grpc_tcp: Option<&config::GrpcTcpListenerConfig>,
     live_grpc_uds: Option<&config::GrpcUdsListenerConfig>,
     peer_mgr_tx: &mpsc::Sender<PeerManagerCommand>,
-) -> Option<Config> {
-    let mut new_config = match Config::load_with_diagnostics(config_path) {
+) -> Option<ReloadedConfig> {
+    let desired_config = match Config::load_with_diagnostics(config_path) {
         Ok(c) => c,
         Err(diagnostic) => {
             error!("{diagnostic}");
             return None;
         }
     };
+    let mut new_config = desired_config.clone();
 
     let honor_graceful_shutdown_changed =
         new_config.global.honor_graceful_shutdown != current.global.honor_graceful_shutdown;
@@ -2170,7 +2215,7 @@ async fn reload_config(
         && !honor_blackhole_changed
     {
         info!("config reloaded — no neighbor / policy / peer-group changes detected");
-        return Some(new_config);
+        return Some(ReloadedConfig::new(new_config, desired_config));
     }
 
     if policy_diff.import_changed || policy_diff.export_changed {
@@ -2215,6 +2260,7 @@ async fn reload_config(
         else {
             return halt_partial(
                 working_config,
+                &desired_config,
                 ReloadStepFailure {
                     bucket,
                     target: name.clone(),
@@ -2240,6 +2286,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket,
                             target: name.clone(),
@@ -2254,6 +2301,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket,
                         target: name.clone(),
@@ -2278,6 +2326,7 @@ async fn reload_config(
         let Some(definition) = policy_admin::named_policy_from_config(&new_config, name) else {
             return halt_partial(
                 working_config,
+                &desired_config,
                 ReloadStepFailure {
                     bucket,
                     target: name.clone(),
@@ -2303,6 +2352,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket,
                             target: name.clone(),
@@ -2317,6 +2367,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket,
                         target: name.clone(),
@@ -2341,6 +2392,7 @@ async fn reload_config(
         let Some(definition) = policy_admin::named_peer_group_from_config(&new_config, name) else {
             return halt_partial(
                 working_config,
+                &desired_config,
                 ReloadStepFailure {
                     bucket,
                     target: name.clone(),
@@ -2366,6 +2418,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket,
                             target: name.clone(),
@@ -2380,6 +2433,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket,
                         target: name.clone(),
@@ -2420,6 +2474,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket: "global_chain.import",
                             target: String::new(),
@@ -2434,6 +2489,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket: "global_chain.import",
                         target: String::new(),
@@ -2471,6 +2527,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket: "global_chain.export",
                             target: String::new(),
@@ -2485,6 +2542,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket: "global_chain.export",
                         target: String::new(),
@@ -2532,6 +2590,7 @@ async fn reload_config(
             Err(e) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket: "neighbors.resolve",
                         target: "new_config.resolved_neighbors".to_string(),
@@ -2578,6 +2637,7 @@ async fn reload_config(
         {
             return halt_partial(
                 working_config,
+                &desired_config,
                 ReloadStepFailure {
                     bucket: "neighbors.reconcile",
                     target: String::new(),
@@ -2734,6 +2794,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket: "peer_group.delete",
                             target: name.clone(),
@@ -2748,6 +2809,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket: "peer_group.delete",
                         target: name.clone(),
@@ -2770,6 +2832,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket: "policy.delete",
                             target: name.clone(),
@@ -2784,6 +2847,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket: "policy.delete",
                         target: name.clone(),
@@ -2806,6 +2870,7 @@ async fn reload_config(
                 if let Err(error) = apply_config_event(&mut working_config, &event) {
                     return halt_partial(
                         working_config,
+                        &desired_config,
                         ReloadStepFailure {
                             bucket: "neighbor_set.delete",
                             target: name.clone(),
@@ -2820,6 +2885,7 @@ async fn reload_config(
             Err(error) => {
                 return halt_partial(
                     working_config,
+                    &desired_config,
                     ReloadStepFailure {
                         bucket: "neighbor_set.delete",
                         target: name.clone(),
@@ -2845,7 +2911,7 @@ async fn reload_config(
     // failure is surfaced rather than logged-and-forgotten.
 
     info!("config reload complete");
-    Some(working_config)
+    Some(ReloadedConfig::new(working_config, desired_config))
 }
 
 /// Halt a SIGHUP reload at the first failed step. Logs the failure
@@ -2856,22 +2922,26 @@ async fn reload_config(
 /// reloading again — at that point the diff runs against the
 /// half-applied state and only the remaining steps fire.
 ///
-/// Returned wrapped in `Option<Config>` so the call sites can use
+/// Returned wrapped in `Option<ReloadedConfig>` so the call sites can use
 /// `return halt_partial(...)` directly inside `reload_config`,
-/// matching its `Option<Config>` return shape.
+/// matching its `Option<ReloadedConfig>` return shape.
 #[expect(
     clippy::needless_pass_by_value,
     clippy::unnecessary_wraps,
-    reason = "owned ReloadStepFailure simplifies call sites that build the value inline; Option<Config> return matches reload_config's signature so call sites can `return halt_partial(...)` directly"
+    reason = "owned ReloadStepFailure simplifies call sites that build the value inline; Option<ReloadedConfig> return matches reload_config's signature so call sites can `return halt_partial(...)` directly"
 )]
-fn halt_partial(working_config: Config, failure: ReloadStepFailure) -> Option<Config> {
+fn halt_partial(
+    working_config: Config,
+    desired_config: &Config,
+    failure: ReloadStepFailure,
+) -> Option<ReloadedConfig> {
     error!(
         bucket = failure.bucket,
         target = %failure.target,
         error = %failure.error,
         "config reload halted at this step — runtime state matches the in-memory snapshot returned by reload (partial). Re-edit TOML and reload again to converge."
     );
-    Some(working_config)
+    Some(ReloadedConfig::new(working_config, desired_config.clone()))
 }
 
 #[cfg(test)]
@@ -3812,7 +3882,10 @@ hold_time = 90
     /// Drive a reload against the given initial+next TOML and return
     /// the commands the mock peer manager observed, in order.
     /// Replies `Ok(())` to every command that carries a reply channel.
-    async fn drive_reload(initial_toml: &str, new_toml: &str) -> (Option<Config>, Vec<String>) {
+    async fn drive_reload(
+        initial_toml: &str,
+        new_toml: &str,
+    ) -> (Option<ReloadedConfig>, Vec<String>) {
         let path = unique_temp_path("reload-driver");
         std::fs::write(&path, initial_toml).unwrap();
         let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
@@ -4072,8 +4145,12 @@ hold_time = 90
         let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
 
-        let result =
-            apply_reload_outcome(cfg.clone(), &peer_mgr_internal_tx, Some(&bridge_tx)).await;
+        let result = apply_reload_outcome(
+            ReloadedConfig::new(cfg.clone(), cfg.clone()),
+            &peer_mgr_internal_tx,
+            Some(&bridge_tx),
+        )
+        .await;
 
         assert_eq!(
             result.err(),
@@ -4105,24 +4182,27 @@ hold_time = 90
         let cfg = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
         std::fs::remove_file(&path).ok();
 
-        let advanced = apply_reload_outcome(cfg.clone(), &peer_mgr_internal_tx, None)
-            .await
-            .expect("no-bridge mode must succeed");
+        let advanced = apply_reload_outcome(
+            ReloadedConfig::new(cfg.clone(), cfg.clone()),
+            &peer_mgr_internal_tx,
+            None,
+        )
+        .await
+        .expect("no-bridge mode must succeed");
         assert_eq!(advanced.global.asn, cfg.global.asn);
         assert!(peer_mgr_internal_rx.try_recv().is_ok());
     }
 
-    /// Regression test for the bridge stale-snapshot bug. Before the
-    /// fix, a SIGHUP-driven `ReplaceConfig` was sent directly to the
-    /// persister, bypassing the bridge that owns the pre-persist
-    /// snapshot used by gRPC mutations. The next mutation would
-    /// therefore apply to the stale pre-reload snapshot and overwrite
-    /// the persisted file with `stale_pre_reload + one_mutation`.
+    /// Regression test for the bridge stale-snapshot bug. The bridge
+    /// owns the pre-persist snapshot used by gRPC mutations. A
+    /// SIGHUP-driven refresh must update that snapshot without writing
+    /// the reloaded file back out, otherwise restart-required pinning
+    /// would destroy an operator's edit-then-restart TOML.
     /// This test drives the bridge directly: send a snapshot
     /// replacement, then a `ConfigEvent` that adds a named policy,
-    /// and assert the resulting `ReplaceConfig` to the persister was
-    /// computed against the *replacement* base — i.e. the bridge's
-    /// internal snapshot was successfully swapped.
+    /// and assert the resulting persisted `ReplaceConfig` was computed
+    /// against the *replacement* base — i.e. the bridge's internal
+    /// snapshot was successfully swapped.
     #[tokio::test]
     async fn config_bridge_replacement_makes_subsequent_events_apply_to_new_snapshot() {
         use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
@@ -4173,10 +4253,13 @@ hold_time = 90
             .await
             .unwrap();
 
-        // First persister message is the replacement itself.
+        // First persister message is the replacement itself, but as a
+        // no-persist refresh. The on-disk TOML is already the
+        // operator's desired snapshot; rewriting it here would clobber
+        // restart-required edits that runtime intentionally pinned.
         let replace_msg = mutation_rx.recv().await.expect("replacement forwarded");
-        let ConfigMutation::ReplaceConfig(received_replace) = replace_msg else {
-            panic!("bridge must forward replacement as ReplaceConfig");
+        let ConfigMutation::RefreshSnapshotNoPersist(received_replace) = replace_msg else {
+            panic!("bridge must forward replacement as RefreshSnapshotNoPersist");
         };
         assert!(
             received_replace.peer_groups.contains_key("upstream"),
@@ -4208,6 +4291,133 @@ hold_time = 90
         drop(replace_tx);
         drop(event_tx);
         bridge.await.unwrap();
+    }
+
+    async fn reload_then_persist_policy_after_desired_refresh(new_toml: &str) -> (Config, Config) {
+        use rustbgpd_api::peer_types::{ConfigEvent, NamedPolicyDefinition};
+
+        let path = unique_temp_path("reload-desired-refresh");
+        std::fs::write(&path, baseline_toml()).unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        let (event_tx, event_rx) = mpsc::channel::<ConfigEvent>(8);
+        let (replace_tx, replace_rx) = mpsc::unbounded_channel::<Box<Config>>();
+        let (mutation_tx, mutation_rx) = mpsc::channel::<ConfigMutation>(8);
+        let persister =
+            tokio::spawn(ConfigPersister::new(mutation_rx, path.clone(), initial.clone()).run());
+        let bridge = tokio::spawn(run_config_bridge(
+            event_rx,
+            replace_rx,
+            mutation_tx,
+            initial.clone(),
+        ));
+
+        std::fs::write(&path, new_toml).unwrap();
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let reloaded = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should return pinned runtime plus desired config");
+
+        let (peer_mgr_internal_tx, mut peer_mgr_internal_rx) =
+            mpsc::unbounded_channel::<InternalCommand>();
+        let runtime = apply_reload_outcome(reloaded, &peer_mgr_internal_tx, Some(&replace_tx))
+            .await
+            .expect("post-reload sync should succeed");
+        assert!(
+            peer_mgr_internal_rx.try_recv().is_ok(),
+            "peer manager snapshot must be refreshed"
+        );
+
+        event_tx
+            .send(ConfigEvent::SetPolicy {
+                name: "after-reload".to_string(),
+                definition: NamedPolicyDefinition {
+                    default_action: "deny".to_string(),
+                    statements: Vec::new(),
+                },
+            })
+            .await
+            .unwrap();
+
+        drop(event_tx);
+        drop(replace_tx);
+        bridge.await.unwrap();
+        persister.await.unwrap();
+
+        let disk = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(
+            disk.policy.definitions.contains_key("after-reload"),
+            "gRPC-style mutation after SIGHUP must persist on top of refreshed desired base"
+        );
+        (runtime, disk)
+    }
+
+    #[tokio::test]
+    async fn reload_pin_grpc_uds_preserves_desired_toml_for_later_persistence() {
+        let new_toml = format!(
+            "{}\n[global.telemetry.grpc_uds]\npath = \"/tmp/rustbgpd-edited.sock\"\n",
+            baseline_toml()
+        );
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert_ne!(
+            runtime.global.telemetry.grpc_uds, disk.global.telemetry.grpc_uds,
+            "runtime must stay pinned to the live listener while disk keeps the operator edit"
+        );
+        assert_eq!(
+            disk.global
+                .telemetry
+                .grpc_uds
+                .as_ref()
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("/tmp/rustbgpd-edited.sock")
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_pin_apply_bum_preserves_desired_toml_for_later_persistence() {
+        let new_toml = format!("apply_bum_enforcement = true\n{}", baseline_toml());
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert!(!runtime.apply_bum_enforcement);
+        assert!(disk.apply_bum_enforcement);
+    }
+
+    #[tokio::test]
+    async fn reload_pin_evpn_instances_preserves_desired_toml_for_later_persistence() {
+        let new_toml = format!(
+            "{}\n[[evpn_instances]]\nvni = 100\nrd = \"65000:100\"\nroute_targets = [\"65000:100\"]\nlocal_vtep_ip = \"10.0.0.1\"\n",
+            baseline_toml()
+        );
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert!(runtime.evpn_instances.is_empty());
+        assert_eq!(disk.evpn_instances.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reload_pin_blackhole_fib_preserves_desired_toml_for_later_persistence() {
+        let new_toml = baseline_toml().replace(
+            "listen_port = 179",
+            "listen_port = 179\nhonor_blackhole = true\ninstall_blackhole_discard = true",
+        );
+        let (runtime, disk) = reload_then_persist_policy_after_desired_refresh(&new_toml).await;
+
+        assert!(!runtime.global.honor_blackhole);
+        assert!(!runtime.global.install_blackhole_discard);
+        assert!(disk.global.honor_blackhole);
+        assert!(disk.global.install_blackhole_discard);
     }
 
     // SoftResetIn-on-import-policy-change coverage is now PM-side:

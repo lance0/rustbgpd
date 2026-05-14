@@ -19,8 +19,16 @@ use crate::config::{Config, Neighbor};
 pub enum ConfigMutation {
     AddNeighbor(Box<Neighbor>),
     DeleteNeighbor(IpAddr),
-    /// Replace the entire config snapshot (e.g. after SIGHUP reload).
+    /// Replace the entire config snapshot and persist it to disk.
     ReplaceConfig(Box<Config>),
+    /// Refresh the persister's base snapshot without writing to disk.
+    ///
+    /// SIGHUP reload uses this for operator-authored TOML that
+    /// contains restart-required fields. Runtime keeps a pinned live
+    /// snapshot, but future gRPC mutations must still apply on top of
+    /// the operator's desired file rather than writing the pinned
+    /// runtime snapshot back to disk.
+    RefreshSnapshotNoPersist(Box<Config>),
 }
 
 /// Listens for config mutations and persists them atomically.
@@ -41,8 +49,8 @@ impl ConfigPersister {
 
     pub async fn run(mut self) {
         while let Some(mutation) = self.rx.recv().await {
-            self.apply(mutation);
-            if let Err(e) = self.persist() {
+            let should_persist = self.apply(mutation);
+            if should_persist && let Err(e) = self.persist() {
                 error!(
                     path = %self.config_path.display(),
                     error = %e,
@@ -52,7 +60,7 @@ impl ConfigPersister {
         }
     }
 
-    fn apply(&mut self, mutation: ConfigMutation) {
+    fn apply(&mut self, mutation: ConfigMutation) -> bool {
         match mutation {
             ConfigMutation::AddNeighbor(neighbor) => {
                 if self
@@ -69,6 +77,7 @@ impl ConfigPersister {
                     info!(address = %neighbor.address, "persisting added neighbor");
                     self.current.neighbors.push(*neighbor);
                 }
+                true
             }
             ConfigMutation::DeleteNeighbor(address) => {
                 let addr_str = address.to_string();
@@ -77,10 +86,17 @@ impl ConfigPersister {
                 if self.current.neighbors.len() < before {
                     info!(%address, "persisting deleted neighbor");
                 }
+                true
             }
             ConfigMutation::ReplaceConfig(new_config) => {
-                info!("replacing persister config snapshot (e.g. after SIGHUP reload)");
+                info!("replacing persister config snapshot and persisting it");
                 self.current = *new_config;
+                true
+            }
+            ConfigMutation::RefreshSnapshotNoPersist(new_config) => {
+                info!("refreshing persister config snapshot without writing to disk");
+                self.current = *new_config;
+                false
             }
         }
     }
@@ -216,5 +232,42 @@ log_format = "json"
 
         let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert!(reloaded.neighbors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn refresh_snapshot_no_persist_updates_base_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = minimal_config();
+        std::fs::write(&path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        let mut refreshed = config.clone();
+        refreshed.neighbors.push(test_neighbor("10.0.0.2", 65002));
+
+        let (tx, rx) = mpsc::channel(16);
+        let persister = ConfigPersister::new(rx, path.clone(), config);
+        let handle = tokio::spawn(persister.run());
+
+        tx.send(ConfigMutation::RefreshSnapshotNoPersist(Box::new(
+            refreshed,
+        )))
+        .await
+        .unwrap();
+        tx.send(ConfigMutation::AddNeighbor(Box::new(test_neighbor(
+            "10.0.0.3", 65003,
+        ))))
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let reloaded: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            reloaded.neighbors.len(),
+            2,
+            "later persisted mutation must build on the refreshed desired snapshot"
+        );
+        assert_eq!(reloaded.neighbors[0].address, "10.0.0.2");
+        assert_eq!(reloaded.neighbors[1].address, "10.0.0.3");
     }
 }
