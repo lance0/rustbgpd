@@ -58,6 +58,16 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   route preservation, withdraw cleanup, shutdown drain, and
   missing-delete idempotency.
 
+- **ADR-0061 M42 FRR interop smoke.** New local containerlab topology
+  `tests/interop/m42-fib-runtime-frr.clab.yml` validates the full
+  FRR → rustbgpd RIB → opt-in general Linux FIB path. FRR advertises
+  unicast routes over EBGP; rustbgpd installs the selected route into
+  configured table `1000` with metric `200`, gateway `10.0.0.2`, and
+  `proto bgp`; a pre-existing `proto static` row at the configured
+  target key is preserved and reported as `foreign_route_exists`; FRR
+  withdrawal removes the owned route; and graceful daemon shutdown
+  drains an owned route while preserving the foreign row.
+
 - **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
   counters expose the periodic nexthop drift-recovery path without
   scraping logs: `evpn_fdb_nhg_drift_members_repaired_total`,

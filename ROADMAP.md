@@ -634,8 +634,8 @@ Features that market research indicates are lower value than originally planned.
 
 ### Interop Test Coverage
 
-35 automated interop scripts cover M1, M3, M4, M10–M38 (including
-M30b, M32b, M35b, M35c, M37+IP sub-suites) against FRR 10.3.1,
+42 automated interop scripts cover M1, M3, M4, M10–M42 (including
+M30b, M32b, M35b, M35c, and M37 variant sub-suites) against FRR 10.3.1,
 BIRD 2.0.12, GoBGP 4.3.0, and StayRTR. M0 (FRR, BIRD) are manual
 smoke tests. M36 is the Gate 7b real-VTEP smoke (rustbgpd-as-VTEP,
 FRR-as-originator, iBGP/AS65000) — 8/8 PASS locally against Linux
@@ -652,8 +652,13 @@ slice 4 aliasing-ECMP) is in place — rustbgpd-as-receiver with
 2× FRR VTEPs sharing ES1 via bond, validates FDB nexthop group
 programming on the receiving VTEP under the expected
 `NHG_TAG | n` / `VTEP_NH_TAG | n` tag scheme, 16/16 PASS first-shot
-against FRR 10.3.1. M39 / M40 are manual only; same hosted-runner
-gap as M30b (Azure kernel lacks `vrf` module).
+against FRR 10.3.1. M41 is CI-gated for RFC 7999 BLACKHOLE receiver
+scoping plus opt-in kernel discard install / withdraw. M42 validates
+the ADR-0061 general unicast FIB runtime against FRR 10.3.1 and a real
+Linux route table: selected EBGP route install into configured table
+1000, foreign-route preservation, FRR withdraw cleanup, and SIGTERM
+drain. M39 / M40 / M42 are manual only; same hosted-runner gap as M30b
+(Azure kernel lacks `vrf` module and privileged dataplane coverage).
 
 **Must-test (high signal, high risk):**
 
@@ -762,7 +767,7 @@ If you need these features, combine rustbgpd with purpose-built tools.
 - [x] Nightly fuzz CI (wire decoder fuzzing)
 - [x] Docker image (multi-stage Dockerfile)
 - [x] Containerlab interop topologies (FRR 10.3.1, BIRD 2.0.12)
-- [x] Automated interop test scripts (M1, M3, M4, M10–M38)
+- [x] Automated interop test scripts (M1, M3, M4, M10–M42, including variant sub-suites)
 - [x] Binary releases (GitHub Releases with cross-compiled linux-amd64/arm64 binaries)
 - [ ] Homebrew formula
 - [x] crates.io publishing (`rustbgpd-wire` published; other crates remain internal)
