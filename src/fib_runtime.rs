@@ -6,7 +6,7 @@
 //! events are wakeups; every pass re-queries the full best-route view
 //! and runs the pure [`crate::fib`] projection/diff model.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -22,8 +22,8 @@ use tracing::{debug, info, warn};
 use crate::config::FibTableConfig;
 use crate::fib::{
     FibDrop, FibIntent, FibKernelProtocol, FibKernelRoute, FibKernelSnapshot, FibOp, FibOwnedState,
-    FibPlan, FibRoute, FibRouteKey, FibRouteTarget, compute_fib_diff, project_fib_intent,
-    record_fib_success,
+    FibPlan, FibRoute, FibRouteKey, FibRouteTarget, compute_fib_diff,
+    project_fib_intent_with_peer_groups, record_fib_success,
 };
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
@@ -300,6 +300,31 @@ async fn query_best_routes(rib_tx: &mpsc::Sender<RibUpdate>) -> Result<Vec<Route
     }
 }
 
+async fn query_peer_groups(
+    rib_tx: &mpsc::Sender<RibUpdate>,
+) -> Result<BTreeMap<IpAddr, String>, &'static str> {
+    let (reply, rx) = oneshot::channel();
+    if rib_tx
+        .send(RibUpdate::QueryPeerGroups { reply })
+        .await
+        .is_err()
+    {
+        warn!("general FIB task could not query peer-group map");
+        return Err("send_failed");
+    }
+    match tokio::time::timeout(RIB_QUERY_TIMEOUT, rx).await {
+        Ok(Ok(groups)) => Ok(groups.into_iter().collect()),
+        Ok(Err(_)) => {
+            warn!("general FIB task peer-group reply dropped");
+            Err("reply_dropped")
+        }
+        Err(_) => {
+            warn!("general FIB task peer-group query timed out");
+            Err("timeout")
+        }
+    }
+}
+
 async fn reconcile_once<F>(
     config: &FibRuntimeConfig,
     rib_query_tx: &mpsc::Sender<RibUpdate>,
@@ -322,7 +347,26 @@ async fn reconcile_once<F>(
             }
         },
     };
-    let intent = project_fib_intent(&config.tables, &routes);
+    let peer_groups = if config
+        .tables
+        .iter()
+        .any(|table| !table.allowed_peer_groups.is_empty())
+    {
+        match tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            result = query_peer_groups(rib_query_tx) => result,
+        } {
+            Ok(groups) => groups,
+            Err(reason) => {
+                status_tx.send_replace(failed_rib_query_statuses(owned, reason));
+                return;
+            }
+        }
+    } else {
+        BTreeMap::new()
+    };
+    let intent = project_fib_intent_with_peer_groups(&config.tables, &routes, &peer_groups);
     let kernel = tokio::select! {
         biased;
         () = shutdown.cancelled() => return,
@@ -519,6 +563,8 @@ fn drop_reason(drop: &FibDrop) -> &'static str {
     match drop {
         FibDrop::NextHopFamilyUnsupported { .. } => "next_hop_family_unsupported",
         FibDrop::ForeignRouteExists { .. } => "foreign_route_exists",
+        FibDrop::PeerNotAllowed { .. } => "peer_not_allowed",
+        FibDrop::RouteLimitExceeded { .. } => "route_limit_exceeded",
     }
 }
 
@@ -535,14 +581,20 @@ fn build_statuses(
         .iter()
         .filter_map(|drop| match drop {
             FibDrop::ForeignRouteExists { key } => Some(*key),
-            FibDrop::NextHopFamilyUnsupported { .. } => None,
+            FibDrop::NextHopFamilyUnsupported { .. }
+            | FibDrop::PeerNotAllowed { .. }
+            | FibDrop::RouteLimitExceeded { .. } => None,
         })
         .collect::<BTreeSet<_>>();
     for drop in &plan.drops {
         out.push(status_for_drop(config, intent, owned, drop));
     }
     for route in owned.routes.values() {
-        if intent.routes.contains_key(&route.key)
+        if (intent.routes.contains_key(&route.key)
+            || intent.frozen_tables.contains(&crate::fib::FibTableKey {
+                table_id: route.key.table_id,
+                metric: route.key.metric,
+            }))
             && !failed_keys.contains(&route.key)
             && !dropped_keys.contains(&route.key)
         {
@@ -600,6 +652,39 @@ fn status_for_drop(
                 }
             }
         }
+        FibDrop::PeerNotAllowed {
+            table_name,
+            prefix,
+            peer,
+        } => {
+            let table = config.tables.iter().find(|table| table.name == *table_name);
+            FibRuntimeStatus {
+                table_name: table_name.clone(),
+                table_id: table.map_or(0, |table| table.table_id),
+                metric: table.map_or(0, |table| table.metric),
+                prefix: *prefix,
+                next_hop: None,
+                peer: Some(*peer),
+                state: FibRuntimeState::Rejected,
+                reason: "peer_not_allowed".to_string(),
+            }
+        }
+        FibDrop::RouteLimitExceeded {
+            table_name,
+            key,
+            next_hop,
+            peer,
+            ..
+        } => FibRuntimeStatus {
+            table_name: table_name.clone(),
+            table_id: key.table_id,
+            metric: key.metric,
+            prefix: key.prefix,
+            next_hop: Some(*next_hop),
+            peer: Some(*peer),
+            state: FibRuntimeState::Rejected,
+            reason: "route_limit_exceeded".to_string(),
+        },
     }
 }
 
@@ -1070,6 +1155,9 @@ mod tests {
             table_id,
             metric,
             families: families.iter().map(|f| (*f).to_string()).collect(),
+            allowed_peer_groups: Vec::new(),
+            allowed_neighbors: Vec::new(),
+            max_routes: None,
         }
     }
 
@@ -1129,6 +1217,27 @@ mod tests {
             while let Some(update) = rx.recv().await {
                 if let RibUpdate::QueryBestRoutes { reply } = update {
                     let _ = reply.send(routes.clone());
+                }
+            }
+        });
+        tx
+    }
+
+    fn rib_with_routes_and_peer_groups(
+        routes: Vec<Route>,
+        peer_groups: BTreeMap<IpAddr, String>,
+    ) -> mpsc::Sender<RibUpdate> {
+        let (tx, mut rx) = mpsc::channel(8);
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                match update {
+                    RibUpdate::QueryBestRoutes { reply } => {
+                        let _ = reply.send(routes.clone());
+                    }
+                    RibUpdate::QueryPeerGroups { reply } => {
+                        let _ = reply.send(peer_groups.clone().into_iter().collect());
+                    }
+                    _ => {}
                 }
             }
         });
@@ -1334,6 +1443,26 @@ mod tests {
         let (status_tx, status_rx) = watch::channel(Vec::new());
         reconcile_once(
             &config(),
+            &rib_tx,
+            fib,
+            &metrics(),
+            &status_tx,
+            owned,
+            &CancellationToken::new(),
+        )
+        .await;
+        status_rx.borrow().clone()
+    }
+
+    async fn reconcile_config_for_test(
+        config: FibRuntimeConfig,
+        rib_tx: mpsc::Sender<RibUpdate>,
+        fib: &mut FakeFib,
+        owned: &mut FibOwnedState,
+    ) -> Vec<FibRuntimeStatus> {
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+        reconcile_once(
+            &config,
             &rib_tx,
             fib,
             &metrics(),
@@ -1801,6 +1930,105 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
         assert_eq!(statuses[0].reason, "next_hop_family_unsupported");
+    }
+
+    #[tokio::test]
+    async fn peer_group_allow_list_rejects_non_matching_best_route_before_apply() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.allowed_peer_groups = vec!["transit".to_string()];
+        let config = FibRuntimeConfig {
+            tables: vec![table],
+        };
+        let rib_tx = rib_with_routes_and_peer_groups(
+            vec![route(v4(24), ip("192.0.2.1"))],
+            BTreeMap::from([(ip("198.51.100.1"), "ix".to_string())]),
+        );
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
+
+        assert!(fib.applied.is_empty());
+        assert!(owned.routes.is_empty());
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
+        assert_eq!(statuses[0].reason, "peer_not_allowed");
+    }
+
+    #[tokio::test]
+    async fn max_routes_rejects_table_before_kernel_apply() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let config = FibRuntimeConfig {
+            tables: vec![table],
+        };
+        let rib_tx = rib_with_routes(vec![
+            route(v4(24), ip("192.0.2.1")),
+            route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24)),
+                ip("192.0.2.2"),
+            ),
+        ]);
+        let mut fib = FakeFib::default();
+        let mut owned = FibOwnedState::default();
+
+        let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
+
+        assert!(fib.applied.is_empty());
+        assert!(owned.routes.is_empty());
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses.iter().all(|status| {
+            status.state == FibRuntimeState::Rejected && status.reason == "route_limit_exceeded"
+        }));
+    }
+
+    #[tokio::test]
+    async fn max_routes_over_cap_freezes_owned_rows_instead_of_draining_table() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let config = FibRuntimeConfig {
+            tables: vec![table],
+        };
+        let existing = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(24)),
+            target: FibRouteTarget {
+                next_hop: ip("192.0.2.1"),
+            },
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let mut fib = FakeFib::default();
+        fib.kernel.routes.insert(
+            existing.key,
+            FibKernelRoute {
+                target: existing.target,
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([(existing.key, existing)]),
+        };
+        let rib_tx = rib_with_routes(vec![
+            route(v4(24), ip("192.0.2.1")),
+            route(
+                Prefix::V4(Ipv4Prefix::new(Ipv4Addr::new(203, 0, 114, 0), 24)),
+                ip("192.0.2.2"),
+            ),
+        ]);
+
+        let statuses = reconcile_config_for_test(config, rib_tx, &mut fib, &mut owned).await;
+
+        assert!(fib.applied.is_empty());
+        assert_eq!(owned.routes.len(), 1);
+        assert_eq!(statuses.len(), 2);
+        assert!(statuses.iter().any(|status| {
+            status.state == FibRuntimeState::Installed && status.reason == "owned"
+        }));
+        assert!(statuses.iter().any(|status| {
+            status.state == FibRuntimeState::Rejected && status.reason == "route_limit_exceeded"
+        }));
     }
 
     #[cfg(target_os = "linux")]

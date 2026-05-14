@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -200,6 +201,11 @@ pub enum RibUpdate {
     QueryBestRoutes {
         /// Response channel.
         reply: oneshot::Sender<Vec<Route>>,
+    },
+    /// Query: return the current per-peer peer-group map.
+    QueryPeerGroups {
+        /// Response channel.
+        reply: oneshot::Sender<HashMap<IpAddr, String>>,
     },
     /// Query: return routes advertised to a specific peer.
     QueryAdvertisedRoutes {

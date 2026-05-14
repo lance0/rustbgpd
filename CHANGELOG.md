@@ -20,6 +20,15 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   protected `kernel-dataplane` GitHub Environment so PR code waits for
   maintainer approval before it reaches the self-hosted runner.
 
+- **ADR-0061 FIB guardrails.** `[[fib_tables]]` now supports
+  `allowed_peer_groups`, `allowed_neighbors`, and `max_routes`.
+  Peer / peer-group allow-lists are enforced before kernel apply, and
+  `max_routes` freezes existing owned rows while suppressing table
+  growth when the eligible route count exceeds the cap. Rejections
+  surface through `ListFibRoutes`, `rustbgpctl rib fib`, and
+  `bgp_fib_routes_rejected_total` as `peer_not_allowed` or
+  `route_limit_exceeded`.
+
 ## [0.21.0] — 2026-05-14
 
 ### Added

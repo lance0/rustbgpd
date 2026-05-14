@@ -1325,6 +1325,9 @@ name = "edge"
 table_id = 1000
 metric = 200
 families = ["ipv4_unicast", "ipv6_unicast"]
+allowed_peer_groups = ["transit"]
+allowed_neighbors = ["198.51.100.2"]
+max_routes = 1000
 ```
 
 When at least one table is configured on Linux, rustbgpd starts a
@@ -1334,6 +1337,16 @@ routes as `RTPROT_BGP` with the configured table and metric, drains
 daemon-owned rows on coordinated shutdown, and publishes per-route
 status through `RibService.ListFibRoutes` and
 `rustbgpctl rib fib`.
+
+Peer and route-count guardrails are enforced before any kernel apply.
+If `allowed_peer_groups` or `allowed_neighbors` is non-empty, a best
+route is eligible when its source peer matches either allow-list. If
+`max_routes` is set and the eligible route count for that table exceeds
+the cap, the table freezes for that pass: already-owned rows stay in
+place, no new adds or replacements are emitted, and over-cap candidates
+that are not already owned are reported as `route_limit_exceeded`.
+`allowed_neighbors` entries are not required to appear in `[[neighbors]]`;
+this keeps the knob usable for dynamic-neighbor ranges and staged peers.
 
 `RTPROT_BGP` is not treated as ownership proof by itself. A route that
 already exists in a configured table before this daemon instance owns it
@@ -1350,6 +1363,9 @@ rustbgpd-specific ownership marker or persisted owned-state.
 | `table_id` | u32 | yes | -- | Linux route table id. Must be unique and cannot be `0`, `252`, `253`, `254`, or `255` |
 | `metric` | u32 | yes | -- | Kernel route metric / priority. Part of the daemon-owned route identity |
 | `families` | string[] | no | `["ipv4_unicast", "ipv6_unicast"]` | Address families eligible for install. Only IPv4 and IPv6 unicast are accepted |
+| `allowed_peer_groups` | string[] | no | `[]` | Optional source peer-group allow-list. Entries must reference existing `[peer_groups.NAME]` blocks |
+| `allowed_neighbors` | string[] | no | `[]` | Optional source neighbor-address allow-list. Entries must parse as IPv4 or IPv6 addresses |
+| `max_routes` | u32 | no | unset | Optional hard cap. `0` is rejected; exceeding the cap freezes existing owned rows and suppresses growth for that table |
 
 **Restart required**: `[[fib_tables]]` is resolved at startup and the
 runtime actor is spawned once. SIGHUP edits are surfaced by
@@ -1691,6 +1707,9 @@ starting:
 | `[[fib_tables]].name` must be unique and match the identifier rule | `duplicate fib table name` / `invalid fib table name` |
 | `[[fib_tables]].table_id` must be unique and must not be `0`, `252`, `253`, `254`, or `255` | `duplicate fib table_id` / `reserved fib table_id` |
 | `[[fib_tables]].families` must be non-empty, contain no duplicates, and contain only `ipv4_unicast` / `ipv6_unicast` | `fib table families must not be empty` / `duplicate fib table family` / `unsupported fib table family` |
+| `[[fib_tables]].allowed_peer_groups` entries must reference existing peer groups and contain no duplicates | `undefined peer_group` / `duplicate allowed_peer_groups` |
+| `[[fib_tables]].allowed_neighbors` entries must parse as IP addresses and contain no duplicates | `invalid allowed_neighbors` / `duplicate allowed_neighbors` |
+| `[[fib_tables]].max_routes` must be omitted or greater than zero | `max_routes must be greater than zero` |
 | `llgr_stale_time` must be <= 16777215 (24-bit) | `llgr_stale_time exceeds maximum` |
 | `route_reflector_client` requires iBGP (local ASN == remote ASN) | `route_reflector_client requires iBGP` |
 | `local_ipv6_nexthop` must be a valid non-link-local, non-loopback, non-multicast IPv6 address | `invalid local_ipv6_nexthop` |

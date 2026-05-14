@@ -635,8 +635,62 @@ fn validate_fib_tables(config: &Config) -> Result<(), ConfigError> {
                 });
             }
         }
+        validate_fib_table_guardrails(config, table)?;
     }
 
+    Ok(())
+}
+
+fn validate_fib_table_guardrails(
+    config: &Config,
+    table: &super::FibTableConfig,
+) -> Result<(), ConfigError> {
+    if let Some(0) = table.max_routes {
+        return Err(ConfigError::InvalidFibTable {
+            reason: format!(
+                "name {:?}: max_routes must be greater than zero",
+                table.name
+            ),
+        });
+    }
+    let mut seen_groups = std::collections::HashSet::new();
+    for group in &table.allowed_peer_groups {
+        if !config.peer_groups.contains_key(group) {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!(
+                    "name {:?}: allowed_peer_groups references undefined peer_group {:?}",
+                    table.name, group
+                ),
+            });
+        }
+        if !seen_groups.insert(group) {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!(
+                    "name {:?}: duplicate allowed_peer_groups entry {:?}",
+                    table.name, group
+                ),
+            });
+        }
+    }
+    let mut seen_neighbors = std::collections::HashSet::new();
+    for neighbor in &table.allowed_neighbors {
+        let parsed = neighbor
+            .parse::<IpAddr>()
+            .map_err(|e| ConfigError::InvalidFibTable {
+                reason: format!(
+                    "name {:?}: invalid allowed_neighbors entry {:?}: {e}",
+                    table.name, neighbor
+                ),
+            })?;
+        if !seen_neighbors.insert(parsed) {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!(
+                    "name {:?}: duplicate allowed_neighbors entry {parsed}",
+                    table.name
+                ),
+            });
+        }
+    }
     Ok(())
 }
 

@@ -698,6 +698,17 @@ pub struct FibTableConfig {
     /// present.
     #[serde(default = "default_fib_families")]
     pub families: Vec<String>,
+    /// Optional peer-group allow-list. When non-empty, routes learned from
+    /// peers outside these groups are rejected before kernel apply.
+    #[serde(default)]
+    pub allowed_peer_groups: Vec<String>,
+    /// Optional neighbor address allow-list. When non-empty, routes learned
+    /// from peers outside this list are rejected before kernel apply.
+    #[serde(default)]
+    pub allowed_neighbors: Vec<String>,
+    /// Optional hard cap for the table. If the eligible route count exceeds
+    /// this value, rustbgpd installs no routes for the table during that pass.
+    pub max_routes: Option<u32>,
 }
 
 fn default_fib_families() -> Vec<String> {

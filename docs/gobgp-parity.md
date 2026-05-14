@@ -254,7 +254,7 @@ the current alpha:
 2. ~~**EVPN RR + bidirectional VTEP (RFC 7432)**~~ — Phase 1 RR role shipped; **Phase 2 bidirectional VTEP shipped across Gates 7a/7b/7b+1/7b+2/7c, ADR-0052/0054/0055/0056** with kernel FDB program/learn loops, MAC-only + MAC+IP local origination under the FRR-style replace model, sticky-MAC config, and sub-second mobility convergence. **Gate 8/8b (v0.17.0)** adds alpha multi-homing execution: DF election (M38), Type 1/4 origination, RFC 7432 §14 aliasing receive-side projection, RFC 7432 §8.4 mass-withdraw filtering, and opt-in kernel BUM-port enforcement (RFC 7432 §8.5). **Gate 9 symmetric Interface-less IRB shipped end-to-end in v0.18.0** (`[[evpn_ip_vrfs]]`, Type 5 origination + remote import + L3 FIB programming, M39 manual smoke). **ADR-0059 aliasing dataplane ECMP** shipped on `main` (slices 1-4 + M40 FRR-validated smoke). Still later: RFC 9135 overlay-index IRB, production-default multi-homing enforcement after the MAC-churn variant of the Gate 8b soak, and duplicate-MAC quarantine action (ADR-0055 §9)
 3. **VPNv4/v6 (RFC 4364)** — enterprise/SP VPN deployments
 4. ~~**Dynamic neighbors (prefix-based)**~~ — shipped: `[[dynamic_neighbors]]` with peer group inheritance, `remote_asn=0`, auto-accept/remove
-5. **Full Zebra/FIB integration** — ADR-0061 adds configured-table kernel route installation, but production router parity still needs broader policy guardrails, route limits, and non-BGP route-manager scope
+5. **Full Zebra/FIB integration** — ADR-0061 adds configured-table kernel route installation with peer / peer-group allow-lists and per-table route caps, but production router parity still needs crash-restart ownership, broader redistribution policy, and non-BGP route-manager scope
 
 ## Pre-1.0 Tech Debt
 

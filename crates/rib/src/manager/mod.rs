@@ -474,6 +474,7 @@ impl RibManager {
                 self.handle_query_received_routes(peer, reply);
             }
             RibUpdate::QueryBestRoutes { reply } => self.handle_query_best_routes(reply),
+            RibUpdate::QueryPeerGroups { reply } => self.handle_query_peer_groups(reply),
             RibUpdate::QueryAdvertisedRoutes { peer, reply } => {
                 self.handle_query_advertised_routes(peer, reply);
             }
@@ -584,6 +585,15 @@ impl RibManager {
         let routes: Vec<_> = self.loc_rib.iter().cloned().collect();
         if reply.send(routes).is_err() {
             warn!("query caller dropped before receiving response");
+        }
+    }
+
+    fn handle_query_peer_groups(
+        &mut self,
+        reply: tokio::sync::oneshot::Sender<std::collections::HashMap<IpAddr, String>>,
+    ) {
+        if reply.send(self.peer_group.clone()).is_err() {
+            warn!("query caller dropped before receiving peer-group map");
         }
     }
 
