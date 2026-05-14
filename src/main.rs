@@ -26,6 +26,7 @@ mod evpn_l3_originator;
 mod evpn_originator;
 mod evpn_segment;
 mod evpn_svi;
+mod fib;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
