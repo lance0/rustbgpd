@@ -66,13 +66,12 @@ architecture diagrams, example configs, and API workflows.
   import + L3 FIB programming (kernel route, L3 neighbor,
   L3VXLAN FDB) through a transactional ownership model with
   value-aware drift detection and four-phase apply ordering.
-  M39 manual containerlab smoke validates the bidirectional
+  M39 self-hosted kernel-dataplane CI validates the bidirectional
   IRB datapath against FRR 10.3.1. Aliasing dataplane ECMP via
   FDB nexthop groups (ADR-0059, slices 1-4) ships as the
-  receive-side ECMP path for multi-homed Type 2; M40 manual
+  receive-side ECMP path for multi-homed Type 2; M40 self-hosted
   containerlab smoke validates it against FRR EVPN-MH 10.3.1.
-  Production-default multi-homing enforcement after the soak
-  + privileged-runner CI gate for M39/M40 remain ahead
+  Production-default multi-homing enforcement after the soak remains ahead
 - VPNv4 / VPNv6 overlays
 - Environments that need the breadth of FRR's multi-decade feature surface
 - Operators who want a CLI-first operational model

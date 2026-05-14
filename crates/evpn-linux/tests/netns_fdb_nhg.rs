@@ -105,7 +105,7 @@ fn is_inner() -> bool {
 /// Build a bridge + VXLAN port with `nolearning` in the current netns.
 /// Returns the VNI for downstream test setup.
 fn build_l2_topology() -> EvpnInstanceId {
-    run("ip", &["addr", "add", "127.0.0.10/32", "dev", "lo"]);
+    run("ip", &["addr", "add", "10.0.0.1/32", "dev", "lo"]);
     run("ip", &["link", "set", "lo", "up"]);
     run("ip", &["link", "add", "name", "br100", "type", "bridge"]);
     run("ip", &["link", "set", "br100", "up"]);
@@ -121,7 +121,7 @@ fn build_l2_topology() -> EvpnInstanceId {
             "id",
             "100",
             "local",
-            "127.0.0.10",
+            "10.0.0.1",
             "dstport",
             "4789",
             "nolearning",
@@ -180,7 +180,7 @@ async fn round_trip_install_and_remove_fdb_nhg() {
                     asn: 65001,
                     value: vni.as_u32(),
                 }],
-                "127.0.0.10".parse::<IpAddr>().unwrap(),
+                "10.0.0.1".parse::<IpAddr>().unwrap(),
                 Some("br100".into()),
                 false,
             )
@@ -303,25 +303,15 @@ async fn cve_guard_blocks_install_when_learning_enabled() {
 
     // Build topology with `learning on` (omit `nolearning` from the
     // vxlan add to keep learning enabled by default).
-    run("ip", &["addr", "add", "127.0.0.10/32", "dev", "lo"]);
+    run("ip", &["addr", "add", "10.0.0.1/32", "dev", "lo"]);
     run("ip", &["link", "set", "lo", "up"]);
     run("ip", &["link", "add", "name", "br100", "type", "bridge"]);
     run("ip", &["link", "set", "br100", "up"]);
     run(
         "ip",
         &[
-            "link",
-            "add",
-            "name",
-            "vxlan100",
-            "type",
-            "vxlan",
-            "id",
-            "100",
-            "local",
-            "127.0.0.10",
-            "dstport",
-            "4789",
+            "link", "add", "name", "vxlan100", "type", "vxlan", "id", "100", "local", "10.0.0.1",
+            "dstport", "4789",
         ],
     );
     run("ip", &["link", "set", "vxlan100", "master", "br100"]);
@@ -351,7 +341,7 @@ async fn cve_guard_blocks_install_when_learning_enabled() {
                     asn: 65001,
                     value: vni.as_u32(),
                 }],
-                "127.0.0.10".parse::<IpAddr>().unwrap(),
+                "10.0.0.1".parse::<IpAddr>().unwrap(),
                 Some("br100".into()),
                 false,
             )

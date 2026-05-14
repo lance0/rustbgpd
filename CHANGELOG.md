@@ -9,6 +9,17 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Self-hosted kernel dataplane CI gate.** New
+  `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
+  dataplane checks that hosted runners cannot reliably exercise:
+  M39 symmetric Interface-less IRB, M40 EVPN aliasing ECMP via FDB
+  nexthop groups, M42 configured-table unicast FIB runtime, and the
+  Docker `fdb_nhg` / `fib_runtime` netns selectors. Jobs target the
+  protected `kernel-dataplane` GitHub Environment so PR code waits for
+  maintainer approval before it reaches the self-hosted runner.
+
 ## [0.21.0] — 2026-05-14
 
 ### Added
