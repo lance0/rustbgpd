@@ -27,8 +27,9 @@ pub(crate) struct FibIntent {
     pub routes: BTreeMap<FibRouteKey, FibRoute>,
     /// Routes suppressed during projection with explicit reasons.
     pub drops: Vec<FibDrop>,
-    /// Tables whose candidate count exceeded `max_routes`. Existing owned rows
-    /// in these tables are frozen in place, but no adds/replaces are emitted.
+    /// Tables whose candidate count exceeded `max_routes`. New growth and
+    /// replacement are suppressed, while eligible already-owned rows may still
+    /// be repaired or withdrawn.
     pub frozen_tables: BTreeSet<FibTableKey>,
 }
 

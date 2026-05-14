@@ -4165,6 +4165,32 @@ metric = 200
 }
 
 #[test]
+fn fib_tables_reject_duplicate_allowed_peer_groups() {
+    let toml = format!(
+        r#"
+{}
+
+[peer_groups.transit]
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+allowed_peer_groups = ["transit", "transit"]
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidFibTable { reason } = err else {
+        panic!("expected InvalidFibTable, got {err}");
+    };
+    assert!(
+        reason.contains("duplicate allowed_peer_groups"),
+        "unexpected error: {reason}"
+    );
+}
+
+#[test]
 fn fib_tables_diff_marks_restart_required() {
     let old = parse(valid_toml()).unwrap();
     let toml = format!(
