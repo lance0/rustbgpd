@@ -48,8 +48,9 @@ pub struct Config {
     /// Empty by default — route-server / route-reflector deployments
     /// leave this empty and never spawn the ordinary unicast kernel
     /// FIB actor. Each entry is an explicit operator opt-in for one
-    /// Linux route table; this first slice is config-only and does
-    /// not program routes yet.
+    /// Linux route table; when at least one table is present the
+    /// default-off FIB reconciler starts and programs unicast best
+    /// routes into the configured non-reserved tables. Restart-required.
     #[serde(default)]
     pub fib_tables: Vec<FibTableConfig>,
     /// Apply Gate 8b BUM-suppression filters to the kernel

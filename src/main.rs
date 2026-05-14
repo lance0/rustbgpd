@@ -338,6 +338,9 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     if diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
     }
+    if diff.fib_tables_changed {
+        restart_sections.push("[[fib_tables]]");
+    }
     if diff.apply_bum_enforcement_changed {
         restart_sections.push("apply_bum_enforcement");
     }
@@ -608,6 +611,7 @@ fn main() {
                     "evpn_instances_changed": diff.evpn_instances_changed,
                     "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
                     "ethernet_segments_changed": diff.ethernet_segments_changed,
+                    "fib_tables_changed": diff.fib_tables_changed,
                     "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
                     "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
                     "inline_policy_import_changed": diff.policy.import_changed,
@@ -2228,6 +2232,14 @@ async fn reload_config(
              kernel-enforcement opt-in."
         );
         new_config.apply_bum_enforcement = current.apply_bum_enforcement;
+    }
+    if new_config.fib_tables != current.fib_tables {
+        error!(
+            "[[fib_tables]] differs from the live config: the ADR-0061 \
+             general unicast FIB reconciler is spawned only at startup. \
+             Restart rustbgpd to apply [[fib_tables]] edits."
+        );
+        new_config.fib_tables.clone_from(&current.fib_tables);
     }
     if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
         || new_config.global.allow_blackhole_broad_prefixes

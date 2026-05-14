@@ -43,8 +43,11 @@ metric = 200
 families = ["ipv4_unicast", "ipv6_unicast"]
 ```
 
-The block is config-only in this ADR's first slice. It reserves the
-operator contract without programming routes yet.
+The first slice landed this block as config-only — reserving the
+operator contract before any kernel writes. The subsequent slices
+landed the pure intent/diff model, the default-off runtime
+reconciler, and kernel validation, so a configured `[[fib_tables]]`
+block now programs unicast best routes into the named tables.
 
 ### 2. Table selection is explicit and non-reserved
 

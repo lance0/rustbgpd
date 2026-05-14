@@ -250,7 +250,16 @@ pub(crate) fn compute_fib_diff(
                     desired: desired.clone(),
                 });
             }
-            (Some(_), Some(_)) => {}
+            (Some(owned_route), Some(_)) => {
+                // Kernel value already matches desired, but the best
+                // route's metadata (peer / origin / path id) may have
+                // changed. Refresh owned state with a no-kernel-op
+                // adopt so `ListFibRoutes` does not report stale
+                // provenance.
+                if *owned_route != *desired {
+                    plan.ops.push(FibOp::Adopt(desired.clone()));
+                }
+            }
         }
     }
 
@@ -549,6 +558,31 @@ mod tests {
         let plan = compute_fib_diff(&intent, &owned, &kernel);
 
         assert!(plan.ops.is_empty());
+        assert!(plan.drops.is_empty());
+    }
+
+    #[test]
+    fn desired_owned_with_same_value_but_changed_provenance_emits_adopt() {
+        let key = key(v4_prefix(2, 24));
+        let owned_route = one_route(key, "203.0.113.1");
+        let mut desired = owned_route.clone();
+        desired.peer = ip("198.51.100.9");
+        desired.origin_type = RouteOrigin::Ibgp;
+        desired.path_id = 7;
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(key, owned_route)]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
+        };
+        let intent = FibIntent {
+            routes: BTreeMap::from([(key, desired.clone())]),
+            drops: vec![],
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert_eq!(plan.ops, vec![FibOp::Adopt(desired)]);
         assert!(plan.drops.is_empty());
     }
 
