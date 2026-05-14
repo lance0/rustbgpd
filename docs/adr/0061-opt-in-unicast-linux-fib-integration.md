@@ -92,9 +92,10 @@ source peer or peer group before it can become kernel intent.
 `max_routes` is an optional hard cap per table. If the eligible candidate
 count exceeds the cap, the table freezes for that reconcile pass:
 already-owned rows remain installed, and non-owned candidates are reported
-as `route_limit_exceeded`. This intentionally avoids arbitrary "first N"
-installs during accidental full-table export while also avoiding a
-table-wide withdraw storm when a feed briefly crosses the cap.
+as `route_limit_exceeded` with bounded status sampling for very large
+tables. This intentionally avoids arbitrary "first N" installs during
+accidental full-table export while also avoiding a table-wide withdraw
+storm when a feed briefly crosses the cap.
 
 ### 6. Initial route set is single-best
 

@@ -483,7 +483,8 @@ Loc-RIB. Rows are `installed`, `rejected`, or `failed`.
 - `rejected` / `route_limit_exceeded`: the table's eligible route count
   exceeded `max_routes`. The table freezes for that pass: existing owned
   rows stay installed, and growth or replacement is suppressed until the
-  eligible count falls back under the cap.
+  eligible count falls back under the cap. For very large over-cap tables,
+  rejected rows are sampled so status output stays bounded.
 - `failed` / `dump_failed:*`, `install_failed:*`, `replace_failed:*`, or
   `remove_failed:*`: the runtime hit a RIB or kernel boundary error. Check
   `bgp_fib_kernel_failures_total` and daemon logs for the matching action.

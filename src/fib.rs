@@ -20,6 +20,8 @@ use rustbgpd_wire::Prefix;
 
 use crate::config::FibTableConfig;
 
+const MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE: usize = 128;
+
 /// Desired general unicast FIB state derived from config and best routes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct FibIntent {
@@ -31,6 +33,9 @@ pub(crate) struct FibIntent {
     /// replacement are suppressed, while eligible already-owned rows may still
     /// be repaired or withdrawn.
     pub frozen_tables: BTreeSet<FibTableKey>,
+    /// Route keys still eligible while their table is frozen. Kept separate
+    /// from `drops` so operator status payloads can stay bounded.
+    pub frozen_eligible_keys: BTreeSet<FibRouteKey>,
 }
 
 /// Kernel table / metric identity for a configured FIB table.
@@ -220,7 +225,9 @@ pub(crate) fn project_fib_intent_with_peer_groups(
     let mut intent = FibIntent::default();
 
     for table in tables {
-        let mut table_routes = BTreeMap::new();
+        let mut table_routes: BTreeMap<FibRouteKey, FibRoute> = BTreeMap::new();
+        let mut table_frozen = false;
+        let mut route_limit_drop_count = 0usize;
         let allowed_neighbors = table
             .allowed_neighbors
             .iter()
@@ -252,6 +259,41 @@ pub(crate) fn project_fib_intent_with_peer_groups(
                 metric: table.metric,
                 prefix: route.prefix,
             };
+            if let Some(limit) = table.max_routes {
+                let projected_len =
+                    table_routes.len() + usize::from(!table_routes.contains_key(&key));
+                if table_frozen || projected_len > limit as usize {
+                    if !table_frozen {
+                        table_frozen = true;
+                        intent.frozen_tables.insert(FibTableKey {
+                            table_id: table.table_id,
+                            metric: table.metric,
+                        });
+                        for projected in table_routes.values() {
+                            intent.frozen_eligible_keys.insert(projected.key);
+                            push_route_limit_drop(
+                                &mut intent,
+                                &table.name,
+                                projected,
+                                limit,
+                                &mut route_limit_drop_count,
+                            );
+                        }
+                        table_routes.clear();
+                    }
+                    intent.frozen_eligible_keys.insert(key);
+                    push_route_limit_drop_for_route(
+                        &mut intent,
+                        &table.name,
+                        key,
+                        route.next_hop,
+                        route.peer,
+                        limit,
+                        &mut route_limit_drop_count,
+                    );
+                    continue;
+                }
+            }
             let projected = FibRoute {
                 table_name: table.name.clone(),
                 key,
@@ -264,30 +306,53 @@ pub(crate) fn project_fib_intent_with_peer_groups(
             };
             table_routes.insert(key, projected);
         }
-        if let Some(limit) = table.max_routes
-            && table_routes.len() > limit as usize
-        {
-            intent.frozen_tables.insert(FibTableKey {
-                table_id: table.table_id,
-                metric: table.metric,
-            });
-            intent.drops.extend(
-                table_routes
-                    .values()
-                    .map(|route| FibDrop::RouteLimitExceeded {
-                        table_name: table.name.clone(),
-                        key: route.key,
-                        next_hop: route.target.next_hop,
-                        peer: route.peer,
-                        limit,
-                    }),
-            );
+        if table_frozen {
             continue;
         }
         intent.routes.extend(table_routes);
     }
 
     intent
+}
+
+fn push_route_limit_drop(
+    intent: &mut FibIntent,
+    table_name: &str,
+    route: &FibRoute,
+    limit: u32,
+    drop_count: &mut usize,
+) {
+    push_route_limit_drop_for_route(
+        intent,
+        table_name,
+        route.key,
+        route.target.next_hop,
+        route.peer,
+        limit,
+        drop_count,
+    );
+}
+
+fn push_route_limit_drop_for_route(
+    intent: &mut FibIntent,
+    table_name: &str,
+    key: FibRouteKey,
+    next_hop: IpAddr,
+    peer: IpAddr,
+    limit: u32,
+    drop_count: &mut usize,
+) {
+    if *drop_count >= MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE {
+        return;
+    }
+    intent.drops.push(FibDrop::RouteLimitExceeded {
+        table_name: table_name.to_string(),
+        key,
+        next_hop,
+        peer,
+        limit,
+    });
+    *drop_count += 1;
 }
 
 /// Compute the route operations needed to converge owned state to intent.
@@ -297,14 +362,6 @@ pub(crate) fn compute_fib_diff(
     owned: &FibOwnedState,
     kernel: &FibKernelSnapshot,
 ) -> FibPlan {
-    let frozen_eligible_keys = intent
-        .drops
-        .iter()
-        .filter_map(|drop| match drop {
-            FibDrop::RouteLimitExceeded { key, .. } => Some(*key),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
     let mut plan = FibPlan {
         ops: Vec::new(),
         drops: intent
@@ -321,7 +378,9 @@ pub(crate) fn compute_fib_diff(
     };
 
     for (key, owned_route) in &owned.routes {
-        if intent.frozen_tables.contains(&key.table_key()) && frozen_eligible_keys.contains(key) {
+        if intent.frozen_tables.contains(&key.table_key())
+            && intent.frozen_eligible_keys.contains(key)
+        {
             match kernel.routes.get(key) {
                 Some(route) if route.protocol == FibKernelProtocol::Other => {
                     plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
@@ -776,6 +835,39 @@ mod tests {
                 ..
             } if table_name == "edge"
         )));
+    }
+
+    #[test]
+    fn route_count_limit_caps_status_drops_but_keeps_eligible_keys() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let routes = (0..150)
+            .map(|octet| {
+                route(
+                    v4_prefix(octet, 24),
+                    ip("203.0.113.1"),
+                    RouteOrigin::Ebgp,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let intent = project_fib_intent(&[table], &routes);
+
+        assert!(intent.routes.is_empty());
+        assert!(intent.frozen_tables.contains(&FibTableKey {
+            table_id: 1000,
+            metric: 200,
+        }));
+        assert_eq!(intent.frozen_eligible_keys.len(), 150);
+        assert_eq!(
+            intent
+                .drops
+                .iter()
+                .filter(|drop| matches!(drop, FibDrop::RouteLimitExceeded { .. }))
+                .count(),
+            MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE
+        );
     }
 
     #[test]

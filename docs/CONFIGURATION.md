@@ -1343,8 +1343,10 @@ If `allowed_peer_groups` or `allowed_neighbors` is non-empty, a best
 route is eligible when its source peer matches either allow-list. If
 `max_routes` is set and the eligible route count for that table exceeds
 the cap, the table freezes for that pass: already-owned rows stay in
-place, no new adds or replacements are emitted, and over-cap candidates
-that are not already owned are reported as `route_limit_exceeded`.
+place, no new growth or replacements are emitted, and over-cap candidates
+that are not already owned are reported as `route_limit_exceeded`. The
+rejected status list is sampled for very large over-cap tables so the cap
+does not produce an unbounded API payload.
 `allowed_neighbors` entries are not required to appear in `[[neighbors]]`;
 this keeps the knob usable for dynamic-neighbor ranges and staged peers.
 
