@@ -312,7 +312,7 @@ those priorities exist.
   IPv4 unicast, M35b injects FlowSpec and toggles GShut without route
   churn, and M35c injects an EVPN Type 2 route and toggles GShut
   without route churn.
-- [x] **RFC 7999 BLACKHOLE control-plane receiver support.** Natural sibling to RFC 8326
+- [x] **RFC 7999 BLACKHOLE receiver + opt-in FIB discard** (v0.21.0). Natural sibling to RFC 8326
   GShut. Well-known `BLACKHOLE` community (`65535:666`) signals
   "drop traffic to this prefix" for DDoS mitigation. Different
   semantic class from GShut: receiver behavior is **data-plane**
@@ -358,6 +358,17 @@ those priorities exist.
       enabled }` or operator-policy attachment via
       `set_community_add = ["BLACKHOLE"]` on a per-prefix import
       filter. Per-prefix route injection is the likely surface.
+- [x] **ADR-0061 opt-in unicast Linux FIB integration** (v0.21.0) —
+  configured `[[fib_tables]]` blocks start a default-off reconciler that
+  projects unicast Loc-RIB best routes into explicit non-reserved Linux
+  route tables. Pure intent/diff model plus a runtime actor; conservative
+  ownership (`RTPROT_BGP` is not ownership proof, so pre-existing and
+  externally-drifted rows are preserved and reported as
+  `foreign_route_exists`); status via `RibService.ListFibRoutes`,
+  `rustbgpctl rib fib`, and Prometheus `bgp_fib_*` counters; privileged
+  netns harness selector plus the M42 FRR containerlab smoke. FIB
+  hardening — per-peer allow-lists, route limits, crash-restart adoption —
+  is tracked as P0 in the priority table above.
 - [x] **Resolve open `cargo audit` findings** (v0.13.2 / v0.14.0) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
   unreachable in v0.13.2; v0.14.0 follow-up granted `checks: write`

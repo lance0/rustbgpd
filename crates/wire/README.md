@@ -112,6 +112,11 @@ let bytes = encode_message(&Message::Open(open));
 - **`PmsiTunnel`** / **`PmsiTunnelType`** / **`PmsiTunnelIdentifier`** — PMSI Tunnel attribute (RFC 6514 §5) carried on EVPN Type 3 IMET routes for ingress-replication BUM. Constructor `PmsiTunnel::for_evpn_ingress_replication(vni, ip)` emits the RFC 8365 §5.1.3 wire shape (raw 24-bit VNI in the label field, originator IP as the tunnel identifier).
 - **`RouteDistinguisher`** — RFC 4364 §4.2 8-byte RD, used by EVPN and VPNv4/v6. Implements `Display` + `FromStr` for the standard `asn:val` / `ipv4:val` textual encodings
 - **`DecodeError`** / **`EncodeError`** — structured error types via `thiserror`
+- **Well-known community constants** — `u32` values for matching and setting
+  standard communities: `COMMUNITY_NO_EXPORT` / `COMMUNITY_NO_ADVERTISE` /
+  `COMMUNITY_NO_EXPORT_SUBCONFED` (RFC 1997), `COMMUNITY_BLACKHOLE` (RFC 7999),
+  `COMMUNITY_GRACEFUL_SHUTDOWN` (RFC 8326), `COMMUNITY_LLGR_STALE` /
+  `COMMUNITY_NO_LLGR` (RFC 9494)
 
 ## Fuzz tested
 

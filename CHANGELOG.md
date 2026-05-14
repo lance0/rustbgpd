@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-05-14
+
 ### Added
 
 - **RFC 7999 BLACKHOLE control-plane receiver support.** The wire crate now
@@ -90,6 +92,12 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   / `bridge fdb show` without scraping logs.
 
 ### Changed
+
+- **rustbgpd-wire 0.9.0 → 0.9.1.** The wire crate exposes new RFC 1997 /
+  RFC 7999 well-known community constants (`COMMUNITY_NO_EXPORT`,
+  `COMMUNITY_NO_ADVERTISE`, `COMMUNITY_NO_EXPORT_SUBCONFED`,
+  `COMMUNITY_BLACKHOLE`). Non-breaking — additive `pub const`s only, no
+  signature or struct changes.
 
 - **ADR-0061 FIB ownership is conservative.** Pre-existing kernel
   routes in configured `[[fib_tables]]` are now treated as foreign
