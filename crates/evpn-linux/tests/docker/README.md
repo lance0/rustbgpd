@@ -1,7 +1,7 @@
-# Docker harness — Gate 8b privileged netns tests
+# Docker harness — privileged netns tests
 
 Local Docker-driven runner for the privileged tests in
-`crates/evpn-linux/tests/netns_bum_filter.rs`. Lets contributors
+`crates/evpn-linux/tests/` and `src/fib_runtime.rs`. Lets contributors
 exercise the `EVPN_LINUX_NETNS=1` gated tests without needing
 iproute2 / iputils-ping / a specific Rust toolchain pre-installed on
 the host, and without leaking netnses into the host namespace on a
@@ -35,6 +35,8 @@ docker build \
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh           # both tests
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh spike     # shell spike only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh roundtrip # netlink round-trip only
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg   # FDB nexthop groups
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime # ADR-0061 FIB runtime
 ```
 
 `--cap-add=NET_ADMIN` is required for `bridge link set ... flood off`
@@ -57,7 +59,9 @@ caches across runs.
 | ------------ | ------------------------------------------------------- | ------------------------------------------------------------------ |
 | `spike`      | `bum_filter_spike_validates_kernel_primitive`           | Shell-driven topology + `ping -b` + `bridge link set` flag toggle |
 | `roundtrip`  | `linux_dataplane_set_bum_port_flags_round_trip`         | `LinuxDataplane::apply` → `RTM_NEWLINK` → `bridge -d link show`   |
-| `all` (default) | both                                                 | both                                                               |
+| `fdb_nhg`    | `netns_fdb_nhg`                                         | ADR-0059 FDB nexthop group install / update / teardown            |
+| `fib_runtime` | `fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip` | ADR-0061 route install / foreign preservation / withdraw / drain |
+| `all` (default) | Gate 8b BUM tests                                    | both Gate 8b BUM tests                                             |
 
 The shell spike asserts the five load-bearing invariants (DF allows,
 Non-DF blocks all three BUM classes, known-unicast survives, restore
@@ -65,6 +69,14 @@ is symmetric, FDB programming unaffected). The Rust round-trip
 asserts that the netlink-attribute encoding actually lands the
 expected `flood off / mcast_flood off / bcast_flood off` triplet on
 the kernel-side bridge port.
+
+The ADR-0061 FIB runtime selector runs a same-module daemon test from
+the `rustbgpd` crate. It creates a Linux netns, installs routes only
+into the configured non-reserved table, asserts table / metric /
+gateway / `proto bgp` shape, preserves an existing foreign route,
+withdraws only daemon-owned rows, drains owned rows on shutdown, and
+treats a route that was externally deleted before withdraw as
+idempotent.
 
 ## Kernel requirements
 

@@ -50,6 +50,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   kernel-failure counters. Empty `fib_tables` keeps the daemon
   control-plane-only.
 
+- **ADR-0061 general FIB netns validation.** The existing privileged
+  Docker netns harness now has a `fib_runtime` selector that exercises
+  the default-off unicast FIB runtime against a real Linux network
+  namespace. The smoke proves configured table / metric / gateway /
+  `proto bgp` route programming, empty-config no-op behavior, foreign
+  route preservation, withdraw cleanup, shutdown drain, and
+  missing-delete idempotency.
+
 - **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
   counters expose the periodic nexthop drift-recovery path without
   scraping logs: `evpn_fdb_nhg_drift_members_repaired_total`,

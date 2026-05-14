@@ -8,6 +8,9 @@
 #   - Gate 8b BUM port-flag tests (`netns_bum_filter`).
 #   - ADR-0059 slice 3b FDB nexthop group tests
 #     (`netns_fdb_nhg`) — requires kernel >= 5.8 for NDA_NH_ID.
+#   - ADR-0061 Slice 4 general unicast FIB runtime validation
+#     (`src/fib_runtime.rs`) — proves configured non-reserved
+#     Linux tables receive and drain daemon-owned routes.
 #
 # Requires:
 #   - Docker daemon running on a Linux host with kernel >= 5.8 for
@@ -31,6 +34,8 @@
 #       (slice 3b round-trip install/remove only)
 #   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_cve
 #       (slice 3b CVE-2025-39851 guard negative path only)
+#   bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime
+#       (ADR-0061 Slice 4 general unicast FIB runtime validation)
 #
 # Exits 0 on green; surfaces the inner cargo exit code otherwise.
 
@@ -42,8 +47,10 @@ IMAGE_TAG="${IMAGE_TAG:-rustbgpd-netns-tests:latest}"
 DOCKERFILE="$SCRIPT_DIR/Dockerfile"
 
 # Test selector. `bum_*` runs the Gate 8b harness; `fdb_nhg` runs
-# the ADR-0059 slice 3b FDB nexthop group integration test.
+# the ADR-0059 slice 3b FDB nexthop group integration test;
+# `fib_runtime` runs the ADR-0061 same-module daemon runtime test.
 TEST_BIN="netns_bum_filter"
+FIB_RUNTIME_FILTER=""
 case "${1:-all}" in
     spike)      FILTER="bum_filter_spike_validates_kernel_primitive" ;;
     roundtrip)  FILTER="linux_dataplane_set_bum_port_flags_round_trip" ;;
@@ -51,8 +58,9 @@ case "${1:-all}" in
     fdb_nhg)    TEST_BIN="netns_fdb_nhg"; FILTER="" ;;
     fdb_nhg_roundtrip)  TEST_BIN="netns_fdb_nhg"; FILTER="round_trip_install_and_remove_fdb_nhg" ;;
     fdb_nhg_cve)        TEST_BIN="netns_fdb_nhg"; FILTER="cve_guard_blocks_install_when_learning_enabled" ;;
+    fib_runtime)        FILTER=""; FIB_RUNTIME_FILTER="fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip" ;;
     *)
-        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve" >&2
+        echo "ERROR: unknown filter '$1' — pick one of: spike, roundtrip, all, fdb_nhg, fdb_nhg_roundtrip, fdb_nhg_cve, fib_runtime" >&2
         exit 2
         ;;
 esac
@@ -130,13 +138,21 @@ DOCKER_ARGS=(
 # netnses and re-exec into them; running them in parallel inside
 # the same container risks them clobbering each other on the
 # `/proc/$$/ns` namespace inheritance the inner re-exec depends on.
-TEST_ARGS=(
-    cargo test -p rustbgpd-evpn-linux --test "$TEST_BIN"
-    --
-    --test-threads=1 --nocapture
-)
-if [ -n "$FILTER" ]; then
-    TEST_ARGS+=("--exact" "$FILTER")
+if [ -n "$FIB_RUNTIME_FILTER" ]; then
+    TEST_ARGS=(
+        cargo test -p rustbgpd "$FIB_RUNTIME_FILTER"
+        --
+        --test-threads=1 --nocapture
+    )
+else
+    TEST_ARGS=(
+        cargo test -p rustbgpd-evpn-linux --test "$TEST_BIN"
+        --
+        --test-threads=1 --nocapture
+    )
+    if [ -n "$FILTER" ]; then
+        TEST_ARGS+=("--exact" "$FILTER")
+    fi
 fi
 
 echo "[harness] running: ${TEST_ARGS[*]}"

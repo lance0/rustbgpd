@@ -838,6 +838,8 @@ mod tests {
     use rustbgpd_wire::{AsPath, Ipv4Prefix, Ipv6Prefix, Origin, PathAttribute, RpkiValidation};
     use std::collections::BTreeMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    #[cfg(target_os = "linux")]
+    use std::process::Command;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1016,6 +1018,152 @@ mod tests {
 
     fn metrics() -> BgpMetrics {
         BgpMetrics::with_registry(Registry::new())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn netns_gate() -> bool {
+        std::env::var("EVPN_LINUX_NETNS").as_deref() == Ok("1")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run(cmd: &str, args: &[&str]) -> std::process::Output {
+        let out = Command::new(cmd).args(args).output().expect("spawn");
+        assert!(
+            out.status.success(),
+            "{cmd} {args:?} failed: status={} stdout={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        out
+    }
+
+    #[cfg(target_os = "linux")]
+    fn try_run(cmd: &str, args: &[&str]) {
+        let _ = Command::new(cmd).args(args).output();
+    }
+
+    #[cfg(target_os = "linux")]
+    struct NetnsFixture {
+        name: String,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl NetnsFixture {
+        fn create(test_name: &str) -> Self {
+            let name = format!("rustbgpd-fib-{test_name}-{}", std::process::id());
+            try_run("ip", &["netns", "delete", &name]);
+            run("ip", &["netns", "add", &name]);
+            run("ip", &["-n", &name, "link", "set", "lo", "up"]);
+            Self { name }
+        }
+
+        fn exec(&self, cmd: &str, args: &[&str]) -> String {
+            let mut full = vec!["netns", "exec", self.name.as_str(), cmd];
+            full.extend(args);
+            let out = run("ip", &full);
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for NetnsFixture {
+        fn drop(&mut self) {
+            try_run("ip", &["netns", "delete", &self.name]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_inner_netns(ns: &NetnsFixture, test_name: &str) {
+        let exe = std::env::current_exe().expect("self-exe");
+        let full_name = format!("fib_runtime::tests::{test_name}");
+        let status = Command::new("ip")
+            .args(["netns", "exec", &ns.name])
+            .arg(&exe)
+            .args(["--exact", "--nocapture", &full_name])
+            .env("RUSTBGPD_FIB_NETNS_INNER", "1")
+            .env("EVPN_LINUX_NETNS", "1")
+            .status()
+            .expect("spawn inner");
+        assert!(status.success(), "inner test invocation failed");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_inner_netns() -> bool {
+        std::env::var("RUSTBGPD_FIB_NETNS_INNER").is_ok()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn setup_unicast_netns(ns: &NetnsFixture) {
+        ns.exec(
+            "ip",
+            &[
+                "link", "add", "fib0", "type", "veth", "peer", "name", "fib-peer",
+            ],
+        );
+        ns.exec("ip", &["addr", "add", "192.0.2.2/24", "dev", "fib0"]);
+        ns.exec("ip", &["link", "set", "fib0", "up"]);
+        ns.exec("ip", &["link", "set", "fib-peer", "up"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn route_show(table_id: u32, prefix: &str) -> String {
+        let table = table_id.to_string();
+        let args = ["route", "show", "table", &table, "exact", prefix];
+        let out = Command::new("ip").args(args).output().expect("spawn");
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if stderr.contains("FIB table does not exist") {
+                return String::new();
+            }
+            panic!(
+                "ip {args:?} failed: status={} stdout={} stderr={}",
+                out.status,
+                String::from_utf8_lossy(&out.stdout),
+                stderr,
+            );
+        }
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn add_static_route(table_id: u32, prefix: &str) {
+        let table = table_id.to_string();
+        run(
+            "ip",
+            &[
+                "route",
+                "add",
+                "table",
+                &table,
+                prefix,
+                "via",
+                "192.0.2.1",
+                "metric",
+                "200",
+                "proto",
+                "static",
+            ],
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn delete_route(table_id: u32, prefix: &str) {
+        let table = table_id.to_string();
+        try_run(
+            "ip",
+            &[
+                "route",
+                "del",
+                "table",
+                &table,
+                prefix,
+                "via",
+                "192.0.2.1",
+                "metric",
+                "200",
+            ],
+        );
     }
 
     async fn reconcile_for_test(
@@ -1276,5 +1424,181 @@ mod tests {
         assert!(msg.attributes.iter().any(|attr| {
             matches!(attr, RouteAttribute::Gateway(RouteAddress::Inet6(addr)) if *addr == "2001:db8:ffff::1".parse::<Ipv6Addr>().unwrap())
         }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn netns_general_unicast_fib_runtime_round_trip() {
+        if !netns_gate() {
+            eprintln!("skipping: set EVPN_LINUX_NETNS=1 to run privileged general FIB netns test");
+            return;
+        }
+
+        if !is_inner_netns() {
+            let ns = NetnsFixture::create("general");
+            setup_unicast_netns(&ns);
+            run_inner_netns(&ns, "netns_general_unicast_fib_runtime_round_trip");
+            return;
+        }
+
+        let prefix = v4(24);
+        let prefix_text = "203.0.113.0/24";
+        let foreign_prefix = "198.51.100.0/24";
+        let mut fib = LinuxUnicastFib::connect().expect("LinuxUnicastFib::connect");
+        let mut owned = FibOwnedState::default();
+        let metrics = metrics();
+        let (status_tx, status_rx) = watch::channel(Vec::new());
+
+        // Empty [[fib_tables]] means no kernel install even when the
+        // RIB has a best route.
+        reconcile_once(
+            &FibRuntimeConfig { tables: vec![] },
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+        )
+        .await;
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "disabled config should not install {prefix_text}"
+        );
+
+        // A foreign route at the target key is preserved and surfaced
+        // as a rejected row instead of being overwritten.
+        add_static_route(1000, prefix_text);
+        reconcile_once(
+            &config(),
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+        )
+        .await;
+        let foreign = route_show(1000, prefix_text);
+        assert!(
+            foreign.contains("proto static"),
+            "foreign route changed: {foreign}"
+        );
+        assert!(owned.routes.is_empty());
+        let statuses = status_rx.borrow().clone();
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
+        assert_eq!(statuses[0].reason, "foreign_route_exists");
+        delete_route(1000, prefix_text);
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "foreign setup route was not removed before install phase"
+        );
+
+        // Configured table receives the BGP-selected best route with
+        // table id, metric, prefix, gateway, and proto bgp.
+        reconcile_once(
+            &config(),
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+        )
+        .await;
+        let installed = route_show(1000, prefix_text);
+        assert!(
+            installed.contains(prefix_text),
+            "route missing: {installed}"
+        );
+        assert!(
+            installed.contains("via 192.0.2.1"),
+            "gateway missing: {installed}"
+        );
+        assert!(
+            installed.contains("proto bgp"),
+            "proto bgp missing: {installed}"
+        );
+        assert!(
+            installed.contains("metric 200"),
+            "metric missing: {installed}"
+        );
+        let dumped = dump_configured_routes(&fib.handle, &config().tables)
+            .await
+            .expect("dump_configured_routes");
+        let key = key(prefix);
+        assert_eq!(
+            dumped.routes.get(&key).map(|r| r.target.next_hop),
+            Some(ip("192.0.2.1"))
+        );
+        assert_eq!(
+            dumped.routes.get(&key).map(|r| r.protocol),
+            Some(FibKernelProtocol::Bgp)
+        );
+
+        // Withdraw removes owned rows only; unrelated foreign rows survive.
+        add_static_route(1000, foreign_prefix);
+        reconcile_once(
+            &config(),
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+        )
+        .await;
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "withdraw left owned route installed"
+        );
+        let foreign_still_present = route_show(1000, foreign_prefix);
+        assert!(
+            foreign_still_present.contains("proto static"),
+            "foreign route was not preserved: {foreign_still_present}"
+        );
+
+        // Missing external delete is idempotent and must not wedge owned state.
+        reconcile_once(
+            &config(),
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+        )
+        .await;
+        delete_route(1000, prefix_text);
+        reconcile_once(
+            &config(),
+            &rib_with_routes(Vec::new()),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+        )
+        .await;
+        assert!(owned.routes.is_empty());
+
+        // Shutdown drain removes daemon-owned routes and clears status.
+        reconcile_once(
+            &config(),
+            &rib_with_routes(vec![route(prefix, ip("192.0.2.1"))]),
+            &mut fib,
+            &metrics,
+            &status_tx,
+            &mut owned,
+        )
+        .await;
+        drain_owned(&mut fib, &metrics, &status_tx, &mut owned).await;
+        assert!(owned.routes.is_empty());
+        assert!(status_rx.borrow().is_empty());
+        assert!(
+            route_show(1000, prefix_text).trim().is_empty(),
+            "shutdown drain left owned route installed"
+        );
+        let foreign_after_drain = route_show(1000, foreign_prefix);
+        assert!(
+            foreign_after_drain.contains("proto static"),
+            "shutdown drain removed foreign route: {foreign_after_drain}"
+        );
     }
 }
