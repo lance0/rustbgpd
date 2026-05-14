@@ -1310,6 +1310,52 @@ See [ADR-0044](adr/0044-mrt-dump-export.md) for design details.
 
 ---
 
+## `[[fib_tables]]`
+
+Optional, repeatable. Declares ordinary Linux route tables that the
+ADR-0061 general unicast FIB runtime may program. Empty by default —
+route-server, route-reflector, and looking-glass deployments leave it
+empty and remain control-plane-only.
+
+```toml
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast", "ipv6_unicast"]
+```
+
+When at least one table is configured on Linux, rustbgpd starts a
+level-triggered reconciler that projects Loc-RIB best routes into the
+declared tables only. The actor preserves foreign kernel rows, writes
+routes as `RTPROT_BGP` with the configured table and metric, drains
+daemon-owned rows on coordinated shutdown, and publishes per-route
+status through `RibService.ListFibRoutes` and
+`rustbgpctl rib fib`.
+
+`RTPROT_BGP` is not treated as ownership proof by itself. A route that
+already exists in a configured table before this daemon instance owns it
+is reported as `foreign_route_exists`, even if its protocol is BGP. That
+conservative rule avoids replacing or deleting FRR/BIRD routes in the
+same table and metric; crash-restart adoption requires a future
+rustbgpd-specific ownership marker or persisted owned-state.
+
+### Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | yes | -- | Operator-facing table name used in status output. Must be unique and match rustbgpd's identifier rules |
+| `table_id` | u32 | yes | -- | Linux route table id. Must be unique and cannot be `0`, `252`, `253`, `254`, or `255` |
+| `metric` | u32 | yes | -- | Kernel route metric / priority. Part of the daemon-owned route identity |
+| `families` | string[] | no | `["ipv4_unicast", "ipv6_unicast"]` | Address families eligible for install. Only IPv4 and IPv6 unicast are accepted |
+
+**Restart required**: `[[fib_tables]]` is resolved at startup and the
+runtime actor is spawned once. SIGHUP edits are surfaced by
+`rustbgpd --diff` and logged as restart-required, but the live table set
+is pinned back to the startup value until the daemon restarts.
+
+---
+
 ## `[[evpn_instances]]`
 
 Optional, repeatable. Declares the local L2VNI / EVPN-instance tenants
@@ -1568,8 +1614,9 @@ earlier reload steps still land at the manager and remain in effect.
 Inline `policy.import` / `policy.export` (the legacy global-fallback
 statements), `[global]` ASN/router-id/families,
 `[global.telemetry.grpc_*]` listener config, `[rpki]`, `[bmp]`,
-`[mrt]`, `[[evpn_instances]]`, `[[ethernet_segments]]`,
-`[[evpn_ip_vrfs]]`, and `apply_bum_enforcement` are
+`[mrt]`, `[[fib_tables]]`, `[[evpn_instances]]`,
+`[[ethernet_segments]]`, `[[evpn_ip_vrfs]]`, and
+`apply_bum_enforcement` are
 **restart-required** — they're surfaced under "Restart-required" in
 `rustbgpd --diff` and logged at reload time with a one-line migration
 hint to named definitions plus `import_chain` / `export_chain` where
@@ -1585,7 +1632,9 @@ follow the same pinning rule because their actors also resolve startup
 snapshots. The Gate 9 `[[evpn_ip_vrfs]]` table (ADR-0058) is pinned the
 same way; today the reconcile actor consumes it only for the IP-VRF
 readiness probe (Linux netlink dumps of the VRF and L3 VXLAN devices,
-logging Ready / NotReady transitions).
+logging Ready / NotReady transitions). The ADR-0061 `[[fib_tables]]`
+table is pinned for the same reason: the general FIB actor owns only the
+explicit tables resolved at startup.
 Reload-time mutation (`AddEvpnInstance` / `DeleteEvpnInstance` and
 SIGHUP delta application) is tracked as alpha-soak follow-up — see
 `docs/evpn-alpha-soak.md`.
@@ -1637,6 +1686,9 @@ starting:
 | BMP collector `reconnect_interval` must be > 0 | `reconnect_interval must be > 0` |
 | `cluster_id` must be a valid IPv4 address | `invalid cluster_id` |
 | `runtime_state_dir` must not be empty | `runtime_state_dir must not be empty` |
+| `[[fib_tables]].name` must be unique and match the identifier rule | `duplicate fib table name` / `invalid fib table name` |
+| `[[fib_tables]].table_id` must be unique and must not be `0`, `252`, `253`, `254`, or `255` | `duplicate fib table_id` / `reserved fib table_id` |
+| `[[fib_tables]].families` must be non-empty, contain no duplicates, and contain only `ipv4_unicast` / `ipv6_unicast` | `fib table families must not be empty` / `duplicate fib table family` / `unsupported fib table family` |
 | `llgr_stale_time` must be <= 16777215 (24-bit) | `llgr_stale_time exceeds maximum` |
 | `route_reflector_client` requires iBGP (local ASN == remote ASN) | `route_reflector_client requires iBGP` |
 | `local_ipv6_nexthop` must be a valid non-link-local, non-loopback, non-multicast IPv6 address | `invalid local_ipv6_nexthop` |

@@ -1097,6 +1097,11 @@ pub struct ConfigDiff {
     /// at startup, so edits are restart-required until a runtime swap
     /// surface exists.
     pub ethernet_segments_changed: bool,
+    /// `[[fib_tables]]` blocks added/removed/modified between old
+    /// and new. The ADR-0061 general-FIB actor resolves the table set
+    /// once at startup, so edits are restart-required until runtime
+    /// swap semantics are deliberately implemented.
+    pub fib_tables_changed: bool,
     /// Top-level Gate 8b kernel-enforcement opt-in changed. The
     /// dataplane actor reads this once at startup, so SIGHUP must not
     /// silently advance the in-memory snapshot.
@@ -1203,6 +1208,7 @@ impl ConfigDiff {
             || self.evpn_instances_changed
             || self.evpn_ip_vrfs_changed
             || self.ethernet_segments_changed
+            || self.fib_tables_changed
             || self.apply_bum_enforcement_changed
             || self.blackhole_fib_discard_changed
     }
@@ -1312,6 +1318,7 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_instances_changed: old.evpn_instances != new.evpn_instances,
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
+        fib_tables_changed: old.fib_tables != new.fib_tables,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
         blackhole_fib_discard_changed,
     }

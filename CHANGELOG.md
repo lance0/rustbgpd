@@ -41,6 +41,33 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `rustbgpctl` renders `65535:666` as `BLACKHOLE` in route community
   output.
 
+- **ADR-0061 general unicast FIB runtime actor.** Configured
+  `[[fib_tables]]` now start a default-off Linux route reconciler that
+  projects unicast Loc-RIB best routes into explicit non-reserved FIB
+  tables, preserves foreign kernel rows, drains daemon-owned rows on
+  shutdown, and exposes status through `RibService.ListFibRoutes`,
+  `rustbgpctl rib fib`, and Prometheus install / withdraw / reject /
+  kernel-failure counters. Empty `fib_tables` keeps the daemon
+  control-plane-only.
+
+- **ADR-0061 general FIB netns validation.** The existing privileged
+  Docker netns harness now has a `fib_runtime` selector that exercises
+  the default-off unicast FIB runtime against a real Linux network
+  namespace. The smoke proves configured table / metric / gateway /
+  `proto bgp` route programming, empty-config no-op behavior, foreign
+  route preservation, withdraw cleanup, shutdown drain, and
+  missing-delete idempotency.
+
+- **ADR-0061 M42 FRR interop smoke.** New local containerlab topology
+  `tests/interop/m42-fib-runtime-frr.clab.yml` validates the full
+  FRR → rustbgpd RIB → opt-in general Linux FIB path. FRR advertises
+  unicast routes over EBGP; rustbgpd installs the selected route into
+  configured table `1000` with metric `200`, gateway `10.0.0.2`, and
+  `proto bgp`; a pre-existing `proto static` row at the configured
+  target key is preserved and reported as `foreign_route_exists`; FRR
+  withdrawal removes the owned route; and graceful daemon shutdown
+  drains an owned route while preserving the foreign row.
+
 - **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
   counters expose the periodic nexthop drift-recovery path without
   scraping logs: `evpn_fdb_nhg_drift_members_repaired_total`,
@@ -63,6 +90,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   / `bridge fdb show` without scraping logs.
 
 ### Changed
+
+- **ADR-0061 FIB ownership is conservative.** Pre-existing kernel
+  routes in configured `[[fib_tables]]` are now treated as foreign
+  unless the current daemon instance already has matching owned state.
+  `RTPROT_BGP` is still the protocol marker rustbgpd writes, but it is
+  not ownership proof by itself because FRR/BIRD can use the same marker
+  in the same table and metric. This avoids replacing or draining other
+  daemons' BGP routes after an ungraceful restart; crash-restart
+  adoption is deferred until rustbgpd has a distinct ownership marker or
+  persisted owned-state.
+
+- **ADR-0061 FIB runtime hardening and documentation sweep.** The
+  runtime now uses the RIB manager's priority query channel for
+  `QueryBestRoutes`, publishes failed status rows when a RIB query
+  fails instead of serving stale installed rows, and aborts in-flight
+  reconcile/apply work promptly on shutdown so the bounded drain gets
+  priority. `ListFibRoutes`, `[[fib_tables]]`, M42, and the privileged
+  netns harness docs now match the shipped behavior.
 
 - **EVPN Gate 9 documentation accuracy.** Refreshed the
   `EvpnInstanceConfig.ip_vrf` schema comment and GoBGP parity row so

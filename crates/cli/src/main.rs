@@ -390,6 +390,8 @@ enum RibAction {
     },
     /// Show RFC 7999 BLACKHOLE discard install status
     Blackholes,
+    /// Show ADR-0061 general FIB route install status
+    Fib,
     /// Inject a route
     Add {
         /// Prefix (e.g., 10.0.0.0/24)
@@ -558,7 +560,7 @@ fn resolve_family(family: &Option<String>) -> Result<Option<i32>, CliError> {
     }
 }
 
-struct RibBlackholesFilterArgs<'a> {
+struct RibStatusFilterArgs<'a> {
     family: &'a Option<String>,
     prefix: &'a Option<String>,
     longer: bool,
@@ -569,7 +571,10 @@ struct RibBlackholesFilterArgs<'a> {
     large_community: &'a [String],
 }
 
-fn reject_blackholes_filters(filters: RibBlackholesFilterArgs<'_>) -> Result<(), CliError> {
+fn reject_rib_status_filters(
+    command: &str,
+    filters: RibStatusFilterArgs<'_>,
+) -> Result<(), CliError> {
     if filters.family.is_some()
         || filters.prefix.is_some()
         || filters.longer
@@ -579,9 +584,9 @@ fn reject_blackholes_filters(filters: RibBlackholesFilterArgs<'_>) -> Result<(),
         || !filters.community.is_empty()
         || !filters.large_community.is_empty()
     {
-        return Err(CliError::Argument(
-            "rib blackholes does not support route filters; use `rustbgpctl rib blackholes`".into(),
-        ));
+        return Err(CliError::Argument(format!(
+            "rib {command} does not support route filters; use `rustbgpctl rib {command}`"
+        )));
     }
     Ok(())
 }
@@ -710,17 +715,28 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             community,
             large_community,
         } => {
-            if matches!(action, Some(RibAction::Blackholes)) {
-                reject_blackholes_filters(RibBlackholesFilterArgs {
-                    family: &family,
-                    prefix: &prefix,
-                    longer,
-                    explain,
-                    explain_peer: &explain_peer,
-                    origin_asn,
-                    community: &community,
-                    large_community: &large_community,
-                })?;
+            if matches!(action, Some(RibAction::Blackholes | RibAction::Fib)) {
+                let command = if matches!(action, Some(RibAction::Fib)) {
+                    "fib"
+                } else {
+                    "blackholes"
+                };
+                reject_rib_status_filters(
+                    command,
+                    RibStatusFilterArgs {
+                        family: &family,
+                        prefix: &prefix,
+                        longer,
+                        explain,
+                        explain_peer: &explain_peer,
+                        origin_asn,
+                        community: &community,
+                        large_community: &large_community,
+                    },
+                )?;
+                if matches!(action, Some(RibAction::Fib)) {
+                    return commands::rib::fib(connection, json).await;
+                }
                 return commands::rib::blackholes(connection, json).await;
             }
 
@@ -819,6 +835,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     }
                 }
                 Some(RibAction::Blackholes) => commands::rib::blackholes(connection, json).await,
+                Some(RibAction::Fib) => commands::rib::fib(connection, json).await,
                 Some(RibAction::Add {
                     prefix,
                     nexthop,
@@ -1191,35 +1208,64 @@ mod tests {
 
     #[test]
     fn rib_blackholes_rejects_route_filters() {
-        let err = reject_blackholes_filters(RibBlackholesFilterArgs {
-            family: &Some("ipv4_unicast".to_string()),
-            prefix: &None,
-            longer: false,
-            explain: false,
-            explain_peer: &None,
-            origin_asn: None,
-            community: &[],
-            large_community: &[],
-        })
+        let err = reject_rib_status_filters(
+            "blackholes",
+            RibStatusFilterArgs {
+                family: &Some("ipv4_unicast".to_string()),
+                prefix: &None,
+                longer: false,
+                explain: false,
+                explain_peer: &None,
+                origin_asn: None,
+                community: &[],
+                large_community: &[],
+            },
+        )
         .unwrap_err();
         assert!(
             err.to_string().contains("does not support route filters"),
             "unexpected error: {err}"
         );
 
-        let err = reject_blackholes_filters(RibBlackholesFilterArgs {
-            family: &None,
-            prefix: &Some("203.0.113.66/32".to_string()),
-            longer: false,
-            explain: false,
-            explain_peer: &None,
-            origin_asn: None,
-            community: &[],
-            large_community: &[],
-        })
+        let err = reject_rib_status_filters(
+            "blackholes",
+            RibStatusFilterArgs {
+                family: &None,
+                prefix: &Some("203.0.113.66/32".to_string()),
+                longer: false,
+                explain: false,
+                explain_peer: &None,
+                origin_asn: None,
+                community: &[],
+                large_community: &[],
+            },
+        )
         .unwrap_err();
         assert!(
             err.to_string().contains("does not support route filters"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rib_fib_rejects_route_filters() {
+        let err = reject_rib_status_filters(
+            "fib",
+            RibStatusFilterArgs {
+                family: &None,
+                prefix: &Some("203.0.113.0/24".to_string()),
+                longer: false,
+                explain: false,
+                explain_peer: &None,
+                origin_asn: None,
+                community: &[],
+                large_community: &[],
+            },
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("rib fib does not support route filters"),
             "unexpected error: {err}"
         );
     }

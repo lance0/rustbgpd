@@ -316,6 +316,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
 | `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
+| `ListFibRoutes` | ADR-0061 general unicast Linux FIB route status for configured `[[fib_tables]]` |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
 ### List received routes (Adj-RIB-In)
@@ -469,6 +470,29 @@ Returns one row per currently observed best route carrying the RFC 7999
 the kernel install error string.
 An empty list means either the reconciler is disabled or no BLACKHOLE-marked
 best routes are currently visible.
+
+### List general FIB route status
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListFibRoutes
+```
+
+Returns one row per desired or daemon-owned route in the ADR-0061
+general unicast Linux FIB runtime. The runtime is default-off and only
+starts when at least one `[[fib_tables]]` block is configured. `state`
+is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALLED`,
+`FIB_ROUTE_STATE_REJECTED`, or `FIB_ROUTE_STATE_FAILED`); `reason`
+carries values such as `owned`, `foreign_route_exists`,
+`next_hop_family_unsupported`, `dump_failed:<error>`,
+`rib_query_failed:<reason>`, or a kernel apply error such as
+`install_failed:<error>`.
+
+`table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
+the route identity and forwarding value. A pre-existing kernel row in a
+configured table is reported as `foreign_route_exists`; `RTPROT_BGP` is
+not ownership proof by itself because another daemon can use the same
+protocol marker.
 
 ---
 

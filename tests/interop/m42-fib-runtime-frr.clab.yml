@@ -1,0 +1,53 @@
+# Containerlab topology: rustbgpd ↔ FRR (M42 — ADR-0061 general FIB)
+#
+# Validates the opt-in general unicast Linux FIB runtime against a real
+# FRR peer:
+#
+#   * FRR advertises 203.0.113.42/32.
+#   * rustbgpd runs with [[fib_tables]] table_id=1000 metric=200.
+#   * rustbgpd must install the selected route into table 1000 with
+#     gateway 10.0.0.2, RTPROT_BGP, and metric 200.
+#   * An existing foreign route at the same configured table/metric
+#     identity for 198.51.100.0/24 must be preserved and reported as a
+#     conflict.
+#   * FRR withdrawal removes only the daemon-owned route.
+#   * A graceful rustbgpd shutdown drains daemon-owned routes.
+#
+# Usage:
+#   docker build -t rustbgpd:dev .
+#   containerlab deploy -t tests/interop/m42-fib-runtime-frr.clab.yml
+#   bash tests/interop/scripts/test-m42-fib-runtime-frr.sh
+#   containerlab destroy -t tests/interop/m42-fib-runtime-frr.clab.yml --cleanup
+
+name: m42-fib-runtime-frr
+
+topology:
+  nodes:
+    rustbgpd:
+      kind: linux
+      image: rustbgpd:dev
+      cmd: sleep infinity
+      binds:
+        - ./configs/rustbgpd-m42-fib.toml:/etc/rustbgpd/config.toml:ro
+        - ./scripts/start-rustbgpd.sh:/usr/local/bin/start-rustbgpd.sh:ro
+      exec:
+        - ip addr add 10.0.0.1/24 dev eth1
+        - ip link set eth1 up
+        - ip route add table 1000 198.51.100.0/24 via 10.0.0.2 metric 200 proto static
+      env:
+        RUST_LOG: info
+
+    frr:
+      kind: linux
+      image: quay.io/frrouting/frr:10.3.1
+      binds:
+        - ./configs/frr-daemons:/etc/frr/daemons:ro
+        - ./configs/frr-bgpd-m42-fib.conf:/etc/frr/frr.conf:ro
+      exec:
+        - ip addr add 10.0.0.2/24 dev eth1
+        - ip link set eth1 up
+
+  links:
+    - endpoints: ["rustbgpd:eth1", "frr:eth1"]
+
+# Network: 10.0.0.0/24 — rustbgpd (10.0.0.1, AS 65001) ↔ FRR (10.0.0.2, AS 65002)

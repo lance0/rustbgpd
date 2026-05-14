@@ -26,6 +26,21 @@ address = "127.0.0.1:50051"
 # Uncomment and create the token file for bearer-token auth:
 # token_file = "/etc/rustbgpd/grpc-token"
 
+# Optional edge-router mode:
+# Leave this block absent when rustbgpd is only a control-plane route
+# injection layer. Configure it only on a Linux host where rustbgpd should
+# program ordinary unicast best routes into dedicated kernel tables.
+#
+# [[fib_tables]]
+# name = "edge"
+# table_id = 1000
+# metric = 200
+# families = ["ipv4_unicast", "ipv6_unicast"]
+#
+# Inspect runtime status with:
+#   rustbgpctl rib fib
+#   rustbgpctl -j rib fib
+
 # RPKI validation — don't announce prefixes we can't prove we hold
 [rpki]
 [[rpki.cache_servers]]

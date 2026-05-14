@@ -2689,6 +2689,10 @@ fn diff_config_json_serializes() {
         "expected ethernet_segments_changed in serialized diff: {json}"
     );
     assert!(
+        json.contains("\"fib_tables_changed\":false"),
+        "expected fib_tables_changed in serialized diff: {json}"
+    );
+    assert!(
         json.contains("\"apply_bum_enforcement_changed\":false"),
         "expected apply_bum_enforcement_changed in serialized diff: {json}"
     );
@@ -3961,6 +3965,151 @@ fn apply_bum_enforcement_diff_marks_restart_required() {
     let new = parse(&new_toml).unwrap();
     let diff = diff_config(&old, &new);
     assert!(diff.apply_bum_enforcement_changed);
+    assert!(diff.has_restart_required_changes());
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0061 — general-purpose unicast Linux FIB config skeleton.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fib_tables_default_empty() {
+    let config = parse(valid_toml()).unwrap();
+    assert!(config.fib_tables.is_empty());
+}
+
+#[test]
+fn fib_tables_parse_explicit_opt_in() {
+    let toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml).unwrap();
+
+    assert_eq!(config.fib_tables.len(), 1);
+    let table = &config.fib_tables[0];
+    assert_eq!(table.name, "edge");
+    assert_eq!(table.table_id, 1000);
+    assert_eq!(table.metric, 200);
+    assert_eq!(table.families, ["ipv4_unicast", "ipv6_unicast"]);
+}
+
+#[test]
+fn fib_tables_reject_reserved_table_ids() {
+    for id in [0, 252, 253, 254, 255] {
+        let toml = format!(
+            r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = {id}
+metric = 200
+"#,
+            valid_toml()
+        );
+        let err = parse(&toml).unwrap_err();
+        let ConfigError::InvalidFibTable { reason } = err else {
+            panic!("expected InvalidFibTable for table {id}, got {err}");
+        };
+        assert!(
+            reason.contains("reserved"),
+            "expected reserved-table error for {id}, got {reason}"
+        );
+    }
+}
+
+#[test]
+fn fib_tables_reject_duplicate_names_and_tables() {
+    let toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+
+[[fib_tables]]
+name = "edge"
+table_id = 1001
+metric = 200
+"#,
+        valid_toml()
+    );
+    assert!(matches!(
+        parse(&toml),
+        Err(ConfigError::InvalidFibTable { .. })
+    ));
+
+    let toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge-a"
+table_id = 1000
+metric = 200
+
+[[fib_tables]]
+name = "edge-b"
+table_id = 1000
+metric = 200
+"#,
+        valid_toml()
+    );
+    assert!(matches!(
+        parse(&toml),
+        Err(ConfigError::InvalidFibTable { .. })
+    ));
+}
+
+#[test]
+fn fib_tables_reject_non_unicast_families() {
+    let toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_flowspec"]
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidFibTable { reason } = err else {
+        panic!("expected InvalidFibTable, got {err}");
+    };
+    assert!(reason.contains("unsupported family"));
+}
+
+#[test]
+fn fib_tables_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let toml = format!(
+        r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+"#,
+        valid_toml()
+    );
+    let new = parse(&toml).unwrap();
+    let diff = diff_config(&old, &new);
+
+    assert!(diff.fib_tables_changed);
     assert!(diff.has_restart_required_changes());
 }
 

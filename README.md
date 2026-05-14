@@ -13,12 +13,13 @@ inject routes.
 **Status: public alpha.** Feature-complete for the initial route-server and
 control-plane target. Dual-stack BGP/MP-BGP, Add-Path, GR/LLGR, RPKI/RTR,
 ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
-are implemented. Kernel FIB
-integration and broader router features remain future work. Validated with
-a workspace test suite, fuzz targets, and 36 automated interop suites against
-FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR — 16 of those interop
-tests run on every PR; the rest are gated locally for runtime or kernel
-reasons.
+are implemented. Default-off Linux FIB integration exists for RFC 7999
+discard routes and configured unicast FIB tables; broader router features
+remain future work. Validated with a workspace test suite, fuzz targets,
+and 42 automated interop scripts — primarily against FRR 10.3.1, plus
+GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented
+M0 containerlab validation. Sixteen interop tests run on every PR; the
+rest are gated locally for runtime or kernel reasons.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The daemon runs on
@@ -48,7 +49,8 @@ architecture diagrams, example configs, and API workflows.
 
 ## Not the best fit today
 
-- Full general-purpose router deployments requiring FIB integration
+- Full general-purpose router deployments expecting default-on,
+  fully policy-guarded FIB integration
 - Full production EVPN **VTEP** deployments — rustbgpd now ships the
   Route Reflector role plus a bidirectional single-homed L2VNI VTEP
   alpha path: declarative `[[evpn_instances]]` (Gate 7a), remote-MAC
@@ -272,7 +274,7 @@ and more explicit internal architecture.
 |----------|---------|
 | Workspace tests | Unit, integration, and property tests (`cargo test --workspace`) |
 | Wire fuzzing | libFuzzer harnesses on message and attribute decoders, CI smoke + nightly extended |
-| Interop suites | 35 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR (15 gated on every PR; remainder run locally) |
+| Interop suites | 42 automated containerlab tests against FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR (16 gated on every PR; remainder run locally) |
 | Protocol coverage | RFC 4271 FSM + UPDATE validation, MP-BGP, GR/LLGR, Add-Path, FlowSpec, RPKI, ASPA, Extended Messages, Extended Next Hop, Route Refresh/ERR, RFC 7999 BLACKHOLE receiver scoping + opt-in FIB discard, RFC 8326 Graceful Shutdown |
 | Architecture decisions | ADRs documenting every protocol and design choice ([docs/adr/](docs/adr/)) |
 
@@ -286,7 +288,11 @@ See [docs/INTEROP.md](docs/INTEROP.md) for full procedures and results.
 
 ## Current limitations
 
-- No kernel FIB integration -- rustbgpd is a control-plane daemon, not a forwarding engine
+- Linux FIB integration is opt-in and scoped: RFC 7999 BLACKHOLE
+  discard routes and configured `[[fib_tables]]` unicast route
+  installation are available, but general-purpose router hardening
+  such as per-peer FIB allow-lists, route limits, and full policy
+  guardrails remains follow-up work
 - EVPN (RFC 7432) is supported in **Route Reflector role plus the Gate 7a/7b/7b+1/7b+2/7c bidirectional VTEP alpha path, with Gate 8/8b multi-homing alpha and Gate 9 slice 6 symmetric Interface-less IRB end-to-end** (ADR-0052, ADR-0054, ADR-0055, ADR-0056, ADR-0057, ADR-0058). RR reflection covers all 5 RFC 7432 / RFC 9136 route types (Type 1–5) end-to-end against FRR. Controller injection via gRPC (`AddEvpnRoute` / `DeleteEvpnRoute`) is currently scoped to Types 2 and 3. Gate 7a ships the declarative half: `[[evpn_instances]]` TOML schema + `EvpnService.ListEvpnInstances` gRPC + `rustbgpctl evpn instances`, all in the domain-only `crates/evpn` crate. Gate 7b adds the level-triggered Linux dataplane reconciler in `crates/evpn-linux`: remote-MAC FDB programming over rtnetlink (single combined `NTF_SELF | NTF_MASTER | NTF_EXT_LEARNED` `RTM_NEWNEIGH` per `(VNI, MAC)`), structural foreign-entry preservation, per-op-fingerprint permanent-failure suppression, errno-based classifier, and a 5 s shutdown drain wired into coordinated daemon shutdown. Gate 7b+1 closes the upward loop: kernel-learned local MACs become MAC-only Type 2 originations with RFC 7432 §15.1 mobility sequencing, one Type 3 IMET per L2VNI carries a PMSI Tunnel attribute for ingress-replication BUM, and `advertise_svi_mac = true` originates a Type 2 for the bridge's own MAC (RFC 9135 §6.1) on instance-Ready. Gate 7b+2 closes the MAC+IP path: with `bridge link set ... neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the bridge's neighbour table drive MAC+IP Type 2 origination under the FRR-style replace model (one Type 2 per MAC at any time — `IpAdded` upgrades from MAC-only to MAC+IP, last `IpRemoved` downgrades back). Gate 7c switches the originator from a 5 s `QueryEvpnRoutes` poll to a push-notified RIB broadcast for sub-second mobility convergence; the 5 s poll stays as a `Lagged` / cold-start backstop. ADR-0056 adds operator-facing `sticky_macs` config. Gate 8/8b adds alpha multi-homing execution: DF election, Type 1/4 origination, opt-in BUM suppression, ESI-aware Type 2 origination, aliasing projection, and receive-side mass-withdraw filtering. Gate 9 (ADR-0058) lands symmetric Interface-less IRB end-to-end: `[[evpn_ip_vrfs]]` TOML schema with VRF / L3VXLAN device + Router MAC binding, pure-logic Type 5 origination + projection helpers, the IP-VRF readiness probe, Linux rtnetlink dumps for VRF / L3VXLAN inventory, a `Dataplane::probe_ip_vrfs` trait surface that the reconcile actor calls every pass, `DataplaneReport.ip_vrf_status` carrying the per-VRF verdict, `ListIpVrfs` / `GetIpVrf` gRPC + `rustbgpctl evpn vrfs` CLI surface, slice 6 PR A's per-IP-VRF kernel route observation + local Type 5 origination (gated on readiness, with a level-triggered diff loop), and slice 6 PR B's remote Type 5 import + L3 FIB programming through a transactional `L3OwnedState` model that programs kernel route + L3 neighbor + L3VXLAN FDB atomically with value-aware drift detection (Router MAC / next-hop transition under the same prefix triggers an atomic `.replace()`), Router MAC conflict detection, four-phase apply ordering (route-remove → resolution-add → route-add → resolution-remove), and foreign-state preservation. M39 manual containerlab smoke validates the bidirectional IRB datapath against FRR 10.3.1. ADR-0059 ships aliasing dataplane ECMP via FDB nexthop groups in four slices on the receive path: slice 1 portable intent (`RemoteMacEntry::alias_group_key`), slice 2 raw-netlink `NDA_NH_ID` / `NHA_FDB` primitive, slice 3a state types + apply primitive with the CVE-2025-39851 guard, slice 3b reconcile coordinator + Pass 1b diff + startup NHID adoption + actor-level FDB-NHG test coverage, and slice 4 M40 manual containerlab smoke against FRR EVPN-MH 10.3.1 (16/16 PASS first-shot). Duplicate-MAC quarantine action, production-default multi-homing enforcement after a clean soak, full overlay-index IRB semantics (RFC 9135 overlay-index model), VLAN-aware bridges, and bridge / VXLAN netdev creation remain follow-up work
 - No VPNv4 / VPNv6 or Confederation support
 - No TCP-AO (RFC 5925) — TCP MD5 and GTSM are supported
@@ -305,8 +311,8 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Runtime** | Rust 1.92+ (workspace MSRV — Tokio rolling-6-month policy), single binary, no external dependencies except optional RPKI/BMP/MRT backends |
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
-| **Not yet supported** | Kernel FIB integration (unicast), EVPN duplicate-MAC quarantine action / production-default multi-homing enforcement / RFC 9135 overlay-index IRB, VPNv4/v6, Confederation, TCP-AO |
-| **Tests** | Workspace test suite, fuzz targets, 36 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (16 interop tests gated on every PR; M36/M37 run locally with privileged kernel access) |
+| **Not yet supported** | EVPN duplicate-MAC quarantine action / production-default multi-homing enforcement / RFC 9135 overlay-index IRB, VPNv4/v6, Confederation, TCP-AO |
+| **Tests** | Workspace test suite, fuzz targets, 42 automated interop scripts primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (16 interop tests gated on every PR; privileged kernel dataplane smokes run locally) |
 
 ## Documentation
 

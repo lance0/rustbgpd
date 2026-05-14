@@ -26,6 +26,8 @@ mod evpn_l3_originator;
 mod evpn_originator;
 mod evpn_segment;
 mod evpn_svi;
+mod fib;
+mod fib_runtime;
 mod looking_glass;
 mod metrics_server;
 mod peer_manager;
@@ -336,6 +338,9 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     if diff.ethernet_segments_changed {
         restart_sections.push("[[ethernet_segments]]");
     }
+    if diff.fib_tables_changed {
+        restart_sections.push("[[fib_tables]]");
+    }
     if diff.apply_bum_enforcement_changed {
         restart_sections.push("apply_bum_enforcement");
     }
@@ -606,6 +611,7 @@ fn main() {
                     "evpn_instances_changed": diff.evpn_instances_changed,
                     "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
                     "ethernet_segments_changed": diff.ethernet_segments_changed,
+                    "fib_tables_changed": diff.fib_tables_changed,
                     "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
                     "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
                     "inline_policy_import_changed": diff.policy.import_changed,
@@ -1366,6 +1372,23 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         blackhole_shutdown.clone(),
     );
 
+    // ADR-0061 general unicast FIB reconciler. Completely opt-in:
+    // an empty `[[fib_tables]]` list returns `None` and leaves
+    // route-server / route-reflector deployments control-plane-only.
+    let (fib_status_tx, fib_status_rx) =
+        tokio::sync::watch::channel(Vec::<fib_runtime::FibRuntimeStatus>::new());
+    let fib_runtime_shutdown = tokio_util::sync::CancellationToken::new();
+    let fib_runtime_handle = fib_runtime::spawn(
+        fib_runtime::FibRuntimeConfig {
+            tables: config.fib_tables.clone(),
+        },
+        rib_tx.clone(),
+        rib_query_tx.clone(),
+        metrics.clone(),
+        fib_status_tx,
+        fib_runtime_shutdown.clone(),
+    );
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1426,6 +1449,37 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                             }
                             blackhole::BlackholeState::Failed => {
                                 rustbgpd_api::proto::BlackholeDiscardState::Failed as i32
+                            }
+                        },
+                        reason: status.reason.clone(),
+                    })
+                    .collect()
+            })
+        },
+        fib_route_snapshot: {
+            let rx = fib_status_rx.clone();
+            Arc::new(move || {
+                rx.borrow()
+                    .iter()
+                    .map(|status| rustbgpd_api::proto::FibRouteStatus {
+                        table_name: status.table_name.clone(),
+                        table_id: status.table_id,
+                        metric: status.metric,
+                        prefix: status.prefix.addr_string(),
+                        prefix_length: u32::from(status.prefix.prefix_len()),
+                        next_hop: status
+                            .next_hop
+                            .map_or_else(String::new, |ip| ip.to_string()),
+                        peer_address: status.peer.map_or_else(String::new, |ip| ip.to_string()),
+                        state: match status.state {
+                            fib_runtime::FibRuntimeState::Installed => {
+                                rustbgpd_api::proto::FibRouteState::Installed as i32
+                            }
+                            fib_runtime::FibRuntimeState::Rejected => {
+                                rustbgpd_api::proto::FibRouteState::Rejected as i32
+                            }
+                            fib_runtime::FibRuntimeState::Failed => {
+                                rustbgpd_api::proto::FibRouteState::Failed as i32
                             }
                         },
                         reason: status.reason.clone(),
@@ -1749,6 +1803,13 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // this daemon lifetime.
     if let Some(handle) = blackhole_handle {
         info!("draining BLACKHOLE discard routes");
+        handle.shutdown().await;
+    }
+
+    // 2.45 Drain daemon-owned ADR-0061 general FIB routes. This is
+    // local kernel state only, so it does not need live BGP sessions.
+    if let Some(handle) = fib_runtime_handle {
+        info!("draining general FIB routes");
         handle.shutdown().await;
     }
 
@@ -2172,6 +2233,14 @@ async fn reload_config(
              kernel-enforcement opt-in."
         );
         new_config.apply_bum_enforcement = current.apply_bum_enforcement;
+    }
+    if new_config.fib_tables != current.fib_tables {
+        error!(
+            "[[fib_tables]] differs from the live config: the ADR-0061 \
+             general unicast FIB reconciler is spawned only at startup. \
+             Restart rustbgpd to apply [[fib_tables]] edits."
+        );
+        new_config.fib_tables.clone_from(&current.fib_tables);
     }
     if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
         || new_config.global.allow_blackhole_broad_prefixes
@@ -3827,6 +3896,7 @@ hold_time = 90
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
             evpn_ip_vrfs: Vec::new(),
+            fib_tables: Vec::new(),
             apply_bum_enforcement: false,
         };
 
