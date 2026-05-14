@@ -12,7 +12,7 @@ Part of [rustbgpd](https://github.com/lance0/rustbgpd).
 | **NeighborService** | Dynamic peer CRUD, enable/disable, soft reset |
 | **PolicyService** | Named policy CRUD and global/per-neighbor chain assignment |
 | **PeerGroupService** | Peer-group CRUD, neighbor-to-group assignment |
-| **RibService** | Received/best/advertised route queries (incl. EVPN) and watch stream |
+| **RibService** | Received/best/advertised route queries (incl. EVPN), BLACKHOLE discard status, and watch stream |
 | **InjectionService** | Inject/withdraw unicast, FlowSpec, and EVPN routes |
 | **ControlService** | Health, metrics, shutdown, MRT trigger |
 | **EvpnService** | List configured local EVPN instances (Phase-2 VTEP foundation; read-only) |

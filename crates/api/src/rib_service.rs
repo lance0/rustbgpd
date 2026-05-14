@@ -15,15 +15,35 @@ use rustbgpd_rib::{
 };
 use rustbgpd_wire::{Afi, AsPath, AsPathSegment, EvpnRoute, PathAttribute, Prefix};
 
+/// Live snapshot provider for daemon-owned BLACKHOLE discard status.
+pub type BlackholeDiscardSnapshotFn =
+    std::sync::Arc<dyn Fn() -> Vec<proto::BlackholeDiscard> + Send + Sync + 'static>;
+
 /// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
+    blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
 }
 
 impl RibService {
     /// Create a new RIB service backed by the given RIB channel.
+    #[allow(dead_code)]
     pub fn new(rib_tx: mpsc::Sender<RibUpdate>) -> Self {
-        Self { rib_tx }
+        Self {
+            rib_tx,
+            blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
+        }
+    }
+
+    /// Create a RIB service with a live BLACKHOLE discard snapshot.
+    pub fn with_blackhole_snapshot(
+        rib_tx: mpsc::Sender<RibUpdate>,
+        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+    ) -> Self {
+        Self {
+            rib_tx,
+            blackhole_discard_snapshot,
+        }
     }
 
     async fn query_routes(&self, peer: Option<IpAddr>) -> Result<Vec<Route>, Status> {
@@ -618,6 +638,15 @@ impl proto::rib_service_server::RibService for RibService {
                 ))
             })?;
         Ok(Response::new(explain_best_path_to_proto(explain)))
+    }
+
+    async fn list_blackhole_discards(
+        &self,
+        _request: Request<proto::ListBlackholeDiscardsRequest>,
+    ) -> Result<Response<proto::ListBlackholeDiscardsResponse>, Status> {
+        Ok(Response::new(proto::ListBlackholeDiscardsResponse {
+            discards: (self.blackhole_discard_snapshot)(),
+        }))
     }
 
     async fn watch_routes(
@@ -1243,6 +1272,37 @@ mod tests {
         });
         let err = svc.list_received_routes(req).await.unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn list_blackhole_discards_returns_live_snapshot() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_blackhole_snapshot(
+            tx,
+            Arc::new(|| {
+                vec![proto::BlackholeDiscard {
+                    prefix: "203.0.113.66".to_string(),
+                    prefix_length: 32,
+                    peer_address: "192.0.2.1".to_string(),
+                    state: proto::BlackholeDiscardState::Installed as i32,
+                    reason: "owned".to_string(),
+                }]
+            }),
+        );
+
+        let resp = svc
+            .list_blackhole_discards(Request::new(proto::ListBlackholeDiscardsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.discards.len(), 1);
+        let row = &resp.discards[0];
+        assert_eq!(row.prefix, "203.0.113.66");
+        assert_eq!(row.prefix_length, 32);
+        assert_eq!(row.peer_address, "192.0.2.1");
+        assert_eq!(row.state, proto::BlackholeDiscardState::Installed as i32);
+        assert_eq!(row.reason, "owned");
     }
 
     #[tokio::test]

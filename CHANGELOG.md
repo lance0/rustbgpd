@@ -18,17 +18,28 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `match_community`, `set_community_add`, and `set_community_remove` parse
   community values. New opt-in `[global] honor_blackhole = true` appends an
   EBGP import chain-tail rule (`match BLACKHOLE → permit, add BLACKHOLE +
-  NO_ADVERTISE`) and hot-applies on SIGHUP through the peer manager. This is
-  the safe control-plane scoping half only; kernel discard/null-route
-  programming remains a future FIB integration slice.
+  NO_ADVERTISE`) and hot-applies on SIGHUP through the peer manager.
+
+- **RFC 7999 opt-in BLACKHOLE FIB discard.** New startup-only
+  `[global] install_blackhole_discard = true` starts a Linux
+  `RTN_BLACKHOLE` route reconciler when paired with
+  `[global] honor_blackhole = true`. The reconciler installs only
+  accepted EBGP best routes that still carry `BLACKHOLE`, defaults to
+  host routes only (`/32` and `/128`), preserves existing kernel routes
+  by refusing overwrite, removes owned rows on withdraw and shutdown,
+  and exposes status through `RibService.ListBlackholeDiscards`,
+  `rustbgpctl rib blackholes`, and Prometheus install / withdraw /
+  reject / kernel-failure counters. `allow_blackhole_broad_prefixes =
+  true` is a separate opt-in for non-host discards.
 
 - **RFC 7999 operator follow-through.** ADR-0060 records the
-  control-plane-only BLACKHOLE decision and the future FIB discard
-  requirements; `examples/ddos-mitigation/config.toml` now shows
+  BLACKHOLE receiver and FIB-discard decisions;
+  `examples/ddos-mitigation/config.toml` now shows
   `[global] honor_blackhole = true` plus an explicit host-route-only
-  import guard; M41 adds a manual FRR interop skeleton for BLACKHOLE
-  receiver scoping; and `rustbgpctl` renders `65535:666` as
-  `BLACKHOLE` in route community output.
+  import guard; M41 is a CI-gated FRR interop for BLACKHOLE receiver
+  scoping plus opt-in kernel discard install / withdraw; and
+  `rustbgpctl` renders `65535:666` as `BLACKHOLE` in route community
+  output.
 
 - **ADR-0059 FDB-NHG drift-recovery Prometheus counters.** New
   counters expose the periodic nexthop drift-recovery path without

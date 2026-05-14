@@ -287,8 +287,8 @@ impl Config {
     /// built-in receiver rule does the safe control-plane half only: it keeps
     /// the `BLACKHOLE` marker present even if an earlier policy tried to
     /// remove it, and adds `NO_ADVERTISE` so the request stays local unless an
-    /// operator deliberately writes a different policy. It does not install a
-    /// kernel discard route; that belongs to a later FIB integration slice.
+    /// operator deliberately writes a different policy. Kernel discard route
+    /// installation is a separate `install_blackhole_discard` opt-in.
     fn build_implicit_blackhole_policy() -> Policy {
         Policy {
             entries: vec![PolicyStatement {
@@ -1068,6 +1068,15 @@ pub struct ConfigDiff {
     pub peer_groups: PeerGroupDiff,
     pub peer_group_details: Vec<(String, Vec<String>)>,
     pub policy: PolicyDiff,
+    /// `[global] honor_graceful_shutdown` changed. This is
+    /// reload-applied through the peer manager, not restart-required.
+    pub honor_graceful_shutdown_changed: bool,
+    /// `[global] honor_blackhole` changed in the control-plane-only
+    /// case. When BLACKHOLE FIB discard is enabled or requested, the
+    /// same raw edit is represented by `blackhole_fib_discard_changed`
+    /// instead because it affects the startup-only reconciler spawn
+    /// gate.
+    pub honor_blackhole_changed: bool,
     pub global_changed: bool,
     pub rpki_changed: bool,
     pub bmp_changed: bool,
@@ -1092,6 +1101,13 @@ pub struct ConfigDiff {
     /// dataplane actor reads this once at startup, so SIGHUP must not
     /// silently advance the in-memory snapshot.
     pub apply_bum_enforcement_changed: bool,
+    /// `[global] install_blackhole_discard`,
+    /// `[global] allow_blackhole_broad_prefixes`, or the
+    /// `honor_blackhole` component of an enabled/requested FIB
+    /// discard spawn gate changed. The BLACKHOLE FIB actor is spawned
+    /// once at startup, so edits are restart-required and must remain
+    /// visible in `--diff`.
+    pub blackhole_fib_discard_changed: bool,
 }
 
 /// Per-neighbor impact derived from inheritance / chain resolution.
@@ -1172,6 +1188,8 @@ impl ConfigDiff {
             || !self.policy.neighbor_sets_changed.is_empty()
             || self.policy.import_chain_changed
             || self.policy.export_chain_changed
+            || self.honor_graceful_shutdown_changed
+            || self.honor_blackhole_changed
     }
 
     /// Changes that require a full daemon restart.
@@ -1186,6 +1204,7 @@ impl ConfigDiff {
             || self.evpn_ip_vrfs_changed
             || self.ethernet_segments_changed
             || self.apply_bum_enforcement_changed
+            || self.blackhole_fib_discard_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -1270,6 +1289,11 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
     let policy = diff_policy(&old.policy, &new.policy);
     let effective_neighbor_impact =
         compute_effective_neighbor_impact(old, new, &peer_groups, &policy);
+    let blackhole_fib_discard_changed = old.global.install_blackhole_discard
+        != new.global.install_blackhole_discard
+        || old.global.allow_blackhole_broad_prefixes != new.global.allow_blackhole_broad_prefixes
+        || ((old.global.install_blackhole_discard || new.global.install_blackhole_discard)
+            && old.global.honor_blackhole != new.global.honor_blackhole);
 
     ConfigDiff {
         neighbors,
@@ -1277,7 +1301,11 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         peer_groups,
         peer_group_details,
         policy,
-        global_changed: old.global != new.global,
+        honor_graceful_shutdown_changed: old.global.honor_graceful_shutdown
+            != new.global.honor_graceful_shutdown,
+        honor_blackhole_changed: old.global.honor_blackhole != new.global.honor_blackhole
+            && !blackhole_fib_discard_changed,
+        global_changed: global_restart_required_changed(old, new),
         rpki_changed: old.rpki != new.rpki,
         bmp_changed: old.bmp != new.bmp,
         mrt_changed: old.mrt != new.mrt,
@@ -1285,7 +1313,25 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
+        blackhole_fib_discard_changed,
     }
+}
+
+fn global_restart_required_changed(old: &Config, new: &Config) -> bool {
+    let old_global = old.global.clone();
+    let mut new_global = new.global.clone();
+
+    // These knobs have explicit reload behavior and must not make the
+    // coarse `[global] changed` restart bucket fire by themselves.
+    // `honor_blackhole` becomes restart-required only as part of the
+    // BLACKHOLE FIB actor's startup gate, reported separately through
+    // `blackhole_fib_discard_changed`.
+    new_global.honor_graceful_shutdown = old_global.honor_graceful_shutdown;
+    new_global.honor_blackhole = old_global.honor_blackhole;
+    new_global.install_blackhole_discard = old_global.install_blackhole_discard;
+    new_global.allow_blackhole_broad_prefixes = old_global.allow_blackhole_broad_prefixes;
+
+    old_global != new_global
 }
 
 /// Walk neighbors that exist in both configs and surface those whose

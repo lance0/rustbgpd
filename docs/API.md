@@ -315,6 +315,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
+| `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
 ### List received routes (Adj-RIB-In)
@@ -451,6 +452,23 @@ peer IP address (e.g. `"10.0.0.2"`); `rd_filter` is an optional **exact**
 match against the route distinguisher in display form (e.g. `"65000:100"`,
 `"10.0.0.1:100"`, or `"4200000000:100"` per RFC 4364 RD types 0/1/2). Empty
 strings disable each filter.
+
+### List BLACKHOLE discard status
+
+```bash
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  localhost:50051 rustbgpd.v1.RibService/ListBlackholeDiscards
+```
+
+Returns one row per currently observed best route carrying the RFC 7999
+`BLACKHOLE` community when the opt-in FIB reconciler is active. `state` is a
+`BlackholeDiscardState` enum (`BLACKHOLE_DISCARD_STATE_INSTALLED`,
+`BLACKHOLE_DISCARD_STATE_REJECTED`, or `BLACKHOLE_DISCARD_STATE_FAILED`);
+`reason` carries values such as `installed`, `owned`, `broad_prefix`,
+`not_ebgp`, `foreign_route_exists`, `lookup_failed`, `remove_failed`, or
+the kernel install error string.
+An empty list means either the reconciler is disabled or no BLACKHOLE-marked
+best routes are currently visible.
 
 ---
 

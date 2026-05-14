@@ -6,6 +6,9 @@ listen_port = 179
 # rule that preserves BLACKHOLE and adds NO_ADVERTISE. EBGP-only
 # (this peer is EBGP — remote_asn 65002).
 honor_blackhole = true
+# FIB leg: accepted EBGP BLACKHOLE host routes install kernel
+# RTN_BLACKHOLE rows. Broad prefixes remain rejected by default.
+install_blackhole_discard = true
 
 [global.telemetry]
 prometheus_addr = "0.0.0.0:9179"

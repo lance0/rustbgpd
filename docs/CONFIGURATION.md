@@ -29,6 +29,8 @@ Required. Defines the local BGP speaker identity.
 | `cluster_id`        | string | no       | --                    | Route reflector cluster ID (must be valid IPv4; enables RR mode) |
 | `honor_graceful_shutdown` | bool | no  | `false`              | Enable RFC 8326 §4 receiver behavior on EBGP imports — see below |
 | `honor_blackhole`   | bool   | no       | `false`              | Enable RFC 7999 receiver scoping on EBGP imports — see below |
+| `install_blackhole_discard` | bool | no | `false`              | Install kernel blackhole routes for accepted RFC 7999 host routes — see below |
+| `allow_blackhole_broad_prefixes` | bool | no | `false`           | Permit non-host BLACKHOLE discard installs when the FIB slice is enabled |
 
 ```toml
 [global]
@@ -38,6 +40,8 @@ listen_port = 179
 runtime_state_dir = "/var/lib/rustbgpd"
 honor_graceful_shutdown = true
 honor_blackhole = true
+install_blackhole_discard = false
+allow_blackhole_broad_prefixes = false
 ```
 
 `runtime_state_dir` must be writable by the rustbgpd process. In containers or
@@ -117,15 +121,43 @@ control-plane scoping behavior rustbgpd can enforce today: it preserves the
 request is not propagated to other peers unless the operator writes a more
 specific policy. Earlier operator denies still short-circuit normally.
 
-This does **not** install a kernel discard/null route. The dataplane RTBH
-piece is still a future FIB integration slice with prefix-authorization and
-maximum-prefix-length guardrails. Operators who want stricter behavior today
-can still write explicit import policy around the `"BLACKHOLE"` alias.
+By default this does **not** install a kernel discard/null route. To turn
+local RTBH enforcement on, set both:
+
+```toml
+[global]
+honor_blackhole = true
+install_blackhole_discard = true
+```
+
+The FIB path is conservative. It only considers accepted best routes that
+still carry `BLACKHOLE` after import policy, only installs routes learned
+from EBGP, and only installs IPv4 `/32` or IPv6 `/128` host routes unless
+`allow_blackhole_broad_prefixes = true` is also set. Existing kernel routes
+for the same prefix are treated as install failures rather than overwritten,
+so operator/static or other-daemon routes are preserved.
+
+`rustbgpctl rib blackholes` shows the current discard status for every
+BLACKHOLE-marked best route the daemon has observed: `installed`, `rejected`
+(`broad_prefix` / `not_ebgp`), or `failed` (`foreign_route_exists`,
+`lookup_failed`, `remove_failed`, or the kernel install error). The same
+surface is available as JSON with `rustbgpctl -j rib blackholes`.
+If the reconciler cannot start at all (for example netlink setup failure, or
+requesting FIB install on a non-Linux build), the status list is empty and
+`bgp_blackhole_discard_kernel_failures_total{action="setup"}` or
+`{action="unsupported_platform"}` carries the failure signal.
 
 SIGHUP hot-applies this field with the same best-effort partial-apply
 semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies
 for EBGP peers, advances the live snapshot, and retries transient per-peer
 refresh failures through the existing pending-refresh path.
+
+`install_blackhole_discard`, `allow_blackhole_broad_prefixes`, and the
+`honor_blackhole` component of an enabled or requested FIB-discard spawn gate
+are startup-only in this slice because the kernel-discard reconciler is
+spawned once at daemon boot. A SIGHUP that edits those fields logs an error
+and pins the live config snapshot back until restart. When FIB discard is not
+configured, `honor_blackhole` remains hot-applied through the peer manager.
 
 The `"BLACKHOLE"` alias is accepted everywhere `match_community`,
 `set_community_add`, and `set_community_remove` parse community values, so

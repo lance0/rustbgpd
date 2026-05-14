@@ -388,6 +388,8 @@ enum RibAction {
         #[arg(long)]
         explain: bool,
     },
+    /// Show RFC 7999 BLACKHOLE discard install status
+    Blackholes,
     /// Inject a route
     Add {
         /// Prefix (e.g., 10.0.0.0/24)
@@ -556,6 +558,34 @@ fn resolve_family(family: &Option<String>) -> Result<Option<i32>, CliError> {
     }
 }
 
+struct RibBlackholesFilterArgs<'a> {
+    family: &'a Option<String>,
+    prefix: &'a Option<String>,
+    longer: bool,
+    explain: bool,
+    explain_peer: &'a Option<String>,
+    origin_asn: Option<u32>,
+    community: &'a [String],
+    large_community: &'a [String],
+}
+
+fn reject_blackholes_filters(filters: RibBlackholesFilterArgs<'_>) -> Result<(), CliError> {
+    if filters.family.is_some()
+        || filters.prefix.is_some()
+        || filters.longer
+        || filters.explain
+        || filters.explain_peer.is_some()
+        || filters.origin_asn.is_some()
+        || !filters.community.is_empty()
+        || !filters.large_community.is_empty()
+    {
+        return Err(CliError::Argument(
+            "rib blackholes does not support route filters; use `rustbgpctl rib blackholes`".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Parse community string "ASN:value" or a well-known alias into u32.
 fn parse_community_str(s: &str) -> Result<u32, String> {
     match s {
@@ -680,6 +710,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             community,
             large_community,
         } => {
+            if matches!(action, Some(RibAction::Blackholes)) {
+                reject_blackholes_filters(RibBlackholesFilterArgs {
+                    family: &family,
+                    prefix: &prefix,
+                    longer,
+                    explain,
+                    explain_peer: &explain_peer,
+                    origin_asn,
+                    community: &community,
+                    large_community: &large_community,
+                })?;
+                return commands::rib::blackholes(connection, json).await;
+            }
+
             let family_val = resolve_family(&family)?;
             let parsed_filter_communities: Vec<u32> = community
                 .iter()
@@ -774,6 +818,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         commands::rib::advertised(connection, &address, f, &filters, json).await
                     }
                 }
+                Some(RibAction::Blackholes) => commands::rib::blackholes(connection, json).await,
                 Some(RibAction::Add {
                     prefix,
                     nexthop,
@@ -1142,6 +1187,41 @@ mod tests {
         } else {
             panic!("expected Rib Received command");
         }
+    }
+
+    #[test]
+    fn rib_blackholes_rejects_route_filters() {
+        let err = reject_blackholes_filters(RibBlackholesFilterArgs {
+            family: &Some("ipv4_unicast".to_string()),
+            prefix: &None,
+            longer: false,
+            explain: false,
+            explain_peer: &None,
+            origin_asn: None,
+            community: &[],
+            large_community: &[],
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not support route filters"),
+            "unexpected error: {err}"
+        );
+
+        let err = reject_blackholes_filters(RibBlackholesFilterArgs {
+            family: &None,
+            prefix: &Some("203.0.113.66/32".to_string()),
+            longer: false,
+            explain: false,
+            explain_peer: &None,
+            origin_asn: None,
+            community: &[],
+            large_community: &[],
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not support route filters"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
