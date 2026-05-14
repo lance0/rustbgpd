@@ -16,7 +16,11 @@ rustbgpctl neighbor delete <addr>      # remove peer
 rustbgpctl neighbor enable <addr>      # enable peer
 rustbgpctl neighbor disable <addr>     # disable peer with reason
 rustbgpctl neighbor soft-reset <addr>  # trigger soft reset
-rustbgpctl rib <received|best|advertised> <addr>  # query routes
+rustbgpctl rib                         # list best routes
+rustbgpctl rib received <addr>         # received routes
+rustbgpctl rib advertised <addr>       # advertised routes
+rustbgpctl rib blackholes              # BLACKHOLE discard status
+rustbgpctl rib fib                     # general FIB route status
 rustbgpctl flowspec list               # list FlowSpec rules
 rustbgpctl evpn                        # list EVPN routes (RFC 7432)
 rustbgpctl evpn add-mac-ip ...         # inject EVPN Type 2 MAC/IP route

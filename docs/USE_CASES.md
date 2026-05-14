@@ -3,10 +3,13 @@
 Concrete deployment scenarios for rustbgpd, with architecture, example configs,
 and API workflows.
 
-rustbgpd is an API-first BGP daemon. It doesn't replace your edge router — it
-sits alongside it as the programmable layer that your automation talks to. The
-edge router (FRR, BIRD, Junos, EOS) handles forwarding. rustbgpd handles the
-control plane logic that's too dynamic or too complex for static config files.
+rustbgpd is an API-first BGP daemon. Its default deployment shape is still to
+sit alongside your edge router as the programmable layer your automation talks
+to. The edge router (FRR, BIRD, Junos, EOS) handles forwarding while rustbgpd
+handles control-plane logic that's too dynamic or too complex for static config
+files. For Linux edge-router experiments, default-off FIB integrations now
+exist for RFC 7999 discard routes and explicit `[[fib_tables]]` unicast route
+tables.
 
 Note: rustbgpd defaults to a local UDS gRPC listener. The `grpcurl` examples
 below that target `localhost:50051` are paired with config snippets that
@@ -235,10 +238,12 @@ Edge routers (FRR/BIRD with FIB)
     └──► IXP route server (eBGP)
 ```
 
-rustbgpd doesn't replace the edge router — it's the **programmable route
-injection layer**. Your provisioning system talks to rustbgpd via gRPC. rustbgpd
-peers with your edge routers via iBGP. The edge routers install routes into the
-kernel FIB and announce them upstream.
+The conservative model is still that rustbgpd is the **programmable route
+injection layer**. Your provisioning system talks to rustbgpd via gRPC.
+rustbgpd peers with your edge routers via iBGP, and those routers install
+routes into their kernel FIB and announce them upstream. If rustbgpd itself is
+running on a Linux edge box, ADR-0061 `[[fib_tables]]` can optionally install
+selected unicast best routes into explicit non-reserved kernel tables.
 
 **Why this model works:**
 - Customer signs up → automation calls `AddPath` → prefix is announced
@@ -582,7 +587,7 @@ thousands of VTEPs, and gives you structured observability.
   Type 3 IMET (RFC 7432 §7.3) per L2VNI carries the PMSI Tunnel
   attribute (RFC 6514 §5) for ingress-replication BUM.
 - **MAC-with-IP Type 2 origination via ARP/ND suppression** — Gate
-  7b+2 ([Unreleased]): with `bridge link set dev vxlan<vni>
+  7b+2 (v0.16.0): with `bridge link set dev vxlan<vni>
   neigh_suppress on`, ARP/ND-snooped `(IP, MAC)` bindings on the
   bridge's neighbour table drive MAC+IP Type 2 origination under
   the FRR-style replace model (one Type 2 per MAC at any time —
@@ -755,8 +760,11 @@ SD-WAN controllers.
 
 Be honest about where rustbgpd isn't the right tool:
 
-- **Full router** — No FIB integration. Can't install routes into the Linux
-  kernel. Use FRR or BIRD if you need a forwarding-plane router.
+- **Full router** — rustbgpd has default-off Linux FIB integrations for RFC
+  7999 discard routes and explicit `[[fib_tables]]` unicast tables, but it is
+  not a full FRR/BIRD replacement. Use a full routing suite when you need
+  default-on main-table ownership, IGPs, broad policy-driven redistribution,
+  route limits per FIB export, or mature multi-protocol forwarding features.
 - **EVPN VTEP role — partial (v0.17.0).** rustbgpd-as-RR has been
   the supported deployment since Phase 1 (ADR-0050). Phase 2
   (Gates 7a / 7b / 7b+1 / 7b+2 / 7c, ADR-0052 / 0054 / 0055 /

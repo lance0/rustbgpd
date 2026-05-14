@@ -20,8 +20,9 @@ _rustbgpctl() {
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
 '--version[Print version]' \
 ":: :_rustbgpctl_commands" \
@@ -40,8 +41,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (neighbor)
@@ -51,10 +53,11 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '::address -- Neighbor address (omit to list all):_default' \
-":: :_rustbgpctl__neighbor_commands" \
+":: :_rustbgpctl__subcmd__neighbor_commands" \
 "*::: :->neighbor" \
 && ret=0
 
@@ -71,13 +74,18 @@ _arguments "${_arguments_options[@]}" : \
 '--hold-time=[Hold time in seconds]:HOLD_TIME:_default' \
 '--max-prefixes=[Max prefix limit]:MAX_PREFIXES:_default' \
 '*--families=[Address families (comma-separated)]:FAMILIES:_default' \
+'--add-path-send-max=[Max paths per prefix for Add-Path send]:ADD_PATH_SEND_MAX:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--route-server-client[Enable transparent route-server client mode (eBGP only)]' \
+'--add-path-receive[Enable Add-Path receive]' \
+'--add-path-send[Enable Add-Path send]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (delete)
@@ -87,8 +95,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (enable)
@@ -98,8 +107,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (disable)
@@ -110,8 +120,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (softreset)
@@ -123,13 +134,14 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_rustbgpctl__neighbor__help_commands" \
+":: :_rustbgpctl__subcmd__neighbor__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -175,14 +187,25 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
 '--family=[Address family filter (ipv4_unicast, ipv6_unicast)]:FAMILY:_default' \
+'-p+[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
+'--prefix=[Prefix filter (e.g., 10.0.0.0/24)]:PREFIX:_default' \
+'--explain-peer=[Scope --explain to a specific peer'\''s Add-Path send view. When set, candidates are filtered by the peer'\''s export policy + sendable families and the top \`add_path_send_max\` are tagged with their advertised rank. Omit for the global Loc-RIB view]:EXPLAIN_PEER:_default' \
+'--origin-asn=[Filter by origin ASN (last ASN in AS_PATH)]:ORIGIN_ASN:_default' \
+'*-c+[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
+'*--community=[Filter by community (e.g., 65001\:100 or BLACKHOLE); may be repeated]:COMMUNITY:_default' \
+'*--large-community=[Filter by large community (e.g., 65001\:100\:200); may be repeated]:LARGE_COMMUNITY:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-l[Show longer (more specific) prefixes matching --prefix]' \
+'--longer[Show longer (more specific) prefixes matching --prefix]' \
+'--explain[Show why the best route was selected (requires --prefix)]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
-":: :_rustbgpctl__rib_commands" \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__rib_commands" \
 "*::: :->rib" \
 && ret=0
 
@@ -201,8 +224,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ':address -- Neighbor address:_default' \
 && ret=0
 ;;
@@ -213,11 +237,37 @@ _arguments "${_arguments_options[@]}" : \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--explain[Explain whether this exact prefix would be advertised to the peer]' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ':address -- Neighbor address:_default' \
+&& ret=0
+;;
+(blackholes)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(fib)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (add)
@@ -227,7 +277,7 @@ _arguments "${_arguments_options[@]}" : \
 '--local-pref=[Local preference]:LOCAL_PREF:_default' \
 '--med=[MED]:MED:_default' \
 '*--as-path=[AS path (space-separated)]:AS_PATH:_default' \
-'*--communities=[Communities (e.g., 65001\:100)]:COMMUNITIES:_default' \
+'*--communities=[Communities (e.g., 65001\:100 or BLACKHOLE)]:COMMUNITIES:_default' \
 '*--large-communities=[Large communities (e.g., 65001\:100\:200)]:LARGE_COMMUNITIES:_default' \
 '--path-id=[Path ID for Add-Path]:PATH_ID:_default' \
 '-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
@@ -235,8 +285,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ':prefix -- Prefix (e.g., 10.0.0.0/24):_default' \
 && ret=0
 ;;
@@ -248,14 +299,15 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ':prefix -- Prefix (e.g., 10.0.0.0/24):_default' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_rustbgpctl__rib__help_commands" \
+":: :_rustbgpctl__subcmd__rib__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -270,6 +322,14 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (advertised)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(blackholes)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(fib)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -302,9 +362,10 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
-":: :_rustbgpctl__flowspec_commands" \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__flowspec_commands" \
 "*::: :->flowspec" \
 && ret=0
 
@@ -325,8 +386,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (delete)
@@ -339,13 +401,14 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_rustbgpctl__flowspec__help_commands" \
+":: :_rustbgpctl__subcmd__flowspec__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -375,6 +438,223 @@ esac
     ;;
 esac
 ;;
+(evpn)
+_arguments "${_arguments_options[@]}" : \
+'--route-type=[Route type filter (1..=5) — applies when no subcommand is given]:ROUTE_TYPE:_default' \
+'--peer=[Peer IP address filter (list mode only)]:PEER:_default' \
+'--rd=[Route Distinguisher filter (list mode only), e.g. "65000\:100"]:RD:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__evpn_commands" \
+"*::: :->evpn" \
+&& ret=0
+
+    case $state in
+    (evpn)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-evpn-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'--route-type=[]:ROUTE_TYPE:_default' \
+'--peer=[]:PEER:_default' \
+'--rd=[]:RD:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(add-mac-ip)
+_arguments "${_arguments_options[@]}" : \
+'--rd=[Route Distinguisher, "asn\:value" / "ip\:value"]:RD:_default' \
+'--ethernet-tag=[Ethernet-tag identifying the EVI (default 0)]:ETHERNET_TAG:_default' \
+'--mac=[MAC address "aa\:bb\:cc\:dd\:ee\:ff"]:MAC:_default' \
+'--ip=[Host IP (optional — MAC-only route if omitted)]:IP:_default' \
+'--label=[VNI for this EVI (required)]:LABEL:_default' \
+'--label2=[Optional second label for RFC 9135 symmetric IRB]:LABEL2:_default' \
+'--next-hop=[VTEP loopback IP (next-hop)]:NEXT_HOP:_default' \
+'*--rt=[Optional route targets, each "asn\:value"]:RT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--no-vxlan-encap[Disable the RFC 8365 VXLAN encapsulation ext community]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(add-imet)
+_arguments "${_arguments_options[@]}" : \
+'--rd=[]:RD:_default' \
+'--ethernet-tag=[]:ETHERNET_TAG:_default' \
+'--ip=[Originator IP (required for Type 3)]:IP:_default' \
+'--next-hop=[VTEP loopback IP (next-hop)]:NEXT_HOP:_default' \
+'*--rt=[]:RT:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--no-vxlan-encap[]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(delete-mac-ip)
+_arguments "${_arguments_options[@]}" : \
+'--rd=[]:RD:_default' \
+'--ethernet-tag=[]:ETHERNET_TAG:_default' \
+'--mac=[]:MAC:_default' \
+'--ip=[]:IP:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(delete-imet)
+_arguments "${_arguments_options[@]}" : \
+'--rd=[]:RD:_default' \
+'--ethernet-tag=[]:ETHERNET_TAG:_default' \
+'--ip=[]:IP:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(instances)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(nexthops)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(vrfs)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'::name -- Operator-facing IP-VRF name. When provided, fetch just this one VRF with detailed not-ready reasons; otherwise list every configured IP-VRF:_default' \
+&& ret=0
+;;
+(diagnose)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__evpn__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-evpn-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add-mac-ip)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add-imet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete-mac-ip)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete-imet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(instances)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(nexthops)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(vrfs)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(diagnose)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
 (watch)
 _arguments "${_arguments_options[@]}" : \
 '-a+[Address family filter]:FAMILY:_default' \
@@ -384,8 +664,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '::address -- Neighbor address filter:_default' \
 && ret=0
 ;;
@@ -396,8 +677,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (metrics)
@@ -407,8 +689,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (shutdown)
@@ -419,8 +702,9 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (mrt-dump)
@@ -430,9 +714,576 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
+;;
+(gshut)
+_arguments "${_arguments_options[@]}" : \
+'--peer=[Peer address; omit to toggle for all peers]:PEER:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'--clear[Clear instead of enabling]' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(top)
+_arguments "${_arguments_options[@]}" : \
+'-i+[Poll interval in seconds (1-60)]:INTERVAL:_default' \
+'--interval=[Poll interval in seconds (1-60)]:INTERVAL:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(policy)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__policy_commands" \
+"*::: :->policy" \
+&& ret=0
+
+    case $state in
+    (policy)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-policy-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Policy name:_default' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[JSON file containing the PolicyDefinition shape]:PATH:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Policy name:_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name -- Policy name:_default' \
+&& ret=0
+;;
+(chain)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__policy__subcmd__chain_commands" \
+"*::: :->chain" \
+&& ret=0
+
+    case $state in
+    (chain)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-policy-chain-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[Neighbor address (omit for the global chains)]:NEIGHBOR:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(set-import)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[Neighbor address (omit for global)]:NEIGHBOR:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'*::policies -- Ordered policy names that compose the chain:_default' \
+&& ret=0
+;;
+(set-export)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[]:NEIGHBOR:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+'*::policies:_default' \
+&& ret=0
+;;
+(clear-import)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[]:NEIGHBOR:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(clear-export)
+_arguments "${_arguments_options[@]}" : \
+'--neighbor=[]:NEIGHBOR:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-policy-chain-help-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__policy__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-policy-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(chain)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain_commands" \
+"*::: :->chain" \
+&& ret=0
+
+    case $state in
+    (chain)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-policy-help-chain-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(neighbor-set)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__neighbor-set_commands" \
+"*::: :->neighbor-set" \
+&& ret=0
+
+    case $state in
+    (neighbor-set)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-neighbor-set-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name:_default' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[]:PATH:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name:_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__neighbor-set__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-neighbor-set-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(peer-group)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_rustbgpctl__subcmd__peer-group_commands" \
+"*::: :->peer-group" \
+&& ret=0
+
+    case $state in
+    (peer-group)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-peer-group-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name:_default' \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+'--from-file=[]:PATH:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name:_default' \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':name:_default' \
+&& ret=0
+;;
+(attach)
+_arguments "${_arguments_options[@]}" : \
+'--group=[Peer-group name]:GROUP:_default' \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':address -- Neighbor address:_default' \
+&& ret=0
+;;
+(detach)
+_arguments "${_arguments_options[@]}" : \
+'-s+[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--addr=[gRPC server address or unix\:///path/to/socket]:ADDR:_default' \
+'--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
+'-j[Output in JSON format]' \
+'--json[Output in JSON format]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+':address -- Neighbor address:_default' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__peer-group__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-peer-group-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(attach)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(detach)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
 ;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
@@ -441,14 +1292,15 @@ _arguments "${_arguments_options[@]}" : \
 '--token-file=[Bearer token file for authenticated gRPC endpoints]:TOKEN_FILE:_default' \
 '-j[Output in JSON format]' \
 '--json[Output in JSON format]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'--no-color[Disable colored output]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ':shell -- Shell to generate completions for:(bash elvish fish powershell zsh)' \
 && ret=0
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_rustbgpctl__help_commands" \
+":: :_rustbgpctl__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -464,7 +1316,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (neighbor)
 _arguments "${_arguments_options[@]}" : \
-":: :_rustbgpctl__help__neighbor_commands" \
+":: :_rustbgpctl__subcmd__help__subcmd__neighbor_commands" \
 "*::: :->neighbor" \
 && ret=0
 
@@ -500,7 +1352,7 @@ esac
 ;;
 (rib)
 _arguments "${_arguments_options[@]}" : \
-":: :_rustbgpctl__help__rib_commands" \
+":: :_rustbgpctl__subcmd__help__subcmd__rib_commands" \
 "*::: :->rib" \
 && ret=0
 
@@ -518,6 +1370,14 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(blackholes)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(fib)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (add)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -532,7 +1392,7 @@ esac
 ;;
 (flowspec)
 _arguments "${_arguments_options[@]}" : \
-":: :_rustbgpctl__help__flowspec_commands" \
+":: :_rustbgpctl__subcmd__help__subcmd__flowspec_commands" \
 "*::: :->flowspec" \
 && ret=0
 
@@ -547,6 +1407,58 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(evpn)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__evpn_commands" \
+"*::: :->evpn" \
+&& ret=0
+
+    case $state in
+    (evpn)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-evpn-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add-mac-ip)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(add-imet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete-mac-ip)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete-imet)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(instances)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(nexthops)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(vrfs)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(diagnose)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -574,6 +1486,154 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(gshut)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(top)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(policy)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__policy_commands" \
+"*::: :->policy" \
+&& ret=0
+
+    case $state in
+    (policy)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-policy-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(chain)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain_commands" \
+"*::: :->chain" \
+&& ret=0
+
+    case $state in
+    (chain)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-policy-chain-command-$line[1]:"
+        case $line[1] in
+            (show)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set-export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-import)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(clear-export)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(neighbor-set)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__neighbor-set_commands" \
+"*::: :->neighbor-set" \
+&& ret=0
+
+    case $state in
+    (neighbor-set)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-neighbor-set-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(peer-group)
+_arguments "${_arguments_options[@]}" : \
+":: :_rustbgpctl__subcmd__help__subcmd__peer-group_commands" \
+"*::: :->peer-group" \
+&& ret=0
+
+    case $state in
+    (peer-group)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:rustbgpctl-help-peer-group-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(get)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(set)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(delete)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(attach)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(detach)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
 (completions)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -598,23 +1658,156 @@ _rustbgpctl_commands() {
 'neighbor:Manage BGP neighbors' \
 'rib:Query and manage the RIB' \
 'flowspec:Manage FlowSpec routes' \
+'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
 'watch:Watch route updates (streaming)' \
 'health:Check daemon health' \
 'metrics:Show Prometheus metrics' \
 'shutdown:Request daemon shutdown' \
 'mrt-dump:Trigger an on-demand MRT dump' \
+'gshut:Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates for one peer (\`--peer X\`) or every currently-managed peer (omit \`--peer\`). Receivers that honor RFC 8326 will set local_pref = 0 on tagged paths, draining traffic ahead of planned maintenance' \
+'top:Live TUI dashboard' \
+'policy:Manage named \`\[\[policy_definitions\]\]\` entries and the global / per-neighbor import/export chains. Backed by PolicyService' \
+'neighbor-set:Manage named \`\[\[neighbor_sets\]\]\` entries used by policy \`match_neighbor_set\`. Backed by PolicyService' \
+'peer-group:Manage named \`\[\[peer_groups\]\]\` entries and bind/unbind neighbors to them. Backed by PeerGroupService' \
 'completions:Generate shell completions' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__completions_commands] )) ||
-_rustbgpctl__completions_commands() {
+(( $+functions[_rustbgpctl__subcmd__completions_commands] )) ||
+_rustbgpctl__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl completions commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__flowspec_commands] )) ||
-_rustbgpctl__flowspec_commands() {
+(( $+functions[_rustbgpctl__subcmd__evpn_commands] )) ||
+_rustbgpctl__subcmd__evpn_commands() {
+    local commands; commands=(
+'list:List EVPN routes (default action — same as omitting the subcommand)' \
+'add-mac-ip:Inject a Type 2 MAC/IP route' \
+'add-imet:Inject a Type 3 IMET route' \
+'delete-mac-ip:Withdraw a Type 2 MAC/IP route by its key fields' \
+'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
+'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
+'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
+'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
+'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl evpn commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__add-imet_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__add-imet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn add-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__add-mac-ip_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__add-mac-ip_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn add-mac-ip commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__delete-imet_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__delete-imet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn delete-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__delete-mac-ip_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__delete-mac-ip_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn delete-mac-ip commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__diagnose_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__diagnose_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn diagnose commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help_commands() {
+    local commands; commands=(
+'list:List EVPN routes (default action — same as omitting the subcommand)' \
+'add-mac-ip:Inject a Type 2 MAC/IP route' \
+'add-imet:Inject a Type 3 IMET route' \
+'delete-mac-ip:Withdraw a Type 2 MAC/IP route by its key fields' \
+'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
+'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
+'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
+'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
+'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl evpn help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-imet_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-imet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help add-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-mac-ip_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__add-mac-ip_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help add-mac-ip commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-imet_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-imet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help delete-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-mac-ip_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__delete-mac-ip_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help delete-mac-ip commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__diagnose_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__diagnose_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help diagnose commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__instances_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__instances_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help instances commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__nexthops_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__nexthops_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help nexthops commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__vrfs_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__help__subcmd__vrfs_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn help vrfs commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__instances_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__instances_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn instances commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__nexthops_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__nexthops_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn nexthops commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__evpn__subcmd__vrfs_commands] )) ||
+_rustbgpctl__subcmd__evpn__subcmd__vrfs_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl evpn vrfs commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__flowspec_commands] )) ||
+_rustbgpctl__subcmd__flowspec_commands() {
     local commands; commands=(
 'add:Add a FlowSpec rule' \
 'delete:Delete a FlowSpec rule' \
@@ -622,18 +1815,18 @@ _rustbgpctl__flowspec_commands() {
     )
     _describe -t commands 'rustbgpctl flowspec commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__flowspec__add_commands] )) ||
-_rustbgpctl__flowspec__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__flowspec__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__flowspec__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl flowspec add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__flowspec__delete_commands] )) ||
-_rustbgpctl__flowspec__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__flowspec__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__flowspec__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl flowspec delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__flowspec__help_commands] )) ||
-_rustbgpctl__flowspec__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__flowspec__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__flowspec__subcmd__help_commands() {
     local commands; commands=(
 'add:Add a FlowSpec rule' \
 'delete:Delete a FlowSpec rule' \
@@ -641,98 +1834,174 @@ _rustbgpctl__flowspec__help_commands() {
     )
     _describe -t commands 'rustbgpctl flowspec help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__flowspec__help__add_commands] )) ||
-_rustbgpctl__flowspec__help__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__flowspec__subcmd__help__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__flowspec__subcmd__help__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl flowspec help add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__flowspec__help__delete_commands] )) ||
-_rustbgpctl__flowspec__help__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__flowspec__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__flowspec__subcmd__help__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl flowspec help delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__flowspec__help__help_commands] )) ||
-_rustbgpctl__flowspec__help__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__flowspec__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__flowspec__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl flowspec help help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__global_commands] )) ||
-_rustbgpctl__global_commands() {
+(( $+functions[_rustbgpctl__subcmd__global_commands] )) ||
+_rustbgpctl__subcmd__global_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl global commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__health_commands] )) ||
-_rustbgpctl__health_commands() {
+(( $+functions[_rustbgpctl__subcmd__gshut_commands] )) ||
+_rustbgpctl__subcmd__gshut_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl gshut commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__health_commands] )) ||
+_rustbgpctl__subcmd__health_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl health commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help_commands] )) ||
-_rustbgpctl__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__help_commands() {
     local commands; commands=(
 'global:Show daemon global configuration' \
 'neighbor:Manage BGP neighbors' \
 'rib:Query and manage the RIB' \
 'flowspec:Manage FlowSpec routes' \
+'evpn:Manage EVPN routes (list, add, delete — RFC 7432)' \
 'watch:Watch route updates (streaming)' \
 'health:Check daemon health' \
 'metrics:Show Prometheus metrics' \
 'shutdown:Request daemon shutdown' \
 'mrt-dump:Trigger an on-demand MRT dump' \
+'gshut:Toggle the RFC 8326 GRACEFUL_SHUTDOWN community on outbound updates for one peer (\`--peer X\`) or every currently-managed peer (omit \`--peer\`). Receivers that honor RFC 8326 will set local_pref = 0 on tagged paths, draining traffic ahead of planned maintenance' \
+'top:Live TUI dashboard' \
+'policy:Manage named \`\[\[policy_definitions\]\]\` entries and the global / per-neighbor import/export chains. Backed by PolicyService' \
+'neighbor-set:Manage named \`\[\[neighbor_sets\]\]\` entries used by policy \`match_neighbor_set\`. Backed by PolicyService' \
+'peer-group:Manage named \`\[\[peer_groups\]\]\` entries and bind/unbind neighbors to them. Backed by PeerGroupService' \
 'completions:Generate shell completions' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__completions_commands] )) ||
-_rustbgpctl__help__completions_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__completions_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help completions commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__flowspec_commands] )) ||
-_rustbgpctl__help__flowspec_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn_commands() {
+    local commands; commands=(
+'list:List EVPN routes (default action — same as omitting the subcommand)' \
+'add-mac-ip:Inject a Type 2 MAC/IP route' \
+'add-imet:Inject a Type 3 IMET route' \
+'delete-mac-ip:Withdraw a Type 2 MAC/IP route by its key fields' \
+'delete-imet:Withdraw a Type 3 IMET route by its key fields' \
+'instances:List local EVPN instances configured on this VTEP. Empty when the daemon is acting purely as an EVPN route reflector' \
+'nexthops:List rustbgpd-owned FDB nexthop groups (ADR-0059 aliasing ECMP)' \
+'vrfs:List configured IP-VRFs (Gate 9, ADR-0058) and their readiness verdict from the most recent reconcile pass' \
+'diagnose:Summarize EVPN VTEP alpha state and key metrics' \
+    )
+    _describe -t commands 'rustbgpctl help evpn commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-imet_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-imet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn add-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-mac-ip_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__add-mac-ip_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn add-mac-ip commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-imet_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-imet_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn delete-imet commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-mac-ip_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__delete-mac-ip_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn delete-mac-ip commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__diagnose_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__diagnose_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn diagnose commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__instances_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__instances_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn instances commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__nexthops_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__nexthops_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn nexthops commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__vrfs_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__evpn__subcmd__vrfs_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help evpn vrfs commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__flowspec_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__flowspec_commands() {
     local commands; commands=(
 'add:Add a FlowSpec rule' \
 'delete:Delete a FlowSpec rule' \
     )
     _describe -t commands 'rustbgpctl help flowspec commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__flowspec__add_commands] )) ||
-_rustbgpctl__help__flowspec__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__flowspec__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__flowspec__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help flowspec add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__flowspec__delete_commands] )) ||
-_rustbgpctl__help__flowspec__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__flowspec__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__flowspec__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help flowspec delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__global_commands] )) ||
-_rustbgpctl__help__global_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__global_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__global_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help global commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__health_commands] )) ||
-_rustbgpctl__help__health_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__gshut_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__gshut_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help gshut commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__health_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__health_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help health commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__help_commands] )) ||
-_rustbgpctl__help__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__metrics_commands] )) ||
-_rustbgpctl__help__metrics_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__metrics_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__metrics_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help metrics commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__mrt-dump_commands] )) ||
-_rustbgpctl__help__mrt-dump_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__mrt-dump_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__mrt-dump_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help mrt-dump commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__neighbor_commands] )) ||
-_rustbgpctl__help__neighbor_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor_commands() {
     local commands; commands=(
 'add:Add a new neighbor' \
 'delete:Delete this neighbor' \
@@ -742,83 +2011,239 @@ _rustbgpctl__help__neighbor_commands() {
     )
     _describe -t commands 'rustbgpctl help neighbor commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__neighbor__add_commands] )) ||
-_rustbgpctl__help__neighbor__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help neighbor add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__neighbor__delete_commands] )) ||
-_rustbgpctl__help__neighbor__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help neighbor delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__neighbor__disable_commands] )) ||
-_rustbgpctl__help__neighbor__disable_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__disable_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__disable_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help neighbor disable commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__neighbor__enable_commands] )) ||
-_rustbgpctl__help__neighbor__enable_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__enable_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__enable_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help neighbor enable commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__neighbor__softreset_commands] )) ||
-_rustbgpctl__help__neighbor__softreset_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__softreset_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor__subcmd__softreset_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help neighbor softreset commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__rib_commands] )) ||
-_rustbgpctl__help__rib_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor-set_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor-set_commands() {
+    local commands; commands=(
+'list:List configured neighbor sets' \
+'get:Show one neighbor set by name' \
+'set:Set (create or replace) a neighbor set from a JSON file' \
+'delete:Delete a neighbor set' \
+    )
+    _describe -t commands 'rustbgpctl help neighbor-set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor-set delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor-set get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor-set list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__neighbor-set__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help neighbor-set set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__peer-group_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__peer-group_commands() {
+    local commands; commands=(
+'list:List configured peer groups' \
+'get:Show one peer group by name' \
+'set:Set (create or replace) a peer group from a JSON file' \
+'delete:Delete a peer group' \
+'attach:Bind a neighbor to a peer group' \
+'detach:Unbind a neighbor from its peer group' \
+    )
+    _describe -t commands 'rustbgpctl help peer-group commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__attach_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__attach_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help peer-group attach commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help peer-group delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__detach_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__detach_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help peer-group detach commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help peer-group get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help peer-group list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__peer-group__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help peer-group set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy_commands() {
+    local commands; commands=(
+'list:List configured policies (names + statement counts)' \
+'get:Show one policy by name' \
+'set:Set (create or replace) a policy from a JSON file' \
+'delete:Delete a policy by name' \
+'chain:Manage global / per-neighbor import/export chains' \
+    )
+    _describe -t commands 'rustbgpctl help policy commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain_commands() {
+    local commands; commands=(
+'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
+'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'set-export:Replace the export chain' \
+'clear-import:Clear the import chain entirely' \
+'clear-export:Clear the export chain entirely' \
+    )
+    _describe -t commands 'rustbgpctl help policy chain commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__clear-export_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__clear-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy chain clear-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__clear-import_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__clear-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy chain clear-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__set-export_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__set-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy chain set-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__set-import_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__set-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy chain set-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__show_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__chain__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy chain show commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__policy__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__policy__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help policy set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__rib_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__rib_commands() {
     local commands; commands=(
 'received:Show received routes from a neighbor' \
 'advertised:Show advertised routes to a neighbor' \
+'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
+'fib:Show ADR-0061 general FIB route install status' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
     )
     _describe -t commands 'rustbgpctl help rib commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__rib__add_commands] )) ||
-_rustbgpctl__help__rib__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__rib__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__rib__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help rib add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__rib__advertised_commands] )) ||
-_rustbgpctl__help__rib__advertised_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__rib__subcmd__advertised_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__rib__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help rib advertised commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__rib__delete_commands] )) ||
-_rustbgpctl__help__rib__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__rib__subcmd__blackholes_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__rib__subcmd__blackholes_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help rib blackholes commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__rib__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__rib__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help rib delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__rib__received_commands] )) ||
-_rustbgpctl__help__rib__received_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__rib__subcmd__fib_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__rib__subcmd__fib_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help rib fib commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__rib__subcmd__received_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__rib__subcmd__received_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help rib received commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__shutdown_commands] )) ||
-_rustbgpctl__help__shutdown_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__shutdown_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__shutdown_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help shutdown commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__help__watch_commands] )) ||
-_rustbgpctl__help__watch_commands() {
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__top_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__top_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl help top commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__help__subcmd__watch_commands] )) ||
+_rustbgpctl__subcmd__help__subcmd__watch_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl help watch commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__metrics_commands] )) ||
-_rustbgpctl__metrics_commands() {
+(( $+functions[_rustbgpctl__subcmd__metrics_commands] )) ||
+_rustbgpctl__subcmd__metrics_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl metrics commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__mrt-dump_commands] )) ||
-_rustbgpctl__mrt-dump_commands() {
+(( $+functions[_rustbgpctl__subcmd__mrt-dump_commands] )) ||
+_rustbgpctl__subcmd__mrt-dump_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl mrt-dump commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor_commands] )) ||
-_rustbgpctl__neighbor_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor_commands] )) ||
+_rustbgpctl__subcmd__neighbor_commands() {
     local commands; commands=(
 'add:Add a new neighbor' \
 'delete:Delete this neighbor' \
@@ -829,28 +2254,28 @@ _rustbgpctl__neighbor_commands() {
     )
     _describe -t commands 'rustbgpctl neighbor commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__add_commands] )) ||
-_rustbgpctl__neighbor__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__delete_commands] )) ||
-_rustbgpctl__neighbor__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__disable_commands] )) ||
-_rustbgpctl__neighbor__disable_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__disable_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__disable_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor disable commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__enable_commands] )) ||
-_rustbgpctl__neighbor__enable_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__enable_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__enable_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor enable commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__help_commands] )) ||
-_rustbgpctl__neighbor__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__help_commands() {
     local commands; commands=(
 'add:Add a new neighbor' \
 'delete:Delete this neighbor' \
@@ -861,115 +2286,486 @@ _rustbgpctl__neighbor__help_commands() {
     )
     _describe -t commands 'rustbgpctl neighbor help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__help__add_commands] )) ||
-_rustbgpctl__neighbor__help__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor help add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__help__delete_commands] )) ||
-_rustbgpctl__neighbor__help__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor help delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__help__disable_commands] )) ||
-_rustbgpctl__neighbor__help__disable_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__disable_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__disable_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor help disable commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__help__enable_commands] )) ||
-_rustbgpctl__neighbor__help__enable_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__enable_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__enable_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor help enable commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__help__help_commands] )) ||
-_rustbgpctl__neighbor__help__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor help help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__help__softreset_commands] )) ||
-_rustbgpctl__neighbor__help__softreset_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__softreset_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__help__subcmd__softreset_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor help softreset commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__neighbor__softreset_commands] )) ||
-_rustbgpctl__neighbor__softreset_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor__subcmd__softreset_commands] )) ||
+_rustbgpctl__subcmd__neighbor__subcmd__softreset_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl neighbor softreset commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib_commands] )) ||
-_rustbgpctl__rib_commands() {
+(( $+functions[_rustbgpctl__subcmd__neighbor-set_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set_commands() {
+    local commands; commands=(
+'list:List configured neighbor sets' \
+'get:Show one neighbor set by name' \
+'set:Set (create or replace) a neighbor set from a JSON file' \
+'delete:Delete a neighbor set' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl neighbor-set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured neighbor sets' \
+'get:Show one neighbor set by name' \
+'set:Set (create or replace) a neighbor set from a JSON file' \
+'delete:Delete a neighbor set' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl neighbor-set help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set help get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set help list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__help__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set help set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__neighbor-set__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__neighbor-set__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl neighbor-set set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group_commands] )) ||
+_rustbgpctl__subcmd__peer-group_commands() {
+    local commands; commands=(
+'list:List configured peer groups' \
+'get:Show one peer group by name' \
+'set:Set (create or replace) a peer group from a JSON file' \
+'delete:Delete a peer group' \
+'attach:Bind a neighbor to a peer group' \
+'detach:Unbind a neighbor from its peer group' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl peer-group commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__attach_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__attach_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group attach commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__detach_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__detach_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group detach commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured peer groups' \
+'get:Show one peer group by name' \
+'set:Set (create or replace) a peer group from a JSON file' \
+'delete:Delete a peer group' \
+'attach:Bind a neighbor to a peer group' \
+'detach:Unbind a neighbor from its peer group' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl peer-group help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__attach_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__attach_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group help attach commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__detach_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__detach_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group help detach commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group help get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group help list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__help__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group help set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__peer-group__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__peer-group__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl peer-group set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy_commands] )) ||
+_rustbgpctl__subcmd__policy_commands() {
+    local commands; commands=(
+'list:List configured policies (names + statement counts)' \
+'get:Show one policy by name' \
+'set:Set (create or replace) a policy from a JSON file' \
+'delete:Delete a policy by name' \
+'chain:Manage global / per-neighbor import/export chains' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl policy commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain_commands() {
+    local commands; commands=(
+'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
+'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'set-export:Replace the export chain' \
+'clear-import:Clear the import chain entirely' \
+'clear-export:Clear the export chain entirely' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl policy chain commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__clear-export_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__clear-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain clear-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__clear-import_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__clear-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain clear-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help_commands() {
+    local commands; commands=(
+'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
+'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'set-export:Replace the export chain' \
+'clear-import:Clear the import chain entirely' \
+'clear-export:Clear the export chain entirely' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl policy chain help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__clear-export_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__clear-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain help clear-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__clear-import_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__clear-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain help clear-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__set-export_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__set-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain help set-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__set-import_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__set-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain help set-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__show_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__help__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain help show commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__set-export_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__set-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain set-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__set-import_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__set-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain set-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__show_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__chain__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy chain show commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help_commands() {
+    local commands; commands=(
+'list:List configured policies (names + statement counts)' \
+'get:Show one policy by name' \
+'set:Set (create or replace) a policy from a JSON file' \
+'delete:Delete a policy by name' \
+'chain:Manage global / per-neighbor import/export chains' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'rustbgpctl policy help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain_commands() {
+    local commands; commands=(
+'show:Show the global chains, or the per-neighbor chains when \`--neighbor\` is given' \
+'set-import:Replace the import chain. Empty list is rejected — use \`clear-import\` instead. Apply globally by omitting \`--neighbor\`' \
+'set-export:Replace the export chain' \
+'clear-import:Clear the import chain entirely' \
+'clear-export:Clear the export chain entirely' \
+    )
+    _describe -t commands 'rustbgpctl policy help chain commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__clear-export_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__clear-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help chain clear-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__clear-import_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__clear-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help chain clear-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__set-export_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__set-export_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help chain set-export commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__set-import_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__set-import_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help chain set-import commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__show_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__chain__subcmd__show_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help chain show commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__delete_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help delete commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__get_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__get_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help get commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help help commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__help__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__help__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy help set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__list_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy list commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__policy__subcmd__set_commands] )) ||
+_rustbgpctl__subcmd__policy__subcmd__set_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl policy set commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__rib_commands] )) ||
+_rustbgpctl__subcmd__rib_commands() {
     local commands; commands=(
 'received:Show received routes from a neighbor' \
 'advertised:Show advertised routes to a neighbor' \
+'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
+'fib:Show ADR-0061 general FIB route install status' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl rib commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__add_commands] )) ||
-_rustbgpctl__rib__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__advertised_commands] )) ||
-_rustbgpctl__rib__advertised_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__advertised_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib advertised commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__delete_commands] )) ||
-_rustbgpctl__rib__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__blackholes_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__blackholes_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib blackholes commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__help_commands] )) ||
-_rustbgpctl__rib__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__fib_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__fib_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib fib commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help_commands() {
     local commands; commands=(
 'received:Show received routes from a neighbor' \
 'advertised:Show advertised routes to a neighbor' \
+'blackholes:Show RFC 7999 BLACKHOLE discard install status' \
+'fib:Show ADR-0061 general FIB route install status' \
 'add:Inject a route' \
 'delete:Withdraw a route' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'rustbgpctl rib help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__help__add_commands] )) ||
-_rustbgpctl__rib__help__add_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help__subcmd__add_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help__subcmd__add_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib help add commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__help__advertised_commands] )) ||
-_rustbgpctl__rib__help__advertised_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help__subcmd__advertised_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help__subcmd__advertised_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib help advertised commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__help__delete_commands] )) ||
-_rustbgpctl__rib__help__delete_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help__subcmd__blackholes_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help__subcmd__blackholes_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib help blackholes commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help__subcmd__delete_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help__subcmd__delete_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib help delete commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__help__help_commands] )) ||
-_rustbgpctl__rib__help__help_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help__subcmd__fib_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help__subcmd__fib_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl rib help fib commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help__subcmd__help_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib help help commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__help__received_commands] )) ||
-_rustbgpctl__rib__help__received_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__help__subcmd__received_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__help__subcmd__received_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib help received commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__rib__received_commands] )) ||
-_rustbgpctl__rib__received_commands() {
+(( $+functions[_rustbgpctl__subcmd__rib__subcmd__received_commands] )) ||
+_rustbgpctl__subcmd__rib__subcmd__received_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl rib received commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__shutdown_commands] )) ||
-_rustbgpctl__shutdown_commands() {
+(( $+functions[_rustbgpctl__subcmd__shutdown_commands] )) ||
+_rustbgpctl__subcmd__shutdown_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl shutdown commands' commands "$@"
 }
-(( $+functions[_rustbgpctl__watch_commands] )) ||
-_rustbgpctl__watch_commands() {
+(( $+functions[_rustbgpctl__subcmd__top_commands] )) ||
+_rustbgpctl__subcmd__top_commands() {
+    local commands; commands=()
+    _describe -t commands 'rustbgpctl top commands' commands "$@"
+}
+(( $+functions[_rustbgpctl__subcmd__watch_commands] )) ||
+_rustbgpctl__subcmd__watch_commands() {
     local commands; commands=()
     _describe -t commands 'rustbgpctl watch commands' commands "$@"
 }

@@ -18,8 +18,10 @@ listen_port = 179
 # (65535:666), rustbgpd preserves BLACKHOLE and adds NO_ADVERTISE so
 # the route is not propagated beyond this mitigation domain.
 #
-# This is control-plane scoping only: rustbgpd does not install a local
-# kernel discard route for BLACKHOLE-tagged prefixes.
+# This example leaves FIB enforcement off: it scopes BLACKHOLE in the
+# control plane only. To install local host-route kernel discards, explicitly
+# set install_blackhole_discard = true; broad prefixes remain rejected unless
+# allow_blackhole_broad_prefixes is also enabled.
 honor_blackhole = true
 
 [global.telemetry]

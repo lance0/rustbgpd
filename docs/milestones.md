@@ -1,4 +1,4 @@
-# Milestone History (M0–M9, M29–M39)
+# Milestone History (M0-M9 plus later interop milestones)
 
 Archived build orders, exit criteria, and design choices from the
 initial development phase. For the current feature roadmap, see
@@ -699,11 +699,11 @@ for the architectural record.
   forwarding-safe across transitions; Router MAC conflicts drop
   conflicting prefixes with `L3Drop::RouterMacConflict`;
   foreign state preservation is enforced by diffing only
-  against `L3OwnedState`. Validated by 11 unit tests in
-  `crates/evpn-linux/src/l3_diff.rs` and two privileged netns
+  against `L3OwnedState`. Validated by 12 unit tests in
+  `crates/evpn-linux/src/l3_diff.rs` and three privileged netns
   integration tests at `crates/evpn-linux/tests/netns_l3_install.rs`
   (gated on `EVPN_LINUX_NETNS=1`) against Linux 6.17, including
-  foreign-route preservation. **M39 containerlab smoke**
+  foreign-route preservation and route-event wakeup. **M39 containerlab smoke**
   validates the bidirectional symmetric Interface-less IRB
   datapath against FRR 10.3.1.
 - **Still deferred (alpha-soak follow-up):** duplicate-MAC
@@ -753,3 +753,5 @@ runners can't sustain:
 | **M37+IP** | Gate 7b+2 — MAC+IP Type 2 origination via ARP/ND suppression under the FRR-style replace model. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m37-evpn-mac-ip-origination.sh`. |
 | **M38** | Gate 8 — observable DF election with two rustbgpd-as-VTEPs sharing an ESI. Validates Type 1/4 origination + the Prometheus `evpn_df_role` surface. | Manual; needs `CAP_NET_ADMIN`. Script: `test-m38-evpn-df-election.sh`. |
 | **M39** | Gate 9 slice 6 — bidirectional EVPN Type 5 / symmetric Interface-less IRB (RFC 9136 §4.4.2) between rustbgpd PE1 and FRR PE2. Validates origination + import + kernel route/neighbor/L3VXLAN FDB programming + ping over the L3VNI VXLAN tunnel + the withdraw leg. | Manual; needs `CAP_NET_ADMIN`. Same hosted-runner gap as M30b (Azure kernel lacks `vrf` module). Script: `test-m39-evpn-type5-symmetric-irb.sh`. |
+| **M40** | ADR-0059 aliasing dataplane ECMP via FDB nexthop groups against FRR EVPN-MH. Validates FDB rows with `nhid`, nexthop groups, alias member collapse, and cleanup. | Manual; needs `CAP_NET_ADMIN` and Linux FDB-NHG support. Script: `test-m40-evpn-aliasing-ecmp-frr.sh`. |
+| **M42** | ADR-0061 opt-in general unicast Linux FIB runtime. Validates configured-table install shape, foreign-route preservation, withdraw, and SIGTERM drain against FRR. | Manual/local containerlab product-path smoke. Script: `test-m42-fib-runtime-frr.sh`. |

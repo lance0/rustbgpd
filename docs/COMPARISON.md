@@ -2,7 +2,7 @@
 
 A feature comparison of open-source BGP daemon implementations.
 
-Last updated: 2026-05-13 (v0.18.0 + ADR-0059 slice chain in v0.19.0)
+Last updated: 2026-05-14 (post-v0.20.0 main, including ADR-0061)
 
 ## Overview
 
@@ -160,8 +160,8 @@ use cases. It trades address family breadth for modern operational tooling (gRPC
 Prometheus, structured logging, TUI, config diagnostics) and memory safety guarantees.
 
 **FRR** is the most feature-complete open-source routing suite, covering BGP plus
-OSPF, IS-IS, PIM, and more. Best choice when you need a full routing stack with
-broad AFI/SAFI coverage and kernel FIB integration.
+OSPF, IS-IS, PIM, and more. Best choice when you need a mature full routing stack
+with broad AFI/SAFI coverage and production-default kernel FIB integration.
 
 **BIRD** dominates IXP route server deployments. Best-in-class memory efficiency
 and a powerful filter language. BIRD 3 adds multithreading for 5000+ peer scale.

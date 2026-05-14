@@ -33,14 +33,16 @@ container exercises a real Linux bridge inside a netns):
   netlink-attribute encoding regression can't slip past
   PR-CI. Runs in roughly 1-2 min warm.
 
-The other 26 interop tests are gated locally — either because they
-need kernel features missing on the GitHub runner image (`vrf` for
-L3VNI, bond ES for multi-homing, the bridge + VXLAN dataplane the
-M36 / M37 / M38 / M39 VTEP smokes drive), substantial wall-clock (M11/M16
-GR/LLGR, M33 scale soak), additional fixtures (StayRTR / mock RTR
-v2 server), or platform-diversity gating (BIRD, GoBGP — exercise
-the wire codec against alternate implementations rather than
-gating every PR).
+The remaining 26 interop scripts are local / manual gates — either
+because they need kernel features missing on the GitHub runner image
+(`vrf` for L3VNI, bond ES for multi-homing, the bridge + VXLAN
+dataplane the M36 / M37 / M38 / M39 / M40 VTEP smokes drive, and
+the configured-table FIB path in M42), substantial wall-clock
+(M11/M16 GR/LLGR, M33 scale soak), additional fixtures (StayRTR /
+mock RTR v2 server), or platform-diversity validation (BIRD, GoBGP
+— exercising alternate implementations without gating every PR).
+The Docker `fib_runtime` selector is also a reviewer-run privileged
+netns smoke today, not a default PR-CI gate.
 
 | Peer | Version | Topology | Status | Notes | Known Quirks | NOTIFICATIONs Observed |
 |------|---------|----------|--------|-------|--------------|------------------------|

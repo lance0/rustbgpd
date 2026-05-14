@@ -319,17 +319,19 @@ landing, tracked here for visibility)
     diffing only against `L3OwnedState`, never the kernel dump.
     Shutdown drain (`reconcile::drain`) computes
     `compute_l3_diff` against empty intent so the L3 ownership
-    state unwinds before exit. 11 unit tests in `l3_diff.rs`
+    state unwinds before exit. 12 unit tests in `l3_diff.rs`
     cover cold start, refcount, shape change, value drift,
     Router MAC conflict, partial-success cleanup, failed-remove
-    retry, NotReady drain, idempotent record. Two privileged
-    netns integration tests at
+    retry, NotReady drain, idempotent record, and route-event
+    wakeup behavior. Three privileged netns integration tests at
     `crates/evpn-linux/tests/netns_l3_install.rs` (gated on
     `EVPN_LINUX_NETNS=1`) re-exec the process inside an `ip
     netns` and assert kernel `ip route show table`, `ip neigh
     show dev`, and `bridge fdb show dev` produce the expected
     rows, with one test pre-loading a `proto static` foreign
-    route and verifying it survives our install/withdraw cycle.
+    route and verifying it survives our install/withdraw cycle,
+    and one test asserting route multicast events wake reconcile
+    within the expected window.
     `IpVrfState.installed_routes_count` + install-error counters
     expose the surface to operators.
   - **M39 manual containerlab smoke** at

@@ -740,7 +740,7 @@ implemented per ADR-0040.
   Type 2 withdrawn within ~3 s of `bridge fdb del`, Type 3 IMET
   drained on shutdown. Local-only / privileged smoke (not in
   PR-CI); the Gate 7b downward path retains its M36 coverage.
-- **Closed in `[Unreleased]` post-v0.16.0:** `advertise_svi_mac`
+- **Closed after v0.16.0 (v0.17.0 follow-ups):** `advertise_svi_mac`
   consumption (origination of the bridge's own MAC on
   instance-Ready via `InstanceDataplaneStatus.bridge_mac`),
   `sticky_macs` config schema (ADR-0056 — listed MACs originated
@@ -760,7 +760,7 @@ implemented per ADR-0040.
 
 ### Phase 3: Multi-homing foundation (Gate 8, ADR-0057)
 
-- **Gate 8 (`[Unreleased]`, ADR-0057):** observable DF election +
+- **Gate 8 (v0.17.0, ADR-0057):** observable DF election +
   Type 1/4 origination. New `crates/evpn/src/segment.rs` carries
   the `EthernetSegment` domain type (ESI, member VNIs, DF
   preference, algorithm, originator IP). New
@@ -816,7 +816,7 @@ implemented per ADR-0040.
   surfaces let operators read it without scraping logs.
   **M39 manual containerlab smoke** validates the bidirectional
   Type 5 path against FRR 10.3.1.
-- **Still ahead in Gate 9 (v0.19.0):** full RFC 9135
+- **Still ahead after Gate 9:** full RFC 9135
   overlay-index IRB (Gate 9 ships the Interface-less variant
   only), auto-derived Route Targets (RFC 8365 §5.1.2.1),
   privileged-runner CI gate for the M39 + M40 smokes.
@@ -868,7 +868,7 @@ implemented per ADR-0040.
   via `RTNLGRP_IPV4_ROUTE` / `RTNLGRP_IPV6_ROUTE` multicast,
   `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC,
   M39 manual smoke against FRR 10.3.1.
-- **Still ahead (v0.19.0):** full RFC 9135 overlay-index
+- **Still ahead:** full RFC 9135 overlay-index
   IRB, auto-derived Route Targets (RFC 8365 §5.1.2.1).
 
 ---

@@ -113,10 +113,10 @@ rustbgpctl evpn diagnose
 - Create Linux bridge or VXLAN netdevs for you.
 - Enforce RFC 7432 §15 duplicate-MAC quarantine. Detection metrics are
   exposed; quarantine action remains future work.
-- Originate Type 5 prefix routes or program the L3VNI / VRF FIB —
-  Gate 9 readiness probing is in place (`[[evpn_ip_vrfs]]` + the
-  reconcile-time `IpVrfStatus` log line), but Type 5 wire shape and
-  kernel FIB programming are still ahead.
+- Configure an IP-VRF / L3VNI tenant. Gate 9 Type 5 origination and
+  symmetric Interface-less IRB dataplane programming ship in the main daemon
+  (`[[evpn_ip_vrfs]]`, `rustbgpctl evpn vrfs`, M39), but this example is kept
+  as a single-homed L2VNI leaf and intentionally omits the L3VNI/VRF pieces.
 
 ## Related
 

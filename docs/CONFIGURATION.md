@@ -468,8 +468,10 @@ Graceful Restart is enabled by default. rustbgpd implements:
   rustbgpd can temporarily advertise `restart_state = true` to static peers
   restored from config, using a marker file under `runtime_state_dir`.
   This helps peers retain our routes while we reconnect, but
-  `forwarding_preserved` remains false because rustbgpd does not yet own or
-  verify the FIB.
+  `forwarding_preserved` remains false because rustbgpd does not persist
+  route/FIB ownership across restart or verify that forwarding state survived.
+  ADR-0061 FIB programming is opt-in and scoped; crash-left rows are preserved
+  as foreign rather than adopted.
 
 ```toml
 [[neighbors]]

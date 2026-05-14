@@ -1,6 +1,6 @@
 # rustbgpd vs GoBGP Feature Parity
 
-Last updated: 2026-05-13 (v0.18.0 + ADR-0059 chain)
+Last updated: 2026-05-14 (post-v0.20.0 main + ADR-0061)
 
 ## Address Families
 
@@ -203,8 +203,8 @@ Competing head-to-head with GoBGP for all use cases:
 - EVPN RR + bidirectional VTEP shipped (Phase 1 ADR-0050; Phase 2 ADR-0052/0054/0055/0056 — MAC-only Type 2 + Type 3 IMET in v0.15.0, MAC+IP Type 2 via ARP/ND suppression in v0.16.0 under the FRR replace model). Gate 8/8b (v0.17.0+) adds alpha multi-homing execution: DF election, Type 1/4 origination, opt-in kernel BUM-port enforcement (RFC 7432 §8.5), ESI-aware Type 2 origination, RFC 7432 §14 aliasing receive-side projection, and RFC 7432 §8.4 mass-withdraw filtering. Gate 9 symmetric Interface-less IRB shipped end-to-end in v0.18.0 (IP-VRF schema, Type 5 origination + remote import + L3 FIB programming with four-phase apply ordering, sub-second `RTNLGRP_IPV4/IPV6_ROUTE` withdraw, `rustbgpctl evpn vrfs` CLI + `ListIpVrfs`/`GetIpVrf` gRPC, M39 smoke). ADR-0059 aliasing dataplane ECMP shipped via FDB nexthop groups across slices 1-4 + M40 FRR smoke. Still missing: RFC 9135 overlay-index IRB, auto-derived RTs (RFC 8365 §5.1.2.1), production-default multi-homing enforcement after the MAC-churn variant of the Gate 8b soak, duplicate-MAC quarantine action, Route Types 6-9
 - VPNv4/v6 and labeled unicast missing
 - No confederation support limits SP deployments
-- gRPC API covers ~86% of GoBGP's RPC surface (no VRF; dynamic-neighbor query via `ListDynamicNeighbors`, runtime Add/Delete deferred)
-- No Zebra/FIB integration — cannot install routes into the kernel
+- gRPC API covers ~86% of GoBGP's RPC surface (EVPN IP-VRF visibility exists via `ListIpVrfs` / `GetIpVrf`; dynamic-neighbor query via `ListDynamicNeighbors`, runtime Add/Delete deferred)
+- Linux FIB integration is scoped and opt-in: RFC 7999 discard routes and ADR-0061 configured-table unicast installs exist, but it is not a Zebra-compatible full routing-suite backend
 
 ## Advantages Over GoBGP
 
@@ -254,7 +254,7 @@ the current alpha:
 2. ~~**EVPN RR + bidirectional VTEP (RFC 7432)**~~ — Phase 1 RR role shipped; **Phase 2 bidirectional VTEP shipped across Gates 7a/7b/7b+1/7b+2/7c, ADR-0052/0054/0055/0056** with kernel FDB program/learn loops, MAC-only + MAC+IP local origination under the FRR-style replace model, sticky-MAC config, and sub-second mobility convergence. **Gate 8/8b (v0.17.0)** adds alpha multi-homing execution: DF election (M38), Type 1/4 origination, RFC 7432 §14 aliasing receive-side projection, RFC 7432 §8.4 mass-withdraw filtering, and opt-in kernel BUM-port enforcement (RFC 7432 §8.5). **Gate 9 symmetric Interface-less IRB shipped end-to-end in v0.18.0** (`[[evpn_ip_vrfs]]`, Type 5 origination + remote import + L3 FIB programming, M39 manual smoke). **ADR-0059 aliasing dataplane ECMP** shipped on `main` (slices 1-4 + M40 FRR-validated smoke). Still later: RFC 9135 overlay-index IRB, production-default multi-homing enforcement after the MAC-churn variant of the Gate 8b soak, and duplicate-MAC quarantine action (ADR-0055 §9)
 3. **VPNv4/v6 (RFC 4364)** — enterprise/SP VPN deployments
 4. ~~**Dynamic neighbors (prefix-based)**~~ — shipped: `[[dynamic_neighbors]]` with peer group inheritance, `remote_asn=0`, auto-accept/remove
-5. **Zebra/FIB integration** — kernel route installation
+5. **Full Zebra/FIB integration** — ADR-0061 adds configured-table kernel route installation, but production router parity still needs broader policy guardrails, route limits, and non-BGP route-manager scope
 
 ## Pre-1.0 Tech Debt
 

@@ -7,16 +7,17 @@ bundle BGP with OSPF, IS-IS, and every other routing protocol:
 
 | Project | Language | Model | Strengths | Gaps |
 |---------|----------|-------|-----------|------|
-| FRR | C | Full routing suite | Feature-complete, wide adoption | Monolith, CLI-first, limited API |
-| BIRD | C | Full routing suite | Excellent filter language, lightweight | CLI-first, no native gRPC |
+| FRR | C | Full routing suite | Feature-complete, wide adoption, production FIB / EVPN depth | Monolith, CLI-first, limited API |
+| BIRD | C | Full routing suite / route-server mainstay | Excellent filter language, lightweight, BIRD 3 multithreading, TCP-AO | CLI-first, no native gRPC |
 | OpenBGPD | C | BGP-only | Clean design, OpenBSD pedigree | Limited platform support, no API |
-| GoBGP | Go | BGP-only, gRPC API | API-first, good ergonomics | GC pauses at scale, Go-specific protos |
+| GoBGP | Go | BGP-only, gRPC API | API-first, Zebra/FIB, EVPN, broad library docs | GC runtime, Go-specific protos |
 
 **Why rustbgpd exists:**
 
 - **GoBGP proved the model.** API-first BGP with gRPC works. Operators
-  want programmable routing, not CLI scripting. But GoBGP carries Go's
-  GC overhead and its protos are Go-flavored.
+  want programmable routing, not CLI scripting. rustbgpd keeps that
+  shape while using Rust's predictable memory model and Rust-native
+  reusable crates.
 - **No Rust BGP daemon exists for production use.** Memory safety,
   zero-cost abstractions, and no GC make Rust ideal for a control plane
   that must be reliable and predictable under load.
@@ -24,9 +25,10 @@ bundle BGP with OSPF, IS-IS, and every other routing protocol:
   standalone, fuzzed BGP codec library fills a gap in the Rust ecosystem.
   Anyone building BGP tooling in Rust (monitors, analyzers, test harnesses)
   can use it without pulling in a full daemon.
-- **Observability is an afterthought in existing daemons.** Prometheus
-  metrics, structured JSON logs, and machine-parseable errors from day
-  one — not bolted on later.
+- **Observability and automation are the differentiators.** Prometheus
+  metrics, structured JSON logs, machine-parseable errors, gRPC-first
+  mutation/query paths, and reproducible interop gates are first-class
+  product surface.
 
 **Target users:** Network automation teams, IX operators, anyone who
 currently drives GoBGP via gRPC and wants memory safety and predictable
@@ -46,7 +48,9 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] Dynamic peer management — add, delete, enable, disable neighbors at runtime (IPv4 + IPv6)
 - [x] Observability — Prometheus metrics at all RIB mutation points, structured JSON logging
 - [x] Operations — coordinated shutdown (ctrl-c + gRPC), gRPC server supervision, metrics server hardening
-- [x] Interop validated — FRR 10.3.1 (17/17 IPv4 + 6 dual-stack automated tests), BIRD 2.0.12
+- [x] Interop validated — 42 automated milestone scripts, 16 PR-gated,
+  primarily against FRR 10.3.1 plus GoBGP / StayRTR and documented BIRD
+  M0 coverage; privileged kernel dataplane smokes run locally
 - [x] Graceful Restart — helper mode + minimal restarting speaker (RFC 4724): capability negotiation, stale route demotion, End-of-RIB detection/sending, timer-based stale sweep, coordinated-restart `R=1` signaling
 - [x] Extended Communities (RFC 4360) — wire decode/encode, common subtypes (route target, route origin, 4-byte AS), RIB storage, gRPC API exposure (ADR-0025)
 - [x] Extended Communities Policy Matching — match on RT/RO values in prefix lists, TOML community-match clauses (ADR-0026)
@@ -66,7 +70,7 @@ performance. Not a replacement for FRR/BIRD in full routing suite roles.
 - [x] RPKI origin validation (RFC 6811 + RFC 8210) — RTR client, VRP table, best-path integration, policy `match_rpki_validation`, new rpki crate (ADR-0034)
 - [x] Config persistence + SIGHUP reload — gRPC neighbor add/delete mutations persist to TOML via atomic write; SIGHUP triggers config reload with structured per-peer reconciliation
 - [x] LLGR (RFC 9494) — two-phase GR timer: GR-stale routes promote to LLGR-stale with LLGR_STALE community, configurable llgr_stale_time per peer, NO_LLGR routes purged at transition, effective stale time = min(local, peer)
-- [x] 1893 workspace tests — unit, integration, property, fuzz
+- [x] Workspace tests — unit, integration, property, and fuzz smoke coverage
 
 For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md).
 
@@ -74,8 +78,11 @@ For detailed milestone build orders, see [docs/milestones.md](docs/milestones.md
 
 ## Planned Features
 
-*Ordered by market impact and what unlocks production adoption. Informed by
-operator feedback, competitive analysis, and IX/SDN market research (March 2026).*
+*Ordered by market impact and what unlocks production adoption. Updated
+after the ADR-0061 FIB merge and a May 2026 competitive pass: FRR remains
+the full routing-suite benchmark, GoBGP remains the closest API-first
+peer, and BIRD 3 raised the route-server bar with multithreading and
+TCP-AO.*
 
 *For feature parity details, see [docs/gobgp-parity.md](docs/gobgp-parity.md)
 and [docs/COMPARISON.md](docs/COMPARISON.md).*
@@ -84,19 +91,37 @@ and [docs/COMPARISON.md](docs/COMPARISON.md).*
 
 **rustbgpd is staying in v0.x until real-world deployment feedback and a
 gRPC security audit close.** Both are non-code gates (see Pre-1.0
-Requirements below). The two requirements anchor v1.0; everything else
-is production-ready today.
+Requirements below). The core route-server / programmable-control-plane path
+is feature-complete for v1.0; general-router FIB hardening and EVPN
+production-default items remain scoped follow-up work.
 
-The release cadence is: ship operator-visible polish in v0.11+ / v0.12+
-cuts as items below land. v1.0 itself is gated on external validation,
-not feature completeness.
+The release cadence is: keep shipping focused v0.x cuts as items below
+land. v1.0 itself is gated on external validation, not feature
+completeness.
 
-### Next Up — Pre-v1.0 Polish (v0.x cuts)
+### Current Priority Order
 
-Operator-visible gaps that should land before v1.0. These are real
-operator-hit items pulled from KNOWN_ISSUES and the Deferred Hardening
-list below; the bullets here are the **active** track, the rest of
-this document is reference / long-tail.
+These are the near-term items that move adoption the most. Older completed
+work and long-tail protocol parity remain below as reference; this table is
+the active planning surface.
+
+| Priority | Item | Why now | Main proof / exit condition |
+|----------|------|---------|-----------------------------|
+| P0 | **Privileged runner for kernel dataplane gates** | M36-M40 and M42 are the highest-value Linux dataplane proof, but several are still local-only. A self-hosted or sponsored runner turns EVPN / FIB regressions into PR failures. | M39, M40, M42, and Docker `fib_runtime` / `fdb_nhg` selectors run on every PR or on a protected scheduled gate. |
+| P0 | **ADR-0061 FIB hardening** | GoBGP and FRR both expose kernel route programming. rustbgpd now has the minimal configured-table path; the next adoption blocker is guardrails. | Per-peer / peer-group FIB allow-lists, active route limits, better crash-restart story, and explicit operator docs for failure modes. |
+| P0 | **gRPC security audit + authorization split** | v1.0 is blocked on an external security review. mTLS exists; operator trust still needs method-level read/write boundaries and audit-ready docs. | Security review complete; mutating RPCs can be disabled or isolated from read-only observability endpoints. |
+| P1 | **EVPN production-default decision point** | The EVPN dataplane is broad now; the missing evidence is soak under MAC churn before turning enforcement defaults on. | Gate 8b MAC-churn 24h soak with `apply_bum_enforcement=true` and `apply_aliasing_ecmp=true`; documented default decision. |
+| P1 | **TCP-AO (RFC 5925)** | BIRD 3 has TCP-AO on Linux, and it is the modern replacement for TCP MD5. This is a visible route-server/security parity gap. | Config schema, Linux socket integration, interop smoke, and fallback behavior documented. |
+| P1 | **Real-time event/history surface** | Operators debugging policy and convergence need a timeline, not only snapshots. This is where an API-first daemon can beat CLI-first stacks. | `EventService.WatchEvents`, bounded event ring, `rustbgpctl events`, route-history query. |
+| P2 | **Runtime-vs-file diff and config UX** | gRPC owns truth after startup; operators need better tooling to compare a candidate TOML to live runtime state. | `rustbgpd --diff` / CLI path can compare candidate file to effective runtime including peer groups and hot-applied policy. |
+| P2 | **Overlay-index IRB / EVPN remaining standards** | Needed for fuller data-center EVPN parity, but lower adoption value than hardening the shipped Interface-less path. | ADR for RFC 9135 overlay-index model and first interop smoke. |
+
+### Pre-v1.0 Worklog
+
+Operator-visible gaps and completed work that feed the priority table above.
+New planning should start from **Current Priority Order**; this section keeps
+the historical context and lower-level implementation notes that explain why
+those priorities exist.
 
 - [x] **SIGHUP policy/peer-group reconciliation** (v0.12.0) —
   `reload_config` now applies named-policy / neighbor-set /
@@ -503,7 +528,7 @@ Features that close the most impactful gaps vs GoBGP for the target user base.
 Each moves overall parity 3-5% while disproportionately improving real-world usability.
 
 - [x] **Transparent route server mode** — `route_server_client` per neighbor: skip automatic local ASN prepend on eBGP re-advertisement for IX route-server clients, preserve original unicast NEXT_HOP, and apply the same transparent AS_PATH behavior to FlowSpec export (ADR-0039)
-- [x] **GR restarting speaker** — minimal honest mode: static peers advertise `R=1` after coordinated restart via persisted marker file; `forwarding_preserved` remains false until FIB integration exists (ADR-0040)
+- [x] **GR restarting speaker** — minimal honest mode: static peers advertise `R=1` after coordinated restart via persisted marker file; `forwarding_preserved` remains false until restart-safe forwarding-state verification exists (ADR-0040)
 - [x] **Policy chaining + named policies** — named TOML definitions, GoBGP-style chain evaluation (permit=continue, deny=stop), configurable default_action (ADR-0036)
 - [x] **Peer groups + peer-aware policy matching** — reusable peer templates with runtime CRUD, neighbor-set matching, route-type matching, exact next-hop matching, and MED / `LOCAL_PREF` comparison in policy; persisted through TOML config snapshots
 - [x] **Extended nexthop** (RFC 8950) — capability code 5, automatic dual-stack negotiation, IPv4 unicast over IPv6 next-hop via `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (ADR-0037)

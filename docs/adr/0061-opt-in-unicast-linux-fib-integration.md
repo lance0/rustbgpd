@@ -14,10 +14,10 @@ kernel paths:
 - EVPN symmetric-IRB Type 5 import into an IP-VRF table (ADR-0058).
 - RFC 7999 BLACKHOLE discard routes (`src/blackhole.rs`, ADR-0060).
 
-It still does not program ordinary unicast Loc-RIB best paths into the
-kernel. Closing that gap changes rustbgpd's product shape: it becomes
-usable as an edge router in addition to route-server / control-plane /
-EVPN roles.
+Before ADR-0061, rustbgpd still did not program ordinary unicast Loc-RIB best
+paths into the kernel. Closing that gap changes the product shape: with
+explicit configuration, rustbgpd can act as a constrained Linux edge-router
+speaker in addition to route-server / control-plane / EVPN roles.
 
 That blast radius is larger than BLACKHOLE and less tenant-scoped than
 EVPN L3VNI. The feature needs its own opt-in boundary, ownership model,
@@ -152,8 +152,9 @@ Positive:
 - The default route-server / RR posture is preserved.
 - The config makes table and metric choices explicit before kernel
   writes.
-- The first implementation can be reviewed and tested without a
-  privileged runner.
+- The pure intent/diff model can be reviewed without privileges, while the
+  runtime path is now backed by opt-in netns validation and the M42
+  containerlab smoke.
 - The design reuses proven local patterns: route-event wakeups,
   periodic full reconcile, owned-state diffs, foreign preservation, and
   bounded drains.

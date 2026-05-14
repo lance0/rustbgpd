@@ -219,7 +219,10 @@ in `crates/evpn/src/origination_es.rs`, DF election in
 aliasing in `crates/evpn/src/aliasing.rs`, mass-withdraw in
 `crates/evpn/src/mass_withdraw.rs`, or BUM-port enforcement), run M38
 to validate DF election + Type 1/4 origination against a peer running
-the same code. Both are **local-only, privileged smokes**:
+the same code. If the release touches **Gate 9 / ADR-0059** (IP-VRF,
+Type 5, L3 FIB programming, aliasing ECMP, or FDB nexthop groups), run
+M39 and/or M40 as appropriate. These are **local-only, privileged
+smokes**:
 
 ```bash
 # M37+IP — Gate 7b+2 MAC-with-IP Type 2 via ARP/ND suppression
@@ -231,6 +234,28 @@ containerlab destroy -t tests/interop/m37-evpn-mac-ip-origination.clab.yml
 containerlab deploy -t tests/interop/m38-evpn-df-election.clab.yml
 bash tests/interop/scripts/test-m38-evpn-df-election.sh
 containerlab destroy -t tests/interop/m38-evpn-df-election.clab.yml
+
+# M39 — Gate 9 symmetric Interface-less IRB Type 5 datapath
+containerlab deploy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
+bash tests/interop/scripts/test-m39-evpn-type5-symmetric-irb.sh
+containerlab destroy -t tests/interop/m39-evpn-type5-symmetric-irb.clab.yml
+
+# M40 — ADR-0059 aliasing ECMP via FDB nexthop groups
+containerlab deploy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
+bash tests/interop/scripts/test-m40-evpn-aliasing-ecmp-frr.sh
+containerlab destroy -t tests/interop/m40-evpn-aliasing-ecmp-frr.clab.yml
+```
+
+If the release touches **ADR-0061 general unicast FIB** (`src/fib.rs`,
+`src/fib_runtime.rs`, `[[fib_tables]]`, `ListFibRoutes`, or
+`rustbgpctl rib fib`), run M42 locally:
+
+```bash
+# M42 — ADR-0061 configured-table unicast Linux FIB runtime
+docker build -t rustbgpd:dev .
+containerlab deploy -t tests/interop/m42-fib-runtime-frr.clab.yml
+bash tests/interop/scripts/test-m42-fib-runtime-frr.sh
+containerlab destroy -t tests/interop/m42-fib-runtime-frr.clab.yml
 ```
 
 Also smoke the controller-injection path against a live RR (M30

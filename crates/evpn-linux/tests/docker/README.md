@@ -36,6 +36,8 @@ bash crates/evpn-linux/tests/docker/run-netns-tests.sh           # default Gate 
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh spike     # shell spike only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh roundtrip # netlink round-trip only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg   # FDB nexthop groups
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_roundtrip # FDB-NHG round-trip only
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg_cve # FDB-NHG nolearning guard only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fib_runtime # ADR-0061 FIB runtime
 ```
 
@@ -60,6 +62,8 @@ caches across runs.
 | `spike`      | `bum_filter_spike_validates_kernel_primitive`           | Shell-driven topology + `ping -b` + `bridge link set` flag toggle |
 | `roundtrip`  | `linux_dataplane_set_bum_port_flags_round_trip`         | `LinuxDataplane::apply` → `RTM_NEWLINK` → `bridge -d link show`   |
 | `fdb_nhg`    | `netns_fdb_nhg`                                         | ADR-0059 FDB nexthop group install / update / teardown            |
+| `fdb_nhg_roundtrip` | `round_trip_install_and_remove_fdb_nhg`          | FDB-NHG member + group + FDB-row install, dump, and teardown      |
+| `fdb_nhg_cve` | `cve_guard_blocks_install_when_learning_enabled`        | CVE-2025-39851 nolearning readiness guard for FDB-NHG installs   |
 | `fib_runtime` | `fib_runtime::tests::netns_general_unicast_fib_runtime_round_trip` | ADR-0061 route install / foreign preservation / withdraw / drain |
 | `all` (default) | Gate 8b BUM tests                                    | both Gate 8b BUM tests                                             |
 
@@ -80,8 +84,14 @@ idempotent.
 
 ## Kernel requirements
 
-- Linux >= 4.18 on the **host** (the container shares the host
-  kernel; `IFLA_BRPORT_BCAST_FLOOD` was added in 4.18).
+- Linux >= 4.18 on the **host** for the Gate 8b BUM selectors (the
+  container shares the host kernel; `IFLA_BRPORT_BCAST_FLOOD` was
+  added in 4.18).
+- Linux >= 5.8 on the **host** for the ADR-0059 FDB-NHG selectors
+  (`RTM_NEWNEXTHOP` / `NHA_FDB` support).
+- Netns-capable Linux for the ADR-0061 `fib_runtime` selector; it
+  uses ordinary route-table operations rather than FDB nexthop
+  groups.
 - `CONFIG_NET_NS=y` and `CONFIG_BRIDGE=y` in the host kernel
   (universal on modern Linux).
 

@@ -375,15 +375,20 @@ policy/statement attribution are deferred.
 
 ### Address family filtering
 
-All `List*` RPCs accept an `afi_safi` field to filter by address family.
-Supported values: `IPV4_UNICAST` (1), `IPV6_UNICAST` (2), `IPV4_FLOWSPEC` (3),
+Route-listing RPCs that return RIB routes (`ListReceivedRoutes`,
+`ListBestRoutes`, `ListAdvertisedRoutes`, and `WatchRoutes`) accept an
+`afi_safi` field to filter by address family. Supported values:
+`IPV4_UNICAST` (1), `IPV6_UNICAST` (2), `IPV4_FLOWSPEC` (3),
 `IPV6_FLOWSPEC` (4), `L2VPN_EVPN` (5), or unspecified (0, returns all
 families). `WatchRoutes` events include the address family of each route
 change.
 
 ### Pagination
 
-All unicast `List*` RPCs support pagination via `page_size` and `page_token` (`ListFlowSpecRoutes` does not support pagination):
+The unicast route-listing RPCs `ListReceivedRoutes`, `ListBestRoutes`, and
+`ListAdvertisedRoutes` support pagination via `page_size` and `page_token`.
+Status RPCs such as `ListBlackholeDiscards` and `ListFibRoutes` return
+unfiltered snapshots. `ListFlowSpecRoutes` does not support pagination.
 
 ```bash
 # First page (2 routes)
@@ -476,6 +481,9 @@ best routes are currently visible.
 ```bash
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   localhost:50051 rustbgpd.v1.RibService/ListFibRoutes
+
+rustbgpctl rib fib          # human table
+rustbgpctl rib fib --json   # JSON array for scripts
 ```
 
 Returns one row per desired or daemon-owned route in the ADR-0061
@@ -484,15 +492,18 @@ starts when at least one `[[fib_tables]]` block is configured. `state`
 is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALLED`,
 `FIB_ROUTE_STATE_REJECTED`, or `FIB_ROUTE_STATE_FAILED`); `reason`
 carries values such as `owned`, `foreign_route_exists`,
-`next_hop_family_unsupported`, `dump_failed:<error>`,
-`rib_query_failed:<reason>`, or a kernel apply error such as
-`install_failed:<error>`.
+`next_hop_family_unsupported`, `dump_failed:DETAIL`,
+`rib_query_failed:DETAIL`, or a kernel apply error such as
+`install_failed:DETAIL`.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
-the route identity and forwarding value. A pre-existing kernel row in a
-configured table is reported as `foreign_route_exists`; `RTPROT_BGP` is
-not ownership proof by itself because another daemon can use the same
-protocol marker.
+the route identity and forwarding value. The CLI human table renders
+`Table`, `Metric`, `Prefix`, `Next hop`, `State`, and `Reason`; JSON output
+uses `table_name`, `table_id`, `metric`, `prefix`, `next_hop`,
+`peer_address`, `state`, and `reason`. A pre-existing kernel row in a
+configured table is reported as `foreign_route_exists`; `RTPROT_BGP` is not
+ownership proof by itself because another daemon can use the same protocol
+marker.
 
 ---
 

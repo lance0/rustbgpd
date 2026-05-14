@@ -202,9 +202,10 @@ resolved.
 - **Graceful Restart: no forwarding-state preservation.** RFC 4724 is
   implemented as helper (receiving speaker) plus minimal restarting speaker
   (`R=1` after coordinated restart via marker file, ADR-0040). However,
-  `forwarding_preserved` is always false because rustbgpd does not own or
-  verify the FIB. Full forwarding-state preservation is deferred until FIB
-  integration exists.
+  `forwarding_preserved` is always false because rustbgpd does not persist
+  route/FIB ownership across restart or verify that forwarding state survived.
+  ADR-0061 FIB programming is opt-in and scoped; crash-left rows are preserved
+  as foreign rather than adopted.
 - **Large community duplicates preserved.** Duplicate large communities
   in received UPDATEs are stored and re-advertised unchanged. Strict
   RFC 8092 normalization (dedup on receipt and before encode) is deferred

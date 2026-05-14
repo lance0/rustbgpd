@@ -183,6 +183,9 @@ When Graceful Restart is enabled (the default), the coordinated shutdown in
 step 2 writes a GR restart marker. On step 4, the daemon advertises `R=1` to
 static peers, asking them to retain our routes while we reconnect. The restart
 window is the largest `gr_restart_time` among all GR-enabled peers.
+rustbgpd still advertises `forwarding_preserved = false`; use a drained
+route-server pair or another traffic-shift procedure when forwarding
+continuity matters.
 
 For zero-downtime upgrades in a route-server pair, drain traffic to the
 standby, upgrade, then swap.

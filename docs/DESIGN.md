@@ -651,7 +651,10 @@ This matrix tracks every protocol behavior: its RFC basis, implementation status
 | MRT dump export | 6396 | post-v0.3.0 | — | Implemented (ADR-0044); TABLE_DUMP_V2 periodic + on-demand, gzip optional |
 | RPKI / RTR client | 8210 | post-v0.3.0 | — | Implemented (ADR-0034); runtime gRPC management deferred |
 
-This matrix is updated with every milestone. "Interop Tested" means validated in the containerlab CI suite, not "someone tried it once."
+This matrix is updated with every milestone. "Interop Tested" means validated
+by a documented containerlab or privileged-netns procedure. CI-gated rows are
+called out explicitly; privileged kernel dataplane smokes run locally until a
+privileged runner is available.
 
 ---
 
@@ -665,8 +668,10 @@ This matrix is updated with every milestone. "Interop Tested" means validated in
 
 ### Compatibility Targets
 
-- **Must not break:** FRR and BIRD. These are tested in CI on every PR via containerlab.
-- **Should not break:** GoBGP (as peer). Tested in CI but failures are investigated, not gating.
+- **Must not break:** FRR. Core FRR interop rows are gated on every PR.
+- **Should not break:** BIRD and GoBGP as peers. BIRD has documented M0
+  validation; GoBGP rows run in the interop suite but are not the primary
+  compatibility gate.
 - **Best effort:** Junos, Arista cEOS, Cisco. Lab-tested when available, not CI-gated.
 
 ### Proto Stability

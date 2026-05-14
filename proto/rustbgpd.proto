@@ -701,8 +701,11 @@ message ListFibRoutesRequest {}
 
 enum FibRouteState {
   FIB_ROUTE_STATE_UNSPECIFIED = 0;
+  // Route is daemon-owned and currently matches the configured kernel table.
   FIB_ROUTE_STATE_INSTALLED = 1;
+  // Route candidate was intentionally withheld before kernel apply.
   FIB_ROUTE_STATE_REJECTED = 2;
+  // Runtime hit a RIB, dump, or kernel boundary error.
   FIB_ROUTE_STATE_FAILED = 3;
 }
 
@@ -715,8 +718,12 @@ message FibRouteStatus {
   string next_hop = 6;
   string peer_address = 7;
   FibRouteState state = 8;
-  // Human-readable reason: owned, next_hop_family_unsupported,
-  // foreign_route_exists, or a kernel error summary.
+  // Operator-facing reason code. Stable values include "owned",
+  // "next_hop_family_unsupported", and "foreign_route_exists"; failure values
+  // are prefixed diagnostics such as "dump_failed:DETAIL",
+  // "rib_query_failed:DETAIL", "install_failed:DETAIL",
+  // "replace_failed:DETAIL", or "remove_failed:DETAIL". Treat text after
+  // ':' as diagnostic detail.
   string reason = 9;
 }
 
