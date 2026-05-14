@@ -126,10 +126,13 @@ resolved.
 - **ADR-0061 general FIB runtime does not adopt routes across crash restart.**
   `[[fib_tables]]` route installs use `RTPROT_BGP`, but that marker is not
   rustbgpd-specific; FRR and BIRD can install indistinguishable rows in the
-  same table and metric. After an ungraceful daemon exit, pre-existing BGP
-  rows in configured tables are therefore preserved and reported as
-  `foreign_route_exists` instead of being adopted, replaced, or drained. A
-  future slice needs a distinct ownership marker or persisted owned-state
+  same table and metric. A coordinated shutdown (SIGTERM) drains every
+  daemon-owned row first; a crash, `SIGKILL`, or OOM does not — so on the
+  next start those pre-existing BGP rows in configured tables are preserved
+  and reported as `foreign_route_exists` instead of being adopted, replaced,
+  or drained. They keep forwarding, but the daemon will not manage them until
+  an operator clears them (`rustbgpctl rib fib`, `ip route show table <id>`).
+  A future slice needs a distinct ownership marker or persisted owned-state
   before safe crash-restart adoption.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.

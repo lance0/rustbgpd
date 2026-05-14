@@ -488,6 +488,15 @@ On coordinated shutdown, the daemon drains only rows still matching its
 owned next-hop. If a row drifted underneath the daemon, it is preserved and
 ownership is dropped.
 
+**Quick smoke check** — one-shot verification that the runtime is live and
+programming the kernel (substitute the configured `table_id`):
+
+```bash
+rustbgpctl rib fib                                  # per-route owned / rejected / failed state
+ip route show table 1000                            # the configured table, straight from the kernel
+curl -s localhost:9179/metrics | grep '^bgp_fib_'   # install / withdraw / reject / kernel-failure counters
+```
+
 ### Explain a best-path decision
 
 ```bash
