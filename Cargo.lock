@@ -2265,6 +2265,7 @@ dependencies = [
  "axum",
  "bytes",
  "dhat",
+ "futures",
  "libc",
  "netlink-packet-route",
  "owo-colors",
