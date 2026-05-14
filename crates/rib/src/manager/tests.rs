@@ -966,6 +966,31 @@ async fn split_horizon_prevents_echo() {
     handle.await.unwrap();
 }
 
+#[tokio::test]
+async fn query_peer_groups_returns_current_policy_context() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    tx.send(RibUpdate::SetPeerPolicyContext {
+        peer,
+        peer_group: Some("transit".to_string()),
+    })
+    .await
+    .unwrap();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    tx.send(RibUpdate::QueryPeerGroups { reply: reply_tx })
+        .await
+        .unwrap();
+
+    let groups = reply_rx.await.unwrap();
+    assert_eq!(groups.get(&peer).map(String::as_str), Some("transit"));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
 /// Like [`make_route`] but with iBGP origin (iBGP-learned route).
 fn make_ibgp_route(prefix: Ipv4Prefix, next_hop: Ipv4Addr) -> Route {
     Route {

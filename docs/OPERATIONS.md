@@ -274,6 +274,8 @@ FIB runtime. The actor is still default-off; configure at least one
 | `bgp_fib_routes_withdrawn_total` | Daemon-owned configured-table routes successfully removed from the kernel |
 | `bgp_fib_routes_rejected_total{reason="foreign_route_exists"}` | Desired route suppressed because a kernel row already exists at the same table / metric / prefix and is not daemon-owned |
 | `bgp_fib_routes_rejected_total{reason="next_hop_family_unsupported"}` | Desired route suppressed because the table family and BGP next-hop family do not match |
+| `bgp_fib_routes_rejected_total{reason="peer_not_allowed"}` | Desired route suppressed by a `[[fib_tables]]` peer / peer-group allow-list |
+| `bgp_fib_routes_rejected_total{reason="route_limit_exceeded"}` | Desired route suppressed because the table exceeded its `max_routes` hard cap; existing owned rows are frozen in place |
 | `bgp_fib_kernel_failures_total{action="setup"}` | Runtime could not open the Linux FIB programming surface at startup |
 | `bgp_fib_kernel_failures_total{action="dump"}` | Runtime could not dump configured route tables during a reconcile pass |
 | `bgp_fib_kernel_failures_total{action="install"}` | Kernel rejected an add operation |
@@ -476,6 +478,13 @@ Loc-RIB. Rows are `installed`, `rejected`, or `failed`.
   preserves them rather than taking ownership by protocol alone.
 - `rejected` / `next_hop_family_unsupported`: the configured table family and
   BGP next-hop family do not match.
+- `rejected` / `peer_not_allowed`: the route's source peer did not match the
+  table's `allowed_neighbors` or `allowed_peer_groups` guardrail.
+- `rejected` / `route_limit_exceeded`: the table's eligible route count
+  exceeded `max_routes`. The table freezes for that pass: existing owned
+  rows stay installed, and growth or replacement is suppressed until the
+  eligible count falls back under the cap. For very large over-cap tables,
+  rejected rows are sampled so status output stays bounded.
 - `failed` / `dump_failed:*`, `install_failed:*`, `replace_failed:*`, or
   `remove_failed:*`: the runtime hit a RIB or kernel boundary error. Check
   `bgp_fib_kernel_failures_total` and daemon logs for the matching action.

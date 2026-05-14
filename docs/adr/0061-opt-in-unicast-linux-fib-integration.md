@@ -41,6 +41,8 @@ name = "edge"
 table_id = 1000
 metric = 200
 families = ["ipv4_unicast", "ipv6_unicast"]
+allowed_peer_groups = ["transit"]
+max_routes = 1000
 ```
 
 The first slice landed this block as config-only — reserving the
@@ -81,7 +83,21 @@ would hide an operationally important choice.
 FlowSpec, EVPN, VPNv4/v6, and labeled-unicast are not part of the
 ordinary FIB contract.
 
-### 5. Initial route set is single-best
+### 5. Per-table guardrails are enforced before apply
+
+`allowed_peer_groups` and `allowed_neighbors` are optional allow-lists.
+When either is set, a Loc-RIB best route must match at least one configured
+source peer or peer group before it can become kernel intent.
+
+`max_routes` is an optional hard cap per table. If the eligible candidate
+count exceeds the cap, the table freezes for that reconcile pass:
+already-owned rows remain installed, and non-owned candidates are reported
+as `route_limit_exceeded` with bounded status sampling for very large
+tables. This intentionally avoids arbitrary "first N" installs during
+accidental full-table export while also avoiding a table-wide withdraw
+storm when a feed briefly crosses the cap.
+
+### 6. Initial route set is single-best
 
 The runtime consumes `RibUpdate::SubscribeRouteEvents` as a wakeup and
 `RibUpdate::QueryBestRoutes` as the level-triggered snapshot, matching
@@ -91,7 +107,7 @@ The existing unicast `RouteEvent` does not carry a full route, and the
 Loc-RIB exposes one best route per prefix. ECMP therefore remains a
 follow-up that needs a deliberate RIB query/view for install candidates.
 
-### 6. Kernel route shape
+### 7. Kernel route shape
 
 The Linux route apply path uses ordinary rtnetlink route messages:
 
@@ -108,7 +124,7 @@ because the next-hop is intentionally not reachable through that device.
 Ordinary unicast should let the kernel validate reachability unless a
 future config knob explicitly changes that behavior.
 
-### 7. Ownership and foreign routes
+### 8. Ownership and foreign routes
 
 The actor must own only rows it installed. It must preserve foreign
 kernel routes by default.
@@ -126,7 +142,7 @@ The EVPN L3 owned-state model is the template: track route *values*, not
 only route keys, so next-hop/metric/table drift emits a correction and
 foreign drift is observable.
 
-### 8. Reload and shutdown
+### 9. Reload and shutdown
 
 Until a runtime swap surface exists, `[[fib_tables]]` edits are
 restart-required and surfaced through config diff. A future hot-reload
@@ -137,7 +153,7 @@ Shutdown drains only daemon-owned rows with a bounded timeout. Missing
 rows on delete (`ENOENT` / `ESRCH`) satisfy the post-condition and must
 not wedge convergence.
 
-### 9. Observability is required before default recommendations change
+### 10. Observability is required before default recommendations change
 
 The runtime exposes status via gRPC / CLI / Prometheus before README
 language changes from "not the best fit" to "supported edge-router

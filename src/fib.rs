@@ -12,13 +12,15 @@
 )]
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use rustbgpd_rib::{Route, RouteOrigin};
 use rustbgpd_wire::Prefix;
 
 use crate::config::FibTableConfig;
+
+const MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE: usize = 128;
 
 /// Desired general unicast FIB state derived from config and best routes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -27,6 +29,22 @@ pub(crate) struct FibIntent {
     pub routes: BTreeMap<FibRouteKey, FibRoute>,
     /// Routes suppressed during projection with explicit reasons.
     pub drops: Vec<FibDrop>,
+    /// Tables whose candidate count exceeded `max_routes`. New growth and
+    /// replacement are suppressed, while eligible already-owned rows may still
+    /// be repaired or withdrawn.
+    pub frozen_tables: BTreeSet<FibTableKey>,
+    /// Route keys still eligible while their table is frozen. Kept separate
+    /// from `drops` so operator status payloads can stay bounded.
+    pub frozen_eligible_keys: BTreeSet<FibRouteKey>,
+}
+
+/// Kernel table / metric identity for a configured FIB table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct FibTableKey {
+    /// Linux route table id.
+    pub table_id: u32,
+    /// Kernel route metric / priority.
+    pub metric: u32,
 }
 
 /// Kernel route identity for ADR-0061-owned routes.
@@ -52,6 +70,15 @@ impl Ord for FibRouteKey {
 impl PartialOrd for FibRouteKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl FibRouteKey {
+    pub(crate) fn table_key(self) -> FibTableKey {
+        FibTableKey {
+            table_id: self.table_id,
+            metric: self.metric,
+        }
     }
 }
 
@@ -128,6 +155,28 @@ pub(crate) enum FibDrop {
         /// Conflicting key.
         key: FibRouteKey,
     },
+    /// A route was learned from a peer outside the table allow-list.
+    PeerNotAllowed {
+        /// Table that rejected the route.
+        table_name: String,
+        /// Destination prefix.
+        prefix: Prefix,
+        /// Peer that supplied the route.
+        peer: IpAddr,
+    },
+    /// A table exceeded its configured hard route-count limit.
+    RouteLimitExceeded {
+        /// Table that rejected the route.
+        table_name: String,
+        /// Linux route identity that would have been installed.
+        key: FibRouteKey,
+        /// Next-hop that would have been installed.
+        next_hop: IpAddr,
+        /// Peer that supplied the route.
+        peer: IpAddr,
+        /// Configured maximum route count.
+        limit: u32,
+    },
 }
 
 /// Pure route operation plan for the Linux apply actor.
@@ -162,11 +211,38 @@ pub(crate) enum FibOp {
 /// Project configured FIB tables and Loc-RIB best routes into desired state.
 #[must_use]
 pub(crate) fn project_fib_intent(tables: &[FibTableConfig], routes: &[Route]) -> FibIntent {
+    project_fib_intent_with_peer_groups(tables, routes, &BTreeMap::new())
+}
+
+/// Project configured FIB tables and Loc-RIB best routes using the current
+/// RIB peer-group map for table allow-list checks.
+#[must_use]
+pub(crate) fn project_fib_intent_with_peer_groups(
+    tables: &[FibTableConfig],
+    routes: &[Route],
+    peer_groups: &BTreeMap<IpAddr, String>,
+) -> FibIntent {
     let mut intent = FibIntent::default();
 
-    for route in routes {
-        for table in tables {
+    for table in tables {
+        let mut table_routes: BTreeMap<FibRouteKey, FibRoute> = BTreeMap::new();
+        let mut table_frozen = false;
+        let mut route_limit_drop_count = 0usize;
+        let allowed_neighbors = table
+            .allowed_neighbors
+            .iter()
+            .filter_map(|neighbor| neighbor.parse::<IpAddr>().ok())
+            .collect::<Vec<_>>();
+        for route in routes {
             if !table_allows_prefix(table, route.prefix) {
+                continue;
+            }
+            if !table_allows_peer(table, &allowed_neighbors, route.peer, peer_groups) {
+                intent.drops.push(FibDrop::PeerNotAllowed {
+                    table_name: table.name.clone(),
+                    prefix: route.prefix,
+                    peer: route.peer,
+                });
                 continue;
             }
             if !prefix_and_nexthop_same_family(route.prefix, route.next_hop) {
@@ -183,6 +259,41 @@ pub(crate) fn project_fib_intent(tables: &[FibTableConfig], routes: &[Route]) ->
                 metric: table.metric,
                 prefix: route.prefix,
             };
+            if let Some(limit) = table.max_routes {
+                let projected_len =
+                    table_routes.len() + usize::from(!table_routes.contains_key(&key));
+                if table_frozen || projected_len > limit as usize {
+                    if !table_frozen {
+                        table_frozen = true;
+                        intent.frozen_tables.insert(FibTableKey {
+                            table_id: table.table_id,
+                            metric: table.metric,
+                        });
+                        for projected in table_routes.values() {
+                            intent.frozen_eligible_keys.insert(projected.key);
+                            push_route_limit_drop(
+                                &mut intent,
+                                &table.name,
+                                projected,
+                                limit,
+                                &mut route_limit_drop_count,
+                            );
+                        }
+                        table_routes.clear();
+                    }
+                    intent.frozen_eligible_keys.insert(key);
+                    push_route_limit_drop_for_route(
+                        &mut intent,
+                        &table.name,
+                        key,
+                        route.next_hop,
+                        route.peer,
+                        limit,
+                        &mut route_limit_drop_count,
+                    );
+                    continue;
+                }
+            }
             let projected = FibRoute {
                 table_name: table.name.clone(),
                 key,
@@ -193,11 +304,55 @@ pub(crate) fn project_fib_intent(tables: &[FibTableConfig], routes: &[Route]) ->
                 origin_type: route.origin_type,
                 path_id: route.path_id,
             };
-            intent.routes.insert(key, projected);
+            table_routes.insert(key, projected);
         }
+        if table_frozen {
+            continue;
+        }
+        intent.routes.extend(table_routes);
     }
 
     intent
+}
+
+fn push_route_limit_drop(
+    intent: &mut FibIntent,
+    table_name: &str,
+    route: &FibRoute,
+    limit: u32,
+    drop_count: &mut usize,
+) {
+    push_route_limit_drop_for_route(
+        intent,
+        table_name,
+        route.key,
+        route.target.next_hop,
+        route.peer,
+        limit,
+        drop_count,
+    );
+}
+
+fn push_route_limit_drop_for_route(
+    intent: &mut FibIntent,
+    table_name: &str,
+    key: FibRouteKey,
+    next_hop: IpAddr,
+    peer: IpAddr,
+    limit: u32,
+    drop_count: &mut usize,
+) {
+    if *drop_count >= MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE {
+        return;
+    }
+    intent.drops.push(FibDrop::RouteLimitExceeded {
+        table_name: table_name.to_string(),
+        key,
+        next_hop,
+        peer,
+        limit,
+    });
+    *drop_count += 1;
 }
 
 /// Compute the route operations needed to converge owned state to intent.
@@ -209,10 +364,35 @@ pub(crate) fn compute_fib_diff(
 ) -> FibPlan {
     let mut plan = FibPlan {
         ops: Vec::new(),
-        drops: intent.drops.clone(),
+        drops: intent
+            .drops
+            .iter()
+            .filter(|drop| {
+                !matches!(
+                    drop,
+                    FibDrop::RouteLimitExceeded { key, .. } if owned.routes.contains_key(key)
+                )
+            })
+            .cloned()
+            .collect(),
     };
 
     for (key, owned_route) in &owned.routes {
+        if intent.frozen_tables.contains(&key.table_key())
+            && intent.frozen_eligible_keys.contains(key)
+        {
+            match kernel.routes.get(key) {
+                Some(route) if route.protocol == FibKernelProtocol::Other => {
+                    plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
+                }
+                Some(route) if route.target != owned_route.target => {
+                    plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
+                }
+                None => plan.ops.push(FibOp::Add(owned_route.clone())),
+                Some(_) => {}
+            }
+            continue;
+        }
         if intent.routes.contains_key(key) {
             continue;
         }
@@ -229,7 +409,10 @@ pub(crate) fn compute_fib_diff(
 
     for (key, desired) in &intent.routes {
         match (owned.routes.get(key), kernel.routes.get(key)) {
-            (None | Some(_), None) => plan.ops.push(FibOp::Add(desired.clone())),
+            (None | Some(_), None) if !intent.frozen_tables.contains(&key.table_key()) => {
+                plan.ops.push(FibOp::Add(desired.clone()));
+            }
+            (None | Some(_), None) => {}
             (None, Some(_)) => {
                 plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
             }
@@ -290,6 +473,24 @@ fn table_allows_prefix(table: &FibTableConfig, prefix: Prefix) -> bool {
     table.families.iter().any(|family| family == wanted)
 }
 
+fn table_allows_peer(
+    table: &FibTableConfig,
+    allowed_neighbors: &[IpAddr],
+    peer: IpAddr,
+    peer_groups: &BTreeMap<IpAddr, String>,
+) -> bool {
+    if table.allowed_neighbors.is_empty() && table.allowed_peer_groups.is_empty() {
+        return true;
+    }
+    allowed_neighbors.contains(&peer)
+        || peer_groups.get(&peer).is_some_and(|group| {
+            table
+                .allowed_peer_groups
+                .iter()
+                .any(|allowed| allowed == group)
+        })
+}
+
 fn prefix_and_nexthop_same_family(prefix: Prefix, next_hop: IpAddr) -> bool {
     matches!(
         (prefix, next_hop),
@@ -337,6 +538,9 @@ mod tests {
                 .iter()
                 .map(|family| (*family).to_string())
                 .collect(),
+            allowed_peer_groups: Vec::new(),
+            allowed_neighbors: Vec::new(),
+            max_routes: None,
         }
     }
 
@@ -356,11 +560,21 @@ mod tests {
     }
 
     fn route(prefix: Prefix, next_hop: IpAddr, origin_type: RouteOrigin, path_id: u32) -> Route {
+        route_from_peer(prefix, next_hop, origin_type, path_id, ip("198.51.100.1"))
+    }
+
+    fn route_from_peer(
+        prefix: Prefix,
+        next_hop: IpAddr,
+        origin_type: RouteOrigin,
+        path_id: u32,
+        peer: IpAddr,
+    ) -> Route {
         Route {
             prefix,
             next_hop,
             link_local_next_hop: None,
-            peer: ip("198.51.100.1"),
+            peer,
             attributes: Arc::new(vec![
                 PathAttribute::Origin(Origin::Igp),
                 PathAttribute::AsPath(AsPath { segments: vec![] }),
@@ -525,11 +739,273 @@ mod tests {
     }
 
     #[test]
+    fn neighbor_allow_list_filters_fib_candidates() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.allowed_neighbors = vec!["198.51.100.2".to_string()];
+        let routes = vec![
+            route_from_peer(
+                v4_prefix(2, 24),
+                ip("203.0.113.1"),
+                RouteOrigin::Ebgp,
+                0,
+                ip("198.51.100.1"),
+            ),
+            route_from_peer(
+                v4_prefix(3, 24),
+                ip("203.0.113.2"),
+                RouteOrigin::Ebgp,
+                0,
+                ip("198.51.100.2"),
+            ),
+        ];
+
+        let intent = project_fib_intent(&[table], &routes);
+
+        assert_eq!(intent.routes.len(), 1);
+        assert!(
+            intent
+                .routes
+                .keys()
+                .any(|key| key.prefix == v4_prefix(3, 24))
+        );
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::PeerNotAllowed { peer, .. }] if *peer == ip("198.51.100.1")
+        ));
+    }
+
+    #[test]
+    fn peer_group_allow_list_uses_current_rib_peer_group_map() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.allowed_peer_groups = vec!["transit".to_string()];
+        let routes = vec![
+            route_from_peer(
+                v4_prefix(2, 24),
+                ip("203.0.113.1"),
+                RouteOrigin::Ebgp,
+                0,
+                ip("198.51.100.1"),
+            ),
+            route_from_peer(
+                v4_prefix(3, 24),
+                ip("203.0.113.2"),
+                RouteOrigin::Ebgp,
+                0,
+                ip("198.51.100.2"),
+            ),
+        ];
+        let peer_groups = BTreeMap::from([
+            (ip("198.51.100.1"), "ix".to_string()),
+            (ip("198.51.100.2"), "transit".to_string()),
+        ]);
+
+        let intent = project_fib_intent_with_peer_groups(&[table], &routes, &peer_groups);
+
+        assert_eq!(intent.routes.len(), 1);
+        assert!(
+            intent
+                .routes
+                .keys()
+                .any(|key| key.prefix == v4_prefix(3, 24))
+        );
+        assert!(matches!(
+            intent.drops.as_slice(),
+            [FibDrop::PeerNotAllowed { peer, .. }] if *peer == ip("198.51.100.1")
+        ));
+    }
+
+    #[test]
+    fn route_count_limit_is_fail_closed_per_table() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let routes = vec![
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+        ];
+
+        let intent = project_fib_intent(&[table], &routes);
+
+        assert!(intent.routes.is_empty());
+        assert_eq!(intent.drops.len(), 2);
+        assert!(intent.drops.iter().all(|drop| matches!(
+            drop,
+            FibDrop::RouteLimitExceeded {
+                table_name,
+                limit: 1,
+                ..
+            } if table_name == "edge"
+        )));
+    }
+
+    #[test]
+    fn route_count_limit_caps_status_drops_but_keeps_eligible_keys() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let routes = (0..150)
+            .map(|octet| {
+                route(
+                    v4_prefix(octet, 24),
+                    ip("203.0.113.1"),
+                    RouteOrigin::Ebgp,
+                    0,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let intent = project_fib_intent(&[table], &routes);
+
+        assert!(intent.routes.is_empty());
+        assert!(intent.frozen_tables.contains(&FibTableKey {
+            table_id: 1000,
+            metric: 200,
+        }));
+        assert_eq!(intent.frozen_eligible_keys.len(), 150);
+        assert_eq!(
+            intent
+                .drops
+                .iter()
+                .filter(|drop| matches!(drop, FibDrop::RouteLimitExceeded { .. }))
+                .count(),
+            MAX_ROUTE_LIMIT_EXCEEDED_DROPS_PER_TABLE
+        );
+    }
+
+    #[test]
+    fn route_count_limit_freezes_existing_owned_rows() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let existing = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
+        let routes = vec![
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+        ];
+        let intent = project_fib_intent(&[table], &routes);
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(existing.key, existing.clone())]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(existing.key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert!(plan.ops.is_empty());
+        assert_eq!(plan.drops.len(), 1);
+        assert!(matches!(
+            plan.drops.as_slice(),
+            [FibDrop::RouteLimitExceeded { key: dropped_key, .. }]
+                if *dropped_key == key(v4_prefix(3, 24))
+        ));
+    }
+
+    #[test]
+    fn route_count_limit_still_withdraws_owned_rows_that_left_the_rib() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let withdrawn = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
+        let routes = vec![
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(4, 24), ip("203.0.113.3"), RouteOrigin::Ebgp, 0),
+        ];
+        let intent = project_fib_intent(&[table], &routes);
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(withdrawn.key, withdrawn.clone())]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(
+                withdrawn.key,
+                kernel("203.0.113.1", FibKernelProtocol::Bgp),
+            )]),
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert_eq!(plan.ops, vec![FibOp::Remove(withdrawn)]);
+        assert_eq!(plan.drops.len(), 2);
+        assert!(plan.drops.iter().all(|drop| matches!(
+            drop,
+            FibDrop::RouteLimitExceeded {
+                table_name,
+                limit: 1,
+                ..
+            } if table_name == "edge"
+        )));
+    }
+
+    #[test]
+    fn route_count_limit_still_detects_drifted_owned_rows() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let existing = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
+        let routes = vec![
+            route(v4_prefix(2, 24), ip("203.0.113.9"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+        ];
+        let intent = project_fib_intent(&[table], &routes);
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(existing.key, existing.clone())]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(existing.key, kernel("203.0.113.8", FibKernelProtocol::Bgp))]),
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert!(plan.ops.is_empty());
+        assert!(plan.drops.iter().any(
+            |drop| matches!(drop, FibDrop::ForeignRouteExists { key } if *key == existing.key)
+        ));
+        assert!(plan
+            .drops
+            .iter()
+            .any(|drop| matches!(drop, FibDrop::RouteLimitExceeded { key: dropped_key, .. } if *dropped_key == key(v4_prefix(3, 24)))));
+    }
+
+    #[test]
+    fn route_count_limit_restores_missing_owned_rows() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(1);
+        let existing = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
+        let routes = vec![
+            route(v4_prefix(2, 24), ip("203.0.113.9"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+        ];
+        let intent = project_fib_intent(&[table], &routes);
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(existing.key, existing.clone())]),
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &FibKernelSnapshot::default());
+
+        assert_eq!(plan.ops, vec![FibOp::Add(existing)]);
+        assert!(plan
+            .drops
+            .iter()
+            .any(|drop| matches!(drop, FibDrop::RouteLimitExceeded { key: dropped_key, .. } if *dropped_key == key(v4_prefix(3, 24)))));
+    }
+
+    #[test]
+    fn route_count_at_limit_installs_candidates() {
+        let mut table = table("edge", 1000, 200, &["ipv4_unicast"]);
+        table.max_routes = Some(2);
+        let routes = vec![
+            route(v4_prefix(2, 24), ip("203.0.113.1"), RouteOrigin::Ebgp, 0),
+            route(v4_prefix(3, 24), ip("203.0.113.2"), RouteOrigin::Ebgp, 0),
+        ];
+
+        let intent = project_fib_intent(&[table], &routes);
+
+        assert_eq!(intent.routes.len(), 2);
+        assert!(intent.drops.is_empty());
+    }
+
+    #[test]
     fn desired_absent_from_owned_and_kernel_emits_add() {
         let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
         let intent = FibIntent {
             routes: BTreeMap::from([(route.key, route.clone())]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(
@@ -554,6 +1030,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(route.key, route)]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
@@ -579,6 +1056,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(key, desired.clone())]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
@@ -600,6 +1078,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(desired.key, desired.clone())]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
@@ -626,6 +1105,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(key, desired)]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
@@ -652,6 +1132,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(key, desired)]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &owned, &kernel);
@@ -704,6 +1185,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(route.key, route.clone())]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
@@ -724,6 +1206,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(route.key, route.clone())]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
@@ -744,6 +1227,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(desired.key, desired.clone())]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
@@ -779,6 +1263,7 @@ mod tests {
         let intent = FibIntent {
             routes: BTreeMap::from([(route.key, route.clone())]),
             drops: vec![],
+            ..FibIntent::default()
         };
 
         let plan = compute_fib_diff(&intent, &owned, &FibKernelSnapshot::default());

@@ -492,9 +492,9 @@ starts when at least one `[[fib_tables]]` block is configured. `state`
 is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALLED`,
 `FIB_ROUTE_STATE_REJECTED`, or `FIB_ROUTE_STATE_FAILED`); `reason`
 carries values such as `owned`, `foreign_route_exists`,
-`next_hop_family_unsupported`, `dump_failed:DETAIL`,
-`rib_query_failed:DETAIL`, or a kernel apply error such as
-`install_failed:DETAIL`.
+`next_hop_family_unsupported`, `peer_not_allowed`,
+`route_limit_exceeded`, `dump_failed:DETAIL`, `rib_query_failed:DETAIL`,
+or a kernel apply error such as `install_failed:DETAIL`.
 
 `table_id`, `metric`, `prefix`, `prefix_length`, and `next_hop` describe
 the route identity and forwarding value. The CLI human table renders

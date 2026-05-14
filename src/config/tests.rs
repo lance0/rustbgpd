@@ -3999,6 +3999,9 @@ metric = 200
     assert_eq!(table.table_id, 1000);
     assert_eq!(table.metric, 200);
     assert_eq!(table.families, ["ipv4_unicast", "ipv6_unicast"]);
+    assert!(table.allowed_peer_groups.is_empty());
+    assert!(table.allowed_neighbors.is_empty());
+    assert_eq!(table.max_routes, None);
 }
 
 #[test]
@@ -4090,6 +4093,101 @@ families = ["ipv4_flowspec"]
         panic!("expected InvalidFibTable, got {err}");
     };
     assert!(reason.contains("unsupported family"));
+}
+
+#[test]
+fn fib_tables_parse_guardrails() {
+    let toml = format!(
+        r#"
+{}
+
+[peer_groups.transit]
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+families = ["ipv4_unicast"]
+allowed_peer_groups = ["transit"]
+allowed_neighbors = ["198.51.100.1", "2001:db8::1"]
+max_routes = 1000
+"#,
+        valid_toml()
+    );
+    let config = parse(&toml).unwrap();
+    let table = &config.fib_tables[0];
+
+    assert_eq!(table.allowed_peer_groups, ["transit"]);
+    assert_eq!(table.allowed_neighbors, ["198.51.100.1", "2001:db8::1"]);
+    assert_eq!(table.max_routes, Some(1000));
+}
+
+#[test]
+fn fib_tables_reject_invalid_guardrails() {
+    let cases = [
+        (
+            r#"allowed_peer_groups = ["missing"]"#,
+            "undefined peer_group",
+        ),
+        (
+            r#"allowed_neighbors = ["not-an-ip"]"#,
+            "invalid allowed_neighbors",
+        ),
+        (
+            r#"allowed_neighbors = ["198.51.100.1", "198.51.100.1"]"#,
+            "duplicate allowed_neighbors",
+        ),
+        (r"max_routes = 0", "max_routes must be greater than zero"),
+    ];
+
+    for (line, expected) in cases {
+        let toml = format!(
+            r#"
+{}
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+{line}
+"#,
+            valid_toml()
+        );
+        let err = parse(&toml).unwrap_err();
+        let ConfigError::InvalidFibTable { reason } = err else {
+            panic!("expected InvalidFibTable, got {err}");
+        };
+        assert!(
+            reason.contains(expected),
+            "expected {expected:?} in error, got {reason:?}"
+        );
+    }
+}
+
+#[test]
+fn fib_tables_reject_duplicate_allowed_peer_groups() {
+    let toml = format!(
+        r#"
+{}
+
+[peer_groups.transit]
+
+[[fib_tables]]
+name = "edge"
+table_id = 1000
+metric = 200
+allowed_peer_groups = ["transit", "transit"]
+"#,
+        valid_toml()
+    );
+    let err = parse(&toml).unwrap_err();
+    let ConfigError::InvalidFibTable { reason } = err else {
+        panic!("expected InvalidFibTable, got {err}");
+    };
+    assert!(
+        reason.contains("duplicate allowed_peer_groups"),
+        "unexpected error: {reason}"
+    );
 }
 
 #[test]
