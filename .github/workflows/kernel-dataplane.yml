@@ -22,7 +22,13 @@ name: Kernel Dataplane
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   schedule:
     # 07:00 UTC nightly — catches dataplane regressions even if a PR
     # author's privileged run was never approved.
