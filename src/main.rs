@@ -338,6 +338,9 @@ fn print_config_diff(diff: &config::ConfigDiff) {
     if diff.apply_bum_enforcement_changed {
         restart_sections.push("apply_bum_enforcement");
     }
+    if diff.blackhole_fib_discard_changed {
+        restart_sections.push("BLACKHOLE FIB discard");
+    }
     if p.import_changed {
         restart_sections.push("[policy.import] (inline)");
     }
@@ -603,6 +606,7 @@ fn main() {
                     "evpn_ip_vrfs_changed": diff.evpn_ip_vrfs_changed,
                     "ethernet_segments_changed": diff.ethernet_segments_changed,
                     "apply_bum_enforcement_changed": diff.apply_bum_enforcement_changed,
+                    "blackhole_fib_discard_changed": diff.blackhole_fib_discard_changed,
                     "inline_policy_import_changed": diff.policy.import_changed,
                     "inline_policy_export_changed": diff.policy.export_changed,
                 },
@@ -1349,8 +1353,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let blackhole_shutdown = tokio_util::sync::CancellationToken::new();
     let blackhole_handle = blackhole::spawn(
         blackhole::BlackholeConfig {
-            install_discard: config.global.honor_blackhole
-                && config.global.install_blackhole_discard,
+            enabled: config.global.honor_blackhole && config.global.install_blackhole_discard,
             allow_broad_prefixes: config.global.allow_blackhole_broad_prefixes,
         },
         rib_tx.clone(),

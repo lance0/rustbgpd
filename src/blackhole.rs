@@ -26,9 +26,11 @@ const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 /// Runtime knobs resolved from `[global]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlackholeConfig {
-    /// Install kernel discard routes when accepted best routes carry
-    /// RFC 7999 `BLACKHOLE`.
-    pub install_discard: bool,
+    /// Whether the BLACKHOLE FIB reconciler should run. The daemon
+    /// passes `honor_blackhole && install_blackhole_discard` here so
+    /// this runtime field represents the effective opt-in, not just
+    /// the raw TOML value.
+    pub enabled: bool,
     /// Permit non-host prefixes. When false, only IPv4 `/32` and IPv6
     /// `/128` are eligible.
     pub allow_broad_prefixes: bool,
@@ -38,7 +40,7 @@ impl BlackholeConfig {
     /// Returns true when the actor should be started.
     #[must_use]
     pub fn enabled(self) -> bool {
-        self.install_discard
+        self.enabled
     }
 }
 
@@ -564,7 +566,7 @@ mod tests {
         )];
         let got = derive_desired(
             BlackholeConfig {
-                install_discard: true,
+                enabled: true,
                 allow_broad_prefixes: false,
             },
             &routes,
@@ -583,7 +585,7 @@ mod tests {
         )];
         let got = derive_desired(
             BlackholeConfig {
-                install_discard: true,
+                enabled: true,
                 allow_broad_prefixes: false,
             },
             &routes,
@@ -602,7 +604,7 @@ mod tests {
         )];
         let got = derive_desired(
             BlackholeConfig {
-                install_discard: true,
+                enabled: true,
                 allow_broad_prefixes: true,
             },
             &routes,
@@ -619,7 +621,7 @@ mod tests {
         )];
         let got = derive_desired(
             BlackholeConfig {
-                install_discard: true,
+                enabled: true,
                 allow_broad_prefixes: false,
             },
             &routes,
@@ -633,7 +635,7 @@ mod tests {
         let routes = vec![route(v4(32), RouteOrigin::Ebgp, vec![])];
         let got = derive_desired(
             BlackholeConfig {
-                install_discard: true,
+                enabled: true,
                 allow_broad_prefixes: false,
             },
             &routes,

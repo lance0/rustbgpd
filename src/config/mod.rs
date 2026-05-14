@@ -1092,6 +1092,11 @@ pub struct ConfigDiff {
     /// dataplane actor reads this once at startup, so SIGHUP must not
     /// silently advance the in-memory snapshot.
     pub apply_bum_enforcement_changed: bool,
+    /// `[global] install_blackhole_discard` or
+    /// `[global] allow_blackhole_broad_prefixes` changed. The
+    /// BLACKHOLE FIB actor is spawned once at startup, so edits are
+    /// restart-required and must remain visible in `--diff`.
+    pub blackhole_fib_discard_changed: bool,
 }
 
 /// Per-neighbor impact derived from inheritance / chain resolution.
@@ -1186,6 +1191,7 @@ impl ConfigDiff {
             || self.evpn_ip_vrfs_changed
             || self.ethernet_segments_changed
             || self.apply_bum_enforcement_changed
+            || self.blackhole_fib_discard_changed
     }
 
     /// Changes detected but not applied by current SIGHUP. Empty
@@ -1285,6 +1291,10 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         evpn_ip_vrfs_changed: old.evpn_ip_vrfs != new.evpn_ip_vrfs,
         ethernet_segments_changed: old.ethernet_segments != new.ethernet_segments,
         apply_bum_enforcement_changed: old.apply_bum_enforcement != new.apply_bum_enforcement,
+        blackhole_fib_discard_changed: old.global.install_blackhole_discard
+            != new.global.install_blackhole_discard
+            || old.global.allow_blackhole_broad_prefixes
+                != new.global.allow_blackhole_broad_prefixes,
     }
 }
 

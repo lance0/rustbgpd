@@ -2645,6 +2645,10 @@ fn diff_config_json_serializes() {
         json.contains("\"apply_bum_enforcement_changed\":false"),
         "expected apply_bum_enforcement_changed in serialized diff: {json}"
     );
+    assert!(
+        json.contains("\"blackhole_fib_discard_changed\":false"),
+        "expected blackhole_fib_discard_changed in serialized diff: {json}"
+    );
 }
 
 #[test]
@@ -3604,6 +3608,20 @@ hold_time = 90
     assert!(cfg.global.honor_blackhole);
     assert!(cfg.global.install_blackhole_discard);
     assert!(cfg.global.allow_blackhole_broad_prefixes);
+}
+
+#[test]
+fn blackhole_fib_discard_diff_marks_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\ninstall_blackhole_discard = true\nallow_blackhole_broad_prefixes = true\n",
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+
+    assert!(diff.blackhole_fib_discard_changed);
+    assert!(diff.has_restart_required_changes());
 }
 
 #[test]
