@@ -41,6 +41,10 @@ pub struct BgpMetrics {
 
     // ── RIB drops ───────────────────────────────────────────────
     outbound_route_drops: IntCounterVec,
+    blackhole_discard_installed: IntCounter,
+    blackhole_discard_withdrawn: IntCounter,
+    blackhole_discard_rejected: IntCounterVec,
+    blackhole_discard_kernel_failures: IntCounterVec,
 
     // ── Loop detection ─────────────────────────────────────────
     as_path_loop_detected: IntCounterVec,
@@ -213,6 +217,36 @@ impl BgpMetrics {
                 "Number of outbound route updates dropped due to full channel",
             ),
             &["peer"],
+        )
+        .expect("valid metric definition");
+
+        let blackhole_discard_installed = IntCounter::new(
+            "bgp_blackhole_discard_installed_total",
+            "RFC 7999 BLACKHOLE kernel discard routes successfully installed.",
+        )
+        .expect("valid metric definition");
+
+        let blackhole_discard_withdrawn = IntCounter::new(
+            "bgp_blackhole_discard_withdrawn_total",
+            "Daemon-owned RFC 7999 BLACKHOLE kernel discard routes successfully removed.",
+        )
+        .expect("valid metric definition");
+
+        let blackhole_discard_rejected = IntCounterVec::new(
+            Opts::new(
+                "bgp_blackhole_discard_rejected_total",
+                "RFC 7999 BLACKHOLE routes rejected before kernel discard install by reason.",
+            ),
+            &["reason"],
+        )
+        .expect("valid metric definition");
+
+        let blackhole_discard_kernel_failures = IntCounterVec::new(
+            Opts::new(
+                "bgp_blackhole_discard_kernel_failures_total",
+                "Kernel failures while applying RFC 7999 BLACKHOLE discard routes by action.",
+            ),
+            &["action"],
         )
         .expect("valid metric definition");
 
@@ -498,6 +532,18 @@ impl BgpMetrics {
             .register(Box::new(outbound_route_drops.clone()))
             .expect("metric not already registered");
         registry
+            .register(Box::new(blackhole_discard_installed.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(blackhole_discard_withdrawn.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(blackhole_discard_rejected.clone()))
+            .expect("metric not already registered");
+        registry
+            .register(Box::new(blackhole_discard_kernel_failures.clone()))
+            .expect("metric not already registered");
+        registry
             .register(Box::new(as_path_loop_detected.clone()))
             .expect("metric not already registered");
         registry
@@ -594,6 +640,10 @@ impl BgpMetrics {
             rib_loc_prefixes,
             max_prefix_exceeded,
             outbound_route_drops,
+            blackhole_discard_installed,
+            blackhole_discard_withdrawn,
+            blackhole_discard_rejected,
+            blackhole_discard_kernel_failures,
             as_path_loop_detected,
             rr_loop_detected,
             gr_active_peers,
@@ -716,6 +766,34 @@ impl BgpMetrics {
     /// Record an outbound route update drop for a peer.
     pub fn record_outbound_route_drop(&self, peer: &str) {
         self.outbound_route_drops.with_label_values(&[peer]).inc();
+    }
+
+    /// Record a successful RFC 7999 kernel discard install.
+    pub fn record_blackhole_discard_installed(&self) {
+        self.blackhole_discard_installed.inc();
+    }
+
+    /// Record a successful RFC 7999 kernel discard removal.
+    pub fn record_blackhole_discard_withdrawn(&self) {
+        self.blackhole_discard_withdrawn.inc();
+    }
+
+    /// Record a rejected RFC 7999 kernel-discard candidate.
+    ///
+    /// `reason` is expected to be `broad_prefix` or `not_ebgp`.
+    pub fn record_blackhole_discard_rejected(&self, reason: &str) {
+        self.blackhole_discard_rejected
+            .with_label_values(&[reason])
+            .inc();
+    }
+
+    /// Record a kernel apply failure for RFC 7999 discard state.
+    ///
+    /// `action` is expected to be `install` or `remove`.
+    pub fn record_blackhole_discard_kernel_failure(&self, action: &str) {
+        self.blackhole_discard_kernel_failures
+            .with_label_values(&[action])
+            .inc();
     }
 
     /// Record `AS_PATH` loop detection: increment by the number of rejected prefixes.

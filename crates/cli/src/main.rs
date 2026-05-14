@@ -388,6 +388,8 @@ enum RibAction {
         #[arg(long)]
         explain: bool,
     },
+    /// Show RFC 7999 BLACKHOLE discard install status
+    Blackholes,
     /// Inject a route
     Add {
         /// Prefix (e.g., 10.0.0.0/24)
@@ -773,6 +775,14 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     } else {
                         commands::rib::advertised(connection, &address, f, &filters, json).await
                     }
+                }
+                Some(RibAction::Blackholes) => {
+                    if explain {
+                        return Err(CliError::Argument(
+                            "--explain is not valid for rib blackholes".into(),
+                        ));
+                    }
+                    commands::rib::blackholes(connection, json).await
                 }
                 Some(RibAction::Add {
                     prefix,

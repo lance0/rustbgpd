@@ -1,13 +1,16 @@
 # Containerlab topology: rustbgpd ↔ FRR (M41 — RFC 7999 BLACKHOLE)
 #
-# Validates the control-plane receiver leg only:
+# Validates the receiver leg plus the opt-in Linux FIB discard path:
 #
 #   * FRR advertises 203.0.113.66/32 with BLACKHOLE (65535:666).
-#   * rustbgpd is configured with `[global] honor_blackhole = true`.
+#   * FRR advertises 203.0.113.67/32 without BLACKHOLE.
+#   * FRR advertises 198.51.100.0/24 with BLACKHOLE to exercise the
+#     broad-prefix reject guard.
+#   * rustbgpd is configured with `[global] honor_blackhole = true` and
+#     `[global] install_blackhole_discard = true`.
 #   * rustbgpd must retain BLACKHOLE and add NO_ADVERTISE on import.
-#
-# This milestone deliberately does not assert kernel discard behavior;
-# ADR-0060 keeps RFC 7999 support control-plane-only for now.
+#   * rustbgpd must install a kernel blackhole route only for the host
+#     BLACKHOLE prefix and remove it after withdrawal.
 #
 # Usage:
 #   containerlab deploy -t tests/interop/m41-blackhole-frr.clab.yml

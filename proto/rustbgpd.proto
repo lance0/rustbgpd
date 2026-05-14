@@ -519,6 +519,7 @@ service RibService {
   rpc ListAdvertisedRoutes(ListRoutesRequest) returns (ListRoutesResponse);
   rpc ExplainAdvertisedRoute(ExplainAdvertisedRouteRequest) returns (ExplainAdvertisedRouteResponse);
   rpc ExplainBestPath(ExplainBestPathRequest) returns (ExplainBestPathResponse);
+  rpc ListBlackholeDiscards(ListBlackholeDiscardsRequest) returns (ListBlackholeDiscardsResponse);
   rpc WatchRoutes(WatchRoutesRequest) returns (stream RouteEvent);
   rpc ListFlowSpecRoutes(ListFlowSpecRequest) returns (ListFlowSpecResponse);
   rpc ListEvpnRoutes(ListEvpnRequest) returns (ListEvpnResponse);
@@ -670,6 +671,23 @@ message ExplainBestPathResponse {
   // gets `add_path_send_max = 0` here — the response reflects
   // what would actually happen, not the bare config knob.
   uint32 add_path_send_max = 6;
+}
+
+message ListBlackholeDiscardsRequest {}
+
+message BlackholeDiscard {
+  string prefix = 1;
+  uint32 prefix_length = 2;
+  string peer_address = 3;
+  // One of: installed, rejected, failed.
+  string state = 4;
+  // Human-readable reason: installed/owned, broad_prefix, not_ebgp, or
+  // a kernel error summary.
+  string reason = 5;
+}
+
+message ListBlackholeDiscardsResponse {
+  repeated BlackholeDiscard discards = 1;
 }
 
 message Route {

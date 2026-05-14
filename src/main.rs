@@ -17,6 +17,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
+mod blackhole;
 mod config;
 mod config_persister;
 mod evpn_dataplane;
@@ -1339,6 +1340,25 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         shutdown: evpn_l3_originator_shutdown.clone(),
     });
 
+    // RFC 7999 BLACKHOLE kernel-discard reconciler (ADR-0060 FIB
+    // slice). Completely opt-in: `install_blackhole_discard = true`
+    // is effective only alongside `honor_blackhole = true`, and the
+    // actor itself still enforces host-prefix-only by default.
+    let (blackhole_status_tx, blackhole_status_rx) =
+        tokio::sync::watch::channel(Vec::<blackhole::BlackholeStatus>::new());
+    let blackhole_shutdown = tokio_util::sync::CancellationToken::new();
+    let blackhole_handle = blackhole::spawn(
+        blackhole::BlackholeConfig {
+            install_discard: config.global.honor_blackhole
+                && config.global.install_blackhole_discard,
+            allow_broad_prefixes: config.global.allow_blackhole_broad_prefixes,
+        },
+        rib_tx.clone(),
+        metrics.clone(),
+        blackhole_status_tx,
+        blackhole_shutdown.clone(),
+    );
+
     // Spawn gRPC API server (keep JoinHandle for supervision)
     let grpc_rib_tx = rib_tx.clone();
     let grpc_rib_query_tx = rib_query_tx;
@@ -1380,6 +1400,21 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
         evpn_fdb_nexthop_snapshot: {
             let rx = evpn_fdb_nexthops_rx.clone();
             Arc::new(move || rx.borrow().clone())
+        },
+        blackhole_discard_snapshot: {
+            let rx = blackhole_status_rx.clone();
+            Arc::new(move || {
+                rx.borrow()
+                    .iter()
+                    .map(|status| rustbgpd_api::proto::BlackholeDiscard {
+                        prefix: status.prefix.addr_string(),
+                        prefix_length: u32::from(status.prefix.prefix_len()),
+                        peer_address: status.peer.to_string(),
+                        state: status.state.as_str().to_string(),
+                        reason: status.reason.clone(),
+                    })
+                    .collect()
+            })
         },
     };
     let mut grpc_handle = tokio::spawn(async move {
@@ -1689,6 +1724,15 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     // 2. Wait for PeerManager to finish draining all peers
     if let Err(e) = peer_mgr_handle.await {
         error!(error = %e, "peer manager task panicked");
+    }
+
+    // 2.4 Drain daemon-owned BLACKHOLE discard routes. This is local
+    // kernel state only, so it does not need live BGP sessions. The
+    // actor removes only prefixes it successfully installed during
+    // this daemon lifetime.
+    if let Some(handle) = blackhole_handle {
+        info!("draining BLACKHOLE discard routes");
+        handle.shutdown().await;
     }
 
     // 2.5 Drain the EVPN Linux dataplane reconciler. The actor
@@ -2068,6 +2112,20 @@ async fn reload_config(
              kernel-enforcement opt-in."
         );
         new_config.apply_bum_enforcement = current.apply_bum_enforcement;
+    }
+    if new_config.global.install_blackhole_discard != current.global.install_blackhole_discard
+        || new_config.global.allow_blackhole_broad_prefixes
+            != current.global.allow_blackhole_broad_prefixes
+    {
+        error!(
+            "[global] BLACKHOLE FIB discard settings differ from the live config: \
+             the RFC 7999 kernel-discard reconciler is spawned only at startup. \
+             Restart rustbgpd to apply install_blackhole_discard or \
+             allow_blackhole_broad_prefixes edits."
+        );
+        new_config.global.install_blackhole_discard = current.global.install_blackhole_discard;
+        new_config.global.allow_blackhole_broad_prefixes =
+            current.global.allow_blackhole_broad_prefixes;
     }
 
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
@@ -3514,6 +3572,8 @@ hold_time = 90
                 dynamic_neighbor_limit: None,
                 honor_graceful_shutdown: false,
                 honor_blackhole: false,
+                install_blackhole_discard: false,
+                allow_blackhole_broad_prefixes: false,
             },
             neighbors: vec![
                 crate::config::Neighbor {

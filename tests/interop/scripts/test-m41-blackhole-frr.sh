@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# M41 interop test — RFC 7999 BLACKHOLE receiver scoping.
+# M41 interop test — RFC 7999 BLACKHOLE receiver scoping + FIB discard.
 #
 # FRR tags 203.0.113.66/32 with BLACKHOLE (65535:666) via an outbound
 # route-map. rustbgpd's [global] honor_blackhole = true appends an
 # implicit chain-tail import rule that preserves BLACKHOLE and adds
-# NO_ADVERTISE. 203.0.113.67/32 is untagged and must not receive the
-# implicit NO_ADVERTISE marker.
+# NO_ADVERTISE, while [global] install_blackhole_discard = true installs
+# a local kernel RTN_BLACKHOLE row for the accepted host route.
+# 203.0.113.67/32 is untagged and must not receive the implicit marker
+# or a kernel discard. 198.51.100.0/24 is tagged but broad, so it is
+# rejected by the host-route guard and must not install a kernel route.
 #
 # Prerequisites:
 #   - containerlab deploy -t tests/interop/m41-blackhole-frr.clab.yml
@@ -47,6 +50,21 @@ route_communities() {
         '[.routes[]? | select("\(.prefix)/\(.prefixLength)" == $p) | .communities[]?] | join(" ")'
 }
 
+grpc_blackholes() {
+    grpcurl -plaintext -import-path . -proto "$PROTO" \
+        "$GRPC_ADDR" rustbgpd.v1.RibService/ListBlackholeDiscards 2>/dev/null
+}
+
+blackhole_status() {
+    local prefix=$1
+    local plen=${prefix#*/}
+    local addr=${prefix%/*}
+    grpc_blackholes | jq -r --arg addr "$addr" --argjson plen "$plen" '
+        [.discards[]? | select(.prefix == $addr and .prefixLength == $plen)]
+        | if length == 0 then "MISSING" else "\(.[0].state)|\(.[0].reason)" end
+    '
+}
+
 has_community() {
     local communities=$1
     local value=$2
@@ -56,6 +74,10 @@ has_community() {
 dump_state_on_failure() {
     echo "===== rustbgpd ListReceivedRoutes (raw) =====" >&2
     grpc_list_received | jq . >&2 || true
+    echo "===== rustbgpd ListBlackholeDiscards (raw) =====" >&2
+    grpc_blackholes | jq . >&2 || true
+    echo "===== rustbgpd container routes =====" >&2
+    docker exec "$RUSTBGPD" ip route show >&2 || true
     echo "===== rustbgpd NeighborState 10.0.0.2 =====" >&2
     grpcurl -plaintext -import-path . -proto "$PROTO" \
         -d '{"address":"10.0.0.2"}' \
@@ -86,8 +108,82 @@ wait_route_present() {
     return 1
 }
 
+wait_blackhole_status() {
+    local prefix=$1
+    local expected_state=$2
+    local expected_reason=${3:-}
+    log "Waiting for BLACKHOLE status $prefix -> $expected_state ${expected_reason:+($expected_reason)}..."
+    for i in $(seq 1 30); do
+        local status
+        status=$(blackhole_status "$prefix")
+        local state=${status%%|*}
+        local reason=${status#*|}
+        if [ "$state" = "$expected_state" ] \
+            && { [ -z "$expected_reason" ] || [ "$reason" = "$expected_reason" ]; }; then
+            ok "$prefix BLACKHOLE status is $state/$reason after ${i}s"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "$prefix BLACKHOLE status did not become $expected_state/${expected_reason:-*} (last: $(blackhole_status "$prefix"))"
+    dump_state_on_failure
+    return 1
+}
+
+wait_kernel_blackhole_route() {
+    local prefix=$1
+    log "Waiting for kernel blackhole route $prefix..."
+    for i in $(seq 1 30); do
+        if docker exec "$RUSTBGPD" ip route show exact "$prefix" \
+            | grep -Eq "^blackhole ${prefix%/*}"; then
+            ok "$prefix installed as kernel blackhole route after ${i}s"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "$prefix did not install as kernel blackhole route"
+    dump_state_on_failure
+    return 1
+}
+
+assert_no_kernel_route() {
+    local prefix=$1
+    if docker exec "$RUSTBGPD" ip route show exact "$prefix" | grep -q .; then
+        fail "$prefix unexpectedly present in rustbgpd kernel FIB"
+        dump_state_on_failure
+        return 1
+    fi
+    ok "$prefix absent from rustbgpd kernel FIB"
+}
+
+wait_no_kernel_route() {
+    local prefix=$1
+    log "Waiting for kernel route $prefix to be removed..."
+    for i in $(seq 1 30); do
+        if ! docker exec "$RUSTBGPD" ip route show exact "$prefix" | grep -q .; then
+            ok "$prefix removed from rustbgpd kernel FIB after ${i}s"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "$prefix remained in rustbgpd kernel FIB"
+    dump_state_on_failure
+    return 1
+}
+
+withdraw_frr_network() {
+    local prefix=$1
+    log "Withdrawing $prefix from FRR..."
+    docker exec "$FRR" vtysh \
+        -c 'configure terminal' \
+        -c 'router bgp 65002' \
+        -c 'address-family ipv4 unicast' \
+        -c "no network $prefix" >/dev/null 2>&1
+}
+
 wait_route_present "203.0.113.66/32"
 wait_route_present "203.0.113.67/32"
+wait_route_present "198.51.100.0/24"
 
 tagged_comms=$(route_communities "203.0.113.66/32")
 log "203.0.113.66/32 communities: $tagged_comms"
@@ -110,5 +206,25 @@ if has_community "$untagged_comms" "$BLACKHOLE_VALUE" \
 else
     ok "203.0.113.67/32 remains untagged (correct)"
 fi
+
+broad_comms=$(route_communities "198.51.100.0/24")
+log "198.51.100.0/24 communities: $broad_comms"
+if has_community "$broad_comms" "$BLACKHOLE_VALUE" \
+    && has_community "$broad_comms" "$NO_ADVERTISE_VALUE"; then
+    ok "198.51.100.0/24 carries BLACKHOLE and NO_ADVERTISE before FIB guard"
+else
+    fail "198.51.100.0/24 missing BLACKHOLE or NO_ADVERTISE (got: $broad_comms)"
+    dump_state_on_failure
+    exit 1
+fi
+
+wait_blackhole_status "203.0.113.66/32" "installed"
+wait_kernel_blackhole_route "203.0.113.66/32"
+assert_no_kernel_route "203.0.113.67/32"
+wait_blackhole_status "198.51.100.0/24" "rejected" "broad_prefix"
+assert_no_kernel_route "198.51.100.0/24"
+
+withdraw_frr_network "203.0.113.66/32"
+wait_no_kernel_route "203.0.113.66/32"
 
 print_summary

@@ -113,15 +113,13 @@ resolved.
   permanent GShut behavior, write it into export policy as
   `set_community_add = ["GRACEFUL_SHUTDOWN"]` instead.
 
-- **RFC 7999 BLACKHOLE does not install discard routes yet.**
-  `[global] honor_blackhole = true` is control-plane scoping only:
-  EBGP imports carrying `BLACKHOLE` (`65535:666`) preserve that marker
-  and receive `NO_ADVERTISE`, but rustbgpd does not program a kernel
-  blackhole/null route. Future FIB discard support needs explicit
-  authorization, host-route-length defaults (`/32` and `/128`),
-  broad-prefix opt-in, rate/active-count limits, visible install
-  status, and idempotent cleanup of only rustbgpd-owned discard state.
-  See ADR-0060.
+- **RFC 7999 BLACKHOLE FIB discard has first-slice guardrails only.**
+  `[global] install_blackhole_discard = true` now installs Linux kernel
+  blackhole routes for accepted EBGP best routes carrying `BLACKHOLE`,
+  but the authorization model is intentionally narrow: EBGP + import
+  policy acceptance + host-prefix-only by default. Per-peer allow-lists,
+  active blackhole limits, rate limits, and privileged interop coverage
+  for install/remove behavior remain follow-ups. See ADR-0060.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says

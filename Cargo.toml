@@ -114,6 +114,11 @@ owo-colors.workspace = true
 axum.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.21"
+netlink-packet-route = "0.30"
+libc.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
 tower.workspace = true

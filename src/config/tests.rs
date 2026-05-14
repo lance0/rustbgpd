@@ -3575,6 +3575,38 @@ fn effective_chain_does_not_append_blackhole_when_honor_disabled() {
 }
 
 #[test]
+fn blackhole_fib_discard_defaults_off() {
+    let cfg = parse(&blackhole_toml(false, 65002)).unwrap();
+    assert!(!cfg.global.install_blackhole_discard);
+    assert!(!cfg.global.allow_blackhole_broad_prefixes);
+}
+
+#[test]
+fn blackhole_fib_discard_flags_parse() {
+    let toml = r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = true
+install_blackhole_discard = true
+allow_blackhole_broad_prefixes = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#;
+    let cfg = parse(toml).unwrap();
+    assert!(cfg.global.honor_blackhole);
+    assert!(cfg.global.install_blackhole_discard);
+    assert!(cfg.global.allow_blackhole_broad_prefixes);
+}
+
+#[test]
 fn blackhole_tail_readds_marker_and_no_advertise_after_operator_remove() {
     use rustbgpd_policy::{RouteContext, evaluate_chain};
     use rustbgpd_wire::{AspaValidation, RpkiValidation};

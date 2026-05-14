@@ -313,17 +313,25 @@ this document is reference / long-tail.
       a host route with `65535:666`; rustbgpd verifies receiver-side
       scoping by preserving `BLACKHOLE` and adding `NO_ADVERTISE`
       under `[global] honor_blackhole = true`.
+    - **FIB discard (opt-in)**: `[global] install_blackhole_discard = true`
+      starts a Linux kernel-discard reconciler when paired with
+      `honor_blackhole = true`. It installs daemon-owned
+      `RTN_BLACKHOLE` routes for EBGP-learned BLACKHOLE best routes,
+      defaults to host routes only (`/32` and `/128`), preserves
+      existing kernel routes by refusing overwrite, cleans up on
+      withdraw / shutdown, and surfaces status through
+      `rustbgpctl rib blackholes` plus Prometheus counters.
   Remaining BLACKHOLE work:
-    - **Dataplane discard**: install a kernel discard/null route for
-      authorized tagged prefixes, subject to RFC 7999 safety checks
-      (especially prefix authorization and max-prefix-length guardrails,
-      typically /32 for IPv4 and /128 for IPv6).
+    - **FIB hardening**: add per-peer / peer-group allow-lists, active
+      blackhole limits, rate limits, startup adoption or explicit stale
+      cleanup policy, and broader audit trails around who requested each
+      discard.
     - **Outbound advertise**: gRPC `SetBlackhole { peer, prefix,
       enabled }` or operator-policy attachment via
       `set_community_add = ["BLACKHOLE"]` on a per-prefix import
       filter. Per-prefix route injection is the likely surface.
     - **FIB interop**: extend M41 or add a sibling milestone that
-      asserts discard behavior once the FIB slice lands.
+      asserts discard install/remove behavior on a privileged runner.
 - [x] **Resolve open `cargo audit` findings** (v0.13.2 / v0.14.0) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
   unreachable in v0.13.2; v0.14.0 follow-up granted `checks: write`

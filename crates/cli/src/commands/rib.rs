@@ -7,7 +7,7 @@ use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
     AddPathRequest, DeletePathRequest, ExplainAdvertisedRouteRequest, ExplainBestPathRequest,
-    ExplainDecision, ListRoutesRequest,
+    ExplainDecision, ListBlackholeDiscardsRequest, ListRoutesRequest,
 };
 use serde::Serialize;
 
@@ -78,6 +78,47 @@ fn print_routes(routes: &[crate::proto::Route], json: bool) {
         println!("No routes");
     } else {
         output::print_route_table(routes);
+    }
+}
+
+#[derive(Serialize)]
+struct JsonBlackholeDiscard {
+    prefix: String,
+    peer_address: String,
+    state: String,
+    reason: String,
+}
+
+fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: bool) {
+    if json {
+        let out: Vec<JsonBlackholeDiscard> = discards
+            .iter()
+            .map(|d| JsonBlackholeDiscard {
+                prefix: format!("{}/{}", d.prefix, d.prefix_length),
+                peer_address: d.peer_address.clone(),
+                state: d.state.clone(),
+                reason: d.reason.clone(),
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out)
+                .expect("failed to serialize BLACKHOLE discard list as JSON")
+        );
+    } else if discards.is_empty() {
+        println!("No BLACKHOLE discard routes");
+    } else {
+        println!("{:<43} {:<18} {:<10} Reason", "Prefix", "Peer", "State");
+        println!("{}", "-".repeat(88));
+        for d in discards {
+            println!(
+                "{:<43} {:<18} {:<10} {}",
+                format!("{}/{}", d.prefix, d.prefix_length),
+                d.peer_address,
+                d.state,
+                d.reason
+            );
+        }
     }
 }
 
@@ -434,6 +475,17 @@ pub async fn best(
     Ok(())
 }
 
+pub async fn blackholes(connection: Connection, json: bool) -> Result<(), CliError> {
+    let mut client =
+        RibServiceClient::with_interceptor(connection.channel(), connection.interceptor());
+    let resp = client
+        .list_blackhole_discards(ListBlackholeDiscardsRequest {})
+        .await?
+        .into_inner();
+    print_blackhole_discards(&resp.discards, json);
+    Ok(())
+}
+
 pub async fn received(
     connection: Connection,
     address: &str,
@@ -578,6 +630,14 @@ mod tests {
         assert_eq!(req.peer_address, "192.0.2.1");
         assert_eq!(req.prefix, "203.0.113.0");
         assert_eq!(req.prefix_length, 24);
+    }
+
+    #[tokio::test]
+    async fn blackholes_calls_rpc() {
+        let server = spawn_mock_server(None).await;
+        let connection = connect(&server.addr, None).await.unwrap();
+
+        blackholes(connection, true).await.unwrap();
     }
 
     /// Pre-existing `best_route` and per-candidate `route` keys

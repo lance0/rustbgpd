@@ -599,6 +599,15 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         ))
     }
 
+    async fn list_blackhole_discards(
+        &self,
+        _request: Request<server_proto::ListBlackholeDiscardsRequest>,
+    ) -> Result<Response<server_proto::ListBlackholeDiscardsResponse>, Status> {
+        Ok(Response::new(server_proto::ListBlackholeDiscardsResponse {
+            discards: vec![],
+        }))
+    }
+
     async fn watch_routes(
         &self,
         _request: Request<server_proto::WatchRoutesRequest>,

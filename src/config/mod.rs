@@ -287,8 +287,8 @@ impl Config {
     /// built-in receiver rule does the safe control-plane half only: it keeps
     /// the `BLACKHOLE` marker present even if an earlier policy tried to
     /// remove it, and adds `NO_ADVERTISE` so the request stays local unless an
-    /// operator deliberately writes a different policy. It does not install a
-    /// kernel discard route; that belongs to a later FIB integration slice.
+    /// operator deliberately writes a different policy. Kernel discard route
+    /// installation is a separate `install_blackhole_discard` opt-in.
     fn build_implicit_blackhole_policy() -> Policy {
         Policy {
             entries: vec![PolicyStatement {

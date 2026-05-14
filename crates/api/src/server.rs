@@ -80,6 +80,10 @@ pub struct ServeConfig {
     /// state. Returns an empty summary when the dataplane actor is
     /// not running.
     pub evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    /// Live snapshot reader for RFC 7999 BLACKHOLE kernel discard
+    /// install state. Returns an empty list when the discard actor is
+    /// disabled or has not observed any BLACKHOLE best routes.
+    pub blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
 }
 
 /// Resolved gRPC listener configuration.
@@ -262,6 +266,7 @@ async fn run_listener(
     let evpn_originated_ip_vrf_route_count = config.evpn_originated_ip_vrf_route_count;
     let evpn_installed_ip_vrf_route_count = config.evpn_installed_ip_vrf_route_count;
     let evpn_fdb_nexthop_snapshot = config.evpn_fdb_nexthop_snapshot;
+    let blackhole_discard_snapshot = config.blackhole_discard_snapshot;
 
     match listener.endpoint {
         ListenerEndpoint::Tcp(addr) => {
@@ -286,6 +291,7 @@ async fn run_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
+                blackhole_discard_snapshot,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -314,6 +320,7 @@ async fn run_listener(
                 evpn_originated_ip_vrf_route_count,
                 evpn_installed_ip_vrf_route_count,
                 evpn_fdb_nexthop_snapshot,
+                blackhole_discard_snapshot,
                 shutdown_rx,
                 rpc_shutdown_tx,
                 config_tx,
@@ -345,6 +352,7 @@ async fn run_tcp_listener(
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -370,7 +378,10 @@ async fn run_tcp_listener(
     }
     builder
         .add_service(RibServiceServer::with_interceptor(
-            RibService::new(rib_query_tx.clone()),
+            RibService::with_blackhole_snapshot(
+                rib_query_tx.clone(),
+                blackhole_discard_snapshot.clone(),
+            ),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(
@@ -450,6 +461,7 @@ async fn run_uds_listener(
     evpn_originated_ip_vrf_route_count: crate::evpn_service::OriginatedIpVrfRouteCountFn,
     evpn_installed_ip_vrf_route_count: crate::evpn_service::InstalledIpVrfRouteCountFn,
     evpn_fdb_nexthop_snapshot: crate::evpn_service::FdbNexthopSnapshotFn,
+    blackhole_discard_snapshot: crate::rib_service::BlackholeDiscardSnapshotFn,
     shutdown_rx: watch::Receiver<bool>,
     rpc_shutdown_tx: watch::Sender<bool>,
     config_tx: Option<mpsc::Sender<ConfigEvent>>,
@@ -465,7 +477,10 @@ async fn run_uds_listener(
     let interceptor = AuthInterceptor::new(auth_token);
     let result = Server::builder()
         .add_service(RibServiceServer::with_interceptor(
-            RibService::new(rib_query_tx.clone()),
+            RibService::with_blackhole_snapshot(
+                rib_query_tx.clone(),
+                blackhole_discard_snapshot.clone(),
+            ),
             interceptor.clone(),
         ))
         .add_service(InjectionServiceServer::with_interceptor(

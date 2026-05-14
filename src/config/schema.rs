@@ -154,6 +154,7 @@ fn default_rpki_expire() -> u64 {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 #[serde(deny_unknown_fields)]
 pub struct Global {
     pub asn: u32,
@@ -181,13 +182,27 @@ pub struct Global {
     /// marker and adds `NO_ADVERTISE` to keep the request local. Off by
     /// default; RFC 7999 §4 says receivers should not discard traffic without
     /// an explicit operator directive. This knob scopes the control-plane
-    /// route today; kernel discard/null-route installation remains a separate
-    /// FIB integration slice.
+    /// route; kernel discard/null-route installation requires the separate
+    /// `install_blackhole_discard` opt-in.
     ///
     /// SIGHUP hot-applies through the peer manager, matching
     /// `honor_graceful_shutdown`.
     #[serde(default)]
     pub honor_blackhole: bool,
+    /// Install local kernel blackhole routes for accepted EBGP best
+    /// routes carrying RFC 7999 `BLACKHOLE`. Off by default and only
+    /// effective when `honor_blackhole = true`. The first FIB slice is
+    /// intentionally conservative: host routes only unless
+    /// `allow_blackhole_broad_prefixes = true`, no overwrite of existing
+    /// kernel routes, and daemon-owned cleanup on withdraw / shutdown.
+    #[serde(default)]
+    pub install_blackhole_discard: bool,
+    /// Permit non-host BLACKHOLE routes to install kernel discard rows.
+    /// Defaults to false so IPv4 `/32` and IPv6 `/128` are the only
+    /// installable prefixes. This knob has no effect unless
+    /// `install_blackhole_discard = true`.
+    #[serde(default)]
+    pub allow_blackhole_broad_prefixes: bool,
     /// Directory for daemon-owned runtime state files.
     #[serde(default = "default_runtime_state_dir")]
     pub runtime_state_dir: String,

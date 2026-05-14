@@ -15,15 +15,35 @@ use rustbgpd_rib::{
 };
 use rustbgpd_wire::{Afi, AsPath, AsPathSegment, EvpnRoute, PathAttribute, Prefix};
 
+/// Live snapshot provider for daemon-owned BLACKHOLE discard status.
+pub type BlackholeDiscardSnapshotFn =
+    std::sync::Arc<dyn Fn() -> Vec<proto::BlackholeDiscard> + Send + Sync + 'static>;
+
 /// gRPC service for querying the RIB (received, best, advertised routes).
 pub struct RibService {
     rib_tx: mpsc::Sender<RibUpdate>,
+    blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
 }
 
 impl RibService {
     /// Create a new RIB service backed by the given RIB channel.
+    #[allow(dead_code)]
     pub fn new(rib_tx: mpsc::Sender<RibUpdate>) -> Self {
-        Self { rib_tx }
+        Self {
+            rib_tx,
+            blackhole_discard_snapshot: std::sync::Arc::new(Vec::new),
+        }
+    }
+
+    /// Create a RIB service with a live BLACKHOLE discard snapshot.
+    pub fn with_blackhole_snapshot(
+        rib_tx: mpsc::Sender<RibUpdate>,
+        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
+    ) -> Self {
+        Self {
+            rib_tx,
+            blackhole_discard_snapshot,
+        }
     }
 
     async fn query_routes(&self, peer: Option<IpAddr>) -> Result<Vec<Route>, Status> {
@@ -618,6 +638,15 @@ impl proto::rib_service_server::RibService for RibService {
                 ))
             })?;
         Ok(Response::new(explain_best_path_to_proto(explain)))
+    }
+
+    async fn list_blackhole_discards(
+        &self,
+        _request: Request<proto::ListBlackholeDiscardsRequest>,
+    ) -> Result<Response<proto::ListBlackholeDiscardsResponse>, Status> {
+        Ok(Response::new(proto::ListBlackholeDiscardsResponse {
+            discards: (self.blackhole_discard_snapshot)(),
+        }))
     }
 
     async fn watch_routes(

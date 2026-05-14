@@ -1,4 +1,4 @@
-# ADR-0060: RFC 7999 BLACKHOLE control-plane scoping
+# ADR-0060: RFC 7999 BLACKHOLE receiver scoping and opt-in FIB discard
 
 **Status:** Accepted
 **Date:** 2026-05-13
@@ -63,25 +63,48 @@ reason about.
 snapshot, and recomputes peer import chains through the same runtime
 policy update path as `honor_graceful_shutdown`.
 
-### 5. No kernel discard route in this slice
+### 5. Kernel discard is a second explicit opt-in
 
-This decision is intentionally control-plane only. rustbgpd does not
-install a blackhole route, `throw` route, nftables rule, TC filter, or
-interface discard path when it sees `BLACKHOLE`.
+`honor_blackhole = true` remains control-plane scoping only. Kernel
+discard installation is enabled only when the operator also sets:
 
-Future FIB discard support needs its own design and must at minimum
-answer:
+```toml
+[global]
+install_blackhole_discard = true
+```
+
+The daemon starts a unicast BLACKHOLE reconciler at boot when both
+`honor_blackhole` and `install_blackhole_discard` are true. The
+reconciler subscribes to unicast best-path events, periodically
+re-queries the Loc-RIB as a level-triggered backstop, and installs
+kernel `RTN_BLACKHOLE` routes only for accepted best routes that still
+carry the RFC 7999 community after import policy.
+
+The first FIB slice is deliberately conservative:
 
 - **Authorization:** which peers or peer-groups are allowed to request
-  discard installation.
+  discard installation. Today the daemon requires the route to be
+  EBGP-learned and still carry `BLACKHOLE` after operator policy; iBGP
+  routes are visible but rejected from local FIB install.
 - **Prefix bounds:** default to host-route-only (`/32` and `/128`) and
-  require explicit opt-in for broader drops.
+  require `allow_blackhole_broad_prefixes = true` for broader drops.
 - **Failure discipline:** a failed discard install must not make the
-  control plane claim enforcement succeeded.
+  control plane claim enforcement succeeded. Failures are surfaced in
+  `rustbgpctl rib blackholes` and Prometheus counters.
 - **Blast-radius controls:** rate limits, maximum active blackholes,
-  and an operator-visible audit trail.
+  and a richer operator-visible audit trail remain follow-ups.
 - **Idempotent cleanup:** route withdrawal, policy rejection, peer flap,
-  and daemon shutdown must remove only rustbgpd-owned discard state.
+  and daemon shutdown remove only discard state installed by this daemon
+  lifetime.
+
+Existing kernel routes for the same prefix are not overwritten. The
+Linux implementation issues `RTM_NEWROUTE` without replace semantics;
+`EEXIST` is an install failure, preserving static routes and other
+routing daemons' FIB ownership.
+
+`install_blackhole_discard` and `allow_blackhole_broad_prefixes` are
+startup-only. SIGHUP pins them to the live snapshot and asks the
+operator to restart, matching the reconciler's one-shot spawn model.
 
 ## Consequences
 
@@ -92,28 +115,33 @@ Positive:
 - Receivers can scope EBGP `BLACKHOLE` routes with one global opt-in.
 - The CLI renders `65535:666` as `BLACKHOLE`, making route inspection
   less error-prone.
-- The control-plane behavior is safe for route reflectors and route
+- The default behavior remains safe for route reflectors and route
   servers because it does not mutate the local kernel FIB.
+- Operators that explicitly opt into FIB enforcement get bounded local
+  RTBH behavior with host-route defaults and owned cleanup.
 
 Negative:
 
-- `honor_blackhole` alone does not mitigate traffic on the local host.
-  A separate router, kernel discard pipeline, or external enforcement
-  system is still required.
-- Operators who expect "BLACKHOLE means install discard" may need a
-  runbook note until FIB discard support exists.
+- `honor_blackhole` alone does not mitigate traffic on the local host;
+  operators must enable `install_blackhole_discard` separately.
+- The first FIB slice does not implement rate limits or per-peer
+  allow-lists beyond EBGP + import-policy acceptance.
 
 Neutral:
 
 - Explicit import policy remains the right place to enforce host-route
   restrictions and peer authorization today.
-- Future FIB discard can reuse the same wire constant and policy alias
-  without changing the control-plane contract.
+- FIB discard reuses the same wire constant and policy alias without
+  changing the control-plane contract.
 
 ## What we rejected
 
-- **Implicit kernel discard on first implementation.** Too much blast
-  radius without authorization, prefix bounds, and cleanup semantics.
+- **Implicit kernel discard under `honor_blackhole`.** Too much blast
+  radius. FIB enforcement requires `install_blackhole_discard = true`.
+- **Overwriting existing kernel routes.** `replace` would be convenient
+  for idempotency, but it could silently steal a static route or another
+  daemon's route. We preserve foreign routes by treating `EEXIST` as a
+  failed install and surfacing it.
 - **Denying BLACKHOLE routes by default.** That prevents route servers
   and mitigation controllers from carrying the signal to the device that
   will actually enforce it.
@@ -131,5 +159,6 @@ Neutral:
 - `src/config/mod.rs` — `build_implicit_blackhole_policy` and effective
   import-chain assembly.
 - `src/peer_manager.rs` — `set_honor_blackhole` hot-apply fan-out.
+- `src/blackhole.rs` — opt-in kernel discard reconciler.
 - `examples/ddos-mitigation/config.toml` — RTBH operator example with
   explicit host-route guard policy.
