@@ -68,6 +68,7 @@ consequences so future contributors understand *why*, not just *what*.
 | [0058](0058-evpn-gate-9-irb-l3vni.md) | EVPN Gate 9 — symmetric IRB, L3VNI, Type 5 dataplane | Accepted | 2026-05-10 |
 | [0059](0059-evpn-aliasing-fdb-nexthop-groups.md) | EVPN aliasing dataplane via FDB nexthop groups | Accepted | 2026-05-12 |
 | [0060](0060-rfc-7999-blackhole.md) | RFC 7999 BLACKHOLE receiver scoping and opt-in FIB discard | Accepted | 2026-05-13 |
+| [0061](0061-opt-in-unicast-linux-fib-integration.md) | Opt-in unicast Linux FIB integration | Proposed | 2026-05-14 |
 
 ## Template
 

@@ -3827,6 +3827,7 @@ hold_time = 90
             evpn_instances: Vec::new(),
             ethernet_segments: Vec::new(),
             evpn_ip_vrfs: Vec::new(),
+            fib_tables: Vec::new(),
             apply_bum_enforcement: false,
         };
 

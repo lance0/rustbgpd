@@ -559,9 +559,85 @@ impl Config {
         // table; the daemon-side supervisor calls
         // `resolve_evpn_ip_vrfs` on demand.
         let _ = self.resolve_evpn_ip_vrfs()?;
+        validate_fib_tables(self)?;
 
         Ok(())
     }
+}
+
+fn validate_fib_tables(config: &Config) -> Result<(), ConfigError> {
+    let mut names = std::collections::HashSet::new();
+    let mut table_ids = std::collections::HashSet::new();
+
+    for table in &config.fib_tables {
+        if table.name.trim().is_empty() {
+            return Err(ConfigError::InvalidFibTable {
+                reason: "name must not be empty".to_string(),
+            });
+        }
+        if !table
+            .name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+            || !table
+                .name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!("name {:?}: must match ^[a-zA-Z][a-zA-Z0-9_-]*$", table.name),
+            });
+        }
+        if !names.insert(table.name.clone()) {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!("duplicate name {:?}", table.name),
+            });
+        }
+        if !table_ids.insert(table.table_id) {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!("duplicate table_id {}", table.table_id),
+            });
+        }
+        match table.table_id {
+            0 | 252 | 253 | 254 | 255 => {
+                return Err(ConfigError::InvalidFibTable {
+                    reason: format!(
+                        "table_id {} is reserved; choose an explicit non-reserved table",
+                        table.table_id
+                    ),
+                });
+            }
+            _ => {}
+        }
+        if table.families.is_empty() {
+            return Err(ConfigError::InvalidFibTable {
+                reason: format!("name {:?}: families must not be empty", table.name),
+            });
+        }
+        let mut seen_families = std::collections::HashSet::new();
+        for family in &table.families {
+            match family.as_str() {
+                "ipv4_unicast" | "ipv6_unicast" => {}
+                other => {
+                    return Err(ConfigError::InvalidFibTable {
+                        reason: format!(
+                            "name {:?}: unsupported family {other:?}; expected \
+                             \"ipv4_unicast\" or \"ipv6_unicast\"",
+                            table.name
+                        ),
+                    });
+                }
+            }
+            if !seen_families.insert(family) {
+                return Err(ConfigError::InvalidFibTable {
+                    reason: format!("name {:?}: duplicate family {family:?}", table.name),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[expect(

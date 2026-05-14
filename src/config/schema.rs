@@ -44,6 +44,14 @@ pub struct Config {
     /// device contract.
     #[serde(default)]
     pub evpn_ip_vrfs: Vec<EvpnIpVrfConfig>,
+    /// General-purpose Linux unicast FIB export tables (ADR-0061).
+    /// Empty by default — route-server / route-reflector deployments
+    /// leave this empty and never spawn the ordinary unicast kernel
+    /// FIB actor. Each entry is an explicit operator opt-in for one
+    /// Linux route table; this first slice is config-only and does
+    /// not program routes yet.
+    #[serde(default)]
+    pub fib_tables: Vec<FibTableConfig>,
     /// Apply Gate 8b BUM-suppression filters to the kernel
     /// (per-port `IFLA_BRPORT_*_FLOOD` triplet on CE-facing bridge
     /// ports). Default `false` — observe-only behavior preserved.
@@ -663,6 +671,38 @@ pub struct EvpnIpVrfConfig {
     pub table_id: u32,
 }
 
+/// Explicit opt-in for ordinary unicast kernel FIB export.
+///
+/// ADR-0061 keeps the general FIB path separate from EVPN L3VNI and
+/// RFC 7999 BLACKHOLE discard. The operator must name every Linux
+/// route table rustbgpd may eventually write to; the daemon never
+/// silently takes over `main`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FibTableConfig {
+    /// Operator-facing handle for future status output and CLI/API
+    /// filters. Unique across `[[fib_tables]]`.
+    pub name: String,
+    /// Linux route table id. Reserved tables are rejected at config
+    /// validation time; use an explicit non-reserved table for the
+    /// first general-FIB tranche.
+    pub table_id: u32,
+    /// Kernel route metric / priority to use for daemon-owned rows.
+    /// Required so coexistence with static routes and other routing
+    /// daemons is a conscious operator choice rather than an implicit
+    /// default.
+    pub metric: u32,
+    /// Address families eligible for future install. Defaults to both
+    /// IPv4 and IPv6 unicast when the `[[fib_tables]]` block itself is
+    /// present.
+    #[serde(default = "default_fib_families")]
+    pub families: Vec<String>,
+}
+
+fn default_fib_families() -> Vec<String> {
+    vec!["ipv4_unicast".to_string(), "ipv6_unicast".to_string()]
+}
+
 /// One Ethernet Segment this PE participates in (Gate 8).
 ///
 /// Each entry produces:
@@ -782,4 +822,6 @@ pub enum ConfigError {
     InvalidEthernetSegment { reason: String },
     #[error("invalid EVPN IP-VRF config: {reason}")]
     InvalidEvpnIpVrf { reason: String },
+    #[error("invalid FIB table config: {reason}")]
+    InvalidFibTable { reason: String },
 }
