@@ -1336,7 +1336,9 @@ declared tables only. The actor preserves foreign kernel rows, writes
 routes as `RTPROT_BGP` with the configured table and metric, drains
 daemon-owned rows on coordinated shutdown, and publishes per-route
 status through `RibService.ListFibRoutes` and
-`rustbgpctl rib fib`.
+`rustbgpctl rib fib`. The actor also writes a crash-recovery owned-state
+file at `<runtime_state_dir>/fib-owned.json` so an ungraceful process
+restart can recover routes the previous rustbgpd instance installed.
 
 Peer and route-count guardrails are enforced before any kernel apply.
 If `allowed_peer_groups` or `allowed_neighbors` is non-empty, a best
@@ -1352,10 +1354,12 @@ this keeps the knob usable for dynamic-neighbor ranges and staged peers.
 
 `RTPROT_BGP` is not treated as ownership proof by itself. A route that
 already exists in a configured table before this daemon instance owns it
-is reported as `foreign_route_exists`, even if its protocol is BGP. That
-conservative rule avoids replacing or deleting FRR/BIRD routes in the
-same table and metric; crash-restart adoption requires a future
-rustbgpd-specific ownership marker or persisted owned-state.
+is reported as `foreign_route_exists`, even if its protocol is BGP. Crash
+recovery uses the persisted owned-state file, the unchanged `[[fib_tables]]`
+declaration, and an exact live-kernel value match; if any of those checks
+fail, the row stays foreign. Unsupported or config-stale state files are
+quarantined as `fib-owned.json.stale`. This conservative rule avoids
+replacing or deleting FRR/BIRD routes in the same table and metric.
 
 ### Fields
 

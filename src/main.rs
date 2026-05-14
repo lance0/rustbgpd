@@ -1381,6 +1381,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
     let fib_runtime_handle = fib_runtime::spawn(
         fib_runtime::FibRuntimeConfig {
             tables: config.fib_tables.clone(),
+            owned_state_path: Some(config.runtime_state_dir().join("fib-owned.json")),
         },
         rib_tx.clone(),
         rib_query_tx.clone(),

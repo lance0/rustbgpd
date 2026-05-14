@@ -163,12 +163,14 @@ chain, etc.).
 |-------|-------|------|
 | Neighbor add/delete via gRPC | Config file (atomic write) | Immediately on mutation |
 | GR restart marker | `<runtime_state_dir>/gr-restart.toml` | On coordinated shutdown |
+| General FIB owned-state | `<runtime_state_dir>/fib-owned.json` | After successful ADR-0061 FIB apply/drain |
 | MRT dump files | `[mrt] output_dir` | On periodic timer or `TriggerMrtDump` |
 | gRPC UDS socket | `<runtime_state_dir>/grpc.sock` | Daemon lifetime |
 
 **Not persisted:** routing state (Adj-RIB-In, Loc-RIB, Adj-RIB-Out), policy
-evaluation state, RPKI VRP tables, BMP client state. All routing state is
-rebuilt from peers after restart.
+evaluation state, RPKI VRP tables, BMP client state. The ADR-0061 FIB file is
+only an ownership receipt for rows rustbgpd already installed; all route
+selection state is still rebuilt from peers after restart.
 
 ---
 
@@ -286,7 +288,12 @@ FIB runtime. The actor is still default-off; configure at least one
 Use `rustbgpctl rib fib --json` as the per-route companion to these counters.
 The most important state to investigate is `foreign_route_exists`: rustbgpd
 will not overwrite or delete pre-existing `RTPROT_BGP` rows because protocol
-alone is not ownership proof.
+alone is not ownership proof. After an ungraceful restart, rustbgpd only
+recovers rows that also appear in `<runtime_state_dir>/fib-owned.json`, match
+the unchanged `[[fib_tables]]` declaration, and still have the exact kernel
+next-hop value the previous instance owned. If the persisted file has an
+unsupported version or stale table signature, rustbgpd renames it to
+`fib-owned.json.stale` and starts with empty owned-state.
 
 ### Graceful Restart
 
@@ -474,7 +481,9 @@ Loc-RIB. Rows are `installed`, `rejected`, or `failed`.
   the current best route.
 - `rejected` / `foreign_route_exists`: a kernel row already exists at the
   same table / metric / prefix but is not owned by this daemon instance.
-  This includes pre-existing `RTPROT_BGP` rows after crash restart; rustbgpd
+  This includes pre-existing `RTPROT_BGP` rows that are absent from
+  `<runtime_state_dir>/fib-owned.json`, have a mismatched `[[fib_tables]]`
+  declaration, or drifted away from the persisted next-hop; rustbgpd
   preserves them rather than taking ownership by protocol alone.
 - `rejected` / `next_hop_family_unsupported`: the configured table family and
   BGP next-hop family do not match.

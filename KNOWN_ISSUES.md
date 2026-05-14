@@ -123,17 +123,16 @@ resolved.
   remain follow-ups. M41 covers FRR-originated install/remove behavior
   in CI. See ADR-0060.
 
-- **ADR-0061 general FIB runtime does not adopt routes across crash restart.**
+- **ADR-0061 general FIB crash recovery is exact-match only.**
   `[[fib_tables]]` route installs use `RTPROT_BGP`, but that marker is not
   rustbgpd-specific; FRR and BIRD can install indistinguishable rows in the
-  same table and metric. A coordinated shutdown (SIGTERM) drains every
-  daemon-owned row first; a crash, `SIGKILL`, or OOM does not — so on the
-  next start those pre-existing BGP rows in configured tables are preserved
-  and reported as `foreign_route_exists` instead of being adopted, replaced,
-  or drained. They keep forwarding, but the daemon will not manage them until
-  an operator clears them (`rustbgpctl rib fib`, `ip route show table <id>`).
-  A future slice needs a distinct ownership marker or persisted owned-state
-  before safe crash-restart adoption.
+  same table and metric. rustbgpd now persists daemon-owned rows to
+  `<runtime_state_dir>/fib-owned.json` and reloads that file after crash,
+  `SIGKILL`, or OOM. Recovery is deliberately conservative: the
+  `[[fib_tables]]` declaration must be unchanged and the live kernel row must
+  still be `RTPROT_BGP` with the exact next-hop rustbgpd recorded. Rows absent
+  from the file, rows with changed config, and drifted rows are preserved and
+  reported as `foreign_route_exists` rather than adopted by protocol alone.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says

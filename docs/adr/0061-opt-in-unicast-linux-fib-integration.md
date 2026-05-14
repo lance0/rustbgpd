@@ -138,6 +138,19 @@ pre-existing BGP-protocol row is preserved and reported as
 `foreign_route_exists` unless this daemon instance already has matching
 owned state.
 
+The actor persists that owned state to
+`<runtime_state_dir>/fib-owned.json` after successful apply/drain
+operations. On startup, the file is usable only when its recorded
+stable table signature still equals the live startup config. Unsupported
+versions or stale signatures are quarantined to `fib-owned.json.stale`
+and ignored. Even then, the runtime still verifies the current kernel row before acting:
+replace/remove decisions require the live row to be `RTPROT_BGP` and to
+carry the exact next-hop value recorded by the previous rustbgpd
+instance. If the row is absent, non-BGP, or drifted, normal diff rules
+apply and the row is either repaired from current intent or preserved as
+foreign. This deliberately avoids protocol-only adoption while allowing
+crash/SIGKILL/OOM recovery for rows rustbgpd can prove it owned.
+
 The EVPN L3 owned-state model is the template: track route *values*, not
 only route keys, so next-hop/metric/table drift emits a correction and
 foreign drift is observable.
@@ -152,6 +165,11 @@ not assume it.
 Shutdown drains only daemon-owned rows with a bounded timeout. Missing
 rows on delete (`ENOENT` / `ESRCH`) satisfy the post-condition and must
 not wedge convergence.
+
+An ungraceful restart reloads `<runtime_state_dir>/fib-owned.json` before
+the first reconcile pass. Because the file is an ownership receipt, not a
+route-selection cache, the actor still re-queries the RIB and re-dumps the
+kernel before deciding whether to keep, replace, or remove a row.
 
 ### 10. Observability is required before default recommendations change
 
@@ -186,7 +204,8 @@ Neutral:
 
 - `RTPROT_BGP` is a marker, not ownership proof by itself. Ownership is
   daemon-owned runtime state plus the full configured
-  table/metric/protocol/route value.
+  table/metric/protocol/route value, persisted to `fib-owned.json` for
+  crash-restart recovery only when the startup config still matches.
 - Graceful Restart `forwarding_preserved=true` remains out of scope.
   Programming a FIB is not enough; preserved forwarding needs crash and
   restart semantics.
