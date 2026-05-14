@@ -1383,6 +1383,7 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
             tables: config.fib_tables.clone(),
         },
         rib_tx.clone(),
+        rib_query_tx.clone(),
         metrics.clone(),
         fib_status_tx,
         fib_runtime_shutdown.clone(),

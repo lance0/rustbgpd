@@ -91,6 +91,24 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **ADR-0061 FIB ownership is conservative.** Pre-existing kernel
+  routes in configured `[[fib_tables]]` are now treated as foreign
+  unless the current daemon instance already has matching owned state.
+  `RTPROT_BGP` is still the protocol marker rustbgpd writes, but it is
+  not ownership proof by itself because FRR/BIRD can use the same marker
+  in the same table and metric. This avoids replacing or draining other
+  daemons' BGP routes after an ungraceful restart; crash-restart
+  adoption is deferred until rustbgpd has a distinct ownership marker or
+  persisted owned-state.
+
+- **ADR-0061 FIB runtime hardening and documentation sweep.** The
+  runtime now uses the RIB manager's priority query channel for
+  `QueryBestRoutes`, publishes failed status rows when a RIB query
+  fails instead of serving stale installed rows, and aborts in-flight
+  reconcile/apply work promptly on shutdown so the bounded drain gets
+  priority. `ListFibRoutes`, `[[fib_tables]]`, M42, and the privileged
+  netns harness docs now match the shipped behavior.
+
 - **EVPN Gate 9 documentation accuracy.** Refreshed the
   `EvpnInstanceConfig.ip_vrf` schema comment and GoBGP parity row so
   they describe the shipped Type 5 origination / import and L3 FIB

@@ -123,6 +123,15 @@ resolved.
   remain follow-ups. M41 covers FRR-originated install/remove behavior
   in CI. See ADR-0060.
 
+- **ADR-0061 general FIB runtime does not adopt routes across crash restart.**
+  `[[fib_tables]]` route installs use `RTPROT_BGP`, but that marker is not
+  rustbgpd-specific; FRR and BIRD can install indistinguishable rows in the
+  same table and metric. After an ungraceful daemon exit, pre-existing BGP
+  rows in configured tables are therefore preserved and reported as
+  `foreign_route_exists` instead of being adopted, replaced, or drained. A
+  future slice needs a distinct ownership marker or persisted owned-state
+  before safe crash-restart adoption.
+
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
   LOCAL_PREF should only appear in iBGP UPDATEs. The validator does

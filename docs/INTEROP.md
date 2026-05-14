@@ -1,8 +1,9 @@
 # Interop Test Results
 
 Tracks interop validation against real BGP implementations. Updated with
-every milestone. "Tested" means validated in the containerlab CI suite,
-not "someone tried it once."
+every milestone. "Tested" means validated by a documented containerlab
+or privileged-netns procedure, not "someone tried it once." CI-gated rows
+are called out explicitly.
 
 ---
 

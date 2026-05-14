@@ -25,7 +25,7 @@ wait_frr_established "$FRR" "10.0.0.1" "rustbgpd ↔ FRR"
 
 grpc_fib_routes() {
     grpcurl -plaintext -import-path . -proto "$PROTO" \
-        "$GRPC_ADDR" rustbgpd.v1.RibService/ListFibRoutes 2>/dev/null
+        "$GRPC_ADDR" rustbgpd.v1.RibService/ListFibRoutes
 }
 
 normalize_fib_state() {
@@ -44,11 +44,19 @@ fib_status() {
     local prefix=$1
     local addr=${prefix%/*}
     local plen=${prefix#*/}
+    local json
+    if ! json=$(grpc_fib_routes 2>&1); then
+        printf 'ERROR|grpcurl_failed:%s\n' "$json"
+        return 0
+    fi
     local raw
-    raw=$(grpc_fib_routes | jq -r --arg addr "$addr" --argjson plen "$plen" '
+    if ! raw=$(printf '%s\n' "$json" | jq -r --arg addr "$addr" --argjson plen "$plen" '
         [.routes[]? | select(.prefix == $addr and .prefixLength == $plen)]
         | if length == 0 then "MISSING" else "\(.[0].state)|\(.[0].reason)|\(.[0].tableId)|\(.[0].metric)|\(.[0].nextHop)" end
-    ')
+    ' 2>&1); then
+        printf 'ERROR|jq_failed:%s\n' "$raw"
+        return 0
+    fi
     if [ "$raw" = "MISSING" ]; then
         echo "$raw"
         return
@@ -92,7 +100,8 @@ wait_fib_status() {
         local state=${status%%|*}
         local rest=${status#*|}
         local reason=${rest%%|*}
-        if [ "$state" = "$expected_state" ] \
+        if [ "$state" != "ERROR" ] \
+            && [ "$state" = "$expected_state" ] \
             && { [ -z "$expected_reason" ] || [ "$reason" = "$expected_reason" ]; }; then
             ok "$prefix FIB status is $state/$reason after ${i}s"
             return 0
@@ -108,7 +117,9 @@ wait_fib_status_missing() {
     local prefix=$1
     log "Waiting for FIB status $prefix to disappear..."
     for i in $(seq 1 30); do
-        if [ "$(fib_status "$prefix")" = "MISSING" ]; then
+        local status
+        status=$(fib_status "$prefix")
+        if [ "$status" = "MISSING" ]; then
             ok "$prefix FIB status disappeared after ${i}s"
             return 0
         fi

@@ -657,8 +657,10 @@ scoping plus opt-in kernel discard install / withdraw. M42 validates
 the ADR-0061 general unicast FIB runtime against FRR 10.3.1 and a real
 Linux route table: selected EBGP route install into configured table
 1000, foreign-route preservation, FRR withdraw cleanup, and SIGTERM
-drain. M39 / M40 / M42 are manual only; same hosted-runner gap as M30b
-(Azure kernel lacks `vrf` module and privileged dataplane coverage).
+drain. Crash-restart adoption is intentionally deferred because
+`RTPROT_BGP` is not rustbgpd-specific ownership proof. M39 / M40 / M42
+are manual only; same hosted-runner gap as M30b (Azure kernel lacks
+`vrf` module and privileged dataplane coverage).
 
 **Must-test (high signal, high risk):**
 

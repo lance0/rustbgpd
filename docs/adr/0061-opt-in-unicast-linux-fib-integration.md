@@ -52,7 +52,7 @@ block now programs unicast best routes into the named tables.
 ### 2. Table selection is explicit and non-reserved
 
 rustbgpd will not silently write to the `main` table. Each table the
-future actor may write to must be named in `[[fib_tables]]`.
+actor may write to must be named in `[[fib_tables]]`.
 
 Reserved Linux table IDs are rejected:
 
@@ -69,8 +69,8 @@ networking safer.
 
 ### 3. Metric is explicit
 
-Each `[[fib_tables]]` entry requires `metric`. The metric becomes part
-of the future owned-route identity and coexistence story; defaulting it
+Each `[[fib_tables]]` entry requires `metric`. The metric is part of
+the owned-route identity and coexistence story; defaulting it
 would hide an operationally important choice.
 
 ### 4. Families are unicast-only
@@ -83,9 +83,9 @@ ordinary FIB contract.
 
 ### 5. Initial route set is single-best
 
-The first runtime slice should consume `RibUpdate::SubscribeRouteEvents`
-as a wakeup and `RibUpdate::QueryBestRoutes` as the level-triggered
-snapshot, matching `src/blackhole.rs`.
+The runtime consumes `RibUpdate::SubscribeRouteEvents` as a wakeup and
+`RibUpdate::QueryBestRoutes` as the level-triggered snapshot, matching
+`src/blackhole.rs`.
 
 The existing unicast `RouteEvent` does not carry a full route, and the
 Loc-RIB exposes one best route per prefix. ECMP therefore remains a
@@ -93,8 +93,7 @@ follow-up that needs a deliberate RIB query/view for install candidates.
 
 ### 6. Kernel route shape
 
-The future Linux route apply path should start with ordinary rtnetlink
-route messages:
+The Linux route apply path uses ordinary rtnetlink route messages:
 
 - `RTM_NEWROUTE` / `RTM_DELROUTE`
 - `RTN_UNICAST`
@@ -118,7 +117,10 @@ Before any `replace`, the actor must prove the existing kernel row is
 daemon-owned and matches the configured table/metric/protocol identity.
 An existing static route, kernel connected route, FRR/BIRD route, or
 operator route for the same prefix/table is a reported conflict, not a
-silent overwrite.
+silent overwrite. `RTPROT_BGP` is not ownership proof by itself; a
+pre-existing BGP-protocol row is preserved and reported as
+`foreign_route_exists` unless this daemon instance already has matching
+owned state.
 
 The EVPN L3 owned-state model is the template: track route *values*, not
 only route keys, so next-hop/metric/table drift emits a correction and
@@ -137,11 +139,11 @@ not wedge convergence.
 
 ### 9. Observability is required before default recommendations change
 
-The first runtime slice must expose status via gRPC / CLI / Prometheus
-before README language changes from "not the best fit" to "supported
-edge-router role." At minimum, operators need installed / rejected /
-failed counts and per-route reasons such as foreign conflict, kernel
-apply error, unresolved next-hop, or unsupported family.
+The runtime exposes status via gRPC / CLI / Prometheus before README
+language changes from "not the best fit" to "supported edge-router
+role." Operators get installed / rejected / failed counts and per-route
+reasons such as foreign conflict, kernel apply error, RIB query failure,
+or unsupported family.
 
 ## Consequences
 
@@ -149,7 +151,7 @@ Positive:
 
 - The default route-server / RR posture is preserved.
 - The config makes table and metric choices explicit before kernel
-  writes exist.
+  writes.
 - The first implementation can be reviewed and tested without a
   privileged runner.
 - The design reuses proven local patterns: route-event wakeups,
@@ -160,14 +162,14 @@ Negative:
 
 - No main-table programming in the first tranche, even for operators who
   already want it.
-- ECMP is not part of the first runtime slice.
+- ECMP is not part of the current runtime.
 - `[[fib_tables]]` is restart-required until a hot-swap actor exists.
 
 Neutral:
 
-- `RTPROT_BGP` is an initial marker, not ownership proof by itself.
-  Ownership is the full configured table/metric/protocol/route value plus
-  daemon-owned state.
+- `RTPROT_BGP` is a marker, not ownership proof by itself. Ownership is
+  daemon-owned runtime state plus the full configured
+  table/metric/protocol/route value.
 - Graceful Restart `forwarding_preserved=true` remains out of scope.
   Programming a FIB is not enough; preserved forwarding needs crash and
   restart semantics.

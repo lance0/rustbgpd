@@ -676,13 +676,13 @@ pub struct EvpnIpVrfConfig {
 ///
 /// ADR-0061 keeps the general FIB path separate from EVPN L3VNI and
 /// RFC 7999 BLACKHOLE discard. The operator must name every Linux
-/// route table rustbgpd may eventually write to; the daemon never
-/// silently takes over `main`.
+/// route table rustbgpd may write to; the daemon never silently takes
+/// over `main`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FibTableConfig {
-    /// Operator-facing handle for future status output and CLI/API
-    /// filters. Unique across `[[fib_tables]]`.
+    /// Operator-facing handle for status output and CLI/API filters.
+    /// Unique across `[[fib_tables]]`.
     pub name: String,
     /// Linux route table id. Reserved tables are rejected at config
     /// validation time; use an explicit non-reserved table for the
@@ -693,8 +693,8 @@ pub struct FibTableConfig {
     /// daemons is a conscious operator choice rather than an implicit
     /// default.
     pub metric: u32,
-    /// Address families eligible for future install. Defaults to both
-    /// IPv4 and IPv6 unicast when the `[[fib_tables]]` block itself is
+    /// Address families eligible for install. Defaults to both IPv4
+    /// and IPv6 unicast when the `[[fib_tables]]` block itself is
     /// present.
     #[serde(default = "default_fib_families")]
     pub families: Vec<String>,

@@ -1098,10 +1098,9 @@ pub struct ConfigDiff {
     /// surface exists.
     pub ethernet_segments_changed: bool,
     /// `[[fib_tables]]` blocks added/removed/modified between old
-    /// and new. ADR-0061's first slice is config-only, and the
-    /// future general-FIB actor will be explicit opt-in kernel state;
-    /// keep edits visible as restart-required until runtime semantics
-    /// are deliberately implemented.
+    /// and new. The ADR-0061 general-FIB actor resolves the table set
+    /// once at startup, so edits are restart-required until runtime
+    /// swap semantics are deliberately implemented.
     pub fib_tables_changed: bool,
     /// Top-level Gate 8b kernel-enforcement opt-in changed. The
     /// dataplane actor reads this once at startup, so SIGHUP must not

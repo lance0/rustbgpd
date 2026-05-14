@@ -32,7 +32,7 @@ docker build \
 ## Run
 
 ```
-bash crates/evpn-linux/tests/docker/run-netns-tests.sh           # both tests
+bash crates/evpn-linux/tests/docker/run-netns-tests.sh           # default Gate 8b BUM tests
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh spike     # shell spike only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh roundtrip # netlink round-trip only
 bash crates/evpn-linux/tests/docker/run-netns-tests.sh fdb_nhg   # FDB nexthop groups
@@ -105,10 +105,15 @@ container around it.
 
 ## CI integration
 
-The harness is wired into PR-CI via the `evpn_bum_filter_kernel`
-job in `.github/workflows/ci.yml`. Every PR runs both gated tests
-against the GitHub-hosted runner's kernel (Ubuntu 24.04, kernel
-6.x — well past the 4.18 floor for `IFLA_BRPORT_BCAST_FLOOD`).
+The default Gate 8b BUM selector is wired into PR-CI via the
+`evpn_bum_filter_kernel` job in `.github/workflows/ci.yml`. Every PR
+runs the shell spike and Rust round-trip against the GitHub-hosted
+runner's kernel (Ubuntu 24.04, kernel 6.x — well past the 4.18 floor
+for `IFLA_BRPORT_BCAST_FLOOD`).
+
+Other selectors are local / manual validation unless a workflow names
+them explicitly. In particular, `fdb_nhg` and `fib_runtime` are
+reviewer-run privileged smokes today, not default PR-CI gates.
 
 The CI step pre-builds the harness image with `docker/build-push-action`
 + GHA layer caching, then invokes `run-netns-tests.sh` with

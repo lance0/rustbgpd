@@ -16,10 +16,10 @@ ASPA path verification, FlowSpec, BMP, MRT, and full gRPC/CLI management
 are implemented. Default-off Linux FIB integration exists for RFC 7999
 discard routes and configured unicast FIB tables; broader router features
 remain future work. Validated with a workspace test suite, fuzz targets,
-and 42 automated interop suites against
-FRR 10.3.1, BIRD 2.0.12, GoBGP 4.3.0, and StayRTR — 16 of those interop
-tests run on every PR; the rest are gated locally for runtime or kernel
-reasons.
+and 42 automated interop scripts — primarily against FRR 10.3.1, plus
+GoBGP 4.3.0 and StayRTR-backed RTR coverage; BIRD 2.0.12 has documented
+M0 containerlab validation. Sixteen interop tests run on every PR; the
+rest are gated locally for runtime or kernel reasons.
 
 > **Alpha expectations:** The config format and gRPC API are not yet frozen.
 > Breaking changes are possible between minor versions. The daemon runs on
@@ -312,7 +312,7 @@ control-plane deployments where you are comfortable with an evolving API.**
 | **Config stability** | TOML format may change between minor versions; migrations documented in CHANGELOG |
 | **API stability** | gRPC proto may add fields/RPCs; breaking changes documented in CHANGELOG |
 | **Not yet supported** | EVPN duplicate-MAC quarantine action / production-default multi-homing enforcement / RFC 9135 overlay-index IRB, VPNv4/v6, Confederation, TCP-AO |
-| **Tests** | Workspace test suite, fuzz targets, 42 automated interop suites against FRR, BIRD, GoBGP, StayRTR, and an in-tree EVPN load generator (16 interop tests gated on every PR; privileged kernel dataplane smokes run locally) |
+| **Tests** | Workspace test suite, fuzz targets, 42 automated interop scripts primarily against FRR plus GoBGP / StayRTR / documented BIRD coverage, and an in-tree EVPN load generator (16 interop tests gated on every PR; privileged kernel dataplane smokes run locally) |
 
 ## Documentation
 
