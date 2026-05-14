@@ -105,9 +105,11 @@ The first FIB slice is deliberately conservative:
   lifetime.
 
 Existing kernel routes for the same prefix are not overwritten. The
-Linux implementation issues `RTM_NEWROUTE` without replace semantics;
-`EEXIST` is an install failure, preserving static routes and other
-routing daemons' FIB ownership.
+Linux implementation preflights the main-table prefix before install
+and issues `RTM_NEWROUTE` without replace semantics. Existing kernel
+routes surface as `foreign_route_exists` / `EEXIST` failures rather
+than overwrites, preserving static routes and other routing daemons'
+FIB ownership.
 
 `install_blackhole_discard`, `allow_blackhole_broad_prefixes`, and the
 `honor_blackhole` component of an enabled or requested FIB-discard spawn
@@ -148,8 +150,9 @@ Neutral:
   radius. FIB enforcement requires `install_blackhole_discard = true`.
 - **Overwriting existing kernel routes.** `replace` would be convenient
   for idempotency, but it could silently steal a static route or another
-  daemon's route. We preserve foreign routes by treating `EEXIST` as a
-  failed install and surfacing it.
+  daemon's route. We preserve foreign routes by preflighting the prefix
+  and treating `EEXIST` as a failed install if the kernel races the
+  preflight.
 - **Denying BLACKHOLE routes by default.** That prevents route servers
   and mitigation controllers from carrying the signal to the device that
   will actually enforce it.

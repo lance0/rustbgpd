@@ -114,6 +114,7 @@ resolved.
   `set_community_add = ["GRACEFUL_SHUTDOWN"]` instead.
 
 - **RFC 7999 BLACKHOLE FIB discard has first-slice guardrails only.**
+  `[global] honor_blackhole = true` plus
   `[global] install_blackhole_discard = true` now installs Linux kernel
   blackhole routes for accepted EBGP best routes carrying `BLACKHOLE`,
   but the authorization model is intentionally narrow: EBGP + import

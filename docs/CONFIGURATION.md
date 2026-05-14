@@ -139,7 +139,8 @@ so operator/static or other-daemon routes are preserved.
 
 `rustbgpctl rib blackholes` shows the current discard status for every
 BLACKHOLE-marked best route the daemon has observed: `installed`, `rejected`
-(`broad_prefix` / `not_ebgp`), or `failed` with the kernel error. The same
+(`broad_prefix` / `not_ebgp`), or `failed` (`foreign_route_exists`,
+`lookup_failed`, `remove_failed`, or the kernel install error). The same
 surface is available as JSON with `rustbgpctl -j rib blackholes`.
 
 SIGHUP hot-applies this field with the same best-effort partial-apply

@@ -315,7 +315,7 @@ Query the routing information base and subscribe to real-time route changes.
 | `ExplainBestPath` | Show all candidates for a prefix with decisive comparison reasons; optional `peer_address` field scopes to that peer's Add-Path send view |
 | `ListFlowSpecRoutes` | FlowSpec routes in Adj-RIB-In / Loc-RIB view |
 | `ListEvpnRoutes` | EVPN routes (RFC 7432) in Loc-RIB view, filterable by route type / peer / RD |
-| `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] install_blackhole_discard = true` |
+| `ListBlackholeDiscards` | RFC 7999 BLACKHOLE kernel-discard install status when `[global] honor_blackhole = true` and `[global] install_blackhole_discard = true` |
 | `WatchRoutes` | Server-streaming: real-time route add/withdraw/best-change events |
 
 ### List received routes (Adj-RIB-In)
@@ -465,7 +465,8 @@ Returns one row per currently observed best route carrying the RFC 7999
 `BlackholeDiscardState` enum (`BLACKHOLE_DISCARD_STATE_INSTALLED`,
 `BLACKHOLE_DISCARD_STATE_REJECTED`, or `BLACKHOLE_DISCARD_STATE_FAILED`);
 `reason` carries values such as `installed`, `owned`, `broad_prefix`,
-`not_ebgp`, or the kernel error string.
+`not_ebgp`, `foreign_route_exists`, `lookup_failed`, `remove_failed`, or
+the kernel install error string.
 An empty list means either the reconciler is disabled or no BLACKHOLE-marked
 best routes are currently visible.
 
