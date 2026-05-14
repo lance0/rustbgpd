@@ -144,6 +144,9 @@ pub(crate) struct FibPlan {
 pub(crate) enum FibOp {
     /// Add a missing daemon-owned route.
     Add(FibRoute),
+    /// Adopt an already-present `RTPROT_BGP` route at the configured
+    /// table / metric / prefix identity after an ungraceful restart.
+    Adopt(FibRoute),
     /// Replace an owned route whose kernel forwarding value drifted.
     Replace {
         /// Previously-owned route identity / metadata.
@@ -223,6 +226,18 @@ pub(crate) fn compute_fib_diff(
     for (key, desired) in &intent.routes {
         match (owned.routes.get(key), kernel.routes.get(key)) {
             (None | Some(_), None) => plan.ops.push(FibOp::Add(desired.clone())),
+            (None, Some(kernel_route)) if kernel_route.protocol == FibKernelProtocol::Bgp => {
+                if kernel_route.target == desired.target {
+                    plan.ops.push(FibOp::Adopt(desired.clone()));
+                } else {
+                    let mut previous = desired.clone();
+                    previous.target = kernel_route.target;
+                    plan.ops.push(FibOp::Replace {
+                        previous,
+                        desired: desired.clone(),
+                    });
+                }
+            }
             (None, Some(_)) => {
                 plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
             }
@@ -245,7 +260,7 @@ pub(crate) fn compute_fib_diff(
 /// Update owned state after a successful future apply operation.
 pub(crate) fn record_fib_success(owned: &mut FibOwnedState, op: &FibOp) {
     match op {
-        FibOp::Add(route) => {
+        FibOp::Add(route) | FibOp::Adopt(route) => {
             owned.routes.insert(route.key, route.clone());
         }
         FibOp::Replace { desired, .. } => {
@@ -595,6 +610,44 @@ mod tests {
     }
 
     #[test]
+    fn stale_bgp_kernel_route_with_same_value_is_adopted_after_restart() {
+        let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(route.key, kernel("203.0.113.1", FibKernelProtocol::Bgp))]),
+        };
+        let intent = FibIntent {
+            routes: BTreeMap::from([(route.key, route.clone())]),
+            drops: vec![],
+        };
+
+        let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
+
+        assert_eq!(plan.ops, vec![FibOp::Adopt(route)]);
+        assert!(plan.drops.is_empty());
+    }
+
+    #[test]
+    fn stale_bgp_kernel_route_with_wrong_value_is_replaced_after_restart() {
+        let desired = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
+        let mut previous = desired.clone();
+        previous.target = FibRouteTarget {
+            next_hop: ip("203.0.113.9"),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(desired.key, kernel("203.0.113.9", FibKernelProtocol::Bgp))]),
+        };
+        let intent = FibIntent {
+            routes: BTreeMap::from([(desired.key, desired.clone())]),
+            drops: vec![],
+        };
+
+        let plan = compute_fib_diff(&intent, &FibOwnedState::default(), &kernel);
+
+        assert_eq!(plan.ops, vec![FibOp::Replace { previous, desired }]);
+        assert!(plan.drops.is_empty());
+    }
+
+    #[test]
     fn foreign_kernel_route_not_owned_and_not_desired_is_ignored() {
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(
@@ -633,6 +686,9 @@ mod tests {
         let mut owned = FibOwnedState::default();
 
         record_fib_success(&mut owned, &FibOp::Add(route.clone()));
+        assert_eq!(owned.routes.get(&route.key), Some(&route));
+
+        record_fib_success(&mut owned, &FibOp::Adopt(route.clone()));
         assert_eq!(owned.routes.get(&route.key), Some(&route));
 
         record_fib_success(

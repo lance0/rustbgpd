@@ -41,19 +41,6 @@ impl RibService {
         }
     }
 
-    /// Create a RIB service with a live BLACKHOLE discard snapshot.
-    #[allow(dead_code)]
-    pub fn with_blackhole_snapshot(
-        rib_tx: mpsc::Sender<RibUpdate>,
-        blackhole_discard_snapshot: BlackholeDiscardSnapshotFn,
-    ) -> Self {
-        Self::with_status_snapshots(
-            rib_tx,
-            blackhole_discard_snapshot,
-            std::sync::Arc::new(Vec::new),
-        )
-    }
-
     /// Create a RIB service with live kernel route status snapshots.
     pub fn with_status_snapshots(
         rib_tx: mpsc::Sender<RibUpdate>,
@@ -1307,7 +1294,7 @@ mod tests {
     #[tokio::test]
     async fn list_blackhole_discards_returns_live_snapshot() {
         let (tx, _rx) = mpsc::channel(16);
-        let svc = RibService::with_blackhole_snapshot(
+        let svc = RibService::with_status_snapshots(
             tx,
             Arc::new(|| {
                 vec![proto::BlackholeDiscard {
@@ -1318,6 +1305,7 @@ mod tests {
                     reason: "owned".to_string(),
                 }]
             }),
+            Arc::new(Vec::new),
         );
 
         let resp = svc

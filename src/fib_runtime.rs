@@ -6,6 +6,7 @@
 //! events are wakeups; every pass re-queries the full best-route view
 //! and runs the pure [`crate::fib`] projection/diff model.
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::net::IpAddr;
 use std::pin::Pin;
@@ -284,8 +285,8 @@ async fn reconcile_once<F>(
     for drop in &plan.drops {
         metrics.record_fib_route_rejected(drop_reason(drop));
     }
-    let failures = apply_plan(fib, metrics, owned, &plan).await;
-    let mut statuses = build_statuses(config, &intent, owned, &plan);
+    let (failures, failed_keys) = apply_plan(fib, metrics, owned, &plan).await;
+    let mut statuses = build_statuses(config, &intent, owned, &plan, &failed_keys);
     statuses.extend(failures);
     status_tx.send_replace(statuses);
 }
@@ -295,12 +296,25 @@ async fn apply_plan<F>(
     metrics: &BgpMetrics,
     owned: &mut FibOwnedState,
     plan: &FibPlan,
-) -> Vec<FibRuntimeStatus>
+) -> (Vec<FibRuntimeStatus>, BTreeSet<FibRouteKey>)
 where
     F: UnicastFib,
 {
     let mut failures = Vec::new();
+    let mut failed_keys = BTreeSet::new();
     for op in &plan.ops {
+        if let FibOp::Adopt(route) = op {
+            record_fib_success(owned, op);
+            info!(
+                table = %route.table_name,
+                table_id = route.key.table_id,
+                metric = route.key.metric,
+                prefix = %route.key.prefix,
+                next_hop = %route.target.next_hop,
+                "adopted existing general FIB route"
+            );
+            continue;
+        }
         match fib.apply(op).await {
             Ok(()) => {
                 match op {
@@ -315,6 +329,7 @@ where
                             "installed general FIB route"
                         );
                     }
+                    FibOp::Adopt(_) => unreachable!("adopt handled before kernel apply"),
                     FibOp::Replace { desired, .. } => {
                         metrics.record_fib_route_installed();
                         info!(
@@ -343,6 +358,7 @@ where
                 let action = op_action(op);
                 metrics.record_fib_kernel_failure(action);
                 warn!(action, error = %e, "failed to apply general FIB route op");
+                failed_keys.insert(op_route(op).key);
                 failures.push(status_for_route(
                     op_route(op),
                     FibRuntimeState::Failed,
@@ -351,7 +367,7 @@ where
             }
         }
     }
-    failures
+    (failures, failed_keys)
 }
 
 async fn drain_owned<F>(
@@ -389,6 +405,7 @@ async fn drain_owned<F>(
 fn op_action(op: &FibOp) -> &'static str {
     match op {
         FibOp::Add(_) => "install",
+        FibOp::Adopt(_) => "adopt",
         FibOp::Replace { .. } => "replace",
         FibOp::Remove(_) => "remove",
     }
@@ -396,7 +413,7 @@ fn op_action(op: &FibOp) -> &'static str {
 
 fn op_route(op: &FibOp) -> &FibRoute {
     match op {
-        FibOp::Add(route) | FibOp::Remove(route) => route,
+        FibOp::Add(route) | FibOp::Adopt(route) | FibOp::Remove(route) => route,
         FibOp::Replace { desired, .. } => desired,
     }
 }
@@ -413,13 +430,14 @@ fn build_statuses(
     intent: &FibIntent,
     owned: &FibOwnedState,
     plan: &FibPlan,
+    failed_keys: &BTreeSet<FibRouteKey>,
 ) -> Vec<FibRuntimeStatus> {
     let mut out = Vec::new();
     for drop in &plan.drops {
         out.push(status_for_drop(config, intent, owned, drop));
     }
     for route in owned.routes.values() {
-        if intent.routes.contains_key(&route.key) {
+        if intent.routes.contains_key(&route.key) && !failed_keys.contains(&route.key) {
             out.push(status_for_route(
                 route,
                 FibRuntimeState::Installed,
@@ -571,6 +589,7 @@ async fn apply_linux_op(handle: &rtnetlink::Handle, op: &FibOp) -> Result<(), St
                 .await
                 .map_err(|e| format!("kernel route add: {e}"))
         }
+        FibOp::Adopt(_) => Ok(()),
         FibOp::Replace { desired: route, .. } => {
             let msg = build_route_message(route)?;
             handle
@@ -651,7 +670,7 @@ fn build_route_message(
         destination_prefix_length: route.key.prefix.prefix_len(),
         source_prefix_length: 0,
         tos: 0,
-        table: u8::try_from(route.key.table_id).unwrap_or(252),
+        table: u8::try_from(route.key.table_id).unwrap_or(0),
         protocol: RouteProtocol::Bgp,
         scope: RouteScope::Universe,
         kind: RouteType::Unicast,
@@ -878,7 +897,7 @@ mod tests {
                     return Err(error);
                 }
                 match op {
-                    FibOp::Add(route) => {
+                    FibOp::Add(route) | FibOp::Adopt(route) => {
                         self.kernel.routes.insert(
                             route.key,
                             FibKernelRoute {
@@ -1266,6 +1285,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_bgp_kernel_row_is_adopted_after_restart() {
+        let mut fib = FakeFib::default();
+        fib.kernel.routes.insert(
+            key(v4(24)),
+            FibKernelRoute {
+                target: FibRouteTarget {
+                    next_hop: ip("192.0.2.1"),
+                },
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let mut owned = FibOwnedState::default();
+
+        let statuses =
+            reconcile_for_test(vec![route(v4(24), ip("192.0.2.1"))], &mut fib, &mut owned).await;
+
+        assert!(fib.applied.is_empty());
+        assert_eq!(owned.routes.len(), 1);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Installed);
+        assert_eq!(statuses[0].reason, "owned");
+    }
+
+    #[tokio::test]
     async fn failed_install_is_visible_in_status() {
         let mut fib = FakeFib {
             fail_apply: vec!["permission denied".to_string()],
@@ -1280,6 +1323,42 @@ mod tests {
         assert_eq!(statuses.len(), 1);
         assert_eq!(statuses[0].state, FibRuntimeState::Failed);
         assert!(statuses[0].reason.contains("install_failed"));
+    }
+
+    #[tokio::test]
+    async fn failed_replace_does_not_emit_duplicate_installed_status() {
+        let prefix = v4(24);
+        let previous = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(prefix),
+            target: FibRouteTarget {
+                next_hop: ip("192.0.2.1"),
+            },
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let mut fib = FakeFib {
+            fail_apply: vec!["replace rejected".to_string()],
+            ..FakeFib::default()
+        };
+        fib.kernel.routes.insert(
+            previous.key,
+            FibKernelRoute {
+                target: previous.target,
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([(previous.key, previous)]),
+        };
+
+        let statuses =
+            reconcile_for_test(vec![route(prefix, ip("192.0.2.2"))], &mut fib, &mut owned).await;
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Failed);
+        assert!(statuses[0].reason.contains("replace_failed"));
     }
 
     #[tokio::test]
@@ -1413,6 +1492,7 @@ mod tests {
 
         let msg = build_route_message(&route).unwrap();
 
+        assert_eq!(msg.header.table, 0);
         assert_eq!(msg.header.protocol, RouteProtocol::Bgp);
         assert!(!msg.header.flags.contains(RouteFlags::Onlink));
         assert!(msg.attributes.iter().any(|attr| {

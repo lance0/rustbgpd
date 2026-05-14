@@ -1,6 +1,6 @@
 # ADR-0061: Opt-in unicast Linux FIB integration
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-05-14
 
 ## Context
