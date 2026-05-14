@@ -142,6 +142,10 @@ BLACKHOLE-marked best route the daemon has observed: `installed`, `rejected`
 (`broad_prefix` / `not_ebgp`), or `failed` (`foreign_route_exists`,
 `lookup_failed`, `remove_failed`, or the kernel install error). The same
 surface is available as JSON with `rustbgpctl -j rib blackholes`.
+If the reconciler cannot start at all (for example netlink setup failure, or
+requesting FIB install on a non-Linux build), the status list is empty and
+`bgp_blackhole_discard_kernel_failures_total{action="setup"}` or
+`{action="unsupported_platform"}` carries the failure signal.
 
 SIGHUP hot-applies this field with the same best-effort partial-apply
 semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies

@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+const ROUTE_EVENT_DEBOUNCE: Duration = Duration::from_millis(200);
 const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -126,6 +127,7 @@ pub fn spawn(
                 config, rib_tx, fib, metrics, status_tx, shutdown,
             )),
             Err(e) => {
+                metrics.record_blackhole_discard_kernel_failure("setup");
                 warn!(error = %e, "BLACKHOLE discard install requested, but netlink setup failed");
                 None
             }
@@ -134,7 +136,8 @@ pub fn spawn(
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (rib_tx, metrics, status_tx, shutdown);
+        let _ = (rib_tx, status_tx, shutdown);
+        metrics.record_blackhole_discard_kernel_failure("unsupported_platform");
         warn!("BLACKHOLE discard install requested, but kernel FIB programming is Linux-only");
         None
     }
@@ -172,6 +175,11 @@ async fn run_loop<F>(
     let mut rejected = HashSet::<RejectedBlackhole>::new();
     let mut interval = tokio::time::interval(RECONCILE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    let mut event_debounce = tokio::time::interval(ROUTE_EVENT_DEBOUNCE);
+    event_debounce.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    event_debounce.tick().await;
+    let mut route_event_dirty = false;
 
     let mut route_events = subscribe_route_events(&rib_tx).await;
     reconcile_once(
@@ -204,18 +212,22 @@ async fn run_loop<F>(
                     &mut rejected,
                 ).await;
             }
+            _ = event_debounce.tick(), if route_event_dirty => {
+                route_event_dirty = false;
+                reconcile_once(
+                    config,
+                    &rib_tx,
+                    &mut fib,
+                    &metrics,
+                    &status_tx,
+                    &mut owned,
+                    &mut rejected,
+                ).await;
+            }
             maybe_event = recv_route_event(&mut route_events) => {
                 match maybe_event {
                     Some(()) => {
-                        reconcile_once(
-                            config,
-                            &rib_tx,
-                            &mut fib,
-                            &metrics,
-                            &status_tx,
-                            &mut owned,
-                            &mut rejected,
-                        ).await;
+                        route_event_dirty = true;
                     }
                     None => {
                         route_events = subscribe_route_events(&rib_tx).await;
@@ -781,9 +793,13 @@ mod tests {
     use super::*;
     use prometheus::Registry;
     use rustbgpd_rib::route::RouteOrigin;
+    use rustbgpd_rib::{RouteEvent, RouteEventType};
     use rustbgpd_wire::{Ipv4Prefix, Ipv6Prefix, Origin};
     use std::net::{Ipv4Addr, Ipv6Addr};
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::Instant;
 
     #[derive(Default)]
@@ -860,6 +876,35 @@ mod tests {
         tx
     }
 
+    fn rib_with_events(
+        routes: Vec<Route>,
+    ) -> (
+        mpsc::Sender<RibUpdate>,
+        Arc<AtomicUsize>,
+        broadcast::Sender<RouteEvent>,
+    ) {
+        let (tx, mut rx) = mpsc::channel(8);
+        let query_count = Arc::new(AtomicUsize::new(0));
+        let query_count_task = Arc::clone(&query_count);
+        let (events_tx, _) = broadcast::channel(16);
+        let events_task = events_tx.clone();
+        tokio::spawn(async move {
+            while let Some(update) = rx.recv().await {
+                match update {
+                    RibUpdate::QueryBestRoutes { reply } => {
+                        query_count_task.fetch_add(1, Ordering::SeqCst);
+                        let _ = reply.send(routes.clone());
+                    }
+                    RibUpdate::SubscribeRouteEvents { reply } => {
+                        let _ = reply.send(events_task.subscribe());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        (tx, query_count, events_tx)
+    }
+
     async fn reconcile_for_test(
         routes: Vec<Route>,
         fib: &mut FakeFib,
@@ -926,6 +971,17 @@ mod tests {
             path_id: 0,
             validation_state: rustbgpd_wire::RpkiValidation::NotFound,
             aspa_state: rustbgpd_wire::AspaValidation::Unknown,
+        }
+    }
+
+    fn route_event(prefix: Prefix) -> RouteEvent {
+        RouteEvent {
+            event_type: RouteEventType::BestChanged,
+            prefix,
+            peer: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))),
+            previous_peer: None,
+            timestamp: "0".to_string(),
+            path_id: 0,
         }
     }
 
@@ -1059,6 +1115,67 @@ mod tests {
         assert!(is_idempotent_route_delete_errno(libc::ENOENT));
         assert!(is_idempotent_route_delete_errno(libc::ESRCH));
         assert!(!is_idempotent_route_delete_errno(libc::EPERM));
+    }
+
+    #[tokio::test]
+    async fn route_events_are_debounced_before_rib_query() {
+        let prefix = v4(32);
+        let (rib_tx, query_count, events_tx) = rib_with_events(vec![route(
+            prefix,
+            RouteOrigin::Ebgp,
+            vec![rustbgpd_wire::COMMUNITY_BLACKHOLE],
+        )]);
+        let metrics = BgpMetrics::with_registry(Registry::new());
+        let (status_tx, _status_rx) = watch::channel(Vec::new());
+        let shutdown = CancellationToken::new();
+        let task_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            run_loop(
+                BlackholeConfig {
+                    enabled: true,
+                    allow_broad_prefixes: false,
+                },
+                rib_tx,
+                FakeFib::default(),
+                metrics,
+                status_tx,
+                task_shutdown,
+            )
+            .await;
+        });
+
+        for _ in 0..20 {
+            if query_count.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            1,
+            "startup should perform exactly one initial RIB query"
+        );
+
+        for _ in 0..5 {
+            let _ = events_tx.send(route_event(prefix));
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            1,
+            "route events should mark the actor dirty without querying immediately"
+        );
+
+        tokio::time::sleep(ROUTE_EVENT_DEBOUNCE + Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            query_count.load(Ordering::SeqCst),
+            2,
+            "a burst of route events should coalesce into one follow-up RIB query"
+        );
+
+        shutdown.cancel();
+        task.await.unwrap();
     }
 
     #[tokio::test]

@@ -2562,6 +2562,45 @@ hold_time = 90
 }
 
 #[test]
+fn diff_config_honor_graceful_shutdown_only_is_reload_applied_not_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\nhonor_graceful_shutdown = true\n",
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+
+    assert!(
+        !diff.global_changed,
+        "hot-applied honor_graceful_shutdown must not set the coarse restart bucket"
+    );
+    assert!(diff.honor_graceful_shutdown_changed);
+    assert!(!diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+}
+
+#[test]
+fn diff_config_honor_blackhole_only_is_reload_applied_not_restart_required() {
+    let old = parse(valid_toml()).unwrap();
+    let new_toml = valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\nhonor_blackhole = true\n",
+    );
+    let new = parse(&new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+
+    assert!(
+        !diff.global_changed,
+        "hot-applied honor_blackhole must not set the coarse restart bucket"
+    );
+    assert!(!diff.blackhole_fib_discard_changed);
+    assert!(diff.honor_blackhole_changed);
+    assert!(!diff.has_restart_required_changes());
+    assert!(diff.has_reload_applied_changes());
+}
+
+#[test]
 fn diff_config_peer_group_added() {
     let old = parse(valid_toml()).unwrap();
     let new_toml = r#"
@@ -2632,6 +2671,14 @@ fn diff_config_json_serializes() {
     assert!(
         json.contains("\"evpn_instances_changed\":false"),
         "expected evpn_instances_changed in serialized diff: {json}"
+    );
+    assert!(
+        json.contains("\"honor_graceful_shutdown_changed\":false"),
+        "expected honor_graceful_shutdown_changed in serialized diff: {json}"
+    );
+    assert!(
+        json.contains("\"honor_blackhole_changed\":false"),
+        "expected honor_blackhole_changed in serialized diff: {json}"
     );
     assert!(
         json.contains("\"evpn_ip_vrfs_changed\":false"),
@@ -3620,6 +3667,26 @@ fn blackhole_fib_discard_diff_marks_restart_required() {
     let new = parse(&new_toml).unwrap();
     let diff = super::diff_config(&old, &new);
 
+    assert!(diff.blackhole_fib_discard_changed);
+    assert!(diff.has_restart_required_changes());
+}
+
+#[test]
+fn blackhole_honor_change_with_fib_discard_marks_fib_restart_only() {
+    let old_toml = valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\nhonor_blackhole = false\ninstall_blackhole_discard = true\n",
+    );
+    let new_toml = valid_toml().replace(
+        "listen_port = 179\n",
+        "listen_port = 179\nhonor_blackhole = true\ninstall_blackhole_discard = true\n",
+    );
+    let old = parse(&old_toml).unwrap();
+    let new = parse(&new_toml).unwrap();
+    let diff = super::diff_config(&old, &new);
+
+    assert!(!diff.global_changed);
+    assert!(!diff.honor_blackhole_changed);
     assert!(diff.blackhole_fib_discard_changed);
     assert!(diff.has_restart_required_changes());
 }

@@ -789,7 +789,8 @@ impl BgpMetrics {
 
     /// Record a kernel apply failure for RFC 7999 discard state.
     ///
-    /// `action` is expected to be `install` or `remove`.
+    /// `action` is expected to be `setup`, `install`, `remove`,
+    /// `lookup`, or `unsupported_platform`.
     pub fn record_blackhole_discard_kernel_failure(&self, action: &str) {
         self.blackhole_discard_kernel_failures
             .with_label_values(&[action])
@@ -1079,6 +1080,26 @@ mod tests {
 
         let flaps = m.session_flaps.with_label_values(&["10.0.0.1"]).get();
         assert_eq!(flaps, 1);
+    }
+
+    #[test]
+    fn blackhole_kernel_failure_counter_accepts_setup_labels() {
+        let m = BgpMetrics::new();
+        m.record_blackhole_discard_kernel_failure("setup");
+        m.record_blackhole_discard_kernel_failure("unsupported_platform");
+
+        assert_eq!(
+            m.blackhole_discard_kernel_failures
+                .with_label_values(&["setup"])
+                .get(),
+            1
+        );
+        assert_eq!(
+            m.blackhole_discard_kernel_failures
+                .with_label_values(&["unsupported_platform"])
+                .get(),
+            1
+        );
     }
 
     #[test]
