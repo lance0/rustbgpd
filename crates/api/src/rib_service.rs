@@ -1275,6 +1275,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_blackhole_discards_returns_live_snapshot() {
+        let (tx, _rx) = mpsc::channel(16);
+        let svc = RibService::with_blackhole_snapshot(
+            tx,
+            Arc::new(|| {
+                vec![proto::BlackholeDiscard {
+                    prefix: "203.0.113.66".to_string(),
+                    prefix_length: 32,
+                    peer_address: "192.0.2.1".to_string(),
+                    state: proto::BlackholeDiscardState::Installed as i32,
+                    reason: "owned".to_string(),
+                }]
+            }),
+        );
+
+        let resp = svc
+            .list_blackhole_discards(Request::new(proto::ListBlackholeDiscardsRequest {}))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.discards.len(), 1);
+        let row = &resp.discards[0];
+        assert_eq!(row.prefix, "203.0.113.66");
+        assert_eq!(row.prefix_length, 32);
+        assert_eq!(row.peer_address, "192.0.2.1");
+        assert_eq!(row.state, proto::BlackholeDiscardState::Installed as i32);
+        assert_eq!(row.reason, "owned");
+    }
+
+    #[tokio::test]
     async fn explain_advertised_route_rejects_invalid_peer_address() {
         let svc = make_service();
         let req = Request::new(proto::ExplainAdvertisedRouteRequest {

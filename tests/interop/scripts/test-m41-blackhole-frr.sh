@@ -55,14 +55,34 @@ grpc_blackholes() {
         "$GRPC_ADDR" rustbgpd.v1.RibService/ListBlackholeDiscards 2>/dev/null
 }
 
+normalize_blackhole_state() {
+    case "$1" in
+        BLACKHOLE_DISCARD_STATE_INSTALLED) echo "installed" ;;
+        BLACKHOLE_DISCARD_STATE_REJECTED) echo "rejected" ;;
+        BLACKHOLE_DISCARD_STATE_FAILED) echo "failed" ;;
+        1) echo "installed" ;;
+        2) echo "rejected" ;;
+        3) echo "failed" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 blackhole_status() {
     local prefix=$1
     local plen=${prefix#*/}
     local addr=${prefix%/*}
-    grpc_blackholes | jq -r --arg addr "$addr" --argjson plen "$plen" '
+    local status
+    status=$(grpc_blackholes | jq -r --arg addr "$addr" --argjson plen "$plen" '
         [.discards[]? | select(.prefix == $addr and .prefixLength == $plen)]
         | if length == 0 then "MISSING" else "\(.[0].state)|\(.[0].reason)" end
-    '
+    ')
+    if [ "$status" = "MISSING" ]; then
+        echo "$status"
+        return
+    fi
+    local state=${status%%|*}
+    local reason=${status#*|}
+    printf '%s|%s\n' "$(normalize_blackhole_state "$state")" "$reason"
 }
 
 has_community() {

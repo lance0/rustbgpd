@@ -147,10 +147,12 @@ semantics as `honor_graceful_shutdown`: rustbgpd recomputes runtime policies
 for EBGP peers, advances the live snapshot, and retries transient per-peer
 refresh failures through the existing pending-refresh path.
 
-`install_blackhole_discard` and `allow_blackhole_broad_prefixes` are
-startup-only in this slice because the kernel-discard reconciler is spawned
-once at daemon boot. A SIGHUP that edits either field logs an error and pins
-the live config snapshot back until restart.
+`install_blackhole_discard`, `allow_blackhole_broad_prefixes`, and the
+`honor_blackhole` component of an enabled or requested FIB-discard spawn gate
+are startup-only in this slice because the kernel-discard reconciler is
+spawned once at daemon boot. A SIGHUP that edits those fields logs an error
+and pins the live config snapshot back until restart. When FIB discard is not
+configured, `honor_blackhole` remains hot-applied through the peer manager.
 
 The `"BLACKHOLE"` alias is accepted everywhere `match_community`,
 `set_community_add`, and `set_community_remove` parse community values, so

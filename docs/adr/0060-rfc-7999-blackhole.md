@@ -56,12 +56,19 @@ the already-scoped route; reapplying the receiver rule at every iBGP hop
 would make local route-server and route-reflector behavior harder to
 reason about.
 
-### 4. SIGHUP hot-applies the knob
+### 4. SIGHUP hot-applies the policy-only knob
 
-`honor_blackhole` is not pinned to startup. Reload sends
-`PeerManagerCommand::SetHonorBlackhole`, advances the live config
-snapshot, and recomputes peer import chains through the same runtime
-policy update path as `honor_graceful_shutdown`.
+When kernel discard installation is disabled, `honor_blackhole` is not
+pinned to startup. Reload sends `PeerManagerCommand::SetHonorBlackhole`,
+advances the live config snapshot, and recomputes peer import chains
+through the same runtime policy update path as `honor_graceful_shutdown`.
+
+When either the live or requested config has
+`install_blackhole_discard = true`, `honor_blackhole` is part of the
+reconciler spawn gate (`honor_blackhole && install_blackhole_discard`).
+SIGHUP pins it to the live snapshot and asks the operator to restart
+rather than silently advancing the control-plane setting without
+starting or stopping the kernel-discard actor.
 
 ### 5. Kernel discard is a second explicit opt-in
 
@@ -102,9 +109,10 @@ Linux implementation issues `RTM_NEWROUTE` without replace semantics;
 `EEXIST` is an install failure, preserving static routes and other
 routing daemons' FIB ownership.
 
-`install_blackhole_discard` and `allow_blackhole_broad_prefixes` are
-startup-only. SIGHUP pins them to the live snapshot and asks the
-operator to restart, matching the reconciler's one-shot spawn model.
+`install_blackhole_discard`, `allow_blackhole_broad_prefixes`, and the
+`honor_blackhole` component of an enabled or requested FIB-discard spawn
+gate are startup-only. SIGHUP pins them to the live snapshot and asks
+the operator to restart, matching the reconciler's one-shot spawn model.
 
 ## Consequences
 

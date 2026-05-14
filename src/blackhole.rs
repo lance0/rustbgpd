@@ -22,6 +22,7 @@ use tracing::{debug, info, warn};
 
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const RIB_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runtime knobs resolved from `[global]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,17 +62,6 @@ pub enum BlackholeState {
     Failed,
 }
 
-impl BlackholeState {
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Installed => "installed",
-            Self::Rejected => "rejected",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 /// Join handle wrapper used by main shutdown.
 pub struct BlackholeHandle {
     shutdown: CancellationToken,
@@ -82,8 +72,17 @@ impl BlackholeHandle {
     /// Request shutdown and wait for bounded cleanup of owned routes.
     pub async fn shutdown(self) {
         self.shutdown.cancel();
-        if let Err(e) = self.task.await {
-            warn!(error = %e, "BLACKHOLE discard task panicked during shutdown");
+        match tokio::time::timeout(SHUTDOWN_TIMEOUT, self.task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                warn!(error = %e, "BLACKHOLE discard task panicked during shutdown");
+            }
+            Err(_) => {
+                warn!(
+                    timeout_ms = SHUTDOWN_TIMEOUT.as_millis(),
+                    "BLACKHOLE discard task did not finish before shutdown timeout"
+                );
+            }
         }
     }
 }

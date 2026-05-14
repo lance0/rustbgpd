@@ -1413,7 +1413,17 @@ async fn run<T>(mut config: Config, profiler: Option<T>) {
                         prefix: status.prefix.addr_string(),
                         prefix_length: u32::from(status.prefix.prefix_len()),
                         peer_address: status.peer.to_string(),
-                        state: status.state.as_str().to_string(),
+                        state: match status.state {
+                            blackhole::BlackholeState::Installed => {
+                                rustbgpd_api::proto::BlackholeDiscardState::Installed as i32
+                            }
+                            blackhole::BlackholeState::Rejected => {
+                                rustbgpd_api::proto::BlackholeDiscardState::Rejected as i32
+                            }
+                            blackhole::BlackholeState::Failed => {
+                                rustbgpd_api::proto::BlackholeDiscardState::Failed as i32
+                            }
+                        },
                         reason: status.reason.clone(),
                     })
                     .collect()
@@ -2012,8 +2022,10 @@ async fn reload_config(
 
     let honor_graceful_shutdown_changed =
         new_config.global.honor_graceful_shutdown != current.global.honor_graceful_shutdown;
-    let honor_blackhole_changed =
+    let mut honor_blackhole_changed =
         new_config.global.honor_blackhole != current.global.honor_blackhole;
+    let blackhole_fib_reload_touches_spawn_gate =
+        current.global.install_blackhole_discard || new_config.global.install_blackhole_discard;
 
     // Warn about sections that require restart. The implicit receiver
     // honor knobs are hot-applied below, so ignore them for this broad
@@ -2129,6 +2141,17 @@ async fn reload_config(
         new_config.global.install_blackhole_discard = current.global.install_blackhole_discard;
         new_config.global.allow_blackhole_broad_prefixes =
             current.global.allow_blackhole_broad_prefixes;
+    }
+    if blackhole_fib_reload_touches_spawn_gate && honor_blackhole_changed {
+        error!(
+            "[global] honor_blackhole differs from the live config while \
+             BLACKHOLE FIB discard is configured: the RFC 7999 \
+             kernel-discard reconciler is spawned only at startup from \
+             honor_blackhole && install_blackhole_discard. Restart \
+             rustbgpd to apply this edit."
+        );
+        new_config.global.honor_blackhole = current.global.honor_blackhole;
+        honor_blackhole_changed = false;
     }
 
     let policy_diff = config::diff_policy(&current.policy, &new_config.policy);
@@ -3455,6 +3478,75 @@ hold_time = 90
             peer_mgr.await.unwrap(),
             "peer manager command must carry enabled=true"
         );
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[tokio::test]
+    async fn reload_pins_honor_blackhole_when_fib_discard_enabled() {
+        let path = unique_temp_path("reload-pins-honor-blackhole-with-fib");
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = true
+install_blackhole_discard = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+        let initial = Config::load_with_diagnostics(path.to_str().unwrap()).unwrap();
+        let live_grpc_tcp = initial.global.telemetry.grpc_tcp.clone();
+        let live_grpc_uds = initial.global.telemetry.grpc_uds.clone();
+
+        std::fs::write(
+            &path,
+            r#"
+[global]
+asn = 65001
+router_id = "10.0.0.1"
+listen_port = 179
+honor_blackhole = false
+install_blackhole_discard = true
+
+[global.telemetry]
+log_format = "json"
+
+[[neighbors]]
+address = "10.0.0.2"
+remote_asn = 65002
+hold_time = 90
+"#,
+        )
+        .unwrap();
+
+        let (peer_mgr_tx, _peer_mgr_rx) = mpsc::channel(8);
+        let returned = reload_config(
+            path.to_str().unwrap(),
+            &initial,
+            live_grpc_tcp.as_ref(),
+            live_grpc_uds.as_ref(),
+            &peer_mgr_tx,
+        )
+        .await
+        .expect("reload should pin honor_blackhole to the startup FIB snapshot");
+
+        assert!(
+            returned.global.honor_blackhole,
+            "honor_blackhole must stay pinned while the FIB reconciler is running"
+        );
+        assert!(returned.global.install_blackhole_discard);
 
         std::fs::remove_file(&path).ok();
     }

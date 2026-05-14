@@ -1092,10 +1092,12 @@ pub struct ConfigDiff {
     /// dataplane actor reads this once at startup, so SIGHUP must not
     /// silently advance the in-memory snapshot.
     pub apply_bum_enforcement_changed: bool,
-    /// `[global] install_blackhole_discard` or
-    /// `[global] allow_blackhole_broad_prefixes` changed. The
-    /// BLACKHOLE FIB actor is spawned once at startup, so edits are
-    /// restart-required and must remain visible in `--diff`.
+    /// `[global] install_blackhole_discard`,
+    /// `[global] allow_blackhole_broad_prefixes`, or the
+    /// `honor_blackhole` component of an enabled/requested FIB
+    /// discard spawn gate changed. The BLACKHOLE FIB actor is spawned
+    /// once at startup, so edits are restart-required and must remain
+    /// visible in `--diff`.
     pub blackhole_fib_discard_changed: bool,
 }
 
@@ -1294,7 +1296,9 @@ pub fn diff_config(old: &Config, new: &Config) -> ConfigDiff {
         blackhole_fib_discard_changed: old.global.install_blackhole_discard
             != new.global.install_blackhole_discard
             || old.global.allow_blackhole_broad_prefixes
-                != new.global.allow_blackhole_broad_prefixes,
+                != new.global.allow_blackhole_broad_prefixes
+            || ((old.global.install_blackhole_discard || new.global.install_blackhole_discard)
+                && old.global.honor_blackhole != new.global.honor_blackhole),
     }
 }
 

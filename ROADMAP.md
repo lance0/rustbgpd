@@ -303,7 +303,10 @@ this document is reference / long-tail.
     - **Inbound scoping (opt-in)**: `[global] honor_blackhole = true`
       appends an EBGP import chain-tail rule
       (`match BLACKHOLE → permit, add BLACKHOLE + NO_ADVERTISE`) and
-      hot-applies on SIGHUP through the peer manager.
+      hot-applies on SIGHUP through the peer manager when FIB discard
+      is not configured. When paired with
+      `install_blackhole_discard = true`, it is restart-required because
+      the kernel-discard reconciler is spawned once at startup.
     - **Operator surface**: `rustbgpctl` accepts and renders
       `BLACKHOLE`, `NO_EXPORT`, `NO_ADVERTISE`,
       `NO_EXPORT_SUBCONFED`, `GRACEFUL_SHUTDOWN`, `LLGR_STALE`, and
@@ -330,8 +333,6 @@ this document is reference / long-tail.
       enabled }` or operator-policy attachment via
       `set_community_add = ["BLACKHOLE"]` on a per-prefix import
       filter. Per-prefix route injection is the likely surface.
-    - **FIB interop**: extend M41 or add a sibling milestone that
-      asserts discard install/remove behavior on a privileged runner.
 - [x] **Resolve open `cargo audit` findings** (v0.13.2 / v0.14.0) —
   vulnerability cleared in v0.13.1; soundness warning accepted as
   unreachable in v0.13.2; v0.14.0 follow-up granted `checks: write`

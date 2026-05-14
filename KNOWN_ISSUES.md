@@ -118,8 +118,9 @@ resolved.
   blackhole routes for accepted EBGP best routes carrying `BLACKHOLE`,
   but the authorization model is intentionally narrow: EBGP + import
   policy acceptance + host-prefix-only by default. Per-peer allow-lists,
-  active blackhole limits, rate limits, and privileged interop coverage
-  for install/remove behavior remain follow-ups. See ADR-0060.
+  active blackhole limits, rate limits, and startup stale-route adoption
+  remain follow-ups. M41 covers FRR-originated install/remove behavior
+  in CI. See ADR-0060.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says

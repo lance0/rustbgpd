@@ -461,9 +461,11 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 ```
 
 Returns one row per currently observed best route carrying the RFC 7999
-`BLACKHOLE` community when the opt-in FIB reconciler is active. `state` is
-`installed`, `rejected`, or `failed`; `reason` carries values such as
-`installed`, `owned`, `broad_prefix`, `not_ebgp`, or the kernel error string.
+`BLACKHOLE` community when the opt-in FIB reconciler is active. `state` is a
+`BlackholeDiscardState` enum (`BLACKHOLE_DISCARD_STATE_INSTALLED`,
+`BLACKHOLE_DISCARD_STATE_REJECTED`, or `BLACKHOLE_DISCARD_STATE_FAILED`);
+`reason` carries values such as `installed`, `owned`, `broad_prefix`,
+`not_ebgp`, or the kernel error string.
 An empty list means either the reconciler is disabled or no BLACKHOLE-marked
 best routes are currently visible.
 

@@ -6,8 +6,8 @@ use crate::output::{
 use crate::proto::injection_service_client::InjectionServiceClient;
 use crate::proto::rib_service_client::RibServiceClient;
 use crate::proto::{
-    AddPathRequest, DeletePathRequest, ExplainAdvertisedRouteRequest, ExplainBestPathRequest,
-    ExplainDecision, ListBlackholeDiscardsRequest, ListRoutesRequest,
+    AddPathRequest, BlackholeDiscardState, DeletePathRequest, ExplainAdvertisedRouteRequest,
+    ExplainBestPathRequest, ExplainDecision, ListBlackholeDiscardsRequest, ListRoutesRequest,
 };
 use serde::Serialize;
 
@@ -96,7 +96,7 @@ fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: b
             .map(|d| JsonBlackholeDiscard {
                 prefix: format!("{}/{}", d.prefix, d.prefix_length),
                 peer_address: d.peer_address.clone(),
-                state: d.state.clone(),
+                state: blackhole_state_label(d.state).to_string(),
                 reason: d.reason.clone(),
             })
             .collect();
@@ -115,10 +115,19 @@ fn print_blackhole_discards(discards: &[crate::proto::BlackholeDiscard], json: b
                 "{:<43} {:<18} {:<10} {}",
                 format!("{}/{}", d.prefix, d.prefix_length),
                 d.peer_address,
-                d.state,
+                blackhole_state_label(d.state),
                 d.reason
             );
         }
+    }
+}
+
+fn blackhole_state_label(state: i32) -> &'static str {
+    match BlackholeDiscardState::try_from(state) {
+        Ok(BlackholeDiscardState::Installed) => "installed",
+        Ok(BlackholeDiscardState::Rejected) => "rejected",
+        Ok(BlackholeDiscardState::Failed) => "failed",
+        Ok(BlackholeDiscardState::Unspecified) | Err(_) => "unknown",
     }
 }
 
