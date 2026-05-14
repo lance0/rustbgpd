@@ -259,6 +259,30 @@ via gRPC `GetMetrics` and `GetHealth` RPCs.
 | `bgp_updates_received_total` | Inbound UPDATE count |
 | `bgp_updates_sent_total` | Outbound UPDATE count |
 
+### General Unicast FIB
+
+These metrics are present when the daemon is built with the ADR-0061 general
+FIB runtime. The actor is still default-off; configure at least one
+`[[fib_tables]]` block to start it.
+
+| Metric | What it tells you |
+|--------|-------------------|
+| `bgp_fib_routes_installed_total` | Configured-table routes successfully installed or replaced in the Linux kernel |
+| `bgp_fib_routes_withdrawn_total` | Daemon-owned configured-table routes successfully removed from the kernel |
+| `bgp_fib_routes_rejected_total{reason="foreign_route_exists"}` | Desired route suppressed because a kernel row already exists at the same table / metric / prefix and is not daemon-owned |
+| `bgp_fib_routes_rejected_total{reason="next_hop_family_unsupported"}` | Desired route suppressed because the table family and BGP next-hop family do not match |
+| `bgp_fib_kernel_failures_total{action="setup"}` | Runtime could not open the Linux FIB programming surface at startup |
+| `bgp_fib_kernel_failures_total{action="dump"}` | Runtime could not dump configured route tables during a reconcile pass |
+| `bgp_fib_kernel_failures_total{action="install"}` | Kernel rejected an add operation |
+| `bgp_fib_kernel_failures_total{action="replace"}` | Kernel rejected a replace operation |
+| `bgp_fib_kernel_failures_total{action="remove"}` | Kernel rejected a remove operation |
+| `bgp_fib_kernel_failures_total{action="unsupported_platform"}` | Config requested FIB programming on a non-Linux build |
+
+Use `rustbgpctl rib fib --json` as the per-route companion to these counters.
+The most important state to investigate is `foreign_route_exists`: rustbgpd
+will not overwrite or delete pre-existing `RTPROT_BGP` rows because protocol
+alone is not ownership proof.
+
 ### Graceful Restart
 
 | Metric | What it tells you |
@@ -430,6 +454,39 @@ rustbgpctl rib received 10.0.0.2
 ```bash
 rustbgpctl rib
 ```
+
+### View general FIB route status
+
+```bash
+rustbgpctl rib fib
+rustbgpctl -j rib fib
+```
+
+This reports only the ADR-0061 configured-table runtime, not the ordinary
+Loc-RIB. Rows are `installed`, `rejected`, or `failed`.
+
+- `installed` / `owned`: rustbgpd owns the row and the kernel table matches
+  the current best route.
+- `rejected` / `foreign_route_exists`: a kernel row already exists at the
+  same table / metric / prefix but is not owned by this daemon instance.
+  This includes pre-existing `RTPROT_BGP` rows after crash restart; rustbgpd
+  preserves them rather than taking ownership by protocol alone.
+- `rejected` / `next_hop_family_unsupported`: the configured table family and
+  BGP next-hop family do not match.
+- `failed` / `dump_failed:*`, `install_failed:*`, `replace_failed:*`, or
+  `remove_failed:*`: the runtime hit a RIB or kernel boundary error. Check
+  `bgp_fib_kernel_failures_total` and daemon logs for the matching action.
+
+For direct kernel inspection, use the configured table and metric:
+
+```bash
+ip route show table 1000
+ip -6 route show table 1000
+```
+
+On coordinated shutdown, the daemon drains only rows still matching its
+owned next-hop. If a row drifted underneath the daemon, it is preserved and
+ownership is dropped.
 
 ### Explain a best-path decision
 

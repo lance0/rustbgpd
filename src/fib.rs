@@ -236,20 +236,20 @@ pub(crate) fn compute_fib_diff(
             (Some(_), Some(kernel_route)) if kernel_route.protocol == FibKernelProtocol::Other => {
                 plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
             }
-            (Some(previous), Some(kernel_route)) if kernel_route.target != desired.target => {
-                if kernel_route.target == previous.target {
-                    // Kernel still holds the value this daemon owns; the
-                    // Loc-RIB best route changed, so converge it.
-                    plan.ops.push(FibOp::Replace {
-                        previous: previous.clone(),
-                        desired: desired.clone(),
-                    });
-                } else {
-                    // Kernel row drifted away from owned state — an
-                    // external writer changed it. Report the conflict
-                    // instead of overwriting foreign drift.
-                    plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
-                }
+            (Some(previous), Some(kernel_route)) if kernel_route.target != previous.target => {
+                // Kernel row drifted away from owned state — an external
+                // writer changed it. Even when the drifted value happens to
+                // match the new desired route, do not adopt it as ours; that
+                // would let a later withdraw delete another owner's row.
+                plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
+            }
+            (Some(previous), Some(_)) if previous.target != desired.target => {
+                // Kernel still holds the value this daemon owns; the Loc-RIB
+                // best route changed, so converge it.
+                plan.ops.push(FibOp::Replace {
+                    previous: previous.clone(),
+                    desired: desired.clone(),
+                });
             }
             (Some(owned_route), Some(_)) => {
                 // Kernel value already matches desired, but the best
@@ -622,6 +622,32 @@ mod tests {
         };
         let kernel = FibKernelSnapshot {
             routes: BTreeMap::from([(key, kernel("203.0.113.9", FibKernelProtocol::Bgp))]),
+        };
+        let intent = FibIntent {
+            routes: BTreeMap::from([(key, desired)]),
+            drops: vec![],
+        };
+
+        let plan = compute_fib_diff(&intent, &owned, &kernel);
+
+        assert!(plan.ops.is_empty());
+        assert_eq!(plan.drops, vec![FibDrop::ForeignRouteExists { key }]);
+    }
+
+    #[test]
+    fn adopt_is_withheld_when_kernel_drift_matches_new_desired_value() {
+        // Owned T0, kernel externally drifted to T1, and the Loc-RIB best
+        // route also moved to T1. Even though no kernel update is needed,
+        // the row no longer matches what this daemon owns and must not be
+        // adopted as daemon-owned metadata.
+        let key = key(v4_prefix(2, 24));
+        let previous = one_route(key, "203.0.113.1");
+        let desired = one_route(key, "203.0.113.2");
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(key, previous)]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(key, kernel("203.0.113.2", FibKernelProtocol::Bgp))]),
         };
         let intent = FibIntent {
             routes: BTreeMap::from([(key, desired)]),
