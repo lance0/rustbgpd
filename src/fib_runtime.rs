@@ -201,7 +201,7 @@ async fn run_loop<F>(
         tokio::select! {
             biased;
             () = shutdown.cancelled() => {
-                drain_owned(&mut fib, &metrics, &status_tx, &mut owned).await;
+                drain_owned(&config, &mut fib, &metrics, &status_tx, &mut owned).await;
                 return;
             }
             _ = interval.tick() => {
@@ -436,6 +436,7 @@ where
 }
 
 async fn drain_owned<F>(
+    config: &FibRuntimeConfig,
     fib: &mut F,
     metrics: &BgpMetrics,
     status_tx: &watch::Sender<Vec<FibRuntimeStatus>>,
@@ -443,8 +444,39 @@ async fn drain_owned<F>(
 ) where
     F: UnicastFib,
 {
+    let snapshot = match fib.dump(&config.tables).await {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            metrics.record_fib_kernel_failure("dump");
+            warn!(error = %e, "failed to dump configured FIB tables before shutdown drain");
+            status_tx.send_replace(failed_dump_statuses(owned, &e));
+            return;
+        }
+    };
     let routes = owned.routes.values().cloned().collect::<Vec<_>>();
     for route in routes {
+        match snapshot.routes.get(&route.key) {
+            None => {
+                owned.routes.remove(&route.key);
+                continue;
+            }
+            Some(kernel_route)
+                if kernel_route.protocol == FibKernelProtocol::Bgp
+                    && kernel_route.target == route.target => {}
+            Some(kernel_route) => {
+                warn!(
+                    table = %route.table_name,
+                    table_id = route.key.table_id,
+                    metric = route.key.metric,
+                    prefix = %route.key.prefix,
+                    owned_next_hop = %route.target.next_hop,
+                    kernel_next_hop = %kernel_route.target.next_hop,
+                    "preserving foreign general FIB route during shutdown drain"
+                );
+                owned.routes.remove(&route.key);
+                continue;
+            }
+        }
         let op = FibOp::Remove(route.clone());
         match fib.apply(&op).await {
             Ok(()) => {
@@ -1568,6 +1600,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drifted_owned_route_missing_from_desired_is_preserved_as_foreign() {
+        let prefix = v4(24);
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(prefix),
+            target: FibRouteTarget {
+                next_hop: ip("192.0.2.1"),
+            },
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let mut fib = FakeFib::default();
+        fib.kernel.routes.insert(
+            route.key,
+            FibKernelRoute {
+                target: FibRouteTarget {
+                    next_hop: ip("192.0.2.99"),
+                },
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([(route.key, route)]),
+        };
+
+        let statuses = reconcile_for_test(Vec::new(), &mut fib, &mut owned).await;
+
+        assert!(fib.applied.is_empty());
+        assert_eq!(owned.routes.len(), 1);
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, FibRuntimeState::Rejected);
+        assert_eq!(statuses[0].reason, "foreign_route_exists");
+    }
+
+    #[tokio::test]
     async fn missing_kernel_route_on_remove_still_advances_owned_state() {
         let prefix = v4(24);
         let route = FibRoute {
@@ -1627,10 +1695,60 @@ mod tests {
             reason: "owned".to_string(),
         }]);
 
-        drain_owned(&mut fib, &metrics(), &status_tx, &mut owned).await;
+        drain_owned(&config(), &mut fib, &metrics(), &status_tx, &mut owned).await;
 
         assert!(owned.routes.is_empty());
         assert!(status_rx.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_preserves_drifted_bgp_route() {
+        let prefix = v4(24);
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(prefix),
+            target: FibRouteTarget {
+                next_hop: ip("192.0.2.1"),
+            },
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+        let mut fib = FakeFib::default();
+        fib.kernel.routes.insert(
+            route.key,
+            FibKernelRoute {
+                target: FibRouteTarget {
+                    next_hop: ip("192.0.2.99"),
+                },
+                protocol: FibKernelProtocol::Bgp,
+            },
+        );
+        let mut owned = FibOwnedState {
+            routes: BTreeMap::from([(route.key, route.clone())]),
+        };
+        let (status_tx, status_rx) = watch::channel(vec![FibRuntimeStatus {
+            table_name: "edge".to_string(),
+            table_id: 1000,
+            metric: 200,
+            prefix,
+            next_hop: Some(ip("192.0.2.1")),
+            peer: Some(ip("198.51.100.1")),
+            state: FibRuntimeState::Installed,
+            reason: "owned".to_string(),
+        }]);
+
+        drain_owned(&config(), &mut fib, &metrics(), &status_tx, &mut owned).await;
+
+        assert!(fib.applied.is_empty());
+        assert!(owned.routes.is_empty());
+        assert!(status_rx.borrow().is_empty());
+        assert_eq!(
+            fib.kernel.routes.get(&route.key).map(|route| route.target),
+            Some(FibRouteTarget {
+                next_hop: ip("192.0.2.99")
+            })
+        );
     }
 
     #[tokio::test]
@@ -1853,7 +1971,7 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        drain_owned(&mut fib, &metrics, &status_tx, &mut owned).await;
+        drain_owned(&config(), &mut fib, &metrics, &status_tx, &mut owned).await;
         assert!(owned.routes.is_empty());
         assert!(status_rx.borrow().is_empty());
         assert!(

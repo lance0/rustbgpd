@@ -220,6 +220,9 @@ pub(crate) fn compute_fib_diff(
             Some(route) if route.protocol == FibKernelProtocol::Other => {
                 plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
             }
+            Some(route) if route.target != owned_route.target => {
+                plan.drops.push(FibDrop::ForeignRouteExists { key: *key });
+            }
             _ => plan.ops.push(FibOp::Remove(owned_route.clone())),
         }
     }
@@ -610,6 +613,25 @@ mod tests {
 
         assert_eq!(plan.ops, vec![FibOp::Remove(route)]);
         assert!(plan.drops.is_empty());
+    }
+
+    #[test]
+    fn owned_route_missing_from_desired_with_drifted_kernel_value_is_foreign() {
+        let route = one_route(key(v4_prefix(2, 24)), "203.0.113.1");
+        let owned = FibOwnedState {
+            routes: BTreeMap::from([(route.key, route.clone())]),
+        };
+        let kernel = FibKernelSnapshot {
+            routes: BTreeMap::from([(route.key, kernel("203.0.113.9", FibKernelProtocol::Bgp))]),
+        };
+
+        let plan = compute_fib_diff(&FibIntent::default(), &owned, &kernel);
+
+        assert!(plan.ops.is_empty());
+        assert_eq!(
+            plan.drops,
+            vec![FibDrop::ForeignRouteExists { key: route.key }]
+        );
     }
 
     #[test]
