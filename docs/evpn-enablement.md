@@ -598,7 +598,9 @@ Still ahead:
 - Auto-derived Route Targets (RFC 8365 §5.1.2.1).
 - Overlay-index IRB (RFC 9135 overlay-index model — Gate 9 ships
   the Interface-less variant only).
-- Privileged-runner CI gate for the M39 + M40 manual smokes.
+- Extend the protected self-hosted `kernel-dataplane` workflow beyond
+  M39 / M40 / M42 to cover the earlier VTEP / DF-election smokes
+  (M36 / M37 / M37+IP / M38) or explicitly keep those reviewer-run.
 
 Further out on this track:
 
