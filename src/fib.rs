@@ -68,7 +68,7 @@ impl PartialOrd for FibRouteKey {
 }
 
 impl FibRouteKey {
-    fn table_key(self) -> FibTableKey {
+    pub(crate) fn table_key(self) -> FibTableKey {
         FibTableKey {
             table_id: self.table_id,
             metric: self.metric,

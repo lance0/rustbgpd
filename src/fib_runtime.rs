@@ -591,10 +591,7 @@ fn build_statuses(
     }
     for route in owned.routes.values() {
         if (intent.routes.contains_key(&route.key)
-            || intent.frozen_tables.contains(&crate::fib::FibTableKey {
-                table_id: route.key.table_id,
-                metric: route.key.metric,
-            }))
+            || intent.frozen_tables.contains(&route.key.table_key()))
             && !failed_keys.contains(&route.key)
             && !dropped_keys.contains(&route.key)
         {
