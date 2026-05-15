@@ -287,13 +287,24 @@ wait_established() {
 dump_session_state_on_failure() {
     for pe in "$PE1_NAME" "$PE2_NAME"; do
         log "=== session-state metrics: $pe ==="
-        local prom
+        local prom matched
         prom="$(prom_scrape "$pe")"
-        printf '%s\n' "$prom" \
+        if [ -z "$prom" ]; then
+            log "  (scrape returned empty — metrics endpoint unreachable)"
+            continue
+        fi
+        # Wrap grep in `|| true` so an empty match doesn't propagate up
+        # through `set -o pipefail` and short-circuit the rest of the
+        # function (the docker-logs dump below is the real diagnostic
+        # signal we need when sessions never reach Established).
+        matched="$( (printf '%s\n' "$prom" \
             | grep -E '^bgp_session_(established|state_transitions|flaps)_total\{' \
-            | sort \
-            | head -40 \
-            | while IFS= read -r line; do log "  $line"; done
+            || true) | sort | head -40 )"
+        if [ -z "$matched" ]; then
+            log "  (no bgp_session_* rows present in scrape)"
+        else
+            printf '%s\n' "$matched" | while IFS= read -r line; do log "  $line"; done
+        fi
     done
     for pe in "$PE1_NAME" "$PE2_NAME"; do
         log "=== docker logs --tail 50: $pe ==="

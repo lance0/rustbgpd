@@ -334,6 +334,7 @@ pe1_df_role, pe2_df_role,
 pe1_df_changes, pe2_df_changes,
 pe1_bum_flags, pe2_bum_flags,
 pe2_running,
+pe1_established_seen, pe2_established_seen,         # sum of bgp_session_established_total — per-sample observability after the pre-churn gate
 pe1_pool_size, pe2_pool_size,                       # harness-tracked
 pe1_fdb_total, pe2_fdb_total,                       # kernel `bridge fdb show | wc -l`
 pe1_fdb_extern_learn, pe2_fdb_extern_learn,         # daemon-programmed remote rows
