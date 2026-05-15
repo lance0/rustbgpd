@@ -345,24 +345,30 @@ verify_topology_link() {
     return "$ok"
 }
 
-# Wait for a single PE's `bgp_session_established_total` to strictly
-# increase past the captured baseline. Used after a flip to confirm
-# the daemon re-established before we resume crediting sample rows
-# to nominal steady-state behavior.
-wait_established_increment() {
-    local pe="$1" baseline="$2"
+# Wait for a freshly restarted PE's daemon to reach Established at
+# least once. `bgp_session_established_total` is an in-process
+# counter — it resets to 0 every time the daemon process restarts,
+# so `>= 1` post-restart is the right "the new process actually
+# peered" gate. (A pre-flip baseline would be meaningless because
+# the counter doesn't survive the restart.) During the bind window
+# right after the new daemon launches, `curl` to :9179 returns
+# "connection refused" and `pe_established_total` falls back to 0,
+# which simply keeps the poll loop running until the listener is
+# up and the OPEN exchange completes.
+wait_established_post_flip() {
+    local pe="$1"
     local timeout_sec="$BGP_ESTABLISHED_TIMEOUT_SEC"
     local deadline=$(($(date +%s) + timeout_sec))
     while [ "$(date +%s)" -lt "$deadline" ]; do
         local cur
         cur="$(pe_established_total "$pe")"
-        if [ "${cur:-0}" -gt "$baseline" ]; then
-            log "post-flip re-established: $pe established_total $baseline -> $cur"
+        if [ "${cur:-0}" -ge 1 ]; then
+            log "post-flip re-established: $pe established_total=$cur"
             return 0
         fi
         sleep 5
     done
-    log "WARN: post-flip $pe did not re-establish within ${timeout_sec}s (baseline=$baseline)"
+    log "WARN: post-flip $pe did not re-establish within ${timeout_sec}s"
     return 1
 }
 
@@ -850,10 +856,6 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
         if [ "$PE2_RUNNING" = "1" ]; then
             flip_log "stopping PE2 daemon (mode=${KILL_MODE})"
             log "flip: stopping PE2 daemon (mode=${KILL_MODE})"
-            # Capture PE2's pre-flip established_total so we can wait
-            # for a real increment on the next start (just observing
-            # `>= 1` is meaningless — the counter is cumulative).
-            PE2_ESTAB_PRE_FLIP="$(pe_established_total "$PE2_NAME")"
             flip_stop_daemon "$PE2_NAME" || true
             PE2_RUNNING=0
         else
@@ -862,8 +864,13 @@ while [ "$(date +%s)" -lt "$END_UNIX" ]; do
             flip_start_daemon "$PE2_NAME" 10.0.0.2 10.0.0.1
             # Wait for re-establishment so the next sample isn't
             # credited as a nominal steady-state row when the
-            # session has actually failed to come back.
-            wait_established_increment "$PE2_NAME" "${PE2_ESTAB_PRE_FLIP:-0}" || true
+            # session has actually failed to come back. The fresh
+            # daemon's counter starts at 0; we just need it to hit
+            # 1 (i.e., the new process has reached Established
+            # once). No cross-restart baseline survives — the
+            # counter is in-process — so a `>= 1` gate is the
+            # right invariant.
+            wait_established_post_flip "$PE2_NAME" || true
             # Kernel netns survives a process restart, so the
             # bridge / VXLAN / CE veth / FDB rows are still in
             # place — the churn pool tracking remains accurate.
