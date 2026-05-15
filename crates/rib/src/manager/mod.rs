@@ -111,6 +111,9 @@ pub struct RibManager {
     /// Current ASPA table for upstream path verification. `None` = no ASPA data.
     aspa_table: Option<Arc<rustbgpd_rpki::AspaTable>>,
     route_events_tx: broadcast::Sender<RouteEvent>,
+    /// Bounded recent route-event history for after-the-fact operator
+    /// timeline queries. Live streaming still uses `route_events_tx`.
+    route_event_history: VecDeque<RouteEvent>,
     /// EVPN best-path change broadcast. Separate from
     /// `route_events_tx` because `RouteEvent` is keyed by `Prefix`
     /// (unicast-only) and EVPN consumers (the daemon's local-MAC
@@ -127,6 +130,7 @@ pub struct RibManager {
 
 const ROUTES_RECEIVED_CHUNK_SIZE: usize = 1024;
 const QUERY_BUDGET_PER_CHUNK: usize = 8;
+const ROUTE_EVENT_HISTORY_CAPACITY: usize = 4096;
 
 enum PendingRouteChunk {
     Withdrawn(Vec<(Prefix, u32)>),
@@ -340,6 +344,7 @@ impl RibManager {
             vrp_table: None,
             aspa_table: None,
             route_events_tx,
+            route_event_history: VecDeque::with_capacity(ROUTE_EVENT_HISTORY_CAPACITY),
             evpn_events_tx,
             metrics,
             rx,
@@ -492,6 +497,14 @@ impl RibManager {
             } => self.handle_explain_advertised_route(peer, prefix, reply),
             RibUpdate::SubscribeRouteEvents { reply } => {
                 self.handle_subscribe_route_events(reply);
+            }
+            RibUpdate::QueryRouteEventHistory {
+                peer,
+                afi,
+                limit,
+                reply,
+            } => {
+                self.handle_query_route_event_history(peer, afi, limit, reply);
             }
             RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                 self.handle_subscribe_evpn_route_events(reply);
@@ -862,6 +875,48 @@ impl RibManager {
     ) {
         let rx = self.route_events_tx.subscribe();
         let _ = reply.send(rx);
+    }
+
+    fn publish_route_event(&mut self, event: RouteEvent) {
+        if self.route_event_history.len() == ROUTE_EVENT_HISTORY_CAPACITY {
+            self.route_event_history.pop_front();
+        }
+        self.route_event_history.push_back(event.clone());
+        let _ = self.route_events_tx.send(event);
+    }
+
+    fn handle_query_route_event_history(
+        &mut self,
+        peer: Option<IpAddr>,
+        afi: Option<Afi>,
+        limit: usize,
+        reply: tokio::sync::oneshot::Sender<Vec<RouteEvent>>,
+    ) {
+        let limit = if limit == 0 {
+            ROUTE_EVENT_HISTORY_CAPACITY
+        } else {
+            limit.min(ROUTE_EVENT_HISTORY_CAPACITY)
+        };
+
+        let mut events: Vec<RouteEvent> = self
+            .route_event_history
+            .iter()
+            .rev()
+            .filter(|event| match afi {
+                Some(Afi::Ipv4) => matches!(event.prefix, Prefix::V4(_)),
+                Some(Afi::Ipv6) => matches!(event.prefix, Prefix::V6(_)),
+                Some(_) => false,
+                None => true,
+            })
+            .filter(|event| match peer {
+                Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),
+                None => true,
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        events.reverse();
+        let _ = reply.send(events);
     }
 
     fn handle_subscribe_evpn_route_events(

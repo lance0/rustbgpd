@@ -256,6 +256,20 @@ pub enum RibUpdate {
         /// Response channel carrying the broadcast receiver.
         reply: oneshot::Sender<broadcast::Receiver<RouteEvent>>,
     },
+    /// Query recent route change events from the bounded in-memory history.
+    QueryRouteEventHistory {
+        /// Optional peer filter. Matches both the current and previous
+        /// best-path peer so peer-scoped queries include withdraws and
+        /// best-path moves away from the peer.
+        peer: Option<IpAddr>,
+        /// Optional address-family filter. `None` = all unicast families.
+        afi: Option<Afi>,
+        /// Maximum events to return from the recent window. 0 = manager default.
+        limit: usize,
+        /// Response channel carrying events ordered oldest-to-newest within
+        /// the selected recent window.
+        reply: oneshot::Sender<Vec<RouteEvent>>,
+    },
     /// Subscribe to EVPN best-path change events. Distinct from
     /// `SubscribeRouteEvents` because EVPN routes are keyed by
     /// `EvpnRouteKey`, not `Prefix`, and the event payload carries

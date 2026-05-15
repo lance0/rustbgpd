@@ -617,6 +617,15 @@ impl rustbgpd_api::proto::rib_service_server::RibService for MockRibService {
         }))
     }
 
+    async fn list_route_events(
+        &self,
+        _request: Request<server_proto::ListRouteEventsRequest>,
+    ) -> Result<Response<server_proto::ListRouteEventsResponse>, Status> {
+        Ok(Response::new(server_proto::ListRouteEventsResponse {
+            events: vec![],
+        }))
+    }
+
     async fn watch_routes(
         &self,
         _request: Request<server_proto::WatchRoutesRequest>,

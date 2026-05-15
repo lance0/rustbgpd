@@ -508,6 +508,44 @@ fn route_to_proto(route: &Route, best: bool) -> proto::Route {
     }
 }
 
+fn route_event_to_proto(event: rustbgpd_rib::RouteEvent) -> proto::RouteEvent {
+    let event_type = match event.event_type {
+        RouteEventType::Added => proto::RouteEventType::Added,
+        RouteEventType::Withdrawn => proto::RouteEventType::Withdrawn,
+        RouteEventType::BestChanged => proto::RouteEventType::BestChanged,
+    };
+
+    proto::RouteEvent {
+        event_type: event_type.into(),
+        prefix: event.prefix.addr_string(),
+        prefix_length: u32::from(event.prefix.prefix_len()),
+        peer_address: event
+            .peer
+            .map_or_else(String::new, |p: IpAddr| p.to_string()),
+        afi_safi: match event.prefix {
+            Prefix::V4(_) => proto::AddressFamily::Ipv4Unicast,
+            Prefix::V6(_) => proto::AddressFamily::Ipv6Unicast,
+        }
+        .into(),
+        timestamp: event.timestamp,
+        previous_peer_address: event
+            .previous_peer
+            .map_or_else(String::new, |p: IpAddr| p.to_string()),
+        path_id: event.path_id,
+    }
+}
+
+fn route_event_afi_filter(afi_safi: i32) -> Result<Option<Afi>, Status> {
+    match afi_safi {
+        0 => Ok(None),
+        x if x == proto::AddressFamily::Ipv4Unicast as i32 => Ok(Some(Afi::Ipv4)),
+        x if x == proto::AddressFamily::Ipv6Unicast as i32 => Ok(Some(Afi::Ipv6)),
+        _ => Err(Status::invalid_argument(
+            "route event history supports only IPv4/IPv6 unicast families",
+        )),
+    }
+}
+
 #[tonic::async_trait]
 impl proto::rib_service_server::RibService for RibService {
     type WatchRoutesStream =
@@ -666,6 +704,41 @@ impl proto::rib_service_server::RibService for RibService {
         }))
     }
 
+    async fn list_route_events(
+        &self,
+        request: Request<proto::ListRouteEventsRequest>,
+    ) -> Result<Response<proto::ListRouteEventsResponse>, Status> {
+        let req = request.into_inner();
+        let afi = route_event_afi_filter(req.afi_safi)?;
+        let peer: Option<IpAddr> = if req.neighbor_address.is_empty() {
+            None
+        } else {
+            Some(
+                req.neighbor_address
+                    .parse()
+                    .map_err(|e| Status::invalid_argument(format!("invalid address: {e}")))?,
+            )
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.rib_tx
+            .send(RibUpdate::QueryRouteEventHistory {
+                peer,
+                afi,
+                limit: req.limit as usize,
+                reply: reply_tx,
+            })
+            .await
+            .map_err(|_| Status::internal("RIB manager unavailable"))?;
+
+        let events = reply_rx
+            .await
+            .map_err(|_| Status::internal("RIB manager dropped reply"))?;
+        Ok(Response::new(proto::ListRouteEventsResponse {
+            events: events.into_iter().map(route_event_to_proto).collect(),
+        }))
+    }
+
     async fn watch_routes(
         &self,
         request: Request<proto::WatchRoutesRequest>,
@@ -717,30 +790,7 @@ impl proto::rib_service_server::RibService for RibService {
                     }
                 }
 
-                let event_type = match event.event_type {
-                    RouteEventType::Added => proto::RouteEventType::Added,
-                    RouteEventType::Withdrawn => proto::RouteEventType::Withdrawn,
-                    RouteEventType::BestChanged => proto::RouteEventType::BestChanged,
-                };
-
-                Some(Ok(proto::RouteEvent {
-                    event_type: event_type.into(),
-                    prefix: event.prefix.addr_string(),
-                    prefix_length: u32::from(event.prefix.prefix_len()),
-                    peer_address: event
-                        .peer
-                        .map_or_else(String::new, |p: IpAddr| p.to_string()),
-                    afi_safi: match event.prefix {
-                        Prefix::V4(_) => proto::AddressFamily::Ipv4Unicast,
-                        Prefix::V6(_) => proto::AddressFamily::Ipv6Unicast,
-                    }
-                    .into(),
-                    timestamp: event.timestamp,
-                    previous_peer_address: event
-                        .previous_peer
-                        .map_or_else(String::new, |p: IpAddr| p.to_string()),
-                    path_id: event.path_id,
-                }))
+                Some(Ok(route_event_to_proto(event)))
             }
             Err(_lagged) => {
                 debug!("WatchRoutes subscriber lagged, skipping missed events");
