@@ -250,6 +250,162 @@ window), at least one full flip cycle observed.
 
 ---
 
+# Gate 8b MAC-churn 24-Hour Soak
+
+Sibling to the Gate 8b BUM-state soak above. Same 2-PE topology,
+same DF flips, but with sustained bridge-FDB churn injected on top
+so the soak exercises:
+
+- kernel-learn / local-MAC observation → Type 2 origination
+- ADR-0059 receive-side aliasing-ECMP (FDB nexthop groups)
+- RFC 7432 §15.1 MAC mobility sequencing
+- Gate 8b BUM-suppression while FDB programming is in flight
+- the ADR-0059 drift-recovery counters under realistic timing
+
+The base Gate 8b soak validated steady memory under DF-flip churn
+only (no FDB churn). This variant is the alpha-checklist exit
+condition for relaxing `apply_bum_enforcement` and
+`apply_aliasing_ecmp` to production defaults.
+
+## Topology
+
+Reuses `tests/soak/gate8b-soak.clab.yml` unchanged. Same PE
+container names (`clab-gate8b-soak-pe1` / `pe2`), same shared ESI,
+same VNI 100. The harness mutates the bridge FDB via
+`docker exec <pe> bridge fdb add/del <mac> dev ce100a master static`
+— direct kernel mutation so the daemon's local-MAC observation
+pipeline is the path under test, not the gRPC route-inject path.
+
+## Run
+
+```bash
+docker build -t rustbgpd:dev .
+sudo containerlab deploy -t tests/soak/gate8b-soak.clab.yml
+
+# Full 24h run (default):
+bash tests/soak/run-gate8b-mac-churn-soak.sh
+
+# 1h smoke with tighter churn:
+SOAK_HOURS=1 CHURN_INTERVAL_SEC=2 CHURN_BATCH_SIZE=32 \
+    bash tests/soak/run-gate8b-mac-churn-soak.sh
+
+# 6-minute aggressive stress (~25 ops/sec, useful pre-1h):
+SOAK_HOURS=0.1 CHURN_INTERVAL_SEC=2 CHURN_BATCH_SIZE=50 \
+    bash tests/soak/run-gate8b-mac-churn-soak.sh
+
+# Auto-destroy on exit:
+CLEANUP=1 bash tests/soak/run-gate8b-mac-churn-soak.sh
+```
+
+## Churn pattern
+
+A bounded rotating MAC pool. The harness picks one batch action
+per tick (`CHURN_INTERVAL_SEC`, default 5s):
+
+- **Add**: install `CHURN_BATCH_SIZE` new MACs on a PE via
+  `bridge fdb add`. Daemon classifies them as local and originates
+  Type 2.
+- **Delete**: remove `CHURN_BATCH_SIZE` MACs from a PE via
+  `bridge fdb del`. Daemon withdraws the Type 2.
+- **Mobility**: pick MACs on one PE, delete from src and add on
+  dst using the same MAC address. Triggers RFC 7432 §15.1 mobility
+  sequencing on the peer PE while ADR-0059 FDB-NHG construction is
+  also under sustained shared-ESI churn.
+
+Pool size is bounded (`MAC_POOL_SIZE`, default 512). Per-PE
+occupancy bracketed by `[POOL_MIN, POOL_MAX]` around
+`MAC_POOL_SIZE / 2`; the harness forces grow/shrink when the
+brackets are crossed so the soak doesn't drift into an empty or
+saturated state.
+
+DF flips continue concurrently — the harness's `docker stop` of
+PE2 clears PE2's pool state file so the in-memory pool tracking
+matches the kernel reality after restart.
+
+## What gets sampled
+
+`tests/soak/runs/gate8b-mac-churn-<UTC>/samples.csv`, one row per
+`SAMPLE_INTERVAL` (default 60s):
+
+```
+ts_unix, elapsed_sec,
+pe1_rss_mb, pe2_rss_mb,
+pe1_df_role, pe2_df_role,
+pe1_df_changes, pe2_df_changes,
+pe1_bum_flags, pe2_bum_flags,
+pe2_running,
+pe1_pool_size, pe2_pool_size,                       # harness-tracked
+pe1_fdb_total, pe2_fdb_total,                       # kernel `bridge fdb show | wc -l`
+pe1_fdb_extern_learn, pe2_fdb_extern_learn,         # daemon-programmed remote rows
+pe1_nh_count, pe2_nh_count,                         # `ip nexthop show | wc -l` — ADR-0059
+pe1_local_origs, pe2_local_origs,                   # evpn_local_originations_total
+pe1_local_orig_errors, pe2_local_orig_errors,
+pe1_local_obs_drops, pe2_local_obs_drops,
+pe1_dup_mac_moves, pe2_dup_mac_moves,               # RFC 7432 §15.1
+pe1_drift_members_repaired, pe2_drift_members_repaired,
+pe1_drift_groups_replaced, pe2_drift_groups_replaced,
+pe1_drift_orphans_cleaned, pe2_drift_orphans_cleaned,
+pe1_drift_disabled, pe2_drift_disabled,             # ADR-0059 drift counters
+churn_adds_total, churn_dels_total, churn_moves_total
+```
+
+Plus per-PE daemon logs (`pe1.log` / `pe2.log`), flip events
+(`flips.log`), churn batches (`churn.log`), and live pool state
+under `state/`.
+
+## Live monitoring
+
+```bash
+tail -F tests/soak/runs/gate8b-mac-churn-<UTC>/soak.log
+tail -F tests/soak/runs/gate8b-mac-churn-<UTC>/samples.csv
+tail -F tests/soak/runs/gate8b-mac-churn-<UTC>/churn.log
+tail -F tests/soak/runs/gate8b-mac-churn-<UTC>/flips.log
+```
+
+## Analyze
+
+No dedicated analyzer yet — `tests/soak/analyze-gate8b-soak.py`
+covers the BUM-state gates that still apply (memory slope, peak
+RSS, DF transition monotonicity). MAC-churn-specific gates
+(`evpn_local_origination_errors_total == 0`, `extern_learn` count
+stable around the pool target on the receiver, ADR-0059 drift
+counters non-monotone but bounded) currently surface from manual
+CSV inspection.
+
+## When to run
+
+- **Before flipping `apply_bum_enforcement` and/or
+  `apply_aliasing_ecmp` to production defaults** — this is the
+  alpha-checklist exit condition (`docs/evpn-alpha-soak.md`,
+  "remaining multi-homing enforcement work").
+- **After any change to** the local-MAC origination / withdraw
+  path (`crates/evpn-linux/src/reconcile.rs`,
+  `src/evpn_originator.rs`,
+  `src/evpn_dataplane.rs`) or the ADR-0059 receive-side aliasing
+  / drift-recovery path (`crates/evpn-linux/src/diff.rs`,
+  `crates/evpn-linux/src/linux/nexthop_raw/`).
+- **Before tagging the first release that flips either default.**
+
+## Smoke-before-soak
+
+Soak-before-soak discipline: always run the short stress before
+committing 24 hours of wall clock.
+
+```bash
+# 5-10 minute aggressive stress — catches obvious leaks, FDB-NHG
+# construction failures, or daemon hangs under load.
+SOAK_HOURS=0.1 CHURN_INTERVAL_SEC=2 CHURN_BATCH_SIZE=50 \
+    bash tests/soak/run-gate8b-mac-churn-soak.sh
+
+# 1h soak — catches non-obvious slow drift.
+SOAK_HOURS=1 bash tests/soak/run-gate8b-mac-churn-soak.sh
+
+# Only then kick the 24h.
+bash tests/soak/run-gate8b-mac-churn-soak.sh
+```
+
+---
+
 # Gate 9 slice 6 24-Hour Soak
 
 Symmetric Interface-less IRB / Type 5 churn harness. The first
