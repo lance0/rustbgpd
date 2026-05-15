@@ -486,10 +486,10 @@ rustbgpctl rib fib          # human table
 rustbgpctl rib fib --json   # JSON array for scripts
 ```
 
-Returns one row per desired or daemon-owned route in the ADR-0061
-general unicast Linux FIB runtime. The runtime is default-off and only
-starts when at least one `[[fib_tables]]` block is configured. `state`
-is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALLED`,
+Returns one row per desired route, daemon-owned route, or one-pass
+reconciliation outcome in the ADR-0061 general unicast Linux FIB runtime.
+The runtime is default-off and only starts when at least one `[[fib_tables]]`
+block is configured. `state` is a `FibRouteState` enum (`FIB_ROUTE_STATE_INSTALLED`,
 `FIB_ROUTE_STATE_REJECTED`, or `FIB_ROUTE_STATE_FAILED`); `reason`
 carries values such as `owned`, `foreign_route_exists`,
 `next_hop_family_unsupported`, `peer_not_allowed`,

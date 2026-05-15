@@ -133,8 +133,9 @@ resolved.
   still be `RTPROT_BGP` with the exact next-hop rustbgpd recorded. Rows absent
   from the file and rows with changed config are preserved and reported as
   `foreign_route_exists` rather than adopted by protocol alone. Rows with
-  persisted owned-state that drifted are reported once as `owned_route_drifted`,
-  then become ordinary foreign state after ownership is released.
+  persisted owned-state that drifted are reported once as `owned_route_drifted`.
+  If the route remains desired on a later pass, the same live row is then
+  reported as ordinary foreign state after ownership is released.
 
 - **No DelayOpen timer.** RFC 4271 §8 optional. Not planned for v1.
 - **LOCAL_PREF accepted on eBGP sessions.** RFC 4271 §5.1.5 says
