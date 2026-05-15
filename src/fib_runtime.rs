@@ -1093,7 +1093,7 @@ impl UnicastFib for LinuxUnicastFib {
 async fn apply_linux_op(handle: &rtnetlink::Handle, op: &FibOp) -> Result<(), String> {
     match op {
         FibOp::Add(route) => {
-            let msg = build_route_message(route)?;
+            let msg = build_route_message(route, RouteMessageGateway::Include)?;
             handle
                 .route()
                 .add(msg)
@@ -1103,7 +1103,7 @@ async fn apply_linux_op(handle: &rtnetlink::Handle, op: &FibOp) -> Result<(), St
         }
         FibOp::Adopt(_) | FibOp::Forget(_) => Ok(()),
         FibOp::Replace { desired: route, .. } => {
-            let msg = build_route_message(route)?;
+            let msg = build_route_message(route, RouteMessageGateway::Include)?;
             handle
                 .route()
                 .add(msg)
@@ -1113,7 +1113,7 @@ async fn apply_linux_op(handle: &rtnetlink::Handle, op: &FibOp) -> Result<(), St
                 .map_err(|e| format!("kernel route replace: {e}"))
         }
         FibOp::Remove(route) => {
-            let msg = build_route_message(route)?;
+            let msg = build_route_message(route, RouteMessageGateway::Omit)?;
             match handle.route().del(msg).execute().await {
                 Ok(()) => Ok(()),
                 Err(e) if is_idempotent_route_delete(&e) => Ok(()),
@@ -1157,8 +1157,16 @@ async fn dump_configured_routes(
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum RouteMessageGateway {
+    Include,
+    Omit,
+}
+
+#[cfg(target_os = "linux")]
 fn build_route_message(
     route: &FibRoute,
+    gateway: RouteMessageGateway,
 ) -> Result<netlink_packet_route::route::RouteMessage, String> {
     use netlink_packet_route::AddressFamily;
     use netlink_packet_route::route::{
@@ -1198,10 +1206,12 @@ fn build_route_message(
                 route.key.prefix,
             )));
     }
-    msg.attributes
-        .push(RouteAttribute::Gateway(ip_to_route_address(
-            route.target.next_hop,
-        )));
+    if matches!(gateway, RouteMessageGateway::Include) {
+        msg.attributes
+            .push(RouteAttribute::Gateway(ip_to_route_address(
+                route.target.next_hop,
+            )));
+    }
     Ok(msg)
 }
 
@@ -2476,7 +2486,7 @@ mod tests {
             path_id: 0,
         };
 
-        let msg = build_route_message(&route).unwrap();
+        let msg = build_route_message(&route, RouteMessageGateway::Include).unwrap();
 
         assert_eq!(msg.header.table, 0);
         assert_eq!(msg.header.protocol, RouteProtocol::Bgp);
@@ -2494,6 +2504,45 @@ mod tests {
         assert!(msg.attributes.iter().any(|attr| {
             matches!(attr, RouteAttribute::Gateway(RouteAddress::Inet6(addr)) if *addr == "2001:db8:ffff::1".parse::<Ipv6Addr>().unwrap())
         }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn remove_route_message_is_key_only() {
+        use netlink_packet_route::route::{RouteAddress, RouteAttribute, RouteProtocol};
+        let route = FibRoute {
+            table_name: "edge".to_string(),
+            key: key(v4(32)),
+            target: FibRouteTarget {
+                next_hop: ip("192.0.2.1"),
+            },
+            peer: ip("198.51.100.1"),
+            origin_type: RouteOrigin::Ebgp,
+            path_id: 0,
+        };
+
+        let msg = build_route_message(&route, RouteMessageGateway::Omit).unwrap();
+
+        assert_eq!(msg.header.protocol, RouteProtocol::Bgp);
+        assert!(
+            msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Table(1000)))
+        );
+        assert!(
+            msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Priority(200)))
+        );
+        assert!(msg.attributes.iter().any(|attr| {
+            matches!(attr, RouteAttribute::Destination(RouteAddress::Inet(addr)) if *addr == "203.0.113.0".parse::<Ipv4Addr>().unwrap())
+        }));
+        assert!(
+            !msg.attributes
+                .iter()
+                .any(|attr| matches!(attr, RouteAttribute::Gateway(_))),
+            "delete messages must not include stale next-hop value"
+        );
     }
 
     #[cfg(target_os = "linux")]

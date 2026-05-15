@@ -362,6 +362,10 @@ impl PeerManager {
 
     fn allocate_session_id(&mut self) -> u64 {
         let id = self.next_session_id;
+        // Session IDs are a stale-notification discriminator, not a durable
+        // protocol identifier. Wrapping would require 2^64 session spawns in
+        // one process lifetime; skip zero so `SessionIdentity::default()`
+        // remains visibly outside the peer-manager allocated range.
         self.next_session_id = self.next_session_id.wrapping_add(1).max(1);
         id
     }
@@ -1454,6 +1458,10 @@ impl PeerManager {
             let _ = handle.shutdown().await;
             return false;
         };
+        debug_assert!(
+            managed.pending_inbound.is_none(),
+            "PeerManager is a single-task actor; starting a candidate must not reenter handlers"
+        );
         if managed.pending_inbound.is_some() {
             info!(%peer_addr, "collision candidate appeared while starting another, dropping newer inbound");
             let _ = handle.shutdown().await;
@@ -2331,6 +2339,10 @@ mod tests {
     use rustbgpd_wire::{
         Capability, Message, OpenMessage, decode_message, encode_message, peek_message_length,
     };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -2502,6 +2514,84 @@ mod tests {
                 advertise_graceful_shutdown: false,
             },
         );
+    }
+
+    #[derive(Default)]
+    struct FakePeerCounters {
+        collision_dump: AtomicU32,
+        shutdown: AtomicU32,
+        stop: AtomicU32,
+    }
+
+    fn fake_peer_handle(
+        peer_addr: IpAddr,
+        state: SessionState,
+        remote_router_id: Option<Ipv4Addr>,
+        counters: Arc<FakePeerCounters>,
+    ) -> PeerHandle {
+        use rustbgpd_transport::PeerCommand;
+
+        let (session_tx, mut session_rx) = mpsc::channel::<PeerCommand>(8);
+        let task = tokio::spawn(async move {
+            while let Some(cmd) = session_rx.recv().await {
+                match cmd {
+                    PeerCommand::QueryState { reply } => {
+                        let _ = reply.send(PeerSessionState {
+                            fsm_state: state,
+                            peer_ip: peer_addr,
+                            prefix_count: 0,
+                            negotiated_hold_time: None,
+                            four_octet_as: None,
+                            remote_router_id,
+                            updates_received: 0,
+                            updates_sent: 0,
+                            notifications_received: 0,
+                            notifications_sent: 0,
+                            flap_count: 0,
+                            uptime_secs: 0,
+                            last_error: String::new(),
+                        });
+                    }
+                    PeerCommand::CollisionDump => {
+                        counters.collision_dump.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    PeerCommand::Shutdown => {
+                        counters.shutdown.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    PeerCommand::Stop { .. } => {
+                        counters.stop.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Ok(())
+        });
+        PeerHandle::from_parts(session_tx, task)
+    }
+
+    fn attach_test_pending_inbound(
+        mgr: &mut PeerManager,
+        peer_addr: IpAddr,
+        handle: PeerHandle,
+        session_id: u64,
+    ) {
+        mgr.peers
+            .get_mut(&peer_addr)
+            .expect("managed peer")
+            .pending_inbound = Some(PendingInbound { handle, session_id });
+    }
+
+    async fn wait_counter(counter: &AtomicU32, expected: u32) {
+        for _ in 0..20 {
+            if counter.load(Ordering::SeqCst) == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), expected);
     }
 
     fn config_neighbor(addr: IpAddr, remote_asn: u32) -> crate::config::Neighbor {
@@ -4516,8 +4606,6 @@ mod tests {
     #[tokio::test]
     async fn simultaneous_active_open_runs_inbound_candidate_before_primary_idle() {
         use rustbgpd_transport::PeerCommand;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicU32, Ordering};
 
         let (_cmd_tx, cmd_rx) = mpsc::channel(16);
         let (rib_tx, _rib_rx) = mpsc::channel(64);
@@ -4660,6 +4748,303 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         panic!("promoted inbound candidate did not reach Established");
+    }
+
+    #[tokio::test]
+    async fn collision_local_wins_drops_inbound_candidate() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 10),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let primary = Arc::new(FakePeerCounters::default());
+        let pending = Arc::new(FakePeerCounters::default());
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            peer_addr,
+            65002,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                primary.clone(),
+            ),
+            false,
+        );
+        attach_test_pending_inbound(
+            &mut mgr,
+            peer_addr,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                pending.clone(),
+            ),
+            2,
+        );
+
+        mgr.handle_session_notification(SessionNotification::OpenReceived {
+            session_id: 2,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        })
+        .await;
+
+        wait_counter(&pending.collision_dump, 1).await;
+        assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+        assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 1);
+        assert!(
+            mgr.peers
+                .get(&peer_addr)
+                .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            "local-wins collision must keep the primary session"
+        );
+    }
+
+    #[tokio::test]
+    async fn collision_equal_router_ids_drops_inbound_candidate() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 2),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let primary = Arc::new(FakePeerCounters::default());
+        let pending = Arc::new(FakePeerCounters::default());
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            peer_addr,
+            65002,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                primary.clone(),
+            ),
+            false,
+        );
+        attach_test_pending_inbound(
+            &mut mgr,
+            peer_addr,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                pending.clone(),
+            ),
+            2,
+        );
+
+        mgr.handle_session_notification(SessionNotification::OpenReceived {
+            session_id: 2,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        })
+        .await;
+
+        wait_counter(&pending.collision_dump, 1).await;
+        assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+        assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 1);
+        assert!(
+            mgr.peers
+                .get(&peer_addr)
+                .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 1),
+            "equal router-id collision must keep the primary session"
+        );
+    }
+
+    #[tokio::test]
+    async fn primary_back_to_idle_promotes_pending_inbound_candidate() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let primary = Arc::new(FakePeerCounters::default());
+        let pending = Arc::new(FakePeerCounters::default());
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            peer_addr,
+            65002,
+            fake_peer_handle(peer_addr, SessionState::OpenSent, None, primary.clone()),
+            false,
+        );
+        attach_test_pending_inbound(
+            &mut mgr,
+            peer_addr,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                pending.clone(),
+            ),
+            2,
+        );
+
+        mgr.handle_session_notification(SessionNotification::BackToIdle {
+            session_id: 1,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+        })
+        .await;
+
+        assert_eq!(primary.shutdown.load(Ordering::SeqCst), 1);
+        assert_eq!(pending.shutdown.load(Ordering::SeqCst), 0);
+        assert!(
+            mgr.peers
+                .get(&peer_addr)
+                .is_some_and(|m| m.pending_inbound.is_none() && m.session_id == 2),
+            "pending inbound candidate should be promoted when the primary idles"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_collision_notifications_do_not_mutate_current_peer() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let primary = Arc::new(FakePeerCounters::default());
+        let pending = Arc::new(FakePeerCounters::default());
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            peer_addr,
+            65002,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                primary.clone(),
+            ),
+            false,
+        );
+        attach_test_pending_inbound(
+            &mut mgr,
+            peer_addr,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                pending.clone(),
+            ),
+            2,
+        );
+
+        mgr.handle_session_notification(SessionNotification::OpenReceived {
+            session_id: 99,
+            role: rustbgpd_transport::SessionRole::InboundCandidate,
+            peer_addr,
+            remote_router_id: Ipv4Addr::new(10, 0, 0, 2),
+        })
+        .await;
+        mgr.handle_session_notification(SessionNotification::BackToIdle {
+            session_id: 99,
+            role: rustbgpd_transport::SessionRole::Primary,
+            peer_addr,
+        })
+        .await;
+
+        assert_eq!(primary.collision_dump.load(Ordering::SeqCst), 0);
+        assert_eq!(pending.collision_dump.load(Ordering::SeqCst), 0);
+        assert!(
+            mgr.peers
+                .get(&peer_addr)
+                .is_some_and(|m| m.pending_inbound.is_some() && m.session_id == 1),
+            "stale notifications must not drop or promote live sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn disable_peer_drains_pending_inbound_candidate() {
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let (rib_tx, _rib_rx) = mpsc::channel(64);
+        let metrics = BgpMetrics::new();
+        let mut mgr = PeerManager::new(
+            cmd_rx,
+            65001,
+            Ipv4Addr::new(10, 0, 0, 1),
+            None,
+            None,
+            metrics,
+            rib_tx,
+            None,
+        );
+        let peer_addr = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let primary = Arc::new(FakePeerCounters::default());
+        let pending = Arc::new(FakePeerCounters::default());
+        insert_test_managed_peer_with_asn(
+            &mut mgr,
+            peer_addr,
+            65002,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                primary.clone(),
+            ),
+            false,
+        );
+        attach_test_pending_inbound(
+            &mut mgr,
+            peer_addr,
+            fake_peer_handle(
+                peer_addr,
+                SessionState::OpenConfirm,
+                Some(Ipv4Addr::new(10, 0, 0, 2)),
+                pending.clone(),
+            ),
+            2,
+        );
+
+        mgr.disable_peer(peer_addr, None).await.unwrap();
+
+        wait_counter(&primary.stop, 1).await;
+        assert_eq!(pending.shutdown.load(Ordering::SeqCst), 1);
+        assert_eq!(primary.stop.load(Ordering::SeqCst), 1);
+        assert!(
+            mgr.peers
+                .get(&peer_addr)
+                .is_some_and(|m| m.pending_inbound.is_none() && !m.enabled),
+            "disable must clear the pending candidate"
+        );
     }
 
     #[tokio::test]
