@@ -127,6 +127,11 @@ pub struct L3OwnedState {
     /// withdraw path even if the IP-VRF's `l3vxlan_device` /
     /// `table_id` change at runtime.
     pub installs: BTreeMap<(IpVrfId, EvpnIpPrefixValue), InstallState>,
+    /// Per-VRF cache of how many entries in `installs` have
+    /// `route_installed == true`. Kept in lock-step with `installs`
+    /// through `record_install` / `record_remove` so
+    /// `route_count_for` is O(log VRFs) instead of an O(N) scan.
+    pub installed_route_counts: BTreeMap<IpVrfId, u64>,
     /// `(l3vxlan_ifindex, next_hop) → router_mac` for every L3
     /// neighbor row we have programmed. Toggled by `AddL3Neighbor`
     /// (insert / replace) and `RemoveL3Neighbor` (remove) op
@@ -161,13 +166,15 @@ pub struct InstallState {
 
 impl L3OwnedState {
     /// Currently-installed routes for one IP-VRF. Backing store for
-    /// the `IpVrfState.installed_routes_count` gRPC field.
+    /// the `IpVrfState.installed_routes_count` gRPC field. Reads
+    /// the per-VRF count cache maintained by `record_install` /
+    /// `record_remove`; absent means zero.
     #[must_use]
     pub fn route_count_for(&self, vrf_id: IpVrfId) -> u64 {
-        self.installs
-            .iter()
-            .filter(|((id, _), i)| *id == vrf_id && i.route_installed)
-            .count() as u64
+        self.installed_route_counts
+            .get(&vrf_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// True when the owned set has no routes installed and no
@@ -175,6 +182,50 @@ impl L3OwnedState {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.installs.is_empty() && self.kernel_neighbors.is_empty() && self.kernel_fdb.is_empty()
+    }
+
+    /// Insert / replace an install row, keeping the per-VRF
+    /// `installed_route_counts` cache in lock-step. Every install
+    /// site in this crate that previously did `installs.insert(...)`
+    /// must route through here.
+    pub(crate) fn record_install(
+        &mut self,
+        key: (IpVrfId, EvpnIpPrefixValue),
+        install: InstallState,
+    ) {
+        let prev = self.installs.insert(key, install);
+        let was_installed = prev.is_some_and(|p| p.route_installed);
+        match (was_installed, install.route_installed) {
+            (false, true) => {
+                *self.installed_route_counts.entry(key.0).or_insert(0) += 1;
+            }
+            (true, false) => self.decrement_count(key.0),
+            _ => {}
+        }
+    }
+
+    /// Remove an install row, keeping the per-VRF
+    /// `installed_route_counts` cache in lock-step. Returns the
+    /// removed `InstallState` if one was present (parity with
+    /// `BTreeMap::remove`).
+    pub(crate) fn record_remove(
+        &mut self,
+        key: &(IpVrfId, EvpnIpPrefixValue),
+    ) -> Option<InstallState> {
+        let removed = self.installs.remove(key);
+        if removed.is_some_and(|r| r.route_installed) {
+            self.decrement_count(key.0);
+        }
+        removed
+    }
+
+    fn decrement_count(&mut self, vrf_id: IpVrfId) {
+        if let Some(count) = self.installed_route_counts.get_mut(&vrf_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.installed_route_counts.remove(&vrf_id);
+            }
+        }
     }
 }
 
@@ -598,7 +649,7 @@ pub fn record_l3_success(
             let vrf = ip_vrfs.iter().find(|v| v.id == *vrf_id);
             let ifindex = ready_l3vxlan_ifindex.get(vrf_id).copied();
             if let (Some(entry), Some(vrf), Some(ifindex)) = (entry, vrf, ifindex) {
-                owned.installs.insert(
+                owned.record_install(
                     (*vrf_id, *prefix),
                     InstallState {
                         route_installed: true,
@@ -611,7 +662,7 @@ pub fn record_l3_success(
             }
         }
         DataplaneOp::RemoveRemoteIpRoute { vrf_id, prefix, .. } => {
-            owned.installs.remove(&(*vrf_id, *prefix));
+            owned.record_remove(&(*vrf_id, *prefix));
         }
         DataplaneOp::AddL3Neighbor {
             l3vxlan_ifindex,
@@ -783,7 +834,7 @@ mod tests {
 
         // Simulate "first install already complete".
         let mut owned = L3OwnedState::default();
-        owned.installs.insert(
+        owned.record_install(
             (vrf_id, prefix_a),
             InstallState {
                 route_installed: true,
@@ -832,7 +883,7 @@ mod tests {
 
         let mut owned = L3OwnedState::default();
         for p in [prefix_a, prefix_b] {
-            owned.installs.insert(
+            owned.record_install(
                 (vrf_id, p),
                 InstallState {
                     route_installed: true,
@@ -881,7 +932,7 @@ mod tests {
         let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
         let mut owned = L3OwnedState::default();
-        owned.installs.insert(
+        owned.record_install(
             (vrf_id, prefix),
             InstallState {
                 route_installed: true,
@@ -923,7 +974,7 @@ mod tests {
         let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
         let mut owned = L3OwnedState::default();
-        owned.installs.insert(
+        owned.record_install(
             (vrf_id, prefix),
             InstallState {
                 route_installed: true,
@@ -1120,7 +1171,7 @@ mod tests {
         // prefix behind the same router MAC to new_vtep — the
         // intent now carries new_vtep for the same (idx, router_mac).
         let mut owned = L3OwnedState::default();
-        owned.installs.insert(
+        owned.record_install(
             (vrf_id, prefix),
             InstallState {
                 route_installed: true,
@@ -1175,7 +1226,7 @@ mod tests {
         let ip_vrfs = one_vrf_table(101, 201, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
         let mut owned = L3OwnedState::default();
-        owned.installs.insert(
+        owned.record_install(
             (vrf_id, prefix),
             InstallState {
                 route_installed: true,
@@ -1226,7 +1277,7 @@ mod tests {
         let vrf_id = IpVrfId::new(101).unwrap();
 
         let mut owned = L3OwnedState::default();
-        owned.installs.insert(
+        owned.record_install(
             (vrf_id, prefix),
             InstallState {
                 route_installed: true,
