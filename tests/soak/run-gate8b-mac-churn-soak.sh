@@ -369,15 +369,24 @@ wait_established_increment() {
 # Send the flip signal to the in-container daemon. Default SIGTERM
 # exercises the coordinated drain; KILL_MODE=kill is a crash-mode
 # flip for catching paths the orderly-exit path masks.
+#
+# The rustbgpd container image ships with `pidof` and the shell
+# `kill` builtin but **not** `ps`, `pkill`, `pgrep`, or `killall`,
+# and the `kill` binary itself isn't present (the image is slim by
+# design). `xargs kill` would try to exec a binary; instead route
+# through `sh -c` so the builtin handles the signal.
 flip_stop_daemon() {
-    local container="$1"
+    local container="$1" signal
     case "$KILL_MODE" in
-        kill) docker exec "$container" pkill -KILL rustbgpd 2>/dev/null || true ;;
-        *)    docker exec "$container" pkill -TERM rustbgpd 2>/dev/null || true ;;
+        kill) signal="-KILL" ;;
+        *)    signal="-TERM" ;;
     esac
+    docker exec "$container" sh -c \
+        "pid=\$(pidof rustbgpd) && [ -n \"\$pid\" ] && kill ${signal} \$pid" \
+        2>/dev/null || true
     local i
     for i in $(seq 1 30); do
-        if ! docker exec "$container" pgrep rustbgpd >/dev/null 2>&1; then
+        if ! docker exec "$container" pidof rustbgpd >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
