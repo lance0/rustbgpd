@@ -202,11 +202,11 @@ async fn apply_report(
                 originated.remove(&status.vni);
             }
             (Some((_, cur)), Some(new)) if cur == new => {}
-            (Some((old_key, old_mac)), Some(new_mac)) => {
+            (Some((old_key, _old_mac)), Some(new_mac)) => {
+                // `withdraw_svi_mac` owns the counter decrement for the
+                // old key — the caller must NOT also call
+                // `record_withdraw` here (carried from v0.18.0).
                 withdraw_svi_mac(inst, old_key, runtime).await;
-                runtime
-                    .originated_local_mac_counts
-                    .record_withdraw(inst.id, old_mac, old_key);
                 if let Some(new_key) = inject_svi_mac(inst, new_mac, runtime).await {
                     originated.insert(status.vni, (new_key, new_mac));
                 } else {
@@ -317,10 +317,10 @@ async fn withdraw_svi_mac(inst: &EvpnInstance, key: EvpnRouteKey, runtime: &SviR
             runtime
                 .metrics
                 .record_evpn_local_origination("svi_withdraw");
-            // Counter decrement only happens for the steady-state
-            // (Some, None) transition — the (Some, Some) bridge-MAC
-            // change path manages it explicitly to keep the counter
-            // monotonic across the withdraw + reinject pair.
+            // `withdraw_svi_mac` owns the counter decrement for every
+            // successful withdraw; callers must not also call
+            // `record_withdraw` or the per-instance counter
+            // double-decrements.
             if let Some(mac) = mac_from_macip_key(&key) {
                 runtime
                     .originated_local_mac_counts
@@ -537,6 +537,53 @@ mod tests {
         let withdraws = withdraws.lock().await;
         assert_eq!(injects.len(), 2, "two Injects: original + post-change");
         assert_eq!(withdraws.len(), 1, "one Withdraw for the old key");
+    }
+
+    /// Pre-v0.21.0 the (Some, Some) caller double-decremented the
+    /// `originated_local_mac_counts` per-VNI counter — one inside
+    /// `withdraw_svi_mac`, one in the caller. Regression-lock: after
+    /// a bridge-MAC change the per-VNI count stays at exactly 1
+    /// (the new MAC), not 0 and not 2.
+    #[tokio::test]
+    async fn bridge_mac_change_keeps_per_vni_count_at_one() {
+        let instances = instance_table(true);
+        let (rib_tx, rib_rx) = mpsc::channel::<RibUpdate>(16);
+        let captured = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let withdraws = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let _responder = drain_responder(rib_rx, captured.clone(), withdraws.clone());
+
+        let counts = OriginatedLocalMacCounts::default();
+        let runtime = SviRuntime {
+            instances,
+            rib_tx,
+            metrics: BgpMetrics::new(),
+            originated_local_mac_counts: counts.clone(),
+            shutdown: CancellationToken::new(),
+        };
+        let mut originated = OriginatedSet::new();
+
+        let mac_a = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x0A]);
+        let mac_b = MacAddress::new([0x02, 0x00, 0x00, 0x00, 0x00, 0x0B]);
+
+        apply_report(
+            &report_with(100, InstanceState::Ready, Some(mac_a)),
+            &mut originated,
+            &runtime,
+        )
+        .await;
+        assert_eq!(counts.count(vni(100)), 1, "first inject leaves count=1");
+
+        apply_report(
+            &report_with(100, InstanceState::Ready, Some(mac_b)),
+            &mut originated,
+            &runtime,
+        )
+        .await;
+        assert_eq!(
+            counts.count(vni(100)),
+            1,
+            "bridge-MAC swap must leave the per-VNI count at 1"
+        );
     }
 
     /// `Ready -> NotReady` (e.g. operator deletes the bridge) must
