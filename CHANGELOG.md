@@ -13,10 +13,11 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Bounded route-event history.** `RibService.ListRouteEvents`
   returns recent unicast best-path events from the RIB manager's
-  in-memory 4096-event ring, filtered by peer and IPv4/IPv6 unicast
-  family. `rustbgpctl events` exposes the same timeline for operators
-  who need after-the-fact route add / withdraw / best-change context
-  without leaving a live `WatchRoutes` stream running.
+  in-memory 4096-event ring, filtered by peer, IPv4/IPv6 unicast
+  family, and exact prefix. `rustbgpctl events --prefix <PREFIX>`
+  exposes the same drilldown for operators who need after-the-fact
+  route add / withdraw / best-change context without leaving a live
+  `WatchRoutes` stream running.
 
 - **Self-hosted kernel dataplane CI gate.** New
   `.github/workflows/kernel-dataplane.yml` runs the privileged Linux
@@ -50,6 +51,14 @@ This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `owned_route_drifted`, increment
   `bgp_fib_routes_rejected_total{reason="owned_route_drifted"}`, release
   daemon ownership, and are preserved on later withdraws.
+
+### Changed
+
+- `RibService` prefix-length validation now rejects out-of-range values
+  (`> 32` for IPv4, `> 128` for IPv6) on `ExplainAdvertisedRoute`,
+  `ExplainBestPath`, and `ListRouteEvents` instead of silently clamping to
+  the family maximum. Clients sending malformed `prefix_length` values now
+  receive `InvalidArgument`.
 
 ## [0.21.0] — 2026-05-14
 

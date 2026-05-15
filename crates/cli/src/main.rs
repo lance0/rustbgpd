@@ -152,6 +152,10 @@ enum Command {
         #[arg(short = 'a', long)]
         family: Option<String>,
 
+        /// Exact prefix filter, e.g. 203.0.113.0/24
+        #[arg(long)]
+        prefix: Option<String>,
+
         /// Maximum recent events to return
         #[arg(short, long, default_value_t = 100)]
         limit: u32,
@@ -908,10 +912,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Events {
             address,
             family,
+            prefix,
             limit,
         } => {
             let family_val = resolve_family(&family)?;
-            commands::watch::history(connection, address, family_val, limit, json).await
+            commands::watch::history(connection, address, family_val, prefix, limit, json).await
         }
 
         Command::Evpn {
@@ -1433,8 +1438,23 @@ mod tests {
 
     #[test]
     fn test_parse_events() {
-        let cli = Cli::try_parse_from(["rustbgpctl", "events", "--limit", "25"]).unwrap();
-        assert!(matches!(cli.command, Command::Events { limit: 25, .. }));
+        let cli = Cli::try_parse_from([
+            "rustbgpctl",
+            "events",
+            "--prefix",
+            "203.0.113.0/24",
+            "--limit",
+            "25",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Events {
+                prefix: Some(ref prefix),
+                limit: 25,
+                ..
+            } if prefix == "203.0.113.0/24"
+        ));
     }
 
     #[test]

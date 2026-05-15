@@ -2748,12 +2748,14 @@ async fn query_route_event_history(
     tx: &mpsc::Sender<RibUpdate>,
     peer: Option<IpAddr>,
     afi: Option<Afi>,
+    prefix: Option<Prefix>,
     limit: usize,
 ) -> Vec<crate::event::RouteEvent> {
     let (reply_tx, reply_rx) = oneshot::channel();
     tx.send(RibUpdate::QueryRouteEventHistory {
         peer,
         afi,
+        prefix,
         limit,
         reply: reply_tx,
     })
@@ -2813,7 +2815,7 @@ async fn route_event_history_records_events_without_subscriber() {
     .await
     .unwrap();
 
-    let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), 100).await;
+    let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), None, 100).await;
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].event_type, crate::event::RouteEventType::Added);
     assert_eq!(history[0].prefix, Prefix::V4(prefix));
@@ -2829,7 +2831,7 @@ async fn route_event_history_empty_query_returns_empty_vec() {
     let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
     let handle = tokio::spawn(manager.run());
 
-    let history = query_route_event_history(&tx, None, None, 0).await;
+    let history = query_route_event_history(&tx, None, None, None, 0).await;
     assert!(history.is_empty());
 
     drop(tx);
@@ -2867,7 +2869,7 @@ async fn route_event_history_records_withdrawn_events() {
     .await
     .unwrap();
 
-    let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), 10).await;
+    let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), None, 10).await;
     assert_eq!(history.len(), 2);
     assert_eq!(
         history[1].event_type,
@@ -2918,7 +2920,7 @@ async fn route_event_history_filters_previous_peer_and_limit() {
     .await
     .unwrap();
 
-    let history = query_route_event_history(&tx, Some(peer1), Some(Afi::Ipv4), 2).await;
+    let history = query_route_event_history(&tx, Some(peer1), Some(Afi::Ipv4), None, 2).await;
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].event_type, crate::event::RouteEventType::Added);
     assert!(matches!(history[0].prefix, Prefix::V4(_)));
@@ -2930,6 +2932,180 @@ async fn route_event_history_filters_previous_peer_and_limit() {
     assert_eq!(history[1].prefix, Prefix::V4(prefix1));
     assert_eq!(history[1].peer, Some(peer2));
     assert_eq!(history[1].previous_peer, Some(peer1));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn route_event_history_filters_exact_ipv4_prefix() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let target = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let other = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+
+    for prefix in [other, target] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_route(prefix, Ipv4Addr::new(10, 0, 0, 1))],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let history = query_route_event_history(&tx, None, None, Some(Prefix::V4(target)), 10).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].prefix, Prefix::V4(target));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn route_event_history_filters_exact_ipv6_prefix() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V6(Ipv6Addr::LOCALHOST);
+    let target = Ipv6Prefix::new("2001:db8:100::".parse().unwrap(), 64);
+    let other = Ipv6Prefix::new("2001:db8:200::".parse().unwrap(), 64);
+
+    for prefix in [other, target] {
+        tx.send(RibUpdate::RoutesReceived {
+            peer,
+            announced: vec![make_v6_route(prefix, Ipv6Addr::LOCALHOST)],
+            withdrawn: vec![],
+            flowspec_announced: vec![],
+            flowspec_withdrawn: vec![],
+            evpn_announced: vec![],
+            evpn_withdrawn: vec![],
+        })
+        .await
+        .unwrap();
+    }
+
+    let history = query_route_event_history(&tx, None, None, Some(Prefix::V6(target)), 10).await;
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].prefix, Prefix::V6(target));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn route_event_history_prefix_peer_and_limit_interact() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let target = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let other = Ipv4Prefix::new(Ipv4Addr::new(198, 51, 100, 0), 24);
+    let peer1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let peer2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer1,
+        announced: vec![make_route_with_lp(target, Ipv4Addr::new(10, 0, 0, 1), 100)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer1,
+        announced: vec![make_route(other, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer2,
+        announced: vec![make_route_with_lp(target, Ipv4Addr::new(10, 0, 0, 2), 200)],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+    tx.send(RibUpdate::RoutesReceived {
+        peer: peer2,
+        announced: vec![],
+        withdrawn: vec![(Prefix::V4(target), 0)],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let history = query_route_event_history(
+        &tx,
+        Some(peer1),
+        Some(Afi::Ipv4),
+        Some(Prefix::V4(target)),
+        2,
+    )
+    .await;
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        history[0].event_type,
+        crate::event::RouteEventType::BestChanged
+    );
+    assert_eq!(history[0].peer, Some(peer2));
+    assert_eq!(history[0].previous_peer, Some(peer1));
+    assert_eq!(
+        history[1].event_type,
+        crate::event::RouteEventType::BestChanged
+    );
+    assert_eq!(history[1].peer, Some(peer1));
+    assert_eq!(history[1].previous_peer, Some(peer2));
+
+    drop(tx);
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn route_event_history_prefix_filter_no_matches_returns_empty() {
+    let (tx, rx) = mpsc::channel(64);
+    let manager = RibManager::new(rx, dummy_query_rx(), None, None, BgpMetrics::new());
+    let handle = tokio::spawn(manager.run());
+
+    let peer = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+    let observed = Ipv4Prefix::new(Ipv4Addr::new(203, 0, 113, 0), 24);
+    let missing = Ipv4Prefix::new(Ipv4Addr::new(192, 0, 2, 0), 24);
+    tx.send(RibUpdate::RoutesReceived {
+        peer,
+        announced: vec![make_route(observed, Ipv4Addr::new(10, 0, 0, 1))],
+        withdrawn: vec![],
+        flowspec_announced: vec![],
+        flowspec_withdrawn: vec![],
+        evpn_announced: vec![],
+        evpn_withdrawn: vec![],
+    })
+    .await
+    .unwrap();
+
+    let history = query_route_event_history(&tx, None, None, Some(Prefix::V4(missing)), 10).await;
+    assert!(history.is_empty());
 
     drop(tx);
     handle.await.unwrap();
@@ -2980,11 +3156,11 @@ async fn route_event_history_filters_ipv6_and_preserves_limited_order() {
     .await
     .unwrap();
 
-    let v6_history = query_route_event_history(&tx, None, Some(Afi::Ipv6), 10).await;
+    let v6_history = query_route_event_history(&tx, None, Some(Afi::Ipv6), None, 10).await;
     assert_eq!(v6_history.len(), 1);
     assert_eq!(v6_history[0].prefix, Prefix::V6(v6_prefix));
 
-    let recent_two = query_route_event_history(&tx, None, None, 2).await;
+    let recent_two = query_route_event_history(&tx, None, None, None, 2).await;
     assert_eq!(recent_two.len(), 2);
     assert_eq!(recent_two[0].prefix, Prefix::V6(v6_prefix));
     assert_eq!(recent_two[1].prefix, Prefix::V4(v4_prefix2));
@@ -3016,7 +3192,7 @@ async fn route_event_history_limit_zero_returns_all_available() {
         .unwrap();
     }
 
-    let history = query_route_event_history(&tx, None, None, 0).await;
+    let history = query_route_event_history(&tx, None, None, None, 0).await;
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].prefix, Prefix::V4(prefix1));
     assert_eq!(history[1].prefix, Prefix::V4(prefix2));
@@ -3049,7 +3225,7 @@ async fn route_event_history_capacity_evicts_oldest_event() {
         .unwrap();
     }
 
-    let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), 0).await;
+    let history = query_route_event_history(&tx, None, Some(Afi::Ipv4), None, 0).await;
     assert_eq!(history.len(), ROUTE_EVENT_HISTORY_CAPACITY);
     assert_eq!(
         history[0].prefix,

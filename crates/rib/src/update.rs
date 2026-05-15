@@ -264,6 +264,8 @@ pub enum RibUpdate {
         peer: Option<IpAddr>,
         /// Optional address-family filter. `None` = all unicast families.
         afi: Option<Afi>,
+        /// Optional exact prefix filter. `None` = all unicast prefixes.
+        prefix: Option<Prefix>,
         /// Maximum events to return from the recent window. 0 = manager default.
         limit: usize,
         /// Response channel carrying events ordered oldest-to-newest within

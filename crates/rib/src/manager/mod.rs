@@ -501,10 +501,11 @@ impl RibManager {
             RibUpdate::QueryRouteEventHistory {
                 peer,
                 afi,
+                prefix,
                 limit,
                 reply,
             } => {
-                self.handle_query_route_event_history(peer, afi, limit, reply);
+                self.handle_query_route_event_history(peer, afi, prefix, limit, reply);
             }
             RibUpdate::SubscribeEvpnRouteEvents { reply } => {
                 self.handle_subscribe_evpn_route_events(reply);
@@ -889,6 +890,7 @@ impl RibManager {
         &mut self,
         peer: Option<IpAddr>,
         afi: Option<Afi>,
+        prefix: Option<Prefix>,
         limit: usize,
         reply: tokio::sync::oneshot::Sender<Vec<RouteEvent>>,
     ) {
@@ -910,6 +912,10 @@ impl RibManager {
             })
             .filter(|event| match peer {
                 Some(peer) => event.peer == Some(peer) || event.previous_peer == Some(peer),
+                None => true,
+            })
+            .filter(|event| match prefix {
+                Some(prefix) => event.prefix == prefix,
                 None => true,
             })
             .take(limit)

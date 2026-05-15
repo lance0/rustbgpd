@@ -438,13 +438,19 @@ grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
 grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
   -d '{"neighbor_address": "10.0.0.2", "afi_safi": "IPV4_UNICAST", "limit": 50}' \
   localhost:50051 rustbgpd.v1.RibService/ListRouteEvents
+
+# Drill into one exact prefix
+grpcurl -plaintext -import-path . -proto proto/rustbgpd.proto \
+  -d '{"prefix": "203.0.113.0", "prefix_length": 24, "limit": 20}' \
+  localhost:50051 rustbgpd.v1.RibService/ListRouteEvents
 ```
 
 `ListRouteEvents` reads the same unicast best-path events that feed
 `WatchRoutes`, but from a bounded 4096-event in-memory ring. Peer filters
 match both `peer_address` and `previous_peer_address`, so a peer-scoped query
-includes withdraws and best-path moves away from that peer. The history is
-process-local and resets on daemon restart.
+includes withdraws and best-path moves away from that peer. Prefix filters are
+exact-match only and can be combined with peer, family, and limit filters. The
+history is process-local and resets on daemon restart.
 
 ### List FlowSpec routes
 

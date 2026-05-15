@@ -743,6 +743,9 @@ message ListRouteEventsRequest {
   // uses the daemon default. Responses are ordered oldest-to-newest
   // within the selected recent window.
   uint32 limit = 3;
+  // Optional exact prefix filter. Empty = no prefix filter.
+  string prefix = 4;
+  uint32 prefix_length = 5;
 }
 
 message ListRouteEventsResponse {
