@@ -1,0 +1,22 @@
+{
+  "started_at": "20260515T192034Z",
+  "git_rev": "81dc33643f23af5838148d17c1a5f204e40a4f35",
+  "git_dirty": false,
+  "image_id": "sha256:d0fd044e91c532d497251a338b5eb5612396df446a32f97fe6c06891e6a14ddf",
+  "kernel": "5.15.0-177-generic",
+  "soak_hours": 1,
+  "sample_interval_sec": 60,
+  "flip_interval_sec": 600,
+  "warmup_sec": 120,
+  "churn_interval_sec": 2,
+  "churn_batch_size": 50,
+  "mac_pool_size": 512,
+  "mobility_fraction_pct": 25,
+  "pool_target": 256,
+  "pool_min": 128,
+  "pool_max": 384,
+  "ce_port": "ce100a",
+  "vni": 100,
+  "topology": "/home/lance/projects/rustbgpd/tests/soak/gate8b-soak.clab.yml",
+  "run_dir": "/home/lance/projects/rustbgpd/tests/soak/runs/gate8b-mac-churn-20260515T192034Z"
+}
